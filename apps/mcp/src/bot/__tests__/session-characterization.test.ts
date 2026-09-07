@@ -29,6 +29,7 @@ const h = vi.hoisted(() => ({
   currentUrl: "",
   elements: [] as unknown[],
   visibleText: "",
+  oauthTerminalCompletionUrl: null as string | null,
   gotos: [] as string[],
   closeCalls: 0,
   documentEpoch: 0,
@@ -82,6 +83,17 @@ vi.mock("../browser.js", async (importOriginal) => {
       }
       mainDocumentIdentity(): string {
         return String(h.documentEpoch);
+      }
+      isActivePage(): boolean {
+        return true;
+      }
+      completedOAuthPage(): null {
+        return null;
+      }
+      takeOAuthTerminalCompletionUrl(): string | null {
+        const url = h.oauthTerminalCompletionUrl;
+        h.oauthTerminalCompletionUrl = null;
+        return url;
       }
       recoverActivePage(): void {}
       armOpenedTabAdoption(): void {}
@@ -178,6 +190,7 @@ beforeEach(() => {
   h.providers = ["google"];
   h.workerEmail = "operator@example.com";
   h.currentUrl = "";
+  h.oauthTerminalCompletionUrl = null;
   h.elements = [];
   h.visibleText = "";
   h.gotos = [];

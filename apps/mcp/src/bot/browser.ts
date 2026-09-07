@@ -380,42 +380,26 @@ export class OAuthFailedError extends Error {
   }
 }
 
-// Pure decision at the heart of Fix C's honest outcome classification,
-// applied the instant an OAuth completion wait's deadline elapses. Exported
-// so the exact race it recovers — the deadline firing in the same instant the
-// provider actually hands control back — can be unit-tested without racing
-// real timers: a 2026-09 dogfood run hit precisely this (Google's redirect
-// landed, but the strict wait's confirmation loop had already timed out) and
-// the tool reported a fabricated "session may have expired" failure for an
-// action that had, in fact, just succeeded.
-//
-//   - `transientClosed` at the deadline → the provider page is gone, which is
-//     this codebase's ordinary popup completion signal (waitForOAuthLifecycle
-//     reports the same state as "closed"); settle it the same way.
-//   - `returnedToProductOrigin` at the deadline (same-tab, the page actually
-//     left the product origin and is back on it — the same departure
-//     condition waitForOAuthLifecycle requires) → the provider DID return
-//     control; report completion, not failure.
-//   - otherwise we simply don't know yet → `awaiting_human` (a consent
-//     screen or 2FA challenge is commonly still showing); never asserted as
-//     a cause, just the honest "not done".
-//
-// A real failure is never inferred here: it comes only from an observed OAuth
-// error on the return URL (`oauthErrorFromReturnUrl`).
-export function classifyOAuthTimeout(
-  transientClosed: boolean,
-  returnedToProductOrigin: boolean,
-): "closed" | "returned" | "awaiting_human" {
-  if (transientClosed) return "closed";
-  if (returnedToProductOrigin) return "returned";
-  return "awaiting_human";
-}
-
 // The one observed denial/error signal OAuth defines: the provider redirects
 // back to the relying party carrying `error=<code>` (RFC 6749 §4.1.2.1 in the
 // query; §4.2.2.1 in the fragment for implicit flows). The code is reported
 // verbatim — it is a fact the provider stated, not a guess.
 const OAUTH_ERROR_CODE_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
+const OAUTH_RESPONSE_PARAMETER_NAMES = new Set([
+  "access_token",
+  "code",
+  "error",
+  "error_description",
+  "error_uri",
+  "expires_in",
+  "id_token",
+  "iss",
+  "scope",
+  "session_state",
+  "state",
+  "token_type",
+]);
+const OAUTH_RESPONSE_FRAGMENT_SIGNALS = new Set(["access_token", "code", "error", "id_token"]);
 
 export function oauthErrorFromReturnUrl(
   url: string,
@@ -439,6 +423,54 @@ export function oauthErrorFromReturnUrl(
     };
   }
   return null;
+}
+
+function oauthRedirectUri(url: string): string | null {
+  try {
+    const redirectUri = new URL(url).searchParams.get("redirect_uri");
+    if (redirectUri === null) return null;
+    const target = new URL(redirectUri);
+    return target.protocol === "http:" || target.protocol === "https:" ? target.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function oauthRedirectTargetMatches(candidateUrl: string, expectedReturnUrl: string): boolean {
+  try {
+    const candidate = new URL(candidateUrl);
+    const expected = new URL(expectedReturnUrl);
+    const expectedNames = [...new Set(expected.searchParams.keys())];
+    const candidateFragment = new URLSearchParams(candidate.hash.slice(1));
+    const hasOAuthResponseFragment =
+      expected.hash.length === 0 &&
+      candidate.hash.length > 1 &&
+      [...candidateFragment.keys()].every((name) => OAUTH_RESPONSE_PARAMETER_NAMES.has(name)) &&
+      [...candidateFragment.keys()].some((name) => OAUTH_RESPONSE_FRAGMENT_SIGNALS.has(name));
+    const hasOnlyExpectedOrOAuthQueryParameters = [...new Set(candidate.searchParams.keys())].every(
+      (name) => expectedNames.includes(name) || OAUTH_RESPONSE_PARAMETER_NAMES.has(name),
+    );
+    return (
+      candidate.protocol === expected.protocol &&
+      candidate.host === expected.host &&
+      candidate.pathname === expected.pathname &&
+      (candidate.hash === expected.hash || hasOAuthResponseFragment) &&
+      hasOnlyExpectedOrOAuthQueryParameters &&
+      expectedNames.every(
+        (name) =>
+          JSON.stringify(candidate.searchParams.getAll(name)) ===
+          JSON.stringify(expected.searchParams.getAll(name)),
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+export interface OAuthCompletionEvidence {
+  page: Page;
+  terminal?: true;
+  url?: string;
 }
 
 export function oauthAwaitingHumanMessage(productOrigin: string, budgetMs: number): string {
@@ -2713,6 +2745,20 @@ export class BrowserController {
     this.pageDriver.oauthProviderPageClosed = value;
   }
 
+  private get oauthCompletionPage(): Page | null {
+    return this.pageDriver.oauthCompletionPage;
+  }
+  private set oauthCompletionPage(value: Page | null) {
+    this.pageDriver.oauthCompletionPage = value;
+  }
+
+  private get oauthTerminalCompletionUrl(): string | null {
+    return this.pageDriver.oauthTerminalCompletionUrl;
+  }
+  private set oauthTerminalCompletionUrl(value: string | null) {
+    this.pageDriver.oauthTerminalCompletionUrl = value;
+  }
+
   private get harnessAttachedPage(): boolean {
     return this.pageDriver.harnessAttachedPage;
   }
@@ -3124,8 +3170,23 @@ export class BrowserController {
   private trackMainDocument(page: Page): void {
     return this.pageDriver.trackMainDocument(page);
   }
-  mainDocumentIdentity(): string {
-    return this.pageDriver.mainDocumentIdentity();
+  mainDocumentIdentity(page: Page | null = this.page): string {
+    return this.pageDriver.mainDocumentIdentity(page);
+  }
+
+  isActivePage(page: Page): boolean {
+    return this.page === page;
+  }
+
+  completedOAuthPage(): Page | null {
+    const page = this.oauthCompletionPage;
+    return page === null || page.isClosed() ? null : page;
+  }
+
+  takeOAuthTerminalCompletionUrl(): string | null {
+    const url = this.oauthTerminalCompletionUrl;
+    this.oauthTerminalCompletionUrl = null;
+    return url;
   }
 
   /** Attach normal controller behavior to a harness-owned Playwright page. */
@@ -3387,7 +3448,15 @@ export class BrowserController {
 
   async type(selector: string, text: string, sealed = false): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
-    await this.withModalInertNeutralized(selector, () => this.typeInner(selector, text, sealed));
+    await this.typeOnPage(this.page, selector, text, sealed);
+  }
+
+  async typeOnPage(page: Page, selector: string, text: string, sealed = false): Promise<void> {
+    await this.withModalInertNeutralized(
+      selector,
+      () => this.typeInner(page, selector, text, sealed),
+      page,
+    );
   }
 
   /**
@@ -3396,9 +3465,12 @@ export class BrowserController {
    * dispatching change and moving focus away mirrors the user's Tab action.
    * This is intentionally not a generic post-type event mechanism.
    */
-  async commitRequiredShippingAddressLine1(selector: string): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    await this.page
+  async commitRequiredShippingAddressLine1(
+    selector: string,
+    page: Page | null = this.page,
+  ): Promise<void> {
+    if (page === null) throw new Error("Browser not started");
+    await page
       .locator(selector)
       .first()
       .evaluate((field) => {
@@ -3410,11 +3482,15 @@ export class BrowserController {
     await this.sleep(500);
   }
 
-  private async typeInner(selector: string, text: string, sealed = false): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
+  private async typeInner(
+    page: Page,
+    selector: string,
+    text: string,
+    sealed = false,
+  ): Promise<void> {
     // Wait for element to be visible and enabled before typing.
-    await this.page.waitForSelector(selector, { state: "visible", timeout: 10000 });
-    const locator = this.page.locator(selector);
+    await page.waitForSelector(selector, { state: "visible", timeout: 10000 });
+    const locator = page.locator(selector);
     // The marker is payment machinery — the card-clearing and saved-card
     // resolution passes find the fields they filled through it. It is not a
     // read seal: nothing masks or refuses a read because of it.
@@ -3424,7 +3500,7 @@ export class BrowserController {
 
     if (!this.humanize) {
       // Fast path for tests / non-humanized runs.
-      await this.page.fill(selector, text);
+      await page.fill(selector, text);
       return;
     }
 
@@ -3446,7 +3522,8 @@ export class BrowserController {
     // maxlength=1), every character landed in the FIRST input and got
     // discarded after char 1. Switching to a single pressSequentially
     // call lets the browser's auto-advance handler move focus naturally.
-    await this.humanClick(selector);
+    if (page === this.page) await this.humanClick(selector);
+    else await locator.click({ timeout: 8000 }).catch(() => undefined);
     // Clear any prefilled value before typing. Only meaningful for
     // single-input fields; multi-input OTP forms ignore this since
     // each box is its own input.
@@ -3603,10 +3680,13 @@ export class BrowserController {
   // domain scope, so a file can only reach the site the task is already on.
   async uploadFile(selector: string, filePath: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
+    await this.uploadFileOnPage(this.page, selector, filePath);
+  }
+
+  async uploadFileOnPage(page: Page, selector: string, filePath: string): Promise<void> {
     if (!existsSync(filePath) || !statSync(filePath).isFile()) {
       throw new Error(`upload: local file not found or not a regular file: ${filePath}`);
     }
-    const page = this.page;
     const locator = page.locator(selector).first();
     const isFileInput = await locator
       .evaluate((el) => el instanceof HTMLInputElement && el.type === "file")
@@ -3655,11 +3735,12 @@ export class BrowserController {
   private async withModalInertNeutralized<T>(
     selector: string,
     fn: (modalActive: boolean) => Promise<T>,
+    page: Page | null = this.page,
   ): Promise<T> {
-    if (!this.page) throw new Error("Browser not started");
+    if (page === null) throw new Error("Browser not started");
     const marker = "data-ts-inert-neutralized";
     const anchorMarker = "data-ts-inert-region-anchor";
-    const modalActive = await this.page
+    const modalActive = await page
       .$eval(
         selector,
         (el, markers) => {
@@ -3701,7 +3782,7 @@ export class BrowserController {
     try {
       return await fn(modalActive);
     } finally {
-      await this.page
+      await page
         .evaluate(
           (markers) => {
             const { marker, anchorMarker } = markers;
@@ -4225,9 +4306,9 @@ export class BrowserController {
     mode: "text" | "css",
     value: string,
     intent: "click" | "type" = "click",
+    page: Page | null = this.page,
   ): Promise<ResolvedPageTarget> {
-    if (!this.page) throw new Error("Browser not started");
-    const page = this.page;
+    if (page === null) throw new Error("Browser not started");
     const matches: Array<{
       handle: ElementHandle<Element>;
       text: string;
@@ -4394,6 +4475,7 @@ export class BrowserController {
     target: TrackedClickTarget,
     shouldTrack: (labels: readonly string[]) => boolean = () => true,
     performClick?: () => Promise<void>,
+    page: Page | null = this.page,
   ): Promise<ClickDispatchStatus> {
     // Accepted residual: aria-labelledby-only names can escape this final probe;
     // closing it would broaden shared click instrumentation again.
@@ -4401,7 +4483,7 @@ export class BrowserController {
     // wait; dispatch-boundary hooks would alter shared click semantics.
     // Accepted residual: page closure during the pre-click state probe remains
     // ambiguous; tightening it would deepen the primitive that regressed ordinary clicks.
-    if (!this.page) {
+    if (page === null) {
       throw new BrowserClickDispatchError("not_dispatched", new Error("Browser not started"));
     }
     let handle: ElementHandle<Element> | null;
@@ -4410,10 +4492,10 @@ export class BrowserController {
       if (target.kind === "handle") {
         handle = target.handle;
       } else if (target.kind === "frame") {
-        handle = await this.resolveFrameElement(target.frame, target.selector);
+        handle = await this.resolveFrameElement(target.frame, target.selector, 0, page);
         dispose = true;
       } else {
-        handle = await this.page.$(target.selector);
+        handle = await page.$(target.selector);
         dispose = true;
       }
     } catch (error) {
@@ -4507,6 +4589,14 @@ export class BrowserController {
         new Error("locator target is disabled"),
       );
     }
+  }
+
+  async clickOnPage(page: Page, selector: string): Promise<void> {
+    await page.locator(selector).click({ timeout: 8000, noWaitAfter: true });
+  }
+
+  async clickViaJsOnPage(page: Page, selector: string): Promise<void> {
+    await page.locator(selector).evaluate((element) => (element as HTMLElement).click());
   }
 
   async typeHandle(handle: ElementHandle<Element>, text: string, sealed = false): Promise<void> {
@@ -5198,16 +5288,25 @@ export class BrowserController {
   // selects whose contents are interchangeable (country pickers).
   async selectOption(selector: string, optionMatcher?: string): Promise<string> {
     if (!this.page) throw new Error("Browser not started");
-    return await this.withModalInertNeutralized(selector, () =>
-      this.selectOptionInner(selector, optionMatcher),
+    return await this.selectOptionOnPage(this.page, selector, optionMatcher);
+  }
+
+  async selectOptionOnPage(page: Page, selector: string, optionMatcher?: string): Promise<string> {
+    return await this.withModalInertNeutralized(
+      selector,
+      () => this.selectOptionInner(page, selector, optionMatcher),
+      page,
     );
   }
 
-  private async selectOptionInner(selector: string, optionMatcher?: string): Promise<string> {
-    if (!this.page) throw new Error("Browser not started");
-    await this.page.waitForSelector(selector, { state: "attached", timeout: 10000 });
+  private async selectOptionInner(
+    page: Page,
+    selector: string,
+    optionMatcher?: string,
+  ): Promise<string> {
+    await page.waitForSelector(selector, { state: "attached", timeout: 10000 });
     let activeSelector = selector;
-    let tagName = await this.page
+    let tagName = await page
       .locator(activeSelector)
       .first()
       .evaluate((node) => node.tagName.toLowerCase());
@@ -5222,9 +5321,9 @@ export class BrowserController {
     // this redirect, every captured Railway/legacy-form `<select>`
     // step replays as "no options found after click."
     if (tagName === "label") {
-      const resolved = await this.resolveLabelToInput(activeSelector);
+      const resolved = await this.resolveLabelToInput(activeSelector, page);
       if (resolved !== activeSelector) {
-        const resolvedTag = await this.page
+        const resolvedTag = await page
           .locator(resolved)
           .first()
           .evaluate((node) => node.tagName.toLowerCase())
@@ -5234,7 +5333,7 @@ export class BrowserController {
           tagName = "select";
         }
       } else {
-        const rowControl = await this.page
+        const rowControl = await page
           .locator(activeSelector)
           .first()
           .evaluate((label) => {
@@ -5261,7 +5360,7 @@ export class BrowserController {
           .catch(() => null);
         if (rowControl !== null) {
           activeSelector = rowControl;
-          tagName = await this.page
+          tagName = await page
             .locator(activeSelector)
             .first()
             .evaluate((node) => node.tagName.toLowerCase())
@@ -5276,7 +5375,7 @@ export class BrowserController {
       // those strings changes the chain's meaning (`... >> nth=1 option`) and
       // makes a full select appear option-less. Descendant lookup, selection,
       // and verification must all stay anchored to the same resolved element.
-      const selectLocator = this.page.locator(activeSelector).first();
+      const selectLocator = page.locator(activeSelector).first();
       const optionLocator = selectLocator.locator("option");
       // Native path. rc.15 — keep value="" options selectable. The
       // Railway workspace dropdown's "No workspace" option is value=""
@@ -5345,7 +5444,7 @@ export class BrowserController {
 
     // Custom combobox path. Sentry, Radix, Headless UI, React Aria
     // — every modern React picker emits role=option on its items.
-    return await this.selectFromCombobox(activeSelector, optionMatcher);
+    return await this.selectFromCombobox(activeSelector, optionMatcher, page);
   }
 
   // Set the country on a phone-number field backed by a phone-local native
@@ -5549,9 +5648,8 @@ export class BrowserController {
       .catch(() => {});
   }
 
-  private async markComboboxPreexistingElements(): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    await this.page.evaluate(() => {
+  private async markComboboxPreexistingElements(page: Page = this.page!): Promise<void> {
+    await page.evaluate(() => {
       const visible = (el: Element): boolean => {
         const rect = el.getBoundingClientRect();
         if (rect.width < 2 || rect.height < 2) return false;
@@ -5570,9 +5668,11 @@ export class BrowserController {
     });
   }
 
-  private async refreshComboboxMarkers(triggerSelector: string): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    await this.page
+  private async refreshComboboxMarkers(
+    triggerSelector: string,
+    page: Page = this.page!,
+  ): Promise<void> {
+    await page
       .locator(triggerSelector)
       .first()
       .evaluate((trigger) => {
@@ -5645,9 +5745,8 @@ export class BrowserController {
       });
   }
 
-  private async clearComboboxMarkers(): Promise<void> {
-    if (!this.page) return;
-    await this.page
+  private async clearComboboxMarkers(page: Page = this.page!): Promise<void> {
+    await page
       .evaluate(() => {
         document
           .querySelectorAll(
@@ -5665,8 +5764,8 @@ export class BrowserController {
   private async selectFromCombobox(
     triggerSelector: string,
     optionMatcher?: string,
+    page: Page = this.page!,
   ): Promise<string> {
-    if (!this.page) throw new Error("Browser not started");
     // 0.8.2-rc.11 — selector normalization. The planner sometimes
     // emits a selector pointing at a `<label for="X">` instead of the
     // associated `<input id="X">` — the label has the visible text
@@ -5677,21 +5776,22 @@ export class BrowserController {
     // react-select control, so the menu never opens. Resolve the
     // label to its associated input here so downstream tiers (the
     // keyboard fallback in particular) actually see an input target.
-    const normalizedSelector = await this.resolveLabelToInput(triggerSelector);
-    await this.markComboboxPreexistingElements();
+    const normalizedSelector = await this.resolveLabelToInput(triggerSelector, page);
+    await this.markComboboxPreexistingElements(page);
     try {
-      await this.humanClick(normalizedSelector);
-      await this.refreshComboboxMarkers(normalizedSelector);
-      let popup = this.page.locator('[data-ts-select-popup="1"]').first();
+      if (page === this.page) await this.humanClick(normalizedSelector);
+      else await page.locator(normalizedSelector).first().click({ timeout: 8000 });
+      await this.refreshComboboxMarkers(normalizedSelector, page);
+      let popup = page.locator('[data-ts-select-popup="1"]').first();
       if ((await popup.count()) === 0) {
-        await this.openComboboxWithKeyboard(normalizedSelector);
-        await this.refreshComboboxMarkers(normalizedSelector);
-        popup = this.page.locator('[data-ts-select-popup="1"]').first();
+        await this.openComboboxWithKeyboard(normalizedSelector, page);
+        await this.refreshComboboxMarkers(normalizedSelector, page);
+        popup = page.locator('[data-ts-select-popup="1"]').first();
       }
       if ((await popup.count()) === 0) {
         throw new Error(`combobox ${triggerSelector}: no single opened popup could be resolved`);
       }
-      const options = this.page.locator("[data-ts-select-option-tier]");
+      const options = page.locator("[data-ts-select-option-tier]");
       let target = options.first();
       if (optionMatcher !== undefined) {
         const matching = options.filter({ hasText: optionMatcher });
@@ -5705,10 +5805,10 @@ export class BrowserController {
         throw new Error(`combobox ${triggerSelector}: opened popup has no actionable options`);
       }
       const committedText = (await target.innerText()).replace(/\s+/g, " ").trim();
-      await this.clickComboboxOption(target);
+      await this.clickComboboxOption(target, page);
       return committedText;
     } finally {
-      await this.clearComboboxMarkers();
+      await this.clearComboboxMarkers(page);
     }
   }
 
@@ -5721,10 +5821,9 @@ export class BrowserController {
   // open a react-select menu. Returns the original selector unchanged
   // when the resolution doesn't apply (target isn't a label, has no
   // `for`, or the `for`-id doesn't resolve to an input).
-  private async resolveLabelToInput(selector: string): Promise<string> {
-    if (!this.page) throw new Error("Browser not started");
+  private async resolveLabelToInput(selector: string, page: Page = this.page!): Promise<string> {
     try {
-      const resolvedId = await this.page
+      const resolvedId = await page
         .locator(selector)
         .first()
         .evaluate((node) => {
@@ -5758,20 +5857,22 @@ export class BrowserController {
     }
   }
 
-  private async openComboboxWithKeyboard(triggerSelector: string): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    const trigger = this.page.locator(triggerSelector).first();
+  private async openComboboxWithKeyboard(
+    triggerSelector: string,
+    page: Page = this.page!,
+  ): Promise<void> {
+    const trigger = page.locator(triggerSelector).first();
     try {
       if ((await trigger.evaluate((node) => node.tagName.toLowerCase())) !== "input") return;
       await trigger.focus({ timeout: 1500 });
-      await this.page.keyboard.press("Alt+ArrowDown");
+      await page.keyboard.press("Alt+ArrowDown");
       await this.wait(0.4);
     } catch {
       return;
     }
   }
 
-  private async clickComboboxOption(target: Locator): Promise<void> {
+  private async clickComboboxOption(target: Locator, page: Page = this.page!): Promise<void> {
     // cmdk (the command-menu library) does NOT commit a selection from the
     // bot's humanized page.mouse.click(x, y): cmdk re-renders + re-orders its
     // list as the search filters, so the cached click coordinates land on the
@@ -5802,7 +5903,8 @@ export class BrowserController {
       await this.wait(0.5);
       return;
     }
-    await this.humanClickLocator(target);
+    if (page === this.page) await this.humanClickLocator(target);
+    else await target.click({ timeout: 5000 });
     await this.wait(0.5);
   }
 
@@ -5821,8 +5923,9 @@ export class BrowserController {
    * Snapshot popups that already exist BEFORE typing — the suggestion popup
    * can open mid-keystroke, so this must run before type(), not after.
    */
-  async markPreexistingTypeSuggestionPopups(): Promise<void> {
-    await this.markComboboxPreexistingElements();
+  async markPreexistingTypeSuggestionPopups(page: Page | null = this.page): Promise<void> {
+    if (page === null) throw new Error("Browser not started");
+    await this.markComboboxPreexistingElements(page);
   }
 
   /**
@@ -5836,12 +5939,15 @@ export class BrowserController {
    * shape), returning as soon as options appear so an already-open popup
    * pays no extra latency.
    */
-  async detectTypeSuggestionPopup(selector: string): Promise<string[]> {
-    if (!this.page) throw new Error("Browser not started");
+  async detectTypeSuggestionPopup(
+    selector: string,
+    page: Page | null = this.page,
+  ): Promise<string[]> {
+    if (page === null) throw new Error("Browser not started");
     for (let attempt = 0; attempt < 6; attempt += 1) {
       if (attempt > 0) await this.sleep(300);
-      await this.refreshComboboxMarkers(selector);
-      const options = this.page.locator("[data-ts-select-option-tier]");
+      await this.refreshComboboxMarkers(selector, page);
+      const options = page.locator("[data-ts-select-option-tier]");
       const count = await options.count();
       if (count === 0) continue;
       const texts: string[] = [];
@@ -5854,10 +5960,10 @@ export class BrowserController {
   }
 
   /** Click the option at `index` (as indexed by detectTypeSuggestionPopup). */
-  async commitTypeSuggestion(index: number): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    const options = this.page.locator("[data-ts-select-option-tier]");
-    await this.clickComboboxOption(options.nth(index));
+  async commitTypeSuggestion(index: number, page: Page | null = this.page): Promise<void> {
+    if (page === null) throw new Error("Browser not started");
+    const options = page.locator("[data-ts-select-option-tier]");
+    await this.clickComboboxOption(options.nth(index), page);
   }
 
   /**
@@ -5882,9 +5988,13 @@ export class BrowserController {
    * unconditional — it only removes our own tracking attributes, never
    * touches page behavior.
    */
-  async discardTypeSuggestionPopup(dismissWithEscape: boolean): Promise<void> {
-    if (dismissWithEscape) await this.pressKey("Escape");
-    await this.clearComboboxMarkers();
+  async discardTypeSuggestionPopup(
+    dismissWithEscape: boolean,
+    page: Page | null = this.page,
+  ): Promise<void> {
+    if (page === null) return;
+    if (dismissWithEscape) await page.keyboard.press("Escape").catch(() => {});
+    await this.clearComboboxMarkers(page);
   }
 
   /**
@@ -5903,10 +6013,11 @@ export class BrowserController {
   async confirmAutocompleteCommitted(
     fieldSelector: string,
     pickedOptionText: string,
+    page: Page | null = this.page,
   ): Promise<boolean> {
-    if (!this.page) throw new Error("Browser not started");
+    if (page === null) throw new Error("Browser not started");
     try {
-      return await this.page
+      return await page
         .locator(fieldSelector)
         .first()
         .evaluate((field, wantedRaw) => {
@@ -7476,17 +7587,17 @@ export class BrowserController {
   // would actually see. Use this for the SHELL decision ONLY — credential/key
   // extraction and wall-text checks deliberately read RAW text via
   // extractText() and must stay byte-identical, so this is purely additive.
-  async extractVisibleText(): Promise<string> {
-    if (!this.page) throw new Error("Browser not started");
-    return await this.page.evaluate(extractObservationVisibleText);
+  async extractVisibleText(page: Page | null = this.page): Promise<string> {
+    if (page === null) throw new Error("Browser not started");
+    return await page.evaluate(extractObservationVisibleText);
   }
 
   /** Canonical tree capture, with the existing whole-document action bindings. */
-  async extractBrowserUseObservation(): Promise<BrowserUseCapture> {
-    if (!this.page) throw new Error("Browser not started");
-    const elements = await this.extractInteractiveElements();
+  async extractBrowserUseObservation(page: Page | null = this.page): Promise<BrowserUseCapture> {
+    if (page === null) throw new Error("Browser not started");
+    const elements = await this.extractInteractiveElements(page);
     return captureBrowserUseDOM(
-      this.page,
+      page,
       elements,
       (frame) => this.framePath(frame),
       (frame) => this.frameSecurity(frame),
@@ -7498,9 +7609,11 @@ export class BrowserController {
    * provision session: compact-observation-v2 applies its allowlist seal
    * before the result is stored, delta'd, or emitted.
    */
-  async extractObservationSemantics(): Promise<{ title: string; headings: string[] }> {
-    if (!this.page) throw new Error("Browser not started");
-    return await this.page.evaluate(() => {
+  async extractObservationSemantics(
+    page: Page | null = this.page,
+  ): Promise<{ title: string; headings: string[] }> {
+    if (page === null) throw new Error("Browser not started");
+    return await page.evaluate(() => {
       const visible = (element: Element): boolean => {
         const html = element as HTMLElement;
         const style = window.getComputedStyle(html);
@@ -12779,9 +12892,9 @@ export class BrowserController {
   // picks up whatever replaced it); the
   // caller surfaces that as a normal "target not found" error, never a
   // silent wrong-frame action.
-  private resolveFrame(target: FrameTarget): Frame | null {
-    if (!this.page) return null;
-    let frame = this.page.mainFrame();
+  private resolveFrame(target: FrameTarget, page: Page | null = this.page): Frame | null {
+    if (page === null) return null;
+    let frame = page.mainFrame();
     for (const part of target.framePath.split("/")) {
       if (!/^\d+$/.test(part)) return null;
       const child = frame.childFrames()[Number.parseInt(part, 10)];
@@ -12796,8 +12909,9 @@ export class BrowserController {
     target: FrameTarget,
     selector: string,
     index = 0,
+    page: Page | null = this.page,
   ): Promise<ElementHandle<Element> | null> {
-    const frame = this.resolveFrame(target);
+    const frame = this.resolveFrame(target, page);
     if (frame === null || this.frameWithinCaptcha(frame)) return null;
     const handle = await frame
       .locator(selector)
@@ -12933,8 +13047,12 @@ export class BrowserController {
   // for (a merchant's own same-domain checkout options rendered in an
   // iframe), the same primitives fillAndSubmitCheckout already relies on for
   // cross-origin PSP fields.
-  async clickInFrame(target: FrameTarget, selector: string): Promise<void> {
-    const handle = await this.resolveFrameElement(target, selector);
+  async clickInFrame(
+    target: FrameTarget,
+    selector: string,
+    page: Page | null = this.page,
+  ): Promise<void> {
+    const handle = await this.resolveFrameElement(target, selector, 0, page);
     if (handle === null) {
       throw new Error(
         `click: the target's frame is no longer present (${this.frameLabel(target)})`,
@@ -12958,8 +13076,13 @@ export class BrowserController {
     }
   }
 
-  async clickViaJsInFrame(target: FrameTarget, selector: string, index = 0): Promise<void> {
-    const handle = await this.resolveFrameElement(target, selector, index);
+  async clickViaJsInFrame(
+    target: FrameTarget,
+    selector: string,
+    index = 0,
+    page: Page | null = this.page,
+  ): Promise<void> {
+    const handle = await this.resolveFrameElement(target, selector, index, page);
     if (handle === null) {
       throw new Error(
         `js_click: the target's frame is no longer present (${this.frameLabel(target)})`,
@@ -12981,8 +13104,9 @@ export class BrowserController {
     selector: string,
     text: string,
     sealed = false,
+    page: Page | null = this.page,
   ): Promise<void> {
-    const handle = await this.resolveFrameElement(target, selector);
+    const handle = await this.resolveFrameElement(target, selector, 0, page);
     if (handle === null) {
       throw new Error(`type: the target's frame is no longer present (${this.frameLabel(target)})`);
     }
@@ -13016,8 +13140,9 @@ export class BrowserController {
     target: FrameTarget,
     selector: string,
     optionMatcher?: string,
+    page: Page | null = this.page,
   ): Promise<string> {
-    const handle = await this.resolveFrameElement(target, selector);
+    const handle = await this.resolveFrameElement(target, selector, 0, page);
     if (handle === null) {
       throw new Error(
         `select: the target's frame is no longer present (${this.frameLabel(target)})`,
@@ -13082,9 +13207,8 @@ export class BrowserController {
     }
   }
 
-  async extractInteractiveElements(): Promise<InteractiveElement[]> {
-    if (!this.page) throw new Error("Browser not started");
-    const page = this.page;
+  async extractInteractiveElements(page: Page | null = this.page): Promise<InteractiveElement[]> {
+    if (page === null) throw new Error("Browser not started");
     const mainRaw = await this.extractElementsFromContext(page);
     const mainGroups = assignCardRadioGroups(mainRaw.clusterMeta);
     const mainElements = mainRaw.out.map((e, i) => ({
@@ -13240,6 +13364,7 @@ export class BrowserController {
     settleTimeoutMs = 30_000,
     consentProvider?: OAuthProviderId,
     expectedGoogleAccountEmail?: string | null,
+    registerCompletionCheck?: (check: () => Promise<OAuthCompletionEvidence | null>) => void,
   ): Promise<void> {
     const product = this.page;
     const context = this.context;
@@ -13250,6 +13375,8 @@ export class BrowserController {
     this.oauthProductPage = product;
     this.oauthProviderPage = null;
     this.oauthProviderPageClosed = false;
+    this.oauthCompletionPage = null;
+    this.oauthTerminalCompletionUrl = null;
     const oauthBudgetMs = Math.max(1, settleTimeoutMs);
     const productUrl = product.url();
     const oauthDeadline = Date.now() + oauthBudgetMs;
@@ -13270,22 +13397,122 @@ export class BrowserController {
     const oauthFailedError = (reason: string): OAuthFailedError => new OAuthFailedError(reason);
     let recovery: Page | null = null;
     let providerPage: Page | null = null;
-    let productDeparted = false;
+    let actionStarted = false;
+    let productNavigated = false;
+    let transientNavigated = false;
+    let expectedReturnUrl: string | null = null;
     let pendingOnProvider = false;
     let lastTransientUrl = productUrl;
+    let observedReturn: { page: Page; url: string } | null = null;
     let onTransientNavigation: ((frame: Frame) => void) | null = null;
-    let resolveProductDeparture: () => void = () => undefined;
-    const productDeparturePromise = new Promise<void>((resolve) => {
-      resolveProductDeparture = resolve;
-    });
-    const onProductNavigation = (frame: Frame): void => {
-      if (frame !== product.mainFrame()) return;
-      if (!this.isOAuthProductUrl(frame.url(), productUrl)) {
-        productDeparted = true;
-        resolveProductDeparture();
+    const popupCapture: {
+      page: Page | null;
+      onNavigation: ((frame: Frame) => void) | null;
+    } = { page: null, onNavigation: null };
+    const captureExpectedReturnUrl = (url: string): void => {
+      expectedReturnUrl ??= oauthRedirectUri(url);
+    };
+    const attemptPage = (page: Page): boolean => page === product || page === popupCapture.page;
+    // Playwright reports a popup's initial navigation before it can associate
+    // the request with a frame. Keep that request inert until the opener's
+    // creation-attributed popup event identifies its page; at that point the
+    // frame is available and proves the request belongs to this attempt.
+    const framelessNavigationRequests = new Set<Request>();
+    const captureFramelessRequestsForPopup = (page: Page): void => {
+      for (const request of framelessNavigationRequests) {
+        try {
+          const frame = request.frame();
+          if (
+            frame.parentFrame() === null &&
+            frame.page() === page &&
+            attemptPage(page) &&
+            this.ownedPages.has(page)
+          ) {
+            captureExpectedReturnUrl(request.url());
+            framelessNavigationRequests.delete(request);
+          }
+        } catch {
+          // The popup has not yet bound this request to its frame. Its next
+          // redirect/page event will give us another chance before teardown.
+        }
       }
     };
+    const onContextRequest = (request: Request): void => {
+      if (!actionStarted || !request.isNavigationRequest()) return;
+      try {
+        const frame = request.frame();
+        if (
+          frame.parentFrame() !== null ||
+          !attemptPage(frame.page()) ||
+          !this.ownedPages.has(frame.page())
+        ) {
+          return;
+        }
+      } catch {
+        // Playwright emits a popup's first navigation request before it
+        // creates the frame. Do not capture it yet: a context-wide request
+        // has no ownership proof until it binds to the popup that the source
+        // page created for this attempt.
+        framelessNavigationRequests.add(request);
+        return;
+      }
+      captureExpectedReturnUrl(request.url());
+    };
+    let resolveProductNavigation: () => void = () => undefined;
+    const productNavigationPromise = new Promise<void>((resolve) => {
+      resolveProductNavigation = resolve;
+    });
+    const recordTopLevelNavigation = (page: Page, frame: Frame): void => {
+      if (!actionStarted || frame !== page.mainFrame()) return;
+      const url = frame.url();
+      captureExpectedReturnUrl(url);
+      observedReturn =
+        this.isOAuthReturnUrl(url, expectedReturnUrl) && oauthErrorFromReturnUrl(url) === null
+          ? { page, url }
+          : null;
+    };
+    const onProductNavigation = (frame: Frame): void => {
+      if (!actionStarted || frame !== product.mainFrame()) return;
+      recordTopLevelNavigation(product, frame);
+      productNavigated = true;
+      resolveProductNavigation();
+    };
+    const completionPage = (): Page | null => {
+      for (const page of [product, providerPage]) {
+        if (
+          page === null ||
+          page.isClosed() ||
+          (page === product ? !productNavigated : !transientNavigated) ||
+          !this.isOAuthReturnUrl(page.url(), expectedReturnUrl) ||
+          oauthErrorFromReturnUrl(page.url()) !== null
+        ) {
+          continue;
+        }
+        return page;
+      }
+      return null;
+    };
+    const completionEvidence = async (): Promise<OAuthCompletionEvidence | null> => {
+      if (!actionStarted) return null;
+      const returnedPage = completionPage();
+      if (returnedPage !== null) {
+        const url = returnedPage.url();
+        if (
+          !returnedPage.isClosed() &&
+          returnedPage.url() === url &&
+          this.isOAuthReturnUrl(url, expectedReturnUrl)
+        ) {
+          return { page: returnedPage };
+        }
+      }
+      if (observedReturn !== null && observedReturn.page.isClosed()) {
+        return { page: observedReturn.page, terminal: true, url: observedReturn.url };
+      }
+      return null;
+    };
+    registerCompletionCheck?.(completionEvidence);
     product.on("framenavigated", onProductNavigation);
+    context.on("request", onContextRequest);
     try {
       recovery = await context.newPage();
       this.trackOpenedTabs(recovery);
@@ -13300,6 +13527,11 @@ export class BrowserController {
       });
       const onPopup = (page: Page): void => {
         if (!this.ownedPages.has(page)) return;
+        popupCapture.page = page;
+        captureFramelessRequestsForPopup(page);
+        popupCapture.onNavigation = (frame: Frame): void => recordTopLevelNavigation(page, frame);
+        page.on("framenavigated", popupCapture.onNavigation);
+        popupCapture.onNavigation(page.mainFrame());
         product.off("popup", onPopup);
         resolvePopup(page);
       };
@@ -13320,6 +13552,7 @@ export class BrowserController {
           );
         }
         try {
+          actionStarted = true;
           await this.click(selector);
         } catch (error) {
           if (!product.isClosed()) throw error;
@@ -13329,50 +13562,61 @@ export class BrowserController {
           // A same-tab provider redirect is just as conclusive as a popup.
           // Do not burn two seconds of the OAuth budget waiting for a window
           // that this service will never open.
-          productDeparturePromise.then(() => null),
+          productNavigationPromise.then(() => null),
           this.sleep(Math.min(remainingBudgetMs(), 2_000)).then(() => null),
         ]);
       } finally {
         product.off("popup", onPopup);
         product.off("close", onProductClose);
         resolvePopup(null);
-        resolveProductDeparture();
+        resolveProductNavigation();
       }
       const transient = providerPage ?? product;
+      if (popupCapture.page !== null && popupCapture.onNavigation !== null) {
+        popupCapture.page.off("framenavigated", popupCapture.onNavigation);
+        popupCapture.onNavigation = null;
+      }
       lastTransientUrl = transient.url();
       onTransientNavigation = (frame: Frame): void => {
-        if (frame === transient.mainFrame()) lastTransientUrl = frame.url();
+        if (frame === transient.mainFrame()) {
+          lastTransientUrl = frame.url();
+          recordTopLevelNavigation(transient, frame);
+          if (transient !== product) transientNavigated = true;
+        }
       };
       transient.on("framenavigated", onTransientNavigation);
-      productDeparted = productDeparted || !this.isOAuthProductUrl(transient.url(), productUrl);
+      expectedReturnUrl ??= oauthRedirectUri(transient.url());
+      if (transient !== product) {
+        transientNavigated = true;
+        recordTopLevelNavigation(transient, transient.mainFrame());
+      }
       const durableProduct = providerPage === null ? recovery : product;
       this.oauthProductPage = durableProduct;
       this.oauthProviderPage = transient;
       this.oauthProviderPageClosed = transient.isClosed();
       this.restoreProductPageWhenOAuthPageCloses(transient, durableProduct);
       this.page = transient;
-      let settled: "closed" | "returned" | null = null;
+      const hasTerminalCompletion = (): boolean =>
+        observedReturn !== null && observedReturn.page.isClosed();
+      let settled: Page | null = null;
       if (consentProvider === undefined) {
         settled = await this.waitForOAuthLifecycle(
-          transient,
-          productUrl,
+          () => expectedReturnUrl,
           remainingBudgetMs(),
-          providerPage === null,
-          productDeparted,
+          completionPage,
+          hasTerminalCompletion,
         );
       } else {
         const deadline = oauthDeadline;
         while (settled === null && Date.now() < deadline) {
           const remaining = deadline - Date.now();
           settled = await this.waitForOAuthLifecycle(
-            transient,
-            productUrl,
+            () => expectedReturnUrl,
             Math.min(1_000, remaining),
-            providerPage === null,
-            productDeparted,
+            completionPage,
+            hasTerminalCompletion,
           );
-          if (settled !== null || transient.isClosed()) break;
-          productDeparted = productDeparted || !this.isOAuthProductUrl(transient.url(), productUrl);
+          if (settled !== null || hasTerminalCompletion()) break;
           if (Date.now() >= deadline) break;
           const consentBudgetMs = deadline - Date.now();
           const advanced = await this.advanceOAuthConsent(
@@ -13384,7 +13628,7 @@ export class BrowserController {
         }
       }
       const observedUrls = [
-        ...(providerPage !== null || productDeparted
+        ...(providerPage !== null || productNavigated
           ? [transient.isClosed() ? lastTransientUrl : transient.url()]
           : []),
         ...(providerPage !== null && !product.isClosed() && product.url() !== productUrl
@@ -13400,22 +13644,16 @@ export class BrowserController {
             ".",
         );
       }
-      if (settled === null) {
-        // Timed out without a confirmed origin-return. Re-check honestly
-        // rather than assume failure — see classifyOAuthTimeout's doc comment
-        // for the false-negative this recovers.
-        const outcome = classifyOAuthTimeout(
-          transient.isClosed(),
-          !transient.isClosed() &&
-            providerPage === null &&
-            productDeparted &&
-            this.isOAuthProductUrl(transient.url(), productUrl),
-        );
-        if (outcome === "awaiting_human") {
-          pendingOnProvider = true;
-          throw awaitingHumanError();
-        }
-        settled = outcome;
+      const completion = settled === null ? await completionEvidence() : { page: settled };
+      if (completion === null) {
+        pendingOnProvider = true;
+        throw awaitingHumanError();
+      }
+      if (completion.terminal) {
+        this.oauthCompletionPage = null;
+        this.oauthTerminalCompletionUrl = completion.url ?? null;
+      } else {
+        this.oauthCompletionPage = completion.page;
       }
       if (providerPage === null && product.isClosed()) {
         const reloaded = await recovery
@@ -13435,6 +13673,7 @@ export class BrowserController {
       }
     } finally {
       product.off("framenavigated", onProductNavigation);
+      context.off("request", onContextRequest);
       if (onTransientNavigation !== null) {
         (providerPage ?? product).off("framenavigated", onTransientNavigation);
       }
@@ -13448,7 +13687,11 @@ export class BrowserController {
         this.oauthProductPage = null;
         this.oauthProviderPage = null;
         this.oauthProviderPageClosed = false;
-        if (providerPage !== null && !providerPage.isClosed()) {
+        if (
+          providerPage !== null &&
+          providerPage !== this.oauthCompletionPage &&
+          !providerPage.isClosed()
+        ) {
           await providerPage.close().catch(() => undefined);
         }
       }
@@ -13469,6 +13712,13 @@ export class BrowserController {
   private restoreProductPageWhenOAuthPageCloses(oauthPage: Page, product: Page | null): void {
     oauthPage.once("close", () => {
       if (this.oauthProviderPage === oauthPage) this.oauthProviderPageClosed = true;
+      // A proven completion may close during the handoff back to the caller.
+      // Its live refs are gone, but its already-validated URL remains a
+      // terminal completion snapshot until the next ordinary observation.
+      if (this.oauthCompletionPage === oauthPage) {
+        this.oauthCompletionPage = null;
+        this.oauthTerminalCompletionUrl ??= oauthPage.url();
+      }
       if (product === null || product.isClosed()) {
         this.adoptLivePage();
         return;
@@ -13480,56 +13730,51 @@ export class BrowserController {
     });
   }
 
-  private isOAuthProductUrl(candidateUrl: string, productUrl: string): boolean {
-    try {
-      const candidate = new URL(candidateUrl);
-      const product = new URL(productUrl);
-      return product.origin === "null"
-        ? candidateUrl === productUrl
-        : candidate.origin === product.origin;
-    } catch {
-      return candidateUrl === productUrl;
-    }
+  private isOAuthReturnUrl(candidateUrl: string, expectedReturnUrl: string | null): boolean {
+    return (
+      expectedReturnUrl !== null && oauthRedirectTargetMatches(candidateUrl, expectedReturnUrl)
+    );
   }
 
   private async waitForOAuthLifecycle(
-    page: Page,
-    productUrl: string,
+    expectedReturnUrl: () => string | null,
     timeoutMs: number,
-    startsOnProduct: boolean,
-    departedBeforeWait: boolean,
-  ): Promise<"closed" | "returned" | null> {
-    let departed = departedBeforeWait;
+    completionPage: () => Page | null,
+    terminalCompletion: () => boolean,
+  ): Promise<Page | null> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      if (page.isClosed()) return "closed";
-      const url = page.url();
-      const isProduct = this.isOAuthProductUrl(url, productUrl);
-      if (startsOnProduct && departed && isProduct) {
+      if (terminalCompletion()) return null;
+      const returnedPage = completionPage();
+      if (returnedPage !== null) {
+        const url = returnedPage.url();
         // A return to the relying party is the OAuth completion signal. A
         // dashboard can keep polling or streaming forever, so networkidle is
         // not a valid requirement for a completed OAuth redirect.
         const returnedUrl = url;
-        const ready = await page
+        const ready = await returnedPage
           .waitForLoadState("domcontentloaded", { timeout: Math.max(1, deadline - Date.now()) })
           .then(() => true)
           .catch(() => false);
-        if (!ready || page.isClosed() || !this.isOAuthProductUrl(page.url(), productUrl)) {
+        if (
+          !ready ||
+          returnedPage.isClosed() ||
+          !this.isOAuthReturnUrl(returnedPage.url(), expectedReturnUrl())
+        ) {
           return null;
         }
         // Require the return URL to survive one event-loop turn so a transient
         // callback hop is never reported as the final product page.
         await this.sleep(Math.min(50, Math.max(1, deadline - Date.now())));
-        return !page.isClosed() &&
-          page.url() === returnedUrl &&
-          this.isOAuthProductUrl(page.url(), productUrl)
-          ? "returned"
+        return !returnedPage.isClosed() &&
+          returnedPage.url() === returnedUrl &&
+          this.isOAuthReturnUrl(returnedPage.url(), expectedReturnUrl())
+          ? returnedPage
           : null;
       }
-      if (!isProduct && url !== "about:blank") departed = true;
       await this.sleep(50);
     }
-    return page.isClosed() ? "closed" : null;
+    return null;
   }
 
   // Read the page's Rails/OmniAuth CSRF token (<meta name="csrf-token">).

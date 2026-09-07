@@ -28,6 +28,7 @@ const h = vi.hoisted(() => ({
   oauthLoginGates: new Map<number, Promise<void>>(),
   waitForInteractiveDomCalls: [] as Array<{ minElements: number; timeoutMs: number }>,
   oauthResultUrl: "https://app.example.com/dashboard",
+  oauthTerminalCompletionUrl: null as string | null,
   restoredStorageStates: [] as Array<{ browserIndex: number; state: unknown }>,
   restoreStorageStateGate: null as Promise<void> | null,
   oauthReadError: null as string | null,
@@ -323,6 +324,17 @@ vi.mock("../browser.js", async (importOriginal) => ({
     }
     mainDocumentIdentity(): string {
       return String(h.mainDocumentEpoch);
+    }
+    isActivePage(): boolean {
+      return true;
+    }
+    completedOAuthPage(): null {
+      return null;
+    }
+    takeOAuthTerminalCompletionUrl(): string | null {
+      const url = h.oauthTerminalCompletionUrl;
+      h.oauthTerminalCompletionUrl = null;
+      return url;
     }
     recoverActivePage(): void {}
     armOpenedTabAdoption(): void {}
@@ -1130,6 +1142,7 @@ beforeEach(() => {
   h.oauthLoginGates = new Map();
   h.waitForInteractiveDomCalls = [];
   h.oauthResultUrl = "https://app.example.com/dashboard";
+  h.oauthTerminalCompletionUrl = null;
   h.restoredStorageStates = [];
   h.restoreStorageStateGate = null;
   h.oauthReadError = null;

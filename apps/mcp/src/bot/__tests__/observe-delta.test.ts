@@ -36,6 +36,7 @@ import type { InteractiveElement } from "../browser.js";
 const h = vi.hoisted(() => ({
   providers: ["google"] as string[],
   oauthStatus: "already_valid" as string,
+  oauthTerminalCompletionUrl: null as string | null,
   currentUrl: "",
   mainDocumentEpoch: 0,
   elements: [] as unknown[],
@@ -72,6 +73,17 @@ vi.mock("../browser.js", () => ({
     }
     mainDocumentIdentity(): string {
       return String(h.mainDocumentEpoch);
+    }
+    isActivePage(): boolean {
+      return true;
+    }
+    completedOAuthPage(): null {
+      return null;
+    }
+    takeOAuthTerminalCompletionUrl(): string | null {
+      const url = h.oauthTerminalCompletionUrl;
+      h.oauthTerminalCompletionUrl = null;
+      return url;
     }
     recoverActivePage(): void {}
     armOpenedTabAdoption(): void {}
@@ -1538,6 +1550,7 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "off";
     h.providers = ["google"];
     h.oauthStatus = "already_valid";
+    h.oauthTerminalCompletionUrl = null;
     h.visibleText = "";
     h.currentUrl = "";
     h.mainDocumentEpoch = 0;

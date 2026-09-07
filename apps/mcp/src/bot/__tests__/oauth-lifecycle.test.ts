@@ -4,19 +4,21 @@
 // holding a detached Playwright Page. No external provider or credentials are
 // involved: the fixture drives the same popup/redirect/close lifecycle locally.
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type Page } from "playwright";
 import {
   BrowserController,
   OAuthAwaitingHumanError,
   OAuthFailedError,
-  classifyOAuthTimeout,
   oauthErrorFromReturnUrl,
 } from "../browser.js";
 import {
   act,
   finishProvisionSession,
   observe,
+  parseElementsTable,
   startHarnessProvisionSession,
 } from "../provision-session.js";
 
@@ -116,6 +118,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
   it("keeps the operator product tab alive when the provider redirects then closes its popup", async () => {
     const { controller, product } = await controllerForProduct();
     const context = product.context();
+    const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1000";
     const providerReturned = product.waitForEvent("popup").then(async (popup) => {
       await popup.goto("data:text/html,provider-token-exchange");
       await product.locator("#state").evaluate((el) => {
@@ -139,14 +143,19 @@ describe("BrowserController OAuth popup lifecycle", () => {
       expect(product.isClosed()).toBe(false);
       expect((controller as unknown as { page: Page }).page).toBe(product);
       expect(controller.currentUrl()).toBe(PRODUCT_URL);
-      expect(result.text).toContain("Signed in");
+      expect(result.oauth).toMatchObject({
+        state: "awaiting_human",
+        next_action: "operate_observe",
+      });
     } finally {
+      if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
       if (sessionId !== null) await finishProvisionSession(sessionId).catch(() => undefined);
       await context.close().catch(() => undefined);
     }
   }, 20_000);
 
-  it("tracks a popup opened after a delayed provider-button dispatch", async () => {
+  it("keeps a delayed popup dispatch pending without a return destination", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();
     const delayedProductUrl = `data:text/html,${encodeURIComponent(`
@@ -171,7 +180,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
     context.on("page", onPage);
 
     try {
-      await controller.loginWithOAuth("#oauth", 6_000);
+      await expect(controller.loginWithOAuth("#oauth", 3_000)).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
       expect(product.isClosed()).toBe(false);
       expect((controller as unknown as { page: Page }).page).toBe(product);
       expect(await controller.extractVisibleText()).toContain("Signed in");
@@ -198,7 +209,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
-  it("clicks a provider-less SPA OAuth control exactly once without probing its traffic", async () => {
+  it("keeps a provider-less SPA OAuth control pending after its popup closes", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();
     await context.route("https://product.test/login", async (route) => {
@@ -220,14 +231,18 @@ describe("BrowserController OAuth popup lifecycle", () => {
           Number(document.body.dataset.oauthClicks ?? "0") + 1,
         );
         button.disabled = true;
-        window.open("https://accounts.google.com/o/oauth2/v2/auth");
+        window.open(
+          "https://accounts.google.com/o/oauth2/v2/auth?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback",
+        );
       };
       document.body.append(button);
     });
     const controller = BrowserController.fromHarnessPage(product);
 
     try {
-      await controller.loginWithOAuth("#oauth", 2_000);
+      await expect(controller.loginWithOAuth("#oauth", 2_000)).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
       expect(await product.locator("#oauth").count()).toBe(1);
       expect(await product.locator("#oauth").isDisabled()).toBe(true);
       expect(await product.locator("body").getAttribute("data-oauth-clicks")).toBe("1");
@@ -247,8 +262,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await route.fulfill({
         contentType: "text/html",
         body: callback
-          ? '<script>window.opener.document.querySelector("#state").textContent="Signed in"; window.close()</script>'
-          : '<main id="state">Signed out</main><button id="oauth" onclick="window.open(\'https://accounts.google.com/chooser\')">Continue</button>',
+          ? '<main id="state">Signed in</main><script>if (window.opener) { window.opener.location.href="https://product.test/callback"; window.close() }</script>'
+          : '<main id="state">Signed out</main><button id="oauth" onclick="window.open(\'https://accounts.google.com/chooser?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback\')">Continue</button>',
       });
     });
     await context.route("https://accounts.google.com/**", async (route) => {
@@ -281,7 +296,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         "worker@example.com",
       );
       expect(identityAuthUser).toBe("worker@example.com");
-      expect(controller.currentUrl()).toBe("https://product.test/login");
+      expect(controller.currentUrl()).toBe("https://product.test/callback");
     } finally {
       await context.close().catch(() => undefined);
     }
@@ -296,8 +311,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await route.fulfill({
         contentType: "text/html",
         body: callback
-          ? '<script>window.opener.document.querySelector("#state").textContent="Signed in"; window.close()</script>'
-          : '<main id="state">Signed out</main><button id="oauth" onclick="window.open(\'https://accounts.google.com/v3/signin/accountchooser\')">Continue</button>',
+          ? '<main id="state">Signed in</main><script>if (window.opener) { window.opener.location.href="https://product.test/callback"; window.close() }</script>'
+          : '<main id="state">Signed out</main><button id="oauth" onclick="window.open(\'https://accounts.google.com/v3/signin/accountchooser?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback\')">Continue</button>',
       });
     });
     await context.route("https://accounts.google.com/**", async (route) => {
@@ -318,7 +333,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await controller.loginWithOAuth("#oauth", 5_000, "google");
       await expect(product.locator("#state").textContent()).resolves.toBe("Signed in");
       expect(selectedAccount).toBe("only@example.com");
-      expect(controller.currentUrl()).toBe("https://product.test/login");
+      expect(controller.currentUrl()).toBe("https://product.test/callback");
     } finally {
       await context.close().catch(() => undefined);
     }
@@ -333,8 +348,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await route.fulfill({
         contentType: "text/html",
         body: callback
-          ? '<script>window.opener.document.querySelector("#state").textContent="Signed in"; window.close()</script>'
-          : '<main id="state">Signed out</main><button id="oauth" onclick="window.open(\'https://accounts.google.com/v3/signin/accountchooser\')">Continue</button>',
+          ? '<main id="state">Signed in</main><script>if (window.opener) { window.opener.location.href="https://product.test/callback"; window.close() }</script>'
+          : '<main id="state">Signed out</main><button id="oauth" onclick="window.open(\'https://accounts.google.com/v3/signin/accountchooser?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback\')">Continue</button>',
       });
     });
     await context.route("https://accounts.google.com/**", async (route) => {
@@ -361,7 +376,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await controller.loginWithOAuth("#oauth", 5_000, "google", "worker@example.com");
       await expect(product.locator("#state").textContent()).resolves.toBe("Signed in");
       expect(selectedAccount).toBe("worker@example.com");
-      expect(controller.currentUrl()).toBe("https://product.test/login");
+      expect(controller.currentUrl()).toBe("https://product.test/callback");
     } finally {
       await context.close().catch(() => undefined);
     }
@@ -394,6 +409,1024 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await expect(product.locator("body").getAttribute("data-consent-clicks")).resolves.toBeNull();
     } finally {
       await context.close().catch(() => undefined);
+    }
+  });
+
+  it("completes a same-tab OAuth return to the product console on a sibling host", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects";
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<button id="oauth" onclick='location.href=${JSON.stringify(
+          `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+        )}'>Continue</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<script>setTimeout(() => location.href=${JSON.stringify(expectedReturnUrl)}, 50)</script>`,
+      }),
+    );
+    await context.route("https://console.product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: "<main>Projects</main>",
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 1_500, "google")).resolves.toBeUndefined();
+      expect(controller.currentUrl()).toBe("https://console.product.test/projects");
+    } finally {
+      await context.close();
+    }
+  });
+
+  it.each(["same-tab", "popup"] as const)(
+    "captures the redirect target before a fast %s OAuth return",
+    async (topology) => {
+      const context = await browser.newContext();
+      const product = await context.newPage();
+      const expectedReturnUrl = "https://console.product.test/projects";
+      const providerUrl = `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`;
+      await context.route("https://product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<button id="oauth" onclick='${
+            topology === "popup" ? "window.open" : "location.assign"
+          }(${JSON.stringify(providerUrl)})'>Continue</button>`,
+        }),
+      );
+      await context.route("https://accounts.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<script>location.replace(${JSON.stringify(expectedReturnUrl)})</script>`,
+        }),
+      );
+      await context.route("https://console.product.test/**", (route) =>
+        route.fulfill({ contentType: "text/html", body: "<main>Projects</main>" }),
+      );
+      await product.goto("https://product.test/login");
+      const controller = BrowserController.fromHarnessPage(product);
+      try {
+        await expect(controller.loginWithOAuth("#oauth", 500)).resolves.toBeUndefined();
+        expect(controller.completedOAuthPage()?.url()).toBe(expectedReturnUrl);
+      } finally {
+        await context.close();
+      }
+    },
+  );
+
+  it.each(["same-tab", "popup"] as const)(
+    "captures the redirect target from a fast %s HTTP redirect",
+    async (topology) => {
+      const context = await browser.newContext();
+      const product = await context.newPage();
+      let expectedReturnUrl = "";
+      const provider = createServer((request, response) => {
+        if (request.url?.startsWith("/provider")) {
+          response.writeHead(302, { location: expectedReturnUrl });
+          response.end();
+          return;
+        }
+        response.writeHead(200, { "content-type": "text/html" });
+        response.end("<main>Projects</main>");
+      });
+      await new Promise<void>((resolve) => provider.listen(0, "127.0.0.1", resolve));
+      const { port } = provider.address() as AddressInfo;
+      expectedReturnUrl = `http://127.0.0.1:${port}/projects`;
+      const providerUrl = `http://127.0.0.1:${port}/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`;
+      await context.route("https://product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<button id="oauth" onclick='${
+            topology === "popup" ? "window.open" : "location.assign"
+          }(${JSON.stringify(providerUrl)})'>Continue</button>`,
+        }),
+      );
+      await product.goto("https://product.test/login");
+      const controller = BrowserController.fromHarnessPage(product);
+      try {
+        await expect(controller.loginWithOAuth("#oauth", 500)).resolves.toBeUndefined();
+        expect(controller.completedOAuthPage()?.url()).toBe(expectedReturnUrl);
+      } finally {
+        await context.close();
+        await new Promise<void>((resolve, reject) =>
+          provider.close((error) => (error === undefined ? resolve() : reject(error))),
+        );
+      }
+    },
+  );
+
+  it("ignores an unrelated context navigation while capturing a popup redirect", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects";
+    const unrelatedReturnUrl = "https://other.test/return";
+    const providerUrl = `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`;
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<button id="oauth" onclick='window.oauthClicked = true; setTimeout(() => window.open(${JSON.stringify(
+          providerUrl,
+        )}), 100)'>Continue</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<script>location.href=${JSON.stringify(expectedReturnUrl)}</script>`,
+      }),
+    );
+    await context.route("https://console.product.test/**", (route) =>
+      route.fulfill({ contentType: "text/html", body: "<main>Projects</main>" }),
+    );
+    await context.route("https://unrelated.test/**", (route) =>
+      route.fulfill({ contentType: "text/html", body: "<main>Unrelated</main>" }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      const login = controller.loginWithOAuth("#oauth", 1_000);
+      await product.waitForFunction(
+        () => (window as { oauthClicked?: boolean }).oauthClicked === true,
+      );
+      const unrelated = await context.newPage();
+      await unrelated.goto(
+        `https://unrelated.test/authorize?redirect_uri=${encodeURIComponent(unrelatedReturnUrl)}`,
+      );
+      await expect(login).resolves.toBeUndefined();
+      expect(controller.completedOAuthPage()?.url()).toBe(expectedReturnUrl);
+      expect(unrelated.isClosed()).toBe(false);
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("keeps a return with a non-OAuth query challenge pending", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects?organization=expected";
+    const challengeUrl = `${expectedReturnUrl}&mfa=required`;
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<button id="oauth" onclick='location.assign(${JSON.stringify(
+          `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+        )})'>Continue</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<script>location.replace(${JSON.stringify(challengeUrl)})</script>`,
+      }),
+    );
+    await context.route("https://console.product.test/**", (route) =>
+      route.fulfill({ contentType: "text/html", body: "<main>Enter verification code</main>" }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 500)).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+    } finally {
+      await context.close();
+    }
+  });
+
+  it.each(["browser-use-dom", "legacy"])(
+    "binds type and select refs to a same-tab OAuth return (%s)",
+    async (format) => {
+      const context = await browser.newContext();
+      const product = await context.newPage();
+      const expectedReturnUrl = "https://console.product.test/projects";
+      await context.route("https://product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<button id="oauth" onclick='location.href=${JSON.stringify(
+            `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+          )}'>Continue</button>`,
+        }),
+      );
+      await context.route("https://accounts.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<script>setTimeout(() => location.href=${JSON.stringify(expectedReturnUrl)}, 50)</script>`,
+        }),
+      );
+      await context.route("https://console.product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: '<main>Projects</main><input id="project-name" value=""><select id="region"><option>Provider</option><option>Product</option></select>',
+        }),
+      );
+      await product.goto("https://product.test/login");
+      const controller = BrowserController.fromHarnessPage(product);
+      let sessionId: string | undefined;
+      try {
+        const started = await startHarnessProvisionSession({
+          browser: controller,
+          serviceUrl: "https://product.test/login",
+          ...(format === "browser-use-dom"
+            ? { observationFormat: "browser-use-dom" as const }
+            : {}),
+        });
+        sessionId = started.session_id;
+        const oauthRef =
+          format === "browser-use-dom"
+            ? started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0]
+            : parseElementsTable(started.el_table ?? "")[0]?.ref;
+        expect(oauthRef).toBeDefined();
+        const result = await act(sessionId, {
+          kind: "oauth_login",
+          target: oauthRef!,
+          provider: "google",
+        });
+        const refs =
+          format === "browser-use-dom"
+            ? [...(result.dom ?? "").matchAll(/\[(@e:[^\]]+)\]</g)].map((match) => match[1]!)
+            : parseElementsTable(result.el_table ?? "").map((element) => element.ref);
+        const [typeRef, selectRef] = refs;
+        expect(typeRef).toBeDefined();
+        expect(selectRef).toBeDefined();
+        await act(sessionId, { kind: "type", target: typeRef!, text: "product" });
+        await act(sessionId, { kind: "select", target: selectRef!, text: "Product" });
+        expect(await product.locator("#project-name").inputValue()).toBe("product");
+        expect(await product.locator("#region").inputValue()).toBe("Product");
+      } finally {
+        if (sessionId) await finishProvisionSession(sessionId);
+        await context.close();
+      }
+    },
+  );
+
+  it.each(["browser-use-dom", "legacy"])(
+    "observes a normal popup return from its completed page (%s)",
+    async (format) => {
+      const context = await browser.newContext();
+      const product = await context.newPage();
+      const expectedReturnUrl = "https://console.product.test/projects";
+      await context.route("https://product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<button id="oauth" onclick='window.open(${JSON.stringify(
+            `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+          )})'>Continue</button>`,
+        }),
+      );
+      await context.route("https://accounts.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<script>location.replace(${JSON.stringify(expectedReturnUrl)})</script>`,
+        }),
+      );
+      await context.route("https://console.product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: '<main>Projects</main><button id="new-project">New project</button>',
+        }),
+      );
+      await product.goto("https://product.test/login");
+      const controller = BrowserController.fromHarnessPage(product);
+      let sessionId: string | undefined;
+      try {
+        const started = await startHarnessProvisionSession({
+          browser: controller,
+          serviceUrl: "https://product.test/login",
+          ...(format === "browser-use-dom"
+            ? { observationFormat: "browser-use-dom" as const }
+            : {}),
+        });
+        sessionId = started.session_id;
+        const oauthRef =
+          format === "browser-use-dom"
+            ? started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0]
+            : parseElementsTable(started.el_table ?? "")[0]?.ref;
+        expect(oauthRef).toBeDefined();
+        const result = await act(sessionId, {
+          kind: "oauth_login",
+          target: oauthRef!,
+          provider: "google",
+        });
+        expect(result.url).toBe(expectedReturnUrl);
+        if (format === "browser-use-dom") expect(result.dom).toContain("New project");
+        else expect(result.el_table).toContain("New project");
+      } finally {
+        if (sessionId) await finishProvisionSession(sessionId);
+        await context.close();
+      }
+    },
+  );
+
+  it.each(["browser-use-dom", "legacy"])(
+    "rechecks completion when the outer action deadline wins during consent work (%s)",
+    async (format) => {
+      const context = await browser.newContext();
+      const product = await context.newPage();
+      const expectedReturnUrl = "https://console.product.test/projects";
+      const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+      const previousCooldown = process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+      process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "4000";
+      process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
+      await context.route("https://product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<button id="oauth" onclick='window.open(${JSON.stringify(
+            `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+          )})'>Continue</button>`,
+        }),
+      );
+      await context.route("https://accounts.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: '<main>Consent</main><input id="project-name" required autocomplete="shipping address-line1" value="provider" onchange="document.body.dataset.shippingCommitted=\'provider\'"><select id="region"><option>Provider</option><option>Product</option></select>',
+        }),
+      );
+      await context.route("https://console.product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: '<main>Projects</main><input id="project-name" required autocomplete="shipping address-line1" value="" onchange="document.body.dataset.shippingCommitted=\'product\'"><select id="region"><option>Provider</option><option>Product</option></select><button id="new-project" onclick="document.body.dataset.projectClicked=\'yes\'">New project</button>',
+        }),
+      );
+      await product.goto("https://product.test/login");
+      const controller = BrowserController.fromHarnessPage(product);
+      vi.spyOn(
+        controller as unknown as {
+          waitForOAuthLifecycle: (...args: unknown[]) => Promise<Page | null>;
+        },
+        "waitForOAuthLifecycle",
+      ).mockResolvedValueOnce(null);
+      let releaseConsent!: () => void;
+      let consentStarted = false;
+      const consentGate = new Promise<boolean>((resolve) => {
+        releaseConsent = () => resolve(true);
+      });
+      vi.spyOn(controller, "advanceOAuthConsent").mockImplementation(async () => {
+        await product.goto("https://console.product.test/projects");
+        consentStarted = true;
+        return await consentGate;
+      });
+      let sessionId: string | undefined;
+      try {
+        const started = await startHarnessProvisionSession({
+          browser: controller,
+          serviceUrl: "https://product.test/login",
+          ...(format === "browser-use-dom"
+            ? { observationFormat: "browser-use-dom" as const }
+            : {}),
+        });
+        sessionId = started.session_id;
+        const refFrom = (observation: { dom?: string; el_table?: string }): string | undefined =>
+          format === "browser-use-dom"
+            ? observation.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0]
+            : parseElementsTable(observation.el_table ?? "")[0]?.ref;
+        const oauthRef = refFrom(started);
+        expect(oauthRef).toBeDefined();
+        const result = await act(sessionId, {
+          kind: "oauth_login",
+          target: oauthRef!,
+          provider: "google",
+        });
+        expect(consentStarted).toBe(true);
+        expect(result.url).toBe("https://console.product.test/projects");
+        expect(result.oauth).toBeUndefined();
+        if (format === "browser-use-dom")
+          expect(result).toMatchObject({ format: "browser-use-dom" });
+        else expect(result.format).toBeUndefined();
+        const productRefs =
+          format === "browser-use-dom"
+            ? [...(result.dom ?? "").matchAll(/\[(@e:[^\]]+)\]</g)].map((match) => match[1]!)
+            : parseElementsTable(result.el_table ?? "").map((element) => element.ref);
+        const [typeRef, selectRef, productRef] = productRefs;
+        expect(typeRef).toBeDefined();
+        expect(selectRef).toBeDefined();
+        expect(productRef).toBeDefined();
+        await act(sessionId, { kind: "type", target: typeRef!, text: "product" });
+        await act(sessionId, { kind: "select", target: selectRef!, text: "Product" });
+        await act(sessionId, { kind: "click", target: productRef! });
+        expect(await product.locator("#project-name").inputValue()).toBe("product");
+        expect(await product.locator("#region").inputValue()).toBe("Product");
+        const provider = (controller as unknown as { page: Page }).page;
+        expect(await provider.locator("#project-name").inputValue()).toBe("provider");
+        expect(await provider.locator("#region").inputValue()).toBe("Provider");
+        expect(await product.locator("body").getAttribute("data-shipping-committed")).toBe(
+          "product",
+        );
+        expect(await provider.locator("body").getAttribute("data-shipping-committed")).toBeNull();
+        expect(await product.locator("body").getAttribute("data-project-clicked")).toBe("yes");
+        expect((controller as unknown as { page: Page }).page.url()).toBe(
+          `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+        );
+        releaseConsent();
+        await vi.waitFor(() =>
+          expect((controller as unknown as { page: Page }).page.url()).toBe(expectedReturnUrl),
+        );
+        const settled = await observe(sessionId);
+        expect(settled.url).toBe(expectedReturnUrl);
+        if (format === "browser-use-dom")
+          expect(settled).toMatchObject({ format: "browser-use-dom" });
+        else expect(settled.format).toBeUndefined();
+      } finally {
+        releaseConsent();
+        if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+        else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
+        if (previousCooldown === undefined)
+          delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+        else process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = previousCooldown;
+        if (sessionId) await finishProvisionSession(sessionId);
+        await context.close();
+      }
+    },
+  );
+
+  it.each([
+    "https://auth.product.test/consent",
+    "https://console.product.test/challenge",
+    "https://unrelated.test/projects",
+  ])("keeps %s pending after provider navigation", async (destination) => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("**/*", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body:
+          route.request().url() === "https://product.test/login"
+            ? '<button id="oauth" onclick="location.href=\'https://accounts.google.com/provider\'">Continue</button>'
+            : route.request().url().startsWith("https://accounts.google.com/")
+              ? `<script>setTimeout(() => location.href=${JSON.stringify(destination)}, 50)</script>`
+              : "<main>Approve sign-in</main>",
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 800, "google")).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+    } finally {
+      await context.close();
+    }
+  });
+
+  it.each(["https://identity.product.test/mfa", "https://product.test/mfa"])(
+    "keeps %s pending despite a different initiated destination",
+    async (mfaUrl) => {
+      const context = await browser.newContext();
+      const product = await context.newPage();
+      const expectedReturnUrl = "https://console.product.test/projects";
+      await context.route("**/*", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body:
+            route.request().url() === "https://product.test/login"
+              ? `<button id="oauth" onclick='location.href=${JSON.stringify(
+                  `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+                )}'>Continue</button>`
+              : route.request().url().startsWith("https://accounts.google.com/")
+                ? `<script>setTimeout(() => location.href=${JSON.stringify(mfaUrl)}, 50)</script>`
+                : "<main>Approve sign-in</main>",
+        }),
+      );
+      await product.goto("https://product.test/login");
+      const controller = BrowserController.fromHarnessPage(product);
+      try {
+        await expect(controller.loginWithOAuth("#oauth", 800, "google")).rejects.toBeInstanceOf(
+          OAuthAwaitingHumanError,
+        );
+      } finally {
+        await context.close();
+      }
+    },
+  );
+
+  it("keeps a return with mismatched fixed redirect query pending", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects?organization=expected";
+    const mismatchedReturnUrl =
+      "https://console.product.test/projects?organization=other&code=oauth-code";
+    await context.route("**/*", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body:
+          route.request().url() === "https://product.test/login"
+            ? `<button id="oauth" onclick='location.href=${JSON.stringify(
+                `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+              )}'>Continue</button>`
+            : route.request().url().startsWith("https://accounts.google.com/")
+              ? `<script>setTimeout(() => location.href=${JSON.stringify(mismatchedReturnUrl)}, 50)</script>`
+              : "<main>Approve sign-in</main>",
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 800, "google")).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("keeps a return with conflicting duplicate fixed redirect query pending", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects?organization=expected";
+    const conflictingReturnUrl =
+      "https://console.product.test/projects?organization=other&organization=expected&code=oauth-code";
+    await context.route("**/*", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body:
+          route.request().url() === "https://product.test/login"
+            ? `<button id="oauth" onclick='location.href=${JSON.stringify(
+                `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+              )}'>Continue</button>`
+            : route.request().url().startsWith("https://accounts.google.com/")
+              ? `<script>setTimeout(() => location.href=${JSON.stringify(conflictingReturnUrl)}, 50)</script>`
+              : "<main>Approve sign-in</main>",
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 800, "google")).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("accepts OAuth response parameters after matching fixed redirect query", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects?organization=expected";
+    const returnedUrl = `${expectedReturnUrl}&code=oauth-code&state=oauth-state`;
+    await context.route("**/*", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body:
+          route.request().url() === "https://product.test/login"
+            ? `<button id="oauth" onclick='location.href=${JSON.stringify(
+                `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+              )}'>Continue</button>`
+            : route.request().url().startsWith("https://accounts.google.com/")
+              ? `<script>setTimeout(() => location.href=${JSON.stringify(returnedUrl)}, 50)</script>`
+              : "<main>Projects</main>",
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 800, "google")).resolves.toBeUndefined();
+      expect(controller.currentUrl()).toBe(returnedUrl);
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("completes a popup OAuth return to its same-origin callback", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const callbackUrl = "https://product.test/callback";
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body:
+          route.request().url() === callbackUrl
+            ? "<main>Signed in</main>"
+            : `<button id="oauth" onclick='window.open(${JSON.stringify(
+                `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(callbackUrl)}`,
+              )})'>Continue</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<script>setTimeout(() => opener.location.href=${JSON.stringify(callbackUrl)}, 50)</script>`,
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 1_500, "google")).resolves.toBeUndefined();
+      expect(controller.currentUrl()).toBe(callbackUrl);
+    } finally {
+      await context.close();
+    }
+  });
+
+  it.each(["oauth_login", "oauth_click"] as const)(
+    "returns a popup OAuth completion from its initiated destination document (%s)",
+    async (kind) => {
+      const context = await browser.newContext();
+      const product = await context.newPage();
+      const expectedReturnUrl = "https://console.product.test/projects";
+      await context.route("https://product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<button id="oauth" onclick='window.open(${JSON.stringify(
+            `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+          )})'>Continue</button>`,
+        }),
+      );
+      await context.route("https://accounts.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<script>setTimeout(() => location.href=${JSON.stringify(expectedReturnUrl)}, 50)</script>`,
+        }),
+      );
+      await context.route("https://console.product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: "<main>Projects</main><button>New project</button>",
+        }),
+      );
+      await product.goto("https://product.test/login");
+      const controller = BrowserController.fromHarnessPage(product);
+      let sessionId: string | undefined;
+      try {
+        const started = await startHarnessProvisionSession({
+          browser: controller,
+          serviceUrl: "https://product.test/login",
+        });
+        sessionId = started.session_id;
+        const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+        expect(oauthRef).toBeDefined();
+        const result = await act(sessionId, {
+          kind,
+          target: oauthRef!,
+          provider: "google",
+        });
+        expect(result.url).toBe(expectedReturnUrl);
+        expect(result.text).toContain("Projects");
+        expect((controller as unknown as { page: Page }).page).toBe(product);
+        expect(controller.completedOAuthPage()?.url()).toBe(expectedReturnUrl);
+      } finally {
+        if (sessionId) await finishProvisionSession(sessionId);
+        await context.close();
+      }
+    },
+  );
+
+  it("rejects a closed completion source instead of clicking a colliding product control", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects";
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<button id="oauth" onclick='window.open(${JSON.stringify(
+          `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+        )})'>Continue</button><button id="shared" onclick="document.body.dataset.productClicked = 'yes'">New project</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<script>location.href=${JSON.stringify(expectedReturnUrl)}</script>`,
+      }),
+    );
+    await context.route("https://console.product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: '<main>Projects</main><button id="shared">New project</button>',
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    let sessionId: string | undefined;
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: "https://product.test/login",
+      });
+      sessionId = started.session_id;
+      const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+      expect(oauthRef).toBeDefined();
+      const completed = await act(sessionId, {
+        kind: "oauth_login",
+        target: oauthRef!,
+        provider: "google",
+      });
+      const sourceRef = parseElementsTable(completed.el_table ?? "").find(
+        (element) => element.label === "New project",
+      )?.ref;
+      expect(sourceRef).toBeDefined();
+      const completionPage = controller.completedOAuthPage();
+      expect(completionPage).not.toBeNull();
+      await completionPage?.close();
+      await expect(act(sessionId, { kind: "click", target: sourceRef! })).rejects.toMatchObject({
+        code: "target_stale",
+      });
+      expect(await product.locator("body").getAttribute("data-product-clicked")).toBeNull();
+    } finally {
+      if (sessionId) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
+
+  it.each(["browser-use-dom", "legacy"])(
+    "returns a terminal completion snapshot after an observed popup return closes (%s)",
+    async (format) => {
+      const context = await browser.newContext();
+      const product = await context.newPage();
+      const expectedReturnUrl = "https://console.product.test/projects";
+      await context.route("https://product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<main>Login</main><button id="oauth" onclick='window.open(${JSON.stringify(
+            `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+          )})'>Continue</button>`,
+        }),
+      );
+      await context.route("https://accounts.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<script>location.href=${JSON.stringify(expectedReturnUrl)}</script>`,
+        }),
+      );
+      await context.route("https://console.product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: "<main>Projects</main><script>window.close()</script>",
+        }),
+      );
+      await product.goto("https://product.test/login");
+      const controller = BrowserController.fromHarnessPage(product);
+      let sessionId: string | undefined;
+      try {
+        const started = await startHarnessProvisionSession({
+          browser: controller,
+          serviceUrl: "https://product.test/login",
+          ...(format === "browser-use-dom"
+            ? { observationFormat: "browser-use-dom" as const }
+            : {}),
+        });
+        sessionId = started.session_id;
+        const oauthRef =
+          format === "browser-use-dom"
+            ? started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0]
+            : parseElementsTable(started.el_table ?? "")[0]?.ref;
+        expect(oauthRef).toBeDefined();
+        const result = await act(sessionId, {
+          kind: "oauth_login",
+          target: oauthRef!,
+          provider: "google",
+        });
+        expect(result).toMatchObject({
+          url: expectedReturnUrl,
+          terminal: {
+            state: "oauth_completed",
+            refs: "unavailable",
+            next_action: "operate_observe",
+          },
+        });
+        expect(result.el_table).toBeUndefined();
+        expect(result.dom).toBeUndefined();
+        const handoff = await observe(sessionId);
+        expect(handoff.url).toBe("https://product.test/login");
+        expect(handoff.terminal).toBeUndefined();
+      } finally {
+        if (sessionId) await finishProvisionSession(sessionId);
+        await context.close();
+      }
+    },
+  );
+
+  it("retains a same-tab return as terminal completion when the product document closes", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects";
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<button id="oauth" onclick='location.href=${JSON.stringify(
+          `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+        )}'>Continue</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<script>location.href=${JSON.stringify(expectedReturnUrl)}</script>`,
+      }),
+    );
+    await context.route("https://console.product.test/**", (route) =>
+      route.fulfill({ contentType: "text/html", body: "<main>Projects</main>" }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    product.on("framenavigated", (frame) => {
+      if (frame === product.mainFrame() && frame.url() === expectedReturnUrl) {
+        setTimeout(() => void product.close(), 0);
+      }
+    });
+    try {
+      await controller.loginWithOAuth("#oauth", 1_000);
+      expect(controller.takeOAuthTerminalCompletionUrl()).toBe(expectedReturnUrl);
+      expect(controller.takeOAuthTerminalCompletionUrl()).toBeNull();
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("invalidates a popup return when its opener moves to a challenge", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects";
+    const challengeUrl = "https://product.test/mfa";
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body:
+          route.request().url() === challengeUrl
+            ? "<main>Enter your verification code</main>"
+            : `<button id="oauth" onclick='window.open(${JSON.stringify(
+                `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+              )})'>Continue</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<script>location.href=${JSON.stringify(expectedReturnUrl)}</script>`,
+      }),
+    );
+    await context.route("https://console.product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<script>window.opener.location.href=${JSON.stringify(challengeUrl)}; window.close()</script>`,
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 1_000)).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+      expect(controller.takeOAuthTerminalCompletionUrl()).toBeNull();
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("keeps a popup pending after its observed return navigates to a challenge", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects";
+    const challengeUrl = "https://console.product.test/mfa";
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<button id="oauth" onclick='window.open(${JSON.stringify(
+          `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+        )})'>Continue</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<script>location.href=${JSON.stringify(expectedReturnUrl)}</script>`,
+      }),
+    );
+    await context.route("https://console.product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body:
+          route.request().url() === expectedReturnUrl
+            ? `<script>location.href=${JSON.stringify(challengeUrl)}</script>`
+            : "<main>Enter your verification code</main><script>window.close()</script>",
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 500)).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("keeps a popup pending after its observed return changes to a hash-routed challenge", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects";
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<button id="oauth" onclick='window.open(${JSON.stringify(
+          `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+        )})'>Continue</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<script>location.href=${JSON.stringify(expectedReturnUrl)}</script>`,
+      }),
+    );
+    await context.route("https://console.product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: '<script>location.hash = "/mfa"; setTimeout(() => window.close(), 20)</script>',
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 500)).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("accepts an OAuth response fragment at the exact return destination", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects";
+    const responseUrl = `${expectedReturnUrl}#code=returned-code&state=attempt-state`;
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<button id="oauth" onclick='location.href=${JSON.stringify(
+          `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+        )}'>Continue</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<script>location.href=${JSON.stringify(responseUrl)}</script>`,
+      }),
+    );
+    await context.route("https://console.product.test/**", (route) =>
+      route.fulfill({ contentType: "text/html", body: "<main>Projects</main>" }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 500)).resolves.toBeUndefined();
+      expect(controller.currentUrl()).toBe(responseUrl);
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("binds tracked clicks to their provided source page", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const provider = await context.newPage();
+    await product.setContent(
+      '<button id="place-order" onclick="document.body.dataset.clicked=\'product\'">Place order</button>',
+    );
+    await provider.setContent(
+      '<button id="place-order" onclick="document.body.dataset.clicked=\'provider\'">Place order</button>',
+    );
+    const controller = BrowserController.fromHarnessPage(provider);
+    try {
+      await controller.clickWithDispatchTracking(
+        { kind: "selector", selector: "#place-order", method: "click" },
+        () => false,
+        undefined,
+        product,
+      );
+      expect(await product.locator("body").getAttribute("data-clicked")).toBe("product");
+      expect(await provider.locator("body").getAttribute("data-clicked")).toBeNull();
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("resolves a label fallback from the supplied source page", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const provider = await context.newPage();
+    await product.setContent(
+      '<div class="n-form-group__row"><label id="region-label">Region</label><select id="product-region"><option>Provider</option><option>Product</option></select></div>',
+    );
+    await provider.setContent(
+      '<div class="n-form-group__row"><label id="region-label">Region</label><select id="provider-region"><option>Provider</option><option>Product</option></select></div>',
+    );
+    const controller = BrowserController.fromHarnessPage(provider);
+    try {
+      await controller.selectOptionOnPage(product, "#region-label", "Product");
+      expect(await product.locator("#product-region").inputValue()).toBe("Product");
+      expect(await provider.locator("#provider-region").inputValue()).toBe("Provider");
+    } finally {
+      await context.close();
     }
   });
 
@@ -484,7 +1517,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
-  it("never reports failed when the same-tab product page closes at the deadline", async () => {
+  it("keeps the same-tab flow pending when its product page closes", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();
     await context.route("https://product.test/**", async (route) => {
@@ -504,7 +1537,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     try {
       const login = controller.loginWithOAuth("#oauth", budgetMs);
       setTimeout(() => void product.close().catch(() => undefined), budgetMs - 50);
-      await login;
+      await expect(login).rejects.toBeInstanceOf(OAuthAwaitingHumanError);
       expect(product.isClosed()).toBe(true);
       expect(controller.currentUrl()).toBe("https://product.test/login");
     } finally {
@@ -521,10 +1554,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
         contentType: "text/html",
         body: callback
           ? "<main>Login cancelled</main>"
-          : '<button id="oauth" onclick="location.href=\'https://provider.test/oauth\'">Login with Provider</button>',
+          : '<button id="oauth" onclick="location.href=\'https://provider.test/oauth?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback\'">Login with Provider</button>',
       });
     });
-    await context.route("https://provider.test/oauth", async (route) => {
+    await context.route("https://provider.test/oauth**", async (route) => {
       await route.fulfill({
         contentType: "text/html",
         body: '<script>setTimeout(() => location.href="https://product.test/callback?error=access_denied&error_description=The+user+denied+access", 20)</script>',
@@ -607,10 +1640,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
         contentType: "text/html",
         body: callback
           ? "<main>Signed in</main>"
-          : '<button id="oauth" onclick="location.href=\'https://provider.test/oauth\'">Login with Provider</button>',
+          : '<button id="oauth" onclick="location.href=\'https://provider.test/oauth?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback\'">Login with Provider</button>',
       });
     });
-    await context.route("https://provider.test/oauth", async (route) => {
+    await context.route("https://provider.test/oauth**", async (route) => {
       await route.fulfill({
         contentType: "text/html",
         body: '<script>setTimeout(() => location.href="https://product.test/callback", 20)</script>',
@@ -644,10 +1677,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
         contentType: "text/html",
         body: callback
           ? '<main>Signed in</main><script>setInterval(() => fetch("/pulse"), 25)</script>'
-          : '<button id="oauth" onclick="location.href=\'https://provider.test/oauth\'">Login with Provider</button>',
+          : '<button id="oauth" onclick="location.href=\'https://provider.test/oauth?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback\'">Login with Provider</button>',
       });
     });
-    await context.route("https://provider.test/oauth", async (route) => {
+    await context.route("https://provider.test/oauth**", async (route) => {
       await route.fulfill({
         contentType: "text/html",
         body: '<script>setTimeout(() => location.href="https://product.test/callback", 100)</script>',
@@ -663,32 +1696,6 @@ describe("BrowserController OAuth popup lifecycle", () => {
     } finally {
       await context.close().catch(() => undefined);
     }
-  });
-});
-
-// Fix C's honest three-outcome classification, pinned as a pure unit test
-// rather than a live-timer race: reproducing the exact real-world race this
-// recovers (the deadline elapsing in the same instant the provider's
-// redirect lands) deterministically in a real browser would require racing
-// Node's event loop against Playwright's navigation events, which is
-// inherently flaky. The decision itself has no browser dependency, so pin it
-// directly.
-describe("classifyOAuthTimeout (Fix C decision logic)", () => {
-  it("reports completion when the provider returned control despite the timeout", () => {
-    // The exact false-negative from the 2026-09 dogfood: OAuth had actually
-    // completed, but the strict wait's confirmation loop still timed out.
-    expect(classifyOAuthTimeout(false, true)).toBe("returned");
-  });
-
-  it("reports awaiting_human when nothing observed proves either completion or failure", () => {
-    expect(classifyOAuthTimeout(false, false)).toBe("awaiting_human");
-  });
-
-  it("settles a provider page that closed at the deadline exactly like the lifecycle wait does", () => {
-    // A closed provider page is this codebase's ordinary popup completion
-    // signal, never a failure.
-    expect(classifyOAuthTimeout(true, false)).toBe("closed");
-    expect(classifyOAuthTimeout(true, true)).toBe("closed");
   });
 });
 

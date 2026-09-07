@@ -22,6 +22,7 @@ import { createHash, createHmac, randomInt } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { Page } from "playwright";
 import {
   BrowserClickDispatchError,
   CHECKOUT_SUBMIT_LABEL_RE,
@@ -34,6 +35,7 @@ import {
   type CheckoutSummary,
   type FrameTarget,
   type InteractiveElement,
+  type OAuthCompletionEvidence,
   type PageTargetSafetySignals,
 } from "./browser.js";
 import type {
@@ -342,6 +344,11 @@ export interface Observation {
   // operate_act{observe:"none"} (action ran; no perception emitted — call
   // operate_observe before the next ref-targeted act).
   observed?: ObserveDetail;
+  terminal?: {
+    state: "oauth_completed";
+    refs: "unavailable";
+    next_action: "operate_observe";
+  };
   // A provider-owned OAuth popup closed while a legacy two-step OAuth action
   // was still settling. This is an expected browser lifecycle transition, not
   // a failed login or a reason to abandon the session. The host should simply
@@ -539,6 +546,7 @@ const DEFAULT_OAUTH_LOGIN_LEASE_COOLDOWN_MS = 3_000;
 const DEFAULT_OAUTH_ACTION_TIMEOUT_MS = 30_000;
 
 interface OAuthActionDeadline {
+  completionCheck?: () => Promise<OAuthCompletionEvidence | null>;
   expiresAt: number;
   timeoutMs: number;
   provider: OAuthProviderId | undefined;
@@ -597,9 +605,9 @@ async function waitForOAuthActionQuiescence(deadline: OAuthActionDeadline): Prom
   }
 }
 
-// Fix C: the OUTER backstop race (withinOAuthActionDeadline) has no page to
-// re-check, so it can only report the one fact it actually observed — never a
-// guessed cause. Which fact depends on the phase: while the action was still
+// The backstop race itself only knows that its budget elapsed. The action
+// boundary checks attempt-local browser completion evidence before exposing
+// this fallback; without that evidence, report no guessed cause. Which fact depends on the phase: while the action was still
 // queued behind a prior OAuth call's lease it was never attempted at all,
 // whereas once running the inner browser.ts wait outlived its own deadline.
 // Both are recoverable, not failures.
@@ -691,11 +699,11 @@ async function withOAuthActionLease<T>(
   }
 }
 
-async function withOAuthActionBoundary<T>(
+async function withOAuthActionBoundary(
   session: Session,
   provider: OAuthProviderId | undefined,
-  run: (deadline: OAuthActionDeadline) => Promise<T>,
-): Promise<T> {
+  run: (deadline: OAuthActionDeadline) => Promise<InternalActResult>,
+): Promise<InternalActResult> {
   const deadline = oauthActionDeadline(provider);
   const releaseCooldownMs = oauthLoginLeaseCooldownMs();
   // A deadline expiry must NOT terminalize the session: the in-flight OAuth
@@ -713,7 +721,22 @@ async function withOAuthActionBoundary<T>(
   return await withOAuthActionLease(
     deadline,
     async () => {
-      return await withinOAuthActionDeadline(run(deadline), deadline);
+      try {
+        return await withinOAuthActionDeadline(run(deadline), deadline);
+      } catch (error) {
+        if (error instanceof OAuthAwaitingHumanError && error.phase !== "not_attempted") {
+          const completion = await deadline.completionCheck?.();
+          if (completion !== undefined && completion !== null) {
+            return {
+              observation: completion.terminal
+                ? terminalOAuthCompletionObservation(session, completion.url!)
+                : await observeSession(session, "compact", undefined, completion.page),
+              outcome: {},
+            };
+          }
+        }
+        throw error;
+      }
     },
     releaseCooldownMs,
   );
@@ -774,6 +797,9 @@ async function runSerializedOAuthBoundary(
         oauthActionRemainingMs(deadline),
         provider,
         provider === "github" ? undefined : expectedGoogleAccountEmail,
+        (check) => {
+          deadline.completionCheck = check;
+        },
       );
       await settleAfterStateChange(browser);
     },
@@ -1258,12 +1284,45 @@ export function resolveTarget(
   return best?.el ?? null;
 }
 
+const compactV2SourcePages = new WeakMap<object, OAuthCompletionEvidence["page"]>();
+const oauthCompletionSourcePages = new WeakMap<object, OAuthCompletionEvidence["page"]>();
+
+function compactV2SourcePage(session: object): OAuthCompletionEvidence["page"] | undefined {
+  const page = compactV2SourcePages.get(session);
+  if (page?.isClosed()) {
+    compactV2SourcePages.delete(session);
+    return undefined;
+  }
+  return page;
+}
+
+function rememberCompactV2SourcePage(
+  session: object,
+  page: OAuthCompletionEvidence["page"] | undefined,
+): void {
+  if (page === undefined) compactV2SourcePages.delete(session);
+  else compactV2SourcePages.set(session, page);
+}
+
+function oauthCompletionSourcePage(session: object): OAuthCompletionEvidence["page"] | undefined {
+  return oauthCompletionSourcePages.get(session);
+}
+
+function rememberOAuthCompletionSourcePage(
+  session: object,
+  page: OAuthCompletionEvidence["page"] | undefined,
+): void {
+  if (page === undefined) oauthCompletionSourcePages.delete(session);
+  else oauthCompletionSourcePages.set(session, page);
+}
+
 function invalidateCompactV2Snapshot(
   session: Pick<Session, "compactV2Refs" | "compactV2Index" | "compactV2Previous">,
 ): void {
   session.compactV2Refs = new Map();
   session.compactV2Index = null;
   session.compactV2Previous = null;
+  compactV2SourcePages.delete(session);
 }
 
 function throwCompactV2StaleRef(): never {
@@ -1453,17 +1512,26 @@ function frameTargetFor(el: FrameScopedTarget): FrameTarget | null {
   };
 }
 
-function frameTargetAllowed(session: Session, el: FrameScopedTarget): boolean {
+function frameTargetAllowed(
+  session: Session,
+  el: FrameScopedTarget,
+  page: Page | undefined = undefined,
+): boolean {
   const target = frameTargetFor(el);
   if (target === null) return true;
   if (target.frameOpaque === true) return false;
-  const pageUrl = session.browser.currentUrl();
+  const pageUrl = page?.url() ?? session.browser.currentUrl();
   if (isSameRecipeDomain(target.frameOrigin, pageUrl)) return true;
   return hostAllowed(target.frameOrigin, hostStrings(session));
 }
 
-function assertFrameTargetAllowed(session: Session, el: FrameScopedTarget, kind: string): void {
-  if (frameTargetAllowed(session, el)) return;
+function assertFrameTargetAllowed(
+  session: Session,
+  el: FrameScopedTarget,
+  kind: string,
+  page: Page | undefined = undefined,
+): void {
+  if (frameTargetAllowed(session, el, page)) return;
   // An opaque (null-origin) frame gets its own TERMINAL refusal: the generic
   // message below suggests allow_host, which can never succeed for a null
   // origin — a remedy the model would loop on forever.
@@ -1489,7 +1557,11 @@ function assertFrameTargetAllowed(session: Session, el: FrameScopedTarget, kind:
 // for navigation/click via hostAllowed's auth-provider carve-outs. A weak
 // model must never be able to type a credential into a rogue or payment
 // iframe just because that host happens to be allow-listed for OAuth.
-function assertSecretFrameTargetAllowed(session: Session, el: FrameScopedTarget): void {
+function assertSecretFrameTargetAllowed(
+  session: Session,
+  el: FrameScopedTarget,
+  page: Page | undefined = undefined,
+): void {
   const target = frameTargetFor(el);
   if (target === null) return;
   if (target.frameOpaque === true) {
@@ -1498,7 +1570,7 @@ function assertSecretFrameTargetAllowed(session: Session, el: FrameScopedTarget)
         "typed into the main frame or a frame on the page's own domain.",
     );
   }
-  const pageUrl = session.browser.currentUrl();
+  const pageUrl = page?.url() ?? session.browser.currentUrl();
   if (isSameRecipeDomain(target.frameOrigin, pageUrl)) return;
   throw new ProvisionTargetNotAllowedError(
     `type_secret refused: the target lives in a cross-domain frame ` +
@@ -2110,8 +2182,8 @@ export function isInboxReadHost(url: string): boolean {
   return host !== null && INBOX_READ_HOSTS.has(host);
 }
 
-function widenAllowedHostsFromCurrentUrl(session: Session): void {
-  const host = registrableHost(session.browser.currentUrl());
+function widenAllowedHostsFromUrl(session: Session, url: string): void {
+  const host = registrableHost(url);
   if (host === null || session.allowedHosts.some((e) => e.host === host)) return;
   const currentBase = baseDomain(host);
   // Chain ONLY off START-sourced hosts: an organic redirect that shares a base
@@ -2194,7 +2266,7 @@ export async function captureScreenshot(
 export function observedHostsForSession(sessionId: string): string[] {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  widenAllowedHostsFromCurrentUrl(session);
+  widenAllowedHostsFromUrl(session, session.browser.currentUrl());
   return [...new Set(egressSeedHosts(session))];
 }
 
@@ -3977,15 +4049,18 @@ function normalizeVolatileCheckoutPath(pathname: string): string {
 // fail-closed backstop for a host whose document identity does not move on a
 // logical page change; query-string, fragment, and known-volatile checkout
 // token churn on the same logical page must not invalidate.
-function compactV2EpochDoc(session: Session): string {
-  let location = session.browser.currentUrl();
+function compactV2EpochDoc(
+  session: Session,
+  page: OAuthCompletionEvidence["page"] | undefined = compactV2SourcePage(session),
+): string {
+  let location = page?.url() ?? session.browser.currentUrl();
   try {
     const parsed = new URL(location);
     if (parsed.origin !== "null" && parsed.origin !== "")
       location = `${parsed.origin}${normalizeVolatileCheckoutPath(parsed.pathname)}`;
   } catch {}
   return createHmac("sha256", session.compactV2Secret)
-    .update(`${session.browser.mainDocumentIdentity()}\u0000${location}`)
+    .update(`${session.browser.mainDocumentIdentity(page)}\u0000${location}`)
     .digest("base64url");
 }
 
@@ -4005,8 +4080,9 @@ function compactV2StableRef(session: Session, doc: string, identity: string): st
 function compactV2Handles(
   session: Session,
   elements: readonly InteractiveElement[],
+  page: OAuthCompletionEvidence["page"] | undefined = compactV2SourcePage(session),
 ): Map<InteractiveElement, string> {
-  const doc = compactV2EpochDoc(session);
+  const doc = compactV2EpochDoc(session, page);
   return new Map(
     [...elementFingerprints(elements)].map(([element, fingerprint]) => [
       element,
@@ -4019,17 +4095,19 @@ function compactV2Handles(
 function compactV2LiveControls(
   session: Session,
   elements: readonly InteractiveElement[],
+  page: OAuthCompletionEvidence["page"] | undefined = compactV2SourcePage(session),
 ): { rows: SafeControlV2[]; byRef: Map<string, string> } {
   let pageOrigin = "";
   try {
-    pageOrigin = new URL(session.browser.currentUrl()).origin;
+    pageOrigin = new URL(page?.url() ?? session.browser.currentUrl()).origin;
   } catch {}
+  const pageUrl = page?.url() ?? session.browser.currentUrl();
   return buildSafeControlsV2({
     elements,
     legacyRefs: provisionElementRefs(elements),
-    handles: compactV2Handles(session, elements),
+    handles: compactV2Handles(session, elements, page),
     pageOrigin,
-    pageUrl: session.browser.currentUrl(),
+    pageUrl,
     canonical: session.compactV2Mode === "on",
   });
 }
@@ -4114,6 +4192,7 @@ function compactV2PublicObservation(
     guidance?: string;
     oauth?: Observation["oauth"];
     observed?: ObserveDetail;
+    terminal?: Observation["terminal"];
     url?: string;
   },
 ): Observation {
@@ -4127,6 +4206,7 @@ function compactV2PublicObservation(
     ...(fields.guidance === undefined ? {} : { guidance: fields.guidance }),
     ...(fields.oauth === undefined ? {} : { oauth: fields.oauth }),
     ...(fields.observed === undefined ? {} : { observed: fields.observed }),
+    ...(fields.terminal === undefined ? {} : { terminal: fields.terminal }),
   };
   // Fixed metadata (long OAuth-shaped URLs) degrades before observation ever
   // fails; the throw is unreachable from real pages.
@@ -4141,17 +4221,20 @@ function compactV2Observation(
   capture: BrowserUseCapture,
   semanticSource: ObservationSemanticSourceV2,
   startMetadata?: CompactV2StartMetadata,
+  sourcePage?: OAuthCompletionEvidence["page"],
 ): Observation {
+  rememberCompactV2SourcePage(session, sourcePage);
   const elements = capture.elements;
   if (startMetadata?.hintPages !== undefined)
     session.compactV2HintPages = [...startMetadata.hintPages];
-  const stage = safeStageV2(session.browser.currentUrl(), elements);
+  const pageUrl = sourcePage?.url() ?? session.browser.currentUrl();
+  const stage = safeStageV2(pageUrl, elements);
   const semantics = safePageSemanticsV2(semanticSource);
-  const epochDoc = compactV2EpochDoc(session);
+  const epochDoc = compactV2EpochDoc(session, sourcePage);
   const previous = session.compactV2Previous;
   const sameDocument = previous !== null && previous.epoch.doc === epochDoc;
-  const safe = compactV2LiveControls(session, elements);
-  const handles = compactV2Handles(session, elements);
+  const safe = compactV2LiveControls(session, elements, sourcePage);
+  const handles = compactV2Handles(session, elements, sourcePage);
   const rendered = serializeBrowserUseDOM(capture.root, {
     ref: (node) => {
       const element = capture.nodeElements.get(node.id);
@@ -4195,7 +4278,7 @@ function compactV2Observation(
   return {
     format: "browser-use-dom",
     session_id: session.id,
-    url: session.browser.currentUrl(),
+    url: pageUrl,
     stage,
     ...(sameDocument ? { delta: true } : {}),
     ...(changed ? { dom } : { dom_unchanged: true as const }),
@@ -4253,6 +4336,7 @@ export async function observeQuery(
 ): Promise<Record<string, unknown>> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const sourcePage = compactV2SourcePage(session);
   const index = session.compactV2Index;
   if (index === null || index.expiresAt < Date.now()) throw new Error("stale_cursor");
   // Query/paging is part of the same session-bound action-map protocol: never return
@@ -4298,7 +4382,7 @@ export async function observeQuery(
     if (parsed.rev !== index.epoch.rev) throw new Error("stale_cursor");
     offset = filterBound || unfiltered ? parsed.offset : 0;
   }
-  const liveElements = (await session.browser.extractBrowserUseObservation()).elements;
+  const liveElements = (await session.browser.extractBrowserUseObservation(sourcePage)).elements;
   const liveSafe = compactV2LiveControls(session, liveElements);
   const liveUnchanged =
     liveSafe.rows.length === index.rows.length &&
@@ -4316,7 +4400,7 @@ export async function observeQuery(
     // epoch's revision advances and cursors minted here bind to the fresh map.
     session.generation += 1;
     pagingRev = session.generation;
-    pagingStage = safeStageV2(session.browser.currentUrl(), liveElements);
+    pagingStage = safeStageV2(sourcePage?.url() ?? session.browser.currentUrl(), liveElements);
     snapshotRows = liveSafe.rows;
     const epoch: ObservationEpochV2 = { doc: index.epoch.doc, rev: pagingRev };
     session.compactV2Index = {
@@ -4377,7 +4461,7 @@ export async function observeQuery(
   const page = encodeV2QueryPage({
     sessionId: session.id,
     stage: pagingStage,
-    pageUrl: session.browser.currentUrl(),
+    pageUrl: sourcePage?.url() ?? session.browser.currentUrl(),
     semantics: index.semantics,
     rows,
     offset,
@@ -4386,11 +4470,50 @@ export async function observeQuery(
   return page.payload;
 }
 
+function terminalOAuthCompletionObservation(session: Session, url: string): Observation {
+  const terminal: NonNullable<Observation["terminal"]> = {
+    state: "oauth_completed",
+    refs: "unavailable",
+    next_action: "operate_observe",
+  };
+  rememberOAuthCompletionSourcePage(session, undefined);
+  rememberCompactV2SourcePage(session, undefined);
+  invalidateCompactV2Snapshot(session);
+  session.prevObserve = null;
+  retainSessionElements(session, []);
+  const guidance =
+    "OAuth completed in a popup that closed before its controls could be observed. " +
+    "Call operate_observe to inspect the active product page.";
+  return compactV2PublicObservation(
+    session,
+    () => ({
+      session_id: session.id,
+      url,
+      text: "",
+      elements: [],
+      guidance,
+      terminal,
+    }),
+    { stage: safeStageV2(url, []), guidance, terminal, url },
+  );
+}
+
 async function observeSession(
   session: Session,
   detail: "compact" | "full" = "compact",
   startMetadata?: CompactV2StartMetadata,
+  sourcePage?: OAuthCompletionEvidence["page"],
 ): Promise<Observation> {
+  if (sourcePage === undefined) {
+    const hadOAuthCompletionSource =
+      oauthCompletionSourcePage(session) !== undefined ||
+      compactV2SourcePage(session) !== undefined;
+    session.browser.takeOAuthTerminalCompletionUrl();
+    rememberOAuthCompletionSourcePage(session, undefined);
+    rememberCompactV2SourcePage(session, undefined);
+    if (hadOAuthCompletionSource) invalidateCompactV2Snapshot(session);
+  }
+  rememberOAuthCompletionSourcePage(session, sourcePage);
   const oauthInProgress = (): Observation => {
     session.prevObserve = null;
     invalidateCompactV2Snapshot(session);
@@ -4418,25 +4541,32 @@ async function observeSession(
     );
   };
   try {
-    session.browser.recoverActivePage();
-    const transition = session.browser.oauthTransitionStatus?.();
-    if (
-      transition?.providerPageClosed === true &&
-      transition.productPageViable &&
-      transition.browserConnected
-    ) {
-      return oauthInProgress();
+    if (sourcePage === undefined) {
+      session.browser.recoverActivePage();
+      const transition = session.browser.oauthTransitionStatus?.();
+      if (
+        transition?.providerPageClosed === true &&
+        transition.productPageViable &&
+        transition.browserConnected
+      ) {
+        return oauthInProgress();
+      }
     }
-    widenAllowedHostsFromCurrentUrl(session);
+    if (sourcePage === undefined) {
+      widenAllowedHostsFromUrl(session, session.browser.currentUrl());
+    }
     session.generation += 1;
     const generation = session.generation;
     const capture =
-      session.compactV2Mode === "on" ? await session.browser.extractBrowserUseObservation() : null;
-    const elements = capture?.elements ?? (await session.browser.extractInteractiveElements());
+      session.compactV2Mode === "on"
+        ? await session.browser.extractBrowserUseObservation(sourcePage)
+        : null;
+    const elements =
+      capture?.elements ?? (await session.browser.extractInteractiveElements(sourcePage));
     retainSessionElements(session, elements);
     let semanticSource: ObservationSemanticSourceV2 = { title: "", headings: [] };
     try {
-      semanticSource = await session.browser.extractObservationSemantics();
+      semanticSource = await session.browser.extractObservationSemantics(sourcePage);
     } catch {
       // Semantic context is optional availability-wise; it is independently
       // sealed below and never changes action-map safety.
@@ -4444,18 +4574,26 @@ async function observeSession(
     const v2Mode = session.compactV2Mode;
     if (v2Mode === "on") {
       if (capture === null) throw new Error("observation_capture_missing");
-      return compactV2Observation(session, generation, capture, semanticSource, startMetadata);
+      return compactV2Observation(
+        session,
+        generation,
+        capture,
+        semanticSource,
+        startMetadata,
+        sourcePage,
+      );
     }
     if (v2Mode === "shadow")
       await exerciseCompactV2Shadow(session, generation, elements, semanticSource);
     session.compactV2Active = false;
     invalidateCompactV2Snapshot(session);
-    const text = await session.browser.extractVisibleText();
+    const text = await session.browser.extractVisibleText(sourcePage);
     const normalizedFull = text.replace(/\s+/g, " ").trim();
     const normalizedText = normalizedFull.slice(0, 4000);
     const guidance = provisionPerceptionGuidance(normalizedText);
-    const url = session.browser.currentUrl();
-    const liveCheckout = await captureCartCheckoutForFillCardFallback(session, url);
+    const url = sourcePage?.url() ?? session.browser.currentUrl();
+    const liveCheckout =
+      sourcePage === undefined ? await captureCartCheckoutForFillCardFallback(session, url) : null;
     const checkoutState = checkoutStateForObservation(
       session,
       url,
@@ -4862,6 +5000,9 @@ async function executeAct(
     if (cardBlock !== null) throw new ManualCardEntryBlockedError(cardBlock);
   }
   let browser = session.browser;
+  const oauthCompletionSource = oauthCompletionSourcePage(session);
+  const compactV2ActionPage =
+    oauthCompletionSource ?? (session.compactV2Active ? compactV2SourcePage(session) : undefined);
   let completedAction: ProvisionAction = action;
   let sensitiveSource: RecordedValueSource | undefined;
   let cartAffecting = false;
@@ -4896,6 +5037,17 @@ async function executeAct(
             : action.target;
     }
   }
+  if (oauthCompletionSource?.isClosed() && "target" in action) {
+    if (session.compactV2Active) throwCompactV2StaleRef();
+    throw new TargetStaleError({
+      status: "target_stale",
+      target: action.target,
+      after_generation: session.generation,
+      reobserve_required: true,
+      replacement_candidates: {} as Record<string, string[]>,
+      retry_policy: "do_not_retry_old_ref",
+    });
+  }
   audit(sessionId, "act", {
     kind: action.kind,
     ...(auditTarget !== undefined ? { target: auditTarget } : {}),
@@ -4909,7 +5061,7 @@ async function executeAct(
   // currentUrl() after the action recorded the POST-navigation URL (an OAuth
   // click that redirected turned round 0's URL into the post-login dashboard,
   // corrupting the skill's entry_url and the login step).
-  const urlBeforeAction = browser.currentUrl();
+  const urlBeforeAction = compactV2ActionPage?.url() ?? browser.currentUrl();
 
   // Defense-in-depth for the confused-deputy guard: if an ORGANIC redirect (not
   // gated by hostAllowed) has landed the operator browser on Squire's own
@@ -4993,7 +5145,12 @@ async function executeAct(
         };
         const locator = parseLocatorTarget(resolutionTarget!);
         if (locator !== null) {
-          const resolved = await browser.resolvePageTarget(locator.mode, locator.value, "type");
+          const resolved = await browser.resolvePageTarget(
+            locator.mode,
+            locator.value,
+            "type",
+            compactV2ActionPage,
+          );
           if (!resolved.ok) {
             if (resolved.reason === "none") {
               throw new Error(`type_secret: no element matched locator "${action.target}".`);
@@ -5002,7 +5159,7 @@ async function executeAct(
           }
           try {
             if (resolved.frameTarget !== null) {
-              assertSecretFrameTargetAllowed(session, resolved.frameTarget);
+              assertSecretFrameTargetAllowed(session, resolved.frameTarget, compactV2ActionPage);
             }
             session.usedLocatorFallback = true;
             await browser.typeHandle(resolved.handle, value, true);
@@ -5012,14 +5169,14 @@ async function executeAct(
           audit(sessionId, "type_secret", {
             slot: action.slot,
             locator_mode: locator.mode,
-            host: registrableHost(browser.currentUrl()),
+            host: registrableHost(urlBeforeAction),
           });
           break;
         }
         const fresh =
           session.compactV2Mode === "on"
-            ? (await browser.extractBrowserUseObservation()).elements
-            : await browser.extractInteractiveElements();
+            ? (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements
+            : await browser.extractInteractiveElements(compactV2ActionPage);
         retainSessionElements(session, fresh);
         // resolveTarget recomputes identities (incl. volatile positional-group
         // fingerprints) from these FRESH elements, so a ref whose group fingerprint
@@ -5042,16 +5199,19 @@ async function executeAct(
         // into a rogue/third-party (e.g. payment) iframe. See
         // assertSecretFrameTargetAllowed; a main-frame or same-domain-frame
         // target is unaffected.
-        assertSecretFrameTargetAllowed(session, el);
+        assertSecretFrameTargetAllowed(session, el, compactV2ActionPage);
         // Type the REAL value into the page. It crosses only browser↔page; the
         // value is never returned to the host and never logged.
         const target = frameTargetFor(el);
-        if (target !== null) await browser.typeInFrame(target, el.selector, value, true);
+        if (target !== null)
+          await browser.typeInFrame(target, el.selector, value, true, compactV2ActionPage);
+        else if (compactV2ActionPage !== undefined)
+          await browser.typeOnPage(compactV2ActionPage, el.selector, value, true);
         else await browser.type(el.selector, value, true);
         audit(sessionId, "type_secret", {
           slot: action.slot,
           target: auditTarget,
-          host: registrableHost(browser.currentUrl()),
+          host: registrableHost(urlBeforeAction),
         });
         break;
       }
@@ -5061,8 +5221,8 @@ async function executeAct(
         // uses selectInFrame. text is the fuzzy option matcher in both paths.
         const fresh =
           session.compactV2Mode === "on"
-            ? (await browser.extractBrowserUseObservation()).elements
-            : await browser.extractInteractiveElements();
+            ? (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements
+            : await browser.extractInteractiveElements(compactV2ActionPage);
         retainSessionElements(session, fresh);
         const el =
           compactV2Authorization === undefined
@@ -5088,19 +5248,28 @@ async function executeAct(
         // click/type passes; see frameTargetAllowed. A native <select> is not a
         // secret field, so the stricter type_secret cross-origin rule does not
         // apply, but the ordinary domain lock does.
-        assertFrameTargetAllowed(session, el, "select");
+        assertFrameTargetAllowed(session, el, "select", compactV2ActionPage);
         bindCartIdentity(isCartAffectingAction(action, el));
         const selectFrame = frameTargetFor(el);
         const committedText =
           selectFrame !== null
-            ? await browser.selectInFrame(selectFrame, el.selector, action.text)
-            : await browser.selectOption(el.selector, action.text);
+            ? await browser.selectInFrame(
+                selectFrame,
+                el.selector,
+                action.text,
+                compactV2ActionPage,
+              )
+            : compactV2ActionPage !== undefined
+              ? await browser.selectOptionOnPage(compactV2ActionPage, el.selector, action.text)
+              : await browser.selectOption(el.selector, action.text);
         session.committedSelectValues.set(
           compactV2CommittedSelectKey(session, el.selector),
           compactV2CommittedSelectValue(session, committedText),
         );
         completedAction = { ...action, text: committedText };
-        await settleAfterStateChange(browser);
+        if (compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage)) {
+          await settleAfterStateChange(browser);
+        }
         break;
       }
       case "set_phone_country": {
@@ -5116,7 +5285,7 @@ async function executeAct(
       case "type":
       case "upload":
       case "oauth_click": {
-        const pageText = await browser.extractVisibleText();
+        const pageText = await browser.extractVisibleText(compactV2ActionPage);
         const blockReason = shouldBlockUnsafeProvisionAction(pageText, action);
         if (blockReason !== null) throw new Error(blockReason);
         // Locator-form target (`text=…` / `css=…`): the host is pointing at a
@@ -5136,6 +5305,7 @@ async function executeAct(
             locator.mode,
             locator.value,
             action.kind === "type" ? "type" : "click",
+            compactV2ActionPage,
           );
           if (!resolved.ok) {
             if (resolved.reason === "none") {
@@ -5164,7 +5334,12 @@ async function executeAct(
             );
             if (resolvedBlock !== null) throw new Error(resolvedBlock);
             if (resolved.frameTarget !== null) {
-              assertFrameTargetAllowed(session, resolved.frameTarget, action.kind);
+              assertFrameTargetAllowed(
+                session,
+                resolved.frameTarget,
+                action.kind,
+                compactV2ActionPage,
+              );
             }
             bindCartIdentity(isCartAffectingAction(action, null, resolved.labels));
             session.usedLocatorFallback = true;
@@ -5189,37 +5364,46 @@ async function executeAct(
               );
             } else if (action.kind === "click" || action.kind === "js_click") {
               const method = action.kind;
-              await adoptTabOpenedByClick(session, browser, async () => {
-                if (method === "click")
-                  await browser.clickWithDispatchTracking({
-                    kind: "handle",
-                    handle: resolved.handle,
-                    method,
-                  });
+              if (compactV2ActionPage !== undefined && !browser.isActivePage(compactV2ActionPage)) {
+                if (method === "click") await browser.clickHandle(resolved.handle);
                 else await browser.jsClickHandle(resolved.handle);
-              });
+              } else {
+                await adoptTabOpenedByClick(session, browser, async () => {
+                  if (method === "click")
+                    await browser.clickWithDispatchTracking({
+                      kind: "handle",
+                      handle: resolved.handle,
+                      method,
+                    });
+                  else await browser.jsClickHandle(resolved.handle);
+                });
+              }
             } else await browser.typeHandle(resolved.handle, action.text);
           } finally {
             await resolved.handle.dispose().catch(() => undefined);
           }
           audit(sessionId, action.kind, {
             locator_mode: locator.mode,
-            host: registrableHost(browser.currentUrl()),
+            host: registrableHost(urlBeforeAction),
           });
           if (action.kind !== "type") {
-            await settleAfterStateChange(browser);
+            if (compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage)) {
+              await settleAfterStateChange(browser);
+            }
             // A tab opened by JS a tick after the click lands during the
             // settle above, not inside the click's own grace window. Drain it
             // here — the queue is already populated, so this costs nothing.
-            await adoptOpenedTab(session, browser, 0);
+            if (compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage)) {
+              await adoptOpenedTab(session, browser, 0);
+            }
           }
           break;
         }
         // Re-resolve against FRESH elements every act — never trust a stale index.
         const fresh =
           session.compactV2Mode === "on"
-            ? (await browser.extractBrowserUseObservation()).elements
-            : await browser.extractInteractiveElements();
+            ? (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements
+            : await browser.extractInteractiveElements(compactV2ActionPage);
         retainSessionElements(session, fresh);
         // resolveTarget recomputes identities (incl. volatile positional-group
         // fingerprints) from these FRESH elements, so a ref whose group fingerprint
@@ -5246,10 +5430,12 @@ async function executeAct(
         resolvedEl = el;
         // Frame domain-lock (operator-frame-support) — see frameTargetAllowed.
         // A main-frame or same-domain-frame target is unaffected.
-        assertFrameTargetAllowed(session, el, action.kind);
+        assertFrameTargetAllowed(session, el, action.kind, compactV2ActionPage);
         bindCartIdentity(isCartAffectingAction(action, el));
         if (action.kind === "click" || action.kind === "js_click") {
           const target = frameTargetFor(el);
+          const sourcePageIsActive =
+            compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage);
           if (
             (session.placeOrderApproval !== null || getActivePendingThreeDs(session) !== null) &&
             isPlaceOrderClickCandidate(el)
@@ -5260,8 +5446,22 @@ async function executeAct(
                   ? { kind: "frame", frame: target, selector: el.selector, method: action.kind }
                   : { kind: "selector", selector: el.selector, method: action.kind },
                 shouldTrack,
+                undefined,
+                compactV2ActionPage,
               ),
             );
+          } else if (!sourcePageIsActive && compactV2ActionPage !== undefined) {
+            if (target !== null) {
+              if (action.kind === "click") {
+                await browser.clickInFrame(target, el.selector, compactV2ActionPage);
+              } else {
+                await browser.clickViaJsInFrame(target, el.selector, 0, compactV2ActionPage);
+              }
+            } else if (action.kind === "click") {
+              await browser.clickOnPage(compactV2ActionPage, el.selector);
+            } else {
+              await browser.clickViaJsOnPage(compactV2ActionPage, el.selector);
+            }
           } else if (action.kind === "click") {
             await adoptTabOpenedByClick(session, browser, async () => {
               await browser.clickWithDispatchTracking(
@@ -5288,7 +5488,13 @@ async function executeAct(
           // are page-scoped). Out of scope for the checkout-option case frame
           // support exists for; a plain frame-scoped fill covers it.
           clearCommittedSelectValue(session, el.selector);
-          await browser.typeInFrame(frameTargetFor(el)!, el.selector, action.text);
+          await browser.typeInFrame(
+            frameTargetFor(el)!,
+            el.selector,
+            action.text,
+            false,
+            compactV2ActionPage,
+          );
         } else if (action.kind === "type") {
           clearCommittedSelectValue(session, el.selector);
           if (!isAutocompleteScopedTypeField(action.provenance, el)) {
@@ -5297,15 +5503,23 @@ async function executeAct(
             // applies to a form/recipe field where a committed value is
             // actually required; forcing every incidental popup into
             // commit-or-stop would break ordinary search typing.
-            await browser.type(el.selector, action.text);
+            if (compactV2ActionPage !== undefined) {
+              await browser.typeOnPage(compactV2ActionPage, el.selector, action.text);
+            } else {
+              await browser.type(el.selector, action.text);
+            }
           } else {
             // 3.1 — a Google-Places-style address field or a react-select/cmdk/
             // Radix combobox can open a suggestion popup as a side effect of
             // typing, not just of an explicit `select`. Snapshot pre-existing
             // popups BEFORE typing (it can open mid-keystroke), then detect what
             // opened afterward.
-            await browser.markPreexistingTypeSuggestionPopups();
-            await browser.type(el.selector, action.text);
+            await browser.markPreexistingTypeSuggestionPopups(compactV2ActionPage);
+            if (compactV2ActionPage !== undefined) {
+              await browser.typeOnPage(compactV2ActionPage, el.selector, action.text);
+            } else {
+              await browser.type(el.selector, action.text);
+            }
             // Cleanup (clear our tracking markers, and dismiss with Escape
             // ONLY when a detected popup is plausibly still open) must run no
             // matter how this resolves — no popup, an ambiguous stop, a
@@ -5323,7 +5537,10 @@ async function executeAct(
             // nothing and bubble to close an enclosing modal/dialog instead.
             let dismissPopupWithEscape = false;
             try {
-              const suggestionTexts = await browser.detectTypeSuggestionPopup(el.selector);
+              const suggestionTexts = await browser.detectTypeSuggestionPopup(
+                el.selector,
+                compactV2ActionPage,
+              );
               if (suggestionTexts.length > 0) {
                 dismissPopupWithEscape = true;
                 const candidates = matchAutocompleteSuggestions(action.text, suggestionTexts);
@@ -5339,7 +5556,7 @@ async function executeAct(
                   );
                 }
                 const pickedText = suggestionTexts[candidates[0]!]!;
-                await browser.commitTypeSuggestion(candidates[0]!);
+                await browser.commitTypeSuggestion(candidates[0]!, compactV2ActionPage);
                 // Never trust that a click "looked right" — POSITIVELY confirm
                 // the commit took (same hard constraint as the field-role
                 // guard, PR #447: a miss is a stop, never a silent
@@ -5353,6 +5570,7 @@ async function executeAct(
                 const committed = await browser.confirmAutocompleteCommitted(
                   el.selector,
                   pickedText,
+                  compactV2ActionPage,
                 );
                 if (!committed) {
                   throw new Error(
@@ -5379,8 +5597,8 @@ async function executeAct(
                 // the live run is unaffected.
                 const refreshed =
                   session.compactV2Mode === "on"
-                    ? (await browser.extractBrowserUseObservation()).elements
-                    : await browser.extractInteractiveElements();
+                    ? (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements
+                    : await browser.extractInteractiveElements(compactV2ActionPage);
                 retainSessionElements(session, refreshed);
                 const liveField = refreshed.find((field) => field.selector === el.selector);
                 const liveValue =
@@ -5388,22 +5606,29 @@ async function executeAct(
                 completedAction = { ...action, text: liveValue };
               }
             } finally {
-              await browser.discardTypeSuggestionPopup(dismissPopupWithEscape);
+              await browser.discardTypeSuggestionPopup(dismissPopupWithEscape, compactV2ActionPage);
             }
-            if (isRequiredShippingAddressLine1(el)) {
-              await browser.commitRequiredShippingAddressLine1(el.selector);
-            }
+          }
+          if (isRequiredShippingAddressLine1(el)) {
+            await browser.commitRequiredShippingAddressLine1(el.selector, compactV2ActionPage);
           }
         } else if (action.kind === "upload") {
           assertNoFrameTarget(el, "upload");
-          await browser.uploadFile(el.selector, action.path);
+          if (compactV2ActionPage !== undefined) {
+            await browser.uploadFileOnPage(compactV2ActionPage, el.selector, action.path);
+          } else {
+            await browser.uploadFile(el.selector, action.path);
+          }
           audit(sessionId, "upload", {
             target: auditTarget,
             path: session.compactV2Active ? "<local-file>" : action.path,
-            host: registrableHost(browser.currentUrl()),
+            host: registrableHost(urlBeforeAction),
           });
         } else {
           assertNoFrameTarget(el, "oauth_click");
+          if (compactV2ActionPage !== undefined && !browser.isActivePage(compactV2ActionPage)) {
+            throwCompactV2StaleRef();
+          }
           if (oauthDeadline === undefined) {
             throw new Error("OAuth action deadline was not established");
           }
@@ -5414,26 +5639,38 @@ async function executeAct(
             action.provider,
             oauthDeadline,
           );
+          rememberOAuthCompletionSourcePage(session, browser.completedOAuthPage() ?? undefined);
         }
-        if (action.kind !== "type") await settleAfterStateChange(browser);
+        if (
+          action.kind !== "type" &&
+          (compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage))
+        ) {
+          await settleAfterStateChange(browser);
+        }
         // Only a plain click follows a tab it opened. oauth_click owns its own
         // provider-page lifecycle and upload never opens one.
-        if (action.kind === "click" || action.kind === "js_click") {
+        if (
+          (action.kind === "click" || action.kind === "js_click") &&
+          (compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage))
+        ) {
           await adoptOpenedTab(session, browser, 0);
         }
         break;
       }
       case "oauth_login": {
-        const pageText = await browser.extractVisibleText();
+        const pageText = await browser.extractVisibleText(compactV2ActionPage);
         const blockReason = shouldBlockUnsafeProvisionAction(pageText, action);
         if (blockReason !== null) throw new Error(blockReason);
+        if (compactV2ActionPage !== undefined && !browser.isActivePage(compactV2ActionPage)) {
+          throwCompactV2StaleRef();
+        }
         // Atomic OAuth deliberately accepts only the observed stable ref. A raw
         // locator would lose the same stale-reference guarantees as every other
         // action before the provider transition begins.
         const fresh =
           session.compactV2Mode === "on"
-            ? (await browser.extractBrowserUseObservation()).elements
-            : await browser.extractInteractiveElements();
+            ? (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements
+            : await browser.extractInteractiveElements(compactV2ActionPage);
         retainSessionElements(session, fresh);
         const el =
           compactV2Authorization === undefined
@@ -5460,6 +5697,7 @@ async function executeAct(
           action.provider,
           oauthDeadline,
         );
+        rememberOAuthCompletionSourcePage(session, browser.completedOAuthPage() ?? undefined);
         break;
       }
     }
@@ -5499,23 +5737,39 @@ async function executeAct(
   // operate_observe before its next ref-targeted act (refs aren't refreshed here).
   const checkoutState =
     internalAccess && collectCheckoutState ? await capturePrivateCheckoutState(session) : undefined;
+  const terminalOAuthCompletionUrl = browser.takeOAuthTerminalCompletionUrl();
+  const actionObservationPage =
+    action.kind === "oauth_login" || action.kind === "oauth_click"
+      ? (oauthCompletionSourcePage(session) ?? compactV2ActionPage)
+      : compactV2ActionPage;
   const observation =
-    detail === "none" && !cartAffecting && action.kind !== "oauth_login"
-      ? compactV2PublicObservation(
-          session,
-          () => ({
-            session_id: session.id,
-            url: browser.currentUrl(),
-            text: "",
-            elements: [],
-            observed: "none" as const,
-          }),
-          {
-            stage: safeStageV2(browser.currentUrl(), session.lastElements),
-            observed: "none",
-          },
-        )
-      : await observeSession(session, detail === "none" ? "compact" : detail);
+    terminalOAuthCompletionUrl !== null
+      ? terminalOAuthCompletionObservation(session, terminalOAuthCompletionUrl)
+      : detail === "none" && !cartAffecting && action.kind !== "oauth_login"
+        ? compactV2PublicObservation(
+            session,
+            () => ({
+              session_id: session.id,
+              url: actionObservationPage?.url() ?? browser.currentUrl(),
+              text: "",
+              elements: [],
+              observed: "none" as const,
+            }),
+            {
+              stage: safeStageV2(
+                actionObservationPage?.url() ?? browser.currentUrl(),
+                session.lastElements,
+              ),
+              observed: "none",
+              url: actionObservationPage?.url() ?? browser.currentUrl(),
+            },
+          )
+        : await observeSession(
+            session,
+            detail === "none" ? "compact" : detail,
+            undefined,
+            actionObservationPage,
+          );
   return {
     observation:
       completedAction.kind === "select" && observation.format !== "browser-use-dom"

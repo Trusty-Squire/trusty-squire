@@ -43,6 +43,7 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
       extractInteractiveElements: vi.fn().mockResolvedValue([]),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout session still active"),
       currentUrl: vi.fn().mockReturnValue(url),
+      takeOAuthTerminalCompletionUrl: vi.fn().mockReturnValue(null),
       readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
       close: vi.fn().mockResolvedValue(undefined),
     } as unknown as BrowserController;

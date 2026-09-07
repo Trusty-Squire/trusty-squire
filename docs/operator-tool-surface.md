@@ -25,7 +25,8 @@ It does not introduce an observation seal or expose vault values.
 real profile. A pending chooser/challenge remains an honest `awaiting_human` result;
 observe that session to continue. The existing password lifecycle actions
 `prepare_signup`, `store_signup`, and `load_saved` remain available through the
-same login tool. No OAuth browser, cookie, or state-machine mechanics change.
+same login tool. The OAuth lifecycle's callback-completion behavior is documented
+in the [MCP tools guide](../README.md#mcp-tools).
 
 `operate_allow_host` retains the existing hostname/control-plane validator and
 adds a public startup-scope check. Only hosts already entitled by the startup
@@ -53,7 +54,7 @@ unchanged. Refusals retain the blocked host and a remedy.
 | `press` | `operate_press(session_id, key)`; fill followed by Enter can use `operate_type(submit=true)` |
 | `scroll` | `operate_scroll(session_id, direction)`; preserves the existing viewport scroll operation; element-scoped scrolling is not added |
 | `allow_host` | `operate_allow_host(session_id, host)` with startup entitlement enforced |
-| `oauth_login`, `oauth_click`, `oauth_settle` | `operate_login(session_id, provider, ref)` invokes the atomic OAuth flow; observe pending human completion, without exposing click/settle choreography |
+| `oauth_login`, `oauth_click`, `oauth_settle` | `operate_login(session_id, provider, ref)` invokes the atomic OAuth flow; an internal `oauth_click` may intentionally return `observed: "none"`, so call `operate_observe` for a stable post-redirect observation without exposing click/settle choreography |
 | `lease` | Removed as a public configuration verb (already absent); the server's session call lease and internal OAuth boundary remain automatic |
 | `login_prepare_signup`, `operate_prepare_login` | Existing `operate_login(action='prepare_signup', ...)` |
 | `login_store_signup`, `operate_store_login` | Existing `operate_login(action='store_signup', ...)` |

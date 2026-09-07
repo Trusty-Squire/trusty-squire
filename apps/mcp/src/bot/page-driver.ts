@@ -47,6 +47,10 @@ export class PageDriver {
   oauthProviderPage: Page | null = null;
 
   oauthProviderPageClosed = false;
+
+  oauthCompletionPage: Page | null = null;
+
+  oauthTerminalCompletionUrl: string | null = null;
   constructor(
     private readonly getContext: () => BrowserContext | null,
     private readonly humanize: boolean,
@@ -86,8 +90,7 @@ export class PageDriver {
     page.on("close", dispose);
   }
 
-  mainDocumentIdentity(): string {
-    const page = this.page;
+  mainDocumentIdentity(page: Page | null = this.page): string {
     if (page === null) return "none";
     this.trackMainDocument(page);
     return String(this.mainDocumentIdentities.get(page));
