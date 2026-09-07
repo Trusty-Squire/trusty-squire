@@ -682,6 +682,8 @@ export function serializeBrowserUseDOM(
   const contexts = new Map<Simplified, string>();
   const textCache = new Map<Simplified, string>();
   const genericContextMaxChars = 120;
+  const containsForm = (n: Simplified): boolean =>
+    n.children.some((child) => formTags.has(tag(child.original)) || containsForm(child));
   const contextualText = (n: Simplified): string => {
     if (!textCache.has(n))
       textCache.set(
@@ -698,7 +700,7 @@ export function serializeBrowserUseDOM(
       ["tr", "li", "fieldset", "label"].includes(t) ||
       o.attributes.role === "row" ||
       (t === "div" &&
-        n.children.some((child) => formTags.has(tag(child.original))) &&
+        containsForm(n) &&
         Array.from(text).length <= genericContextMaxChars);
     let context = container
       ? text || enclosing
@@ -713,6 +715,29 @@ export function serializeBrowserUseDOM(
   };
   if (efficient) contextualize(tree);
   const emittedTargets = new Set<string>();
+  const stateIconCache = new Map<BrowserUseNode, string[]>();
+  const stateIcons = (node: BrowserUseNode): string[] => {
+    if (!stateIconCache.has(node)) {
+      const icons: string[] = [];
+      const collect = (child: BrowserUseNode): void => {
+        if (!child.visible || child.contentDocument) return;
+        if (tag(child) === "svg" || child.attributes.role === "img") {
+          icons.push(
+            child.attributes["aria-label"] ||
+              child.attributes["data-icon"] ||
+              child.attributes.class ||
+              tag(child),
+          );
+          return;
+        }
+        if (child.clickListener || ["button", "input", "select", "a"].includes(tag(child))) return;
+        child.children.forEach(collect);
+      };
+      node.children.forEach(collect);
+      stateIconCache.set(node, icons);
+    }
+    return stateIconCache.get(node)!;
+  };
   const render = (n: Simplified, depth: number): string => {
     const o = n.original,
       t = tag(o),
@@ -755,34 +780,21 @@ export function serializeBrowserUseDOM(
       if (
         efficient &&
         n.interactive &&
-        ["div", "span", "li", "button"].includes(t) &&
-        (t === "button" ||
-          o.clickListener ||
-          o.cursor === "pointer" ||
-          "tabindex" in o.attributes ||
-          ["button", "option", "checkbox", "radio"].includes(o.attributes.role ?? ""))
+        ((["div", "span", "li", "button"].includes(t) &&
+          (t === "button" ||
+            o.clickListener ||
+            o.cursor === "pointer" ||
+            "tabindex" in o.attributes ||
+            ["button", "option", "checkbox", "radio"].includes(o.attributes.role ?? ""))) ||
+          (t === "a" &&
+            ((o.attributes.class ?? "").split(/\s+/).includes("card") || stateIcons(o).length > 0)))
       ) {
         // Raw DOM evidence, never a guessed selected=true. Preserve the entire
         // class list: a distinguishing Tailwind token may be at its very end.
         if (o.attributes.class?.trim())
           attrs +=
             (attrs ? " " : "") + `state_class=${JSON.stringify(o.attributes.class.trim())}`;
-        const icons: string[] = [];
-        const collectIcons = (c: BrowserUseNode): void => {
-          if (!c.visible || c.contentDocument) return;
-          if (tag(c) === "svg" || c.attributes.role === "img") {
-            icons.push(
-              c.attributes["aria-label"] ||
-                c.attributes["data-icon"] ||
-                c.attributes.class ||
-                tag(c),
-            );
-            return;
-          }
-          if (c.clickListener || ["button", "input", "select", "a"].includes(tag(c))) return;
-          c.children.forEach(collectIcons);
-        };
-        o.children.forEach(collectIcons);
+        const icons = stateIcons(o);
         if (icons.length)
           attrs +=
             (attrs ? " " : "") +

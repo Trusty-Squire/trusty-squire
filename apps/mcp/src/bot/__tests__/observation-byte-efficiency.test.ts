@@ -226,6 +226,19 @@ describe("observation byte efficiency", () => {
     });
     const inputLine = serializeBrowserUseDOM(broad).dom.split("\n").find((line) => line.includes("<input"));
     expect(inputLine).not.toContain("context=");
+    const wrapped = node("DIV", {
+      children: [
+        node("DIV", {
+          children: [
+            node("LABEL", {
+              children: [node("SPAN", { children: [node("INPUT", { attributes: { type: "checkbox" } })] })],
+            }),
+          ],
+        }),
+        node("SPAN", { children: [text("Marketing emails")] }),
+      ],
+    });
+    expect(serializeBrowserUseDOM(wrapped).dom).toContain("context=Marketing emails");
   });
   it("emits native button class evidence without inferring selection", () => {
     const card = node("BUTTON", {
@@ -237,6 +250,20 @@ describe("observation byte efficiency", () => {
     const after = serializeBrowserUseDOM(card).dom;
     expect(before).toContain('state_class="card border-neutral"');
     expect(after).toContain('state_class="card border-selected"');
+    expect(after).not.toContain("selected=true");
+  });
+  it("emits actual class and icon evidence for link cards", () => {
+    const card = node("A", {
+      attributes: { href: "#", class: "card border-neutral" },
+      children: [text("Product Analytics")],
+    });
+    const before = serializeBrowserUseDOM(card).dom;
+    card.attributes.class = "card border-selected";
+    card.children.push(node("SVG", { attributes: { class: "check-icon" } }));
+    const after = serializeBrowserUseDOM(card).dom;
+    expect(before).toContain('state_class="card border-neutral"');
+    expect(after).toContain('state_class="card border-selected"');
+    expect(after).toContain('state_icons=["check-icon"]');
     expect(after).not.toContain("selected=true");
   });
   it("never reassigns ids after insertions, removals or navigation", () => {

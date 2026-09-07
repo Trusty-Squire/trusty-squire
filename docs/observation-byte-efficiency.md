@@ -23,12 +23,12 @@ fixture comparison, not used as the baseline runtime refs.
 
 | Page / reproduction | Before bytes | After bytes | Saved | Reduction |
 | --- | ---: | ---: | ---: | ---: |
-| ipinfo | 7627 | 13211 | -5584 | -73.2% |
-| mdn | 5390 | 6094 | -704 | -13.1% |
+| ipinfo | 7627 | 15903 | -8276 | -108.5% |
+| mdn | 5390 | 6240 | -850 | -15.8% |
 | hacker-news | 19376 | 20001 | -625 | -3.2% |
 | wikipedia | 6422 | 7068 | -646 | -10.1% |
-| github | 4431 | 5823 | -1392 | -31.4% |
-| gov-uk | 1434 | 1842 | -408 | -28.5% |
+| github | 4431 | 7157 | -2726 | -61.5% |
+| gov-uk | 1434 | 1907 | -473 | -33.0% |
 | Highlighted code (synthetic Vouchflow case) | 515 | 73 | 442 | 85.8% |
 | 12 repeated checkbox bindings (synthetic Resend case) | 1151 | 587 | 564 | 49.0% |
 | 24 distinct unlabelled checkboxes (reachability control) | 1151 | 1175 | -24 | -2.1% |
@@ -101,7 +101,7 @@ the `format` label, OAuth, vault behavior and payment approval are unchanged.
 ## Multi-select card evidence (PostHog follow-up)
 
 Production emits authored `aria-pressed`, `aria-selected` and `data-state` values.
-Actionable generic cards and native buttons also expose their full screened `state_class` and visible
+Actionable generic cards, native buttons, and card links also expose their full screened `state_class` and visible
 child `state_icons` evidence. These facts describe the DOM, not a guessed boolean
 selection state. The class list is intentionally not truncated: a distinguishing
 utility class may occur at its end. Opaque capability refs deliberately outweigh

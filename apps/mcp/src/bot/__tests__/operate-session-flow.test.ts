@@ -5088,7 +5088,7 @@ describe("Compact V2 action-map boundary", () => {
       serviceUrl: "https://app.example.com/dashboard",
     });
     const original = domRefs(started)[0]!;
-    expect(original).toMatch(/^@e:[a-z0-9]{1,2}$/);
+    expect(original).toMatch(/^@e:[A-Za-z0-9_-]{11}$/);
     h.elements.unshift(
       elem({ index: 1, id: "inserted", visibleText: "Inserted control", selector: "#inserted" }),
     );
