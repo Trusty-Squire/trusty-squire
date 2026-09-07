@@ -159,6 +159,29 @@ describe("observation byte efficiency", () => {
     expect(withCopy.dom).toContain("Copy sample");
     expect(withCopy.refs.length).toBeGreaterThan(0);
   });
+  it("keeps code visible through its opaque wrapper while suppressing externally occluded code", () => {
+    const source = "const mandate = await sign();";
+    const highlighted = () =>
+      node("PRE", {
+        paintOrder: 1,
+        children: [
+          node("CODE", {
+            paintOrder: 2,
+            computedStyles: opaque,
+            children: [text(source)],
+          }),
+        ],
+      });
+    const selfPainted = highlighted();
+    expect(serializeBrowserUseDOM(selfPainted).dom).toBe(`<pre> ${JSON.stringify(source)}`);
+    const externallyCovered = node("BODY", {
+      children: [
+        highlighted(),
+        node("DIV", { paintOrder: 3, computedStyles: opaque }),
+      ],
+    });
+    expect(serializeBrowserUseDOM(externallyCovered).dom).not.toContain(source);
+  });
   it("deduplicates only repeated bindings, retaining every distinct unlabelled checkbox", () => {
     const checkbox = (id: string) =>
       node("INPUT", { id, attributes: { type: "checkbox", value: "on" } });

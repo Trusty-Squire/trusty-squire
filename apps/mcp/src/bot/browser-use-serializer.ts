@@ -496,11 +496,12 @@ function imageContext(n: Simplified): string {
 function codeText(n: BrowserUseNode, paintedOver?: ReadonlySet<BrowserUseNode>): string | null {
   if (!["pre", "code"].includes(tag(n)) || !n.visible) return null;
   let actionable = false;
-  const collect = (c: BrowserUseNode): string => {
+  const collect = (c: BrowserUseNode, root = false): string => {
     if (c.nodeType === 3)
       return !paintedOver?.has(c) && (c.visible || /^\s*$/.test(c.value)) ? c.value : "";
     if (c.nodeType === 11) actionable = true;
     if (c.nodeType !== 1 || DISABLED.has(tag(c))) return "";
+    if (!root && paintedOver?.has(c)) return "";
     // Neutralize only the canonical small-icon class/id heuristic on markup.
     const plainMarkup =
       ["pre", "code", "span", "div"].includes(tag(c)) &&
@@ -508,9 +509,9 @@ function codeText(n: BrowserUseNode, paintedOver?: ReadonlySet<BrowserUseNode>):
     const actual = plainMarkup ? { ...c, bounds: null } : c;
     if (browserUseInteractive(actual) || c.scrollable || c.shadowType || c.contentDocument)
       actionable = true;
-    return c.children.map(collect).join("");
+    return c.children.map((child) => collect(child)).join("");
   };
-  const value = collect(n);
+  const value = collect(n, true);
   return actionable ? null : value;
 }
 
@@ -709,10 +710,10 @@ export function serializeBrowserUseDOM(
     const o = n.original,
       t = tag(o),
       indent = "\t".repeat(depth);
-    if (n.code !== undefined)
-      return paintedOver.has(o)
-        ? ""
-        : `${indent}<${t}> ${JSON.stringify(codeText(o, paintedOver) ?? n.code)}`;
+    if (n.code !== undefined) {
+      const code = codeText(o, paintedOver);
+      return code ? `${indent}<${t}> ${JSON.stringify(code)}` : "";
+    }
     // A duplicate binding cannot add reachability. Only omit an empty form row
     // when its exact action identity was already emitted; never infer equivalence
     // from matching labels, checked state, values or position.
