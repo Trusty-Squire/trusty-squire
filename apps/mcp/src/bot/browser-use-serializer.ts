@@ -295,6 +295,25 @@ export function browserUseBoundedContextText(n: BrowserUseNode, limit: number): 
   };
   return visit(n) ? characters.join("") : null;
 }
+export function browserUseBoundedRawText(n: BrowserUseNode, limit: number): string {
+  const characters: string[] = [];
+  const visit = (current: BrowserUseNode): boolean => {
+    if (current.nodeType === 3) {
+      for (const character of current.value) {
+        if (characters.length === limit) return false;
+        characters.push(character);
+      }
+      return true;
+    }
+    for (const child of current.children) if (!visit(child)) return false;
+    return true;
+  };
+  return visit(n) ? characters.join("") : characters.join("") + "...";
+}
+export function browserUseCapRawText(value: string, limit: number): string {
+  const characters = Array.from(value);
+  return characters.length <= limit ? value : characters.slice(0, limit).join("") + "...";
+}
 export function browserUseOrderedHeadingContext<T>(
   children: readonly T[],
   enclosing: string,
@@ -929,9 +948,9 @@ export function serializeBrowserUseDOM(
         n.interactive &&
         contexts.get(n) &&
         !["aria-label", "title", "placeholder", "ax_name"].some((key) =>
-          o.attributes[key]?.trim(),
+          (o.attributes[key] ?? "").length > 0,
         ) &&
-        browserUseBoundedContextText(o, 1) === ""
+        browserUseBoundedRawText(o, 1) === ""
       )
         attrs += (attrs ? " " : "") + `context=${cap(contexts.get(n)!)}`;
       if (n.interactive && targets.get(n)?.targetable === false)

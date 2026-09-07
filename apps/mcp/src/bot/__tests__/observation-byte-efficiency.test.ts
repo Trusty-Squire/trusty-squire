@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   browserUseBoundedContextText,
+  browserUseBoundedRawText,
   serializeBrowserUseDOM,
   type BrowserUseNode,
 } from "../browser-use-serializer.js";
@@ -272,6 +273,32 @@ describe("observation byte efficiency", () => {
       ],
     });
     expect(serializeBrowserUseDOM(nestedHeading).dom).toContain("context=Billing");
+  });
+  it("keeps exact whitespace action labels distinct from unlabelled controls", () => {
+    for (const label of [" ", "  ", "\t", "\n"]) {
+      const button = node("BUTTON", { children: [text(label)] });
+      const dom = serializeBrowserUseDOM(
+        node("SECTION", { children: [node("H2", { children: [text("Billing")] }), button] }),
+      ).dom;
+      const line = dom.split("\n").find((value) => value.includes(`[${button.id}]<button`));
+      expect(line).not.toContain("context=");
+      expect(dom).toContain(`\n\t${label}`);
+    }
+    const generic = node("BUTTON", { children: [text(" ")] });
+    const genericLine = serializeBrowserUseDOM(
+      node("DIV", { children: [text("Plan settings"), generic] }),
+    ).dom
+      .split("\n")
+      .find((value) => value.includes(`[${generic.id}]<button`));
+    expect(genericLine).not.toContain("context=");
+    const unlabeled = node("BUTTON");
+    expect(
+      serializeBrowserUseDOM(
+        node("SECTION", { children: [node("H2", { children: [text("Billing")] }), unlabeled] }),
+      ).dom,
+    ).toContain(`context=Billing`);
+    expect(browserUseBoundedRawText(text(" "), 1)).toBe(" ");
+    expect(browserUseBoundedRawText(text("  "), 1)).toBe(" ...");
   });
   it("rejects ineligible and whitespace-only context before unbounded collection", () => {
     const whitespace = text(" ");

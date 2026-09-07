@@ -143,7 +143,7 @@ describe("interleaved observation DOM", () => {
       const frame = await (await page.locator("#support").elementHandle())!.contentFrame();
       const local = "Local support preference";
       await frame!.setContent(
-        `<section>Whole section context must not be inherited <div style="margin-top: 800px">${local}<span><button id="below"> </button></span></div></section>`,
+        `<section>Whole section context must not be inherited <div style="margin-top: 800px">${local}<span><button id="below"></button></span></div></section>`,
       );
       const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
       const findFrame = (node: BrowserUseNode): BrowserUseNode | undefined =>
@@ -167,7 +167,7 @@ describe("interleaved observation DOM", () => {
       const frame = await (await page.locator("#support").elementHandle())!.contentFrame();
       const broad = "Oversized generic container ".repeat(4);
       await frame!.setContent(
-        `<div style="margin-top: 800px">${broad}<span><button id="below"> </button></span></div>`,
+        `<div style="margin-top: 800px">${broad}<span><button id="below"></button></span></div>`,
       );
       const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
       const findFrame = (node: BrowserUseNode): BrowserUseNode | undefined =>
@@ -184,7 +184,7 @@ describe("interleaved observation DOM", () => {
       await page.close();
     }
   });
-  it("inherits a bounded preceding heading for an unlabelled iframe control", async () => {
+  it("keeps a whitespace iframe action label instead of inheriting heading context", async () => {
     const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
     try {
       await page.setContent('<iframe id="support" style="width: 400px; height: 100px"></iframe>');
@@ -201,7 +201,7 @@ describe("interleaved observation DOM", () => {
       const hint = findFrame(capture.root)?.hiddenElements.find(
         (element) => element.tag === "button",
       );
-      expect(hint?.text).toBe("Billing");
+      expect(hint?.text).toBe(" ");
     } finally {
       await page.close();
     }

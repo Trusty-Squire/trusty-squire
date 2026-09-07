@@ -20,6 +20,8 @@ interface FrameTree {
 import type { InteractiveElement } from "./browser.js";
 import {
   browserUseBoundedContextText,
+  browserUseBoundedRawText,
+  browserUseCapRawText,
   browserUseInteractive,
   browserUseLocalContextContainer,
   browserUseOrderedHeadingContext,
@@ -67,10 +69,16 @@ export async function captureBrowserUseDOM(
 ): Promise<BrowserUseCapture> {
   const nodeElements = new Map<string, InteractiveElement>();
   const opaqueFrames = new Map<Frame, boolean>();
-  const viewMetadata = new Map<
-    string,
-    { layout: Layout | undefined; name: string; frame?: Frame }
-  >();
+const viewMetadata = new Map<
+  string,
+  {
+    layout: Layout | undefined;
+    name: string;
+    selector: string;
+    ownerFrame: Frame;
+    frame?: Frame;
+  }
+>();
   let moreAbove = false,
     moreBelow = false;
   const classifyFrame = async (frame: Frame): Promise<void> => {
@@ -391,13 +399,15 @@ export async function captureBrowserUseDOM(
         children: [],
         contentDocument: null,
       };
-      viewMetadata.set(id, {
-        layout: l,
-        name: String(axNode?.name?.value ?? ""),
-        ...(raw.frameId && frameById.has(raw.frameId)
-          ? { frame: frameById.get(raw.frameId)! }
-          : {}),
-      });
+    viewMetadata.set(id, {
+      layout: l,
+      name: String(axNode?.name?.value ?? ""),
+      selector,
+      ownerFrame: frame,
+      ...(raw.frameId && frameById.has(raw.frameId)
+        ? { frame: frameById.get(raw.frameId)! }
+        : {}),
+    });
       rawById.set(id, raw);
       nodeFrame.set(id, frame);
       selectorsById.set(id, selector);
@@ -526,10 +536,40 @@ export async function captureBrowserUseDOM(
       if (n.contentDocument) await attachFrames(n.contentDocument, depth + 1);
     };
     await attachFrames(root);
-    const hints = (n: BrowserUseNode): void => {
+    const hints = async (n: BrowserUseNode): Promise<void> => {
       if (["IFRAME", "FRAME"].includes(n.nodeName) && n.contentDocument) {
         const viewportHeight = viewMetadata.get(n.id)?.layout?.client?.height ?? 0;
         let anyHidden = false;
+        const isHidden = (c: BrowserUseNode): boolean => {
+          const l = viewMetadata.get(c.id)?.layout;
+          return (
+            !c.visible &&
+            !!l?.bounds &&
+            l.styles.display !== "none" &&
+            l.styles.visibility !== "hidden" &&
+            !(Number(l.styles.opacity ?? "1") <= 0)
+          );
+        };
+        const rawLabels = new Map<string, string>();
+        const collectRawLabels = async (c: BrowserUseNode): Promise<void> => {
+          if (isHidden(c) && browserUseInteractive(c)) {
+            const metadata = viewMetadata.get(c.id);
+        const frame = metadata?.ownerFrame;
+            const selector = metadata?.selector;
+            if (frame && selector)
+              try {
+                rawLabels.set(
+                  c.id,
+                  browserUseCapRawText(
+                    await frame.locator(selector).evaluate((element) => element.textContent ?? ""),
+                    iframeHintContextMaxChars,
+                  ),
+                );
+              } catch {}
+          }
+          for (const child of c.children) await collectRawLabels(child);
+        };
+        await collectRawLabels(n.contentDocument);
         const actionableDescendants = new Map<BrowserUseNode, boolean>();
         const actionableDescendant = (c: BrowserUseNode): boolean => {
           if (!actionableDescendants.has(c))
@@ -550,14 +590,8 @@ export async function captureBrowserUseDOM(
             ? browserUseBoundedContextText(c, iframeHintContextMaxChars)
             : null;
         const collect = (c: BrowserUseNode, context = ""): string | null => {
-          const meta = viewMetadata.get(c.id),
-            l = meta?.layout;
-          const hidden =
-            !c.visible &&
-            !!l?.bounds &&
-            l.styles.display !== "none" &&
-            l.styles.visibility !== "hidden" &&
-            !(Number(l.styles.opacity ?? "1") <= 0);
+          const meta = viewMetadata.get(c.id);
+          const hidden = isHidden(c);
           anyHidden ||= hidden;
           if (hidden && browserUseInteractive(c))
             n.hiddenElements.push({
@@ -568,6 +602,8 @@ export async function captureBrowserUseDOM(
                 c.attributes.placeholder ||
                 c.attributes.title ||
                 c.attributes["aria-label"] ||
+                rawLabels.get(c.id) ||
+                browserUseBoundedRawText(c, iframeHintContextMaxChars) ||
                 context ||
                 "(no label)",
               pages: viewportHeight > 0 ? (c.bounds!.y / viewportHeight).toFixed(1) : 0,
@@ -587,10 +623,10 @@ export async function captureBrowserUseDOM(
         n.hiddenElements = n.hiddenElements.slice(0, 10);
         n.hiddenContent = n.hiddenElements.length === 0 && anyHidden;
       }
-      n.children.forEach(hints);
-      if (n.contentDocument) hints(n.contentDocument);
+      for (const child of n.children) await hints(child);
+      if (n.contentDocument) await hints(n.contentDocument);
     };
-    hints(root);
+    await hints(root);
     const scroll = await page.evaluate(() => ({
       above: window.scrollY > 0,
       below: document.documentElement.scrollHeight - window.innerHeight - window.scrollY > 0,
