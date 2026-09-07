@@ -425,18 +425,15 @@ function oauthRedirectTargetMatches(candidateUrl: string, expectedReturnUrl: str
   try {
     const candidate = new URL(candidateUrl);
     const expected = new URL(expectedReturnUrl);
-    const expectedParams = [...expected.searchParams];
+    const expectedNames = [...new Set(expected.searchParams.keys())];
     return (
       candidate.protocol === expected.protocol &&
       candidate.host === expected.host &&
       candidate.pathname === expected.pathname &&
-      expectedParams.every(
-        ([name, value]) =>
-          candidate.searchParams.getAll(name).filter((candidateValue) => candidateValue === value)
-            .length >=
-          expectedParams.filter(
-            ([expectedName, expectedValue]) => expectedName === name && expectedValue === value,
-          ).length,
+      expectedNames.every(
+        (name) =>
+          JSON.stringify(candidate.searchParams.getAll(name)) ===
+          JSON.stringify(expected.searchParams.getAll(name)),
       )
     );
   } catch {
@@ -446,7 +443,6 @@ function oauthRedirectTargetMatches(candidateUrl: string, expectedReturnUrl: str
 
 export interface OAuthCompletionEvidence {
   page: Page;
-  url: string;
 }
 
 export function oauthAwaitingHumanMessage(productOrigin: string, budgetMs: number): string {
@@ -3132,8 +3128,12 @@ export class BrowserController {
   private trackMainDocument(page: Page): void {
     return this.pageDriver.trackMainDocument(page);
   }
-  mainDocumentIdentity(): string {
-    return this.pageDriver.mainDocumentIdentity();
+  mainDocumentIdentity(page: Page | null = this.page): string {
+    return this.pageDriver.mainDocumentIdentity(page);
+  }
+
+  isActivePage(page: Page): boolean {
+    return this.page === page;
   }
 
   /** Attach normal controller behavior to a harness-owned Playwright page. */
@@ -4515,6 +4515,14 @@ export class BrowserController {
         new Error("locator target is disabled"),
       );
     }
+  }
+
+  async clickOnPage(page: Page, selector: string): Promise<void> {
+    await page.locator(selector).click({ timeout: 8000, noWaitAfter: true });
+  }
+
+  async clickViaJsOnPage(page: Page, selector: string): Promise<void> {
+    await page.locator(selector).evaluate((element) => (element as HTMLElement).click());
   }
 
   async typeHandle(handle: ElementHandle<Element>, text: string, sealed = false): Promise<void> {
@@ -13310,7 +13318,7 @@ export class BrowserController {
       return !returnedPage.isClosed() &&
         returnedPage.url() === url &&
         this.isOAuthReturnUrl(url, expectedReturnUrl)
-        ? { page: returnedPage, url }
+        ? { page: returnedPage }
         : null;
     };
     registerCompletionCheck?.(completionEvidence);

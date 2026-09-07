@@ -457,7 +457,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await context.route("https://console.product.test/**", (route) =>
       route.fulfill({
         contentType: "text/html",
-        body: "<main>Projects</main><button>New project</button>",
+        body: '<main>Projects</main><button id="new-project" onclick="document.body.dataset.projectClicked=\'yes\'">New project</button>',
       }),
     );
     await product.goto("https://product.test/login");
@@ -472,28 +472,33 @@ describe("BrowserController OAuth popup lifecycle", () => {
     });
     let sessionId: string | undefined;
     try {
-      sessionId = (
-        await startHarnessProvisionSession({
-          browser: controller,
-          serviceUrl: "https://product.test/login",
-        })
-      ).session_id;
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: "https://product.test/login",
+        observationFormat: "compact-v2",
+      });
+      sessionId = started.session_id;
+      const oauthRef = (started as { dom?: string }).dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
+      expect(oauthRef).toBeDefined();
       const result = await act(sessionId, {
         kind: "oauth_login",
-        target: "Continue",
+        target: oauthRef!,
         provider: "google",
       });
       expect(result.url).toBe("https://console.product.test/projects");
       expect(result.oauth).toBeUndefined();
-      expect(result.text).toContain("Projects");
-      expect(result.el_table).toContain("New project");
+      expect(result).toMatchObject({ format: "compact-v2" });
+      const productRef = (result as { dom?: string }).dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
+      expect(productRef).toBeDefined();
+      await act(sessionId, { kind: "click", target: productRef! });
+      expect(await product.locator("body").getAttribute("data-project-clicked")).toBe("yes");
       releaseConsent();
       await vi.waitFor(() =>
         expect((controller as unknown as { page: Page }).page.url()).toBe(expectedReturnUrl),
       );
       const settled = await observe(sessionId);
       expect(settled.url).toBe(expectedReturnUrl);
-      expect(settled.text).toContain("Projects");
+      expect(settled).toMatchObject({ format: "compact-v2" });
     } finally {
       releaseConsent();
       if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
@@ -579,6 +584,36 @@ describe("BrowserController OAuth popup lifecycle", () => {
               )}'>Continue</button>`
             : route.request().url().startsWith("https://accounts.google.com/")
               ? `<script>setTimeout(() => location.href=${JSON.stringify(mismatchedReturnUrl)}, 50)</script>`
+              : "<main>Approve sign-in</main>",
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 800, "google")).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("keeps a return with conflicting duplicate fixed redirect query pending", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects?organization=expected";
+    const conflictingReturnUrl =
+      "https://console.product.test/projects?organization=other&organization=expected&code=oauth-code";
+    await context.route("**/*", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body:
+          route.request().url() === "https://product.test/login"
+            ? `<button id="oauth" onclick='location.href=${JSON.stringify(
+                `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+              )}'>Continue</button>`
+            : route.request().url().startsWith("https://accounts.google.com/")
+              ? `<script>setTimeout(() => location.href=${JSON.stringify(conflictingReturnUrl)}, 50)</script>`
               : "<main>Approve sign-in</main>",
       }),
     );

@@ -1276,12 +1276,27 @@ export function resolveTarget(
   return best?.el ?? null;
 }
 
+const compactV2SourcePages = new WeakMap<object, OAuthCompletionEvidence["page"]>();
+
+function compactV2SourcePage(session: object): OAuthCompletionEvidence["page"] | undefined {
+  return compactV2SourcePages.get(session);
+}
+
+function rememberCompactV2SourcePage(
+  session: object,
+  page: OAuthCompletionEvidence["page"] | undefined,
+): void {
+  if (page === undefined) compactV2SourcePages.delete(session);
+  else compactV2SourcePages.set(session, page);
+}
+
 function invalidateCompactV2Snapshot(
   session: Pick<Session, "compactV2Refs" | "compactV2Index" | "compactV2Previous">,
 ): void {
   session.compactV2Refs = new Map();
   session.compactV2Index = null;
   session.compactV2Previous = null;
+  compactV2SourcePages.delete(session);
 }
 
 function throwCompactV2StaleRef(): never {
@@ -3995,15 +4010,18 @@ function normalizeVolatileCheckoutPath(pathname: string): string {
 // fail-closed backstop for a host whose document identity does not move on a
 // logical page change; query-string, fragment, and known-volatile checkout
 // token churn on the same logical page must not invalidate.
-function compactV2EpochDoc(session: Session): string {
-  let location = session.browser.currentUrl();
+function compactV2EpochDoc(
+  session: Session,
+  page: OAuthCompletionEvidence["page"] | undefined = compactV2SourcePage(session),
+): string {
+  let location = page?.url() ?? session.browser.currentUrl();
   try {
     const parsed = new URL(location);
     if (parsed.origin !== "null" && parsed.origin !== "")
       location = `${parsed.origin}${normalizeVolatileCheckoutPath(parsed.pathname)}`;
   } catch {}
   return createHmac("sha256", session.compactV2Secret)
-    .update(`${session.browser.mainDocumentIdentity()}\u0000${location}`)
+    .update(`${session.browser.mainDocumentIdentity(page)}\u0000${location}`)
     .digest("base64url");
 }
 
@@ -4023,8 +4041,9 @@ function compactV2StableRef(session: Session, doc: string, identity: string): st
 function compactV2Handles(
   session: Session,
   elements: readonly InteractiveElement[],
+  page: OAuthCompletionEvidence["page"] | undefined = compactV2SourcePage(session),
 ): Map<InteractiveElement, string> {
-  const doc = compactV2EpochDoc(session);
+  const doc = compactV2EpochDoc(session, page);
   return new Map(
     [...elementFingerprints(elements)].map(([element, fingerprint]) => [
       element,
@@ -4037,17 +4056,19 @@ function compactV2Handles(
 function compactV2LiveControls(
   session: Session,
   elements: readonly InteractiveElement[],
+  page: OAuthCompletionEvidence["page"] | undefined = compactV2SourcePage(session),
 ): { rows: SafeControlV2[]; byRef: Map<string, string> } {
   let pageOrigin = "";
   try {
-    pageOrigin = new URL(session.browser.currentUrl()).origin;
+    pageOrigin = new URL(page?.url() ?? session.browser.currentUrl()).origin;
   } catch {}
+  const pageUrl = page?.url() ?? session.browser.currentUrl();
   return buildSafeControlsV2({
     elements,
     legacyRefs: provisionElementRefs(elements),
-    handles: compactV2Handles(session, elements),
+    handles: compactV2Handles(session, elements, page),
     pageOrigin,
-    pageUrl: session.browser.currentUrl(),
+    pageUrl,
     canonical: session.compactV2Mode === "on",
   });
 }
@@ -4159,17 +4180,20 @@ function compactV2Observation(
   capture: BrowserUseCapture,
   semanticSource: ObservationSemanticSourceV2,
   startMetadata?: CompactV2StartMetadata,
+  sourcePage?: OAuthCompletionEvidence["page"],
 ): Observation {
+  rememberCompactV2SourcePage(session, sourcePage);
   const elements = capture.elements;
   if (startMetadata?.hintPages !== undefined)
     session.compactV2HintPages = [...startMetadata.hintPages];
-  const stage = safeStageV2(session.browser.currentUrl(), elements);
+  const pageUrl = sourcePage?.url() ?? session.browser.currentUrl();
+  const stage = safeStageV2(pageUrl, elements);
   const semantics = safePageSemanticsV2(semanticSource);
-  const epochDoc = compactV2EpochDoc(session);
+  const epochDoc = compactV2EpochDoc(session, sourcePage);
   const previous = session.compactV2Previous;
   const sameDocument = previous !== null && previous.epoch.doc === epochDoc;
-  const safe = compactV2LiveControls(session, elements);
-  const handles = compactV2Handles(session, elements);
+  const safe = compactV2LiveControls(session, elements, sourcePage);
+  const handles = compactV2Handles(session, elements, sourcePage);
   const rendered = serializeBrowserUseDOM(capture.root, {
     ref: (node) => {
       const element = capture.nodeElements.get(node.id);
@@ -4213,7 +4237,7 @@ function compactV2Observation(
   return {
     format: "browser-use-dom",
     session_id: session.id,
-    url: session.browser.currentUrl(),
+    url: pageUrl,
     stage,
     ...(sameDocument ? { delta: true } : {}),
     ...(changed ? { dom } : { dom_unchanged: true as const }),
@@ -4271,6 +4295,7 @@ export async function observeQuery(
 ): Promise<Record<string, unknown>> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const sourcePage = compactV2SourcePage(session);
   const index = session.compactV2Index;
   if (index === null || index.expiresAt < Date.now()) throw new Error("stale_cursor");
   // Query/paging is part of the same session-bound action-map protocol: never return
@@ -4316,7 +4341,7 @@ export async function observeQuery(
     if (parsed.rev !== index.epoch.rev) throw new Error("stale_cursor");
     offset = filterBound || unfiltered ? parsed.offset : 0;
   }
-  const liveElements = (await session.browser.extractBrowserUseObservation()).elements;
+  const liveElements = (await session.browser.extractBrowserUseObservation(sourcePage)).elements;
   const liveSafe = compactV2LiveControls(session, liveElements);
   const liveUnchanged =
     liveSafe.rows.length === index.rows.length &&
@@ -4334,7 +4359,7 @@ export async function observeQuery(
     // epoch's revision advances and cursors minted here bind to the fresh map.
     session.generation += 1;
     pagingRev = session.generation;
-    pagingStage = safeStageV2(session.browser.currentUrl(), liveElements);
+    pagingStage = safeStageV2(sourcePage?.url() ?? session.browser.currentUrl(), liveElements);
     snapshotRows = liveSafe.rows;
     const epoch: ObservationEpochV2 = { doc: index.epoch.doc, rev: pagingRev };
     session.compactV2Index = {
@@ -4395,7 +4420,7 @@ export async function observeQuery(
   const page = encodeV2QueryPage({
     sessionId: session.id,
     stage: pagingStage,
-    pageUrl: session.browser.currentUrl(),
+    pageUrl: sourcePage?.url() ?? session.browser.currentUrl(),
     semantics: index.semantics,
     rows,
     offset,
@@ -4470,7 +4495,14 @@ async function observeSession(
     const v2Mode = session.compactV2Mode;
     if (v2Mode === "on") {
       if (capture === null) throw new Error("observation_capture_missing");
-      return compactV2Observation(session, generation, capture, semanticSource, startMetadata);
+      return compactV2Observation(
+        session,
+        generation,
+        capture,
+        semanticSource,
+        startMetadata,
+        sourcePage,
+      );
     }
     if (v2Mode === "shadow")
       await exerciseCompactV2Shadow(session, generation, elements, semanticSource);
@@ -4889,6 +4921,8 @@ async function executeAct(
     if (cardBlock !== null) throw new ManualCardEntryBlockedError(cardBlock);
   }
   let browser = session.browser;
+  const compactV2ActionPage =
+    session.compactV2Active ? compactV2SourcePage(session) : undefined;
   let completedAction: ProvisionAction = action;
   let sensitiveSource: RecordedValueSource | undefined;
   let cartAffecting = false;
@@ -5143,9 +5177,17 @@ async function executeAct(
       case "type":
       case "upload":
       case "oauth_click": {
-        const pageText = await browser.extractVisibleText();
+        const pageText = await browser.extractVisibleText(compactV2ActionPage);
         const blockReason = shouldBlockUnsafeProvisionAction(pageText, action);
         if (blockReason !== null) throw new Error(blockReason);
+        if (
+          compactV2ActionPage !== undefined &&
+          !browser.isActivePage(compactV2ActionPage) &&
+          action.kind !== "click" &&
+          action.kind !== "js_click"
+        ) {
+          throwCompactV2StaleRef();
+        }
         // Locator-form target (`text=…` / `css=…`): the host is pointing at a
         // control that has NO `@e:` ref because the inventory never emitted it (a
         // bare click-handler <div> with no role/label, e.g. a SPA "Add To Cart"
@@ -5245,7 +5287,7 @@ async function executeAct(
         // Re-resolve against FRESH elements every act — never trust a stale index.
         const fresh =
           session.compactV2Mode === "on"
-            ? (await browser.extractBrowserUseObservation()).elements
+            ? (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements
             : await browser.extractInteractiveElements();
         retainSessionElements(session, fresh);
         // resolveTarget recomputes identities (incl. volatile positional-group
@@ -5277,6 +5319,8 @@ async function executeAct(
         bindCartIdentity(isCartAffectingAction(action, el));
         if (action.kind === "click" || action.kind === "js_click") {
           const target = frameTargetFor(el);
+          const sourcePageIsActive =
+            compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage);
           if (
             (session.placeOrderApproval !== null || getActivePendingThreeDs(session) !== null) &&
             isPlaceOrderClickCandidate(el)
@@ -5289,6 +5333,12 @@ async function executeAct(
                 shouldTrack,
               ),
             );
+          } else if (!sourcePageIsActive && compactV2ActionPage !== undefined && target === null) {
+            if (action.kind === "click") {
+              await browser.clickOnPage(compactV2ActionPage, el.selector);
+            } else {
+              await browser.clickViaJsOnPage(compactV2ActionPage, el.selector);
+            }
           } else if (action.kind === "click") {
             await adoptTabOpenedByClick(session, browser, async () => {
               await browser.clickWithDispatchTracking(
@@ -5442,10 +5492,18 @@ async function executeAct(
             oauthDeadline,
           );
         }
-        if (action.kind !== "type") await settleAfterStateChange(browser);
+        if (
+          action.kind !== "type" &&
+          (compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage))
+        ) {
+          await settleAfterStateChange(browser);
+        }
         // Only a plain click follows a tab it opened. oauth_click owns its own
         // provider-page lifecycle and upload never opens one.
-        if (action.kind === "click" || action.kind === "js_click") {
+        if (
+          (action.kind === "click" || action.kind === "js_click") &&
+          (compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage))
+        ) {
           await adoptOpenedTab(session, browser, 0);
         }
         break;
@@ -5532,17 +5590,26 @@ async function executeAct(
           session,
           () => ({
             session_id: session.id,
-            url: browser.currentUrl(),
+            url: compactV2ActionPage?.url() ?? browser.currentUrl(),
             text: "",
             elements: [],
             observed: "none" as const,
           }),
           {
-            stage: safeStageV2(browser.currentUrl(), session.lastElements),
+            stage: safeStageV2(
+              compactV2ActionPage?.url() ?? browser.currentUrl(),
+              session.lastElements,
+            ),
             observed: "none",
+            url: compactV2ActionPage?.url() ?? browser.currentUrl(),
           },
         )
-      : await observeSession(session, detail === "none" ? "compact" : detail);
+      : await observeSession(
+          session,
+          detail === "none" ? "compact" : detail,
+          undefined,
+          compactV2ActionPage,
+        );
   return {
     observation:
       completedAction.kind === "select" && observation.format !== "browser-use-dom"
