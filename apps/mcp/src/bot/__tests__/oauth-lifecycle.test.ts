@@ -4,7 +4,7 @@
 // holding a detached Playwright Page. No external provider or credentials are
 // involved: the fixture drives the same popup/redirect/close lifecycle locally.
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
 import {
   BrowserController,
@@ -394,6 +394,124 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await expect(product.locator("body").getAttribute("data-consent-clicks")).resolves.toBeNull();
     } finally {
       await context.close().catch(() => undefined);
+    }
+  });
+
+  it("completes a same-tab OAuth return to the product console on a sibling host", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: '<button id="oauth" onclick="location.href=\'https://accounts.google.com/provider\'">Continue</button>',
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: '<script>setTimeout(() => location.href="https://console.product.test/projects", 50)</script>',
+      }),
+    );
+    await context.route("https://console.product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: "<main>Projects</main>",
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 1_500, "google")).resolves.toBeUndefined();
+      expect(controller.currentUrl()).toBe("https://console.product.test/projects");
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("rechecks completion when the outer action deadline wins during consent work", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1600";
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: '<button id="oauth" onclick="location.href=\'https://accounts.google.com/provider\'">Continue</button>',
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: "<main>Consent</main>",
+      }),
+    );
+    await context.route("https://console.product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: "<main>Projects</main><button>New project</button>",
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    let releaseConsent!: () => void;
+    const consentGate = new Promise<boolean>((resolve) => {
+      releaseConsent = () => resolve(true);
+    });
+    vi.spyOn(controller, "advanceOAuthConsent").mockImplementation(async () => {
+      await product.goto("https://console.product.test/projects");
+      return await consentGate;
+    });
+    let sessionId: string | undefined;
+    try {
+      sessionId = (
+        await startHarnessProvisionSession({
+          browser: controller,
+          serviceUrl: "https://product.test/login",
+        })
+      ).session_id;
+      const result = await act(sessionId, {
+        kind: "oauth_login",
+        target: "Continue",
+        provider: "google",
+      });
+      expect(result.url).toBe("https://console.product.test/projects");
+      expect(result.oauth).toBeUndefined();
+      expect(result.text).toContain("Projects");
+    } finally {
+      releaseConsent();
+      if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
+      if (sessionId) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
+
+  it.each([
+    "https://auth.product.test/consent",
+    "https://console.product.test/challenge",
+    "https://unrelated.test/projects",
+  ])("keeps %s pending after provider navigation", async (destination) => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("**/*", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body:
+          route.request().url() === "https://product.test/login"
+            ? '<button id="oauth" onclick="location.href=\'https://accounts.google.com/provider\'">Continue</button>'
+            : route.request().url().startsWith("https://accounts.google.com/")
+              ? `<script>setTimeout(() => location.href=${JSON.stringify(destination)}, 50)</script>`
+              : "<main>Approve sign-in</main>",
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 800, "google")).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+    } finally {
+      await context.close();
     }
   });
 

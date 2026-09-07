@@ -13240,6 +13240,7 @@ export class BrowserController {
     settleTimeoutMs = 30_000,
     consentProvider?: OAuthProviderId,
     expectedGoogleAccountEmail?: string | null,
+    registerCompletionCheck?: (check: () => boolean) => void,
   ): Promise<void> {
     const product = this.page;
     const context = this.context;
@@ -13285,6 +13286,19 @@ export class BrowserController {
         resolveProductDeparture();
       }
     };
+    // The outer action budget may win while consent/readiness work is still
+    // unwinding. Give it attempt-local, read-only evidence, never a stale flag
+    // from an earlier login or a guess based only on the current URL.
+    registerCompletionCheck?.(() => {
+      const transient = providerPage ?? product;
+      return (
+        providerPage === null &&
+        productDeparted &&
+        !transient.isClosed() &&
+        this.isOAuthProductUrl(transient.url(), productUrl) &&
+        oauthErrorFromReturnUrl(transient.url()) === null
+      );
+    });
     product.on("framenavigated", onProductNavigation);
     try {
       recovery = await context.newPage();
@@ -13484,9 +13498,19 @@ export class BrowserController {
     try {
       const candidate = new URL(candidateUrl);
       const product = new URL(productUrl);
-      return product.origin === "null"
-        ? candidateUrl === productUrl
-        : candidate.origin === product.origin;
+      if (product.origin === "null") return candidateUrl === productUrl;
+      if (candidate.origin === product.origin) return true;
+      // Marketing/login and console hosts can differ (e.g. xata.io →
+      // console.xata.io). Keep provider/broker challenge and callback routes
+      // out of this sibling-host completion signal.
+      return (
+        candidate.protocol === product.protocol &&
+        isSameRecipeDomain(candidate.hostname, product.hostname) &&
+        !/(?:^|[./_-])(?:auth|oauth|login|signin|signup|sso|callback|consent|challenge|verify|verification|realms)(?:[./_-]|$)/i.test(
+          candidate.hostname + candidate.pathname,
+        ) &&
+        oauthErrorFromReturnUrl(candidateUrl) === null
+      );
     } catch {
       return candidateUrl === productUrl;
     }

@@ -539,6 +539,7 @@ const DEFAULT_OAUTH_LOGIN_LEASE_COOLDOWN_MS = 3_000;
 const DEFAULT_OAUTH_ACTION_TIMEOUT_MS = 30_000;
 
 interface OAuthActionDeadline {
+  completionCheck?: () => boolean;
   expiresAt: number;
   timeoutMs: number;
   provider: OAuthProviderId | undefined;
@@ -597,9 +598,9 @@ async function waitForOAuthActionQuiescence(deadline: OAuthActionDeadline): Prom
   }
 }
 
-// Fix C: the OUTER backstop race (withinOAuthActionDeadline) has no page to
-// re-check, so it can only report the one fact it actually observed — never a
-// guessed cause. Which fact depends on the phase: while the action was still
+// The backstop race itself only knows that its budget elapsed. The action
+// boundary checks attempt-local browser completion evidence before exposing
+// this fallback; without that evidence, report no guessed cause. Which fact depends on the phase: while the action was still
 // queued behind a prior OAuth call's lease it was never attempted at all,
 // whereas once running the inner browser.ts wait outlived its own deadline.
 // Both are recoverable, not failures.
@@ -691,11 +692,11 @@ async function withOAuthActionLease<T>(
   }
 }
 
-async function withOAuthActionBoundary<T>(
+async function withOAuthActionBoundary(
   session: Session,
   provider: OAuthProviderId | undefined,
-  run: (deadline: OAuthActionDeadline) => Promise<T>,
-): Promise<T> {
+  run: (deadline: OAuthActionDeadline) => Promise<InternalActResult>,
+): Promise<InternalActResult> {
   const deadline = oauthActionDeadline(provider);
   const releaseCooldownMs = oauthLoginLeaseCooldownMs();
   // A deadline expiry must NOT terminalize the session: the in-flight OAuth
@@ -713,7 +714,18 @@ async function withOAuthActionBoundary<T>(
   return await withOAuthActionLease(
     deadline,
     async () => {
-      return await withinOAuthActionDeadline(run(deadline), deadline);
+      try {
+        return await withinOAuthActionDeadline(run(deadline), deadline);
+      } catch (error) {
+        if (
+          error instanceof OAuthAwaitingHumanError &&
+          error.phase !== "not_attempted" &&
+          deadline.completionCheck?.()
+        ) {
+          return { observation: await observeSession(session), outcome: {} };
+        }
+        throw error;
+      }
     },
     releaseCooldownMs,
   );
@@ -774,6 +786,9 @@ async function runSerializedOAuthBoundary(
         oauthActionRemainingMs(deadline),
         provider,
         provider === "github" ? undefined : expectedGoogleAccountEmail,
+        (check) => {
+          deadline.completionCheck = check;
+        },
       );
       await settleAfterStateChange(browser);
     },
