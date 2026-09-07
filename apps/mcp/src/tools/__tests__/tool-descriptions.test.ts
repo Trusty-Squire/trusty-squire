@@ -147,11 +147,32 @@ describe("descriptions do not promise guards that #663 removed", () => {
 
 // Registered descriptions are the protocol documentation delivered to callers.
 describe("current observation protocol documentation", () => {
-  for (const name of ["operate_start", "operate_observe"]) {
-    it(`${name} documents the DOM tree without retired table instructions`, () => {
-      const description = OPERATE_TOOLS.find((tool) => tool.name === name)!.description;
+  it("operate_start documents the DOM tree without retired table instructions", () => {
+    const description = OPERATE_TOOLS.find((tool) => tool.name === "operate_start")!.description;
+    for (const token of [
+      "browser-use-dom",
+      "dom",
+      "tab-indented",
+      "|SHADOW(open)|",
+      "not-targetable=true",
+      "more_above",
+      "more_below",
+      "*",
+      "removed",
+      "delta:true",
+    ]) {
+      expect(description).toContain(token);
+    }
+    expect(description).not.toMatch(/safe_table|observe_query|\[ref,role,facts/);
+    expect(description).not.toMatch(/\b[qfaxsbltcrm]=/);
+    expect(description).not.toMatch(/state bitset|detail:full|card\/secret-shaped|never emitted/);
+  });
+
+  it("operate_observe documents both reachable response grammars", () => {
+    const description = OPERATE_TOOLS.find((tool) => tool.name === "operate_observe")!.description;
       for (const token of [
         "browser-use-dom",
+        "browser-use-control-query",
         "dom",
         "tab-indented",
         "|SHADOW(open)|",
@@ -164,9 +185,9 @@ describe("current observation protocol documentation", () => {
       ]) {
         expect(description).toContain(token);
       }
-      expect(description).not.toMatch(/safe_table|observe_query|\[ref,role,facts/);
-      expect(description).not.toMatch(/\b[qfaxsbltcrm]=/);
-      expect(description).not.toMatch(/state bitset|detail:full|card\/secret-shaped|never emitted/);
-    });
-  }
+      expect(description).toContain("safe_table");
+      expect(description).toContain("[ref,role,facts?]");
+      expect(description).not.toMatch(/observe_query/);
+      expect(description).not.toMatch(/detail:full|card\/secret-shaped|never emitted/);
+  });
 });

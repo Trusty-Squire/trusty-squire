@@ -308,7 +308,9 @@ export function compactToolResultText(result: unknown): string {
     typeof result === "object" &&
     result !== null &&
     "format" in result &&
-    (result as { format?: unknown }).format === "browser-use-dom"
+    ["browser-use-dom", "browser-use-control-query"].includes(
+      (result as { format?: unknown }).format as string,
+    )
   ) {
     return JSON.stringify(result);
   }

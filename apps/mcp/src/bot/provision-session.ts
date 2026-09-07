@@ -380,9 +380,9 @@ export interface Observation {
   // canonical cart URL and safe retry semantics from operate_act { kind: "cart_add" }.
   cart_delta?: "+1" | "0" | "unknown";
   selected_option?: string;
-  // compact-v2's closed action map. It is intentionally value-free and does
-  // not use the V1 snapshot-file recovery protocol.
-  format?: "browser-use-dom";
+  // Browser-use DOM trees and paged control-query results do not use the V1
+  // snapshot-file recovery protocol.
+  format?: "browser-use-dom" | "browser-use-control-query";
   stage?: SafeStageV2;
   generation?: number;
   safe_table?: SafeControlV2[];
@@ -4076,7 +4076,7 @@ function compactV2HintPage(
   const nextOffset = offset + 1;
   const remaining = session.compactV2HintPages.length - nextOffset;
   const payload = {
-    format: "browser-use-dom",
+    format: "browser-use-control-query",
     url: "",
     session_id: session.id,
     stage: index.stage,

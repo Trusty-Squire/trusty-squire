@@ -1933,8 +1933,14 @@ describe("TOOLS registry", () => {
       expect(description).toContain("removed");
       expect(description).toContain("reset the prior view");
       expect(description).toContain("Refs stay usable on the same document");
-      expect(description).not.toMatch(/safe_table|observe_query|\b[qfaxsbltcrm]=/);
     }
+    const start = TOOLS.find((tool) => tool.name === "operate_start")?.description ?? "";
+    expect(start).not.toMatch(/safe_table|observe_query|\b[qfaxsbltcrm]=/);
+    const observe = TOOLS.find((tool) => tool.name === "operate_observe")?.description ?? "";
+    expect(observe).toContain("browser-use-control-query");
+    expect(observe).toContain("safe_table");
+    expect(observe).toContain("[ref,role,facts?]");
+    expect(observe).not.toContain("observe_query");
   });
 });
 

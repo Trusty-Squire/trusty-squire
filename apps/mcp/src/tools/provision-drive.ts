@@ -340,6 +340,14 @@ const DOM_OBSERVATION_CONTRACT =
   "Without delta:true, reset the prior view. Refs stay usable on the same document; on stale_ref, " +
   "call operate_observe and choose a current ref. ";
 
+const CONTROL_QUERY_CONTRACT =
+  "With query, role, or cursor, format is `browser-use-control-query`, not `browser-use-dom`. " +
+  "Its `safe_table` is a paged control map: each row is `[ref,role,facts?]`; role is " +
+  "b=button, l=link, t=textbox, s=select, c=checkbox, r=radio, tb=tab, m=menuitem, or f=file. " +
+  "facts is a `|`-joined `@label` alias followed by present s=state (c=checked, u=unchecked, d=disabled, r=required), " +
+  "a=action, f=field, q=choice-position/total, and x=s same-origin or x=x cross-origin frame; absent x means main frame. " +
+  "Use overflow.next_cursor to page safe_table. A cursor from hint_overflow returns `hint` and pages with hint_overflow.next_cursor. ";
+
 export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   name: "operate_start",
   description:
@@ -401,9 +409,10 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
   description:
     "Re-read the current page of an operate session. " +
     DOM_OBSERVATION_CONTRACT +
-    "Omit query/cursor/role for the tree. Supplying query or role instead searches the full document's " +
-    "control inventory, including off-viewport controls; cursor pages those separate search results " +
-    "via overflow.next_cursor. detail does not expand the default tree format. " +
+    "Omit query/cursor/role for the tree. Supplying query or role searches the full document's " +
+    "control inventory, including off-viewport controls. " +
+    CONTROL_QUERY_CONTRACT +
+    "detail does not expand the default tree format. " +
     "Explicit legacy sessions (TRUSTY_SQUIRE_OBSERVE_V2=off or shadow) return legacy observations.",
   inputSchema: observeSchema,
   jsonInputSchema: {

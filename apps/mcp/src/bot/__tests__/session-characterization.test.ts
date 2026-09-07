@@ -689,6 +689,11 @@ describe("characterization: agent-facing observation payload shapes", () => {
     });
     const result = await observeQuery(start.session_id, "sign up");
     expect(Object.keys(result).sort()).toEqual(QUERY_KEYS);
+    expect(result).toMatchObject({
+      format: "browser-use-control-query",
+      safe_table: expect.any(Array),
+    });
+    expect(result).not.toHaveProperty("dom");
     expect(JSON.stringify(result)).not.toContain("#submit");
   });
 });

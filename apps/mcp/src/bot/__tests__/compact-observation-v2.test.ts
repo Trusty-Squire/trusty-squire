@@ -821,7 +821,7 @@ describe("compact observation v2", () => {
       headings: ["Getting started"],
     });
     expect(page).toEqual({
-      format: "browser-use-dom",
+      format: "browser-use-control-query",
       url: "",
       session_id: "session",
       stage: "browse",

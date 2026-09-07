@@ -4176,8 +4176,10 @@ describe("Compact V2 action-map boundary", () => {
       { session_id: started.session_id, query: "Item 149", cursor: pageCursor },
       null,
     )) as {
+      format: string;
       safe_table: unknown[];
     };
+    expect(byQuery.format).toBe("browser-use-control-query");
     expect(byQuery.safe_table).toHaveLength(1);
     const byRole = (await observeQuery(started.session_id, "", "button", pageCursor)) as {
       safe_table: unknown[];
@@ -4910,6 +4912,7 @@ describe("Compact V2 action-map boundary", () => {
     let hintCursor = started.hint_overflow?.next_cursor;
     while (hintCursor !== undefined) {
       const page = await observeQuery(started.session_id, "", undefined, hintCursor);
+      expect(page.format).toBe("browser-use-control-query");
       expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThanOrEqual(
         OBSERVE_V2_MAX_WIRE_BYTES,
       );
