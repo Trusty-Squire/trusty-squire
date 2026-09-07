@@ -5483,9 +5483,7 @@ async function executeAct(
           );
         } else if (action.kind === "type") {
           clearCommittedSelectValue(session, el.selector);
-          const sourcePageIsActive =
-            compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage);
-          if (!sourcePageIsActive || !isAutocompleteScopedTypeField(action.provenance, el)) {
+          if (!isAutocompleteScopedTypeField(action.provenance, el)) {
             // Free text only — e.g. a site-search/catalog-search box, which
             // can legitimately open its own suggestion listbox too. 3.1 only
             // applies to a form/recipe field where a committed value is
@@ -5502,8 +5500,12 @@ async function executeAct(
             // typing, not just of an explicit `select`. Snapshot pre-existing
             // popups BEFORE typing (it can open mid-keystroke), then detect what
             // opened afterward.
-            await browser.markPreexistingTypeSuggestionPopups();
-            await browser.type(el.selector, action.text);
+            await browser.markPreexistingTypeSuggestionPopups(compactV2ActionPage);
+            if (compactV2ActionPage !== undefined) {
+              await browser.typeOnPage(compactV2ActionPage, el.selector, action.text);
+            } else {
+              await browser.type(el.selector, action.text);
+            }
             // Cleanup (clear our tracking markers, and dismiss with Escape
             // ONLY when a detected popup is plausibly still open) must run no
             // matter how this resolves — no popup, an ambiguous stop, a
@@ -5521,7 +5523,10 @@ async function executeAct(
             // nothing and bubble to close an enclosing modal/dialog instead.
             let dismissPopupWithEscape = false;
             try {
-              const suggestionTexts = await browser.detectTypeSuggestionPopup(el.selector);
+              const suggestionTexts = await browser.detectTypeSuggestionPopup(
+                el.selector,
+                compactV2ActionPage,
+              );
               if (suggestionTexts.length > 0) {
                 dismissPopupWithEscape = true;
                 const candidates = matchAutocompleteSuggestions(action.text, suggestionTexts);
@@ -5537,7 +5542,7 @@ async function executeAct(
                   );
                 }
                 const pickedText = suggestionTexts[candidates[0]!]!;
-                await browser.commitTypeSuggestion(candidates[0]!);
+                await browser.commitTypeSuggestion(candidates[0]!, compactV2ActionPage);
                 // Never trust that a click "looked right" — POSITIVELY confirm
                 // the commit took (same hard constraint as the field-role
                 // guard, PR #447: a miss is a stop, never a silent
@@ -5551,6 +5556,7 @@ async function executeAct(
                 const committed = await browser.confirmAutocompleteCommitted(
                   el.selector,
                   pickedText,
+                  compactV2ActionPage,
                 );
                 if (!committed) {
                   throw new Error(
@@ -5577,8 +5583,8 @@ async function executeAct(
                 // the live run is unaffected.
                 const refreshed =
                   session.compactV2Mode === "on"
-                    ? (await browser.extractBrowserUseObservation()).elements
-                    : await browser.extractInteractiveElements();
+                    ? (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements
+                    : await browser.extractInteractiveElements(compactV2ActionPage);
                 retainSessionElements(session, refreshed);
                 const liveField = refreshed.find((field) => field.selector === el.selector);
                 const liveValue =
@@ -5586,11 +5592,14 @@ async function executeAct(
                 completedAction = { ...action, text: liveValue };
               }
             } finally {
-              await browser.discardTypeSuggestionPopup(dismissPopupWithEscape);
+              await browser.discardTypeSuggestionPopup(
+                dismissPopupWithEscape,
+                compactV2ActionPage,
+              );
             }
-            if (isRequiredShippingAddressLine1(el)) {
-              await browser.commitRequiredShippingAddressLine1(el.selector, compactV2ActionPage);
-            }
+          }
+          if (isRequiredShippingAddressLine1(el)) {
+            await browser.commitRequiredShippingAddressLine1(el.selector, compactV2ActionPage);
           }
         } else if (action.kind === "upload") {
           assertNoFrameTarget(el, "upload");

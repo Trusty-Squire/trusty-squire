@@ -385,7 +385,7 @@ export class OAuthFailedError extends Error {
 // query; §4.2.2.1 in the fragment for implicit flows). The code is reported
 // verbatim — it is a fact the provider stated, not a guess.
 const OAUTH_ERROR_CODE_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
-const OAUTH_RESPONSE_FRAGMENT_NAMES = new Set([
+const OAUTH_RESPONSE_PARAMETER_NAMES = new Set([
   "access_token",
   "code",
   "error",
@@ -445,13 +445,17 @@ function oauthRedirectTargetMatches(candidateUrl: string, expectedReturnUrl: str
     const hasOAuthResponseFragment =
       expected.hash.length === 0 &&
       candidate.hash.length > 1 &&
-      [...candidateFragment.keys()].every((name) => OAUTH_RESPONSE_FRAGMENT_NAMES.has(name)) &&
+      [...candidateFragment.keys()].every((name) => OAUTH_RESPONSE_PARAMETER_NAMES.has(name)) &&
       [...candidateFragment.keys()].some((name) => OAUTH_RESPONSE_FRAGMENT_SIGNALS.has(name));
+    const hasOnlyExpectedOrOAuthQueryParameters = [...new Set(candidate.searchParams.keys())].every(
+      (name) => expectedNames.includes(name) || OAUTH_RESPONSE_PARAMETER_NAMES.has(name),
+    );
     return (
       candidate.protocol === expected.protocol &&
       candidate.host === expected.host &&
       candidate.pathname === expected.pathname &&
       (candidate.hash === expected.hash || hasOAuthResponseFragment) &&
+      hasOnlyExpectedOrOAuthQueryParameters &&
       expectedNames.every(
         (name) =>
           JSON.stringify(candidate.searchParams.getAll(name)) ===
@@ -5917,8 +5921,9 @@ export class BrowserController {
    * Snapshot popups that already exist BEFORE typing — the suggestion popup
    * can open mid-keystroke, so this must run before type(), not after.
    */
-  async markPreexistingTypeSuggestionPopups(): Promise<void> {
-    await this.markComboboxPreexistingElements();
+  async markPreexistingTypeSuggestionPopups(page: Page | null = this.page): Promise<void> {
+    if (page === null) throw new Error("Browser not started");
+    await this.markComboboxPreexistingElements(page);
   }
 
   /**
@@ -5932,12 +5937,15 @@ export class BrowserController {
    * shape), returning as soon as options appear so an already-open popup
    * pays no extra latency.
    */
-  async detectTypeSuggestionPopup(selector: string): Promise<string[]> {
-    if (!this.page) throw new Error("Browser not started");
+  async detectTypeSuggestionPopup(
+    selector: string,
+    page: Page | null = this.page,
+  ): Promise<string[]> {
+    if (page === null) throw new Error("Browser not started");
     for (let attempt = 0; attempt < 6; attempt += 1) {
       if (attempt > 0) await this.sleep(300);
-      await this.refreshComboboxMarkers(selector);
-      const options = this.page.locator("[data-ts-select-option-tier]");
+      await this.refreshComboboxMarkers(selector, page);
+      const options = page.locator("[data-ts-select-option-tier]");
       const count = await options.count();
       if (count === 0) continue;
       const texts: string[] = [];
@@ -5950,10 +5958,10 @@ export class BrowserController {
   }
 
   /** Click the option at `index` (as indexed by detectTypeSuggestionPopup). */
-  async commitTypeSuggestion(index: number): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    const options = this.page.locator("[data-ts-select-option-tier]");
-    await this.clickComboboxOption(options.nth(index));
+  async commitTypeSuggestion(index: number, page: Page | null = this.page): Promise<void> {
+    if (page === null) throw new Error("Browser not started");
+    const options = page.locator("[data-ts-select-option-tier]");
+    await this.clickComboboxOption(options.nth(index), page);
   }
 
   /**
@@ -5978,9 +5986,13 @@ export class BrowserController {
    * unconditional — it only removes our own tracking attributes, never
    * touches page behavior.
    */
-  async discardTypeSuggestionPopup(dismissWithEscape: boolean): Promise<void> {
-    if (dismissWithEscape) await this.pressKey("Escape");
-    await this.clearComboboxMarkers();
+  async discardTypeSuggestionPopup(
+    dismissWithEscape: boolean,
+    page: Page | null = this.page,
+  ): Promise<void> {
+    if (page === null) return;
+    if (dismissWithEscape) await page.keyboard.press("Escape").catch(() => {});
+    await this.clearComboboxMarkers(page);
   }
 
   /**
@@ -5999,10 +6011,11 @@ export class BrowserController {
   async confirmAutocompleteCommitted(
     fieldSelector: string,
     pickedOptionText: string,
+    page: Page | null = this.page,
   ): Promise<boolean> {
-    if (!this.page) throw new Error("Browser not started");
+    if (page === null) throw new Error("Browser not started");
     try {
-      return await this.page
+      return await page
         .locator(fieldSelector)
         .first()
         .evaluate((field, wantedRaw) => {
@@ -13386,12 +13399,18 @@ export class BrowserController {
     let lastTransientUrl = productUrl;
     let observedClosedReturnUrl: string | null = null;
     let onTransientNavigation: ((frame: Frame) => void) | null = null;
+    let onPopupNavigation: ((frame: Frame) => void) | null = null;
+    let popupCapturePage: Page | null = null;
+    const captureExpectedReturnUrl = (url: string): void => {
+      expectedReturnUrl ??= oauthRedirectUri(url);
+    };
     let resolveProductNavigation: () => void = () => undefined;
     const productNavigationPromise = new Promise<void>((resolve) => {
       resolveProductNavigation = resolve;
     });
     const onProductNavigation = (frame: Frame): void => {
       if (!actionStarted || frame !== product.mainFrame()) return;
+      captureExpectedReturnUrl(frame.url());
       productNavigated = true;
       resolveProductNavigation();
     };
@@ -13444,6 +13463,22 @@ export class BrowserController {
       });
       const onPopup = (page: Page): void => {
         if (!this.ownedPages.has(page)) return;
+        popupCapturePage = page;
+        onPopupNavigation = (frame: Frame): void => {
+          if (frame !== page.mainFrame()) return;
+          const url = frame.url();
+          captureExpectedReturnUrl(url);
+          if (
+            this.isOAuthReturnUrl(url, expectedReturnUrl) &&
+            oauthErrorFromReturnUrl(url) === null
+          ) {
+            observedClosedReturnUrl = url;
+          } else {
+            observedClosedReturnUrl = null;
+          }
+        };
+        page.on("framenavigated", onPopupNavigation);
+        onPopupNavigation(page.mainFrame());
         product.off("popup", onPopup);
         resolvePopup(page);
       };
@@ -13484,6 +13519,10 @@ export class BrowserController {
         resolveProductNavigation();
       }
       const transient = providerPage ?? product;
+      if (popupCapturePage !== null && onPopupNavigation !== null) {
+        popupCapturePage.off("framenavigated", onPopupNavigation);
+        onPopupNavigation = null;
+      }
       lastTransientUrl = transient.url();
       onTransientNavigation = (frame: Frame): void => {
         if (frame === transient.mainFrame()) {

@@ -435,6 +435,75 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it.each(["same-tab", "popup"] as const)(
+    "captures the redirect target before a fast %s OAuth return",
+    async (topology) => {
+      const context = await browser.newContext();
+      const product = await context.newPage();
+      const expectedReturnUrl = "https://console.product.test/projects";
+      const providerUrl =
+        `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`;
+      await context.route("https://product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<button id="oauth" onclick='${
+            topology === "popup" ? "window.open" : "location.assign"
+          }(${JSON.stringify(providerUrl)})'>Continue</button>`,
+        }),
+      );
+      await context.route("https://accounts.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<script>location.replace(${JSON.stringify(expectedReturnUrl)})</script>`,
+        }),
+      );
+      await context.route("https://console.product.test/**", (route) =>
+        route.fulfill({ contentType: "text/html", body: "<main>Projects</main>" }),
+      );
+      await product.goto("https://product.test/login");
+      const controller = BrowserController.fromHarnessPage(product);
+      try {
+        await expect(controller.loginWithOAuth("#oauth", 500)).resolves.toBeUndefined();
+        expect(controller.currentUrl()).toBe(expectedReturnUrl);
+      } finally {
+        await context.close();
+      }
+    },
+  );
+
+  it("keeps a return with a non-OAuth query challenge pending", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects?organization=expected";
+    const challengeUrl = `${expectedReturnUrl}&mfa=required`;
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<button id="oauth" onclick='location.assign(${JSON.stringify(
+          `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+        )})'>Continue</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<script>location.replace(${JSON.stringify(challengeUrl)})</script>`,
+      }),
+    );
+    await context.route("https://console.product.test/**", (route) =>
+      route.fulfill({ contentType: "text/html", body: "<main>Enter verification code</main>" }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 500)).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+    } finally {
+      await context.close();
+    }
+  });
+
   it.each(["compact-v2", "legacy"])(
     "binds type and select refs to a same-tab OAuth return (%s)",
     async (format) => {
