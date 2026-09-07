@@ -1,6 +1,6 @@
 # Canonical DOM serialization
 
-Compact-v2 observations use the TypeScript port of browser-use 0.13.10 in
+`browser-use-dom` observations use the TypeScript port of browser-use 0.13.10 in
 `apps/mcp/src/bot/browser-use-serializer.ts`. `browser-use-capture.ts` adapts
 Chrome's DOM, layout snapshot and accessibility trees to its input. Python is
 used only by the committed fixture generator, never by the MCP runtime.
@@ -19,8 +19,10 @@ observation of the same document. A changed view sends its complete `dom` tree;
 `delta: true` identifies an existing document, and `removed` names refs that left
 the rendered view. An unchanged view omits `dom`, retaining the consumer's prior
 view. Query operates on the full document inventory, including controls outside
-the viewport, and retains its existing paged search-result format and aliases.
-Query results are not a second DOM observation serializer.
+the viewport. Query, role, and cursor responses use the separate
+`browser-use-control-query` paged control-map format and aliases; they are not
+DOM-tree observations. Its complete grammar is in the registered
+`operate_observe` description.
 
 Every DOM observation includes `more_above` and `more_below`. The existing scroll
 action remains reachable. A below-fold control can be found with

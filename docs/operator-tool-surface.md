@@ -41,7 +41,7 @@ unchanged. Refusals retain the blocked host and a remedy.
 | --- | --- |
 | `operate_start` | Unchanged |
 | `operate_finish`, `operate_finish_task` | `operate_finish(session_id, outcome?, store?, summary?, data?, verify_recipe?)`; outcome is `none`, `credentials`, or `result`, replacing the nested kind union; terminal preparation and teardown are unchanged |
-| `operate_observe`, `operate_observe_query` | `operate_observe(session_id, query?, role?, cursor?, detail?)` |
+| `operate_observe` | `operate_observe(session_id, query?, role?, cursor?, detail?)` |
 | `operate_screenshot` | Same capture handler/schema and cost warning; reader name in guidance updated |
 | `operate_act` | Removed public union; use the verbs below |
 | `goto`, `navigate` | `operate_navigate(session_id, url)` (`navigate` was already absent in this checkout) |
@@ -84,15 +84,15 @@ it; this change does not edit `compact-observation-v2.ts` or rewrite its output.
 ## Click fallback validation follow-up
 
 Ordinary click dispatch tracking wraps the original click operation, retaining
-checkbox/toggle, widget and modal behavior. Compact-v2 carries only a sanitized,
+checkbox/toggle, widget and modal behavior. The browser-use DOM format carries only a sanitized,
 proven pre-dispatch pointer-interception signal to the internal `operate_click`
 fallback. Other failures retain their existing mapping; payment callers retain
 the existing handle-bound tracking path.
 
-Reachability is tested deterministically through the compact-v2 session and tool
+Reachability is tested deterministically through the browser-use DOM session and tool
 seam using the production dispatch error class and classifier. A legacy
 real-Chromium overlay case also proves a failed plain click reaches DOM dispatch
-and activates the control exactly once. The optional compact-v2 browser fixture
+and activates the control exactly once. The optional browser-use DOM fixture
 was dropped after stale-ref failures before dispatch, as explicitly authorized;
 it did not exercise the intended failure path. No existing flow assertions were
 weakened or skipped to fix tracking regressions.

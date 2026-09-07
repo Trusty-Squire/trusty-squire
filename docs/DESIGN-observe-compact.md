@@ -46,9 +46,9 @@ Inside `elements`:
 The session observation format is selected once at start by
 `TRUSTY_SQUIRE_OBSERVE_V2=on|shadow|off` and defaults to `on`:
 
-- `on` emits Compact V2. Every detail level stays in the V2 format;
+- `on` emits the browser-use DOM format. Every detail level stays in that format;
   `detail:"full"` does not expose the V1 inventory.
-- `shadow` runs the native Compact V2 serializer without retaining or emitting
+- `shadow` runs the native browser-use DOM serializer without retaining or emitting
   its result, while callers continue to receive and target V1 observations.
 - `off` keeps the V1 observation and action contract.
 
@@ -65,15 +65,15 @@ genuinely ambiguous step can escalate to `detail:"full"` for that one call. In
 V2, ambiguity is resolved through its paging/query protocol instead of
 restoring legacy fields.
 
-## Compact V2 — superseded wire contract
+## Superseded Compact V2 wire contract
 
 The tuple table, separate page-text channel, fixed wire budget, and overflow
 cursor contract this section once described are replaced by the canonical
-browser-use DOM port. The current Compact V2 contract is owned by
+browser-use DOM port. The current `browser-use-dom` contract is owned by
 [`browser-use-serializer-port.md`](browser-use-serializer-port.md), including
 the interleaved tree, stable refs, whole-document query, viewport signals,
 screening boundary, and fixture oracle. This document retains the original
-design rationale and the V1 history below; it is not a second Compact V2 wire
+design rationale and the V1 history below; it is not a second current wire
 reference.
 
 ## Legacy V1 — Phase 1 compact encoder ✅ shipped

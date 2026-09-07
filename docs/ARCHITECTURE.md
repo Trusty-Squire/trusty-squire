@@ -60,7 +60,7 @@ A live browser session held by the MCP server. The host agent observes pages and
 chooses actions, while the MCP process owns the browser, sealed secret slots,
 captcha handling, and extraction.
 
-The default observation boundary is Compact V2. The MCP captures the DOM,
+The default observation boundary is `browser-use-dom`. The MCP captures the DOM,
 layout, and accessibility trees, then emits a viewport-scoped, interleaved DOM
 representation with document-scoped stable refs. Its live query inventory can
 find controls outside the viewport; a visible but unbindable node stays in the

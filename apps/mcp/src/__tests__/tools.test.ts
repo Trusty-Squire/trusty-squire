@@ -1923,20 +1923,24 @@ describe("TOOLS registry", () => {
     }
   });
 
-  it("documents compact observation reconstruction on every operator entry point", () => {
+  it("documents DOM observation reconstruction on every operator entry point", () => {
     for (const name of ["operate_start", "operate_observe"]) {
       const description = TOOLS.find((tool) => tool.name === name)?.description ?? "";
-      expect(description).toContain("stable refs");
+      expect(description).toContain("browser-use-dom");
       expect(description).toContain("delta:true");
-      expect(description).toContain("unchanged");
+      expect(description).toContain("replaces the entire prior tree");
+      expect(description).toContain("when omitted retain the prior tree");
       expect(description).toContain("removed");
-      expect(description).toContain("text_unchanged:true");
-      expect(description).toContain("snapshot_file");
-      expect(description).toContain("nothing changed, not an empty page");
-      expect(description).toContain("delta:false as a full resync");
-      expect(description).toContain("discard the prior element map");
-      expect(description).toContain("Only when delta:true");
+      expect(description).toContain("reset the prior view");
+      expect(description).toContain("Refs stay usable on the same document");
     }
+    const start = TOOLS.find((tool) => tool.name === "operate_start")?.description ?? "";
+    expect(start).not.toMatch(/safe_table|observe_query|\b[qfaxsbltcrm]=/);
+    const observe = TOOLS.find((tool) => tool.name === "operate_observe")?.description ?? "";
+    expect(observe).toContain("browser-use-control-query");
+    expect(observe).toContain("safe_table");
+    expect(observe).toContain("[ref,role,facts?]");
+    expect(observe).not.toContain("observe_query");
   });
 });
 

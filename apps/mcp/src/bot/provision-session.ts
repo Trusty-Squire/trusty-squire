@@ -380,9 +380,9 @@ export interface Observation {
   // canonical cart URL and safe retry semantics from operate_act { kind: "cart_add" }.
   cart_delta?: "+1" | "0" | "unknown";
   selected_option?: string;
-  // compact-v2's closed action map. It is intentionally value-free and does
-  // not use the V1 snapshot-file recovery protocol.
-  format?: "compact-v2";
+  // Browser-use DOM trees and paged control-query results do not use the V1
+  // snapshot-file recovery protocol.
+  format?: "browser-use-dom" | "browser-use-control-query";
   stage?: SafeStageV2;
   generation?: number;
   safe_table?: SafeControlV2[];
@@ -4076,7 +4076,7 @@ function compactV2HintPage(
   const nextOffset = offset + 1;
   const remaining = session.compactV2HintPages.length - nextOffset;
   const payload = {
-    format: "compact-v2",
+    format: "browser-use-control-query",
     url: "",
     session_id: session.id,
     stage: index.stage,
@@ -4115,7 +4115,7 @@ function compactV2PublicObservation(
   if (session.compactV2Mode !== "on") return legacy();
   session.compactV2Active = true;
   const payload = {
-    format: "compact-v2" as const,
+    format: "browser-use-dom" as const,
     session_id: session.id,
     url: fields.url ?? session.browser.currentUrl(),
     stage: fields.stage,
@@ -4192,7 +4192,7 @@ function compactV2Observation(
     ? (previous.renderedRefs ?? []).filter((ref) => !rendered.refs.includes(ref))
     : [];
   return {
-    format: "compact-v2",
+    format: "browser-use-dom",
     session_id: session.id,
     url: session.browser.currentUrl(),
     stage,
@@ -5517,7 +5517,7 @@ async function executeAct(
       : await observeSession(session, detail === "none" ? "compact" : detail);
   return {
     observation:
-      completedAction.kind === "select" && observation.format !== "compact-v2"
+      completedAction.kind === "select" && observation.format !== "browser-use-dom"
         ? { ...observation, selected_option: completedAction.text }
         : observation,
     outcome: {
@@ -6761,9 +6761,9 @@ async function snapshotForPostcondition(session: Session): Promise<Postcondition
         value_len: element.value!.length,
       }));
   return {
-    url: obs.format === "compact-v2" ? session.browser.currentUrl() : obs.url,
+    url: obs.format === "browser-use-dom" ? session.browser.currentUrl() : obs.url,
     text:
-      obs.format === "compact-v2"
+      obs.format === "browser-use-dom"
         ? await session.browser.extractVisibleText()
         : (session.prevObserve?.text ?? obs.text ?? ""),
     fields,

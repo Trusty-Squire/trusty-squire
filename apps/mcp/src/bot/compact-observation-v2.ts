@@ -1533,7 +1533,7 @@ export function encodeV2QueryPage(args: {
 }): { payload: Record<string, unknown>; nextOffset: number } {
   const offset = args.offset ?? 0;
   let fixed: Record<string, unknown> = {
-    format: "compact-v2",
+    format: "browser-use-control-query",
     url: args.pageUrl ?? "",
     session_id: args.sessionId,
     stage: args.stage,

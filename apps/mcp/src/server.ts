@@ -302,13 +302,15 @@ function toolResultContent(result: unknown) {
   };
 }
 
-/** Compact V2 is a model wire protocol; indentation adds no information. */
+/** Minify the observation envelope; DOM indentation remains inside its string. */
 export function compactToolResultText(result: unknown): string {
   if (
     typeof result === "object" &&
     result !== null &&
     "format" in result &&
-    (result as { format?: unknown }).format === "compact-v2"
+    ["browser-use-dom", "browser-use-control-query"].includes(
+      (result as { format?: unknown }).format as string,
+    )
   ) {
     return JSON.stringify(result);
   }

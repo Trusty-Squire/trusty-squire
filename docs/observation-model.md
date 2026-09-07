@@ -1,10 +1,10 @@
 # Design: Trusty Squire operator observation model — skeleton + resident DOM + descriptive refs
 
-**Status:** Current authority for the observation no-seal policy. Compact V2's
+**Status:** Current authority for the observation no-seal policy. The browser-use DOM
 wire, identity, screening, query, and fixture contract is owned by
 [`browser-use-serializer-port.md`](browser-use-serializer-port.md); the remaining
 roadmap material is historical.
-**Scope:** `@trusty-squire/mcp` operator observation/serialization layer (`operate_observe`, `operate_screenshot`, `operate_extract`, the flat acting verbs, and the compact-v2 serializer)
+**Scope:** `@trusty-squire/mcp` operator observation/serialization layer (`operate_observe`, `operate_screenshot`, `operate_extract`, the flat acting verbs, and the browser-use DOM serializer)
 **Author:** firstmate, from hands-on operator driving (ipinfo signup + whitejade.xyz checkout, rc.19)
 **Related:** PR #624 (interim gap-2 patch: tolerate live re-renders in compact-v2 overflow paging). This doc is the model that makes that patch unnecessary long-term.
 
@@ -96,9 +96,9 @@ actually renders:
   origins are verbatim. A password field's value, an operator-injected vault
   value, a filled card number and CVV, a rendered API key, recovery code, TOTP,
   or JWT are all ordinary page content. (One bounded exception, owner's
-  2026-09-07 serializer order: compact-v2's emitted names and interleaved text
+  2026-09-07 serializer order: the browser-use DOM format's emitted names and interleaved text
   rewrite secret-shaped substrings — see the carve-outs below.)
-- Compact-v2's `url` is the live page URL, path and query included. Its DOM
+- The browser-use DOM format's `url` is the live page URL, path and query included. Its DOM
   attributes follow canonical browser-use's selection and ordering; see the
   pinned serializer contract in `browser-use-serializer-port.md`.
 - `extract` returns every labeled candidate the page shows, including one that
@@ -106,7 +106,7 @@ actually renders:
   The `no_legit_credential` and "the secret is still masked/hidden" refusals are
   gone.
 
-**One compact-v2 screening carve-out (2026-09-07).** Compact V2 screens only
+**One browser-use DOM screening carve-out (2026-09-07).** The browser-use DOM format screens only
 secret-shaped substrings in emitted names and interleaved DOM text. This is a
 wire-shape contract, not a read seal: it preserves surrounding text, line shape,
 and refs, while screenshots, extracts, and field values remain verbatim. The

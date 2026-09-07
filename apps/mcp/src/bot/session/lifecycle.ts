@@ -1007,7 +1007,7 @@ export interface StartOptions {
 
 export interface HarnessStartOptions extends Omit<StartOptions, "profileDir" | "proxyUrl"> {
   browser: BrowserController;
-  observationFormat?: "v1" | "compact-v2";
+  observationFormat?: "v1" | "browser-use-dom";
 }
 
 // Fail-closed precondition GATE — NOT autonomous recovery. An operate task that
@@ -1092,7 +1092,7 @@ export async function startProvisionSession(
       return compactV2Mode === "on"
         ? {
             session_id: id,
-            format: "compact-v2",
+            format: "browser-use-dom",
             stage: "auth",
             url: "",
             needs_user: gate.needs_user,
@@ -1172,7 +1172,7 @@ export async function startProvisionSession(
     );
     session.initializing = false;
     session.lastActivityAt = Date.now();
-    if (observation.format === "compact-v2") return observation;
+    if (observation.format === "browser-use-dom") return observation;
     return {
       ...observation,
       hint: hintParts.join("\n"),
@@ -1206,7 +1206,7 @@ export async function startHarnessProvisionSession(
     id,
     browser: opts.browser,
     allowedHosts,
-    compactV2Mode: opts.observationFormat === "compact-v2" ? "on" : "off",
+    compactV2Mode: opts.observationFormat === "browser-use-dom" ? "on" : "off",
     startUrl: opts.serviceUrl,
     hintServed: opts.hint !== undefined,
     consentInboxRead: opts.consentInboxRead !== false,
@@ -1228,7 +1228,7 @@ export async function startHarnessProvisionSession(
     );
     session.initializing = false;
     session.lastActivityAt = Date.now();
-    if (observation.format === "compact-v2") return observation;
+    if (observation.format === "browser-use-dom") return observation;
     return { ...observation, hint: opts.hint ?? "" };
   } catch (error) {
     deregisterProvisionSession(session);

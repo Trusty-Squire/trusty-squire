@@ -328,62 +328,32 @@ const startSchema = z.object({
   // Google session exists — rather than driving into a mid-task login wall.
 });
 
-const OBSERVE_DELTA_CONTRACT =
-  "The following observation rules are V1-only (TRUSTY_SQUIRE_OBSERVE_V2=off or shadow). " +
-  "In V1 compact observations, elements are carried in `el_table`: a TAB-delimited table whose FIRST line is the " +
-  "header (tab-joined column names, a subset of ref,label,tag,role,type,value_len,checked,href,testId," +
-  "topmost,occluded_by, always starting ref,label,tag) and each following line is ONE element (tab-joined " +
-  "cells in header order). An empty cell = that field is absent for that element; value_len is a number, " +
-  "checked/topmost are true/false; a tab, newline, carriage-return or backslash inside a cell is " +
-  "backslash-escaped (\\t \\n \\r \\\\). el_table is absent when the emit has no element rows. " +
-  "In V1, stable refs remain reusable across observes while their controls still exist. " +
-  "The first observe, a URL change, or high churn returns delta:false as a full resync: discard the prior " +
-  "element map and rebuild it from this el_table (or from snapshot_file — the table may omit collapsed " +
-  "chrome links, which the file keeps); a delta:false with NO snapshot_file already has the complete, " +
-  "uncollapsed set in el_table (a persistence-fallback response) — reset from it directly. " +
-  "Only when delta:true, el_table lists ONLY the changed elements: upsert them by ref, delete refs listed " +
-  "in removed, and retain the remaining elements counted by unchanged. text_unchanged:true means reuse the " +
-  "prior text because text is empty. snapshot_file points to the complete current snapshot (all elements, " +
-  "with path). An empty delta (no el_table) means nothing changed, not an empty page. " +
-  'In V1, detail:"full" instead returns the legacy `elements` JSON array (every field), never el_table. ' +
-  "If a control you can see in `text`/the screenshot has NO row in el_table (a bare unlabeled clickable " +
-  'div — e.g. some SPA "Add To Cart" buttons), it has no ref: click it with operate_click ' +
-  'ref=`text="…"` or `css=…` (see operate_click). `click` respects actionability and throws if an overlay ' +
-  "intercepts; dismiss the overlay; operate_click may internally dispatch through a " +
-  "transparent overlay. Under default compact-v2, only refs and @labels from the current action map are " +
-  "accepted. A ref is a durable element fingerprint: it stays valid across acts and benign re-renders on the same " +
-  "document, so one observation can drive several acts. On opaque `stale_ref`, call operate_observe and choose a " +
-  "new ref; do not retry the old one or use V1 replacement candidates or locator fallback. ";
+const DOM_OBSERVATION_CONTRACT =
+  "Default format is `browser-use-dom`: `session_id` continues the session, `url` is the live page URL, " +
+  "and `stage` identifies the page stage. `dom` is a tab-indented tree with interleaved visible text: " +
+  "`[@e:...]<tag attributes />` identifies a control; attributes may include field values and state. " +
+  "`|SHADOW(open)|` / `|SHADOW(closed)|` mark shadow hosts, with Open/Closed Shadow and Shadow End boundaries. " +
+  "`not-targetable=true` marks display-only refs that cannot be acted on. `*` before a ref marks a new " +
+  "element or compound control. `more_above` / `more_below` indicate content beyond the viewport; use operate_scroll. " +
+  "`delta:true` means the same document: when `dom` is present it replaces the entire prior tree; " +
+  "when omitted retain the prior tree. `removed` lists refs that left the rendered view. " +
+  "Without delta:true, reset the prior view. Refs stay usable on the same document; on stale_ref, " +
+  "call operate_observe and choose a current ref. ";
 
-const COMPACT_V2_CONTRACT =
-  "When format is `compact-v2`, use its action map: session_id is the continuation handle; `url` is the live page URL; `stage` is a finite enum; " +
-  "semantic carries the page title and primary visible heading; safe_table rows use [ref,role,facts?], where role is " +
-  "b=button,l=link,t=textbox,s=select,c=checkbox,r=radio,tb=tab,m=menuitem,f=file. ref is an opaque durable " +
-  "element handle. facts is a pipe-delimited string: an optional first unkeyed segment is the row's @label alias, " +
-  "a slug of its short label accepted by the acting verbs as ref. " +
-  "The label is followed by any present s=<state bitset>, a=<action>, " +
-  "f=<field>, q=<choice position>/<choice total>, and x=<frame> segments. Fact-only rows begin with a keyed segment. " +
-  "State bitset codes are c=checked,u=unchecked,d=disabled,r=required; frame codes are x=s for a same-origin child " +
-  "and x=x for a cross-origin child, while an omitted x means the main frame. Actions are search,close,next,previous,submit," +
-  "continue,login,signup,add_to_cart,view_cart,checkout,payment,destructive; fields are email,password,username,name,phone,search,address," +
-  "city,region,postal,country,date,quantity,promo,payment. Short labels are included for viewport-prioritized controls; " +
-  "labels are exactly what the page renders. The row form omits field " +
-  "values purely as a size budget: read a value off the page with operate_screenshot, or with an explicitly " +
-  "selected V1 session. For a named product/control from the task, " +
-  "call operate_observe with query set to those task words; it returns matching actionable refs with labels " +
-  "and code-owned facts. Use overflow.next_cursor to page. `detail:full` keeps the V2 format while V2 is enabled; " +
-  "set TRUSTY_SQUIRE_OBSERVE_V2=off for the legacy format. A delta:true delta retains the preceding V2 table, then upserts tuple rows in safe_table, " +
-  "removes refs in removed, and updates stage or semantic only when either changed. Omitted semantic title/heading remains from the preceding V2 page. " +
-  "A delta with none of those fields means the view is unchanged. ";
+const CONTROL_QUERY_CONTRACT =
+  "With query, role, or cursor, format is `browser-use-control-query`, not `browser-use-dom`. " +
+  "Its `safe_table` is a paged control map: each row is `[ref,role,facts?]`; role is " +
+  "b=button, l=link, t=textbox, s=select, c=checkbox, r=radio, tb=tab, m=menuitem, or f=file. " +
+  "facts is a `|`-joined `@label` alias followed by present s=state (c=checked, u=unchecked, d=disabled, r=required), " +
+  "a=action, f=field, q=choice-position/total, and x=s same-origin or x=x cross-origin frame; absent x means main frame. " +
+  "Use overflow.next_cursor to page safe_table. A cursor from hint_overflow returns `hint` and pages with hint_overflow.next_cursor. ";
 
 export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   name: "operate_start",
   description:
     "Begin an interactive website task: opens a scoped browser on the " +
-    "user's machine at service_url and returns the initial compact observation " +
-    "(legacy el_table/delta or compact-v2 safe_table). " +
-    COMPACT_V2_CONTRACT +
-    OBSERVE_DELTA_CONTRACT +
+    "user's machine at service_url and returns the initial page observation. " +
+    DOM_OBSERVATION_CONTRACT +
     "YOU are the planner — read the observation, then drive the signup, setup, or " +
     "checkout with operate_click, operate_type, operate_select, operate_navigate, operate_scroll, and operate_login (operate_pay for a purchase), re-read with " +
     "operate_observe, and call operate_extract " +
@@ -430,21 +400,20 @@ const observeSchema = z.object({
   role: z
     .enum(["button", "link", "textbox", "select", "checkbox", "radio", "tab", "menuitem", "file"])
     .optional(),
-  // Payload verbosity within the selected observation mode. In V2 both values
-  // return the compact action map; in V1, full requests the legacy expanded payload.
+  // Both values return the default DOM tree; legacy full requests expanded fields.
   detail: z.enum(["compact", "full"]).optional(),
 });
 
 export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
   name: "operate_observe",
   description:
-    "Re-read the current page of an operate session. Supply query to find controls or cursor to page overflow. The default compact-v2 mode returns the compact " +
-    'safe_table action map; `detail:"full"` stays in that format and does not restore legacy fields. ' +
-    COMPACT_V2_CONTRACT +
-    "Only explicitly selected V1 modes use el_table, reusable stable refs, locator fallbacks, snapshot_file, " +
-    "or the legacy expanded elements payload. " +
-    OBSERVE_DELTA_CONTRACT +
-    'In V1 only, pass detail:"full" for the legacy screen+accessibility+full-field payload on a genuinely ambiguous step.',
+    "Re-read the current page of an operate session. " +
+    DOM_OBSERVATION_CONTRACT +
+    "Omit query/cursor/role for the tree. Supplying query or role searches the full document's " +
+    "control inventory, including off-viewport controls. " +
+    CONTROL_QUERY_CONTRACT +
+    "detail does not expand the default tree format. " +
+    "Explicit legacy sessions (TRUSTY_SQUIRE_OBSERVE_V2=off or shadow) return legacy observations.",
   inputSchema: observeSchema,
   jsonInputSchema: {
     type: "object",
@@ -498,14 +467,14 @@ export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
   name: "operate_screenshot",
   description:
     "WARNING: EXPENSIVE — a screenshot is a full image and costs far more context than any " +
-    "observation. Reach for it ONLY when the DOM serialization (Compact V2 safe_table, " +
+    "observation. Reach for it ONLY when the DOM tree or control search (" +
     "operate_observe with query/cursor) is NOT sufficient to determine the page state; " +
-    "if the tables already tell you what the page is doing, do not take one. " +
+    "if the observation already tells you what the page is doing, do not take one. " +
     "Debugging tool: capture a screenshot of what the operate session's browser actually RENDERS — " +
     "the whole page (default: viewport; full_page:true for the whole scrollable page) or ONE specific " +
     "frame in isolation via frame_index or frame_url_contains, so a cross-origin challenge iframe (a " +
     "3-D Secure ACS frame, a captcha) can be captured on its own even when it won't show clearly inside " +
-    "a full-page shot. Use this when safe_table from Compact V2, or text/el_table from an explicitly " +
+    "a full-page shot. Use this when the DOM tree, or text/el_table from an explicitly " +
     "selected V1 session, isn't enough to tell what state " +
     "a stuck page is actually in — a challenge that never advances, an unexpected layout, a captcha you " +
     "need to SEE. Read-only: never navigates, clicks, types, submits, or steals focus; it only reads " +
@@ -566,7 +535,7 @@ const formSelectionsSchema = z
   .refine((value) => Object.keys(value).length > 0, "Provide at least one selection")
   .refine((value) => Object.keys(value).length <= 12, "At most 12 selections per call")
   .describe(
-    "Map each current Compact V2 @e: ref or @label, or V1 observed label/ref, to its visible option text.",
+    "Map each current browser-use DOM @e: ref or @label, or V1 observed label/ref, to its visible option text.",
   );
 
 interface ExtractArgs {
