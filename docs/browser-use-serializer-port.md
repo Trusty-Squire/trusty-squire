@@ -89,7 +89,7 @@ surface. The canonical small-icon class/geometry heuristic is not evidence that
 a syntax-highlight span is a control.
 
 Selectable controls emit authored `aria-pressed`/`aria-selected` and existing
-`data-state` values, plus raw screened `state_class` for selection classes and visible
+`data-state` values, plus raw `state_class` for selection classes and visible
 check, selected, tick, or authored ARIA-state child `state_icons` evidence. These are
 DOM facts, not inferred selected booleans.
 Stateless cards keep stable action refs but selection is undetectable by design;
@@ -118,7 +118,8 @@ or quarantined. Unrelated behavior and payment suites remain required.
   stable refs, changed interleaved text, and explicit capture failures.
 - `pnpm --filter @trusty-squire/mcp test:fast` runs the static required tier.
 
-Canonical equality is checked directly, normalizing identity only. The HN fixture
-pins `usernametaken29` verbatim. Browser regressions also cover the reported
+Canonical equality is checked directly, normalizing identity only. The volatile HN
+capture does not pin `usernametaken29`; its regression injects that value into visible
+fixture text before serialization. Browser regressions also cover the reported
 `trusty-squire-dogfood-20260625` slug, synthetic key names and documentation JSON,
 and rendered API-key-shaped text in names, prose and revealed input values.
