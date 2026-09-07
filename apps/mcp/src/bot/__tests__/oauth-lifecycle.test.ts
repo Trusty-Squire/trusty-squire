@@ -892,6 +892,45 @@ describe("BrowserController OAuth popup lifecycle", () => {
     },
   );
 
+  it("keeps a popup pending after its observed return navigates to a challenge", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects";
+    const challengeUrl = "https://console.product.test/mfa";
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<button id="oauth" onclick='window.open(${JSON.stringify(
+          `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+        )})'>Continue</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<script>location.href=${JSON.stringify(expectedReturnUrl)}</script>`,
+      }),
+    );
+    await context.route("https://console.product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body:
+          route.request().url() === expectedReturnUrl
+            ? `<script>location.href=${JSON.stringify(challengeUrl)}</script>`
+            : "<main>Enter your verification code</main><script>window.close()</script>",
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 500)).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+    } finally {
+      await context.close();
+    }
+  });
+
   it("binds tracked clicks to their provided source page", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();

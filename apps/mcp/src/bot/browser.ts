@@ -13513,6 +13513,8 @@ export class BrowserController {
             oauthErrorFromReturnUrl(lastTransientUrl) === null
           ) {
             observedClosedReturnUrl = lastTransientUrl;
+          } else {
+            observedClosedReturnUrl = null;
           }
         }
       };
