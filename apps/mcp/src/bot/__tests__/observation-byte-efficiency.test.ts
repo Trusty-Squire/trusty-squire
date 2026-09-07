@@ -323,6 +323,27 @@ describe("observation byte efficiency", () => {
     expect(reads).toBe(1);
     expect(browserUseBoundedContextText(text(" ".repeat(121)), 120)).toBeNull();
   });
+  it("keeps suppressed descendants out of fallback context", () => {
+    const checkbox = node("INPUT", { attributes: { type: "checkbox" } });
+    const context = node("DIV", {
+      children: [
+        node("SCRIPT", { children: [text("const secret = 'not-rendered'")] }),
+        node("SPAN", {
+          visible: false,
+          computedStyles: { display: "none" },
+          children: [text("hidden copy", { visible: false })],
+        }),
+        text("Email updates"),
+        checkbox,
+      ],
+    });
+    expect(browserUseBoundedContextText(context, 120)).toBe("Email updates");
+    const dom = serializeBrowserUseDOM(context).dom;
+    expect(dom).toContain("context=Email updates");
+    expect(dom).not.toContain("secret");
+    expect(dom).not.toContain("hidden copy");
+    expect(dom).toContain(`[${checkbox.id}]<input`);
+  });
   it("emits native button class evidence without inferring selection", () => {
     const card = node("BUTTON", {
       attributes: { class: "card border-neutral" },

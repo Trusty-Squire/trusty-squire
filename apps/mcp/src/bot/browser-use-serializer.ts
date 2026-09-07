@@ -280,13 +280,26 @@ export function browserUseBoundedContextText(n: BrowserUseNode, limit: number): 
     textStarted = true;
     return characters.length <= limit;
   };
+  const rendered = (current: BrowserUseNode): boolean => {
+    if (![1, 3].includes(current.nodeType)) return true;
+    const styles = current.computedStyles;
+    return (
+      current.snapshot &&
+      !DISABLED.has(tag(current)) &&
+      styles?.display !== "none" &&
+      styles?.visibility !== "hidden" &&
+      !(Number(styles?.opacity ?? "1") <= 0)
+    );
+  };
   const visit = (current: BrowserUseNode): boolean => {
+    if (!rendered(current)) return true;
     if (current.nodeType === 3) {
       for (const character of current.value) if (!append(character)) return false;
       return true;
     }
     let sawChild = false;
     for (const child of current.children) {
+      if (!rendered(child)) continue;
       if (sawChild && textStarted) pendingSpace = true;
       sawChild = true;
       if (!visit(child)) return false;
