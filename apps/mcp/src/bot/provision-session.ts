@@ -344,6 +344,11 @@ export interface Observation {
   // operate_act{observe:"none"} (action ran; no perception emitted — call
   // operate_observe before the next ref-targeted act).
   observed?: ObserveDetail;
+  terminal?: {
+    state: "oauth_completed";
+    refs: "unavailable";
+    next_action: "operate_observe";
+  };
   // A provider-owned OAuth popup closed while a legacy two-step OAuth action
   // was still settling. This is an expected browser lifecycle transition, not
   // a failed login or a reason to abandon the session. The host should simply
@@ -723,7 +728,9 @@ async function withOAuthActionBoundary(
           const completion = await deadline.completionCheck?.();
           if (completion !== undefined && completion !== null) {
             return {
-              observation: await observeSession(session, "compact", undefined, completion.page),
+              observation: completion.terminal
+                ? terminalOAuthCompletionObservation(session, completion.url!)
+                : await observeSession(session, "compact", undefined, completion.page),
               outcome: {},
             };
           }
@@ -4192,6 +4199,7 @@ function compactV2PublicObservation(
     guidance?: string;
     oauth?: Observation["oauth"];
     observed?: ObserveDetail;
+    terminal?: Observation["terminal"];
     url?: string;
   },
 ): Observation {
@@ -4205,6 +4213,7 @@ function compactV2PublicObservation(
     ...(fields.guidance === undefined ? {} : { guidance: fields.guidance }),
     ...(fields.oauth === undefined ? {} : { oauth: fields.oauth }),
     ...(fields.observed === undefined ? {} : { observed: fields.observed }),
+    ...(fields.terminal === undefined ? {} : { terminal: fields.terminal }),
   };
   // Fixed metadata (long OAuth-shaped URLs) degrades before observation ever
   // fails; the throw is unreachable from real pages.
@@ -4468,6 +4477,34 @@ export async function observeQuery(
   return page.payload;
 }
 
+function terminalOAuthCompletionObservation(session: Session, url: string): Observation {
+  const terminal: NonNullable<Observation["terminal"]> = {
+    state: "oauth_completed",
+    refs: "unavailable",
+    next_action: "operate_observe",
+  };
+  rememberOAuthCompletionSourcePage(session, undefined);
+  rememberCompactV2SourcePage(session, undefined);
+  invalidateCompactV2Snapshot(session);
+  session.prevObserve = null;
+  retainSessionElements(session, []);
+  const guidance =
+    "OAuth completed in a popup that closed before its controls could be observed. " +
+    "Call operate_observe to inspect the active product page.";
+  return compactV2PublicObservation(
+    session,
+    () => ({
+      session_id: session.id,
+      url,
+      text: "",
+      elements: [],
+      guidance,
+      terminal,
+    }),
+    { stage: safeStageV2(url, []), guidance, terminal, url },
+  );
+}
+
 async function observeSession(
   session: Session,
   detail: "compact" | "full" = "compact",
@@ -4475,10 +4512,10 @@ async function observeSession(
   sourcePage?: OAuthCompletionEvidence["page"],
 ): Promise<Observation> {
   if (sourcePage === undefined) {
-    const completedPage = oauthCompletionSourcePage(session);
-    if (completedPage !== undefined && !session.browser.isActivePage(completedPage)) {
-      sourcePage = completedPage;
-    }
+    session.browser.takeOAuthTerminalCompletionUrl();
+    rememberOAuthCompletionSourcePage(session, undefined);
+    rememberCompactV2SourcePage(session, undefined);
+    invalidateCompactV2Snapshot(session);
   }
   rememberOAuthCompletionSourcePage(session, sourcePage);
   const oauthInProgress = (): Observation => {
@@ -5395,6 +5432,8 @@ async function executeAct(
                   ? { kind: "frame", frame: target, selector: el.selector, method: action.kind }
                   : { kind: "selector", selector: el.selector, method: action.kind },
                 shouldTrack,
+                undefined,
+                compactV2ActionPage,
               ),
             );
           } else if (!sourcePageIsActive && compactV2ActionPage !== undefined) {
@@ -5686,8 +5725,11 @@ async function executeAct(
   // operate_observe before its next ref-targeted act (refs aren't refreshed here).
   const checkoutState =
     internalAccess && collectCheckoutState ? await capturePrivateCheckoutState(session) : undefined;
+  const terminalOAuthCompletionUrl = browser.takeOAuthTerminalCompletionUrl();
   const observation =
-    detail === "none" && !cartAffecting && action.kind !== "oauth_login"
+    terminalOAuthCompletionUrl !== null
+      ? terminalOAuthCompletionObservation(session, terminalOAuthCompletionUrl)
+      : detail === "none" && !cartAffecting && action.kind !== "oauth_login"
       ? compactV2PublicObservation(
           session,
           () => ({

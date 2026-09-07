@@ -443,6 +443,8 @@ function oauthRedirectTargetMatches(candidateUrl: string, expectedReturnUrl: str
 
 export interface OAuthCompletionEvidence {
   page: Page;
+  terminal?: true;
+  url?: string;
 }
 
 export function oauthAwaitingHumanMessage(productOrigin: string, budgetMs: number): string {
@@ -2724,6 +2726,13 @@ export class BrowserController {
     this.pageDriver.oauthCompletionPage = value;
   }
 
+  private get oauthTerminalCompletionUrl(): string | null {
+    return this.pageDriver.oauthTerminalCompletionUrl;
+  }
+  private set oauthTerminalCompletionUrl(value: string | null) {
+    this.pageDriver.oauthTerminalCompletionUrl = value;
+  }
+
   private get harnessAttachedPage(): boolean {
     return this.pageDriver.harnessAttachedPage;
   }
@@ -3146,6 +3155,12 @@ export class BrowserController {
   completedOAuthPage(): Page | null {
     const page = this.oauthCompletionPage;
     return page === null || page.isClosed() ? null : page;
+  }
+
+  takeOAuthTerminalCompletionUrl(): string | null {
+    const url = this.oauthTerminalCompletionUrl;
+    this.oauthTerminalCompletionUrl = null;
+    return url;
   }
 
   /** Attach normal controller behavior to a harness-owned Playwright page. */
@@ -4468,6 +4483,7 @@ export class BrowserController {
     target: TrackedClickTarget,
     shouldTrack: (labels: readonly string[]) => boolean = () => true,
     performClick?: () => Promise<void>,
+    page: Page | null = this.page,
   ): Promise<ClickDispatchStatus> {
     // Accepted residual: aria-labelledby-only names can escape this final probe;
     // closing it would broaden shared click instrumentation again.
@@ -4475,7 +4491,7 @@ export class BrowserController {
     // wait; dispatch-boundary hooks would alter shared click semantics.
     // Accepted residual: page closure during the pre-click state probe remains
     // ambiguous; tightening it would deepen the primitive that regressed ordinary clicks.
-    if (!this.page) {
+    if (page === null) {
       throw new BrowserClickDispatchError("not_dispatched", new Error("Browser not started"));
     }
     let handle: ElementHandle<Element> | null;
@@ -4484,10 +4500,10 @@ export class BrowserController {
       if (target.kind === "handle") {
         handle = target.handle;
       } else if (target.kind === "frame") {
-        handle = await this.resolveFrameElement(target.frame, target.selector);
+        handle = await this.resolveFrameElement(target.frame, target.selector, 0, page);
         dispose = true;
       } else {
-        handle = await this.page.$(target.selector);
+        handle = await page.$(target.selector);
         dispose = true;
       }
     } catch (error) {
@@ -13358,6 +13374,7 @@ export class BrowserController {
     this.oauthProviderPage = null;
     this.oauthProviderPageClosed = false;
     this.oauthCompletionPage = null;
+    this.oauthTerminalCompletionUrl = null;
     const oauthBudgetMs = Math.max(1, settleTimeoutMs);
     const productUrl = product.url();
     const oauthDeadline = Date.now() + oauthBudgetMs;
@@ -13384,6 +13401,7 @@ export class BrowserController {
     let expectedReturnUrl: string | null = null;
     let pendingOnProvider = false;
     let lastTransientUrl = productUrl;
+    let observedClosedReturnUrl: string | null = null;
     let onTransientNavigation: ((frame: Frame) => void) | null = null;
     let resolveProductNavigation: () => void = () => undefined;
     const productNavigationPromise = new Promise<void>((resolve) => {
@@ -13412,13 +13430,20 @@ export class BrowserController {
     const completionEvidence = async (): Promise<OAuthCompletionEvidence | null> => {
       if (!actionStarted) return null;
       const returnedPage = completionPage();
-      if (returnedPage === null) return null;
-      const url = returnedPage.url();
-      return !returnedPage.isClosed() &&
-        returnedPage.url() === url &&
-        this.isOAuthReturnUrl(url, expectedReturnUrl)
-        ? { page: returnedPage }
-        : null;
+      if (returnedPage !== null) {
+        const url = returnedPage.url();
+        if (
+          !returnedPage.isClosed() &&
+          returnedPage.url() === url &&
+          this.isOAuthReturnUrl(url, expectedReturnUrl)
+        ) {
+          return { page: returnedPage };
+        }
+      }
+      if (providerPage !== null && providerPage.isClosed() && observedClosedReturnUrl !== null) {
+        return { page: providerPage, terminal: true, url: observedClosedReturnUrl };
+      }
+      return null;
     };
     registerCompletionCheck?.(completionEvidence);
     product.on("framenavigated", onProductNavigation);
@@ -13482,10 +13507,25 @@ export class BrowserController {
           lastTransientUrl = frame.url();
           expectedReturnUrl ??= oauthRedirectUri(frame.url());
           if (transient !== product) transientNavigated = true;
+          if (
+            transient !== product &&
+            this.isOAuthReturnUrl(lastTransientUrl, expectedReturnUrl) &&
+            oauthErrorFromReturnUrl(lastTransientUrl) === null
+          ) {
+            observedClosedReturnUrl = lastTransientUrl;
+          }
         }
       };
       transient.on("framenavigated", onTransientNavigation);
       expectedReturnUrl ??= oauthRedirectUri(transient.url());
+      if (
+        transient !== product &&
+        this.isOAuthReturnUrl(lastTransientUrl, expectedReturnUrl) &&
+        oauthErrorFromReturnUrl(lastTransientUrl) === null
+      ) {
+        transientNavigated = true;
+        observedClosedReturnUrl = lastTransientUrl;
+      }
       const durableProduct = providerPage === null ? recovery : product;
       this.oauthProductPage = durableProduct;
       this.oauthProviderPage = transient;
@@ -13498,6 +13538,7 @@ export class BrowserController {
           () => expectedReturnUrl,
           remainingBudgetMs(),
           completionPage,
+          () => providerPage !== null && providerPage.isClosed() && observedClosedReturnUrl !== null,
         );
       } else {
         const deadline = oauthDeadline;
@@ -13507,6 +13548,7 @@ export class BrowserController {
             () => expectedReturnUrl,
             Math.min(1_000, remaining),
             completionPage,
+            () => providerPage !== null && providerPage.isClosed() && observedClosedReturnUrl !== null,
           );
           if (settled !== null) break;
           if (Date.now() >= deadline) break;
@@ -13541,7 +13583,12 @@ export class BrowserController {
         pendingOnProvider = true;
         throw awaitingHumanError();
       }
-      this.oauthCompletionPage = completion.page;
+      if (completion.terminal) {
+        this.oauthCompletionPage = null;
+        this.oauthTerminalCompletionUrl = completion.url ?? null;
+      } else {
+        this.oauthCompletionPage = completion.page;
+      }
       if (providerPage === null && product.isClosed()) {
         const reloaded = await recovery
           .reload({
@@ -13617,9 +13664,11 @@ export class BrowserController {
     expectedReturnUrl: () => string | null,
     timeoutMs: number,
     completionPage: () => Page | null,
+    terminalCompletion: () => boolean,
   ): Promise<Page | null> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      if (terminalCompletion()) return null;
       const returnedPage = completionPage();
       if (returnedPage !== null) {
         const url = returnedPage.url();

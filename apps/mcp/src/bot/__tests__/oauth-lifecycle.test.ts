@@ -826,6 +826,97 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it.each(["compact-v2", "legacy"])(
+    "returns a terminal completion snapshot after an observed popup return closes (%s)",
+    async (format) => {
+      const context = await browser.newContext();
+      const product = await context.newPage();
+      const expectedReturnUrl = "https://console.product.test/projects";
+      await context.route("https://product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<main>Login</main><button id="oauth" onclick='window.open(${JSON.stringify(
+            `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+          )})'>Continue</button>`,
+        }),
+      );
+      await context.route("https://accounts.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<script>location.href=${JSON.stringify(expectedReturnUrl)}</script>`,
+        }),
+      );
+      await context.route("https://console.product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: "<main>Projects</main><script>window.close()</script>",
+        }),
+      );
+      await product.goto("https://product.test/login");
+      const controller = BrowserController.fromHarnessPage(product);
+      let sessionId: string | undefined;
+      try {
+        const started = await startHarnessProvisionSession({
+          browser: controller,
+          serviceUrl: "https://product.test/login",
+          ...(format === "compact-v2" ? { observationFormat: "compact-v2" as const } : {}),
+        });
+        sessionId = started.session_id;
+        const oauthRef =
+          format === "compact-v2"
+            ? started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0]
+            : parseElementsTable(started.el_table ?? "")[0]?.ref;
+        expect(oauthRef).toBeDefined();
+        const result = await act(sessionId, {
+          kind: "oauth_login",
+          target: oauthRef!,
+          provider: "google",
+        });
+        expect(result).toMatchObject({
+          url: expectedReturnUrl,
+          terminal: {
+            state: "oauth_completed",
+            refs: "unavailable",
+            next_action: "operate_observe",
+          },
+        });
+        expect(result.el_table).toBeUndefined();
+        expect(result.dom).toBeUndefined();
+        const handoff = await observe(sessionId);
+        expect(handoff.url).toBe("https://product.test/login");
+        expect(handoff.terminal).toBeUndefined();
+      } finally {
+        if (sessionId) await finishProvisionSession(sessionId);
+        await context.close();
+      }
+    },
+  );
+
+  it("binds tracked clicks to their provided source page", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const provider = await context.newPage();
+    await product.setContent(
+      '<button id="place-order" onclick="document.body.dataset.clicked=\'product\'">Place order</button>',
+    );
+    await provider.setContent(
+      '<button id="place-order" onclick="document.body.dataset.clicked=\'provider\'">Place order</button>',
+    );
+    const controller = BrowserController.fromHarnessPage(provider);
+    try {
+      await controller.clickWithDispatchTracking(
+        { kind: "selector", selector: "#place-order", method: "click" },
+        () => false,
+        undefined,
+        product,
+      );
+      expect(await product.locator("body").getAttribute("data-clicked")).toBe("product");
+      expect(await provider.locator("body").getAttribute("data-clicked")).toBeNull();
+    } finally {
+      await context.close();
+    }
+  });
+
   it("reports awaiting_human — never a guessed cause — when Google never reaches its OAuth completion signal", async () => {
     // Fix C regression: this used to reject with a fabricated cause ("the
     // saved session may have expired") even though nothing observed here

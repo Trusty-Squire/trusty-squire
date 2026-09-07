@@ -49,6 +49,8 @@ export class PageDriver {
   oauthProviderPageClosed = false;
 
   oauthCompletionPage: Page | null = null;
+
+  oauthTerminalCompletionUrl: string | null = null;
   constructor(
     private readonly getContext: () => BrowserContext | null,
     private readonly humanize: boolean,
