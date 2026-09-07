@@ -13399,8 +13399,10 @@ export class BrowserController {
     let lastTransientUrl = productUrl;
     let observedClosedReturnUrl: string | null = null;
     let onTransientNavigation: ((frame: Frame) => void) | null = null;
-    let onPopupNavigation: ((frame: Frame) => void) | null = null;
-    let popupCapturePage: Page | null = null;
+    const popupCapture: {
+      page: Page | null;
+      onNavigation: ((frame: Frame) => void) | null;
+    } = { page: null, onNavigation: null };
     const captureExpectedReturnUrl = (url: string): void => {
       expectedReturnUrl ??= oauthRedirectUri(url);
     };
@@ -13477,8 +13479,8 @@ export class BrowserController {
       });
       const onPopup = (page: Page): void => {
         if (!this.ownedPages.has(page)) return;
-        popupCapturePage = page;
-        onPopupNavigation = (frame: Frame): void => {
+        popupCapture.page = page;
+        popupCapture.onNavigation = (frame: Frame): void => {
           if (frame !== page.mainFrame()) return;
           const url = frame.url();
           captureExpectedReturnUrl(url);
@@ -13491,8 +13493,8 @@ export class BrowserController {
             observedClosedReturnUrl = null;
           }
         };
-        page.on("framenavigated", onPopupNavigation);
-        onPopupNavigation(page.mainFrame());
+        page.on("framenavigated", popupCapture.onNavigation);
+        popupCapture.onNavigation(page.mainFrame());
         product.off("popup", onPopup);
         resolvePopup(page);
       };
@@ -13533,9 +13535,9 @@ export class BrowserController {
         resolveProductNavigation();
       }
       const transient = providerPage ?? product;
-      if (popupCapturePage !== null && onPopupNavigation !== null) {
-        popupCapturePage.off("framenavigated", onPopupNavigation);
-        onPopupNavigation = null;
+      if (popupCapture.page !== null && popupCapture.onNavigation !== null) {
+        popupCapture.page.off("framenavigated", popupCapture.onNavigation);
+        popupCapture.onNavigation = null;
       }
       lastTransientUrl = transient.url();
       onTransientNavigation = (frame: Frame): void => {
@@ -13570,13 +13572,15 @@ export class BrowserController {
       this.oauthProviderPageClosed = transient.isClosed();
       this.restoreProductPageWhenOAuthPageCloses(transient, durableProduct);
       this.page = transient;
+      const hasTerminalCompletion = (): boolean =>
+        providerPage !== null && providerPage.isClosed() && observedClosedReturnUrl !== null;
       let settled: Page | null = null;
       if (consentProvider === undefined) {
         settled = await this.waitForOAuthLifecycle(
           () => expectedReturnUrl,
           remainingBudgetMs(),
           completionPage,
-          () => providerPage !== null && providerPage.isClosed() && observedClosedReturnUrl !== null,
+          hasTerminalCompletion,
         );
       } else {
         const deadline = oauthDeadline;
@@ -13586,9 +13590,9 @@ export class BrowserController {
             () => expectedReturnUrl,
             Math.min(1_000, remaining),
             completionPage,
-            () => providerPage !== null && providerPage.isClosed() && observedClosedReturnUrl !== null,
+            hasTerminalCompletion,
           );
-          if (settled !== null) break;
+          if (settled !== null || hasTerminalCompletion()) break;
           if (Date.now() >= deadline) break;
           const consentBudgetMs = deadline - Date.now();
           const advanced = await this.advanceOAuthConsent(

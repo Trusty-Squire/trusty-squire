@@ -204,7 +204,7 @@ describe("operator new-tab adoption", () => {
     await inbox.evaluate(() => {
       document.querySelector("#popup")!.setAttribute("onclick", "oauthClickSeen()");
     });
-    const login = controller.loginWithOAuth("#popup", 5_000);
+    const login = controller.loginWithOAuth("#popup", 3_000);
     try {
       // loginWithOAuth has already made its recovery page and armed its popup
       // listener. The next context page is foreign, created before the popup.

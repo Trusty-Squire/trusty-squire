@@ -118,6 +118,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
   it("keeps the operator product tab alive when the provider redirects then closes its popup", async () => {
     const { controller, product } = await controllerForProduct();
     const context = product.context();
+    const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1000";
     const providerReturned = product.waitForEvent("popup").then(async (popup) => {
       await popup.goto("data:text/html,provider-token-exchange");
       await product.locator("#state").evaluate((el) => {
@@ -143,6 +145,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
       expect(controller.currentUrl()).toBe(PRODUCT_URL);
       expect(result.oauth).toMatchObject({ state: "awaiting_human", next_action: "operate_observe" });
     } finally {
+      if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
       if (sessionId !== null) await finishProvisionSession(sessionId).catch(() => undefined);
       await context.close().catch(() => undefined);
     }
@@ -173,7 +177,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     context.on("page", onPage);
 
     try {
-      await expect(controller.loginWithOAuth("#oauth", 6_000)).rejects.toBeInstanceOf(
+      await expect(controller.loginWithOAuth("#oauth", 3_000)).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
       expect(product.isClosed()).toBe(false);
@@ -675,7 +679,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const product = await context.newPage();
     const expectedReturnUrl = "https://console.product.test/projects";
     const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+    const previousCooldown = process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
     process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1600";
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
     await context.route("https://product.test/**", (route) =>
       route.fulfill({
         contentType: "text/html",
@@ -749,7 +755,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       expect(await provider.locator("body").getAttribute("data-shipping-committed")).toBeNull();
       expect(await product.locator("body").getAttribute("data-project-clicked")).toBe("yes");
       expect((controller as unknown as { page: Page }).page.url()).toBe(
-        "https://accounts.google.com/provider",
+        `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
       );
       releaseConsent();
       await vi.waitFor(() =>
@@ -763,6 +769,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
       releaseConsent();
       if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
       else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
+      if (previousCooldown === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = previousCooldown;
       if (sessionId) await finishProvisionSession(sessionId);
       await context.close();
     }

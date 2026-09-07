@@ -4512,10 +4512,12 @@ async function observeSession(
   sourcePage?: OAuthCompletionEvidence["page"],
 ): Promise<Observation> {
   if (sourcePage === undefined) {
+    const hadOAuthCompletionSource =
+      oauthCompletionSourcePage(session) !== undefined || compactV2SourcePage(session) !== undefined;
     session.browser.takeOAuthTerminalCompletionUrl();
     rememberOAuthCompletionSourcePage(session, undefined);
     rememberCompactV2SourcePage(session, undefined);
-    invalidateCompactV2Snapshot(session);
+    if (hadOAuthCompletionSource) invalidateCompactV2Snapshot(session);
   }
   rememberOAuthCompletionSourcePage(session, sourcePage);
   const oauthInProgress = (): Observation => {
