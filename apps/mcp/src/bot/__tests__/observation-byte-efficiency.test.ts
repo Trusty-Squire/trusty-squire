@@ -432,6 +432,19 @@ describe("observation byte efficiency", () => {
     expect(result.dom).not.toContain("state_icons=");
     expect(result.dom).toContain("aria-pressed=true");
     expect(result.refs).toEqual([parent.id, parent.children[1]!.id]);
+    const cursorChild = node("DIV", {
+      attributes: { "aria-pressed": "true" },
+      cursor: "pointer",
+      children: [text("Favorite")],
+    });
+    const cursorParent = node("DIV", {
+      clickListener: true,
+      children: [text("Plan"), cursorChild],
+    });
+    const cursorResult = serializeBrowserUseDOM(cursorParent);
+    expect(cursorResult.dom).not.toContain("state_icons=");
+    expect(cursorResult.dom).toContain("aria-pressed=true");
+    expect(cursorResult.refs).toEqual([cursorParent.id, cursorChild.id]);
   });
   it("emits selection evidence for reachable controls without card tag heuristics", () => {
     const link = node("A", {

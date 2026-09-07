@@ -865,26 +865,12 @@ export function serializeBrowserUseDOM(
     const glyph = browserUseBoundedContextText(child, 4)?.replace(/\s+/g, "");
     return glyph && /^[✓✔☑✅]+$/.test(glyph) ? glyph : null;
   };
-  const independentAction = (child: BrowserUseNode): boolean => {
-    const attributes = child.attributes;
-    return (
-      child.clickListener ||
-      ["button", "input", "select", "textarea", "a", "details", "summary", "option"].includes(
-        tag(child),
-      ) ||
-      ["onclick", "onmousedown", "onmouseup", "onkeydown", "onkeyup", "tabindex"].some(
-        (attribute) => attribute in attributes,
-      ) ||
-      interactiveRoles.has(attributes.role ?? "") ||
-      interactiveRoles.has(child.axRole ?? "")
-    );
-  };
   const stateIcons = (node: BrowserUseNode): string[] => {
     if (!stateIconCache.has(node)) {
       const icons: string[] = [];
       const collect = (child: BrowserUseNode): void => {
         if (!child.visible || child.contentDocument) return;
-        if (independentAction(child)) return;
+        if (browserUseInteractive(child)) return;
         const evidence = stateIconEvidence(child);
         if (evidence) {
           icons.push(evidence);
