@@ -160,6 +160,21 @@ describe("interleaved observation DOM", () => {
       await page.close();
     }
   });
+  it("keeps CSS-hidden descendants out of fallback context", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(
+        '<div>Notification preferences<div style="display:none">private tier</div><input type="checkbox"></div>',
+      );
+      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const dom = serializeBrowserUseDOM(capture.root).dom;
+      const input = dom.split("\n").find((line) => line.includes("<input"));
+      expect(input).toContain("context=Notification preferences");
+      expect(dom).not.toContain("private tier");
+    } finally {
+      await page.close();
+    }
+  });
   it("rejects oversized iframe containers before inheriting their text", async () => {
     const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
     try {

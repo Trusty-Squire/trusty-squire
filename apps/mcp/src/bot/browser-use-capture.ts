@@ -375,7 +375,7 @@ const viewMetadata = new Map<
         value: raw.nodeValue,
         attributes: a,
         visible,
-        snapshot: !!l,
+        snapshot: l?.bounds !== null,
         bounds: l?.bounds ?? null,
         cursor: l?.styles.cursor ?? null,
         paintOrder: l?.paintOrder ?? null,
