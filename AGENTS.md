@@ -772,8 +772,7 @@ workspace dependencies are built before the server starts.
 
 Playwright serializes only the callback's source text into the page — the
 module's closure does not travel. Keep page callbacks self-contained and test the
-real browser path. The former prose extractor failed this way; its replacement
-capture is covered by `apps/mcp/src/bot/__tests__/observation-prose.test.ts`.
+real browser path.
 
 ---
 

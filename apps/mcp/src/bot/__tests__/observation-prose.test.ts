@@ -141,7 +141,9 @@ describe("interleaved observation DOM", () => {
       const output = serializeBrowserUseDOM(capture.root, {
         ref: (node) => {
           const element = capture.nodeElements.get(node.id);
-          return element ? handles.get(element)! : { ref: `@e:unbound_${node.id}`, targetable: false };
+          return element
+            ? handles.get(element)!
+            : { ref: `@e:unbound_${node.id}`, targetable: false };
         },
       });
 
@@ -151,8 +153,8 @@ describe("interleaved observation DOM", () => {
       expect(capture.elements.some((element) => element.id === "opaque")).toBe(false);
       expect(safe.rows.map((row) => row.ref)).toEqual([...safe.byRef.keys()]);
       expect(
-        safe.rows.map((row) =>
-          capture.elements.find((element) => handles.get(element) === row.ref)?.id,
+        safe.rows.map(
+          (row) => capture.elements.find((element) => handles.get(element) === row.ref)?.id,
         ),
       ).toEqual(expect.arrayContaining(["same", "cross"]));
       expect(output.dom).toContain("not-targetable=true");
@@ -200,7 +202,9 @@ describe("interleaved observation DOM", () => {
       const output = serializeBrowserUseDOM(capture.root, {
         ref: (node) => {
           const element = capture.nodeElements.get(node.id);
-          return element ? handles.get(element)! : { ref: `@e:unbound_${node.id}`, targetable: false };
+          return element
+            ? handles.get(element)!
+            : { ref: `@e:unbound_${node.id}`, targetable: false };
         },
       });
 
@@ -252,7 +256,9 @@ describe("interleaved observation DOM", () => {
       const output = serializeBrowserUseDOM(capture.root, {
         ref: (node) => {
           const element = capture.nodeElements.get(node.id);
-          return element ? handles.get(element)! : { ref: `@e:unbound_${node.id}`, targetable: false };
+          return element
+            ? handles.get(element)!
+            : { ref: `@e:unbound_${node.id}`, targetable: false };
         },
       });
 

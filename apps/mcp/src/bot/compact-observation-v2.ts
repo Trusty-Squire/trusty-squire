@@ -1022,8 +1022,7 @@ export function safePageSemanticsV2(source: ObservationSemanticSourceV2): SafePa
     const normalized = normalizeDescriptionV2(value);
     if (normalized === undefined) return undefined;
     const description = safeDescriptionV2(normalized)!;
-    if (normalized.length <= SAFE_DESCRIPTION_MAX_CHARS)
-      return screenBrowserUseValueV2(normalized);
+    if (normalized.length <= SAFE_DESCRIPTION_MAX_CHARS) return screenBrowserUseValueV2(normalized);
     const visible = description.slice(0, -1);
     return screenBrowserUseValueV2(normalized, Array.from(visible).length) + "…";
   };

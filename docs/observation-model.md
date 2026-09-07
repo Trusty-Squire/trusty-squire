@@ -1,6 +1,9 @@
 # Design: Trusty Squire operator observation model — skeleton + resident DOM + descriptive refs
 
-**Status:** Phase 1 (identity model) shipped. Phase 2 shipped as node-level redaction and was then REMOVED ENTIRELY — see §4.5 and §9; phases 3-4 not started
+**Status:** Current authority for the observation no-seal policy. Compact V2's
+wire, identity, screening, query, and fixture contract is owned by
+[`browser-use-serializer-port.md`](browser-use-serializer-port.md); the remaining
+roadmap material is historical.
 **Scope:** `@trusty-squire/mcp` operator observation/serialization layer (`operate_observe`, `operate_screenshot`, `operate_extract`, the flat acting verbs, and the compact-v2 serializer)
 **Author:** firstmate, from hands-on operator driving (ipinfo signup + whitejade.xyz checkout, rc.19)
 **Related:** PR #624 (interim gap-2 patch: tolerate live re-renders in compact-v2 overflow paging). This doc is the model that makes that patch unnecessary long-term.
@@ -103,49 +106,12 @@ actually renders:
   The `no_legit_credential` and "the secret is still masked/hidden" refusals are
   gone.
 
-**One compact-v2 screening carve-out (2026-09-06, ipinfo dogfood Findings 1–2).**
-The compact-v2 label alias is a code-derived target, not a read, and its documented
-contract was always "screened … never a value." The ipinfo run caught that
-contract being false: a site that renders an API key as its copy button's
-accessible name emitted the live token as the label `@f9a062f02fadf5` (and its
-first four characters again inside `@curl-h-authorization-bearer-f9a0`), putting
-the secret into the transcript. `controlLabelV2` now screens the accessible
-name for credential shape (vendor anchors, JWT shape, length + character-class
-+ entropy over unbroken runs and over hyphen/underscore-grouped bodies with all
-segments ≥4 chars scored as one joined run — `looksLikeSecretShapedName` in
-`compact-observation-v2.ts`) and emits `@redacted-secret` instead, keeping the
-row's ref, role, and every non-secret fact so the control stays actionable.
-Values, screenshots, and extracts remain verbatim, and ordinary labels
-(`@8-8-8-8`, `@bmbmlite`) are tuned to survive verbatim. The subsequent canonical
-DOM port applies that shared substring screen to emitted names and interleaved
-text, preserving surrounding copy and indentation.
-See the current contract below.
-
-**Canonical DOM port (2026-09-07).** The separate page-text channel and its
-prose extractor have been deleted. Interleaved text, hierarchy, viewport scoping,
-containment, stable ref identity and the mandatory name/text screen now follow
-[`browser-use-serializer-port.md`](browser-use-serializer-port.md). The generated
-canonical fixture corpus, not a byte count, is the acceptance oracle.
-
-- **Duplicate-label ordinals.** Two controls legitimately sharing an
-  accessible name (two `@curl-example` copy buttons) both emitted the same
-  label, so `@curl-example` was a dead ambiguous target forever. Labels are
-  now disambiguated deterministically at map-build time: the first
-  occurrence keeps the base slug, later ones gain `-2`, `-3`, … — each row
-  individually addressable, no ordinal-dependent fingerprint change.
-- **Lossless hint paging.** The compact-v2 wire budget (4096 bytes / 1024
-  tokens) used to cut the composed session hint at a raw byte boundary — the
-  first page ended mid-URL (`- entry: https://ipin…`), costing an extra
-  paging call and a mis-assembled route. Pages now split at UTF-8 token
-  boundaries (last whitespace within each page's byte cap; a whitespace-free
-  hint falls back to the hard split), making paging lossless.
-- **Region context for opaque labels.** A label slug with no 3+-letter word
-  run (`@as15169`, `@1w`) is unreadable to the agent. Such labels gain the
-  short, screened name of the region they sit in (`@as15169-as-details`); a
-  legible label gains nothing (bytes stay on the map), and a secret-shaped
-  region name is refused as context by the same shared screen — a section
-  that displays a key as its heading never rides into a label as
-  "context".
+**One compact-v2 screening carve-out (2026-09-07).** Compact V2 screens only
+secret-shaped substrings in emitted names and interleaved DOM text. This is a
+wire-shape contract, not a read seal: it preserves surrounding text, line shape,
+and refs, while screenshots, extracts, and field values remain verbatim. The
+canonical DOM serializer, its exact screening boundary, and its fixture oracle
+are owned by [`browser-use-serializer-port.md`](browser-use-serializer-port.md).
 
 **Why.** The seal and the extractor contradicted each other in production: on
 BrowserStack's settings page, with the Access Key revealed, `operate_screenshot`

@@ -65,99 +65,16 @@ genuinely ambiguous step can escalate to `detail:"full"` for that one call. In
 V2, ambiguity is resolved through its paging/query protocol instead of
 restoring legacy fields.
 
-## Compact V2 — current default contract
+## Compact V2 — superseded wire contract
 
-Compact V2 is a native TypeScript serializer over the interactive DOM/AX data
-already extracted through `BrowserController`'s CDP path. It ports only the
-compact tuple formatting; it does not launch Python or depend on browser-use at
-runtime.
-
-The serializer emits the live page URL and a compact control map. **Nothing on
-that wire is screened for content** (owner's order, 2026-09-05: remove ALL seals
-— see [observation-model.md §4.5](observation-model.md)), except the one narrow
-compact-v2 screening carve-out (Findings 1–2, 2026-09-06): a control's
-accessible name that reads as a credential is screened to `@redacted-secret` by
-`controlLabelV2`, and the extracted page-prose `text` channel rewrites only
-secret-shaped substrings to `[redacted]` (§4.5 owns the contract). Page-derived
-hostnames, origins, titles, headings, labels, options, errors, and nested action
-results are otherwise the page's own copy, card material and rendered API keys
-included.
-`text` carries only the bounded, budget-degraded screened prose channel (rows
-pack first); rows carry no field values purely as a payload SIZE budget — read
-a value with `operate_screenshot`, `operate_extract`, or a V1
-session. The audit trail and the
-registry-bound recipe trace keep the closed-vocabulary screen
-(`recordableTokenV2`), because neither is a read by the agent. V2 does not add a payment
-validation or approval gate.
-
-The public observation contains:
-
-- `format:"compact-v2"`, the opaque `session_id`, and a code-owned `stage` enum.
-- At most one screened title and primary visible heading in `semantic`.
-- A `safe_table` of visible, topmost controls. Each row is
-  `[ref,role,facts?]`; roles are finite one- or two-character codes and `facts`
-  can contain only a screened short name plus code-owned state, action, field,
-  choice-position, and frame facts.
-- Rows are packed in priority order until the budget is reached; there is no
-  fixed first-page row count. The complete encoded payload must satisfy both
-  the 4,096-byte wire ceiling and the 1,024-token cap, estimated at ~4 bytes
-  per token. When fixed metadata alone would starve the rows, it degrades
-  first (shrink `url`, drop `semantic`, drop start hints) before any row is
-  left off the page; the budget throw remains only as a fail-closed guard on
-  code-owned fields. `overflow.next_cursor` pages the remaining action map
-  through the MCP, never through a persisted snapshot file.
-
-`operate_observe` performs named-control lookup privately against the live
-browser when given `query`, `role`, or `cursor`. The query, optional role filter,
-and HMAC-bound cursor stay inside the
-session; results remain screened `safe_table` tuples. An empty query consumes an
-`overflow.next_cursor`, and also consumes `hint_overflow.next_cursor` when the
-trusted start hint spans more than one page. Map cursors (the default
-observation's and every unfiltered page's) are filter-independent: a map cursor
-combined with a query or role performs the filtered lookup over the whole map
-from the start. Only a filtered page mints a cursor bound to its exact query
-and role, so that filtered list continues deterministically and does not
-continue under a different filter. Query material is matched normally
-whatever it spells; there is no card or secret screen on the query path.
-
-An exact, cursorless `Google` or `GitHub` lookup has a narrow bounded hydration
-repair for auth shells that mount or label their provider controls after the
-initial observation. Each refresh rebuilds and revalidates the complete
-action map. A privately matched, initially unlabeled control may receive only the
-queried provider name in the result; its returned ref is still the
-current indexed handle. Explicit cursors remain immutable and stale on DOM
-change, arbitrary queries do not receive this wait, and the repair never clicks
-or falls back to a generic locator.
-
-Action refs are opaque snapshot indexes of the form
-`@e:<base36-generation>.<base36-position>`. Authorization requires every one of
-these checks before the private legacy target is resolved:
-
-1. canonical syntax and the current observation generation;
-2. membership in the session-held action map;
-3. an unexpired index bound to both the browser's main-document identity and
-   current URL;
-4. an exact live match for the complete indexed control map and its private
-   bindings.
-
-Forged, stale, out-of-range, wrong-generation, cross-document, or drifted refs
-all fail with the same opaque `reobserve_required`. Browser-driving actions
-invalidate the map. The caller must observe again and select a new handle; V2
-never falls through to label, `text=`, CSS, or V1 replacement-candidate
-resolution.
-
-When the page identity and complete control map are unchanged, a repeat
-observe may return `delta:true`; omitted `safe_table` and semantic fields retain
-their preceding V2 values. Any structural action-map or stage change remints a
-generation and sends a fresh paged map. The tuple delta decoder still treats
-present rows as upserts and `removed` refs as deletions, so the wire contract
-remains forward-compatible without weakening snapshot membership.
-
-`apps/mcp/src/bot/__tests__/compact-observation-v2.test.ts` owns serializer,
-screening, query, stage, semantics, budget, and tuple-format gates.
-`operate-session-flow.test.ts` owns session-mode rollout, start metadata,
-cursor/page/document identity, live-map membership, action invalidation, V2
-audit screening, and V1 compatibility gates.
+The tuple table, separate page-text channel, fixed wire budget, and overflow
+cursor contract this section once described are replaced by the canonical
+browser-use DOM port. The current Compact V2 contract is owned by
+[`browser-use-serializer-port.md`](browser-use-serializer-port.md), including
+the interleaved tree, stable refs, whole-document query, viewport signals,
+screening boundary, and fixture oracle. This document retains the original
+design rationale and the V1 history below; it is not a second Compact V2 wire
+reference.
 
 ## Legacy V1 — Phase 1 compact encoder ✅ shipped
 

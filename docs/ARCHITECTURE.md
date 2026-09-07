@@ -60,13 +60,13 @@ A live browser session held by the MCP server. The host agent observes pages and
 chooses actions, while the MCP process owns the browser, sealed secret slots,
 captcha handling, and extraction.
 
-The default observation boundary is Compact V2. The MCP builds a screened,
-finite action map before any audit, retention, delta, or public result; raw page
-text, URLs, values, and snapshot files stay private. Its opaque controls are
-bound to one observation generation, main-document identity, page, and exact
-live map. The detailed wire format, private query/paging protocol, and V1
-rollout switch are owned by
-[`DESIGN-observe-compact.md`](DESIGN-observe-compact.md).
+The default observation boundary is Compact V2. The MCP captures the DOM,
+layout, and accessibility trees, then emits a viewport-scoped, interleaved DOM
+representation with document-scoped stable refs. Its live query inventory can
+find controls outside the viewport; a visible but unbindable node stays in the
+tree with an explicit non-targetable marker. The detailed wire, identity,
+screening, query, and fixture contract is owned by
+[`browser-use-serializer-port.md`](browser-use-serializer-port.md).
 
 **Payment approval**
 

@@ -52,9 +52,7 @@ export interface BrowserUseCapture {
   moreBelow: boolean;
 }
 const rect = (v: number[] | undefined): DOMBounds | null =>
-  v && v.length >= 4
-    ? { x: v[0]!, y: v[1]!, width: v[2]!, height: v[3]! }
-    : null;
+  v && v.length >= 4 ? { x: v[0]!, y: v[1]!, width: v[2]!, height: v[3]! } : null;
 const pathKey = (frame: string | null | undefined, selector: string): string =>
   `${frame ?? ""}\0${selector}`;
 
@@ -87,9 +85,7 @@ export async function captureBrowserUseDOM(
   };
   await Promise.all(page.frames().map(classifyFrame));
   const opaqueFramePaths = new Set(
-    [...opaqueFrames]
-      .filter(([, opaque]) => opaque)
-      .map(([frame]) => framePath(frame)),
+    [...opaqueFrames].filter(([, opaque]) => opaque).map(([frame]) => framePath(frame)),
   );
   const elements = existing
     .filter((e) => e.frameOpaque !== true && !opaqueFramePaths.has(e.framePath ?? null))
@@ -358,13 +354,7 @@ export async function captureBrowserUseDOM(
         n.children.push(build(shadow, chain, n, selector + " >> css=", frame));
       if (raw.contentDocument) {
         const contentFrame = frameById.get(raw.frameId ?? "") ?? frame;
-        n.contentDocument = build(
-          raw.contentDocument,
-          chain,
-          n,
-          "",
-          contentFrame,
-        );
+        n.contentDocument = build(raw.contentDocument, chain, n, "", contentFrame);
       }
       return n;
     };
@@ -453,11 +443,7 @@ export async function captureBrowserUseDOM(
           visited.add(frame);
           const child = await page.context().newCDPSession(frame);
           sessions.push(child);
-          n.contentDocument = await capture(
-            child,
-            `${framePath(frame)}:`,
-            frame,
-          );
+          n.contentDocument = await capture(child, `${framePath(frame)}:`, frame);
         }
       }
       for (const c of n.children) await attachFrames(c, depth);
@@ -481,13 +467,12 @@ export async function captureBrowserUseDOM(
           if (hidden && browserUseInteractive(c))
             n.hiddenElements.push({
               tag: c.nodeName.toLowerCase(),
-              text: (
+              text:
                 meta?.name ||
                 c.attributes.placeholder ||
                 c.attributes.title ||
                 c.attributes["aria-label"] ||
-                "(no label)"
-              ),
+                "(no label)",
               pages: viewportHeight > 0 ? (c.bounds!.y / viewportHeight).toFixed(1) : 0,
             });
           c.children.forEach(collect);
