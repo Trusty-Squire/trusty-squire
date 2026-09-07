@@ -265,7 +265,7 @@ export interface Observation {
   hint?: string;
   // V1 compatibility only. Compact-v2 omits this property entirely and
   // emits the canonical interleaved `dom` representation instead.
-  text: string;
+  text?: string;
   // Domain-aware steering for the host planner. This is not a script; it is
   // guardrail context for states the raw page text routinely misleads agents on.
   guidance?: string;
@@ -6765,7 +6765,7 @@ async function snapshotForPostcondition(session: Session): Promise<Postcondition
     text:
       obs.format === "compact-v2"
         ? await session.browser.extractVisibleText()
-        : (session.prevObserve?.text ?? obs.text),
+        : (session.prevObserve?.text ?? obs.text ?? ""),
     fields,
   };
 }
