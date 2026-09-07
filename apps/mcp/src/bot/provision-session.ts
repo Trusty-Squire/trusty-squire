@@ -5002,8 +5002,7 @@ async function executeAct(
   let browser = session.browser;
   const oauthCompletionSource = oauthCompletionSourcePage(session);
   const compactV2ActionPage =
-    oauthCompletionSource ??
-    (session.compactV2Active ? compactV2SourcePage(session) : undefined);
+    oauthCompletionSource ?? (session.compactV2Active ? compactV2SourcePage(session) : undefined);
   let completedAction: ProvisionAction = action;
   let sensitiveSource: RecordedValueSource | undefined;
   let cartAffecting = false;

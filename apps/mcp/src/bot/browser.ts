@@ -13412,8 +13412,7 @@ export class BrowserController {
     const captureExpectedReturnUrl = (url: string): void => {
       expectedReturnUrl ??= oauthRedirectUri(url);
     };
-    const attemptPage = (page: Page): boolean =>
-      page === product || page === popupCapture.page;
+    const attemptPage = (page: Page): boolean => page === product || page === popupCapture.page;
     // Playwright reports a popup's initial navigation before it can associate
     // the request with a frame. Keep that request inert until the opener's
     // creation-attributed popup event identifies its page; at that point the

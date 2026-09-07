@@ -25,7 +25,8 @@ It does not introduce an observation seal or expose vault values.
 real profile. A pending chooser/challenge remains an honest `awaiting_human` result;
 observe that session to continue. The existing password lifecycle actions
 `prepare_signup`, `store_signup`, and `load_saved` remain available through the
-same login tool. No OAuth browser, cookie, or state-machine mechanics change.
+same login tool. The OAuth lifecycle's callback-completion behavior is documented
+in the [MCP tools guide](../README.md#mcp-tools).
 
 `operate_allow_host` retains the existing hostname/control-plane validator and
 adds a public startup-scope check. Only hosts already entitled by the startup

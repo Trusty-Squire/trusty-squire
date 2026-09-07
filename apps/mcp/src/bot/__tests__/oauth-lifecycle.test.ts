@@ -552,7 +552,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const controller = BrowserController.fromHarnessPage(product);
     try {
       const login = controller.loginWithOAuth("#oauth", 1_000);
-      await product.waitForFunction(() => (window as { oauthClicked?: boolean }).oauthClicked === true);
+      await product.waitForFunction(
+        () => (window as { oauthClicked?: boolean }).oauthClicked === true,
+      );
       const unrelated = await context.newPage();
       await unrelated.goto(
         `https://unrelated.test/authorize?redirect_uri=${encodeURIComponent(unrelatedReturnUrl)}`,
