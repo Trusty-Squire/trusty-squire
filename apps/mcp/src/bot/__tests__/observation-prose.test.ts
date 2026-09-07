@@ -114,6 +114,135 @@ describe("interleaved observation DOM", () => {
       );
     }
   });
+  it("keeps an unmapped child control non-targetable when its selector collides with the main document", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(
+        '<button id="shared" onclick="document.body.dataset.main = \'clicked\'">Main action</button><iframe srcdoc="<button id=shared>Child action</button>"></iframe>',
+      );
+      const context = page.context();
+      const session = await context.newCDPSession(page);
+      const send = session.send.bind(session) as (
+        method: string,
+        params?: Record<string, unknown>,
+      ) => Promise<unknown>;
+      const intercepted = new Proxy(session, {
+        get(target, property, receiver) {
+          if (property === "send")
+            return async (method: string, params?: Record<string, unknown>): Promise<unknown> => {
+              const result = await send(method, params);
+              if (method !== "Page.getFrameTree") return result;
+              const tree = structuredClone(result) as {
+                frameTree: { childFrames?: Array<{ frame: { url: string } }> };
+              };
+              tree.frameTree.childFrames![0]!.frame.url = "https://stale.example/child";
+              return tree;
+            };
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const newCDPSession = vi
+        .spyOn(context, "newCDPSession")
+        .mockImplementation(async (target) => {
+          if (target === page) return intercepted;
+          throw new Error("No frame with given id");
+        });
+      let capture: Awaited<ReturnType<typeof captureBrowserUseDOM>>;
+      try {
+        capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      } finally {
+        newCDPSession.mockRestore();
+      }
+      const output = serializeBrowserUseDOM(capture.root, {
+        ref: (node) => {
+          const element = capture.nodeElements.get(node.id);
+          return element
+            ? `@e:${element.index}`
+            : { ref: `@e:unbound_${node.id}`, targetable: false };
+        },
+      });
+      const lines = output.dom.split("\n");
+      const childTextLine = lines.findIndex((line) => line.includes("Child action"));
+      expect(childTextLine).toBeGreaterThan(0);
+      expect(lines[childTextLine - 1]).toMatch(
+        /\[@e:unbound_[^\]]+\]<button[^\n]*not-targetable=true/,
+      );
+      expect(capture.elements.some((element) => element.visibleText === "Child action")).toBe(false);
+      const main = capture.elements.find((element) => element.visibleText === "Main action")!;
+      expect(main.framePath).toBeNull();
+      await page.locator(main.selector).click();
+      expect(await page.locator("body").getAttribute("data-main")).toBe("clicked");
+    } finally {
+      await page.close();
+    }
+  });
+  it("keeps the parent observation usable when a child CDP session disappears during capture", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(
+        '<button id="main" onclick="document.body.dataset.main = \'clicked\'">Main action</button><iframe srcdoc="<button id=child>Child action</button>"></iframe>',
+      );
+      const context = page.context();
+      const session = await context.newCDPSession(page);
+      const send = session.send.bind(session) as (
+        method: string,
+        params?: Record<string, unknown>,
+      ) => Promise<unknown>;
+      type CapturedNode = {
+        nodeName: string;
+        children?: CapturedNode[];
+        contentDocument?: unknown;
+      };
+      const intercepted = new Proxy(session, {
+        get(target, property, receiver) {
+          if (property === "send")
+            return async (method: string, params?: Record<string, unknown>): Promise<unknown> => {
+              const result = await send(method, params);
+              if (method !== "DOM.getDocument") return result;
+              const document = structuredClone(result) as {
+                root: CapturedNode;
+              };
+              const stripChildDocuments = (node: CapturedNode): void => {
+                if (node.nodeName === "IFRAME") delete node.contentDocument;
+                for (const child of node.children ?? []) stripChildDocuments(child);
+              };
+              stripChildDocuments(document.root);
+              return document;
+            };
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const newCDPSession = vi
+        .spyOn(context, "newCDPSession")
+        .mockImplementation(async (target) => {
+          if (target === page) return intercepted;
+          throw new Error("Target frame detached during capture");
+        });
+      let capture: Awaited<ReturnType<typeof captureBrowserUseDOM>>;
+      try {
+        capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+        expect(newCDPSession).toHaveBeenCalledTimes(2);
+      } finally {
+        newCDPSession.mockRestore();
+      }
+      const output = serializeBrowserUseDOM(capture.root, {
+        ref: (node) => {
+          const element = capture.nodeElements.get(node.id);
+          return element ? `@e:${element.index}` : { ref: `@e:unbound_${node.id}`, targetable: false };
+        },
+      });
+      expect(output.dom).toContain("Main action");
+      expect(output.dom).toContain("<iframe");
+      expect(output.dom).not.toContain("Child action");
+      const main = capture.elements.find((element) => element.visibleText === "Main action")!;
+      await page.locator(main.selector).click();
+      expect(await page.locator("body").getAttribute("data-main")).toBe("clicked");
+    } finally {
+      await page.close();
+    }
+  });
   it("keeps a captured child frame visible when its CDP binding world disappears", async () => {
     const page = await browser.newPage();
     try {

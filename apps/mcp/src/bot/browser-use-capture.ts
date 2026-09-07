@@ -140,7 +140,9 @@ export async function captureBrowserUseDOM(
     const frameById = new Map<string, Frame>();
     const framePathById = new Map<string, string | null>();
     const unboundFrames = new Set<Frame>();
-    const isFrameUnbound = (frame: Frame): boolean => {
+    const unboundFrameIds = new Set<string>();
+    const isFrameUnbound = (frame: Frame | null): boolean => {
+      if (frame === null) return true;
       let current: Frame | null = frame;
       while (current !== null) {
         if (unboundFrames.has(current)) return true;
@@ -148,17 +150,23 @@ export async function captureBrowserUseDOM(
       }
       return false;
     };
+    const markUnboundFrameTree = (tree: FrameTree, frame: Frame | undefined): void => {
+      unboundFrameIds.add(tree.frame.id);
+      if (frame) framePathById.set(tree.frame.id, framePath(frame));
+      for (const [index, child] of (tree.childFrames ?? []).entries())
+        markUnboundFrameTree(child, frame?.childFrames()[index]);
+    };
     const bindFrames = (tree: FrameTree, frame: Frame): void => {
       frameIds.push(tree.frame.id);
       frameById.set(tree.frame.id, frame);
       framePathById.set(tree.frame.id, frame === page.mainFrame() ? null : framePath(frame));
       const available = new Set(frame.childFrames());
-      for (const child of tree.childFrames ?? []) {
+      for (const [index, child] of (tree.childFrames ?? []).entries()) {
         const matched = [...available].find((candidate) => candidate.url() === child.frame.url);
         if (matched) {
           available.delete(matched);
           bindFrames(child, matched);
-        }
+        } else markUnboundFrameTree(child, frame.childFrames()[index]);
       }
     };
     bindFrames(frames.frameTree, owningFrame);
@@ -174,6 +182,16 @@ export async function captureBrowserUseDOM(
       for (const [key, element] of existingBySelector)
         if (belongsToFailedFrame(element.framePath)) existingBySelector.delete(key);
     };
+    for (const frameId of unboundFrameIds) {
+      const path = framePathById.get(frameId);
+      if (path === undefined) continue;
+      const belongsToUnboundFrame = (candidate: string | null | undefined): boolean =>
+        candidate === path || candidate?.startsWith(`${path}/`) === true;
+      for (let i = elements.length - 1; i >= 0; i -= 1)
+        if (belongsToUnboundFrame(elements[i]!.framePath)) elements.splice(i, 1);
+      for (const [key, element] of existingBySelector)
+        if (belongsToUnboundFrame(element.framePath)) existingBySelector.delete(key);
+    }
     for (const frameId of frameIds.slice(1)) {
       try {
         const tree = await client.send("Accessibility.getFullAXTree", { frameId });
@@ -186,9 +204,10 @@ export async function captureBrowserUseDOM(
     const listeners = new Set<number>();
     const bindings = new Map<number, InteractiveElement>();
     for (const frameId of frameIds) {
-      const frame = frameById.get(frameId) ?? owningFrame;
+      const frame = frameById.get(frameId);
+      if (!frame) continue;
       if (isFrameUnbound(frame)) continue;
-      const path = framePathById.get(frameId) ?? (frame === page.mainFrame() ? null : framePath(frame));
+      const path = framePathById.get(frameId)!;
       const candidates = elements.filter((e) => (e.framePath ?? null) === path);
       const frameBindings = new Map<number, InteractiveElement>();
       const frameListeners = new Set<number>();
@@ -249,14 +268,14 @@ export async function captureBrowserUseDOM(
     }
     await client.send("Runtime.releaseObjectGroup", { objectGroup: "ts-observation" }).catch(() => undefined);
     const rawById = new Map<string, RawNode>();
-    const nodeFrame = new Map<string, Frame>();
+    const nodeFrame = new Map<string, Frame | null>();
     const selectorsById = new Map<string, string>();
     const build = (
       raw: RawNode,
       parents: Array<{ raw: RawNode; layout: Layout }>,
       parent: BrowserUseNode | null,
       selector: string,
-      frame: Frame,
+      frame: Frame | null,
     ): BrowserUseNode => {
       const l = layouts.get(raw.backendNodeId),
         a = Object.fromEntries(
@@ -389,7 +408,7 @@ export async function captureBrowserUseDOM(
       for (const shadow of raw.shadowRoots ?? [])
         n.children.push(build(shadow, chain, n, selector + " >> css=", frame));
       if (raw.contentDocument) {
-        const contentFrame = frameById.get(raw.frameId ?? "") ?? frame;
+        const contentFrame = raw.frameId ? (frameById.get(raw.frameId) ?? null) : null;
         n.contentDocument = build(raw.contentDocument, chain, n, "", contentFrame);
       }
       return n;
@@ -403,6 +422,7 @@ export async function captureBrowserUseDOM(
       // nodes for display, but do not manufacture an unusable action binding.
       if (
         !el &&
+        frame !== null &&
         !isFrameUnbound(frame) &&
         !inClosedShadow &&
         opaqueFrames.get(frame) === false &&
@@ -478,9 +498,13 @@ export async function captureBrowserUseDOM(
         const frame = viewMetadata.get(n.id)?.frame;
         if (frame && !frame.isDetached() && !visited.has(frame)) {
           visited.add(frame);
-          const child = await page.context().newCDPSession(frame);
-          sessions.push(child);
-          n.contentDocument = await capture(child, `${framePath(frame)}:`, frame);
+          try {
+            const child = await page.context().newCDPSession(frame);
+            sessions.push(child);
+            n.contentDocument = await capture(child, `${framePath(frame)}:`, frame);
+          } catch {
+            n.contentDocument = null;
+          }
         }
       }
       for (const c of n.children) await attachFrames(c, depth);
