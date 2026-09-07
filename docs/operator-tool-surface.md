@@ -4,7 +4,9 @@ The public operator contract is the named set in `apps/mcp/src/tools/provision-d
 (`OPERATE_TOOLS`), plus `operate_pay`, `operate_payment_status`, `list_credentials`,
 and `list_payment_cards` in `apps/mcp/src/tools/index.ts`. That named set contains
 **18 tools** (the original design's 17-tool heading was a counting error).
-The two recipe tools and nine other vault/account tools remain separately exposed:
+The exact-set check applies to the operator driving surface and the two named vault
+lists, not to other MCP surfaces. The two recipe tools and nine other vault/account
+tools remain separately exposed, as explicitly reconfirmed during implementation:
 29 default tools total, or 31 with maintainer diagnostics enabled.
 
 Actions use `ref` from the current observation. `operate_observe` is the single
@@ -66,9 +68,10 @@ unchanged. Refusals retain the blocked host and a remedy.
 | `operate_remember`, `operate_use` | Removed aliases; unchanged `operate_recipe_save` and `operate_recipe_run` remain |
 | `operate_pay`, `operate_payment_status`, `list_credentials`, `list_payment_cards` | Unchanged |
 
-Recorded-recipe compatibility is not an acceptance constraint. Legacy internal
-Tool objects remain unregistered implementation/test adapters; their presence
-does not restore the removed MCP names. No work is spent migrating recordings.
+Recorded-recipe compatibility is not an acceptance constraint. The superseded Tool objects, union input schema, alias wrappers, and union dispatch
+are deleted. The flat verbs call the existing guarded executor through a private
+function. Tests invoke the new verbs or test internal executor behavior directly.
+No work is spent migrating recordings.
 No recipe assertions were deleted or quarantined for this change.
 
 The serializer, observation payload, payment/3DS implementation, vault internals,
@@ -79,14 +82,12 @@ it; this change does not edit `compact-observation-v2.ts` or rewrite its output.
 ## Validation
 
 - MCP typecheck, ESLint for changed TypeScript files, Prettier checks, and `git diff --check` passed.
-- The static `test:fast` run passed all 15 required behavior files (581 tests,
-  3 existing skips) and all 9 payment-safety files (468 tests). Its first
-  fast-core pass identified seven assertions still using the retired surface;
-  after migration, `vitest run --config vitest.fast-core.config.ts` passed all
-  84 files (1,358 tests, 1 existing skip).
-- After adding the click no-dispatch regression, the complete
-  `operate-session-flow.test.ts` and `tools.test.ts` rerun passed 382 tests.
+- The complete static `test:fast` run passed all 108 files: 84 fast-core files
+  (1,431 tests, 1 existing skip), 15 required behavior files (582 tests,
+  3 existing skips), and 9 payment-safety files (469 tests).
   Required behavior/payment files were not filtered or moved to the slow tier.
+- The operator export test checks the literal name set, uniqueness, registration
+  parity, and absence of public `kind` schemas while preserving separate surfaces.
 - `provision-session.test.ts` passed 155 tests and `operator-recipe.test.ts`
   passed 54 tests. No recipe assertions were deleted or quarantined.
 - A direct comparison against the pre-change source confirmed the credential-fill

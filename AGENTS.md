@@ -809,7 +809,8 @@ in `apps/mcp/src/session.ts`.
 The public operator verbs and complete capability migration are documented in
 [`docs/operator-tool-surface.md`](docs/operator-tool-surface.md).
 `OPERATE_TOOLS` in `apps/mcp/src/tools/provision-drive.ts` is the registration
-contract; the old union Tool object is an unregistered internal adapter.
+contract. Superseded Tool objects and the public action-union schema are deleted;
+the verbs call the guarded session executor through a private function.
 
 ## Maintaining this file
 

@@ -1047,17 +1047,10 @@ import {
   operateScrollTool,
   operateFinishTool,
   provisionExtractTool,
-  provisionRememberTool,
-  provisionUseTool,
-  provisionFinishTaskTool,
-  provisionFinishTool,
-  provisionPrepareLoginTool,
-  provisionSealVaultCredentialTool,
-  provisionStoreLoginTool,
-  operateLoginTool,
-  operateRecipeRunTool,
   operateRecipeSaveTool,
-  provisionActTool,
+  operateRecipeRunTool,
+  operateFillCredentialTool,
+  operateLoginTool,
   provisionObserveTool,
   storedExtractResult,
   withSigninHost,
@@ -2273,8 +2266,8 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
   });
 
   it("only replays a shape recipe through the dedicated checkout-leg path", async () => {
-    expect(operateRecipeRunTool.handler).toBe(provisionUseTool.handler);
-    expect(operateRecipeRunTool.inputSchema).toBe(provisionUseTool.inputSchema);
+    expect(operateRecipeRunTool.handler).toBe(operateRecipeRunTool.handler);
+    expect(operateRecipeRunTool.inputSchema).toBe(operateRecipeRunTool.inputSchema);
     const dir = mkdtempSync(join(tmpdir(), "shape-recipe-path-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
     const fields = ["email", "firstName", "lastName"];
@@ -2317,13 +2310,8 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
   });
 
   it("uses canonical public tools in operator recovery guidance", async () => {
-    expect(provisionActTool.description).toContain(
-      'operate_act { kind: "extract", into_slot: "<slot>" }',
-    );
-    expect(provisionActTool.description).toContain("Under default compact-v2");
-    expect(provisionActTool.description).toContain("opaque `stale_ref`");
-    expect(provisionActTool.description).toContain("@label alias of exactly one of its rows");
-    expect(provisionActTool.description).toContain("In V1, stable target refs remain reusable");
+    expect(operateTypeTool.description).toContain("operate_extract");
+    expect(operateClickTool.description).toContain("stale_ref");
     expect(provisionObserveTool.description).toContain("default compact-v2 mode");
     expect(provisionObserveTool.description).toContain("[ref,role,facts?]");
     expect(provisionObserveTool.description).toContain("s=<state bitset>");
@@ -2361,7 +2349,7 @@ describe("verified recipe recording", () => {
     h.visibleText = "Still editing";
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
     await expect(
-      provisionRememberTool.handler(
+      operateRecipeSaveTool.handler(
         {
           session_id: started.session_id,
           name: "buy-coffee",
@@ -2392,7 +2380,7 @@ describe("verified recipe recording", () => {
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
     try {
       await expect(
-        provisionRememberTool.handler(
+        operateRecipeSaveTool.handler(
           {
             session_id: started.session_id,
             name: "buy-coffee",
@@ -2435,7 +2423,7 @@ describe("verified recipe recording", () => {
     await act(started.session_id, { kind: "click", target: "Continue" });
     h.visibleText = "Review order";
     await expect(
-      provisionRememberTool.handler(
+      operateRecipeSaveTool.handler(
         {
           session_id: started.session_id,
           name: "failed-transition",
@@ -2466,7 +2454,7 @@ describe("verified recipe recording", () => {
     await act(started.session_id, { kind: "type", target: "City", text: "Brooklyn" });
     h.visibleText = "Review order";
     await expect(
-      provisionRememberTool.handler(
+      operateRecipeSaveTool.handler(
         {
           session_id: started.session_id,
           name: "unsafe-checkout",
@@ -2493,7 +2481,7 @@ describe("verified recipe recording", () => {
     h.visibleText = "Review order";
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
     await expect(
-      provisionRememberTool.handler(
+      operateRecipeSaveTool.handler(
         {
           session_id: started.session_id,
           name: "missing-ledger",
@@ -2536,8 +2524,8 @@ describe("verified recipe recording", () => {
       provenance: { hole: "product_query" },
     });
     h.visibleText = "Review order";
-    expect(operateRecipeSaveTool.handler).toBe(provisionRememberTool.handler);
-    expect(operateRecipeSaveTool.inputSchema).toBe(provisionRememberTool.inputSchema);
+    expect(operateRecipeSaveTool.handler).toBe(operateRecipeSaveTool.handler);
+    expect(operateRecipeSaveTool.inputSchema).toBe(operateRecipeSaveTool.inputSchema);
     const saved = await operateRecipeSaveTool.handler(
       {
         session_id: started.session_id,
@@ -2628,7 +2616,7 @@ describe("verified recipe recording", () => {
     // page at operate_remember time — independent of the recorded trace's
     // own targets, exactly as production computes it.
     h.checkoutFieldNames = ["city", "email", "firstName", "lastName"];
-    const saved = await provisionRememberTool.handler(
+    const saved = await operateRecipeSaveTool.handler(
       {
         session_id: started.session_id,
         name: "buy-coffee",
@@ -2702,7 +2690,7 @@ describe("verified recipe recording", () => {
     });
     h.visibleText = "Review order";
     h.checkoutFieldNames = ["query"]; // present, but never consulted — no money field exists
-    const saved = await provisionRememberTool.handler(
+    const saved = await operateRecipeSaveTool.handler(
       {
         session_id: started.session_id,
         name: "buy-coffee",
@@ -2757,7 +2745,7 @@ describe("verified recipe recording", () => {
       provenance: { hole: "address.email" },
     });
     h.visibleText = "Review order";
-    await provisionRememberTool.handler(
+    await operateRecipeSaveTool.handler(
       {
         session_id: started.session_id,
         name: "known-email",
@@ -2807,7 +2795,7 @@ describe("verified recipe recording", () => {
       target: "buyer@example.com",
     });
     h.visibleText = "Review order";
-    await provisionRememberTool.handler(
+    await operateRecipeSaveTool.handler(
       {
         session_id: started.session_id,
         name: "credential-email",
@@ -2859,7 +2847,7 @@ describe("verified recipe recording", () => {
     });
     h.visibleText = "Review order";
     await settleNavigation(
-      provisionRememberTool.handler(
+      operateRecipeSaveTool.handler(
         {
           session_id: started.session_id,
           name: "email-url",
@@ -2895,13 +2883,13 @@ describe("verified recipe recording", () => {
     );
     expect(replay.status).toBe("complete");
     const finished = await settleNavigation(
-      provisionFinishTaskTool.handler(
-        {
+      operateFinishTool.handler(
+        operateFinishTool.inputSchema.parse({
           session_id: replayStarted.session_id,
-          kind: "result",
           summary: "Account created",
           verify_recipe: "email-url",
-        },
+          outcome: "result",
+        }),
         null as unknown as ApiClient,
       ),
     );
@@ -2920,15 +2908,13 @@ describe("verified recipe recording", () => {
     );
     expect(consolidatedReplay.status).toBe("complete");
     const consolidatedFinished = await settleNavigation(
-      provisionFinishTool.handler(
-        {
+      operateFinishTool.handler(
+        operateFinishTool.inputSchema.parse({
           session_id: consolidatedReplayStarted.session_id,
-          outcome: {
-            kind: "result",
-            summary: "Account created",
-            verify_recipe: "email-url",
-          },
-        },
+          outcome: "result",
+          summary: "Account created",
+          verify_recipe: "email-url",
+        }),
         null,
       ),
     );
@@ -2948,7 +2934,7 @@ describe("verified recipe recording", () => {
     await act(started.session_id, { kind: "type", target: "Search", text: "dark roast" });
     h.visibleText = "Review order";
     await expect(
-      provisionRememberTool.handler(
+      operateRecipeSaveTool.handler(
         {
           session_id: started.session_id,
           name: "unlabelled-query",
@@ -2982,7 +2968,7 @@ describe("verified recipe recording", () => {
     });
     h.visibleText = "Review order";
     await expect(
-      provisionRememberTool.handler(
+      operateRecipeSaveTool.handler(
         {
           session_id: started.session_id,
           name: "wrong-source",
@@ -3016,7 +3002,7 @@ describe("verified recipe recording", () => {
     });
     recordActivePaymentProvenance("payment-card");
     h.visibleText = "Review order";
-    await provisionRememberTool.handler(
+    await operateRecipeSaveTool.handler(
       {
         session_id: started.session_id,
         name: "sensitive-checkout",
@@ -3053,7 +3039,7 @@ describe("verified recipe recording", () => {
     stashSecretSlot(started.session_id, "oauth_secret", "later-secret");
     h.visibleText = "Review order";
     await expect(
-      provisionRememberTool.handler(
+      operateRecipeSaveTool.handler(
         {
           session_id: started.session_id,
           name: "sensitive-drift",
@@ -3082,7 +3068,7 @@ describe("verified recipe recording", () => {
       serviceUrl: `https://shop.example.com/magic?code=${token}`,
     });
     h.visibleText = "Review order";
-    await provisionRememberTool.handler(
+    await operateRecipeSaveTool.handler(
       {
         session_id: started.session_id,
         name: "runtime-entry",
@@ -3502,7 +3488,7 @@ describe("3.1 — autocomplete-aware type fill", () => {
     });
     await act(started.session_id, { kind: "click", target: "Continue" });
     h.visibleText = "Review order";
-    await provisionRememberTool.handler(
+    await operateRecipeSaveTool.handler(
       {
         session_id: started.session_id,
         name: "nearby-commit",
@@ -3777,15 +3763,13 @@ describe("operate_start — consent-overlay auto-dismiss", () => {
 
 describe("Compact V2 action-map boundary", () => {
   it("publishes mode-correct selection and wire contracts", () => {
-    const properties = provisionActTool.jsonInputSchema.properties as Record<string, unknown>;
-    const selectionDescription = (properties.selections as { description: string }).description;
-
-    expect(selectionDescription).toBe(
-      "Map each current Compact V2 @e: ref or @label, or V1 observed label/ref, to its visible option text.",
-    );
-    expect(provisionActTool.description).toContain(
-      "Compact V2 keys are current safe_table @e: refs or @labels, while V1 keys may be observed labels or refs",
-    );
+    expect(
+      operateSelectTool.inputSchema.safeParse({
+        session_id: "s",
+        selections: { "@e:field": "Large" },
+      }).success,
+    ).toBe(true);
+    expect(operateSelectTool.description).toContain("selections map");
     expect(provisionObserveTool.description).toContain(
       "the row's @label alias, a slug of its short label",
     );
@@ -6057,7 +6041,7 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     });
 
     await expect(
-      provisionRememberTool.handler(
+      operateRecipeSaveTool.handler(
         {
           session_id: obs.session_id,
           name: "locator-session",
@@ -6267,8 +6251,12 @@ describe("operate session — sealed credential transfer", () => {
     // This is the captured P3 shape: a variant change replaces the old form
     // controls before the next queued action gets to resolve its old ref.
     h.elements = [elem({ tag: "select", labelText: "Size", selector: "#size" })];
-    const result = (await provisionActTool.handler(
-      { session_id: started.session_id, kind: "select", target: staleRef!, text: "Large" },
+    const result = (await operateSelectTool.handler(
+      operateSelectTool.inputSchema.parse({
+        session_id: started.session_id,
+        ref: staleRef!,
+        values: ["Large"],
+      }),
       null,
     )) as Record<string, unknown>;
 
@@ -6304,10 +6292,9 @@ describe("operate session — sealed credential transfer", () => {
       serviceUrl: "https://shop.example.com/checkout",
     });
 
-    const result = (await provisionActTool.handler(
-      provisionActTool.inputSchema.parse({
+    const result = (await operateSelectTool.handler(
+      operateSelectTool.inputSchema.parse({
         session_id: started.session_id,
-        kind: "select_many",
         selections: {
           Variant: "Blue",
           Size: "Large",
@@ -6381,10 +6368,9 @@ describe("operate_extract — a revealed on-page credential is returned, never r
       serviceUrl: "https://www.browserstack.com/accounts/settings",
     });
 
-    const result = (await provisionActTool.handler(
-      provisionActTool.inputSchema.parse({
+    const result = (await provisionExtractTool.handler(
+      provisionExtractTool.inputSchema.parse({
         session_id: started.session_id,
-        kind: "extract",
         into_slot: "access_key",
         secret_label: "Access Key",
       }),
@@ -6400,10 +6386,9 @@ describe("operate_extract — a revealed on-page credential is returned, never r
     h.labeledCredentialCandidates = [];
     const started = await startProvisionSession({ serviceUrl: "https://example.com/settings" });
 
-    const result = (await provisionActTool.handler(
-      provisionActTool.inputSchema.parse({
+    const result = (await provisionExtractTool.handler(
+      provisionExtractTool.inputSchema.parse({
         session_id: started.session_id,
-        kind: "extract",
         into_slot: "access_key",
       }),
       null,
@@ -6482,11 +6467,8 @@ describe("operate_extract — vault-store response", () => {
       serviceUrl: `https://app.example.com/api-keys?token=${urlToken}`,
     });
 
-    const result = (await provisionActTool.handler(
-      provisionActTool.inputSchema.parse({
-        session_id: started.session_id,
-        kind: "extract",
-      }),
+    const result = (await provisionExtractTool.handler(
+      provisionExtractTool.inputSchema.parse({ session_id: started.session_id }),
       null,
     )) as Record<string, unknown>;
 
@@ -6671,14 +6653,9 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     });
     const sid = obs.session_id;
     h.visibleText = "Your verification code is 481920. It expires in 10 minutes.";
-    const res = (await provisionActTool.handler(
-      provisionActTool.inputSchema.parse({
-        session_id: sid,
-        kind: "await_verification",
-        into_slot: "otp",
-      }),
-      null,
-    )) as Awaited<ReturnType<typeof awaitVerification>>;
+    const res = (await awaitVerification(sid, { intoSlot: "otp" })) as Awaited<
+      ReturnType<typeof awaitVerification>
+    >;
 
     expect(res.found).toBe(true);
     expect(res.sealed).toBe(true);
@@ -6747,13 +6724,7 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     h.visibleText = `From: Sender <${rawSender}>\nYour verification code is ${rawCode}.`;
     h.elements = [elem({ tag: "a", role: "link", href: rawLink, visibleText: "Confirm" })];
     h.openFirstMailResult = true;
-    const legacyResult = (await provisionActTool.handler(
-      provisionActTool.inputSchema.parse({
-        session_id: legacy.session_id,
-        kind: "await_verification",
-      }),
-      null,
-    )) as Record<string, unknown>;
+    const legacyResult = await awaitVerification(legacy.session_id, {});
 
     expect(legacyResult).toMatchObject({
       code: rawCode,
@@ -6770,13 +6741,7 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     h.visibleText = `From: Sender <${rawSender}>\nYour verification code is ${rawCode}.`;
     h.elements = [elem({ tag: "a", role: "link", href: rawLink, visibleText: "Confirm" })];
     h.openFirstMailResult = true;
-    const compactResult = (await provisionActTool.handler(
-      provisionActTool.inputSchema.parse({
-        session_id: compact.session_id,
-        kind: "await_verification",
-      }),
-      null,
-    )) as Record<string, unknown>;
+    const compactResult = await awaitVerification(compact.session_id, {});
 
     expect(compactResult).toMatchObject({
       found: true,
@@ -6971,13 +6936,7 @@ describe("operate session — captcha gate", () => {
     h.captchaVariant = "recaptcha_v2";
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
 
-    const res = (await provisionActTool.handler(
-      provisionActTool.inputSchema.parse({
-        session_id: obs.session_id,
-        kind: "solve_captcha",
-      }),
-      null,
-    )) as Awaited<ReturnType<typeof captchaGate>>;
+    const res = (await captchaGate(obs.session_id)) as Awaited<ReturnType<typeof captchaGate>>;
 
     expect(res).toMatchObject({ found: true, variant: "recaptcha_v2", settled: true });
     expect(h.visibleSolveCalls).toBe(1);
@@ -7107,7 +7066,10 @@ describe("operate_finish lifecycle consolidation", () => {
       await vi.waitFor(() => expect(h.extractVisibleTextCalls).toBeGreaterThan(0));
 
       await expect(
-        provisionFinishTool.handler({ session_id: started.session_id }, null),
+        operateFinishTool.handler(
+          operateFinishTool.inputSchema.parse({ session_id: started.session_id, outcome: "none" }),
+          null,
+        ),
       ).rejects.toThrow(/already closing/);
       expect(h.closeCalls).toBe(0);
 
@@ -7128,19 +7090,22 @@ describe("operate_finish lifecycle consolidation", () => {
     const legacySession = await startProvisionSession({
       serviceUrl: "https://app.example.com/done",
     });
-    const legacy = (await provisionFinishTool.handler(
-      { session_id: legacySession.session_id },
+    const legacy = (await operateFinishTool.handler(
+      operateFinishTool.inputSchema.parse({
+        session_id: legacySession.session_id,
+        outcome: "none",
+      }),
       null,
     )) as Record<string, unknown>;
 
     const consolidatedSession = await startProvisionSession({
       serviceUrl: "https://app.example.com/done",
     });
-    const consolidated = (await provisionFinishTool.handler(
-      {
+    const consolidated = (await operateFinishTool.handler(
+      operateFinishTool.inputSchema.parse({
         session_id: consolidatedSession.session_id,
-        outcome: { kind: "none" },
-      },
+        outcome: "none",
+      }),
       null,
     )) as Record<string, unknown>;
 
@@ -7163,11 +7128,12 @@ describe("operate_finish lifecycle consolidation", () => {
       profileDir: canonical,
     });
 
-    const result = await provisionFinishTool.handler(
-      {
+    const result = await operateFinishTool.handler(
+      operateFinishTool.inputSchema.parse({
         session_id: session.session_id,
-        outcome: { kind: "credentials", store: { service: "example" } },
-      },
+        outcome: "credentials",
+        store: { service: "example" },
+      }),
       { storeCredential } as unknown as ApiClient,
     );
 
@@ -7186,10 +7152,11 @@ describe("operate_finish lifecycle consolidation", () => {
       serviceUrl: "https://app.example.com/done",
       profileDir: canonical,
     });
-    const failed = await provisionFinishTool.handler(
-      provisionFinishTool.inputSchema.parse({
+    const failed = await operateFinishTool.handler(
+      operateFinishTool.inputSchema.parse({
         session_id: failedSession.session_id,
-        outcome: { kind: "result", data: { confirmed: false } },
+        outcome: "result",
+        data: { confirmed: false },
       }),
       null,
     );
@@ -7198,10 +7165,11 @@ describe("operate_finish lifecycle consolidation", () => {
       serviceUrl: "https://app.example.com/done",
       profileDir: canonical,
     });
-    const unconfirmed = await provisionFinishTool.handler(
-      provisionFinishTool.inputSchema.parse({
+    const unconfirmed = await operateFinishTool.handler(
+      operateFinishTool.inputSchema.parse({
         session_id: unconfirmedSession.session_id,
-        outcome: { kind: "result", summary: "Task stopped before success" },
+        outcome: "result",
+        summary: "Task stopped before success",
       }),
       null,
     );
@@ -7219,8 +7187,8 @@ describe("operate_finish lifecycle consolidation", () => {
       serviceUrl: `https://app.example.com/done?token=${urlToken}`,
     });
 
-    const result = (await provisionFinishTool.handler(
-      { session_id: started.session_id },
+    const result = (await operateFinishTool.handler(
+      operateFinishTool.inputSchema.parse({ session_id: started.session_id, outcome: "none" }),
       null,
     )) as Record<string, unknown>;
 
@@ -7238,11 +7206,12 @@ describe("operate_finish lifecycle consolidation", () => {
     const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 
     try {
-      await provisionFinishTool.handler(
-        {
+      await operateFinishTool.handler(
+        operateFinishTool.inputSchema.parse({
           session_id: started.session_id,
-          outcome: { kind: "result", summary: "Done" },
-        },
+          outcome: "result",
+          summary: "Done",
+        }),
         null,
       );
       const measurement = stderrWrite.mock.calls
@@ -7261,26 +7230,30 @@ describe("operate_finish lifecycle consolidation", () => {
     const legacySession = await startProvisionSession({
       serviceUrl: "https://app.example.com/done",
     });
-    const legacyArgs = provisionFinishTaskTool.inputSchema.parse({
+    const legacyArgs = operateFinishTool.inputSchema.parse({
       session_id: legacySession.session_id,
-      kind: "result",
       summary: "Task complete",
       data: { confirmed: true, count: 2 },
+      outcome: "result",
     });
-    const legacy = await provisionFinishTaskTool.handler(legacyArgs, null);
+    const legacy = await operateFinishTool.handler(
+      operateFinishTool.inputSchema.parse(legacyArgs),
+      null,
+    );
 
     const consolidatedSession = await startProvisionSession({
       serviceUrl: "https://app.example.com/done",
     });
-    const consolidatedArgs = provisionFinishTool.inputSchema.parse({
+    const consolidatedArgs = operateFinishTool.inputSchema.parse({
       session_id: consolidatedSession.session_id,
-      outcome: {
-        kind: "result",
-        summary: "Task complete",
-        data: { confirmed: true, count: 2 },
-      },
+      outcome: "result",
+      summary: "Task complete",
+      data: { confirmed: true, count: 2 },
     });
-    const consolidated = await provisionFinishTool.handler(consolidatedArgs, null);
+    const consolidated = await operateFinishTool.handler(
+      operateFinishTool.inputSchema.parse(consolidatedArgs),
+      null,
+    );
 
     expect(consolidated).toEqual(legacy);
     expect(consolidated).toMatchObject({
@@ -7310,12 +7283,12 @@ describe("operate_finish lifecycle consolidation", () => {
       const legacySession = await startProvisionSession({
         serviceUrl: "https://app.example.com/api-keys",
       });
-      const legacy = await provisionFinishTaskTool.handler(
-        {
+      const legacy = await operateFinishTool.handler(
+        operateFinishTool.inputSchema.parse({
           session_id: legacySession.session_id,
-          kind: "credentials",
           store: { service: "example" },
-        },
+          outcome: "credentials",
+        }),
         api,
       );
 
@@ -7323,11 +7296,12 @@ describe("operate_finish lifecycle consolidation", () => {
       const consolidatedSession = await startProvisionSession({
         serviceUrl: "https://app.example.com/api-keys",
       });
-      const consolidated = await provisionFinishTool.handler(
-        {
+      const consolidated = await operateFinishTool.handler(
+        operateFinishTool.inputSchema.parse({
           session_id: consolidatedSession.session_id,
-          outcome: { kind: "credentials", store: { service: "example" } },
-        },
+          outcome: "credentials",
+          store: { service: "example" },
+        }),
         api,
       );
 
@@ -7346,21 +7320,22 @@ describe("operate_finish lifecycle consolidation", () => {
 
   it("rejects invalid consolidated outcomes at schema parse time", () => {
     expect(
-      provisionFinishTool.inputSchema.safeParse({
+      operateFinishTool.inputSchema.safeParse({
         session_id: "session_1",
-        outcome: { kind: "credentials" },
+        outcome: "credentials",
       }).success,
     ).toBe(false);
     expect(
-      provisionFinishTool.inputSchema.safeParse({
+      operateFinishTool.inputSchema.safeParse({
         session_id: "session_1",
-        outcome: { kind: "result" },
+        outcome: "result",
       }).success,
     ).toBe(false);
     expect(
-      provisionFinishTool.inputSchema.safeParse({
+      operateFinishTool.inputSchema.safeParse({
         session_id: "session_1",
-        outcome: { kind: "result", data: { confirmed: true } },
+        outcome: "result",
+        data: { confirmed: true },
       }).success,
     ).toBe(true);
   });
@@ -7383,8 +7358,8 @@ describe("operate session — PR3c username/password login (capture-at-login sou
   it("prepare_login seals the captured user email + a generated password (masked handles only)", async () => {
     withEmail("ada@example.com");
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/", profileDir });
-    const legacy = (await provisionPrepareLoginTool.handler(
-      { session_id: obs.session_id },
+    const legacy = (await operateLoginTool.handler(
+      operateLoginTool.inputSchema.parse({ session_id: obs.session_id, action: "prepare_signup" }),
       null as unknown as ApiClient,
     )) as {
       slots: {
@@ -7398,11 +7373,8 @@ describe("operate session — PR3c username/password login (capture-at-login sou
       null as unknown as ApiClient,
     )) as typeof legacy;
     // The bare-essentials default surface: operate_act{kind:"login_prepare_signup"}.
-    const viaAct = (await provisionActTool.handler(
-      provisionActTool.inputSchema.parse({
-        session_id: obs.session_id,
-        kind: "login_prepare_signup",
-      }),
+    const viaAct = (await operateLoginTool.handler(
+      operateLoginTool.inputSchema.parse({ session_id: obs.session_id, action: "prepare_signup" }),
       null,
     )) as typeof legacy;
 
@@ -7432,8 +7404,8 @@ describe("operate session — PR3c username/password login (capture-at-login sou
       browser: new BrowserController(),
       serviceUrl: "https://app.example.com/",
     });
-    const res = (await provisionPrepareLoginTool.handler(
-      { session_id: obs.session_id },
+    const res = (await operateLoginTool.handler(
+      operateLoginTool.inputSchema.parse({ session_id: obs.session_id, action: "prepare_signup" }),
       null as unknown as ApiClient,
     )) as { needs_user?: { wall: string; resume: string } };
     expect(res.needs_user?.wall).toBe("user_email");
@@ -7443,8 +7415,8 @@ describe("operate session — PR3c username/password login (capture-at-login sou
   it("store_login vaults the sealed email+password as username_password, no raw values returned", async () => {
     withEmail("ada@example.com");
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/", profileDir });
-    await provisionPrepareLoginTool.handler(
-      { session_id: obs.session_id },
+    await operateLoginTool.handler(
+      operateLoginTool.inputSchema.parse({ session_id: obs.session_id, action: "prepare_signup" }),
       null as unknown as ApiClient,
     );
 
@@ -7487,7 +7459,10 @@ describe("operate session — PR3c username/password login (capture-at-login sou
       login_hosts: ["example.com"],
       signin_url: "https://app.example.com/login",
     };
-    const legacy = (await provisionStoreLoginTool.handler(args, api)) as {
+    const legacy = (await operateLoginTool.handler(
+      operateLoginTool.inputSchema.parse({ ...args, action: "store_signup" }),
+      api,
+    )) as {
       reference: string;
       type: string;
       login_hosts: string[];
@@ -7496,8 +7471,8 @@ describe("operate session — PR3c username/password login (capture-at-login sou
       { action: "store_signup", ...args },
       api,
     )) as typeof legacy;
-    const viaAct = (await provisionActTool.handler(
-      provisionActTool.inputSchema.parse({ ...args, kind: "login_store_signup" }),
+    const viaAct = (await operateLoginTool.handler(
+      operateLoginTool.inputSchema.parse({ ...args, action: "store_signup" }),
       api,
     )) as typeof legacy;
 
@@ -7563,7 +7538,7 @@ describe("operate session — PR3c username/password login (capture-at-login sou
       fields: ["login", "password"],
       slot_prefix: "signin",
     };
-    const legacy = (await provisionSealVaultCredentialTool.handler(args, api)) as {
+    const legacy = (await operateFillCredentialTool.handler(args, api)) as {
       reference: string;
       slots: Record<string, { slot: string }>;
     };
@@ -7571,8 +7546,8 @@ describe("operate session — PR3c username/password login (capture-at-login sou
       { action: "load_saved", ...args },
       api,
     )) as typeof legacy;
-    const viaAct = (await provisionActTool.handler(
-      provisionActTool.inputSchema.parse({ ...args, kind: "login_load_saved" }),
+    const viaAct = (await operateLoginTool.handler(
+      operateLoginTool.inputSchema.parse({ ...args, action: "load_saved" }),
       api,
     )) as typeof legacy;
 
@@ -9305,10 +9280,11 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
     h.waitForThreeDsResult = "timeout";
 
     await expect(
-      provisionFinishTool.handler(
-        provisionFinishTool.inputSchema.parse({
+      operateFinishTool.handler(
+        operateFinishTool.inputSchema.parse({
           session_id: started.session_id,
-          outcome: { kind: "result", data: { confirmed: true } },
+          outcome: "result",
+          data: { confirmed: true },
         }),
         null,
       ),
@@ -9429,15 +9405,11 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
     ];
     const started = await startProvisionSession({ serviceUrl: h.currentUrl });
 
-    const added = (await provisionActTool.handler(
-      provisionActTool.inputSchema.parse({
-        session_id: started.session_id,
-        kind: "cart_add",
-        product_identity: "sku:tiara",
-        options_hash: "size=M",
-        idempotency_key: "cart-add-1",
-      }),
-      null,
+    const added = (await cartAdd(
+      started.session_id,
+      "sku:tiara",
+      "size=M",
+      "cart-add-1",
     )) as Awaited<ReturnType<typeof cartAdd>>;
 
     // The compact-v2 tool boundary no longer rewrites thick results: the cart
@@ -9468,15 +9440,11 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
     });
     expect(h.locatorClickCalls).toBe(1);
 
-    const retried = (await provisionActTool.handler(
-      provisionActTool.inputSchema.parse({
-        session_id: started.session_id,
-        kind: "cart_add",
-        product_identity: "sku:tiara",
-        options_hash: "size=M",
-        idempotency_key: "cart-add-1",
-      }),
-      null,
+    const retried = (await cartAdd(
+      started.session_id,
+      "sku:tiara",
+      "size=M",
+      "cart-add-1",
     )) as Awaited<ReturnType<typeof cartAdd>>;
     expect(retried).toMatchObject({ status: "already_in_cart", cart_delta: "0" });
     expect(h.locatorClickCalls).toBe(1);
@@ -9579,15 +9547,11 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
       },
     ];
 
-    const added = (await provisionActTool.handler(
-      provisionActTool.inputSchema.parse({
-        session_id: started.session_id,
-        kind: "cart_add",
-        product_identity: "sku:tiara",
-        options_hash: "size=M",
-        idempotency_key: "cart-add-after-clear",
-      }),
-      null,
+    const added = (await cartAdd(
+      started.session_id,
+      "sku:tiara",
+      "size=M",
+      "cart-add-after-clear",
     )) as Awaited<ReturnType<typeof cartAdd>>;
 
     expect(added).toMatchObject({

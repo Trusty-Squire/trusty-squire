@@ -130,11 +130,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BrowserController } from "../browser.js";
 import { TOOLS } from "../../tools/index.js";
-import {
-  provisionObserveTool,
-  provisionObserveQueryTool,
-  provisionStartTool,
-} from "../../tools/provision-drive.js";
+import { provisionObserveTool, provisionStartTool } from "../../tools/provision-drive.js";
 import {
   startProvisionSession,
   startHarnessProvisionSession,
@@ -242,29 +238,6 @@ describe("characterization: registered operator tool surface", () => {
             "file",
           ],
         },
-      },
-    });
-    expect(provisionObserveQueryTool.jsonInputSchema).toEqual({
-      type: "object",
-      required: ["session_id"],
-      properties: {
-        session_id: { type: "string" },
-        query: { type: "string" },
-        role: {
-          type: "string",
-          enum: [
-            "button",
-            "link",
-            "textbox",
-            "select",
-            "checkbox",
-            "radio",
-            "tab",
-            "menuitem",
-            "file",
-          ],
-        },
-        cursor: { type: "string" },
       },
     });
     expect(provisionStartTool.name).toBe("operate_start");

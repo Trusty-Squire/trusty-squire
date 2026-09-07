@@ -357,13 +357,14 @@ import {
   findTool,
   TOOLS,
 } from "../tools/index.js";
+import * as OperatorSurface from "../tools/provision-drive.js";
 import {
   operateLoginTool,
   operateRecipeRunTool,
   operateRecipeSaveTool,
-  provisionActTool,
-  provisionFinishTool,
+  operateFinishTool,
   provisionStartTool,
+  operateTypeTool,
 } from "../tools/provision-drive.js";
 
 function stubBrowser(): PaymentBrowser {
@@ -603,13 +604,14 @@ describe("operate_pay card selection", () => {
 
 describe("operate_act manual card refusal", () => {
   it("returns the vaulted-card alternative and its verified-total prerequisite", async () => {
-    const args = provisionActTool.inputSchema.parse({
+    const args = operateTypeTool.inputSchema.parse({
       session_id: "session_1",
-      kind: "type",
-      target: "Card number",
       text: "5555 5555 5555 4444",
+      ref: "Card number",
     });
-    await expect(provisionActTool.handler(args, null)).resolves.toMatchObject({
+    await expect(
+      operateTypeTool.handler(operateTypeTool.inputSchema.parse(args), null),
+    ).resolves.toMatchObject({
       status: "manual_card_entry_refused",
       safe_alternative: "operate_pay",
       missing_prerequisite: "verified_cart_total",
@@ -1835,6 +1837,41 @@ describe("TOOLS registry", () => {
     expect(names).not.toContain("check_provision_status");
   });
 
+  it("exports only the registered operator tool definitions, without duplicates", () => {
+    const exported = Object.values(OperatorSurface).filter(
+      (value): value is (typeof TOOLS)[number] =>
+        typeof value === "object" &&
+        value !== null &&
+        "name" in value &&
+        "inputSchema" in value &&
+        "handler" in value,
+    );
+    const names = exported.map((tool) => tool.name);
+    expect(names.length).toBe(new Set(names).size);
+    expect(names.sort()).toEqual(
+      [
+        "operate_start",
+        "operate_finish",
+        "operate_observe",
+        "operate_screenshot",
+        "operate_navigate",
+        "operate_click",
+        "operate_type",
+        "operate_select",
+        "operate_press",
+        "operate_scroll",
+        "operate_allow_host",
+        "operate_login",
+        "operate_fill_credential",
+        "operate_extract",
+        // Recipe tools are a separate preserved surface; no alias definitions remain.
+        "operate_recipe_save",
+        "operate_recipe_run",
+      ].sort(),
+    );
+    expect(OperatorSurface.OPERATE_TOOLS.map((tool) => tool.name).sort()).toEqual(names);
+  });
+
   it("does not register removed aliases or the action union", () => {
     for (const name of [
       "operate_act",
@@ -1853,16 +1890,13 @@ describe("TOOLS registry", () => {
   });
 
   it("exposes consolidated lifecycle/recipe schemas and drops their former standalone tool names", () => {
-    const finishProperties = provisionFinishTool.jsonInputSchema.properties as Record<
+    const finishProperties = operateFinishTool.jsonInputSchema.properties as Record<
       string,
       unknown
     >;
-    const finishVariants = (finishProperties.outcome as { oneOf: Record<string, unknown>[] }).oneOf;
-    expect(finishVariants).toHaveLength(3);
-    expect(finishVariants[1]).toMatchObject({ required: ["kind", "store"] });
-    expect(finishVariants[2]).toMatchObject({
-      required: ["kind"],
-      anyOf: [{ required: ["summary"] }, { required: ["data"] }],
+    expect(finishProperties.outcome).toMatchObject({
+      type: "string",
+      enum: ["none", "credentials", "result"],
     });
 
     expect(operateRecipeRunTool.name).toBe("operate_recipe_run");
