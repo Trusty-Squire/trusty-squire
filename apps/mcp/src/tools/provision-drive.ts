@@ -117,7 +117,7 @@ async function resolveRouteHint(serviceUrl: string): Promise<string | undefined>
 // Verified success → synthesize the run into a pending-review skill and publish
 // it so the next provision of this service gets a hint. The registry gates
 // activation on the verifier replay, so this upload is best-effort: every
-// outcome is recorded in the finish_task result trail, nothing is thrown.
+// outcome is recorded in the operate_finish result trail, nothing is thrown.
 async function autoPromoteProvision(sessionId: string): Promise<string> {
   try {
     const promoted = await captureAndPromoteSession(sessionId);

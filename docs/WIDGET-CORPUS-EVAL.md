@@ -102,7 +102,7 @@ options (logged as `skipped (option list already visible …)`).
 ## Adding captures (growing coverage)
 
 Automatic capture writes the accumulated rounds only when a successful
-credential task reaches capture/promotion. Mid-round `operate_act` captures
+credential task reaches capture/promotion. Mid-round operator actions capture
 store inventory and the action with `state.html: ""`; `operate_observe`
 persists no corpus round. Only the final extract round stores full HTML.
 To capture a static widget, finish a provision with its final extract round on

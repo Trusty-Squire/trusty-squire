@@ -179,11 +179,10 @@ and transferred secrets are not returned to the agent.
 ## Payment Flow
 
 ```text
-cart and checkout observations expose a best-effort checkout_state overlay with one next action
-  -> operate_act kind=cart_add reserves product+variant identity and an
-     idempotency key, post-verifies the exact line, and suppresses duplicate
-     retry clicks
-  -> checkout_state is informational only; it is never a charge input
+cart and checkout observations expose a best-effort checkout state
+  -> the agent adds items through the observed cart UI with operate_click,
+     then re-observes before proceeding
+  -> checkout state is informational only; it is never a charge input
   -> observed card controls direct the agent to operate_pay, while model-supplied
      PAN-shaped entry remains refused; operate_pay establishes the approval amount
      without exposing the vaulted card to the model
@@ -249,11 +248,11 @@ agent starts operate_pay in the addressed checkout session
      saved-card resolution, NOT masked — observations and screenshots show them),
      while session state retains only approval/mandate and card-reference metadata
   -> the caller verifies the live final total against the approved amount itself
-     and places the order through operate_act. For click/js_click, the session's
+     and places the order through operate_click. For an operate_click, the session's
      fill-time approval snapshot permits at most one dispatch to a control matching
      the shared pay/place-order label heuristic; a repeat is refused and requires a
      fresh approval in a fresh session. Non-charge-labeled clicks, key presses, and
-     oauth_click remain ungated. Card VALUES are visible in observations and
+     OAuth controls remain ungated. Card VALUES are visible in observations and
      screenshots once filled — the operator masks no read (owner's order,
      2026-09-05); the money-fence is the phone approval and the one-shot charge
      click, not concealment
@@ -311,8 +310,8 @@ capture -> synthesize -> sign -> publish -> verify -> active
 DOM-target actions are promotable into registry Skills only when they are
 main-frame and inventory-backed; modeled navigation retains its existing domain
 lock. An explicitly selected V1 session can still complete by using
-`operate_act` with a live `text=…` or `css=…` locator when a visible control has
-no observed ref, but an
+`operate_click` or `operate_type` with a live `text=…` or `css=…` locator when a
+visible control has no observed ref, but an
 off-inventory action cannot be synthesized into a portable step. Such a session
 is skipped by auto-promotion and cannot be saved as an operator recipe.
 Inventory-backed frame actions can be saved in an operator recipe with their

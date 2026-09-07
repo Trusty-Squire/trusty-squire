@@ -1,7 +1,7 @@
 # Design: Trusty Squire operator observation model — skeleton + resident DOM + descriptive refs
 
 **Status:** Phase 1 (identity model) shipped. Phase 2 shipped as node-level redaction and was then REMOVED ENTIRELY — see §4.5 and §9; phases 3-4 not started
-**Scope:** `@trusty-squire/mcp` operator observation/serialization layer (`operate_observe`, `operate_observe_query`, `operate_act`, `operate_screenshot`, and the compact-v2 serializer)
+**Scope:** `@trusty-squire/mcp` operator observation/serialization layer (`operate_observe`, `operate_screenshot`, `operate_extract`, the flat acting verbs, and the compact-v2 serializer)
 **Author:** firstmate, from hands-on operator driving (ipinfo signup + whitejade.xyz checkout, rc.19)
 **Related:** PR #624 (interim gap-2 patch: tolerate live re-renders in compact-v2 overflow paging). This doc is the model that makes that patch unnecessary long-term.
 
@@ -12,10 +12,10 @@
 Driving real signups and a real Shopify checkout on rc.19, the agent was effectively blind and could not reliably fill dynamic forms. Concrete failures:
 
 - **Overflow paging is fatal on live forms.** Controls past the first ~4 go into `overflow`; paging to reach them fails with `stale_cursor`/`invalid_cursor` on essentially every attempt. Root cause (confirmed in `provision-session.ts observeQuery`): the snapshot is bound to the full current URL (Shopify appends a volatile `?_r=` token) and to a byte-identical live-element re-match, so any re-render or URL-token change invalidates it. Interactive checkouts re-render constantly. **Net: the delivery-address fields could not be reached at all.**
-- **Controls lose their identity.** Non-viewport controls serialize as a bare role letter (`@e:3.1 "b"`) with no label. `operate_observe_query` matches on labels, so an unlabeled control is unfindable.
+- **Controls lose their identity.** Non-viewport controls serialize as a bare role letter (`@e:3.1 "b"`) with no label. `operate_observe(query=...)` matches on labels, so an unlabeled control is unfindable.
 - **Screenshots over-seal.** `operate_screenshot` returned `sealed_context` on plain browse and pre-payment checkout pages, not just secret pages — the agent could not see layout at all until after a payment attempt.
 - **No readable page text.** `text` is always `""`. Combined with unlabeled controls and sealed screenshots, the agent had no window into the page beyond a lossy control table.
-- **Refs churn every action.** Each `operate_act` bumps the generation and invalidates every ref, forcing a re-observe per field. A 5-field form is 5 fragile round-trips.
+- **Refs churn every action.** Each action used to bump the generation and invalidate every ref, forcing a re-observe per field. A 5-field form was 5 fragile round-trips.
 
 The through-line: the layer is tuned for **payload size** and **secret-safety**, and overshoots on both — compressing away identity and blanket-sealing visibility — which blinds the agent on exactly the dynamic forms (checkout, multi-step signup) that matter.
 
@@ -81,8 +81,8 @@ The history of this section is a one-way ratchet toward visibility:
 3. **Removal (2026-09-05, this section's current state)** — **every seal comes
    out. No carve-outs, no payments remnant, no default-on flag.**
 
-**What that means concretely.** `operate_observe`, `operate_observe_query`,
-`operate_screenshot`, and `operate_act { kind: "extract" }` return what the page
+**What that means concretely.** `operate_observe`, `operate_screenshot`, and
+`operate_extract` return what the page
 actually renders:
 
 - `operate_screenshot` returns the page's real pixels. There is no mask
@@ -203,7 +203,7 @@ One handle names a skeleton row, addresses an `expand`/`read`, and labels a set-
 ## 5. Migration / compatibility
 
 - PR #624 is an interim patch on the current compact-v2 paging; it unblocks now. This model supersedes `overflow` + cursor paging.
-- `operate_act` targets already accept a ref; descriptive refs are a drop-in change to how refs are minted, plus `expand`/`read` as new read verbs and `screenshot` gaining the set-of-marks overlay.
+- The flat acting verbs accept a ref; descriptive refs are a drop-in change to how refs are minted, plus `expand`/`read` as new read verbs and `screenshot` gaining the set-of-marks overlay.
 - Recipe replay (`operate_recipe_save/run`) binds to targets; descriptive refs are more stable for replay than positional indices, but the migration must confirm recorded recipes still resolve.
 
 ## 6. Risks / open questions (for the review)
@@ -238,7 +238,7 @@ Independent outside voice: codex (gpt-5.x, high effort, read-only). It landed re
 - **Atomicity/epoch.** Every op records the DOM version observed vs acted on; browser reads race framework updates; "no round-trip" is not "no race." Fail closed on version mismatch.
 - **Prompt-injection surface.** `expand`/`read`/set-of-marks return page-controlled text (labels, aria, DOM text) — untrusted input that must not steer action selection.
 - **Set-of-marks bound.** Viewport-first, top-N by salience/size, hard rendering budget, clustering on dense grids — not "label every element."
-- **`operate_act` migration is not drop-in.** Ref grammar, escaping, HMAC/seal binding, and recipe serialization assume positional refs; migrate deliberately.
+- **Flat-verb migration is not drop-in.** Ref grammar, escaping, HMAC/seal binding, and recipe serialization assume positional refs; migrate deliberately.
 - **Recipes get less deterministic.** Name/label replay needs versioned locators (fingerprint + label + document scope) with fail-closed migration.
 
 ### Phasing (codex + review: this is a big-bang; ship it in slices)
@@ -307,7 +307,7 @@ and where it is deliberately narrower or more conservative than §4.1 above.
   change every fingerprint in it. Every tier is frame-scoped so a control in an
   embedded frame can never hash onto a main-page ref.
 - **Label** — `@continue-with-google`, slugified from the already-screened
-  control description. It is an addressable alias: `operate_act` accepts it and
+  control description. It is an addressable alias: the flat acting verbs accept it and
   resolves it to a ref. Over-length names stay legible: when the accessible
   name is a heading glued to a longer description, the leading title is kept
   and the description dropped (the seam is detected in the original name, and

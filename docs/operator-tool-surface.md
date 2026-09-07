@@ -1,9 +1,11 @@
 # Flat operator tool surface
 
-The public operator contract is the named set in `apps/mcp/src/tools/provision-drive.ts`
-(`OPERATE_TOOLS`), plus `operate_pay`, `operate_payment_status`, `list_credentials`,
-and `list_payment_cards` in `apps/mcp/src/tools/index.ts`. That named set contains
-**18 tools** (the original design's 17-tool heading was a counting error).
+The public operator contract is the 14 driving verbs in
+`apps/mcp/src/tools/provision-drive.ts`'s `OPERATE_TOOLS` (excluding the two
+separate recipe tools), plus `operate_pay`, `operate_payment_status`,
+`list_credentials`, and `list_payment_cards` in `apps/mcp/src/tools/index.ts`.
+That named set contains **18 tools** (the original design's 17-tool heading was
+a counting error).
 The exact-set check applies to the operator driving surface and the two named vault
 lists, not to other MCP surfaces. The two recipe tools and nine other vault/account
 tools remain separately exposed, as explicitly reconfirmed during implementation:
