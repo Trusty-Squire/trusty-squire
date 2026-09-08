@@ -100,6 +100,32 @@ describe("interleaved observation DOM", () => {
     }
   });
 
+  it("uses only the effective owner for an explicit duplicate-id form control", async () => {
+    const page = await browser.newPage();
+    const refs = new StableObservationRefs();
+    const read = async () => {
+      const capture = await captureThroughController(page);
+      const submitter = capture.elements.find((element) => element.id === "submitter")!;
+      return { element: submitter, ref: refs.actions("doc", capture.elements).get(submitter)! };
+    };
+    try {
+      await page.setContent(`
+        <form id="payment" action="/safe"></form>
+        <form id="payment" action="/other"></form>
+        <button id="submitter" form="payment">Pay</button>
+      `);
+      const held = await read();
+      await page.locator("form:nth-of-type(2)").evaluate((form) => form.setAttribute("action", "/changed"));
+      const afterNonOwnerChange = await read();
+      expect(afterNonOwnerChange.element.observationIdentity).toBe(held.element.observationIdentity);
+      expect(afterNonOwnerChange.ref).toBe(held.ref);
+      await page.locator("form:nth-of-type(1)").evaluate((form) => form.setAttribute("action", "/danger"));
+      expect((await read()).ref).not.toBe(held.ref);
+    } finally {
+      await page.close();
+    }
+  });
+
   it("retires persistent anchors when only a base URL retargets relative actions", async () => {
     const page = await browser.newPage();
     const refs = new StableObservationRefs();

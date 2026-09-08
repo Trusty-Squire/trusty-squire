@@ -98,6 +98,10 @@ empty form and submitter actions resolve to the document URL rather than a base
 URL. Link download presence/value is material because it changes navigation into
 a download. Ordinary editable-field values remain non-material.
 
+Explicit `form=` ownership is resolved through the browser's effective form
+association, not by matching every duplicate ID. A non-owner form can change
+without retiring the control's capability; an actual owner change still does.
+
 Final focused validation after the srcdoc decision: all 21 real-browser tests
 passed, including physical-node persistence/replacement and both ancestral and
 explicit form-destination changes. Typecheck and changed-file ESLint exited 0.

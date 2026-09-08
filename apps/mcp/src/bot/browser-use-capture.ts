@@ -228,6 +228,7 @@ export async function captureBrowserUseDOM(
     const bindings = new Map<number, InteractiveElement>();
     const baseUris = new Map<Frame, string>();
     const baseTargets = new Map<Frame, string>();
+    const formOwners = new Map<number, number | null>();
     for (const frameId of frameIds) {
       const frame = frameById.get(frameId);
       if (!frame) continue;
@@ -245,7 +246,7 @@ export async function captureBrowserUseDOM(
         // backend identities without guessing from tag names or accessible names.
         const selectors = candidates.map((e) => e.selector);
         const objects = await client.send("Runtime.evaluate", {
-          expression: `(() => { const roots=[document]; for(let i=0;i<roots.length;i++) for(const e of roots[i].querySelectorAll('*')) if(e.shadowRoot) roots.push(e.shadowRoot); const found=${JSON.stringify(selectors)}.map(s => { const p=s.split(' >> nth='); const matches=roots.flatMap(r=>{try{return [...r.querySelectorAll(p[0])]}catch{return []}}); return matches[Number(p[1]||0)] || null; }); return Object.assign(found,{baseURI:document.baseURI,baseTarget:document.querySelector('base[target]')?.getAttribute('target')}); })()`,
+          expression: `(() => { const roots=[document]; for(let i=0;i<roots.length;i++) for(const e of roots[i].querySelectorAll('*')) if(e.shadowRoot) roots.push(e.shadowRoot); const found=${JSON.stringify(selectors)}.map(s => { const p=s.split(' >> nth='); const matches=roots.flatMap(r=>{try{return [...r.querySelectorAll(p[0])]}catch{return []}}); return matches[Number(p[1]||0)] || null; }); const formOwners=roots.flatMap(r=>[...r.querySelectorAll('[form]')]).flatMap(e=>[e,e.form||null]); return Object.assign(found,{baseURI:document.baseURI,baseTarget:document.querySelector('base[target]')?.getAttribute('target'),formOwners}); })()`,
           contextId: context.executionContextId,
           objectGroup: "ts-observation",
         });
@@ -258,6 +259,30 @@ export async function captureBrowserUseDOM(
           baseUris.set(frame, typeof baseUri === "string" ? baseUri : frame.url());
           const baseTarget = props.result.find((p) => p.name === "baseTarget")?.value?.value;
           if (typeof baseTarget === "string") baseTargets.set(frame, baseTarget);
+          const ownerObjects = props.result.find((p) => p.name === "formOwners")?.value?.objectId;
+          if (ownerObjects) {
+            const ownerProps = await client.send("Runtime.getProperties", {
+              objectId: ownerObjects,
+              ownProperties: true,
+            });
+            const ownerValues = new Map(
+              ownerProps.result
+                .filter((p) => /^\d+$/.test(p.name))
+                .map((p) => [Number(p.name), p.value]),
+            );
+            for (let i = 0; ownerValues.has(i); i += 2) {
+              const control = ownerValues.get(i);
+              if (!control?.objectId) continue;
+              const controlNode = await client.send("DOM.describeNode", { objectId: control.objectId });
+              const owner = ownerValues.get(i + 1);
+              if (!owner?.objectId) {
+                formOwners.set(controlNode.node.backendNodeId, null);
+                continue;
+              }
+              const ownerNode = await client.send("DOM.describeNode", { objectId: owner.objectId });
+              formOwners.set(controlNode.node.backendNodeId, ownerNode.node.backendNodeId);
+            }
+          }
           const indexed = props.result.filter((p) => /^\d+$/.test(p.name) && p.value?.objectId);
           for (let i = 0; i < indexed.length; i += 8)
             await Promise.all(
@@ -463,7 +488,7 @@ export async function captureBrowserUseDOM(
       signature: string;
       target: string;
     };
-    const explicitForms = new Map<Frame, Map<string, FormIntent[]>>();
+    const formIntents = new Map<number, FormIntent>();
     const effectiveDestination = (
       frame: Frame | null | undefined,
       value: string | undefined,
@@ -538,14 +563,7 @@ export async function captureBrowserUseDOM(
       ]);
     };
     const collectForms = (n: BrowserUseNode): void => {
-      const frame = nodeFrame.get(n.id);
-      if (frame && n.nodeName === "FORM" && n.attributes.id) {
-        let forms = explicitForms.get(frame);
-        if (!forms) explicitForms.set(frame, (forms = new Map()));
-        const intents = forms.get(n.attributes.id) ?? [];
-        intents.push(formIntent(n));
-        forms.set(n.attributes.id, intents);
-      }
+      if (n.nodeName === "FORM") formIntents.set(rawById.get(n.id)!.backendNodeId, formIntent(n));
       n.children.forEach(collectForms);
       if (n.contentDocument) collectForms(n.contentDocument);
     };
@@ -607,12 +625,15 @@ export async function captureBrowserUseDOM(
         }
       }
       if (el && frame && documentLoaders.get(frame) && liveBackendNodeIds.has(raw.backendNodeId)) {
+        const explicitOwner = formOwners.get(raw.backendNodeId);
         const owners =
           n.attributes.form === undefined
             ? form === undefined
               ? []
               : [form]
-            : (explicitForms.get(frame)?.get(n.attributes.form) ?? []);
+            : explicitOwner === undefined || explicitOwner === null
+              ? []
+              : [formIntents.get(explicitOwner)].filter((owner): owner is FormIntent => owner !== undefined);
         el.observationIdentity = `${frameIdentity(frame)}:${documentLoaders.get(frame)}:${raw.backendNodeId}`;
         // Include destinations and form ownership even when the visible name
         // stays the same. State/value and surrounding text are not identity.
@@ -639,6 +660,10 @@ export async function captureBrowserUseDOM(
           n.attributes.autocomplete,
           n.attributes["data-field-role"],
         ]);
+        if (n.attributes.form !== undefined && !formOwners.has(raw.backendNodeId)) {
+          delete el.observationIdentity;
+          delete el.observationIntent;
+        }
         if (!elements.includes(el)) elements.push(el);
         nodeElements.set(n.id, el);
       }
