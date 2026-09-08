@@ -260,6 +260,10 @@ export async function captureBrowserUseDOM(
             await frame.evaluate(() => {
               const names = new Set<string>();
               const roots: Array<Document | ShadowRoot> = [document];
+              const getShadowRoot = Object.getOwnPropertyDescriptor(
+                Element.prototype,
+                "shadowRoot",
+              )?.get;
               for (let i = 0; i < roots.length; i++)
                 for (const el of Array.from(roots[i]!.querySelectorAll("*"))) {
                   const name = el.localName;
@@ -277,7 +281,8 @@ export async function captureBrowserUseDOM(
                       constructor = Object.getPrototypeOf(constructor) as Function | undefined;
                     }
                   }
-                  if (el.shadowRoot) roots.push(el.shadowRoot);
+                  const shadowRoot = getShadowRoot?.call(el);
+                  if (shadowRoot) roots.push(shadowRoot);
                 }
               return [...names];
             }),
@@ -293,7 +298,7 @@ export async function captureBrowserUseDOM(
         // backend identities without guessing from tag names or accessible names.
         const selectors = candidates.map((e) => e.selector);
         const objects = await client.send("Runtime.evaluate", {
-          expression: `(() => { const roots=[document]; for(let i=0;i<roots.length;i++) for(const e of roots[i].querySelectorAll('*')) if(e.shadowRoot) roots.push(e.shadowRoot); const found=${JSON.stringify(selectors)}.map(s => { const p=s.split(' >> nth='); const matches=roots.flatMap(r=>{try{return [...r.querySelectorAll(p[0])]}catch{return []}}); return matches[Number(p[1]||0)] || null; }); const formOwners=roots.flatMap(r=>[...r.querySelectorAll('[form]')]).flatMap(e=>[e,e.form||null]); return Object.assign(found,{baseURI:document.baseURI,baseTarget:document.querySelector('base[target]')?.getAttribute('target'),formOwners}); })()`,
+          expression: `(() => { const roots=[document],getShadowRoot=Object.getOwnPropertyDescriptor(Element.prototype,'shadowRoot')?.get; for(let i=0;i<roots.length;i++) for(const e of roots[i].querySelectorAll('*')) { const shadowRoot=getShadowRoot?.call(e); if(shadowRoot) roots.push(shadowRoot); } const found=${JSON.stringify(selectors)}.map(s => { const p=s.split(' >> nth='); const matches=roots.flatMap(r=>{try{return [...r.querySelectorAll(p[0])]}catch{return []}}); return matches[Number(p[1]||0)] || null; }); const formOwners=roots.flatMap(r=>[...r.querySelectorAll('[form]')]).flatMap(e=>[e,e.form||null]); return Object.assign(found,{baseURI:document.baseURI,baseTarget:document.querySelector('base[target]')?.getAttribute('target'),formOwners}); })()`,
           contextId: context.executionContextId,
           objectGroup: "ts-observation",
         });
@@ -344,7 +349,7 @@ export async function captureBrowserUseDOM(
         }
         try {
           const listenerTargets = await client.send("Runtime.evaluate", {
-            expression: `(() => { const roots=[document], priority=[], fallback=[], limit=100; for(let i=0;i<roots.length;i++) for(const el of roots[i].querySelectorAll('*')) { if(el.shadowRoot) roots.push(el.shadowRoot); if(!el.localName.includes('-')) continue; const r=el.getBoundingClientRect(), s=getComputedStyle(el), visible=r.width>1&&r.height>1&&r.bottom>0&&r.right>0&&r.top<innerHeight&&r.left<innerWidth&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)>0; const role=el.getAttribute('role')||''; const likely=visible&&(/(?:quick-add|add-to-cart|product-form|buy|cart)/.test(el.localName)||el.closest("form,[class*='product'],[id*='product'],[class*='price'],[id*='price']")!==null||['button','link','checkbox','radio','combobox','textbox','menuitem','option','tab'].includes(role)||el.hasAttribute('command')||el.hasAttribute('commandfor')||el.hasAttribute('popovertarget')); const targets=likely?priority:fallback; if(targets.length<limit) targets.push(el); } return [...priority,...fallback].slice(0,limit); })()`,
+            expression: `(() => { const roots=[document], priority=[], fallback=[], limit=100,getShadowRoot=Object.getOwnPropertyDescriptor(Element.prototype,'shadowRoot')?.get; for(let i=0;i<roots.length;i++) for(const el of roots[i].querySelectorAll('*')) { const shadowRoot=getShadowRoot?.call(el); if(shadowRoot) roots.push(shadowRoot); if(!el.localName.includes('-')) continue; const r=el.getBoundingClientRect(), s=getComputedStyle(el), visible=r.width>1&&r.height>1&&r.bottom>0&&r.right>0&&r.top<innerHeight&&r.left<innerWidth&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)>0; const role=el.getAttribute('role')||''; const likely=visible&&(/(?:quick-add|add-to-cart|product-form|buy|cart)/.test(el.localName)||el.closest("form,[class*='product'],[id*='product'],[class*='price'],[id*='price']")!==null||['button','link','checkbox','radio','combobox','textbox','menuitem','option','tab'].includes(role)||el.hasAttribute('command')||el.hasAttribute('commandfor')||el.hasAttribute('popovertarget')); const targets=likely?priority:fallback; if(targets.length<limit) targets.push(el); } return [...priority,...fallback].slice(0,limit); })()`,
             contextId: context.executionContextId,
             objectGroup: "ts-observation",
           });
@@ -386,7 +391,7 @@ export async function captureBrowserUseDOM(
           const mainWorldContextId = mainWorldContexts.get(frameId);
           if (mainWorldContextId !== undefined) {
             const clickObjects = await client.send("Runtime.evaluate", {
-              expression: `(() => { if(typeof getEventListeners!=='function')return null; const roots=[document],found=[]; let count=0; for(let i=0;i<roots.length;i++) for(const el of roots[i].querySelectorAll('*')) { if(el.shadowRoot)roots.push(el.shadowRoot); if(++count>10000)return null; if(el.localName.includes('-'))continue; const l=getEventListeners(el); if(l.click||l.mousedown||l.mouseup||l.pointerdown||l.pointerup){found.push(el);if(found.length>100)return null;} } return found;})()`,
+              expression: `(() => { if(typeof getEventListeners!=='function')return null; const roots=[document],found=[],getShadowRoot=Object.getOwnPropertyDescriptor(Element.prototype,'shadowRoot')?.get; let count=0; for(let i=0;i<roots.length;i++) for(const el of roots[i].querySelectorAll('*')) { const shadowRoot=getShadowRoot?.call(el); if(shadowRoot)roots.push(shadowRoot); if(++count>10000)return null; if(el.localName.includes('-'))continue; const l=getEventListeners(el); if(l.click||l.mousedown||l.mouseup||l.pointerdown||l.pointerup){found.push(el);if(found.length>100)return null;} } return found;})()`,
               contextId: mainWorldContextId,
               includeCommandLineAPI: true,
               objectGroup: "ts-observation",

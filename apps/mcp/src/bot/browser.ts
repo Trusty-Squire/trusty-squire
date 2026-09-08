@@ -12079,6 +12079,12 @@ export class BrowserController {
       // Collect candidates across the document and every open shadow
       // root. Closed shadow roots are unreachable — accepted.
       const collected: Element[] = [];
+      const getNativeShadowRoot = Object.getOwnPropertyDescriptor(
+        Element.prototype,
+        "shadowRoot",
+      )?.get;
+      const shadowRootFor = (element: Element): ShadowRoot | null =>
+        getNativeShadowRoot?.call(element) ?? null;
       const walk = (root: Document | ShadowRoot): void => {
         // Defensive: a root with no querySelectorAll (a detached/closed
         // node surfaced mid-render by Descope-style web components on
@@ -12098,7 +12104,8 @@ export class BrowserController {
         if (root == null || typeof root.querySelectorAll !== "function") return;
         root.querySelectorAll(SELECTOR).forEach((n) => collected.push(n));
         root.querySelectorAll("*").forEach((el) => {
-          if (el.shadowRoot !== null) walk(el.shadowRoot);
+          const shadowRoot = shadowRootFor(el);
+          if (shadowRoot !== null) walk(shadowRoot);
         });
       };
       walk(document);
@@ -12451,10 +12458,12 @@ export class BrowserController {
           // open shadow root at the same point to reach the deepest composed
           // element, matching what the user's pointer would strike. Closed roots
           // yield a null shadowRoot and the descent stops — same as the DOM.
-          while (top.shadowRoot !== null) {
-            const deeper = top.shadowRoot.elementFromPoint(x, y);
+          let shadowRoot = shadowRootFor(top);
+          while (shadowRoot !== null) {
+            const deeper = shadowRoot.elementFromPoint(x, y);
             if (deeper === null || deeper === top) break;
             top = deeper;
+            shadowRoot = shadowRootFor(top);
           }
           if (top === el || el.contains(top)) return { topmost: true, occludedBy: null };
           let owner: Node | null = top;
@@ -12514,7 +12523,8 @@ export class BrowserController {
           if (root == null || typeof root.querySelectorAll !== "function") return;
           for (const el of Array.from(root.querySelectorAll<HTMLElement>("*"))) {
             if (raw.length >= MAX_CARDS) break;
-            if (el.shadowRoot !== null) scanRoot(el.shadowRoot);
+            const shadowRoot = shadowRootFor(el);
+            if (shadowRoot !== null) scanRoot(shadowRoot);
             const tag = el.tagName.toLowerCase();
             if (!isCardTag(tag)) continue;
             if (alreadyMatched.has(el)) continue;

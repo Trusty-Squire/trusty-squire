@@ -114,6 +114,43 @@ describe("interleaved observation DOM", () => {
     }
   });
 
+  it("does not invoke page-owned shadow-root accessors during observation", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<form id="form">
+        <button id="native-buy" type="submit" name="add">Add to cart</button>
+        <shadow-accessor-control id="guard"></shadow-accessor-control>
+      </form>`);
+      await page.locator("#form").evaluate((form) =>
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          form.setAttribute("data-submitted", "yes");
+        }),
+      );
+      await page.locator("#guard").evaluate((element) => {
+        let reads = 0;
+        document.body.setAttribute("data-shadow-root-reads", "0");
+        Object.defineProperty(element, "shadowRoot", {
+          get() {
+            reads += 1;
+            document.body.setAttribute("data-shadow-root-reads", String(reads));
+            document.querySelector<HTMLFormElement>("#form")?.requestSubmit();
+            return null;
+          },
+        });
+      });
+      const capture = await captureThroughController(page);
+      expect(await page.locator("body").getAttribute("data-shadow-root-reads")).toBe("0");
+      expect(await page.locator("#form").getAttribute("data-submitted")).toBeNull();
+      const buy = capture.elements.find((element) => element.id === "native-buy")!;
+      expect(buy).toMatchObject({ tag: "button", name: "add", type: "submit" });
+      await page.locator(buy.selector).click();
+      expect(await page.locator("#form").getAttribute("data-submitted")).toBe("yes");
+    } finally {
+      await page.close();
+    }
+  });
+
   it("binds persistent capabilities to physical nodes across fresh CDP captures", async () => {
     const page = await browser.newPage();
     const refs = new StableObservationRefs();
