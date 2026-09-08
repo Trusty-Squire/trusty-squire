@@ -115,6 +115,11 @@ change: link/form relation, ping and referrer-policy activation semantics; and
 native button command/popover routing with auto-state submitter behavior. They
 require their own scope and validation plan. No runtime or test changes for
 either concern are included here, and neither is claimed as live-proven.
+That native-classification follow-up also includes empty and unknown `button type`
+values: the current submitter classifier binds form destinations only for
+absent or literal `submit` button types. Physical-node regressions establish
+removal, replacement and own captured-intent invalidation, but do not establish
+form-destination invalidation for this explicitly deferred classification case.
 
 Final focused validation after the srcdoc decision: all 21 real-browser tests
 passed, including physical-node persistence/replacement and both ancestral and
