@@ -176,6 +176,77 @@ describe("interleaved observation DOM", () => {
     }
   });
 
+  it("distinguishes empty navigation targets from inherited base targets", async () => {
+    const page = await browser.newPage();
+    const assertStale = async (markup: string, id: string, selector: string, attribute: string) => {
+      const refs = new StableObservationRefs();
+      const read = async () => {
+        const capture = await captureThroughController(page);
+        const element = capture.elements.find((candidate) => candidate.id === id)!;
+        return { element, ref: refs.actions("doc", capture.elements).get(element)! };
+      };
+      await page.setContent(markup);
+      const held = await read();
+      await page.locator(selector).evaluate((element, name) => element.setAttribute(name, ""), attribute);
+      const changed = await read();
+      expect(changed.element.observationIdentity).toBe(held.element.observationIdentity);
+      expect(changed.ref).not.toBe(held.ref);
+    };
+    try {
+      await assertStale(
+        '<base target="receipt"><a id="link" href="/continue">Continue</a>',
+        "link",
+        "#link",
+        "target",
+      );
+      await assertStale(
+        '<base target="receipt"><form id="form"><button id="submitter">Pay</button></form>',
+        "submitter",
+        "#form",
+        "target",
+      );
+      await assertStale(
+        '<base target="receipt"><form><button id="submitter">Pay</button></form>',
+        "submitter",
+        "#submitter",
+        "formtarget",
+      );
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("keeps empty and missing submission actions stable across base URL changes", async () => {
+    const page = await browser.newPage();
+    const refs = new StableObservationRefs();
+    const read = async () => {
+      const capture = await captureThroughController(page);
+      const handles = refs.actions("doc", capture.elements);
+      return new Map(
+        ["empty-form", "empty-submitter", "missing-form"].map((id) => {
+          const element = capture.elements.find((candidate) => candidate.id === id)!;
+          return [id, { identity: element.observationIdentity, ref: handles.get(element)! }];
+        }),
+      );
+    };
+    try {
+      await page.setContent(`
+        <base id="base" href="https://safe.example/">
+        <form action=""><button id="empty-form">Pay</button><button id="empty-submitter" formaction="">Confirm</button></form>
+        <form><button id="missing-form">Continue</button></form>
+      `);
+      const first = await read();
+      await page.locator("#base").evaluate((base) => base.setAttribute("href", "https://other.example/"));
+      const second = await read();
+      for (const id of first.keys()) {
+        expect(second.get(id)!.identity).toBe(first.get(id)!.identity);
+        expect(second.get(id)!.ref).toBe(first.get(id)!.ref);
+      }
+    } finally {
+      await page.close();
+    }
+  });
+
   it("retires a held submitter when effective submission semantics change", async () => {
     const page = await browser.newPage();
     const refs = new StableObservationRefs();
@@ -230,6 +301,26 @@ describe("interleaved observation DOM", () => {
       );
       const held = await read();
       await page.locator("#submitter").evaluate((element) => element.setAttribute("value", "delete"));
+      const changed = await read();
+      expect(changed.element.observationIdentity).toBe(held.element.observationIdentity);
+      expect(changed.ref).not.toBe(held.ref);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("retires a held link when download mode changes", async () => {
+    const page = await browser.newPage();
+    const refs = new StableObservationRefs();
+    const read = async () => {
+      const capture = await captureThroughController(page);
+      const link = capture.elements.find((element) => element.id === "contract")!;
+      return { element: link, ref: refs.actions("doc", capture.elements).get(link)! };
+    };
+    try {
+      await page.setContent('<a id="contract" href="/contract.pdf">View contract</a>');
+      const held = await read();
+      await page.locator("#contract").evaluate((element) => element.setAttribute("download", "invoice.pdf"));
       const changed = await read();
       expect(changed.element.observationIdentity).toBe(held.element.observationIdentity);
       expect(changed.ref).not.toBe(held.ref);

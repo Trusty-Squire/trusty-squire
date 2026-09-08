@@ -476,12 +476,19 @@ export async function captureBrowserUseDOM(
         return null;
       }
     };
+    const effectiveSubmissionDestination = (
+      frame: Frame | null | undefined,
+      value: string | undefined,
+    ): string | null =>
+      value === undefined || value.trim() === ""
+        ? (frame?.url() ?? null)
+        : effectiveDestination(frame, value);
     const effectiveMethod = (value: string | undefined): string => {
       const method = value?.trim().toLowerCase();
       return method === "post" || method === "dialog" ? method : "get";
     };
     const effectiveTarget = (value: string | undefined, fallback: string): string =>
-      value?.trim() || fallback;
+      value === undefined ? fallback : value.trim();
     const effectiveEnctype = (value: string | undefined): string => {
       const enctype = value?.trim().toLowerCase();
       return ["multipart/form-data", "text/plain"].includes(enctype ?? "")
@@ -490,7 +497,7 @@ export async function captureBrowserUseDOM(
     };
     const formIntent = (n: BrowserUseNode): FormIntent => {
       const frame = nodeFrame.get(n.id);
-      const action = effectiveDestination(frame, n.attributes.action, frame?.url() ?? null);
+      const action = effectiveSubmissionDestination(frame, n.attributes.action);
       const method = effectiveMethod(n.attributes.method);
       const target = effectiveTarget(n.attributes.target, baseTargets.get(frame!) ?? "_self");
       const enctype = effectiveEnctype(n.attributes.enctype);
@@ -517,7 +524,7 @@ export async function captureBrowserUseDOM(
       return owners.map((owner) => [
         n.attributes.formaction === undefined
           ? owner.action
-          : effectiveDestination(frame, n.attributes.formaction),
+          : effectiveSubmissionDestination(frame, n.attributes.formaction),
         n.attributes.formmethod === undefined ? owner.method : effectiveMethod(n.attributes.formmethod),
         n.attributes.formtarget === undefined
           ? owner.target
@@ -625,6 +632,7 @@ export async function captureBrowserUseDOM(
           ["A", "AREA"].includes(n.nodeName)
             ? effectiveTarget(n.attributes.target, baseTargets.get(frame) ?? "_self")
             : null,
+          ["A", "AREA"].includes(n.nodeName) ? n.attributes.download : null,
           n.attributes.form,
           owners.map((owner) => owner.signature),
           submissionIntent(n, frame, owners),

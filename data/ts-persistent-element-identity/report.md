@@ -93,7 +93,10 @@ overrides it, so mutations to either source retire the capability before a stale
 submit can change request behavior. The first document base target supplies the
 default browsing context for target-less forms, submitters and links, and the
 submitter's name/value pair is also bound because it becomes submitted form data.
-Ordinary editable-field values remain non-material.
+Explicitly empty targets remain distinct from a missing target, while missing or
+empty form and submitter actions resolve to the document URL rather than a base
+URL. Link download presence/value is material because it changes navigation into
+a download. Ordinary editable-field values remain non-material.
 
 Final focused validation after the srcdoc decision: all 21 real-browser tests
 passed, including physical-node persistence/replacement and both ancestral and
