@@ -928,6 +928,20 @@ function controlNamingTexts(el: InteractiveElement): Array<string | null | undef
   ];
 }
 
+function controlLabelNamingTexts(el: InteractiveElement): Array<string | null | undefined> {
+  const role = roleOf(el);
+  return [
+    el.ariaLabel,
+    el.labelText,
+    el.iconLabel,
+    el.visibleText,
+    isButtonInput(el) ? el.value : undefined,
+    el.title,
+    role === "textbox" ? el.placeholder : undefined,
+    role === "textbox" ? el.name : undefined,
+  ];
+}
+
 function candidateTexts(el: InteractiveElement): string[] {
   return [
     el.visibleText,
@@ -950,13 +964,28 @@ function candidateText(el: InteractiveElement): string {
 }
 
 function controlDescription(el: InteractiveElement): string | undefined {
-  // Labels are chosen from visible/accessibility naming sources only. Native
-  // button values are names; field values, `name`, and `id` stay excluded.
-  // The name is not length-budgeted here; its slug has a separate budget.
-  const chosen = controlNamingTexts(el)
+  // Prefer authored accessibility names over descendant text. Navigation
+  // toggles and data-row controls often contain an entire menu/card subtree;
+  // choosing textContent first turned their concise aria/label name into a
+  // mashed-together alias. Native button values are names, while field values
+  // and ids remain excluded. Textbox placeholder/name are useful only after
+  // the genuine accessibility and visible-name sources have been exhausted.
+  const chosen = controlLabelNamingTexts(el)
     .map((candidate) => normalizeDescriptionV2(candidate))
     .find((candidate) => candidate !== undefined);
-  if (chosen === undefined) return undefined;
+  if (chosen === undefined) {
+    // Every actionable row still needs a human-usable alias. The nearest
+    // semantic region is the best available immediate context; a genuinely
+    // anonymous control falls back to its role rather than becoming a bare
+    // [ref, role] tuple. This is descriptive only and does not alter identity.
+    const role = roleOf(el);
+    if (role === null) return undefined;
+    const rawContext = el.container?.includes(":")
+      ? el.container.slice(el.container.indexOf(":") + 1)
+      : el.container;
+    const context = safeDescriptionV2(rawContext?.replace(/[-_]+/g, " "));
+    return context === undefined ? role : `${context} ${role}`;
+  }
   // Add the page's region context to otherwise opaque labels (such as @as15169).
   const context = regionContextV2(el.container, chosen);
   return context === undefined ? chosen : `${chosen} ${context}`;
