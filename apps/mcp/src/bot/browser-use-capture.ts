@@ -787,7 +787,8 @@ export async function captureBrowserUseDOM(
             .filter((child) => /^H[1-6]$/.test(child.nodeName))
             .map(labelText)
             .find((value) => value !== null);
-          const label = parent.attributes["aria-label"]?.trim() || labelledByText(parent) || heading;
+          const label =
+            parent.attributes["aria-label"]?.trim() || labelledByText(parent) || heading;
           return label ? `${kind}:${label}` : null;
         }
         child = parent;

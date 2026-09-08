@@ -24,11 +24,20 @@ is a different node and cannot inherit a ref. Unbound/duplicate identities fail
 closed. Full CDP accessible names and authored role, destination and form binding
 supply intent checks; inventory-relative inferred labels do not supply identity.
 
-Query labels are compatibility aliases bound once to that same capability. An
-alias is reserved through document reset and never transferred to a replacement
-node. They are not a second semantic re-resolution path. The opaque suffix grew
-from 11 to 22 characters; the prefix and observation/query field shapes remain.
-The full design and regression map are in
+Query labels are compatibility aliases bound once to that same capability. Every
+actionable compact-map row receives a concise alias: Chrome's resolved accessible
+name takes precedence, followed by authored `aria-label`, `aria-labelledby` or
+an associated label, an image control's own `alt`, visible control text, a
+button value or descendant icon name, title, and—only for textboxes—placeholder
+or name. If none is meaningful, a named semantic container plus the control
+role is used; otherwise the emitted role and a deterministic position provide
+the floor. Aliases preserve page-provided Unicode content after NFKC
+normalization, exclude the compact-map delimiters, and are bounded to 32
+characters. This display-only derivation neither changes private query matching
+nor becomes a second semantic re-resolution path. An alias is reserved through
+document reset and never transferred to a replacement node. The opaque suffix
+grew from 11 to 22 characters; the prefix and observation/query field shapes
+remain. The full design and regression map are in
 [data/ts-persistent-element-identity/report.md](../data/ts-persistent-element-identity/report.md).
 
 A changed view sends its complete `dom` tree;

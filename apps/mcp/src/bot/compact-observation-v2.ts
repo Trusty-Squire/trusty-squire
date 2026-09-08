@@ -1016,7 +1016,10 @@ function controlDescription(el: InteractiveElement, role: SafeRoleV2): string {
     .find((candidate) => candidate !== undefined);
   if (chosen !== undefined) {
     // Add the page's region context to otherwise opaque labels (such as @as15169).
-    const context = regionContextV2(el.compactNames ? el.compactNames.container : el.container, chosen);
+    const context = regionContextV2(
+      el.compactNames ? el.compactNames.container : el.container,
+      chosen,
+    );
     const description = context === undefined ? chosen : `${chosen} ${context}`;
     if (controlLabelV2(description) !== undefined) return description;
   }
@@ -1024,7 +1027,9 @@ function controlDescription(el: InteractiveElement, role: SafeRoleV2): string {
   // semantic region is the best available immediate context; a genuinely
   // anonymous control falls back to its role rather than becoming a bare
   // [ref, role] tuple. This is descriptive only and does not alter identity.
-  const context = namedContainerContextV2(el.compactNames ? el.compactNames.container : el.container);
+  const context = namedContainerContextV2(
+    el.compactNames ? el.compactNames.container : el.container,
+  );
   return context === undefined ? `${role} ${el.index + 1}` : `${context} ${role}`;
 }
 
@@ -1032,8 +1037,8 @@ function controlDescription(el: InteractiveElement, role: SafeRoleV2): string {
 function isUninformativeDescriptionV2(description: string): boolean {
   return (
     !/[a-zA-Z]{3,}/.test(description) &&
-    !Array.from(description).some((character) =>
-      character.charCodeAt(0) > 0x7f && /\p{L}/u.test(character),
+    !Array.from(description).some(
+      (character) => character.charCodeAt(0) > 0x7f && /\p{L}/u.test(character),
     )
   );
 }

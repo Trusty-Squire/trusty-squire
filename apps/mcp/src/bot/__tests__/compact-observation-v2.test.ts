@@ -653,7 +653,13 @@ describe("compact observation v2", () => {
         sessionId: "session",
         stage: "browse",
         rows: [
-          { ref: "@e:unicode", role: "button", visibility: "viewport", frame: "main", label: piped },
+          {
+            ref: "@e:unicode",
+            role: "button",
+            visibility: "viewport",
+            frame: "main",
+            label: piped,
+          },
           { ref: "@e:long", role: "button", visibility: "viewport", frame: "main", label: long },
         ],
         cursorFor: () => "cursor",
@@ -704,9 +710,9 @@ describe("compact observation v2", () => {
     });
 
     it("uses visible text before a descendant icon label", () => {
-      expect(
-        labelsFor(element({ visibleText: "Checkout", iconLabel: "Acme" })),
-      ).toEqual(["@checkout"]);
+      expect(labelsFor(element({ visibleText: "Checkout", iconLabel: "Acme" }))).toEqual([
+        "@checkout",
+      ]);
     });
 
     it("uses a descendant icon label before a control title", () => {
@@ -716,9 +722,7 @@ describe("compact observation v2", () => {
     });
 
     it("uses a text-content button's own visible name", () => {
-      expect(labelsFor(element({ visibleText: "Create account" }))).toEqual([
-        "@create-account",
-      ]);
+      expect(labelsFor(element({ visibleText: "Create account" }))).toEqual(["@create-account"]);
     });
 
     it("uses textbox placeholder then name when no accessible or visible name exists", () => {
