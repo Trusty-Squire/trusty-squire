@@ -1427,8 +1427,8 @@ function resolveAuthorizedCompactV2Target(
   }
   const live = compactV2LiveControls(session, elements);
   const matches = live.rows.filter((row) => row.ref === authorization.row.ref);
-  // Fingerprints are unique within an inventory by construction, so >1 means a
-  // broken invariant rather than an addressable ambiguity: refuse either way.
+  // Physical identities are unique within an inventory by construction, so >1
+  // means a broken invariant rather than an addressable ambiguity: refuse either way.
   if (matches.length !== 1) throwCompactV2StaleRef();
   const liveRow = matches[0]!;
   if (!sameCompactV2Intent(liveRow, authorization.row)) throwCompactV2StaleRef();

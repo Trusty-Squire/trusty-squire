@@ -273,7 +273,9 @@ export async function captureBrowserUseDOM(
             for (let i = 0; ownerValues.has(i); i += 2) {
               const control = ownerValues.get(i);
               if (!control?.objectId) continue;
-              const controlNode = await client.send("DOM.describeNode", { objectId: control.objectId });
+              const controlNode = await client.send("DOM.describeNode", {
+                objectId: control.objectId,
+              });
               const owner = ownerValues.get(i + 1);
               if (!owner?.objectId) {
                 formOwners.set(controlNode.node.backendNodeId, null);
@@ -550,13 +552,17 @@ export async function captureBrowserUseDOM(
       n: BrowserUseNode,
       frame: Frame,
       owners: readonly FormIntent[],
-    ): Array<[string | null, string, string, string, boolean, string | undefined, string | undefined]> | null => {
+    ): Array<
+      [string | null, string, string, string, boolean, string | undefined, string | undefined]
+    > | null => {
       if (!isSubmitter(n) || owners.length === 0) return null;
       return owners.map((owner) => [
         n.attributes.formaction === undefined
           ? owner.action
           : effectiveSubmissionDestination(frame, n.attributes.formaction),
-        n.attributes.formmethod === undefined ? owner.method : effectiveMethod(n.attributes.formmethod),
+        n.attributes.formmethod === undefined
+          ? owner.method
+          : effectiveMethod(n.attributes.formmethod),
         n.attributes.formtarget === undefined
           ? owner.target
           : effectiveTarget(n.attributes.formtarget, baseTargets.get(frame) ?? "_self"),
@@ -634,16 +640,17 @@ export async function captureBrowserUseDOM(
       if (el && frame && documentLoaders.get(frame) && liveBackendNodeIds.has(raw.backendNodeId)) {
         const submitter = isSubmitter(n);
         const explicitOwner = submitter ? formOwners.get(raw.backendNodeId) : undefined;
-        const owners =
-          !submitter
-            ? []
-            : n.attributes.form === undefined
+        const owners = !submitter
+          ? []
+          : n.attributes.form === undefined
             ? form === undefined
               ? []
               : [form]
             : explicitOwner === undefined || explicitOwner === null
               ? []
-              : [formIntents.get(explicitOwner)].filter((owner): owner is FormIntent => owner !== undefined);
+              : [formIntents.get(explicitOwner)].filter(
+                  (owner): owner is FormIntent => owner !== undefined,
+                );
         el.observationIdentity = `${frameIdentity(frame)}:${documentLoaders.get(frame)}:${raw.backendNodeId}`;
         // Include destinations and form ownership even when the visible name
         // stays the same. State/value and surrounding text are not identity.

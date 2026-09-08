@@ -115,11 +115,17 @@ describe("interleaved observation DOM", () => {
         <button id="submitter" form="payment">Pay</button>
       `);
       const held = await read();
-      await page.locator("form:nth-of-type(2)").evaluate((form) => form.setAttribute("action", "/changed"));
+      await page
+        .locator("form:nth-of-type(2)")
+        .evaluate((form) => form.setAttribute("action", "/changed"));
       const afterNonOwnerChange = await read();
-      expect(afterNonOwnerChange.element.observationIdentity).toBe(held.element.observationIdentity);
+      expect(afterNonOwnerChange.element.observationIdentity).toBe(
+        held.element.observationIdentity,
+      );
       expect(afterNonOwnerChange.ref).toBe(held.ref);
-      await page.locator("form:nth-of-type(1)").evaluate((form) => form.setAttribute("action", "/danger"));
+      await page
+        .locator("form:nth-of-type(1)")
+        .evaluate((form) => form.setAttribute("action", "/danger"));
       expect((await read()).ref).not.toBe(held.ref);
     } finally {
       await page.close();
@@ -252,7 +258,9 @@ describe("interleaved observation DOM", () => {
         <form><button id="submitter">Pay</button></form>
       `);
       const first = await read();
-      await page.locator("#base").evaluate((base) => base.setAttribute("target", "attacker-window"));
+      await page
+        .locator("#base")
+        .evaluate((base) => base.setAttribute("target", "attacker-window"));
       const second = await read();
       for (const id of first.keys()) {
         expect(second.get(id)!.identity).toBe(first.get(id)!.identity);
@@ -309,7 +317,9 @@ describe("interleaved observation DOM", () => {
       };
       await page.setContent(markup);
       const held = await read();
-      await page.locator(selector).evaluate((element, name) => element.setAttribute(name, ""), attribute);
+      await page
+        .locator(selector)
+        .evaluate((element, name) => element.setAttribute(name, ""), attribute);
       const changed = await read();
       expect(changed.element.observationIdentity).toBe(held.element.observationIdentity);
       expect(changed.ref).not.toBe(held.ref);
@@ -358,7 +368,9 @@ describe("interleaved observation DOM", () => {
         <form><button id="missing-form">Continue</button></form>
       `);
       const first = await read();
-      await page.locator("#base").evaluate((base) => base.setAttribute("href", "https://other.example/"));
+      await page
+        .locator("#base")
+        .evaluate((base) => base.setAttribute("href", "https://other.example/"));
       const second = await read();
       for (const id of first.keys()) {
         expect(second.get(id)!.identity).toBe(first.get(id)!.identity);
@@ -385,10 +397,12 @@ describe("interleaved observation DOM", () => {
       `);
       let held = await read();
       const mutate = async (selector: string, attribute: string, value = "") => {
-        await page.locator(selector).evaluate(
-          (element, change) => element.setAttribute(change.attribute, change.value),
-          { attribute, value },
-        );
+        await page
+          .locator(selector)
+          .evaluate((element, change) => element.setAttribute(change.attribute, change.value), {
+            attribute,
+            value,
+          });
         const next = await read();
         expect(next.element.observationIdentity).toBe(held.element.observationIdentity);
         expect(next.ref).not.toBe(held.ref);
@@ -401,7 +415,9 @@ describe("interleaved observation DOM", () => {
       await mutate("#submitter", "formtarget", "receipt-final");
       await mutate("#submitter", "formenctype", "multipart/form-data");
       await mutate("#submitter", "formnovalidate");
-      await page.locator("#submitter").evaluate((element) => element.removeAttribute("formnovalidate"));
+      await page
+        .locator("#submitter")
+        .evaluate((element) => element.removeAttribute("formnovalidate"));
       const afterValidationRestore = await read();
       expect(afterValidationRestore.ref).not.toBe(held.ref);
     } finally {
@@ -422,7 +438,9 @@ describe("interleaved observation DOM", () => {
         '<form><button id="submitter" name="operation" value="safe">Pay</button></form>',
       );
       const held = await read();
-      await page.locator("#submitter").evaluate((element) => element.setAttribute("value", "delete"));
+      await page
+        .locator("#submitter")
+        .evaluate((element) => element.setAttribute("value", "delete"));
       const changed = await read();
       expect(changed.element.observationIdentity).toBe(held.element.observationIdentity);
       expect(changed.ref).not.toBe(held.ref);
@@ -442,7 +460,9 @@ describe("interleaved observation DOM", () => {
     try {
       await page.setContent('<a id="contract" href="/contract.pdf">View contract</a>');
       const held = await read();
-      await page.locator("#contract").evaluate((element) => element.setAttribute("download", "invoice.pdf"));
+      await page
+        .locator("#contract")
+        .evaluate((element) => element.setAttribute("download", "invoice.pdf"));
       const changed = await read();
       expect(changed.element.observationIdentity).toBe(held.element.observationIdentity);
       expect(changed.ref).not.toBe(held.ref);

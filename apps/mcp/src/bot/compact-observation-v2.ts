@@ -1350,9 +1350,8 @@ export function buildSafeControlsV2(args: {
     });
   }
   rows.sort((a, b) => a.priority - b.priority || a.legacy.localeCompare(b.legacy));
-  // Disambiguate AFTER the final ordering so duplicate labels (two copy
-  // buttons for two different tokens, identically labelled) get ordinals that
-  // are deterministic per snapshot rather than extraction-order-dependent.
+  // The legacy fallback disambiguates after final ordering. Compact-v2 supplies
+  // anchorLabel instead, reserving each alias for its physical-node capability.
   const disambiguated = disambiguateDuplicateLabelsV2(rows.map(({ row }) => row.label));
   const byRef = new Map<string, string>();
   const safeRows = rows.map(({ ref, legacy, row }, position) => {
