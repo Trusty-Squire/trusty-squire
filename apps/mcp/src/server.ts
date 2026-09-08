@@ -233,7 +233,8 @@ export async function buildServer(
       return errorContent("server_unavailable", "server is shutting down");
     }
     try {
-      activeApi.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
+      const callApi = activeApi;
+      callApi.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
       if (operatorForwarder !== undefined && tool.name.startsWith("operate_")) {
         return toolResultContent(
           await operatorForwarder.invoke(tool.name, parsed.data, String(extra.requestId), {
@@ -241,8 +242,8 @@ export async function buildServer(
           }),
         );
       }
-      const invoke = async () =>
-        await tool.handler(parsed.data, activeApi, {
+      const invokeHandler = async () =>
+        await tool.handler(parsed.data, callApi, {
           notifyUser: async (message, data) => {
             await server.sendLoggingMessage({
               level: "notice",
@@ -251,6 +252,20 @@ export async function buildServer(
             });
           },
         });
+      const invoke = async () => {
+        // Some embedders provide a narrow ApiClient test double. Production
+        // clients always install the async-local audit context.
+        const withAuditContext = callApi.withAuditContext?.bind(callApi);
+        if (withAuditContext === undefined) return await invokeHandler();
+        return await withAuditContext(
+          {
+            taskId: tool.name,
+            invocationId: String(extra.requestId),
+            purpose: tool.name,
+          },
+          invokeHandler,
+        );
+      };
       // Tool handlers await independently.  A finish must therefore close the
       // admission gate and drain calls that already entered before it snapshots
       // eligible state and closes the browser. `operate_finish*` owns that transition.

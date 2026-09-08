@@ -109,6 +109,7 @@ import type {
   CredentialStore,
   CredentialType,
   VaultAuditEventInput,
+  VaultAuditAttribution,
   VaultAuditListOptions,
   VaultAuditPayload,
   VaultAuditRecord,
@@ -124,6 +125,23 @@ export const VAULT_REVEAL_PURPOSE = "reveal";
 
 export const DEFAULT_LABEL = "default";
 export const MAX_CREDENTIAL_LABEL_LENGTH = 60;
+
+function fallbackProxyAttribution(): {
+  purpose: string;
+  attribution: VaultAuditAttribution;
+  grant_id?: string;
+} {
+  return {
+    purpose: "use_credential",
+    attribution: {
+      task_id: null,
+      agent_identity: null,
+      invocation_id: null,
+      purpose: "use_credential",
+      caller_missing: true,
+    },
+  };
+}
 
 export function normalizeCredentialLabel(raw: string): string | null {
   const label = raw.trim();
@@ -146,6 +164,7 @@ export interface VaultStoreInput {
   // with an EMPTY allowlist — which would make use_credential 403 every
   // call. Accepts bare hosts or full URLs; normalised + deduped.
   observed_hosts?: string[];
+  audit_attribution?: VaultAuditAttribution;
 }
 
 export interface VaultEntry {
@@ -241,8 +260,14 @@ export interface VaultClient {
     reference: string,
     accountId: string,
     purpose?: string,
+    attribution?: VaultAuditAttribution,
   ): Promise<Record<string, string>>;
-  delete(reference: string, accountId: string): Promise<void>;
+  delete(
+    reference: string,
+    accountId: string,
+    requester?: VaultRequester,
+    attribution?: VaultAuditAttribution,
+  ): Promise<void>;
 }
 
 const ASSERTION_MAX_AGE_MS = 60 * 60 * 1000;
@@ -357,6 +382,9 @@ export class CredentialVault implements VaultClient {
       await this.recordAudit(input.account_id, VAULT_AUDIT_TYPES.rotated, {
         reference: existing.reference,
         requester: "user",
+        ...(input.audit_attribution !== undefined
+          ? { attribution: input.audit_attribution, purpose: input.audit_attribution.purpose }
+          : {}),
         service: input.service,
         label,
       });
@@ -418,6 +446,9 @@ export class CredentialVault implements VaultClient {
         await this.recordAudit(input.account_id, VAULT_AUDIT_TYPES.rotated, {
           reference: winner.reference,
           requester: "user",
+          ...(input.audit_attribution !== undefined
+            ? { attribution: input.audit_attribution, purpose: input.audit_attribution.purpose }
+            : {}),
           service: input.service,
           label,
         });
@@ -436,6 +467,9 @@ export class CredentialVault implements VaultClient {
     await this.recordAudit(input.account_id, VAULT_AUDIT_TYPES.stored, {
       reference,
       requester: "system",
+      ...(input.audit_attribution !== undefined
+        ? { attribution: input.audit_attribution, purpose: input.audit_attribution.purpose }
+        : {}),
       service: input.service,
       label,
       ...(input.type !== undefined && input.type !== null ? { credential_type: input.type } : {}),
@@ -457,6 +491,7 @@ export class CredentialVault implements VaultClient {
     reference: string,
     accountId: string,
     fields: Record<string, string>,
+    attribution?: VaultAuditAttribution,
   ): Promise<RotateResult> {
     const existing = await this.deps.store.findActive(reference);
     if (existing === null || existing.account_id !== accountId) {
@@ -475,6 +510,7 @@ export class CredentialVault implements VaultClient {
     await this.recordAudit(accountId, VAULT_AUDIT_TYPES.rotated, {
       reference,
       requester: "user",
+      ...(attribution !== undefined ? { attribution, purpose: attribution.purpose } : {}),
     });
     return { rotated_at: now.toISOString() };
   }
@@ -490,6 +526,7 @@ export class CredentialVault implements VaultClient {
     accountId: string,
     name: string,
     value: string,
+    attribution?: VaultAuditAttribution,
   ): Promise<{ field_names: string[] }> {
     const fieldName = name.trim();
     if (fieldName.length === 0) {
@@ -516,6 +553,7 @@ export class CredentialVault implements VaultClient {
       reference,
       requester: "user",
       label: record.label,
+      ...(attribution !== undefined ? { attribution, purpose: attribution.purpose } : {}),
     });
     return { field_names: fieldNames };
   }
@@ -548,6 +586,7 @@ export class CredentialVault implements VaultClient {
     reference: string,
     accountId: string,
     purpose = "agent:browser_login_fill",
+    attribution?: VaultAuditAttribution,
   ): Promise<Record<string, string>> {
     const record = await this.deps.store.findActive(reference);
     if (record === null || record.account_id !== accountId) {
@@ -559,6 +598,7 @@ export class CredentialVault implements VaultClient {
       requester: "agent",
       signingDeviceId: null,
       assertion: null,
+      ...(attribution !== undefined ? { attribution } : {}),
     });
   }
 
@@ -566,22 +606,29 @@ export class CredentialVault implements VaultClient {
   // Counts against the same per-account retrieval rate limit as the
   // agent/runtime paths — a reveal IS a retrieval, so the human path
   // can't be used to sidestep the 100/hr ceiling.
-  async reveal(reference: string, accountId: string): Promise<Record<string, string>> {
+  async reveal(
+    reference: string,
+    accountId: string,
+    attribution?: VaultAuditAttribution,
+  ): Promise<Record<string, string>> {
     const record = await this.deps.store.findActive(reference);
     if (record === null || record.account_id !== accountId) {
       throw new CredentialNotFoundError(reference);
     }
+    const purpose = attribution?.purpose ?? "user:vault_reveal";
     await this.enforceRetrievalRateLimit(accountId, {
       reference,
-      purpose: "user:vault_reveal",
+      purpose,
       requester: "user",
+      ...(attribution !== undefined ? { attribution } : {}),
     });
     const fields = await this.decryptFields(record);
     await this.deps.store.markRetrieved(reference, this.now());
     await this.recordAudit(accountId, VAULT_AUDIT_TYPES.retrieved, {
       reference,
-      purpose: "user:vault_reveal",
+      purpose,
       requester: "user",
+      ...(attribution !== undefined ? { attribution } : {}),
       outcome: "success",
     });
     return fields;
@@ -607,6 +654,7 @@ export class CredentialVault implements VaultClient {
     approvalId: string,
     approvedFieldNames: readonly string[],
     approverAccountId: string,
+    attribution: VaultAuditAttribution,
   ): Promise<Record<string, string>> {
     const record = await this.deps.store.findActive(reference);
     if (record === null || record.account_id !== accountId) {
@@ -618,6 +666,7 @@ export class CredentialVault implements VaultClient {
         reference,
         purpose: VAULT_REVEAL_PURPOSE,
         requester: "agent",
+        attribution,
         outcome: "missing_credential",
         approval_id: approvalId,
         approver_account_id: approverAccountId,
@@ -633,6 +682,7 @@ export class CredentialVault implements VaultClient {
       approvalId,
       approverAccountId,
       discloseFields: approvedFieldNames,
+      attribution,
     });
   }
 
@@ -640,6 +690,7 @@ export class CredentialVault implements VaultClient {
     reference: string,
     accountId: string,
     requester: VaultRequester = "user",
+    attribution?: VaultAuditAttribution,
   ): Promise<void> {
     const existing = await this.deps.store.findActive(reference);
     if (existing === null || existing.account_id !== accountId) {
@@ -653,6 +704,7 @@ export class CredentialVault implements VaultClient {
         ? { service: existing.metadata.service }
         : {}),
       label: existing.label,
+      ...(attribution !== undefined ? { attribution, purpose: attribution.purpose } : {}),
     });
   }
 
@@ -688,7 +740,11 @@ export class CredentialVault implements VaultClient {
   // scoped + audited. Idempotent if it's already active. Refuses (409)
   // if restoring would collide with a live (service,label) twin — the
   // one-active-per-slot invariant the upsert path relies on.
-  async restore(reference: string, accountId: string): Promise<void> {
+  async restore(
+    reference: string,
+    accountId: string,
+    attribution?: VaultAuditAttribution,
+  ): Promise<void> {
     const rec = await this.deps.store.findByReferenceIncludingDeleted(reference);
     if (rec === null || rec.account_id !== accountId) {
       throw new CredentialNotFoundError(reference);
@@ -706,6 +762,7 @@ export class CredentialVault implements VaultClient {
     await this.recordAudit(accountId, VAULT_AUDIT_TYPES.restored, {
       reference,
       requester: "user",
+      ...(attribution !== undefined ? { attribution, purpose: attribution.purpose } : {}),
     });
   }
 
@@ -717,12 +774,17 @@ export class CredentialVault implements VaultClient {
     accountId: string,
     http: ProxyHttpTemplate,
     executor: ProxyExecutor,
+    audit: {
+      purpose: string;
+      attribution: VaultAuditAttribution;
+      grant_id?: string;
+    } = fallbackProxyAttribution(),
   ): Promise<ProxyResponse> {
     const record = await this.deps.store.findActive(reference);
     if (record === null || record.account_id !== accountId) {
       throw new CredentialNotFoundError(reference);
     }
-    return this.proxyRecord(record, accountId, http, executor);
+    return this.proxyRecord(record, accountId, http, executor, audit);
   }
 
   async proxyResolvedCredential(
@@ -730,6 +792,11 @@ export class CredentialVault implements VaultClient {
     accountId: string,
     http: ProxyHttpTemplate | ((current: CredentialRecord) => ProxyHttpTemplate),
     executor: ProxyExecutor,
+    audit: {
+      purpose: string;
+      attribution: VaultAuditAttribution;
+      grant_id?: string;
+    } = fallbackProxyAttribution(),
   ): Promise<ProxyResponse> {
     const current = await this.deps.store.findActive(record.reference);
     if (current === null || current.account_id !== accountId) {
@@ -740,6 +807,7 @@ export class CredentialVault implements VaultClient {
       accountId,
       typeof http === "function" ? http(current) : http,
       executor,
+      audit,
     );
   }
 
@@ -748,6 +816,7 @@ export class CredentialVault implements VaultClient {
     accountId: string,
     http: ProxyHttpTemplate,
     executor: ProxyExecutor,
+    audit: { purpose: string; attribution: VaultAuditAttribution; grant_id?: string },
   ): Promise<ProxyResponse> {
     const reference = record.reference;
     const targetHost = safeHost(http.url);
@@ -755,6 +824,7 @@ export class CredentialVault implements VaultClient {
       await this.recordProxyAudit(accountId, VAULT_AUDIT_TYPES.proxyRejected, {
         reference,
         requester: "agent",
+        ...audit,
         ...(targetHost !== null ? { target_host: targetHost } : {}),
       });
       throw new AllowlistViolationError(reference, targetHost);
@@ -769,6 +839,7 @@ export class CredentialVault implements VaultClient {
       await this.recordProxyAudit(accountId, VAULT_AUDIT_TYPES.proxyExecuted, {
         reference,
         requester: "agent",
+        ...audit,
         target_host: targetHost,
         response_status: response.status,
         response_size: Buffer.byteLength(response.body, "utf8"),
@@ -779,6 +850,7 @@ export class CredentialVault implements VaultClient {
       await this.recordProxyAudit(accountId, VAULT_AUDIT_TYPES.proxyExecuted, {
         reference,
         requester: "agent",
+        ...audit,
         target_host: targetHost,
         upstream_duration_ms: this.now().getTime() - startedAt,
         proxy_error: err instanceof Error ? err.message : String(err),
@@ -888,6 +960,7 @@ export class CredentialVault implements VaultClient {
     // Set only by the approval-gated reveal: disclose exactly these fields and
     // audit the outcome of THAT, not of the raw decrypt.
     discloseFields?: readonly string[];
+    attribution?: VaultAuditAttribution;
   }): Promise<Record<string, string>> {
     const { reference, purpose, requester, signingDeviceId, assertion } = args;
     const approval = {
@@ -904,6 +977,7 @@ export class CredentialVault implements VaultClient {
         reference,
         purpose,
         requester,
+        ...(args.attribution !== undefined ? { attribution: args.attribution } : {}),
         signing_device_id: signingDeviceId,
         ...approval,
       });
@@ -915,6 +989,7 @@ export class CredentialVault implements VaultClient {
           reference,
           purpose,
           requester,
+          ...(args.attribution !== undefined ? { attribution: args.attribution } : {}),
           signing_device_id: signingDeviceId,
           outcome: "stale_assertion",
           ...approval,
@@ -929,6 +1004,7 @@ export class CredentialVault implements VaultClient {
         reference,
         purpose,
         requester,
+        ...(args.attribution !== undefined ? { attribution: args.attribution } : {}),
         signing_device_id: signingDeviceId,
         outcome: "missing_credential",
         ...approval,
@@ -949,6 +1025,7 @@ export class CredentialVault implements VaultClient {
         reference,
         purpose,
         requester,
+        ...(args.attribution !== undefined ? { attribution: args.attribution } : {}),
         signing_device_id: signingDeviceId,
         outcome: "field_set_changed",
         ...approval,
@@ -959,6 +1036,7 @@ export class CredentialVault implements VaultClient {
       reference,
       purpose,
       requester,
+      ...(args.attribution !== undefined ? { attribution: args.attribution } : {}),
       signing_device_id: signingDeviceId,
       outcome: "success",
       ...approval,
@@ -975,7 +1053,7 @@ export class CredentialVault implements VaultClient {
     accountId: string,
     auditOnLimit: Pick<
       VaultAuditPayload,
-      "reference" | "purpose" | "requester" | "signing_device_id" | "approval_id"
+      "reference" | "purpose" | "requester" | "signing_device_id" | "approval_id" | "attribution"
     >,
   ): Promise<void> {
     const since = new Date(this.now().getTime() - RATE_LIMIT_WINDOW_MS);

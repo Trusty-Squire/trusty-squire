@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z, type Tool } from "../../tools/index.js";
+import type { ApiClient } from "../../api-client.js";
 import type { SessionGuard } from "../../session-guard.js";
 
 const state = vi.hoisted(() => ({
@@ -34,6 +35,7 @@ import { OperatorForwarder } from "../broker/forwarder.js";
 import { forwarderId } from "../broker/lineage.js";
 import { OperatorBroker } from "../broker/operator.js";
 import { listenBroker } from "../broker/transport.js";
+import type { TabCapability } from "../broker/authority.js";
 
 beforeEach(() => {
   state.sessions.clear();
@@ -106,6 +108,110 @@ it("deregisters the lifecycle session when target discovery fails after start", 
   expect(state.finish).toHaveBeenCalledWith(internalId);
   expect(events).toEqual([`finish:${internalId}`, expect.stringMatching(/^cleanup:/)]);
   expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
+});
+
+it("attributes broker proxy calls to their originating operator commands", async () => {
+  const requests: Headers[] = [];
+  const broker = new OperatorBroker(
+    {
+      accountId: "account",
+      agentSessionToken: "token",
+      apiBaseUrl: "http://unused.test",
+      registryBaseUrl: "http://unused.test",
+      fetch: (async (_input, init) => {
+        requests.push(new Headers(init?.headers));
+        return Response.json({
+          response: { status: 200, headers: {}, body: "", truncated: false },
+        });
+      }) as typeof fetch,
+    },
+    "cell",
+  );
+  const identity = await broker.authenticate("token", "audited-agent", "a".repeat(43));
+  if (identity === null) throw new Error("Test broker authentication failed");
+  const principal = { ...identity, clientId: "client" };
+  const internalId = "internal-session";
+  state.finish.mockImplementation(async (sessionId: string) => {
+    state.sessions.delete(sessionId);
+    return { session_id: sessionId, url: "", closed: true };
+  });
+  state.sessions.set(internalId, {
+    browser: {
+      brokerTargetId: async () => "target",
+      isConnected: () => true,
+      waitForThreeDsResolution: async () => "succeeded",
+    },
+    pendingThreeDs: null,
+  });
+  const proxy = async (api: ApiClient | null) => {
+    if (api === null) throw new Error("Missing broker API client");
+    await api.useCredential({
+      reference: "vault://account/service/credential",
+      http: { method: "GET", url: "https://service.test/resource" },
+    });
+  };
+  const startTool: Tool = {
+    name: "operate_start",
+    description: "",
+    inputSchema: z.object({}).strict(),
+    jsonInputSchema: {},
+    handler: async (_args, api) => {
+      await proxy(api);
+      return { session_id: internalId };
+    },
+  };
+  const clickTool: Tool = {
+    name: "operate_click",
+    description: "",
+    inputSchema: z.object({ session_id: z.string() }).strict(),
+    jsonInputSchema: {},
+    handler: async (_args, api) => {
+      await proxy(api);
+      return { clicked: true };
+    },
+  };
+  Object.defineProperty(broker, "tools", { value: [startTool, clickTool] });
+  await broker.authority.claimForwarder(principal);
+
+  const started = (await broker.call(
+    principal,
+    "tool",
+    { name: "operate_start", args: {} },
+    "start-request",
+  )) as { capability: TabCapability };
+  await broker.call(
+    principal,
+    "tool",
+    {
+      name: "operate_click",
+      args: { session_id: started.capability.sessionId },
+      capability: started.capability,
+    },
+    "click-request",
+  );
+  await broker.authority.close(principal, started.capability);
+
+  expect(
+    requests.map((headers) => ({
+      agent: headers.get("X-Squire-Agent-Identity"),
+      task: headers.get("X-Squire-Task-Id"),
+      invocation: headers.get("X-Squire-Invocation-Id"),
+      purpose: headers.get("X-Squire-Purpose"),
+    })),
+  ).toEqual([
+    {
+      agent: "audited-agent",
+      task: "operate_start",
+      invocation: "start-request",
+      purpose: "operate_start",
+    },
+    {
+      agent: "audited-agent",
+      task: "operate_click",
+      invocation: "click-request",
+      purpose: "operate_click",
+    },
+  ]);
 });
 
 it("settles no-page starts without retaining a recoverable mutation", async () => {

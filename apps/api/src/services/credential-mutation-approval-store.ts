@@ -4,6 +4,7 @@ import {
   type CredentialStore,
   type VaultAuditEventInput,
   type VaultAuditStore,
+  type VaultAuditAttribution,
 } from "@trusty-squire/vault";
 import type { CredentialMutationMetadata } from "./credential-metadata.js";
 
@@ -21,11 +22,18 @@ export interface CredentialMutationApprovalInput {
   nonce: string;
   agent: string;
   requesterKind: CredentialMutationRequesterKind;
+  auditAttribution?: VaultAuditAttribution;
+  auditPurpose?: string;
   intentHash: string;
   expiresAt: Date;
 }
 
-export interface CredentialMutationApprovalRecord extends CredentialMutationApprovalInput {
+export interface CredentialMutationApprovalRecord extends Omit<
+  CredentialMutationApprovalInput,
+  "auditAttribution" | "auditPurpose"
+> {
+  auditAttribution: VaultAuditAttribution;
+  auditPurpose: string;
   id: string;
   accountId: string;
   status: CredentialMutationApprovalStatus;
@@ -75,6 +83,13 @@ export class InMemoryCredentialMutationApprovalStore implements CredentialMutati
       id,
       accountId,
       ...cloneInput(input),
+      auditAttribution: approvalAuditAttribution(
+        input.auditAttribution,
+        input.agent,
+        input.auditPurpose ?? input.auditAttribution?.purpose ?? `credential.${input.operation}`,
+      ),
+      auditPurpose:
+        input.auditPurpose ?? input.auditAttribution?.purpose ?? `credential.${input.operation}`,
       status: "pending",
       failureCode: null,
       mandateId: null,
@@ -226,7 +241,9 @@ function metadataAfterEdit(
   current: Record<string, unknown>,
   after: CredentialMutationMetadata,
 ): Record<string, unknown> {
-  const { auth_strategy: _authStrategy, login_hosts: _loginHosts, ...preserved } = current;
+  const preserved = { ...current };
+  delete preserved.auth_strategy;
+  delete preserved.login_hosts;
   return {
     ...preserved,
     login_hosts: after.login_hosts,
@@ -264,6 +281,8 @@ export function mutationAuditEvent(record: CredentialMutationApprovalRecord): Va
     payload: {
       reference: record.credentialReference,
       requester: record.requesterKind === "web" ? "user" : "agent",
+      purpose: record.auditPurpose,
+      attribution: record.auditAttribution,
       ...(record.credentialService !== null ? { service: record.credentialService } : {}),
       label: record.operation === "edit" ? record.after!.label : record.credentialLabel,
       approval_id: record.id,
@@ -297,5 +316,21 @@ function cloneRecord(record: CredentialMutationApprovalRecord): CredentialMutati
     expiresAt: new Date(record.expiresAt),
     createdAt: new Date(record.createdAt),
     executedAt: record.executedAt === null ? null : new Date(record.executedAt),
+  };
+}
+
+function approvalAuditAttribution(
+  attribution: VaultAuditAttribution | undefined,
+  agent: string,
+  purpose: string,
+): VaultAuditAttribution {
+  const taskId = attribution?.task_id ?? null;
+  const invocationId = attribution?.invocation_id ?? null;
+  return {
+    task_id: taskId,
+    agent_identity: attribution?.agent_identity ?? agent,
+    invocation_id: invocationId,
+    purpose: attribution?.purpose ?? purpose,
+    ...(taskId === null || invocationId === null ? { caller_missing: true } : {}),
   };
 }

@@ -103,6 +103,14 @@ vault action, newest first, keyset-paginated. That stream is unreadable at
 egress volume — a few hundred proxied LLM calls are a few hundred
 `vault.proxy_executed` rows carrying the same reference, host, and requester.
 
+Every newly written row has a non-empty `purpose` plus structured
+`attribution` (`task_id`, authenticated `agent_identity`, `invocation_id`, and
+`grant_id` for standing egress). When a producer genuinely lacks caller
+context, its identity fields are `null` and `caller_missing: true`; it never
+invents a plausible task or invocation. Reads synthesize that explicit
+caller-missing form for historical JSON rows that predate these fields, so old
+timelines remain valid.
+
 The MCP `audit_log` tool therefore shapes it on READ (nothing about how events
 are recorded changes; `apps/mcp/src/tools/audit-rollup.ts` owns the shaping):
 
@@ -117,10 +125,9 @@ are recorded changes; `apps/mcp/src/tools/audit-rollup.ts` owns the shaping):
 - **`expand: "<rollup id>"`** — the individual calls behind one rollup. The id
   carries (reference, host, window), so the drill-down is stateless.
 - **`grant_totals`** — cumulative calls / bytes / last-used per egress grant.
-  Attribution is by credential reference within the grant's lifetime: the write
-  side records no grant id on a proxied call, so direct `use_credential` traffic
-  on the same credential is counted here too. The response says so in
-  `attribution`. Per-event provenance is a planned write-side follow-up.
+  New egress proxy rows carry structured task/agent/invocation attribution and
+  the exact grant id. Historical or caller-missing rows remain readable and use
+  the prior credential-reference-within-grant-lifetime fallback.
 - **`view: "raw"`** — the unaggregated escape hatch, exactly the server's page.
 
 Only verifiably-2xx egress is allowed to disappear into an aggregate: a non-2xx

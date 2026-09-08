@@ -3,6 +3,7 @@ export type {
   CredentialStore,
   CredentialType,
   VaultAuditEventInput,
+  VaultAuditAttribution,
   VaultAuditListOptions,
   VaultAuditPayload,
   VaultAuditRecord,
@@ -11,7 +12,11 @@ export type {
   VaultRequester,
 } from "./types.js";
 
-export { VAULT_AUDIT_TYPES } from "./types.js";
+export {
+  VAULT_AUDIT_TYPES,
+  attributedVaultAuditPayload,
+  unattributedVaultAuditAttribution,
+} from "./types.js";
 export { CredentialSlotConflictError } from "./types.js";
 
 export {

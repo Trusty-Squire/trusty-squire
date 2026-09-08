@@ -87,6 +87,8 @@ describe("vouch-gated credential mutations", () => {
       headers: {
         authorization: `Bearer ${agentToken}`,
         "x-squire-agent-identity": "Codex",
+        "x-squire-task-id": "task-mutate-42",
+        "x-squire-invocation-id": "invoke-mutate-7",
       },
       payload,
     });
@@ -215,6 +217,18 @@ describe("vouch-gated credential mutations", () => {
     expect(after?.ciphertext.equals(before!.ciphertext)).toBe(true);
     expect(after?.encrypted_dek.equals(before!.encrypted_dek)).toBe(true);
     expect(after?.account_kek_blob.equals(before!.account_kek_blob)).toBe(true);
+    const [audit] = await deps.vaultAuditStore.list(accountId, {
+      type: VAULT_AUDIT_TYPES.metadataEdited,
+      reference,
+    });
+    expect(audit?.payload).toMatchObject({
+      purpose: "credential.edit",
+      attribution: {
+        task_id: "task-mutate-42",
+        agent_identity: "codex",
+        invocation_id: "invoke-mutate-7",
+      },
+    });
 
     const immutableField = await createMutation({
       operation: "edit",
@@ -599,7 +613,9 @@ describe("vouch-gated credential mutations", () => {
       type: VAULT_AUDIT_TYPES.metadataEdited,
       reference,
     });
-    expect(audits.find((event) => event.payload.approval_id === id)?.payload.requester).toBe("user");
+    expect(audits.find((event) => event.payload.approval_id === id)?.payload.requester).toBe(
+      "user",
+    );
   });
 
   it("leaves approval and metadata pending when the atomic audit write fails", async () => {
