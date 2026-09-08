@@ -125,6 +125,10 @@ export async function listenBroker(
         return;
       }
       const request = parsed.data;
+      if (request.method === "acknowledge") {
+        void dispatch(request).catch(() => socket.destroy());
+        return;
+      }
       const input = JSON.stringify([request.method, request.params]);
       const previous = replies.get(request.id);
       let result: Promise<unknown>;
@@ -186,7 +190,7 @@ export async function listenBroker(
 export class BrokerClient {
   private readonly pending = new Map<
     string,
-    { resolve: (value: unknown) => void; reject: (error: Error) => void }
+    { method: string; resolve: (value: unknown) => void; reject: (error: Error) => void }
   >();
   private ended = false;
   private constructor(private readonly socket: Socket) {
@@ -213,7 +217,10 @@ export class BrokerClient {
       this.pending.delete(reply.id);
       if (reply.error !== undefined)
         pending.reject(new BrokerRefusal(reply.error.code, reply.error.message));
-      else pending.resolve(reply.result);
+      else {
+        if (pending.method === "tool") this.acknowledge(reply.id);
+        pending.resolve(reply.result);
+      }
     });
   }
   static async connect(path: string, token: string): Promise<BrokerClient> {
@@ -252,8 +259,17 @@ export class BrokerClient {
     if (this.pending.size >= 64)
       return Promise.reject(new BrokerRefusal("capacity", "Too many pending broker calls"));
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      this.pending.set(id, { method, resolve, reject });
       send(this.socket, { version: 1, id, method, params });
+    });
+  }
+  acknowledge(requestId: string): void {
+    if (this.ended || this.socket.destroyed) return;
+    send(this.socket, {
+      version: 1,
+      id: randomUUID(),
+      method: "acknowledge",
+      params: { requestId },
     });
   }
   isConnected(): boolean {

@@ -1,4 +1,5 @@
 import { connectOrLaunchBroker } from "./discovery.js";
+import { randomUUID } from "node:crypto";
 import type { SessionGuard } from "../../session-guard.js";
 import type { BrokerClient } from "./transport.js";
 import type { TabCapability } from "./authority.js";
@@ -31,6 +32,18 @@ export class OperatorForwarder {
     }
     return this.connection;
   }
+  private async reconcile(client: BrokerClient): Promise<void> {
+    const result = (await client.call("reconcile", {})) as {
+      outcomes?: Array<{ requestId: string; operation: string }>;
+    };
+    const outcomes = result.outcomes ?? [];
+    if (outcomes.length === 0) return;
+    for (const outcome of outcomes) client.acknowledge(outcome.requestId);
+    throw new BrokerRefusal(
+      "outcome_unknown",
+      `Prior ${outcomes.map((outcome) => outcome.operation).join(", ")} completed without a delivered result; do not replay it`,
+    );
+  }
   async invoke(name: string, args: Record<string, unknown>): Promise<unknown> {
     const starting =
       name === "operate_start" || (name === "operate_recipe_run" && args.session_id === undefined);
@@ -43,6 +56,7 @@ export class OperatorForwarder {
       }
     }
     const client = await this.connect();
+    await this.reconcile(client);
     if (!starting && args.session_id === undefined && this.sessions.size === 1)
       args = { ...args, session_id: this.sessions.keys().next().value };
     const id = typeof args.session_id === "string" ? args.session_id : undefined;
@@ -57,7 +71,7 @@ export class OperatorForwarder {
       name,
       args,
       ...(capability === undefined ? {} : { capability }),
-    })) as { result: unknown; capability?: TabCapability };
+    }, randomUUID())) as { result: unknown; capability?: TabCapability };
     if (reply.capability !== undefined)
       this.sessions.set(reply.capability.sessionId, reply.capability);
     if (name === "operate_finish" && id !== undefined) this.sessions.delete(id);

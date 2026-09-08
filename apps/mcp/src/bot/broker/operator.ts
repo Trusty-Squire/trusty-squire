@@ -1,6 +1,6 @@
 import { withBrokerAdmission } from "./admission-context.js";
 import { brokerBrowserCustody } from "./custody.js";
-import type { DispatchJournal } from "./dispatch-journal.js";
+import type { DispatchJournal, PendingDispatchOutcome } from "./dispatch-journal.js";
 import { timingSafeEqual, createHash } from "node:crypto";
 import { z } from "zod";
 import { ApiClient, type ApiClientConfig } from "../../api-client.js";
@@ -90,6 +90,11 @@ export class OperatorBroker implements BrokerTransportPort {
     if (tool === null || !tool.name.startsWith("operate_"))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
+    if (await this.journal?.hasCompleted(principal.agentId, requestId))
+      throw new BrokerRefusal(
+        "outcome_unknown",
+        "This mutation result was already reconciled; never replay it",
+      );
     let api = this.apis.get(principal.clientId);
     if (api === undefined) {
       api = new ApiClient({ ...this.config, agentIdentity: principal.agentId });
@@ -115,12 +120,13 @@ export class OperatorBroker implements BrokerTransportPort {
         async (id, signal, reserve) => {
           if (signal.aborted) throw new BrokerRefusal("cancelled", "Start cancelled");
           const mutationCapableStart = tool.name === "operate_recipe_run";
-          if (mutationCapableStart) await this.journal?.record(id, requestId, "entered");
+          const dispatch = { agentId: principal.agentId, operation: tool.name };
+          if (mutationCapableStart) await this.journal?.record(id, requestId, "entered", dispatch);
           observation = await withBrokerAdmission(
             { sessionId: id, reserve },
             async () => await tool.handler(args, pinnedApi),
           );
-          if (mutationCapableStart) await this.journal?.record(id, requestId, "settled");
+          if (mutationCapableStart) await this.journal?.record(id, requestId, "outcome", dispatch);
           internalId = String((observation as { session_id: string }).session_id);
           const session = sessionForCall(internalId);
           if (session === undefined) {
@@ -151,7 +157,8 @@ export class OperatorBroker implements BrokerTransportPort {
                 "operate_screenshot",
                 "operate_payment_status",
               ].includes(name);
-              if (mutating) await this.journal?.record(id, commandId, "entered");
+              const dispatch = { agentId: principal.agentId, operation: name };
+              if (mutating) await this.journal?.record(id, commandId, "entered", dispatch);
               const result =
                 name === "operate_finish"
                   ? await execute()
@@ -161,10 +168,11 @@ export class OperatorBroker implements BrokerTransportPort {
                 "payment-custody",
                 session.pendingThreeDs === null ? "settled" : "entered",
               );
-              if (mutating) await this.journal?.record(id, commandId, "settled");
+              if (mutating) await this.journal?.record(id, commandId, "outcome", dispatch);
               return remapSession(result, internalId, id);
             },
             close: async (reason) => {
+              if (await this.journal?.hasOutstanding(id)) return false;
               const pending = session.pendingThreeDs;
               if (reason === "disconnect" && pending !== null && Date.now() < pending.deadline) {
                 const resolution = await session.browser.waitForThreeDsResolution(0);
@@ -228,6 +236,13 @@ export class OperatorBroker implements BrokerTransportPort {
     );
     if (tool.name === "operate_finish") await this.authority.close(principal, capability);
     return { result };
+  }
+  async reconcile(principal: BrokerPrincipal): Promise<{ outcomes: PendingDispatchOutcome[] }> {
+    return { outcomes: (await this.journal?.pendingOutcomes(principal.agentId)) ?? [] };
+  }
+  async acknowledge(principal: BrokerPrincipal, requestId: string): Promise<void> {
+    if (await this.journal?.acknowledge(principal.agentId, requestId))
+      await this.authority.retryQuarantined();
   }
   async disconnect(principal: BrokerPrincipal): Promise<void> {
     await this.authority.disconnect(principal);

@@ -86,4 +86,30 @@ describe("broker dispatch custody", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("retains a returned mutation until its client receipt is durable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-journal-reconcile-"));
+    const path = join(root, "dispatch.jsonl");
+    const journal = new DispatchJournal(path);
+    try {
+      await journal.record("session", "request", "entered", {
+        agentId: "agent",
+        operation: "operate_pay",
+      });
+      await journal.record("session", "request", "outcome", {
+        agentId: "agent",
+        operation: "operate_pay",
+      });
+      await expect(new DispatchJournal(path).assertReconciled()).resolves.toBeUndefined();
+      await expect(new DispatchJournal(path).pendingOutcomes("agent")).resolves.toEqual([
+        { sessionId: "session", requestId: "request", operation: "operate_pay" },
+      ]);
+      expect(await journal.hasOutstanding("session")).toBe(true);
+      await expect(journal.acknowledge("agent", "request")).resolves.toBe(true);
+      expect(await journal.hasOutstanding("session")).toBe(false);
+      expect(await journal.hasCompleted("agent", "request")).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

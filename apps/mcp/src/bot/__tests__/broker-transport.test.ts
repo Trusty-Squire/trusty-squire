@@ -113,4 +113,31 @@ describe("authenticated broker IPC", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("durably acknowledges a delivered tool response", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-ipc-"));
+    const path = join(root, "b.sock");
+    const acknowledgements: string[] = [];
+    const broker = await listenBroker(path, {
+      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
+      call: async (_principal, method, params) => {
+        if (method === "acknowledge") {
+          acknowledgements.push(String(params.requestId));
+          return {};
+        }
+        return { delivered: true };
+      },
+      disconnect: async () => undefined,
+    });
+    let client: BrokerClient | undefined;
+    try {
+      client = await BrokerClient.connect(path, "test");
+      expect(await client.call("tool", {}, "operation")).toEqual({ delivered: true });
+      await expect.poll(() => acknowledgements).toEqual(["operation"]);
+    } finally {
+      await client?.close();
+      await broker.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

@@ -14072,10 +14072,10 @@ export class BrowserController {
     // undefined (no-op) and any failure must degrade to the popup/none path.
     if (cdp !== null) {
       const promptDeadline = Date.now() + Math.min(4_000, timeoutMs);
-      while (Date.now() < promptDeadline && !fedcmResolved && this.context.pages().length <= 1) {
+      while (Date.now() < promptDeadline && !fedcmResolved && this.ownedPages.live().length <= 1) {
         await this.sleep(250);
       }
-      if (!fedcmResolved && this.context.pages().length <= 1) {
+      if (!fedcmResolved && this.ownedPages.live().length <= 1) {
         try {
           await this.page.evaluate(() => {
             const g = (

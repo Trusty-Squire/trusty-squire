@@ -15,6 +15,7 @@ import {
 import { installBrokerBrowserCustody } from "./custody.js";
 import { BrokerRuntime } from "./runtime.js";
 import { OperatorBroker } from "./operator.js";
+import { BrokerRefusal } from "./scheduler.js";
 import { listenBroker } from "./transport.js";
 
 /** Explicit foreground service entrypoint. A supervisor may retain the broker;
@@ -91,6 +92,18 @@ export async function runBrokerDaemon(): Promise<void> {
       if (idleTimer !== undefined) clearTimeout(idleTimer);
       const report = await guard.inspect();
       if (report.problem !== null) throw new Error(report.problem.message);
+      if (method === "reconcile") return await operator.reconcile(principal);
+      if (method === "acknowledge") {
+        if (typeof params.requestId !== "string")
+          throw new Error("A broker acknowledgement requires its request ID");
+        await operator.acknowledge(principal, params.requestId);
+        return {};
+      }
+      if (await journal.hasOutstanding())
+        throw new BrokerRefusal(
+          "outcome_unknown",
+          "Prior mutation outcome awaits reconciliation; reconnect without replaying it",
+        );
       if (method === "maintenance") {
         if (maintenanceOwner !== undefined && maintenanceOwner !== principal.clientId)
           throw new Error("Identity maintenance is already owned");
