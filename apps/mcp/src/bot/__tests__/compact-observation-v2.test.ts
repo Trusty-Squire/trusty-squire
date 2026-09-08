@@ -686,6 +686,11 @@ describe("compact observation v2", () => {
       expect(labelsFor(element({ ariaLabel: "!!!" }))).toEqual(["@button-1"]);
     });
 
+    it("falls back to the emitted role for combining marks alone", () => {
+      expect(controlLabelV2("\u0301")).toBeUndefined();
+      expect(labelsFor(element({ ariaLabel: "\u0301" }))).toEqual(["@button-1"]);
+    });
+
     it("uses an associated label before a form control's visible subtree", () => {
       const input = element({
         tag: "input",

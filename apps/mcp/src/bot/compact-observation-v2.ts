@@ -266,7 +266,11 @@ export function isCompactV2Handle(target: string): boolean {
 
 /** The `@label` alias form, distinguishable from a handle by its `@e:` prefix. */
 export function isCompactV2Label(target: string): boolean {
-  return COMPACT_V2_LABEL_RE.test(target) && Array.from(target.slice(1)).length <= LABEL_MAX_CHARS;
+  return (
+    COMPACT_V2_LABEL_RE.test(target) &&
+    /[\p{L}\p{N}]/u.test(target) &&
+    Array.from(target.slice(1)).length <= LABEL_MAX_CHARS
+  );
 }
 
 /**
@@ -357,7 +361,7 @@ export function controlLabelV2(description: string | undefined): string | undefi
     if (lastBoundary > 0) characters = characters.slice(0, lastBoundary);
   }
   slug = characters.join("").replace(/-+$/g, "");
-  if (slug.length === 0) return undefined;
+  if (slug.length === 0 || !/[\p{L}\p{N}]/u.test(slug)) return undefined;
   return `@${slug}${truncated && usesUnicode ? "…" : ""}`;
 }
 
