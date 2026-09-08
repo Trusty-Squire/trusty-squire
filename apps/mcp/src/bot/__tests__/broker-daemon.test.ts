@@ -99,6 +99,103 @@ it("keeps a draining recovery endpoint reachable while refusing mutations", asyn
   }
 });
 
+it("keeps the real daemon endpoint recoverable when drain retains quarantined custody", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ts-broker-drain-process-"));
+  const socket = join(root, "b.sock");
+  const config = join(root, "config");
+  const profile = join(root, "profile");
+  const account = {
+    account_id: "fixture-account",
+    agent_session_token: "before",
+    api_base_url: "http://127.0.0.1:1",
+    saved_at: new Date().toISOString(),
+  };
+  const paymentArgs = {
+    session_id: "00000000-0000-4000-8000-000000000001",
+    item: "fixture purchase",
+    reason: "drain recovery",
+  };
+  const journal = new DispatchJournal(join(profile, "trusty-squire-broker-dispatch.jsonl"));
+  await mkdir(profile);
+  await mkdir(join(root, "home"));
+  await new SessionStore(join(config, "trusty-squire", "session.json")).write(account);
+  await journal.record(paymentArgs.session_id, "stuck-payment", "outcome", {
+    forwarderId: forwarderId(credential),
+    operation: "operate_pay",
+    outcome: { status: "payment_outcome_unknown" },
+  });
+  const child = spawn(
+    process.execPath,
+    [
+      require.resolve("tsx/cli"),
+      fileURLToPath(new URL("./fixtures/broker-draining-daemon.ts", import.meta.url)),
+    ],
+    {
+      env: {
+        ...process.env,
+        HOME: join(root, "home"),
+        XDG_CONFIG_HOME: config,
+        TMPDIR: root,
+        TRUSTY_SQUIRE_ACCOUNT_ID: account.account_id,
+        TRUSTY_SQUIRE_PROFILE_DIR: profile,
+        TRUSTY_SQUIRE_REAPER_DIR: join(root, "reapers"),
+        TRUSTY_SQUIRE_BROKER_SOCKET: socket,
+        TRUSTY_SQUIRE_BROKER_SUPERVISED: "1",
+        BOT_CDP_ENDPOINT: "",
+      },
+      stdio: ["ignore", "ignore", "pipe"],
+    },
+  );
+  let diagnostic = "";
+  child.stderr.on("data", (chunk) => {
+    diagnostic += String(chunk);
+  });
+  const exited = new Promise<void>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", () => resolve());
+  });
+  let client: BrokerClient | undefined;
+  try {
+    for (let attempt = 0; attempt < 200; attempt++) {
+      if (
+        await lstat(socket).then(
+          () => true,
+          () => false,
+        )
+      )
+        break;
+      if (child.exitCode !== null) throw new Error(diagnostic);
+      await sleep(25);
+    }
+    child.kill("SIGTERM");
+    for (let attempt = 0; attempt < 200; attempt++) {
+      if (diagnostic.includes("cleanup unproven")) break;
+      if (child.exitCode !== null) throw new Error(diagnostic);
+      await sleep(25);
+    }
+    await expect(lstat(socket)).resolves.toBeDefined();
+    client = await BrokerClient.connect(socket, account.agent_session_token, credential);
+    await expect(client.call("recover", { name: "operate_pay", args: paymentArgs })).resolves.toEqual({
+      requestId: "stuck-payment",
+      result: {
+        reconciliation: {
+          request_id: "stuck-payment",
+          operation: "operate_pay",
+          status: "payment_outcome_unknown",
+        },
+      },
+    });
+    await expect(
+      client.call("tool", { name: "operate_start", args: { service_url: "https://example.test" } }),
+    ).rejects.toMatchObject({ code: "broker_draining" });
+  } finally {
+    await client?.close();
+    if (child.exitCode === null) child.kill("SIGKILL");
+    await exited;
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30000);
+
 it("returns only a durable start outcome after daemon death", async () => {
   const root = await mkdtemp(join(tmpdir(), "ts-broker-daemon-recovery-"));
   const socket = join(root, "b.sock");
