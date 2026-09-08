@@ -2823,9 +2823,12 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await product.goto("https://product.test/login");
     const controller = BrowserController.fromHarnessPage(product);
     const startedAt = Date.now();
+    const budgetMs = 3_000;
 
     try {
-      const rejected = controller.loginWithOAuth("#oauth", 1_000, "google");
+      // Direct callers do not supply the facade's handoff callback, so their
+      // explicit total budget must remain the whole lifecycle's ceiling.
+      const rejected = controller.loginWithOAuth("#oauth", budgetMs, "google");
       await expect(rejected).rejects.toBeInstanceOf(OAuthAwaitingHumanError);
       await expect(rejected).rejects.toMatchObject({
         message: expect.stringMatching(/has not returned to https:\/\/product\.test/i),
@@ -2836,6 +2839,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await expect(rejected).rejects.toMatchObject({
         message: expect.stringMatching(/operate_observe/),
       });
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(budgetMs - 500);
       expect(Date.now() - startedAt).toBeLessThan(5_000);
       // The pending challenge must stay reachable: the provider popup is still
       // open and is the controller's active page, so operate_observe reads it.
@@ -2850,7 +2854,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     } finally {
       await context.close().catch(() => undefined);
     }
-  });
+  }, 6_000);
 
   it("reports failed when a popup carries the denial to the callback and then closes itself", async () => {
     const context = await browser.newContext();
@@ -3040,8 +3044,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     } finally {
       if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
       else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
-      if (previousCooldown === undefined)
-        delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+      if (previousCooldown === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
       else process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = previousCooldown;
       if (sessionId !== undefined) await finishProvisionSession(sessionId);
       await context.close().catch(() => undefined);

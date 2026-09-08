@@ -390,8 +390,13 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   unavailable and directs the host to `operate_observe`, which resumes on the
   retained viable product page. Every OAuth login
   is serialized from action start through completion and a short release cooldown; other
-  session work remains parallel. The whole serialized action has a 30-second
-  deadline. At that boundary it rechecks captured, attempt-local return evidence:
+  session work remains parallel. OAuth setup and post-completion DOM settlement
+  use a short deadline capped at 30 seconds. Once an authorized OAuth control
+  opens an owned provider popup or navigates the product tab, the chooser,
+  consent, and 2FA phase receives a fresh human deadline: five minutes by
+  default, or the full positive value of
+  `TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS` when configured. At an active-phase
+  deadline, it rechecks captured, attempt-local return evidence:
   an observed return completes the action rather than being reported as pending.
   Only when no such completion evidence exists does the call return a normal
   observation with `oauth.state: "awaiting_human"`, a `reason` naming only what
