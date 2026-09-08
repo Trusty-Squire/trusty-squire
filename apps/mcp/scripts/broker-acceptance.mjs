@@ -136,7 +136,11 @@ export async function runFixtureAcceptance(root = process.cwd(), crashFirst = fa
     HOME: join(lab, "home"),
     XDG_CONFIG_HOME: join(lab, "config"),
     XDG_CACHE_HOME: join(lab, "cache"),
-    TMPDIR: join(root, ".t"),
+    // Chrome creates a Unix-domain crashpad socket below TMPDIR. A worktree
+    // path can exceed Linux's 108-byte socket limit and makes Chrome SIGTRAP
+    // before DevTools is available; /tmp keeps this disposable runtime path
+    // short while profiles and acceptance artifacts remain inside the worktree.
+    TMPDIR: process.platform === "linux" ? "/tmp" : join(root, ".t"),
     TRUSTY_SQUIRE_PROFILE_DIR: profile,
     TRUSTY_SQUIRE_REAPER_DIR: join(lab, "reapers"),
     TRUSTY_SQUIRE_BROKER_SOCKET: socket,
