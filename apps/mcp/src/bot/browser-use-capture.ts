@@ -716,6 +716,8 @@ export async function captureBrowserUseDOM(
       const value = text(n).replace(/\s+/g, " ").trim();
       return value.length === 0 ? null : value.slice(0, 120);
     };
+    const rawText = (n: BrowserUseNode): string =>
+      n.nodeType === 3 ? n.value : n.children.map(rawText).join(" ");
     const visibleText = (n: BrowserUseNode, inUserAgentShadow = false): string => {
       if (n.nodeType === 3) return inUserAgentShadow ? "" : n.value;
       return n.children
@@ -861,7 +863,6 @@ export async function captureBrowserUseDOM(
             t = n.nodeName.toLowerCase(),
             selector = selectorsById.get(n.id)!;
           const path = frame === page.mainFrame() ? null : framePath(frame);
-          const explicitAriaLabel = a["aria-label"]?.trim();
           el = {
             index: nextSyntheticIndex++,
             tag: t,
@@ -869,25 +870,22 @@ export async function captureBrowserUseDOM(
             id: a.id ?? null,
             name: a.name ?? null,
             placeholder: a.placeholder ?? null,
-            ariaLabel: explicitAriaLabel || null,
+            ariaLabel: a["aria-label"] ?? null,
             role:
               a.role ??
               (["a", "button", "input", "select", "textarea"].includes(t) ? null : "button"),
-            labelText: associatedLabelText(n),
-            visibleText: visibleText(n).trim() || null,
+            labelText: null,
+            visibleText: rawText(n).trim() || null,
             selector,
             visible: true,
             inViewport: n.visible,
             inConsentWidget: false,
             href: a.href ?? null,
             title: a.title ?? null,
-            iconLabel: iconLabel(n),
-            alt: a.alt ?? null,
             value: a.value ?? null,
             frameOrigin: frame === page.mainFrame() ? null : new URL(frame.url()).origin,
             frameUrl: frame === page.mainFrame() ? null : frame.url(),
             framePath: path,
-            container: syntheticContainer(n),
           };
         }
       }
@@ -945,6 +943,7 @@ export async function captureBrowserUseDOM(
         el.compactNames = {
           ariaLabel: n.attributes["aria-label"]?.trim() || ownedLabel || null,
           labelledByText: labelledByText(n),
+          accessibleName: viewMetadata.get(n.id)?.name.trim() || null,
           labelText: associatedLabelText(n),
           visibleText: visibleText(n).trim() || null,
           alt: n.attributes.alt ?? null,
@@ -953,6 +952,7 @@ export async function captureBrowserUseDOM(
           placeholder: n.attributes.placeholder ?? null,
           name: n.attributes.name ?? null,
           value: n.attributes.value ?? null,
+          container: syntheticContainer(n),
         };
         if (!elements.includes(el)) elements.push(el);
         nodeElements.set(n.id, el);

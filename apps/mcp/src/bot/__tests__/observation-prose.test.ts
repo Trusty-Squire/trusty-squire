@@ -37,8 +37,10 @@ describe("interleaved observation DOM", () => {
         <button id="checkout"><img alt="Acme"><span>Checkout</span></button>
         <button id="preferences" aria-label="設定"></button>
         <span id="empty-name">Master volume</span><div id="empty-volume" role="slider" aria-label="" aria-labelledby="empty-name" tabindex="0" style="display:block;width:20px;height:20px"></div>
-        <section><h2>Volume controls</h2><div id="volume" role="slider" tabindex="0" style="display:block;width:20px;height:20px"></div></section>
+        <section><h2>Volume controls</h2><label for="volume">Master volume</label><div id="volume" role="slider" tabindex="0" style="display:block;width:20px;height:20px"></div></section>
         <section><div id="structural-floor" role="slider" tabindex="0" style="display:block;width:20px;height:20px"></div></section>
+        <input id="native-submit" type="submit">
+        <span id="image-name">Find product</span><input id="named-image" type="image" alt="Search" aria-labelledby="image-name">
         <section id="shadow-section"><h2>Shadow volume controls</h2><x-slider id="shadow-host"></x-slider></section>
       `);
       await page.locator("body").evaluate((body) => {
@@ -72,16 +74,25 @@ describe("interleaved observation DOM", () => {
       expect(labelFor("checkout")).toBe("@checkout");
       expect(labelFor("preferences")).toBe("@設定");
       expect(labelFor("empty-volume")).toBe("@master-volume");
-      expect(labelFor("volume")).toBe("@volume-controls-button");
+      expect(labelFor("volume")).toMatch(/^@master-volume(?:-\d+)?$/);
       expect(labelFor("structural-floor")).toMatch(/^@button-\d+$/);
       expect(labelFor("shadow-volume")).toBe("@shadow-volume");
       expect(labelFor("shadow-floor")).toBe("@shadow-volume-controls-button");
       expect(labelFor("shadow-email")).toBe("@shadow-work-email");
       expect(labelFor("shadow-associated")).toBe("@shadow-email");
       expect(labelFor("image-search")).toBe("@search");
-      const queryEmail = capture.elements.find((candidate) => candidate.id === "query-email")!;
+      expect(labelFor("native-submit")).toBe("@submit");
+      expect(labelFor("named-image")).toBe("@find-product");
+      const queryCapture = await captureThroughController(page);
+      const queryEmail = queryCapture.elements.find((candidate) => candidate.id === "query-email")!;
       expect(controlMatchesPrivateQueryV2(queryEmail, "work email")).toBe(true);
       expect(controlMatchesPrivateQueryV2(queryEmail, "billing contact")).toBe(false);
+      const volume = capture.elements.find((candidate) => candidate.id === "volume")!;
+      expect(controlMatchesPrivateQueryV2(volume, "master volume")).toBe(false);
+      const shadowAssociated = queryCapture.elements.find(
+        (candidate) => candidate.id === "shadow-associated",
+      )!;
+      expect(controlMatchesPrivateQueryV2(shadowAssociated, "outer email")).toBe(true);
     } finally {
       await page.close();
     }

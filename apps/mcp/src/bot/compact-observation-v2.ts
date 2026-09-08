@@ -946,11 +946,19 @@ function controlLabelNamingTexts(el: InteractiveElement): Array<string | null | 
   const role = roleOf(el);
   const names = el.compactNames;
   if (names) {
+    const accessibleName = normalizeDescriptionV2(names.accessibleName);
+    const visibleText = normalizeDescriptionV2(names.visibleText);
+    const iconLabel = normalizeDescriptionV2(names.iconLabel);
+    const aggregateIconName =
+      visibleText !== undefined &&
+      iconLabel !== undefined &&
+      accessibleName === `${iconLabel} ${visibleText}`;
     return [
       names.ariaLabel,
-      (el.type ?? "").toLowerCase() === "image" ? names.alt : undefined,
       names.labelledByText,
+      aggregateIconName ? undefined : names.accessibleName,
       names.labelText,
+      (el.type ?? "").toLowerCase() === "image" ? names.alt : undefined,
       names.visibleText,
       isButtonInput(el) ? names.value : undefined,
       names.iconLabel,
@@ -1005,7 +1013,7 @@ function controlDescription(el: InteractiveElement, role: SafeRoleV2): string {
     .find((candidate) => candidate !== undefined);
   if (chosen !== undefined) {
     // Add the page's region context to otherwise opaque labels (such as @as15169).
-    const context = regionContextV2(el.container, chosen);
+    const context = regionContextV2(el.compactNames ? el.compactNames.container : el.container, chosen);
     const description = context === undefined ? chosen : `${chosen} ${context}`;
     if (controlLabelV2(description) !== undefined) return description;
   }
@@ -1013,7 +1021,7 @@ function controlDescription(el: InteractiveElement, role: SafeRoleV2): string {
   // semantic region is the best available immediate context; a genuinely
   // anonymous control falls back to its role rather than becoming a bare
   // [ref, role] tuple. This is descriptive only and does not alter identity.
-  const context = namedContainerContextV2(el.container);
+  const context = namedContainerContextV2(el.compactNames ? el.compactNames.container : el.container);
   return context === undefined ? `${role} ${el.index + 1}` : `${context} ${role}`;
 }
 

@@ -15241,6 +15241,7 @@ export function isSafeSignupChoiceText(text: string): boolean {
 export interface CompactControlNames {
   ariaLabel: string | null;
   labelledByText: string | null;
+  accessibleName: string | null;
   labelText: string | null;
   visibleText: string | null;
   alt: string | null;
@@ -15249,6 +15250,7 @@ export interface CompactControlNames {
   placeholder: string | null;
   name: string | null;
   value: string | null;
+  container: string | null;
 }
 
 export interface InteractiveElement {
