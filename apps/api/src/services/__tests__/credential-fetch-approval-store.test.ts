@@ -32,6 +32,19 @@ function input(over: Partial<CredentialFetchApprovalInput> = {}): CredentialFetc
 }
 
 describe("InMemoryCredentialFetchApprovalStore", () => {
+  it("marks approvals without caller context as caller missing", async () => {
+    const store = new InMemoryCredentialFetchApprovalStore(() => new Date(T0));
+    const id = await store.create("acct_1", input());
+
+    expect((await store.getById(id))?.auditAttribution).toEqual({
+      task_id: null,
+      agent_identity: "codex",
+      invocation_id: null,
+      purpose: "reveal",
+      caller_missing: true,
+    });
+  });
+
   it("claims exactly once, no matter how many callers race", async () => {
     let nowMs = T0;
     const store = new InMemoryCredentialFetchApprovalStore(() => new Date(nowMs));
@@ -188,7 +201,19 @@ describe("PrismaCredentialFetchApprovalStore", () => {
     const { prisma, updates } = fakePrisma(row);
     const store = new PrismaCredentialFetchApprovalStore(prisma, () => new Date(T0 + 1000));
 
-    expect((await store.claim("fetch_1", "acct_1")).kind).toBe("claimed");
+    const claimed = await store.claim("fetch_1", "acct_1");
+    expect(claimed).toMatchObject({
+      kind: "claimed",
+      record: {
+        auditAttribution: {
+          task_id: null,
+          agent_identity: "codex",
+          invocation_id: null,
+          purpose: "reveal",
+          caller_missing: true,
+        },
+      },
+    });
     expect(updates[0]!.where).toMatchObject({
       id: "fetch_1",
       account_id: "acct_1",

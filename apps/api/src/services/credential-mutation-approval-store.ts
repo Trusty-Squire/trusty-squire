@@ -83,13 +83,13 @@ export class InMemoryCredentialMutationApprovalStore implements CredentialMutati
       id,
       accountId,
       ...cloneInput(input),
-      auditAttribution: input.auditAttribution ?? {
-        task_id: `credential.${input.operation}`,
-        agent_identity: input.agent,
-        invocation_id: id,
-        purpose: input.auditPurpose ?? `credential.${input.operation}`,
-      },
-      auditPurpose: input.auditPurpose ?? `credential.${input.operation}`,
+      auditAttribution: approvalAuditAttribution(
+        input.auditAttribution,
+        input.agent,
+        input.auditPurpose ?? input.auditAttribution?.purpose ?? `credential.${input.operation}`,
+      ),
+      auditPurpose:
+        input.auditPurpose ?? input.auditAttribution?.purpose ?? `credential.${input.operation}`,
       status: "pending",
       failureCode: null,
       mandateId: null,
@@ -314,5 +314,21 @@ function cloneRecord(record: CredentialMutationApprovalRecord): CredentialMutati
     expiresAt: new Date(record.expiresAt),
     createdAt: new Date(record.createdAt),
     executedAt: record.executedAt === null ? null : new Date(record.executedAt),
+  };
+}
+
+function approvalAuditAttribution(
+  attribution: VaultAuditAttribution | undefined,
+  agent: string,
+  purpose: string,
+): VaultAuditAttribution {
+  const taskId = attribution?.task_id ?? null;
+  const invocationId = attribution?.invocation_id ?? null;
+  return {
+    task_id: taskId,
+    agent_identity: attribution?.agent_identity ?? agent,
+    invocation_id: invocationId,
+    purpose: attribution?.purpose ?? purpose,
+    ...(taskId === null || invocationId === null ? { caller_missing: true } : {}),
   };
 }

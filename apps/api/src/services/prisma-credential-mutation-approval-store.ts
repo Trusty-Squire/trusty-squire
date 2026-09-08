@@ -1,4 +1,5 @@
 import type { ApiPrismaClient } from "./api-prisma-client.js";
+import type { VaultAuditAttribution } from "@trusty-squire/vault";
 import type { CredentialMutationMetadata } from "./credential-metadata.js";
 import {
   type CredentialMutationCommitResult,
@@ -13,6 +14,9 @@ export class PrismaCredentialMutationApprovalStore implements CredentialMutation
   constructor(private readonly prisma: ApiPrismaClient) {}
 
   async create(accountId: string, input: CredentialMutationApprovalInput): Promise<string> {
+    const purpose =
+      input.auditPurpose ?? input.auditAttribution?.purpose ?? `credential.${input.operation}`;
+    const attribution = approvalAuditAttribution(input.auditAttribution, input.agent, purpose);
     const row = await this.prisma.credentialMutationApproval.create({
       data: {
         id: ulid(),
@@ -26,10 +30,10 @@ export class PrismaCredentialMutationApprovalStore implements CredentialMutation
         nonce: input.nonce,
         agent: input.agent,
         requester_kind: input.requesterKind,
-        audit_task_id: input.auditAttribution?.task_id ?? `credential.${input.operation}`,
-        audit_agent_identity: input.auditAttribution?.agent_identity ?? input.agent,
-        audit_invocation_id: input.auditAttribution?.invocation_id,
-        audit_purpose: input.auditPurpose ?? `credential.${input.operation}`,
+        audit_task_id: attribution.task_id,
+        audit_agent_identity: attribution.agent_identity,
+        audit_invocation_id: attribution.invocation_id,
+        audit_purpose: purpose,
         intent_hash: input.intentHash,
         status: "pending",
         expires_at: input.expiresAt,
@@ -341,6 +345,7 @@ function toRecord(row: {
   if (row.requester_kind !== "web" && row.requester_kind !== "agent") {
     throw new Error("invalid credential mutation requester kind");
   }
+  const purpose = row.audit_purpose ?? `credential.${row.operation}`;
   return {
     id: row.id,
     accountId: row.account_id,
@@ -353,13 +358,17 @@ function toRecord(row: {
     nonce: row.nonce,
     agent: row.agent,
     requesterKind: row.requester_kind,
-    auditAttribution: {
-      task_id: row.audit_task_id ?? `credential.${row.operation}`,
-      agent_identity: row.audit_agent_identity ?? row.agent,
-      invocation_id: row.audit_invocation_id ?? row.id,
-      purpose: row.audit_purpose ?? `credential.${row.operation}`,
-    },
-    auditPurpose: row.audit_purpose ?? `credential.${row.operation}`,
+    auditAttribution: approvalAuditAttribution(
+      {
+        task_id: row.audit_task_id,
+        agent_identity: row.audit_agent_identity,
+        invocation_id: row.audit_invocation_id,
+        purpose,
+      },
+      row.agent,
+      purpose,
+    ),
+    auditPurpose: purpose,
     intentHash: row.intent_hash,
     status: row.status,
     failureCode: row.failure_code,
@@ -367,5 +376,21 @@ function toRecord(row: {
     createdAt: row.created_at,
     expiresAt: row.expires_at,
     executedAt: row.executed_at,
+  };
+}
+
+function approvalAuditAttribution(
+  attribution: VaultAuditAttribution | undefined,
+  agent: string,
+  purpose: string,
+): VaultAuditAttribution {
+  const taskId = attribution?.task_id ?? null;
+  const invocationId = attribution?.invocation_id ?? null;
+  return {
+    task_id: taskId,
+    agent_identity: attribution?.agent_identity ?? agent,
+    invocation_id: invocationId,
+    purpose: attribution?.purpose ?? purpose,
+    ...(taskId === null || invocationId === null ? { caller_missing: true } : {}),
   };
 }

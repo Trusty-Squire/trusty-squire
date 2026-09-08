@@ -1,4 +1,5 @@
 import { ulid } from "ulid";
+import type { VaultAuditAttribution } from "@trusty-squire/vault";
 import type { ApiPrismaClient } from "./api-prisma-client.js";
 import type {
   CredentialFetchApprovalInput,
@@ -19,6 +20,8 @@ export class PrismaCredentialFetchApprovalStore implements CredentialFetchApprov
   ) {}
 
   async create(accountId: string, input: CredentialFetchApprovalInput): Promise<string> {
+    const purpose = input.auditPurpose ?? input.auditAttribution?.purpose ?? "reveal";
+    const attribution = approvalAuditAttribution(input.auditAttribution, input.agent, purpose);
     const row = await this.prisma.credentialFetchApproval.create({
       data: {
         id: ulid(),
@@ -31,10 +34,10 @@ export class PrismaCredentialFetchApprovalStore implements CredentialFetchApprov
         nonce: input.nonce,
         agent: input.agent,
         requester_kind: input.requesterKind,
-        audit_task_id: input.auditAttribution?.task_id ?? "fetch_credential",
-        audit_agent_identity: input.auditAttribution?.agent_identity ?? input.agent,
-        audit_invocation_id: input.auditAttribution?.invocation_id,
-        audit_purpose: input.auditPurpose ?? "reveal",
+        audit_task_id: attribution.task_id,
+        audit_agent_identity: attribution.agent_identity,
+        audit_invocation_id: attribution.invocation_id,
+        audit_purpose: purpose,
         intent_hash: input.intentHash,
         status: "pending",
         expires_at: input.expiresAt,
@@ -158,6 +161,7 @@ export interface CredentialFetchApprovalRow {
 }
 
 function toRecord(row: CredentialFetchApprovalRow): CredentialFetchApprovalRecord {
+  const purpose = row.audit_purpose ?? "reveal";
   return {
     id: row.id,
     accountId: row.account_id,
@@ -169,13 +173,17 @@ function toRecord(row: CredentialFetchApprovalRow): CredentialFetchApprovalRecor
     nonce: row.nonce,
     agent: row.agent,
     requesterKind: row.requester_kind === "web" ? "web" : ("agent" as CredentialFetchRequesterKind),
-    auditAttribution: {
-      task_id: row.audit_task_id ?? "fetch_credential",
-      agent_identity: row.audit_agent_identity ?? row.agent,
-      invocation_id: row.audit_invocation_id ?? row.id,
-      purpose: row.audit_purpose ?? "reveal",
-    },
-    auditPurpose: row.audit_purpose ?? "reveal",
+    auditAttribution: approvalAuditAttribution(
+      {
+        task_id: row.audit_task_id,
+        agent_identity: row.audit_agent_identity,
+        invocation_id: row.audit_invocation_id,
+        purpose,
+      },
+      row.agent,
+      purpose,
+    ),
+    auditPurpose: purpose,
     intentHash: row.intent_hash,
     status: row.status as CredentialFetchApprovalStatus,
     failureCode: row.failure_code,
@@ -184,5 +192,21 @@ function toRecord(row: CredentialFetchApprovalRow): CredentialFetchApprovalRecor
     expiresAt: row.expires_at,
     approvedAt: row.approved_at,
     deliveredAt: row.delivered_at,
+  };
+}
+
+function approvalAuditAttribution(
+  attribution: VaultAuditAttribution | undefined,
+  agent: string,
+  purpose: string,
+): VaultAuditAttribution {
+  const taskId = attribution?.task_id ?? null;
+  const invocationId = attribution?.invocation_id ?? null;
+  return {
+    task_id: taskId,
+    agent_identity: attribution?.agent_identity ?? agent,
+    invocation_id: invocationId,
+    purpose: attribution?.purpose ?? purpose,
+    ...(taskId === null || invocationId === null ? { caller_missing: true } : {}),
   };
 }
