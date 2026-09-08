@@ -8088,7 +8088,7 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   // Copy-only key surfaces (e.g. LangWatch's /settings/api-keys) never render
   // the value into the DOM — it goes to the clipboard on a "Copy" click. Read
   // it (clipboard-read is granted at context creation).
-  const clip = await browser.readClipboard().catch(() => "");
+  const clip = await browser.readClipboard(page).catch(() => "");
 
   // Primary api_key: first FULL hit wins; a truncated/masked hit is the fallback.
   let state = initialExtractionState();

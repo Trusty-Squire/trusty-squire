@@ -1365,8 +1365,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
           (el) => el.label === "Open settings",
         )?.ref;
         expect(openRef).toBeDefined();
-        const openedPage = await source.waitForEvent("popup");
+        const openedPagePromise = source.waitForEvent("popup");
         const opened = await act(sessionId, { kind: "click", target: openRef! });
+        const openedPage = await openedPagePromise;
         expect(opened.url).toBe("https://console.product.test/opened");
         expect(openedPage.url()).toBe("https://console.product.test/opened");
         const openedInputRef = parseElementsTable(opened.el_table ?? "").find(

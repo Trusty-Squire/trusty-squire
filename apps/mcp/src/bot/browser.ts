@@ -7873,9 +7873,7 @@ export class BrowserController {
     };
   }
 
-  async readCheckoutReviewLineItems(
-    page?: Page | null,
-  ): Promise<Array<{ title: string; quantity: number }>>;
+  async readCheckoutReviewLineItems(): Promise<Array<{ title: string; quantity: number }>>;
   async readCheckoutReviewLineItems(includeDetails: true, page?: Page | null): Promise<
     Array<{
       title: string;
@@ -11070,17 +11068,17 @@ export class BrowserController {
   // `clipboard-read` permission, granted at context creation. Returns
   // an empty string if the clipboard is empty; throws on permission
   // failure (caller catches and falls through to other paths).
-  async readClipboard(): Promise<string> {
-    if (!this.page) throw new Error("Browser not started");
+  async readClipboard(page: Page | null = this.page): Promise<string> {
+    if (!page) throw new Error("Browser not started");
     // navigator.clipboard.readText() REJECTS ("Document is not focused") unless
     // the page has focus — which a sequence of Playwright actions + page.evaluate
     // reads between the copy-click and here can drop, silently yielding "". Bring
     // the tab to front and focus the document first. MEASURED 2026-06-24
     // (deepinfra: the copy-key clipboard held the 32-char key in a probe but the
     // replay's read came back empty — focus was the difference).
-    await this.page.bringToFront().catch(() => undefined);
-    await this.page.evaluate(() => window.focus()).catch(() => undefined);
-    return await this.page.evaluate(async () => {
+    await page.bringToFront().catch(() => undefined);
+    await page.evaluate(() => window.focus()).catch(() => undefined);
+    return await page.evaluate(async () => {
       try {
         return await navigator.clipboard.readText();
       } catch {
