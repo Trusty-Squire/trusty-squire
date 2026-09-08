@@ -102,6 +102,14 @@ Explicit `form=` ownership is resolved through the browser's effective form
 association, not by matching every duplicate ID. A non-owner form can change
 without retiring the control's capability; an actual owner change still does.
 
+## Deferred native activation concerns
+
+Two source-reviewed concerns are explicitly outside this persistent-identity
+change: link/form relation, ping and referrer-policy activation semantics; and
+native button command/popover routing with auto-state submitter behavior. They
+require their own scope and validation plan. No runtime or test changes for
+either concern are included here, and neither is claimed as live-proven.
+
 Final focused validation after the srcdoc decision: all 21 real-browser tests
 passed, including physical-node persistence/replacement and both ancestral and
 explicit form-destination changes. Typecheck and changed-file ESLint exited 0.
