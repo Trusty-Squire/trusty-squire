@@ -254,15 +254,20 @@ export async function captureBrowserUseDOM(
               for (let i = 0; i < roots.length; i++)
                 for (const el of Array.from(roots[i]!.querySelectorAll("*"))) {
                   const name = el.localName;
-                  if (
-                    name.includes("-") &&
-                    (
-                      customElements.get(name) as
-                        | (CustomElementConstructor & { formAssociated?: boolean })
-                        | undefined
-                    )?.formAssociated === true
-                  )
-                    names.add(name);
+                  if (name.includes("-")) {
+                    let constructor = customElements.get(name) as Function | undefined;
+                    while (constructor) {
+                      const descriptor = Object.getOwnPropertyDescriptor(
+                        constructor,
+                        "formAssociated",
+                      );
+                      if (descriptor) {
+                        if ("value" in descriptor && descriptor.value === true) names.add(name);
+                        break;
+                      }
+                      constructor = Object.getPrototypeOf(constructor) as Function | undefined;
+                    }
+                  }
                   if (el.shadowRoot) roots.push(el.shadowRoot);
                 }
               return [...names];
@@ -329,44 +334,88 @@ export async function captureBrowserUseDOM(
             );
         }
         try {
-            const listenerTargets = await client.send("Runtime.evaluate", {
-              expression: `(() => { const roots=[document], customPriority=[], customFallback=[], standardPriority=[], standardFallback=[], limit=100; for(let i=0;i<roots.length;i++) for(const el of roots[i].querySelectorAll('*')) { if(el.shadowRoot) roots.push(el.shadowRoot); const r=el.getBoundingClientRect(), s=getComputedStyle(el), visible=r.width>1&&r.height>1&&r.bottom>0&&r.right>0&&r.top<innerHeight&&r.left<innerWidth&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)>0; if(el.localName.includes('-')) { const role=el.getAttribute('role')||''; const likely=visible&&(/(?:quick-add|add-to-cart|product-form|buy|cart)/.test(el.localName)||el.closest("form,[class*='product'],[id*='product'],[class*='price'],[id*='price']")!==null||['button','link','checkbox','radio','combobox','textbox','menuitem','option','tab'].includes(role)||el.hasAttribute('command')||el.hasAttribute('commandfor')||el.hasAttribute('popovertarget')); const targets=likely?customPriority:customFallback; if(targets.length<limit) targets.push(el); } else { const targets=visible?standardPriority:standardFallback; if(targets.length<limit) targets.push(el); } } return [...customPriority,...customFallback].slice(0,limit).concat([...standardPriority,...standardFallback].slice(0,limit)); })()`,
-              contextId: context.executionContextId,
-              objectGroup: "ts-observation",
+          const listenerTargets = await client.send("Runtime.evaluate", {
+            expression: `(() => { const roots=[document], priority=[], fallback=[], limit=100; for(let i=0;i<roots.length;i++) for(const el of roots[i].querySelectorAll('*')) { if(el.shadowRoot) roots.push(el.shadowRoot); if(!el.localName.includes('-')) continue; const r=el.getBoundingClientRect(), s=getComputedStyle(el), visible=r.width>1&&r.height>1&&r.bottom>0&&r.right>0&&r.top<innerHeight&&r.left<innerWidth&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)>0; const role=el.getAttribute('role')||''; const likely=visible&&(/(?:quick-add|add-to-cart|product-form|buy|cart)/.test(el.localName)||el.closest("form,[class*='product'],[id*='product'],[class*='price'],[id*='price']")!==null||['button','link','checkbox','radio','combobox','textbox','menuitem','option','tab'].includes(role)||el.hasAttribute('command')||el.hasAttribute('commandfor')||el.hasAttribute('popovertarget')); const targets=likely?priority:fallback; if(targets.length<limit) targets.push(el); } return [...priority,...fallback].slice(0,limit); })()`,
+            contextId: context.executionContextId,
+            objectGroup: "ts-observation",
+          });
+          if (listenerTargets.result.objectId) {
+            const props = await client.send("Runtime.getProperties", {
+              objectId: listenerTargets.result.objectId,
+              ownProperties: true,
             });
-            if (listenerTargets.result.objectId) {
-              const props = await client.send("Runtime.getProperties", {
-                objectId: listenerTargets.result.objectId,
-                ownProperties: true,
-              });
-              const indexed = props.result.filter((p) => /^\d+$/.test(p.name) && p.value?.objectId);
-              for (let i = 0; i < indexed.length; i += 8) {
-                const batches = await Promise.all(
-                  indexed.slice(i, i + 8).map((p) =>
-                    client.send("DOMDebugger.getEventListeners", {
-                      objectId: p.value!.objectId!,
-                      depth: 0,
-                      pierce: true,
-                    }),
-                  ),
-                );
-                for (const events of batches)
-                  for (const listener of events.listeners)
-                    if (
-                      listener.backendNodeId !== undefined &&
-                      [
-                        "click",
-                        "mousedown",
-                        "mouseup",
-                        "pointerdown",
-                        "pointerup",
-                        "keydown",
-                        "keyup",
-                      ].includes(listener.type)
-                    )
-                      frameListeners.add(listener.backendNodeId);
+            const indexed = props.result.filter((p) => /^\d+$/.test(p.name) && p.value?.objectId);
+            for (let i = 0; i < indexed.length; i += 8) {
+              const batches = await Promise.all(
+                indexed.slice(i, i + 8).map((p) =>
+                  client.send("DOMDebugger.getEventListeners", {
+                    objectId: p.value!.objectId!,
+                    depth: 0,
+                    pierce: true,
+                  }),
+                ),
+              );
+              for (const events of batches)
+                for (const listener of events.listeners)
+                  if (
+                    listener.backendNodeId !== undefined &&
+                    [
+                      "click",
+                      "mousedown",
+                      "mouseup",
+                      "pointerdown",
+                      "pointerup",
+                      "keydown",
+                      "keyup",
+                    ].includes(listener.type)
+                  )
+                    frameListeners.add(listener.backendNodeId);
+            }
+          }
+        } catch {}
+        try {
+          const listenerTargets = await client.send("Runtime.evaluate", {
+            expression: `(() => { const roots=[document],found=[]; let count=0; for(let i=0;i<roots.length;i++) for(const el of roots[i].querySelectorAll('*')) { if(el.shadowRoot)roots.push(el.shadowRoot); if(++count>10000)return null; if(!el.localName.includes('-'))found.push(el); } return found;})()`,
+            contextId: context.executionContextId,
+            objectGroup: "ts-observation",
+          });
+          if (listenerTargets.result.objectId) {
+            const props = await client.send("Runtime.getProperties", {
+              objectId: listenerTargets.result.objectId,
+              ownProperties: true,
+            });
+            const indexed = props.result.filter((p) => /^\d+$/.test(p.name) && p.value?.objectId);
+            let found = 0;
+            for (let i = 0; i < indexed.length && found < 100; i += 8) {
+              const batch = indexed.slice(i, i + 8);
+              const events = await Promise.all(
+                batch.map((p) =>
+                  client.send("DOMDebugger.getEventListeners", {
+                    objectId: p.value!.objectId!,
+                    depth: 0,
+                    pierce: true,
+                  }),
+                ),
+              );
+              for (const [index, result] of events.entries()) {
+                if (
+                  !result.listeners.some((listener) =>
+                    ["click", "mousedown", "mouseup", "pointerdown", "pointerup"].includes(
+                      listener.type,
+                    ),
+                  )
+                )
+                  continue;
+                const target = batch[index]!;
+                const d = await client.send("DOM.describeNode", {
+                  objectId: target.value!.objectId!,
+                });
+                frameListeners.add(d.node.backendNodeId);
+                found += 1;
+                if (found === 100) break;
               }
             }
+          }
         } catch {}
         for (const [backendNodeId, element] of frameBindings) bindings.set(backendNodeId, element);
         for (const backendNodeId of frameListeners) listeners.add(backendNodeId);

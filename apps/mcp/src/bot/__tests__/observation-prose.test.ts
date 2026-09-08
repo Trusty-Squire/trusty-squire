@@ -44,6 +44,76 @@ describe("interleaved observation DOM", () => {
     }
   });
 
+  it("finds a standard listener after ordinary visible content", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(
+        `${Array.from({ length: 120 }, (_, index) => `<span id="ordinary-${index}">Item</span>`).join("")}<span id="late-listener">Continue</span>`,
+      );
+      await page.locator("#late-listener").evaluate((element) =>
+        element.addEventListener("click", () => element.setAttribute("data-clicked", "yes")),
+      );
+      const capture = await captureThroughController(page);
+      const listener = capture.elements.find((element) => element.id === "late-listener")!;
+      expect(listener).toMatchObject({ tag: "span" });
+      await page.locator(listener.selector).click();
+      expect(await page.locator("#late-listener").getAttribute("data-clicked")).toBe("yes");
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("does not invoke form-associated accessors during observation", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<style>getter-form-control, data-form-control { display:block; width:20px; height:20px }</style>
+        <form id="form"><getter-form-control id="getter-control"></getter-form-control><data-form-control id="data-control" aria-label="Add to cart">Add</data-form-control></form>`);
+      await page.locator("#form").evaluate((form) =>
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          form.setAttribute("data-submitted", "yes");
+        }),
+      );
+      const getterReads = await page.evaluate(() => {
+        let reads = 0;
+        document.body.setAttribute("data-form-associated-reads", "0");
+        customElements.define(
+          "getter-form-control",
+          class extends HTMLElement {
+            static get formAssociated() {
+              reads += 1;
+              document.body.setAttribute("data-form-associated-reads", String(reads));
+              if (reads > 1) document.querySelector<HTMLFormElement>("#form")?.requestSubmit();
+              return true;
+            }
+          },
+        );
+        customElements.define(
+          "data-form-control",
+          class extends HTMLElement {
+            static formAssociated = true;
+            constructor() {
+              super();
+              this.attachInternals();
+            }
+          },
+        );
+        return reads;
+      });
+      const capture = await captureThroughController(page);
+      expect(await page.locator("#form").getAttribute("data-submitted")).toBeNull();
+      expect(await page.locator("body").getAttribute("data-form-associated-reads")).toBe(
+        String(getterReads),
+      );
+      expect(capture.elements.some((element) => element.id === "getter-control")).toBe(false);
+      expect(capture.elements.find((element) => element.id === "data-control")).toMatchObject({
+        tag: "data-form-control",
+      });
+    } finally {
+      await page.close();
+    }
+  });
+
   it("binds persistent capabilities to physical nodes across fresh CDP captures", async () => {
     const page = await browser.newPage();
     const refs = new StableObservationRefs();
