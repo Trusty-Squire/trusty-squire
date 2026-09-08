@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
@@ -7,7 +7,7 @@ import {
   beginBrokerQualification,
   brokerAdmissionMode,
   brokerForwardingEnabled,
-  completeBrokerQualification,
+  recordBrokerQualificationEvidence,
 } from "../broker/qualification.js";
 
 const roots: string[] = [];
@@ -31,7 +31,7 @@ it("keeps socket-configured production on the single-session path before qualifi
   await expect(brokerForwardingEnabled(env.TRUSTY_SQUIRE_BROKER_SOCKET, dir, "account", env)).resolves.toBe(false);
 });
 
-it("enables broker forwarding only for a live qualification run or completed evidence", async () => {
+it("keeps recorded qualification evidence inert until an explicit operator enablement", async () => {
   const dir = await profile();
   const runId = await beginBrokerQualification(dir, "account");
   const socket = join(dir, "broker.sock");
@@ -41,13 +41,31 @@ it("enables broker forwarding only for a live qualification run or completed evi
       TRUSTY_SQUIRE_BROKER_QUALIFICATION_RUN_ID: runId,
     }),
   ).resolves.toBe(true);
-  await completeBrokerQualification(dir, "account", runId, join(dir, "evidence.json"), [
+  const evidencePath = join(dir, "evidence.json");
+  await expect(
+    recordBrokerQualificationEvidence(dir, "account", runId, evidencePath, [
+      "one.example",
+      "two.example",
+      "three.example",
+    ]),
+  ).rejects.toThrow("Qualification evidence is missing");
+  await expect(
+    brokerAdmissionMode(dir, "account", {
+      TRUSTY_SQUIRE_BROKER_QUALIFICATION_RUN_ID: runId,
+    }),
+  ).resolves.toBe("qualifying");
+  await writeFile(evidencePath, JSON.stringify({ kind: "real-service-three-MCP-process-acceptance" }));
+  await recordBrokerQualificationEvidence(dir, "account", runId, evidencePath, [
     "one.example",
     "two.example",
     "three.example",
   ]);
-  await expect(brokerAdmissionMode(dir, "account", {})).resolves.toBe("qualified");
-  await expect(brokerForwardingEnabled(socket, dir, "other-account", {})).resolves.toBe(false);
+  await expect(brokerAdmissionMode(dir, "account", {})).resolves.toBe("single");
+  await expect(brokerForwardingEnabled(socket, dir, "account", {})).resolves.toBe(false);
+  const enabled = { TRUSTY_SQUIRE_BROKER_CONCURRENCY: "enabled" };
+  await expect(brokerAdmissionMode(dir, "account", enabled)).resolves.toBe("enabled");
+  await expect(brokerForwardingEnabled(socket, dir, "account", enabled)).resolves.toBe(true);
+  await expect(brokerForwardingEnabled(socket, dir, "other-account", enabled)).resolves.toBe(false);
   await abandonBrokerQualification(dir, "account", runId);
-  await expect(brokerAdmissionMode(dir, "account", {})).resolves.toBe("qualified");
+  await expect(brokerAdmissionMode(dir, "account", {})).resolves.toBe("single");
 });

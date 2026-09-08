@@ -8,14 +8,14 @@ const FILE = "trusty-squire-broker-qualification.json";
 interface QualificationRecord {
   version: 1;
   accountId: string;
-  state: "qualifying" | "qualified";
+  state: "qualifying" | "evidence_recorded";
   runId?: string;
   completedAt?: string;
   evidencePath?: string;
   serviceHosts?: string[];
 }
 
-export type BrokerAdmissionMode = "single" | "qualifying" | "qualified";
+export type BrokerAdmissionMode = "single" | "qualifying" | "enabled";
 
 export function brokerQualificationPath(profileDir: string): string {
   return join(profilePathIdentity(profileDir), FILE);
@@ -27,7 +27,7 @@ async function readQualification(profileDir: string): Promise<QualificationRecor
     if (
       record.version !== 1 ||
       typeof record.accountId !== "string" ||
-      !["qualifying", "qualified"].includes(record.state) ||
+      !["qualifying", "evidence_recorded"].includes(record.state) ||
       (record.runId !== undefined && typeof record.runId !== "string") ||
       (record.completedAt !== undefined && typeof record.completedAt !== "string") ||
       (record.evidencePath !== undefined && typeof record.evidencePath !== "string") ||
@@ -50,9 +50,15 @@ export async function brokerAdmissionMode(
   if (typeof accountId !== "string" || accountId.length === 0) return "single";
   const record = await readQualification(profileDir);
   if (record === null || record.accountId !== accountId) return "single";
-  if (record.state === "qualified") return "qualified";
-  return record.runId !== undefined && record.runId === env.TRUSTY_SQUIRE_BROKER_QUALIFICATION_RUN_ID
-    ? "qualifying"
+  if (
+    record.state === "qualifying" &&
+    record.runId !== undefined &&
+    record.runId === env.TRUSTY_SQUIRE_BROKER_QUALIFICATION_RUN_ID
+  )
+    return "qualifying";
+  return record.state === "evidence_recorded" &&
+    env.TRUSTY_SQUIRE_BROKER_CONCURRENCY === "enabled"
+    ? "enabled"
     : "single";
 }
 
@@ -75,13 +81,18 @@ export async function beginBrokerQualification(profileDir: string, accountId: st
   return runId;
 }
 
-export async function completeBrokerQualification(
+export async function recordBrokerQualificationEvidence(
   profileDir: string,
   accountId: string,
   runId: string,
   evidencePath: string,
   serviceHosts: readonly string[],
 ): Promise<void> {
+  try {
+    await readFile(evidencePath);
+  } catch {
+    throw new Error("Qualification evidence is missing");
+  }
   const record = await readQualification(profileDir);
   if (
     record?.state !== "qualifying" ||
@@ -95,7 +106,7 @@ export async function completeBrokerQualification(
     JSON.stringify({
       version: 1,
       accountId,
-      state: "qualified",
+      state: "evidence_recorded",
       completedAt: new Date().toISOString(),
       evidencePath,
       serviceHosts: [...serviceHosts],

@@ -34,7 +34,7 @@ export async function runBrokerDaemon(): Promise<void> {
   if (session?.account_id === undefined || session.agent_session_token === undefined)
     throw new Error("Broker requires an enrolled account; run connect first");
   if ((await brokerAdmissionMode(CHROME_PROFILE_DIR, session.account_id)) === "single")
-    throw new Error("Broker concurrency requires completed real-auth qualification for this profile");
+    throw new Error("Broker concurrency requires explicit operator enablement after real-auth qualification");
   setServingAccountId(session.account_id);
   const cellId = createHash("sha256")
     .update(JSON.stringify([session.account_id, profilePathIdentity(CHROME_PROFILE_DIR)]))

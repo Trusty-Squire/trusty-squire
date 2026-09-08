@@ -15,10 +15,12 @@ mechanical increment while that human-gated qualification remains pending.
 
 ## Configuration and operation
 
-Build with `pnpm --filter @trusty-squire/mcp build`. Before real-auth
-qualification completes, setting a broker socket leaves the ordinary
-single-session operator path in place; it never enables shared production
-admission. Set the same
+Build with `pnpm --filter @trusty-squire/mcp build`. Setting a broker socket
+leaves the ordinary single-session operator path in place until the captain has
+completed and inspected the real-auth qualification, then separately sets
+`TRUSTY_SQUIRE_BROKER_CONCURRENCY=enabled` for the broker and participating MCP
+processes. Socket configuration and a recorded evidence path never enable
+shared production admission by themselves. Set the same
 `TRUSTY_SQUIRE_BROKER_SOCKET`, `TRUSTY_SQUIRE_PROFILE_DIR`, and pinned
 `TRUSTY_SQUIRE_ACCOUNT_ID` in each participating MCP process. Each MCP client
 lineage must also receive its own stable, random base64url
@@ -35,7 +37,8 @@ handle crosses IPC. `TRUSTY_SQUIRE_AGENT_IDENTITY` supplies a connection's agent
 label. The lineage credential proves reconnect ownership independently of that
 label; a caller with only a session ID, agent label, or credential hash cannot
 reclaim another client's capability. The broker admits at most three concurrent
-sessions only for a completed real-auth-qualified profile.
+sessions only when the captain has explicitly enabled a profile after real-auth
+qualification.
 
 `connect` requests maintenance over the existing socket, prevents new admissions,
 and waits for existing sessions and payment outcomes to drain. It closes Chrome
@@ -152,7 +155,11 @@ its cookies into the harness.
    checks service postconditions, and measures isolation and teardown. Preserve
    its evidence file and run the broader reviewed auth matrix before changing
    the production default or removing the exclusive fallback. A fully successful
-   run writes a profile-local qualification record bound to that account and the
-   three tested service hosts. Only then may ordinary socket-configured MCP
-   servers forward into the shared broker. A failed or interrupted run removes
-   its in-progress record; never create or copy this record manually.
+   run writes an inert profile-local evidence record bound to that account and
+   the three tested service hosts. The record does not assert qualification or
+   enable concurrency. After personally inspecting the evidence and completing
+   the reviewed real-auth matrix, the captain may separately set
+   `TRUSTY_SQUIRE_BROKER_CONCURRENCY=enabled` for the broker and participating
+   MCP processes. Socket configuration and the evidence record alone stay on
+   the single-session path. A failed or interrupted run removes its in-progress
+   record; never create or copy this record manually.
