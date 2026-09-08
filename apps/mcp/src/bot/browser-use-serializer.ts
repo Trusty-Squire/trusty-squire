@@ -192,13 +192,10 @@ export function browserUseInteractive(n: BrowserUseNode, canonical = false): boo
         "onkeydown",
         "onkeyup",
       ].some((key) => key in a) ||
-      ("tabindex" in a && Number(a.tabindex) >= 0) ||
       customInteractiveRoles.has(a.role ?? "") ||
       customInteractiveRoles.has(n.axRole ?? "") ||
       n.axRole === "listbox" ||
-      n.axProperties.some(
-        (p) => ["focusable", "editable", "settable"].includes(p.name) && p.value === true,
-      )
+      n.axProperties.some((p) => ["editable", "settable"].includes(p.name) && p.value === true)
     );
   }
   if (n.clickListener) return true;

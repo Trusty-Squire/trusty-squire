@@ -86,9 +86,15 @@ describe("observation byte efficiency", () => {
         { attributes: { role: "button" } },
         { attributes: { onpointerdown: "buy()" } },
         { axRole: "button" },
-        { attributes: { tabindex: "0" } },
       ])
         expect(browserUseInteractive({ ...decorative, ...props })).toBe(true);
+      expect(browserUseInteractive({ ...decorative, attributes: { tabindex: "0" } })).toBe(false);
+      expect(
+        browserUseInteractive({
+          ...decorative,
+          axProperties: [{ name: "focusable", value: true }],
+        }),
+      ).toBe(false);
       expect(
         browserUseInteractive({ ...decorative, clickListener: true, attributes: { inert: "" } }),
       ).toBe(false);

@@ -381,11 +381,13 @@ describe("interleaved observation DOM", () => {
   it("gives a labelled custom wrapper's sole enabled buy control its label", async () => {
     const page = await browser.newPage();
     try {
-      await page.setContent(`<style>add-to-cart-component { display:block }</style>
+      await page.setContent(`<style>add-to-cart-component, slideshow-slide { display:block }</style>
         <form id="cart-form"><add-to-cart-component aria-label="Add to cart">
           <button id="sold-out" disabled>Sold out</button>
+          <a class="icon"></a>
           <button id="buy" type="submit" name="add"></button>
-        </add-to-cart-component></form>`);
+        </add-to-cart-component></form>
+        <slideshow-slide id="focus-only" tabindex="0">Focus-only slide</slideshow-slide>`);
       await page.locator("#cart-form").evaluate((form) =>
         form.addEventListener("submit", (event) => {
           event.preventDefault();
@@ -401,6 +403,7 @@ describe("interleaved observation DOM", () => {
       expect(capture.elements.find((el) => el.id === "sold-out")).toMatchObject({
         disabled: true,
       });
+      expect(capture.elements.some((el) => el.id === "focus-only")).toBe(false);
       await page.locator(buy[0]!.selector).click();
       expect(await page.locator("#cart-form").getAttribute("data-submitted")).toBe("yes");
     } finally {

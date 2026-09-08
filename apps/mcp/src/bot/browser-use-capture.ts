@@ -322,37 +322,46 @@ export async function captureBrowserUseDOM(
               }),
             );
         }
-        // The console helper in an isolated world only sees that world's
-        // listeners. DOMDebugger with pierce reports the page's real handlers,
-        // including those on custom elements inside shadow roots.
-        const documentObject = await client.send("Runtime.evaluate", {
-          expression: "document",
-          contextId: context.executionContextId,
-          objectGroup: "ts-observation",
-        });
-        if (documentObject.result.objectId) {
-          const events = await client.send("DOMDebugger.getEventListeners", {
-            objectId: documentObject.result.objectId,
-            depth: -1,
-            pierce: true,
+        try {
+          const listenerTargets = await client.send("Runtime.evaluate", {
+            expression: `(() => { const roots=[document], targets=[]; for(let i=0;i<roots.length&&targets.length<100;i++) for(const el of roots[i].querySelectorAll('*')) { if(el.localName.includes('-')) { targets.push(el); if(targets.length>=100) break; } if(el.shadowRoot) roots.push(el.shadowRoot); } return targets; })()`,
+            contextId: context.executionContextId,
+            objectGroup: "ts-observation",
           });
-          for (const listener of events.listeners) {
-            if (
-              listener.backendNodeId !== undefined &&
-              [
-                "click",
-                "mousedown",
-                "mouseup",
-                "pointerdown",
-                "pointerup",
-                "keydown",
-                "keyup",
-              ].includes(listener.type)
-            ) {
-              frameListeners.add(listener.backendNodeId);
+          if (listenerTargets.result.objectId) {
+            const props = await client.send("Runtime.getProperties", {
+              objectId: listenerTargets.result.objectId,
+              ownProperties: true,
+            });
+            const indexed = props.result.filter((p) => /^\d+$/.test(p.name) && p.value?.objectId);
+            for (let i = 0; i < indexed.length; i += 8) {
+              const batches = await Promise.all(
+                indexed.slice(i, i + 8).map((p) =>
+                  client.send("DOMDebugger.getEventListeners", {
+                    objectId: p.value!.objectId!,
+                    depth: 0,
+                    pierce: true,
+                  }),
+                ),
+              );
+              for (const events of batches)
+                for (const listener of events.listeners)
+                  if (
+                    listener.backendNodeId !== undefined &&
+                    [
+                      "click",
+                      "mousedown",
+                      "mouseup",
+                      "pointerdown",
+                      "pointerup",
+                      "keydown",
+                      "keyup",
+                    ].includes(listener.type)
+                  )
+                    frameListeners.add(listener.backendNodeId);
             }
           }
-        }
+        } catch {}
         for (const [backendNodeId, element] of frameBindings) bindings.set(backendNodeId, element);
         for (const backendNodeId of frameListeners) listeners.add(backendNodeId);
       } catch {
@@ -642,7 +651,8 @@ export async function captureBrowserUseDOM(
       const label = n.attributes["aria-label"]?.trim() || n.attributes.title?.trim();
       if (custom && label && sole && !ownedLabels.has(sole.id)) ownedLabels.set(sole.id, label);
       const nativeTag =
-        ["BUTTON", "SELECT", "TEXTAREA", "A"].includes(n.nodeName) ||
+        ["BUTTON", "SELECT", "TEXTAREA"].includes(n.nodeName) ||
+        (n.nodeName === "A" && "href" in n.attributes) ||
         (n.nodeName === "INPUT" && n.attributes.type?.toLowerCase() !== "hidden");
       const disabledNative =
         nativeTag &&
@@ -652,6 +662,15 @@ export async function captureBrowserUseDOM(
       const native = nativeTag && !disabledNative;
       const explicit =
         n.clickListener ||
+        [
+          "onclick",
+          "onmousedown",
+          "onmouseup",
+          "onpointerdown",
+          "onpointerup",
+          "onkeydown",
+          "onkeyup",
+        ].some((key) => key in n.attributes) ||
         [
           "button",
           "link",
