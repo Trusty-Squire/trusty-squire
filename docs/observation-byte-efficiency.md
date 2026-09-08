@@ -62,11 +62,13 @@ width change; the remaining growth is serializer output, principally Hacker News
 
 ## Deliberate divergence from canonical browser-use
 
-The six canonical comparisons still pass with only identity normalized. Their
-production differences, including reachability, filtering, context, selection
-evidence, and the explicit unchanged-DOM signal, are owned by
-[the serializer-port contract](browser-use-serializer-port.md). The table above
-measures production output.
+All seven canonical fixture comparisons still pass with only identity normalized.
+The six live pages are listed in the table; the deterministic local Shopify
+fixture covers custom-element controls and is not part of these live-page byte
+measurements. Their production differences, including reachability, filtering,
+context, selection evidence, and the explicit unchanged-DOM signal, are owned
+by [the serializer-port contract](browser-use-serializer-port.md). The table
+above measures production output.
 
 Visible fixture text, including `usernametaken29`, is serialized verbatim in the
 HN-based regression. Tool descriptions, the `format` label, OAuth, vault
@@ -74,10 +76,10 @@ behavior and payment approval are unchanged.
 
 ## Evidence ledger
 
-- 2026-09-07 — `bash scripts/capture-browser-use.sh`: six `CAPTURED` lines;
+- 2026-09-07 — `bash scripts/capture-browser-use.sh`: seven `CAPTURED` lines;
   canonical bytes 6134 (IPinfo), 4669 (MDN), 13987 (HN), 5503 (Wikipedia),
-  3590 (GitHub), 1214 (GOV.UK). These are upstream numeric-ref outputs, separate
-  from the runtime comparison table above.
+  3590 (GitHub), 1214 (GOV.UK), and 738 (local Shopify). These are upstream
+  numeric-ref outputs, separate from the runtime comparison table above.
 - 2026-09-07 — targeted serializer, efficiency and real-Chrome observation tests:
   `Test Files 3 passed (3)`; `Tests 38 passed (38)`.
 - 2026-09-07 — memory helper: `conflict: both AGENTS.md and CLAUDE.md are real
@@ -112,5 +114,5 @@ particular card. Include this limitation in the PR body.
 aria-selected, data-state, class-change and appearing-check-icon cards. The real
 Chrome test captures before/after, clicks the stateless card using its original
 ref binding, confirms its row stays identical, and asserts each stateful row
-changes with actual DOM evidence. The canonical six-page oracle still passes
-unchanged. Targeted validation: `Test Files 3 passed (3)`; `Tests 39 passed (39)`.
+changes with actual DOM evidence. The seven-fixture canonical oracle still
+passes unchanged. Targeted validation: `Test Files 3 passed (3)`; `Tests 39 passed (39)`.
