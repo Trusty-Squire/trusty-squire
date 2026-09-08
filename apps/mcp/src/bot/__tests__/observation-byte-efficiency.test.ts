@@ -121,6 +121,17 @@ describe("observation byte efficiency", () => {
     expect(output.dom).toContain("aria-pressed=true");
   });
 
+  it("groups inert repeated siblings only when their UTF-8 wire form shrinks", () => {
+    const siblings = (value: string) =>
+      serializeBrowserUseDOM(node("BODY", { children: Array.from({ length: 3 }, () => text(value)) }))
+        .dom;
+    expect(siblings("OK")).toBe("OK\nOK\nOK");
+    expect(siblings("猫猫猫")).toBe("猫猫猫 [repeated ×3]");
+    expect(Buffer.byteLength("猫猫猫 [repeated ×3]", "utf8")).toBeLessThan(
+      Buffer.byteLength("猫猫猫\n猫猫猫\n猫猫猫", "utf8"),
+    );
+  });
+
   it("ports full union coverage, equal-order batching, opacity and document isolation", () => {
     const covered = text("Covered copy", { paintOrder: 1, computedStyles: transparent });
     const left = node("DIV", {

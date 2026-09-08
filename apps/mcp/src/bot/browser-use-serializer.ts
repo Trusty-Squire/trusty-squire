@@ -1110,7 +1110,9 @@ export function serializeBrowserUseDOM(
             .join("\n");
           groupingEnabled = true;
           const compact = grouped.join("\n");
-          lines.push(Buffer.byteLength(compact) < Buffer.byteLength(plain) ? compact : plain);
+          lines.push(
+            Buffer.byteLength(compact, "utf8") < Buffer.byteLength(plain, "utf8") ? compact : plain,
+          );
           i += count - 1;
           continue;
         }
@@ -1127,7 +1129,19 @@ export function serializeBrowserUseDOM(
         )
           count++;
       }
-      lines.push(line + (count > 1 ? ` [repeated ×${count}]` : ""));
+      if (count > 1) {
+        const compact = line + ` [repeated ×${count}]`;
+        const plain = [
+          line,
+          ...n.children
+            .slice(i + 1, i + count)
+            .map((item) => render(item, next))
+            .filter(Boolean),
+        ].join("\n");
+        lines.push(
+          Buffer.byteLength(compact, "utf8") < Buffer.byteLength(plain, "utf8") ? compact : plain,
+        );
+      } else lines.push(line);
       i += count - 1;
     }
     if (o.nodeType === 11 && n.children.length) lines.push(indent + "Shadow End");
