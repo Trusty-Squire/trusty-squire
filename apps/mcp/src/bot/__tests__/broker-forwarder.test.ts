@@ -157,7 +157,7 @@ describe("MCP broker forwarding", () => {
       await recorded;
       await expect(lost).rejects.toThrow("connection lost");
       await expect(
-        restarted.invoke("operate_pay", { session_id: "session" }, "7"),
+        restarted.invoke("operate_pay", { session_id: "session" }, "7", { recover: true }),
       ).resolves.toEqual({
         reconciliation: {
           request_id: paymentRequest,
@@ -170,7 +170,157 @@ describe("MCP broker forwarding", () => {
         restarted.invoke("operate_payment_status", { session_id: "session" }, "7"),
       ).resolves.toEqual({ status: "completed" });
       expect(paymentDispatches).toBe(1);
-      await expect.poll(() => acknowledgements).toEqual([paymentRequest]);
+      await expect.poll(() => acknowledgements).toContain(paymentRequest);
+    } finally {
+      await forwarder.close();
+      await restarted.close();
+      await broker.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("requires an explicit recovery signal before reusing a reset request ID", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-forward-explicit-recovery-"));
+    const path = join(root, "b.sock");
+    const capability = {
+      cellId: "cell",
+      browserEpoch: "epoch",
+      sessionId: "session",
+      targetId: "target",
+      leaseGeneration: "one",
+    };
+    let recoveries = 0;
+    let dispatches = 0;
+    const broker = await listenBroker(path, {
+      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
+      call: async (_principal, method, params) => {
+        if (method === "reclaim") return { capabilities: [capability] };
+        if (method === "acknowledge") return {};
+        if (method === "recover") {
+          recoveries++;
+          return {
+            requestId: "prior-broker-request",
+            result: {
+              reconciliation: {
+                request_id: "prior-broker-request",
+                operation: "operate_click",
+                status: "completed",
+              },
+            },
+          };
+        }
+        dispatches++;
+        expect(params).toMatchObject({ name: "operate_click", capability });
+        return { result: { dispatched: true } };
+      },
+      disconnect: async () => undefined,
+    });
+    const guard: SessionGuard = {
+      bind: async () => ({
+        account_id: "account",
+        agent_session_token: "test",
+        api_base_url: "http://unused.test",
+        saved_at: "",
+      }),
+      inspect: async () => ({ problem: null }),
+      boundAccountId: () => "account",
+    };
+    const forwarder = new OperatorForwarder(path, guard, credential("a"));
+    try {
+      await expect(
+        forwarder.invoke("operate_click", { session_id: "session", ref: "@continue" }, "1"),
+      ).resolves.toEqual({ dispatched: true });
+      expect(recoveries).toBe(0);
+      expect(dispatches).toBe(1);
+      await expect(
+        forwarder.invoke(
+          "operate_click",
+          { session_id: "session", ref: "@continue" },
+          "1",
+          { recover: true },
+        ),
+      ).resolves.toMatchObject({ reconciliation: { request_id: "prior-broker-request" } });
+      expect(recoveries).toBe(1);
+      expect(dispatches).toBe(1);
+    } finally {
+      await forwarder.close();
+      await broker.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers a lost start reply without opening another session", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-forward-start-recovery-"));
+    const path = join(root, "b.sock");
+    const capability = {
+      cellId: "cell",
+      browserEpoch: "epoch",
+      sessionId: "session",
+      targetId: "target",
+      leaseGeneration: "one",
+    };
+    let starts = 0;
+    let startEntered!: () => void;
+    let releaseStart!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      startEntered = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    const acknowledgements: string[] = [];
+    const broker = await listenBroker(path, {
+      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
+      call: async (_principal, method, params) => {
+        if (method === "reclaim") return { capabilities: starts === 0 ? [] : [capability] };
+        if (method === "acknowledge") {
+          acknowledgements.push(String(params.requestId));
+          return {};
+        }
+        if (method === "recover")
+          return {
+            requestId: "lost-start-request",
+            capability,
+            result: { session_id: "session", broker: { targetId: "target" } },
+          };
+        if (params.name === "operate_start") {
+          starts++;
+          startEntered();
+          await released;
+          return { capability, result: { session_id: "session" } };
+        }
+        if (params.name === "operate_observe") return { result: { session_id: "session", dom: "ready" } };
+        throw new Error(`Unexpected ${method}`);
+      },
+      disconnect: async () => undefined,
+    });
+    const guard: SessionGuard = {
+      bind: async () => ({
+        account_id: "account",
+        agent_session_token: "test",
+        api_base_url: "http://unused.test",
+        saved_at: "",
+      }),
+      inspect: async () => ({ problem: null }),
+      boundAccountId: () => "account",
+    };
+    const forwarder = new OperatorForwarder(path, guard, credential("a"));
+    const restarted = new OperatorForwarder(path, guard, credential("a"));
+    try {
+      const lost = forwarder.invoke("operate_start", {}, "1");
+      await entered;
+      await (forwarder as unknown as { client?: BrokerClient }).client?.close();
+      releaseStart();
+      await expect(lost).rejects.toThrow("connection lost");
+      await expect(restarted.invoke("operate_start", {}, "1", { recover: true })).resolves.toMatchObject({
+        session_id: "session",
+      });
+      await expect(restarted.invoke("operate_observe", { session_id: "session" }, "2")).resolves.toMatchObject({
+        dom: "ready",
+      });
+      expect(starts).toBe(1);
+      expect(restarted.sessionCount()).toBe(1);
+      expect(acknowledgements).toEqual(["lost-start-request", expect.any(String)]);
     } finally {
       await forwarder.close();
       await restarted.close();
@@ -189,6 +339,7 @@ describe("MCP broker forwarding", () => {
       call: async (_principal, method, _params, requestId) => {
         if (method === "recover") return null;
         if (method === "acknowledge") return {};
+        if (method === "reclaim") return { capabilities: [] };
         if (requests.has(requestId))
           return {
             result: {
@@ -238,7 +389,9 @@ describe("MCP broker forwarding", () => {
     const broker = await listenBroker(path, {
       authenticate: async (token) =>
         token === "test" ? { accountId: "account", agentId: "agent" } : null,
-      call: async (principal, _method, params) => {
+      call: async (principal, method, params) => {
+        if (method === "reclaim") return { capabilities: [] };
+        if (method === "acknowledge") return {};
         calls++;
         clients.add(principal.clientId);
         if (params.name === "operate_start") {

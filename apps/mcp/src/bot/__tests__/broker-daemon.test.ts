@@ -7,9 +7,20 @@ import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
 import { SessionStore } from "../../session.js";
 import { BrokerClient } from "../broker/transport.js";
+import { brokerEnvironment } from "../broker/discovery.js";
 const require = createRequire(import.meta.url);
 const sleep = async (ms: number) => await new Promise((r) => setTimeout(r, ms));
 const credential = "a".repeat(43);
+
+it("keeps a forwarder's lineage credential out of the detached broker environment", () => {
+  expect(
+    brokerEnvironment(
+      { PATH: "/bin", TRUSTY_SQUIRE_FORWARDER_CREDENTIAL: credential },
+      "/tmp/broker.sock",
+    ),
+  ).toEqual({ PATH: "/bin", TRUSTY_SQUIRE_BROKER_SOCKET: "/tmp/broker.sock" });
+});
+
 it("keeps a live control client, coordinates plain maintenance, refreshes credentials, and removes its endpoint", async () => {
   const root = await mkdtemp(join(tmpdir(), "ts-broker-daemon-"));
   const socket = join(root, "b.sock");
@@ -73,8 +84,16 @@ it("keeps a live control client, coordinates plain maintenance, refreshes creden
     await expect(BrokerClient.connect(socket, "before", credential)).rejects.toThrow(
       "Invalid broker credential",
     );
-    replacement = await BrokerClient.connect(socket, "after", credential);
     await first.close();
+    for (let attempt = 0; attempt < 40; attempt++) {
+      try {
+        replacement = await BrokerClient.connect(socket, "after", credential);
+        break;
+      } catch {
+        await sleep(25);
+      }
+    }
+    if (replacement === undefined) throw new Error("replacement broker client did not connect");
     await sleep(1200);
     expect(child.exitCode).toBeNull();
     expect(await replacement.call("maintenance", {})).toMatchObject({ state: "ready" });

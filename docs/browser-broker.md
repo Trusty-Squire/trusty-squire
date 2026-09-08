@@ -69,6 +69,11 @@ binding. Browser epoch changes invalidate earlier capabilities.
   replayed. Unsettled or malformed journal state refuses browser replacement and
   requires reconciliation against actual outcomes; there is no automatic
   erase-and-retry recovery for uncertain payments.
+- After a restarted MCP process loses an operator reply, its retry must set MCP
+  request metadata `"trusty-squire/recover": true`. This explicitly asks the
+  broker to reconcile the same JSON-RPC request ID with its durable lineage
+  record; ordinary reset IDs are always fresh calls. A recovered start returns
+  its existing session capability without retaining page observations.
 - Idle shutdown requires zero connected clients and zero active, admitting, or
   quarantined sessions. Graceful Chrome closure precedes lease release. Socket
   recovery requires process birth, endpoint inode, and old-profile-free evidence.

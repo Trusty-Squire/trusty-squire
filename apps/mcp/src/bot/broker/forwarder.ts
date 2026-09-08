@@ -4,7 +4,11 @@ import type { SessionGuard } from "../../session-guard.js";
 import type { BrokerClient } from "./transport.js";
 import type { TabCapability } from "./authority.js";
 import { BrokerRefusal } from "./scheduler.js";
-import { forwarderId, requireLineageCredential } from "./lineage.js";
+import { requireLineageCredential } from "./lineage.js";
+
+export interface BrokerRecoveryRequest {
+  recover?: boolean;
+}
 
 /** The MCP process holds only opaque capabilities. Never reconnect/replay a
  * dispatched request after transport loss: its side effect may have happened. */
@@ -14,7 +18,6 @@ export class OperatorForwarder {
   private connecting = false;
   private readonly sessions = new Map<string, TabCapability>();
   private readonly lineageCredential: string;
-  private readonly idempotencyNamespace: string;
   private readonly invocationNamespace = randomUUID();
   constructor(
     private readonly path: string,
@@ -22,7 +25,6 @@ export class OperatorForwarder {
     credential?: string,
   ) {
     this.lineageCredential = credential ?? this.loadCredential();
-    this.idempotencyNamespace = forwarderId(this.lineageCredential);
   }
   private loadCredential(): string {
     return requireLineageCredential();
@@ -55,7 +57,7 @@ export class OperatorForwarder {
     return createHash("sha256").update(requestId).digest("hex");
   }
   private idempotencyKey(callerRequestHash: string): string {
-    return `${this.idempotencyNamespace}:${this.invocationNamespace}:${callerRequestHash}`;
+    return `${this.invocationNamespace}:${callerRequestHash}`;
   }
   private async recover(
     client: BrokerClient,
@@ -63,19 +65,33 @@ export class OperatorForwarder {
     name: string,
     args: Record<string, unknown>,
     capability: TabCapability | undefined,
-  ): Promise<{ requestId: string; result: unknown } | undefined> {
+  ): Promise<{ requestId: string; result: unknown; capability?: TabCapability } | undefined> {
     const reply = (await client.call("recover", {
       callerRequestHash,
       name,
       args,
       ...(capability === undefined ? {} : { capability }),
     })) as { requestId?: unknown; result?: unknown } | null;
-    return typeof reply?.requestId === "string" ? { requestId: reply.requestId, result: reply.result } : undefined;
+    return typeof reply?.requestId === "string"
+      ? {
+          requestId: reply.requestId,
+          result: reply.result,
+          ...(this.isCapability(reply.capability) ? { capability: reply.capability } : {}),
+        }
+      : undefined;
+  }
+  private isCapability(value: unknown): value is TabCapability {
+    if (value === null || typeof value !== "object") return false;
+    const capability = value as Record<string, unknown>;
+    return ["cellId", "browserEpoch", "sessionId", "targetId", "leaseGeneration"].every(
+      (key) => typeof capability[key] === "string",
+    );
   }
   async invoke(
     name: string,
     args: Record<string, unknown>,
     requestId: string = randomUUID(),
+    recovery: BrokerRecoveryRequest = {},
   ): Promise<unknown> {
     const callerRequestHash = this.callerRequestHash(requestId);
     const idempotencyKey = this.idempotencyKey(callerRequestHash);
@@ -101,9 +117,13 @@ export class OperatorForwarder {
       capability === undefined
     )
       throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
-    const recovered = await this.recover(client, callerRequestHash, name, args, capability);
+    const recovered = recovery.recover
+      ? await this.recover(client, callerRequestHash, name, args, capability)
+      : undefined;
     if (recovered !== undefined) {
       await client.acknowledge(recovered.requestId);
+      if (recovered.capability !== undefined)
+        this.sessions.set(recovered.capability.sessionId, recovered.capability);
       if (name === "operate_finish" && id !== undefined) this.sessions.delete(id);
       return recovered.result;
     }

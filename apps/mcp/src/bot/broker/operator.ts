@@ -94,6 +94,13 @@ export function reconciliationOutcome(
   return outcome;
 }
 
+export function brokerCommandMutates(name: string, args: Record<string, unknown>): boolean {
+  return (
+    !["operate_observe", "operate_screenshot", "operate_payment_status"].includes(name) &&
+    !(name === "operate_extract" && args.store === undefined)
+  );
+}
+
 /** Existing handlers and per-session payment state run unchanged INSIDE the
  * broker. Every MCP connection gets its own pinned API client and capability. */
 export class OperatorBroker implements BrokerTransportPort {
@@ -204,6 +211,11 @@ export class OperatorBroker implements BrokerTransportPort {
               ...dispatch,
               outcome: reconciliationOutcome(tool.name, observation),
             });
+          else if (tool.name === "operate_start")
+            await this.journal?.record(id, requestId, "outcome", {
+              ...dispatch,
+              outcome: { status: "completed" },
+            });
           internalId = String((observation as { session_id: string }).session_id);
           const session = sessionForCall(internalId);
           if (session === undefined) {
@@ -229,11 +241,7 @@ export class OperatorBroker implements BrokerTransportPort {
                 throw new BrokerRefusal("unknown_tool", "Unknown operator command");
               const translated = { ...commandArgs, session_id: internalId };
               const execute = async () => await command.handler(translated, pinnedApi);
-              const mutating = ![
-                "operate_observe",
-                "operate_screenshot",
-                "operate_payment_status",
-              ].includes(name);
+              const mutating = brokerCommandMutates(name, commandArgs);
               const commandDispatch = {
                 agentId: principal.agentId,
                 forwarderId: principal.forwarderId ?? principal.agentId,
@@ -339,9 +347,12 @@ export class OperatorBroker implements BrokerTransportPort {
   ): Promise<
     | {
         requestId: string;
-        result: {
-          reconciliation: ReconciledDispatchOutcome & { request_id: string; operation: string };
-        };
+        capability?: TabCapability;
+        result:
+          | {
+              reconciliation: ReconciledDispatchOutcome & { request_id: string; operation: string };
+            }
+          | Record<string, unknown>;
       }
     | null
   > {
@@ -362,18 +373,34 @@ export class OperatorBroker implements BrokerTransportPort {
         inputHash: inputHash({ name: tool.name, args, capability: input.capability }),
       },
     );
-    return completed === undefined
-      ? null
-      : {
-          requestId: completed.requestId,
-          result: {
-            reconciliation: {
-              request_id: completed.requestId,
-              operation: completed.operation,
-              ...completed.outcome,
-            },
+    if (completed === undefined) return null;
+    if (completed.operation === "operate_start") {
+      const capability = this.authority.recoverCapability(principal, completed.sessionId);
+      if (capability === undefined) return null;
+      return {
+        requestId: completed.requestId,
+        capability,
+        result: {
+          session_id: capability.sessionId,
+          broker: {
+            cellId: capability.cellId,
+            browserEpoch: capability.browserEpoch,
+            targetId: capability.targetId,
+            pid: process.pid,
           },
-        };
+        },
+      };
+    }
+    return {
+      requestId: completed.requestId,
+      result: {
+        reconciliation: {
+          request_id: completed.requestId,
+          operation: completed.operation,
+          ...completed.outcome,
+        },
+      },
+    };
   }
   async reclaim(principal: BrokerPrincipal): Promise<{ capabilities: TabCapability[] }> {
     return { capabilities: this.authority.reclaim(principal) };
@@ -392,10 +419,15 @@ export class OperatorBroker implements BrokerTransportPort {
     if (
       capability === undefined ||
       typeof input.data.args.session_id !== "string" ||
-      input.data.args.session_id !== capability.sessionId ||
-      !this.authority.hasCapability(principal, capability)
+      input.data.args.session_id !== capability.sessionId
     )
       return false;
+    try {
+      if (!this.authority.hasCapability(principal, capability)) return false;
+    } catch (error) {
+      if (error instanceof BrokerRefusal) return false;
+      throw error;
+    }
     if (this.journal === undefined) return false;
     return await this.journal.hasOnlyPaymentCustody(
       capability.sessionId,

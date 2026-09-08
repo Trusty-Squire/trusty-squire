@@ -1,11 +1,12 @@
 import { mkdtemp, rm, appendFile, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { z, type Tool } from "../../tools/index.js";
 import { installBrokerBrowserCustody } from "../broker/custody.js";
 import { DispatchJournal } from "../broker/dispatch-journal.js";
-import { OperatorBroker, reconciliationOutcome } from "../broker/operator.js";
+import { OperatorBroker, brokerCommandMutates, reconciliationOutcome } from "../broker/operator.js";
 
 describe("broker dispatch custody", () => {
   it("refuses replacement after an uncertain dispatch and admits only a settled journal", async () => {
@@ -92,25 +93,96 @@ describe("broker dispatch custody", () => {
     const path = join(root, "dispatch.jsonl");
     const journal = new DispatchJournal(path);
     try {
+      const callerRequestHash = "a".repeat(64);
       await journal.record("session", "request", "entered", {
         agentId: "agent",
         forwarderId: "forwarder",
+        callerRequestHash,
         operation: "operate_pay",
+        inputHash: "payment-input",
       });
       await journal.record("session", "request", "outcome", {
         agentId: "agent",
         forwarderId: "forwarder",
+        callerRequestHash,
         operation: "operate_pay",
+        inputHash: "payment-input",
         outcome: { status: "completed" },
       });
       await expect(new DispatchJournal(path).assertReconciled()).resolves.toBeUndefined();
-      await expect(new DispatchJournal(path).pendingOutcomes("forwarder")).resolves.toEqual([
-        { sessionId: "session", requestId: "request", operation: "operate_pay" },
-      ]);
+      await expect(
+        new DispatchJournal(path).recoveryOutcome("forwarder", callerRequestHash, {
+          operation: "operate_pay",
+          inputHash: "payment-input",
+        }),
+      ).resolves.toMatchObject({ sessionId: "session", requestId: "request" });
       expect(await journal.hasOutstanding("session")).toBe(true);
       await expect(journal.acknowledge("forwarder", "request")).resolves.toBe(true);
       expect(await journal.hasOutstanding("session")).toBe(false);
       expect(await journal.hasCompleted("forwarder", "request")).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats extraction as mutating only when it writes to the vault", () => {
+    expect(brokerCommandMutates("operate_extract", { session_id: "session" })).toBe(false);
+    expect(
+      brokerCommandMutates("operate_extract", { session_id: "session", store: { service: "example" } }),
+    ).toBe(true);
+    expect(brokerCommandMutates("operate_pay", { session_id: "session" })).toBe(true);
+  });
+
+  it("returns an existing start capability after a lost response", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-journal-start-recovery-"));
+    const path = join(root, "dispatch.jsonl");
+    const journal = new DispatchJournal(path);
+    const broker = new OperatorBroker(
+      {
+        accountId: "account",
+        agentSessionToken: "token",
+        apiBaseUrl: "http://unused.test",
+        registryBaseUrl: "http://unused.test",
+      },
+      "cell",
+      journal,
+    );
+    const principal = {
+      accountId: "account",
+      agentId: "local-agent",
+      forwarderId: "forwarder-a",
+      clientId: "restarted",
+    };
+    const callerRequestHash = "b".repeat(64);
+    try {
+      broker.authority.claimForwarder(principal);
+      const capability = await broker.authority.open(principal, ["site:a"], async () => ({
+        targetId: "target",
+        invoke: async () => undefined,
+        close: async () => true,
+      }));
+      await journal.record(capability.sessionId, "forwarder:old-process:request", "outcome", {
+        forwarderId: principal.forwarderId,
+        callerRequestHash,
+        operation: "operate_start",
+        inputHash: createHash("sha256")
+          .update(
+            '{"args":{"service_url":"https://example.test"},"capability":null,"name":"operate_start"}',
+          )
+          .digest("hex"),
+        outcome: { status: "completed" },
+      });
+      await expect(
+        broker.recover(principal, {
+          callerRequestHash,
+          name: "operate_start",
+          args: { service_url: "https://example.test" },
+        }),
+      ).resolves.toMatchObject({
+        capability,
+        result: { session_id: capability.sessionId, broker: { targetId: "target" } },
+      });
+      expect(broker.authority.inventory()).toEqual({ active: 1, quarantined: 0, admitting: 0 });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

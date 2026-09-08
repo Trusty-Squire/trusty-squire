@@ -254,6 +254,20 @@ export class BrokerAuthority {
     });
   }
 
+  recoverCapability(principal: BrokerPrincipal, sessionId: string): TabCapability | undefined {
+    this.assertPrincipal(principal);
+    const actor = this.actors.get(sessionId);
+    if (
+      actor === undefined ||
+      actor.state !== "active" ||
+      actor.principal.forwarderId !== principal.forwarderId ||
+      actor.principal.agentId !== principal.agentId
+    )
+      return undefined;
+    actor.principal = { ...principal };
+    return { ...actor.capability };
+  }
+
   hasCapability(principal: BrokerPrincipal, capability: TabCapability): boolean {
     this.assertPrincipal(principal);
     const actor = this.actors.get(capability.sessionId);

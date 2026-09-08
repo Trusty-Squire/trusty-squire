@@ -20,6 +20,11 @@ interface EndpointOwner {
   device: number;
 }
 
+export function brokerEnvironment(env: NodeJS.ProcessEnv, path: string): NodeJS.ProcessEnv {
+  const { TRUSTY_SQUIRE_FORWARDER_CREDENTIAL: _lineageCredential, ...brokerEnv } = env;
+  return { ...brokerEnv, TRUSTY_SQUIRE_BROKER_SOCKET: path };
+}
+
 export async function publishEndpointOwner(path: string): Promise<void> {
   const identity = processBirthIdentity(process.pid);
   if (identity === null)
@@ -102,7 +107,7 @@ export async function connectOrLaunchBroker(
     {
       detached: true,
       stdio: "ignore",
-      env: { ...process.env, TRUSTY_SQUIRE_BROKER_SOCKET: path },
+      env: brokerEnvironment(process.env, path),
     },
   );
   let failure: Error | undefined;

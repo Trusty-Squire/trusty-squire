@@ -118,6 +118,11 @@ export interface ServerCallAdmission extends ServerCallLifecycle {
   inFlightCount(): number;
 }
 
+function brokerRecoveryRequested(meta: unknown): boolean {
+  if (meta === null || typeof meta !== "object") return false;
+  return (meta as Record<string, unknown>)["trusty-squire/recover"] === true;
+}
+
 // `connect` may complete while the host's stdio server is already running.
 // Keep the post-install read behind an injected loader so the call boundary can
 // pick up the account-bound session that Finish just published without making
@@ -231,7 +236,9 @@ export async function buildServer(
       activeApi.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
       if (operatorForwarder !== undefined && tool.name.startsWith("operate_")) {
         return toolResultContent(
-          await operatorForwarder.invoke(tool.name, parsed.data, String(req.id)),
+          await operatorForwarder.invoke(tool.name, parsed.data, String(req.id), {
+            recover: brokerRecoveryRequested((req.params as { _meta?: unknown })._meta),
+          }),
         );
       }
       const invoke = async () =>
