@@ -96,7 +96,9 @@ submitter's name/value pair is also bound because it becomes submitted form data
 Explicitly empty targets remain distinct from a missing target, while missing or
 empty form and submitter actions resolve to the document URL rather than a base
 URL. Link download presence/value is material because it changes navigation into
-a download. Ordinary editable-field values remain non-material.
+a download. Reserved browsing-context target keywords are normalized
+case-insensitively, while named targets preserve their authored case. Ordinary
+editable-field values remain non-material.
 
 Explicit `form=` ownership is resolved through the browser's effective form
 association, not by matching every duplicate ID. A non-owner form can change

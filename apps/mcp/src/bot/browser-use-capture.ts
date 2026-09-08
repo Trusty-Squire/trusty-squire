@@ -512,8 +512,11 @@ export async function captureBrowserUseDOM(
       const method = value?.trim().toLowerCase();
       return method === "post" || method === "dialog" ? method : "get";
     };
-    const effectiveTarget = (value: string | undefined, fallback: string): string =>
-      value === undefined ? fallback : value.trim();
+    const effectiveTarget = (value: string | undefined, fallback: string): string => {
+      const target = (value === undefined ? fallback : value).trim();
+      const keyword = target.toLowerCase();
+      return ["_self", "_blank", "_parent", "_top"].includes(keyword) ? keyword : target;
+    };
     const effectiveEnctype = (value: string | undefined): string => {
       const enctype = value?.trim().toLowerCase();
       return ["multipart/form-data", "text/plain"].includes(enctype ?? "")

@@ -263,6 +263,41 @@ describe("interleaved observation DOM", () => {
     }
   });
 
+  it("keeps anchors stable when reserved target keyword casing changes", async () => {
+    const page = await browser.newPage();
+    const refs = new StableObservationRefs();
+    const read = async () => {
+      const capture = await captureThroughController(page);
+      const handles = refs.actions("doc", capture.elements);
+      return new Map(
+        ["link", "form-submit", "submitter"].map((id) => {
+          const element = capture.elements.find((candidate) => candidate.id === id)!;
+          return [id, { identity: element.observationIdentity, ref: handles.get(element)! }];
+        }),
+      );
+    };
+    try {
+      await page.setContent(`
+        <a id="link" href="/continue" target="_BLANK">Continue</a>
+        <form id="form" target="_PARENT"><button id="form-submit">Pay</button></form>
+        <form><button id="submitter" formtarget="_TOP">Confirm</button></form>
+      `);
+      const held = await read();
+      await page.locator("#link").evaluate((element) => element.setAttribute("target", "_blank"));
+      await page.locator("#form").evaluate((element) => element.setAttribute("target", "_parent"));
+      await page
+        .locator("#submitter")
+        .evaluate((element) => element.setAttribute("formtarget", "_top"));
+      const changed = await read();
+      for (const id of held.keys()) {
+        expect(changed.get(id)!.identity).toBe(held.get(id)!.identity);
+        expect(changed.get(id)!.ref).toBe(held.get(id)!.ref);
+      }
+    } finally {
+      await page.close();
+    }
+  });
+
   it("distinguishes empty navigation targets from inherited base targets", async () => {
     const page = await browser.newPage();
     const assertStale = async (markup: string, id: string, selector: string, attribute: string) => {
