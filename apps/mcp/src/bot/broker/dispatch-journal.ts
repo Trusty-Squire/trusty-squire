@@ -9,7 +9,6 @@ interface DispatchRecord {
   requestId: string;
   phase: DispatchPhase;
   at: number;
-  agentId?: string;
   forwarderId?: string;
   callerRequestHash?: string;
   operation?: string;
@@ -77,7 +76,6 @@ export class DispatchJournal {
           typeof record.sessionId !== "string" ||
           typeof record.requestId !== "string" ||
           !["entered", "outcome", "acknowledged", "settled"].includes(record.phase) ||
-          (record.agentId !== undefined && typeof record.agentId !== "string") ||
           (record.forwarderId !== undefined && typeof record.forwarderId !== "string") ||
           (record.callerRequestHash !== undefined && typeof record.callerRequestHash !== "string") ||
           (record.operation !== undefined && typeof record.operation !== "string") ||
@@ -162,7 +160,7 @@ export class DispatchJournal {
     callerRequestHash: string,
     expected: Pick<DispatchRecord, "operation" | "inputHash">,
   ): Promise<CompletedDispatchOutcome | undefined> {
-    const record = [...(await this.states()).values()].find(
+    const record = [...(await this.states()).values()].reverse().find(
       (record) =>
         record.forwarderId === forwarderId &&
         record.callerRequestHash === callerRequestHash &&
@@ -192,7 +190,6 @@ export class DispatchJournal {
       outcomes.map(async (record) =>
         await this.record(record.sessionId, record.requestId, "acknowledged", {
           forwarderId,
-          ...(record.agentId === undefined ? {} : { agentId: record.agentId }),
           ...(record.callerRequestHash === undefined
             ? {}
             : { callerRequestHash: record.callerRequestHash }),
@@ -211,7 +208,7 @@ export class DispatchJournal {
     phase: DispatchPhase,
     detail?: Pick<
       DispatchRecord,
-      "agentId" | "forwarderId" | "callerRequestHash" | "operation" | "inputHash" | "outcome"
+      "forwarderId" | "callerRequestHash" | "operation" | "inputHash" | "outcome"
     >,
   ): Promise<void> {
     const operation = this.tail.then(async () => {

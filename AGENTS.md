@@ -796,9 +796,9 @@ The public operator contract and capability migration are owned by
 
 ## Cross-process browser broker
 
-The opt-in broker custody, maintenance, recovery, and qualification contracts live
-in [`docs/browser-broker.md`](docs/browser-broker.md). Mechanical fixture acceptance
-does not qualify real Google auth or authorize changing the production default.
+The socket-configured broker custody, maintenance, recovery, and qualification
+contracts live in [`docs/browser-broker.md`](docs/browser-broker.md). Mechanical
+fixture acceptance does not qualify real Google auth or prove the current head.
 
 ## Maintaining this file
 

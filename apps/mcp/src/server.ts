@@ -1,5 +1,4 @@
 import { OperatorForwarder } from "./bot/broker/forwarder.js";
-import { brokerForwardingEnabled } from "./bot/broker/qualification.js";
 // MCP server: reads its account's session from the session file, sets up an ApiClient
 // against the configured API base URL, and exposes the registered tools
 // over stdio.
@@ -428,9 +427,7 @@ export async function runServer(): Promise<void> {
 
   const callAdmission = createServerCallAdmission();
   const brokerPath = process.env.TRUSTY_SQUIRE_BROKER_SOCKET;
-  const brokerEnabled = brokerForwardingEnabled(brokerPath);
-  const forwarder =
-    brokerPath === undefined || !brokerEnabled ? undefined : new OperatorForwarder(brokerPath, sessionGuard);
+  const forwarder = brokerPath === undefined ? undefined : new OperatorForwarder(brokerPath, sessionGuard);
   const server = await buildServer(
     api,
     callAdmission,

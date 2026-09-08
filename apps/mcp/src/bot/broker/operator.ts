@@ -64,6 +64,12 @@ function callerRequestHash(requestId: string): string | undefined {
   return value !== undefined && /^[a-f0-9]{64}$/.test(value) ? value : undefined;
 }
 
+function journalForwarderId(principal: BrokerPrincipal): string {
+  if (principal.forwarderId === undefined)
+    throw new BrokerRefusal("unauthorized", "Forwarder lineage is required for journal custody");
+  return principal.forwarderId;
+}
+
 function dispatchDetail(
   principal: BrokerPrincipal,
   requestId: string,
@@ -72,8 +78,7 @@ function dispatchDetail(
 ) {
   const requestHash = callerRequestHash(requestId);
   return {
-    agentId: principal.agentId,
-    forwarderId: principal.forwarderId ?? principal.agentId,
+    forwarderId: journalForwarderId(principal),
     ...(requestHash === undefined ? {} : { callerRequestHash: requestHash }),
     operation,
     inputHash: inputHashValue,
@@ -183,7 +188,7 @@ export class OperatorBroker implements BrokerTransportPort {
       this.inputHash(principal, { name: tool.name, args, capability: input.capability }),
     );
     const completed = await this.journal?.completedOutcome(
-      principal.forwarderId ?? principal.agentId,
+      journalForwarderId(principal),
       requestId,
       dispatch,
     );
@@ -275,8 +280,7 @@ export class OperatorBroker implements BrokerTransportPort {
                 "payment-custody",
                 session.pendingThreeDs === null ? "settled" : "entered",
                 {
-                  agentId: principal.agentId,
-                  forwarderId: principal.forwarderId ?? principal.agentId,
+                  forwarderId: journalForwarderId(principal),
                 },
               );
               if (mutating)
@@ -300,8 +304,7 @@ export class OperatorBroker implements BrokerTransportPort {
               const result = await finishProvisionSession(internalId);
               if (result.closed)
                 await this.journal?.record(id, "payment-custody", "settled", {
-                  agentId: principal.agentId,
-                  forwarderId: principal.forwarderId ?? principal.agentId,
+                  forwarderId: journalForwarderId(principal),
                 });
               return result.closed;
             },
@@ -393,7 +396,7 @@ export class OperatorBroker implements BrokerTransportPort {
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
     const completed = await this.journal?.recoveryOutcome(
-      principal.forwarderId ?? principal.agentId,
+      journalForwarderId(principal),
       callerHash,
       {
         operation: tool.name,
@@ -433,7 +436,7 @@ export class OperatorBroker implements BrokerTransportPort {
     return { capabilities: this.authority.reclaim(principal) };
   }
   async acknowledge(principal: BrokerPrincipal, requestId: string): Promise<void> {
-    if (await this.journal?.acknowledge(principal.forwarderId ?? principal.agentId, requestId))
+    if (await this.journal?.acknowledge(journalForwarderId(principal), requestId))
       await this.authority.retryQuarantined();
   }
   async canContinuePaymentStatus(
@@ -458,7 +461,7 @@ export class OperatorBroker implements BrokerTransportPort {
     if (this.journal === undefined) return false;
     return await this.journal.hasOnlyPaymentCustody(
       capability.sessionId,
-      principal.forwarderId ?? principal.agentId,
+      journalForwarderId(principal),
     );
   }
   async disconnect(principal: BrokerPrincipal): Promise<void> {

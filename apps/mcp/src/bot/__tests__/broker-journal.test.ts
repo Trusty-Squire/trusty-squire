@@ -108,14 +108,12 @@ describe("broker dispatch custody", () => {
     try {
       const callerRequestHash = "a".repeat(64);
       await journal.record("session", "request", "entered", {
-        agentId: "agent",
         forwarderId: "forwarder",
         callerRequestHash,
         operation: "operate_pay",
         inputHash: "payment-input",
       });
       await journal.record("session", "request", "outcome", {
-        agentId: "agent",
         forwarderId: "forwarder",
         callerRequestHash,
         operation: "operate_pay",
@@ -150,6 +148,41 @@ describe("broker dispatch custody", () => {
       brokerCommandMutates("operate_extract", { session_id: "session", store: { service: "example" } }),
     ).toBe(true);
     expect(brokerCommandMutates("operate_pay", { session_id: "session" })).toBe(true);
+  });
+
+  it("recovers and acknowledges the latest reset-ID dispatch", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-journal-latest-recovery-"));
+    const path = join(root, "dispatch.jsonl");
+    const journal = new DispatchJournal(path);
+    const callerRequestHash = "d".repeat(64);
+    const detail = {
+      forwarderId: "forwarder",
+      callerRequestHash,
+      operation: "operate_click",
+      inputHash: "stable-input",
+    };
+    const outcome = {
+      ...detail,
+      outcome: { status: "completed" as const },
+    };
+    try {
+      await journal.record("session", "old-request", "entered", detail);
+      await journal.record("session", "old-request", "outcome", outcome);
+      await journal.acknowledge("forwarder", "old-request");
+      await journal.record("session", "new-request", "entered", detail);
+      await journal.record("session", "new-request", "outcome", outcome);
+
+      await expect(
+        new DispatchJournal(path).recoveryOutcome("forwarder", callerRequestHash, {
+          operation: "operate_click",
+          inputHash: "stable-input",
+        }),
+      ).resolves.toMatchObject({ requestId: "new-request" });
+      await journal.acknowledge("forwarder", "new-request");
+      await expect(journal.hasOutstanding("session", "forwarder")).resolves.toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("returns an existing start capability after a lost response", async () => {
@@ -392,13 +425,11 @@ describe("broker dispatch custody", () => {
         const outcome = reconciliationOutcome("operate_pay", result);
         expect(outcome).toEqual(expected);
         await journal.record("session", requestId, "entered", {
-          agentId: "agent",
           forwarderId: "forwarder",
           operation: "operate_pay",
           inputHash: `${requestId}-hash`,
         });
         await journal.record("session", requestId, "outcome", {
-          agentId: "agent",
           forwarderId: "forwarder",
           operation: "operate_pay",
           inputHash: `${requestId}-hash`,
@@ -418,10 +449,11 @@ describe("broker dispatch custody", () => {
       const records = (await readFile(path, "utf8"))
         .trim()
         .split("\n")
-        .map((line) => JSON.parse(line) as { phase: string; outcome?: unknown });
+        .map((line) => JSON.parse(line) as { phase: string; outcome?: unknown; agentId?: unknown });
       expect(records.filter((record) => record.phase === "outcome").map((record) => record.outcome)).toEqual(
         outcomes.map((entry) => entry.expected),
       );
+      expect(records.every((record) => record.agentId === undefined)).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

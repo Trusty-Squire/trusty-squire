@@ -40,10 +40,6 @@ async function readQualification(profileDir: string): Promise<QualificationRecor
   }
 }
 
-export function brokerForwardingEnabled(socketPath: string | undefined): boolean {
-  return socketPath !== undefined;
-}
-
 export async function beginBrokerQualification(profileDir: string, accountId: string): Promise<string> {
   const runId = randomUUID();
   await writeFile(

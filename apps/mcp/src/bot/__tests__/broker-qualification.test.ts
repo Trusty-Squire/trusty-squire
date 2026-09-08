@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import {
   beginBrokerQualification,
-  brokerForwardingEnabled,
   recordBrokerQualificationEvidence,
 } from "../broker/qualification.js";
 
@@ -22,16 +21,9 @@ async function profile(): Promise<string> {
   return dir;
 }
 
-it("enables broker forwarding for every socket-configured client", () => {
-  expect(brokerForwardingEnabled(undefined)).toBe(false);
-  expect(brokerForwardingEnabled("/private/broker.sock")).toBe(true);
-});
-
-it("records only extant qualification evidence without altering socket forwarding", async () => {
+it("records only extant qualification evidence", async () => {
   const dir = await profile();
   const runId = await beginBrokerQualification(dir, "account");
-  const socket = join(dir, "broker.sock");
-  expect(brokerForwardingEnabled(socket)).toBe(true);
   const evidencePath = join(dir, "evidence.json");
   await expect(
     recordBrokerQualificationEvidence(dir, "account", runId, evidencePath, [
@@ -46,5 +38,4 @@ it("records only extant qualification evidence without altering socket forwardin
     "two.example",
     "three.example",
   ]);
-  expect(brokerForwardingEnabled(socket)).toBe(true);
 });
