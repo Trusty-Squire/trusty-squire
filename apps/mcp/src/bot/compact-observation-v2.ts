@@ -160,7 +160,7 @@ export interface SafeObservationBaselineV2 {
   renderedRefs?: string[];
 }
 
-export const COMPACT_V2_HANDLE_LENGTH = 11;
+export const COMPACT_V2_HANDLE_LENGTH = 22;
 const COMPACT_V2_HANDLE_RE = new RegExp(`^@e:[A-Za-z0-9_-]{${COMPACT_V2_HANDLE_LENGTH}}$`);
 
 export class StableObservationRefs {
@@ -168,14 +168,70 @@ export class StableObservationRefs {
   private generation = 0;
   private refs = new Map<string, string>();
   private identities = new Map<string, string>();
+  private anchors = new Map<string, { intent: string; ref: string }>();
+  private aliases = new Map<string, string>();
+  private aliasOwners = new Map<string, string>();
+  private reset(document: string): void {
+    if (this.document === document) return;
+    this.document = document;
+    this.generation++;
+    this.refs.clear();
+    this.identities.clear();
+    this.anchors.clear();
+    this.aliases.clear();
+    this.aliasOwners.clear();
+  }
+
+  /** Reconcile the full live inventory, retiring absent or materially changed nodes. */
+  actions(
+    document: string,
+    elements: readonly InteractiveElement[],
+  ): Map<InteractiveElement, string> {
+    this.reset(document);
+    const present = new Set(elements.map((el) => el.observationIdentity));
+    for (const identity of this.anchors.keys()) {
+      if (!present.has(identity)) this.anchors.delete(identity);
+    }
+    const counts = new Map<string, number>();
+    for (const el of elements) {
+      if (el.observationIdentity)
+        counts.set(el.observationIdentity, (counts.get(el.observationIdentity) ?? 0) + 1);
+    }
+    const handles = new Map<InteractiveElement, string>();
+    for (const el of elements) {
+      const identity = el.observationIdentity;
+      if (!identity || el.observationIntent === undefined || counts.get(identity) !== 1) {
+        if (identity) this.anchors.delete(identity);
+        continue;
+      }
+      let anchor = this.anchors.get(identity);
+      if (!anchor || anchor.intent !== el.observationIntent) {
+        anchor = {
+          intent: el.observationIntent,
+          ref: this.get(document, `action:${randomBytes(32).toString("base64url")}`),
+        };
+        this.anchors.set(identity, anchor);
+      }
+      handles.set(el, anchor.ref);
+    }
+    return handles;
+  }
+
+  /** Compatibility spelling of one capability; never reassign an old alias. */
+  label(ref: string, preferred: string | undefined): string | undefined {
+    const existing = this.aliases.get(ref);
+    if (existing !== undefined || preferred === undefined) return existing;
+    let candidate = preferred;
+    for (let suffix = 2; this.aliasOwners.has(candidate); suffix++)
+      candidate = `${preferred}-${suffix}`;
+    this.aliases.set(ref, candidate);
+    this.aliasOwners.set(candidate, ref);
+    return candidate;
+  }
+
   constructor(private readonly secret: Buffer<ArrayBufferLike> = randomBytes(32)) {}
   get(document: string, identity: string): string {
-    if (this.document !== document) {
-      this.document = document;
-      this.generation++;
-      this.refs.clear();
-      this.identities.clear();
-    }
+    this.reset(document);
     let ref = this.refs.get(identity);
     if (ref === undefined) {
       for (let collision = 0; ; collision++) {
@@ -1244,6 +1300,7 @@ export function buildSafeControlsV2(args: {
   pageOrigin: string;
   pageUrl?: string;
   canonical?: boolean;
+  anchorLabel?: (ref: string, preferred: string | undefined) => string | undefined;
 }): { rows: SafeControlV2[]; byRef: Map<string, string> } {
   const rows: Array<{
     ref: string;
@@ -1293,13 +1350,12 @@ export function buildSafeControlsV2(args: {
     });
   }
   rows.sort((a, b) => a.priority - b.priority || a.legacy.localeCompare(b.legacy));
-  // Disambiguate AFTER the final ordering so duplicate labels (two copy
-  // buttons for two different tokens, identically labelled) get ordinals that
-  // are deterministic per snapshot rather than extraction-order-dependent.
+  // The legacy fallback disambiguates after final ordering. Compact-v2 supplies
+  // anchorLabel instead, reserving each alias for its physical-node capability.
   const disambiguated = disambiguateDuplicateLabelsV2(rows.map(({ row }) => row.label));
   const byRef = new Map<string, string>();
   const safeRows = rows.map(({ ref, legacy, row }, position) => {
-    const label = disambiguated[position];
+    const label = args.anchorLabel ? args.anchorLabel(ref, row.label) : disambiguated[position];
     byRef.set(ref, legacy);
     return { ref, ...row, ...(label === undefined ? {} : { label }) };
   });

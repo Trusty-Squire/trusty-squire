@@ -72,7 +72,6 @@ import {
   type SafeObservationIndexV2,
   type SafeStageV2,
 } from "./compact-observation-v2.js";
-import { elementFingerprints } from "./element-fingerprint.js";
 import type { ApiClient } from "../api-client.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
 import { pickVerificationLink, type VerificationLinkCandidate } from "./email-verification.js";
@@ -1370,7 +1369,7 @@ function sameCompactV2Control(left: SafeControlV2, right: SafeControlV2): boolea
 
 /**
  * Authorize an agent-supplied target against the observed skeleton. Two forms:
- * a `@e:` handle (the durable fingerprint) or a `@label` alias, which resolves
+ * a `@e:` handle (the physical node anchor) or a `@label` alias, which resolves
  * to exactly one observed handle or fails — never a guess. Only the epoch's
  * `doc` gates here; a benign re-render since the observation is expected and is
  * settled at act time against live elements.
@@ -1411,10 +1410,10 @@ function resolveCompactV2Label(
 
 /**
  * Re-resolve an authorized ref against LIVE elements. The handle is minted from
- * the element's durable fingerprint under the current document epoch, so this
+ * the element's physical node identity and material intent under the document epoch, so this
  * survives a re-render between two acts (the whole point of the identity model)
  * while a replaced document, a removed control, or a control that changed role
- * under the same fingerprint all fail closed.
+ * under the same node identity all fail closed.
  */
 function resolveAuthorizedCompactV2Target(
   session: Session,
@@ -1428,8 +1427,8 @@ function resolveAuthorizedCompactV2Target(
   }
   const live = compactV2LiveControls(session, elements);
   const matches = live.rows.filter((row) => row.ref === authorization.row.ref);
-  // Fingerprints are unique within an inventory by construction, so >1 means a
-  // broken invariant rather than an addressable ambiguity: refuse either way.
+  // Physical identities are unique within an inventory by construction, so >1
+  // means a broken invariant rather than an addressable ambiguity: refuse either way.
   if (matches.length !== 1) throwCompactV2StaleRef();
   const liveRow = matches[0]!;
   if (!sameCompactV2Intent(liveRow, authorization.row)) throwCompactV2StaleRef();
@@ -4067,28 +4066,26 @@ function compactV2EpochDoc(
 // Weak ownership keeps allocator lifetime bound to the session without retaining
 // closed sessions. One namespace/counter serves both action and display refs.
 const observationRefs = new WeakMap<Session, StableObservationRefs>();
-function compactV2StableRef(session: Session, doc: string, identity: string): string {
+function compactV2RefAllocator(session: Session): StableObservationRefs {
   let refs = observationRefs.get(session);
   if (!refs) {
     refs = new StableObservationRefs(session.compactV2Secret);
     observationRefs.set(session, refs);
   }
-  return refs.get(doc, identity);
+  return refs;
+}
+function compactV2StableRef(session: Session, doc: string, identity: string): string {
+  return compactV2RefAllocator(session).get(doc, identity);
 }
 
-/** Preserve existing fingerprint and live-resolution semantics with shorter keys. */
+/** Reconcile physical anchors once for the shared DOM/action inventory. */
 function compactV2Handles(
   session: Session,
   elements: readonly InteractiveElement[],
   page: OAuthCompletionEvidence["page"] | undefined = compactV2SourcePage(session),
 ): Map<InteractiveElement, string> {
   const doc = compactV2EpochDoc(session, page);
-  return new Map(
-    [...elementFingerprints(elements)].map(([element, fingerprint]) => [
-      element,
-      compactV2StableRef(session, doc, `action\u001f${fingerprint}`),
-    ]),
-  );
+  return compactV2RefAllocator(session).actions(doc, elements);
 }
 
 /** The live skeleton for an element inventory, under the session's epoch. */
@@ -4110,6 +4107,7 @@ function compactV2LiveControls(
     pageOrigin,
     pageUrl,
     canonical: session.compactV2Mode === "on",
+    anchorLabel: (ref, label) => compactV2RefAllocator(session).label(ref, label),
   });
 }
 
@@ -4397,7 +4395,7 @@ export async function observeQuery(
     // Benign live re-render (validation states appearing, dynamic fields
     // toggling, rotating checkout query tokens): re-serialize the same
     // document instead of failing the page. Refs are unaffected — they are
-    // fingerprint-derived — but the positional page offsets are not, so the
+    // node-bound — but the positional page offsets are not, so the
     // epoch's revision advances and cursors minted here bind to the fresh map.
     session.generation += 1;
     pagingRev = session.generation;
@@ -5703,7 +5701,7 @@ async function executeAct(
       }
     }
   } finally {
-    // An act no longer retires the action map. Refs are fingerprint-derived and
+    // An act no longer retires the action map. Refs are node-bound and
     // re-resolved live against the observed epoch on every act, so the agent can
     // fill a whole form from one observation. Only LEAVING the observed document
     // retires them — the same condition the authorization check enforces — so

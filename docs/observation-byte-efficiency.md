@@ -1,7 +1,10 @@
 # Observation byte-efficiency evidence
 
 Measured 2026-09-07 against baseline `c386d00bea4961a2fd82f07a892463b08e1a739e`.
-Copy the table and divergence notes below into the delivery PR body.
+These are historical measurements of the 11-character ref version. Persistent
+physical-node anchors now use 22-character (132-bit) suffixes; see
+[browser-use-serializer-port.md](browser-use-serializer-port.md#identity-deltas-and-query).
+The recorded byte totals below have not been re-measured for that later change.
 
 ## Reproduce
 
@@ -51,7 +54,7 @@ controls have been proven to share bindings. Distinct unlabelled controls are
 preserved, as the 24-control row demonstrates. Deleting apparent proxy checkboxes
 without an identity relationship could remove an independent action.
 
-Production refs use 11 base64url characters, preserving 66 bits of session-secret
+The measured production version used 11 base64url characters, preserving 66 bits of session-secret
 HMAC output. A million arbitrary capability guesses succeeds with probability below
 1 in 70 trillion, and a million independently minted refs has collision probability
 below 1 in 100 million; a collision is retried before emission. The one-byte increase

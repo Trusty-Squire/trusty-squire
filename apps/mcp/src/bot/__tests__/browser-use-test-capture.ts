@@ -1,3 +1,4 @@
+import { elementFingerprints } from "../element-fingerprint.js";
 import type { InteractiveElement } from "../browser.js";
 import type { BrowserUseCapture } from "../browser-use-capture.js";
 import type { BrowserUseNode } from "../browser-use-serializer.js";
@@ -6,6 +7,29 @@ export function mockBrowserUseCapture(
   elements: InteractiveElement[],
   text: readonly string[] = [],
 ): BrowserUseCapture {
+  // Old state-machine fixtures model DOM continuity with structural keys.
+  // Identity regressions supply explicit physical identities; real CDP tests
+  // prove that production never falls back to these synthetic fixture keys.
+  const fingerprints = elementFingerprints(elements);
+  elements = elements.map((el) => ({
+    ...el,
+    observationIdentity: el.observationIdentity ?? fingerprints.get(el)!,
+    observationIntent:
+      el.observationIntent ??
+      JSON.stringify([
+        el.tag,
+        el.type,
+        el.role,
+        el.name,
+        el.visibleText,
+        el.labelText,
+        el.ariaLabel,
+        el.iconLabel,
+        el.title,
+        el.placeholder,
+        el.href,
+      ]),
+  }));
   const node = (id: string, over: Partial<BrowserUseNode>): BrowserUseNode => ({
     id,
     nodeType: 1,

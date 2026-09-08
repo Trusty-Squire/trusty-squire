@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import type { CDPSession, Frame, Page } from "playwright";
 interface RawNode {
   nodeId: number;
@@ -14,7 +15,7 @@ interface RawNode {
   isScrollable?: boolean;
 }
 interface FrameTree {
-  frame: { id: string; url: string };
+  frame: { id: string; url: string; loaderId: string };
   childFrames?: FrameTree[];
 }
 import type { InteractiveElement } from "./browser.js";
@@ -26,6 +27,18 @@ import {
   type BrowserUseNode,
   type DOMBounds,
 } from "./browser-use-serializer.js";
+
+// Frame object identity prevents backend IDs from crossing renderer/frame scopes.
+// Kept outside the page; authored DOM attributes cannot forge this namespace.
+const frameIdentities = new WeakMap<Frame, string>();
+function frameIdentity(frame: Frame): string {
+  let identity = frameIdentities.get(frame);
+  if (identity === undefined) {
+    identity = randomBytes(32).toString("base64url");
+    frameIdentities.set(frame, identity);
+  }
+  return identity;
+}
 
 const STYLES = [
   "display",
@@ -168,7 +181,9 @@ export async function captureBrowserUseDOM(
       for (const [index, child] of (tree.childFrames ?? []).entries())
         markUnboundFrameTree(child, frame?.childFrames()[index]);
     };
+    const documentLoaders = new Map<Frame, string>();
     const bindFrames = (tree: FrameTree, frame: Frame): void => {
+      documentLoaders.set(frame, tree.frame.loaderId);
       frameIds.push(tree.frame.id);
       frameById.set(tree.frame.id, frame);
       framePathById.set(tree.frame.id, frame === page.mainFrame() ? null : framePath(frame));
@@ -211,6 +226,9 @@ export async function captureBrowserUseDOM(
     }
     const listeners = new Set<number>();
     const bindings = new Map<number, InteractiveElement>();
+    const baseUris = new Map<Frame, string>();
+    const baseTargets = new Map<Frame, string>();
+    const formOwners = new Map<number, number | null>();
     for (const frameId of frameIds) {
       const frame = frameById.get(frameId);
       if (!frame) continue;
@@ -228,7 +246,7 @@ export async function captureBrowserUseDOM(
         // backend identities without guessing from tag names or accessible names.
         const selectors = candidates.map((e) => e.selector);
         const objects = await client.send("Runtime.evaluate", {
-          expression: `(() => { const roots=[document]; for(let i=0;i<roots.length;i++) for(const e of roots[i].querySelectorAll('*')) if(e.shadowRoot) roots.push(e.shadowRoot); return ${JSON.stringify(selectors)}.map(s => { const p=s.split(' >> nth='); const found=roots.flatMap(r=>{try{return [...r.querySelectorAll(p[0])]}catch{return []}}); return found[Number(p[1]||0)] || null; }); })()`,
+          expression: `(() => { const roots=[document]; for(let i=0;i<roots.length;i++) for(const e of roots[i].querySelectorAll('*')) if(e.shadowRoot) roots.push(e.shadowRoot); const found=${JSON.stringify(selectors)}.map(s => { const p=s.split(' >> nth='); const matches=roots.flatMap(r=>{try{return [...r.querySelectorAll(p[0])]}catch{return []}}); return matches[Number(p[1]||0)] || null; }); const formOwners=roots.flatMap(r=>[...r.querySelectorAll('[form]')]).flatMap(e=>[e,e.form||null]); return Object.assign(found,{baseURI:document.baseURI,baseTarget:document.querySelector('base[target]')?.getAttribute('target'),formOwners}); })()`,
           contextId: context.executionContextId,
           objectGroup: "ts-observation",
         });
@@ -237,6 +255,36 @@ export async function captureBrowserUseDOM(
             objectId: objects.result.objectId,
             ownProperties: true,
           });
+          const baseUri = props.result.find((p) => p.name === "baseURI")?.value?.value;
+          baseUris.set(frame, typeof baseUri === "string" ? baseUri : frame.url());
+          const baseTarget = props.result.find((p) => p.name === "baseTarget")?.value?.value;
+          if (typeof baseTarget === "string") baseTargets.set(frame, baseTarget);
+          const ownerObjects = props.result.find((p) => p.name === "formOwners")?.value?.objectId;
+          if (ownerObjects) {
+            const ownerProps = await client.send("Runtime.getProperties", {
+              objectId: ownerObjects,
+              ownProperties: true,
+            });
+            const ownerValues = new Map(
+              ownerProps.result
+                .filter((p) => /^\d+$/.test(p.name))
+                .map((p) => [Number(p.name), p.value]),
+            );
+            for (let i = 0; ownerValues.has(i); i += 2) {
+              const control = ownerValues.get(i);
+              if (!control?.objectId) continue;
+              const controlNode = await client.send("DOM.describeNode", {
+                objectId: control.objectId,
+              });
+              const owner = ownerValues.get(i + 1);
+              if (!owner?.objectId) {
+                formOwners.set(controlNode.node.backendNodeId, null);
+                continue;
+              }
+              const ownerNode = await client.send("DOM.describeNode", { objectId: owner.objectId });
+              formOwners.set(controlNode.node.backendNodeId, ownerNode.node.backendNodeId);
+            }
+          }
           const indexed = props.result.filter((p) => /^\d+$/.test(p.name) && p.value?.objectId);
           for (let i = 0; i < indexed.length; i += 8)
             await Promise.all(
@@ -434,7 +482,107 @@ export async function captureBrowserUseDOM(
       return n;
     };
     const root = build(dom.root, [], null, "", owningFrame);
-    const visit = (n: BrowserUseNode, inClosedShadow = false): void => {
+    type FormIntent = {
+      action: string | null;
+      enctype: string;
+      method: string;
+      noValidate: boolean;
+      signature: string;
+      target: string;
+    };
+    const formIntents = new Map<number, FormIntent>();
+    const effectiveDestination = (
+      frame: Frame | null | undefined,
+      value: string | undefined,
+      fallback: string | null = null,
+    ): string | null => {
+      if (value === undefined) return fallback;
+      try {
+        return new URL(value, baseUris.get(frame!) ?? frame?.url()).href;
+      } catch {
+        return value;
+      }
+    };
+    const effectiveSubmissionDestination = (
+      frame: Frame | null | undefined,
+      value: string | undefined,
+    ): string | null =>
+      value === undefined || value.trim() === ""
+        ? (frame?.url() ?? null)
+        : effectiveDestination(frame, value);
+    const effectiveMethod = (value: string | undefined): string => {
+      const method = value?.trim().toLowerCase();
+      return method === "post" || method === "dialog" ? method : "get";
+    };
+    const effectiveTarget = (value: string | undefined, fallback: string): string => {
+      const target = (value === undefined ? fallback : value).trim();
+      const keyword = target.toLowerCase();
+      return ["_self", "_blank", "_parent", "_top"].includes(keyword) ? keyword : target;
+    };
+    const effectiveEnctype = (value: string | undefined): string => {
+      const enctype = value?.trim().toLowerCase();
+      return ["multipart/form-data", "text/plain"].includes(enctype ?? "")
+        ? enctype!
+        : "application/x-www-form-urlencoded";
+    };
+    const formIntent = (n: BrowserUseNode): FormIntent => {
+      const frame = nodeFrame.get(n.id);
+      const action = effectiveSubmissionDestination(frame, n.attributes.action);
+      const method = effectiveMethod(n.attributes.method);
+      const target = effectiveTarget(n.attributes.target, baseTargets.get(frame!) ?? "_self");
+      const enctype = effectiveEnctype(n.attributes.enctype);
+      const noValidate = n.attributes.novalidate !== undefined;
+      return {
+        action,
+        method,
+        target,
+        enctype,
+        noValidate,
+        signature: JSON.stringify([n.id, action, method, target, enctype, noValidate]),
+      };
+    };
+    const isSubmitter = (n: BrowserUseNode): boolean => {
+      const type = n.attributes.type?.toLowerCase();
+      return (
+        (n.nodeName === "BUTTON" && (type === undefined || type === "submit")) ||
+        (n.nodeName === "INPUT" && (type === "submit" || type === "image"))
+      );
+    };
+    const submissionIntent = (
+      n: BrowserUseNode,
+      frame: Frame,
+      owners: readonly FormIntent[],
+    ): Array<
+      [string | null, string, string, string, boolean, string | undefined, string | undefined]
+    > | null => {
+      if (!isSubmitter(n) || owners.length === 0) return null;
+      return owners.map((owner) => [
+        n.attributes.formaction === undefined
+          ? owner.action
+          : effectiveSubmissionDestination(frame, n.attributes.formaction),
+        n.attributes.formmethod === undefined
+          ? owner.method
+          : effectiveMethod(n.attributes.formmethod),
+        n.attributes.formtarget === undefined
+          ? owner.target
+          : effectiveTarget(n.attributes.formtarget, baseTargets.get(frame) ?? "_self"),
+        n.attributes.formenctype === undefined
+          ? owner.enctype
+          : effectiveEnctype(n.attributes.formenctype),
+        owner.noValidate || n.attributes.formnovalidate !== undefined,
+        n.attributes.name,
+        n.attributes.value,
+      ]);
+    };
+    const collectForms = (n: BrowserUseNode): void => {
+      if (n.nodeName === "FORM") formIntents.set(rawById.get(n.id)!.backendNodeId, formIntent(n));
+      n.children.forEach(collectForms);
+      if (n.contentDocument) collectForms(n.contentDocument);
+    };
+    collectForms(root);
+    const visit = (n: BrowserUseNode, inClosedShadow = false, form?: FormIntent): void => {
+      if (n.nodeName === "FORM") form = formIntent(n);
+      if (["IFRAME", "FRAME"].includes(n.nodeName)) form = undefined;
       const raw = rawById.get(n.id)!,
         frame = nodeFrame.get(n.id)!;
       let el = bindings.get(raw.backendNodeId);
@@ -489,13 +637,56 @@ export async function captureBrowserUseDOM(
           };
         }
       }
-      if (el) {
+      if (el && frame && documentLoaders.get(frame) && liveBackendNodeIds.has(raw.backendNodeId)) {
+        const submitter = isSubmitter(n);
+        const explicitOwner = submitter ? formOwners.get(raw.backendNodeId) : undefined;
+        const owners = !submitter
+          ? []
+          : n.attributes.form === undefined
+            ? form === undefined
+              ? []
+              : [form]
+            : explicitOwner === undefined || explicitOwner === null
+              ? []
+              : [formIntents.get(explicitOwner)].filter(
+                  (owner): owner is FormIntent => owner !== undefined,
+                );
+        el.observationIdentity = `${frameIdentity(frame)}:${documentLoaders.get(frame)}:${raw.backendNodeId}`;
+        // Include destinations and form ownership even when the visible name
+        // stays the same. State/value and surrounding text are not identity.
+        el.observationIntent = JSON.stringify([
+          n.nodeName,
+          n.axRole,
+          viewMetadata.get(n.id)?.name,
+          n.attributes.type,
+          n.attributes.role,
+          n.attributes.name,
+          n.attributes["aria-label"],
+          n.attributes["aria-labelledby"],
+          n.attributes.title,
+          n.attributes.placeholder,
+          n.attributes.href,
+          effectiveDestination(frame, n.attributes.href),
+          ["A", "AREA"].includes(n.nodeName)
+            ? effectiveTarget(n.attributes.target, baseTargets.get(frame) ?? "_self")
+            : null,
+          ["A", "AREA"].includes(n.nodeName) ? n.attributes.download : null,
+          submitter ? n.attributes.form : null,
+          owners.map((owner) => owner.signature),
+          submissionIntent(n, frame, owners),
+          n.attributes.autocomplete,
+          n.attributes["data-field-role"],
+        ]);
+        if (submitter && n.attributes.form !== undefined && !formOwners.has(raw.backendNodeId)) {
+          delete el.observationIdentity;
+          delete el.observationIntent;
+        }
         if (!elements.includes(el)) elements.push(el);
         nodeElements.set(n.id, el);
       }
       const closed = inClosedShadow || n.shadowType?.toLowerCase() === "closed";
-      n.children.forEach((child) => visit(child, closed));
-      if (n.contentDocument) visit(n.contentDocument);
+      n.children.forEach((child) => visit(child, closed, child.shadowType ? undefined : form));
+      if (n.contentDocument) visit(n.contentDocument, closed, undefined);
     };
     visit(root);
     return root;
