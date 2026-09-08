@@ -328,10 +328,9 @@ export async function captureBrowserUseDOM(
               }),
             );
         }
-        if (containsCustomElements)
-          try {
+        try {
             const listenerTargets = await client.send("Runtime.evaluate", {
-              expression: `(() => { const roots=[document], priority=[], fallback=[], limit=100; for(let i=0;i<roots.length;i++) for(const el of roots[i].querySelectorAll('*')) { if(el.shadowRoot) roots.push(el.shadowRoot); if(!el.localName.includes('-')) continue; const r=el.getBoundingClientRect(), s=getComputedStyle(el), visible=r.width>1&&r.height>1&&r.bottom>0&&r.right>0&&r.top<innerHeight&&r.left<innerWidth&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)>0; const role=el.getAttribute('role')||''; const likely=visible&&(/(?:quick-add|add-to-cart|product-form|buy|cart)/.test(el.localName)||el.closest("form,[class*='product'],[id*='product'],[class*='price'],[id*='price']")!==null||['button','link','checkbox','radio','combobox','textbox','menuitem','option','tab'].includes(role)||el.hasAttribute('command')||el.hasAttribute('commandfor')||el.hasAttribute('popovertarget')); const targets=likely?priority:fallback; if(targets.length<limit) targets.push(el); } return [...priority,...fallback].slice(0,limit); })()`,
+              expression: `(() => { const roots=[document], customPriority=[], customFallback=[], standardPriority=[], standardFallback=[], limit=100; for(let i=0;i<roots.length;i++) for(const el of roots[i].querySelectorAll('*')) { if(el.shadowRoot) roots.push(el.shadowRoot); const r=el.getBoundingClientRect(), s=getComputedStyle(el), visible=r.width>1&&r.height>1&&r.bottom>0&&r.right>0&&r.top<innerHeight&&r.left<innerWidth&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)>0; if(el.localName.includes('-')) { const role=el.getAttribute('role')||''; const likely=visible&&(/(?:quick-add|add-to-cart|product-form|buy|cart)/.test(el.localName)||el.closest("form,[class*='product'],[id*='product'],[class*='price'],[id*='price']")!==null||['button','link','checkbox','radio','combobox','textbox','menuitem','option','tab'].includes(role)||el.hasAttribute('command')||el.hasAttribute('commandfor')||el.hasAttribute('popovertarget')); const targets=likely?customPriority:customFallback; if(targets.length<limit) targets.push(el); } else { const targets=visible?standardPriority:standardFallback; if(targets.length<limit) targets.push(el); } } return [...customPriority,...customFallback].slice(0,limit).concat([...standardPriority,...standardFallback].slice(0,limit)); })()`,
               contextId: context.executionContextId,
               objectGroup: "ts-observation",
             });
@@ -368,7 +367,7 @@ export async function captureBrowserUseDOM(
                       frameListeners.add(listener.backendNodeId);
               }
             }
-          } catch {}
+        } catch {}
         for (const [backendNodeId, element] of frameBindings) bindings.set(backendNodeId, element);
         for (const backendNodeId of frameListeners) listeners.add(backendNodeId);
       } catch {
@@ -635,12 +634,6 @@ export async function captureBrowserUseDOM(
       if (n.contentDocument) collectForms(n.contentDocument);
     };
     collectForms(root);
-    const visit = (n: BrowserUseNode, inClosedShadow = false, form?: FormIntent): void => {
-      if (n.nodeName === "FORM") form = formIntent(n);
-      if (["IFRAME", "FRAME"].includes(n.nodeName)) form = undefined;
-    // A labelled custom wrapper can own a native control without being a click
-    // target itself. Bind its label only to a sole descendant, never to a grid
-    // of competing buttons or to the wrapper's bounding box.
     const ownedLabels = new Map<string, string>();
     const ownedControl = (n: BrowserUseNode): { count: number; sole?: BrowserUseNode } => {
       if (
@@ -692,7 +685,10 @@ export async function captureBrowserUseDOM(
       if (custom && label && sole && !ownedLabels.has(sole.id)) ownedLabels.set(sole.id, label);
       return { count, ...(sole ? { sole } : {}) };
     };
-    ownedControl(root);
+    if (containsCustomElements) ownedControl(root);
+    const visit = (n: BrowserUseNode, inClosedShadow = false, form?: FormIntent): void => {
+      if (n.nodeName === "FORM") form = formIntent(n);
+      if (["IFRAME", "FRAME"].includes(n.nodeName)) form = undefined;
       const raw = rawById.get(n.id)!,
         frame = nodeFrame.get(n.id)!;
       let el = bindings.get(raw.backendNodeId);

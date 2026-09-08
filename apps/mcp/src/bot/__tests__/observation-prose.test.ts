@@ -27,6 +27,23 @@ afterAll(async () => {
   await browser?.close();
 });
 describe("interleaved observation DOM", () => {
+  it("keeps a standard direct-listener control actionable", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent('<span id="listener">Continue</span>');
+      await page.locator("#listener").evaluate((element) =>
+        element.addEventListener("click", () => element.setAttribute("data-clicked", "yes")),
+      );
+      const capture = await captureThroughController(page);
+      const listener = capture.elements.find((element) => element.id === "listener")!;
+      expect(listener).toMatchObject({ tag: "span" });
+      await page.locator(listener.selector).click();
+      expect(await page.locator("#listener").getAttribute("data-clicked")).toBe("yes");
+    } finally {
+      await page.close();
+    }
+  });
+
   it("binds persistent capabilities to physical nodes across fresh CDP captures", async () => {
     const page = await browser.newPage();
     const refs = new StableObservationRefs();
@@ -99,6 +116,11 @@ describe("interleaved observation DOM", () => {
       expect(explicit).toBeDefined();
       await page.locator("form").evaluate((form) => form.setAttribute("action", "/other"));
       expect(await read()).not.toBe(explicit);
+    } finally {
+      await page.close();
+    }
+  });
+
   it("finds Shopify owned buy controls and folds repeated custom-element content", async () => {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
     try {
@@ -125,7 +147,7 @@ describe("interleaved observation DOM", () => {
       }).rows;
       for (const el of buy) {
         expect(rows.find((row) => row.ref === handles.get(el))?.role).toBe("button");
-        expect(handles.get(el)).toMatch(/^@e:[A-Za-z0-9_-]{11}$/);
+        expect(handles.get(el)).toMatch(/^@e:[A-Za-z0-9_-]{22}$/);
       }
       for (const el of buy) await page.locator(el.selector).click();
       expect(await page.evaluate(() => (window as unknown as { cart: string[] }).cart)).toEqual([
@@ -284,6 +306,11 @@ describe("interleaved observation DOM", () => {
         expect(element.observationIdentity).toBe(prior.identity);
         expect(second.handles.get(element)).not.toBe(prior.ref);
       }
+    } finally {
+      await page.close();
+    }
+  });
+
   it("does not borrow custom wrapper labels across competing controls or hidden subtrees", async () => {
     const page = await browser.newPage();
     try {
@@ -378,6 +405,11 @@ describe("interleaved observation DOM", () => {
         expect(changed.get(id)!.identity).toBe(held.get(id)!.identity);
         expect(changed.get(id)!.ref).toBe(held.get(id)!.ref);
       }
+    } finally {
+      await page.close();
+    }
+  });
+
   it("gives a labelled custom wrapper's sole enabled buy control its label", async () => {
     const page = await browser.newPage();
     try {
@@ -526,6 +558,11 @@ describe("interleaved observation DOM", () => {
         .evaluate((element) => element.removeAttribute("formnovalidate"));
       const afterValidationRestore = await read();
       expect(afterValidationRestore.ref).not.toBe(held.ref);
+    } finally {
+      await page.close();
+    }
+  });
+
   it("does not transfer wrapper labels across an enabled wrapper control", async () => {
     const page = await browser.newPage();
     try {
