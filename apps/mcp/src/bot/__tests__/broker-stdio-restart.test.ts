@@ -1,31 +1,48 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { chromium } from "playwright";
 import { afterEach, describe, expect, it } from "vitest";
 import { SessionStore } from "../../session.js";
-import { forwarderId } from "../broker/lineage.js";
-import { listenBroker } from "../broker/transport.js";
+import { brokerElectionRoot } from "../broker/discovery.js";
+import { ProfileBusyError, acquireProfileOperationGuard } from "../profile.js";
 
 const require = createRequire(import.meta.url);
 const credential = "a".repeat(43);
-const brokerIdentity = {
-  cellId: "retained-cell",
-  browserEpoch: "retained-epoch",
-  targetId: "retained-target",
-  pid: 4242,
-};
-const capability = {
-  ...brokerIdentity,
-  sessionId: "retained-session",
-  leaseGeneration: "retained-lease",
-};
+const sleep = async (ms: number) => await new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+let chromiumAvailable = false;
+try {
+  chromiumAvailable = existsSync(chromium.executablePath());
+} catch {
+  chromiumAvailable = false;
+}
 
 interface StdioClient {
   initialize(): Promise<void>;
   callTool(name: string, args: Record<string, unknown>): Promise<Record<string, unknown>>;
+}
+
+interface EndpointOwner {
+  pid: number;
+  start_time: string;
+  profileDir: string;
+}
+
+interface BrowserLaunch {
+  marker: string;
+  user_data_dir: string;
+  anchor?: { pid: number; start_time: string };
+}
+
+interface ReaperManifest {
+  owner: { pid: number };
+  launches: BrowserLaunch[];
 }
 
 function stdioClient(child: ChildProcess, diagnostics: () => string): StdioClient {
@@ -56,7 +73,7 @@ function stdioClient(child: ChildProcess, diagnostics: () => string): StdioClien
       const timeout = setTimeout(() => {
         pending.delete(id);
         reject(new Error(`MCP ${method} timed out: ${diagnostics()}`));
-      }, 10_000);
+      }, 30_000);
       pending.set(id, {
         resolve: (value) => {
           clearTimeout(timeout);
@@ -91,29 +108,87 @@ function stdioClient(child: ChildProcess, diagnostics: () => string): StdioClien
   };
 }
 
-function waitForExit(child: ChildProcess, diagnostics: () => string): Promise<void> {
+function waitForExit(child: ChildProcess, diagnostics: () => string): Promise<number | null> {
   return new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("exit", (code, signal) => {
-      if (code === 0 && signal === null) resolve();
-      else reject(new Error(`MCP server exited code=${code} signal=${signal}: ${diagnostics()}`));
+      if (signal === null) resolve(code);
+      else reject(new Error(`process exited signal=${signal}: ${diagnostics()}`));
     });
   });
 }
 
-describe("broker-backed MCP stdio restart", () => {
+async function waitFor<T>(read: () => Promise<T | undefined>, description: string): Promise<T> {
+  let failure = "";
+  for (let attempt = 0; attempt < 400; attempt++) {
+    try {
+      const value = await read();
+      if (value !== undefined) return value;
+    } catch (error) {
+      failure = error instanceof Error ? error.message : String(error);
+    }
+    await sleep(25);
+  }
+  throw new Error(`${description} did not become available${failure ? `: ${failure}` : ""}`);
+}
+
+async function endpointOwner(path: string): Promise<EndpointOwner | undefined> {
+  try {
+    const owner = JSON.parse(await readFile(`${path}.owner.json`, "utf8")) as EndpointOwner;
+    return Number.isSafeInteger(owner.pid) && typeof owner.start_time === "string" ? owner : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function browserLaunch(
+  root: string,
+  brokerPid: number,
+  profile: string,
+): Promise<{ marker: string; pid: number; startTime: string } | undefined> {
+  try {
+    for (const entry of await readdir(root)) {
+      if (!entry.endsWith(".json")) continue;
+      const manifest = JSON.parse(await readFile(join(root, entry), "utf8")) as ReaperManifest;
+      if (manifest.owner?.pid !== brokerPid) continue;
+      const launch = manifest.launches?.find(
+        (candidate) => candidate.user_data_dir === profile && candidate.anchor !== undefined,
+      );
+      if (launch?.anchor === undefined) continue;
+      return {
+        marker: launch.marker,
+        pid: launch.anchor.pid,
+        startTime: launch.anchor.start_time,
+      };
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+async function closeServer(server: Server): Promise<void> {
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+}
+
+const describeChromium = chromiumAvailable ? describe : describe.skip;
+
+describeChromium("broker-backed MCP stdio restart", () => {
   const roots: string[] = [];
 
   afterEach(async () => {
-    await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })));
+    await Promise.all(
+      roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })),
+    );
   });
 
-  it("reclaims the same broker browser session after an MCP stdio restart", async () => {
+  it("reclaims one supervised broker and one real browser after an MCP stdio restart", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-broker-stdio-restart-"));
     roots.push(root);
     const socket = join(root, "broker.sock");
     const config = join(root, "config");
     const profile = join(root, "profile");
+    const reapers = join(root, "reapers");
     await Promise.all([mkdir(profile), mkdir(join(root, "home"))]);
     const account = {
       account_id: "fixture-account",
@@ -123,59 +198,49 @@ describe("broker-backed MCP stdio restart", () => {
     };
     await new SessionStore(join(config, "trusty-squire", "session.json")).write(account);
 
-    let starts = 0;
-    let reclaims = 0;
-    const disconnects: boolean[] = [];
-    const broker = await listenBroker(socket, {
-      authenticate: async (_token, _agentId, lineageCredential) =>
-        lineageCredential === credential
-          ? {
-              accountId: account.account_id,
-              agentId: "stdio-restart",
-              forwarderId: forwarderId(credential),
-            }
-          : null,
-      call: async (_principal, method, params) => {
-        if (method === "reclaim") {
-          reclaims += 1;
-          return { capabilities: starts === 0 ? [] : [capability] };
-        }
-        if (method === "acknowledge" || method === "confirm_start") return {};
-        if (method === "recover") return null;
-        if (method !== "tool") throw new Error(`Unexpected broker method ${method}`);
-        const name = (params as { name?: unknown }).name;
-        if (name === "operate_start") {
-          starts += 1;
-          return {
-            capability,
-            result: { session_id: capability.sessionId, broker: brokerIdentity },
-          };
-        }
-        if (name === "operate_observe")
-          return {
-            result: {
-              session_id: capability.sessionId,
-              dom: "retained broker browser",
-              broker: brokerIdentity,
-            },
-          };
-        if (name === "operate_finish") return { result: { closed: true } };
-        throw new Error(`Unexpected broker tool ${String(name)}`);
-      },
-      disconnect: async (_principal, explicit) => {
-        disconnects.push(explicit === true);
-      },
+    const service = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "text/html" });
+      response.end("<!doctype html><title>Retained browser</title><button>Ready</button>");
     });
+    await new Promise<void>((resolve) => service.listen(0, "127.0.0.1", resolve));
+    const address = service.address();
+    if (address === null || typeof address === "string") throw new Error("test service did not bind");
+    const serviceUrl = `http://127.0.0.1:${address.port}/`;
+
+    let brokerDiagnostics = "";
+    const broker = spawn(
+      process.execPath,
+      [require.resolve("tsx/cli"), fileURLToPath(new URL("../../bin.ts", import.meta.url)), "broker"],
+      {
+        env: {
+          ...process.env,
+          HOME: join(root, "home"),
+          XDG_CONFIG_HOME: config,
+          TMPDIR: root,
+          TRUSTY_SQUIRE_ACCOUNT_ID: account.account_id,
+          TRUSTY_SQUIRE_PROFILE_DIR: profile,
+          TRUSTY_SQUIRE_REAPER_DIR: reapers,
+          TRUSTY_SQUIRE_BROKER_SOCKET: socket,
+          TRUSTY_SQUIRE_BROKER_SUPERVISED: "1",
+          TRUSTY_SQUIRE_AGENT_IDENTITY: "stdio-restart",
+          UNIVERSAL_BOT_CHANNEL: "chrome",
+          UNIVERSAL_BOT_CHROME_BINARY: chromium.executablePath(),
+          BOT_SELF_LAUNCH: "1",
+          BOT_CDP_ENDPOINT: "",
+        },
+        stdio: ["ignore", "ignore", "pipe"],
+      },
+    );
+    broker.stderr?.on("data", (chunk) => {
+      brokerDiagnostics += String(chunk);
+    });
+    const brokerExited = waitForExit(broker, () => brokerDiagnostics);
     const children: ChildProcess[] = [];
-    const launch = () => {
-      let stderr = "";
+    const launchServer = () => {
+      let diagnostics = "";
       const child = spawn(
         process.execPath,
-        [
-          require.resolve("tsx/cli"),
-          fileURLToPath(new URL("../../bin.ts", import.meta.url)),
-          "server",
-        ],
+        [require.resolve("tsx/cli"), fileURLToPath(new URL("../../bin.ts", import.meta.url)), "server"],
         {
           env: {
             ...process.env,
@@ -184,8 +249,9 @@ describe("broker-backed MCP stdio restart", () => {
             TMPDIR: root,
             TRUSTY_SQUIRE_ACCOUNT_ID: account.account_id,
             TRUSTY_SQUIRE_PROFILE_DIR: profile,
-            TRUSTY_SQUIRE_REAPER_DIR: join(root, "reapers"),
+            TRUSTY_SQUIRE_REAPER_DIR: reapers,
             TRUSTY_SQUIRE_BROKER_SOCKET: socket,
+            TRUSTY_SQUIRE_BROKER_SUPERVISED: "1",
             TRUSTY_SQUIRE_FORWARDER_CREDENTIAL: credential,
             TRUSTY_SQUIRE_AGENT_IDENTITY: "stdio-restart",
             BOT_CDP_ENDPOINT: "",
@@ -195,44 +261,69 @@ describe("broker-backed MCP stdio restart", () => {
       );
       children.push(child);
       child.stderr?.on("data", (chunk) => {
-        stderr += String(chunk);
+        diagnostics += String(chunk);
       });
-      return { child, diagnostics: () => stderr };
+      return { child, diagnostics: () => diagnostics };
     };
+
     try {
-      const first = launch();
+      const owner = await waitFor(
+        async () => {
+          if (broker.exitCode !== null) throw new Error(brokerDiagnostics);
+          const owner = await endpointOwner(socket);
+          return owner?.pid === broker.pid ? owner : undefined;
+        },
+        "supervised broker endpoint owner",
+      );
+      expect(owner.pid).toBe(broker.pid);
+      let contender: { release(): void } | undefined;
+      try {
+        contender = acquireProfileOperationGuard(profile, brokerElectionRoot(profile));
+        throw new Error("supervised broker did not retain its canonical profile election");
+      } catch (error) {
+        expect(error).toBeInstanceOf(ProfileBusyError);
+      } finally {
+        contender?.release();
+      }
+
+      const first = launchServer();
       const firstClient = stdioClient(first.child, first.diagnostics);
       await firstClient.initialize();
-      const started = await firstClient.callTool("operate_start", {
-        service_url: "https://example.test",
-      });
-      expect(started).toMatchObject({ session_id: capability.sessionId, broker: brokerIdentity });
-      const firstExit = waitForExit(first.child, first.diagnostics);
-      first.child.stdin?.end();
-      await firstExit;
+      const started = await firstClient.callTool("operate_start", { service_url: serviceUrl });
+      const sessionId = started.session_id;
+      if (typeof sessionId !== "string")
+        throw new Error(`operate_start returned no session: ${JSON.stringify(started)}`);
+      const before = await waitFor(
+        async () => await browserLaunch(reapers, owner.pid, profile),
+        "real broker browser owner",
+      );
 
-      const second = launch();
+      const firstExited = waitForExit(first.child, first.diagnostics);
+      first.child.stdin?.end();
+      expect(await firstExited).toBe(0);
+
+      const second = launchServer();
       const secondClient = stdioClient(second.child, second.diagnostics);
       await secondClient.initialize();
-      const observed = await secondClient.callTool("operate_observe", {
-        session_id: capability.sessionId,
-      });
-      expect(observed).toMatchObject({
-        session_id: capability.sessionId,
-        dom: "retained broker browser",
-        broker: brokerIdentity,
-      });
-      await secondClient.callTool("operate_finish", { session_id: capability.sessionId });
-      const secondExit = waitForExit(second.child, second.diagnostics);
-      second.child.stdin?.end();
-      await secondExit;
+      const observed = await secondClient.callTool("operate_observe", { session_id: sessionId });
+      expect(observed).toMatchObject({ session_id: sessionId, url: serviceUrl });
+      const after = await waitFor(
+        async () => await browserLaunch(reapers, owner.pid, profile),
+        "retained real broker browser owner",
+      );
+      expect(after).toEqual(before);
+      expect(await endpointOwner(socket)).toEqual(owner);
+      expect(broker.exitCode).toBeNull();
 
-      expect(starts).toBe(1);
-      expect(reclaims).toBeGreaterThanOrEqual(3);
-      expect(disconnects).toEqual([false, false]);
+      await secondClient.callTool("operate_finish", { session_id: sessionId });
+      const secondExited = waitForExit(second.child, second.diagnostics);
+      second.child.stdin?.end();
+      expect(await secondExited).toBe(0);
     } finally {
       for (const child of children) if (child.exitCode === null) child.kill("SIGTERM");
-      await broker.close();
+      if (broker.exitCode === null) broker.kill("SIGTERM");
+      await brokerExited.catch(() => undefined);
+      await closeServer(service);
     }
-  }, 30_000);
+  }, 120_000);
 });
