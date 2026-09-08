@@ -8,18 +8,27 @@ import { BrokerRefusal } from "./scheduler.js";
  * dispatched request after transport loss: its side effect may have happened. */
 export class OperatorForwarder {
   private connection: Promise<BrokerClient> | undefined;
+  private client: BrokerClient | undefined;
+  private connecting = false;
   private readonly sessions = new Map<string, TabCapability>();
   constructor(
     private readonly path: string,
     private readonly guard: SessionGuard,
   ) {}
   private connect(): Promise<BrokerClient> {
-    this.connection ??= (async () => {
-      const session = await this.guard.bind();
-      if (session?.agent_session_token === undefined)
-        throw new BrokerRefusal("unauthorized", "Connect before using the broker");
-      return await connectOrLaunchBroker(this.path, session.agent_session_token);
-    })();
+    if (this.connection === undefined) {
+      this.connecting = true;
+      this.connection = (async () => {
+        const session = await this.guard.bind();
+        if (session?.agent_session_token === undefined)
+          throw new BrokerRefusal("unauthorized", "Connect before using the broker");
+        const client = await connectOrLaunchBroker(this.path, session.agent_session_token);
+        this.client = client;
+        return client;
+      })().finally(() => {
+        this.connecting = false;
+      });
+    }
     return this.connection;
   }
   async invoke(name: string, args: Record<string, unknown>): Promise<unknown> {
@@ -29,6 +38,7 @@ export class OperatorForwarder {
       const existing = await this.connection.catch(() => undefined);
       if (existing === undefined || !existing.isConnected()) {
         this.connection = undefined;
+        this.client = undefined;
         this.sessions.clear();
       }
     }
@@ -57,10 +67,14 @@ export class OperatorForwarder {
     return this.sessions.size;
   }
   connected(): boolean {
-    return this.connection !== undefined;
+    return this.client?.isConnected() ?? this.connecting;
   }
   async close(): Promise<void> {
-    await (await this.connection)?.close();
+    const connection = this.connection;
+    this.connection = undefined;
+    const client = this.client ?? (await connection?.catch(() => undefined));
+    this.client = undefined;
+    await client?.close();
     this.sessions.clear();
   }
 }

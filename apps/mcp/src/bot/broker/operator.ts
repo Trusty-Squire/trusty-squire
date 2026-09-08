@@ -114,12 +114,13 @@ export class OperatorBroker implements BrokerTransportPort {
         siteResources(hosts),
         async (id, signal, reserve) => {
           if (signal.aborted) throw new BrokerRefusal("cancelled", "Start cancelled");
-          await this.journal?.record(id, requestId, "entered");
+          const mutationCapableStart = tool.name === "operate_recipe_run";
+          if (mutationCapableStart) await this.journal?.record(id, requestId, "entered");
           observation = await withBrokerAdmission(
             { sessionId: id, reserve },
             async () => await tool.handler(args, pinnedApi),
           );
-          await this.journal?.record(id, requestId, "settled");
+          if (mutationCapableStart) await this.journal?.record(id, requestId, "settled");
           internalId = String((observation as { session_id: string }).session_id);
           const session = sessionForCall(internalId);
           if (session === undefined) {

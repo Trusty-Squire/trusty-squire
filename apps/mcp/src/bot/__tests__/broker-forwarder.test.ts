@@ -46,6 +46,7 @@ describe("MCP broker forwarding", () => {
     };
     const a = new OperatorForwarder(path, guard),
       b = new OperatorForwarder(path, guard);
+    let brokerClosed = false;
     try {
       const first = (await a.invoke("operate_start", {})) as { session_id: string };
       const second = (await b.invoke("operate_start", {})) as { session_id: string };
@@ -61,10 +62,21 @@ describe("MCP broker forwarding", () => {
       await a.invoke("operate_finish", { session_id: first.session_id });
       expect(a.sessionCount()).toBe(0);
       expect(b.sessionCount()).toBe(1);
+      const rejected = new OperatorForwarder(path, {
+        ...guard,
+        bind: async () => null,
+      });
+      await expect(rejected.invoke("operate_start", {})).rejects.toThrow("Connect before");
+      expect(rejected.connected()).toBe(false);
+      await expect(rejected.close()).resolves.toBeUndefined();
+      expect(a.connected()).toBe(true);
+      await broker.close();
+      brokerClosed = true;
+      await expect.poll(() => a.connected(), { timeout: 1_000 }).toBe(false);
     } finally {
       await a.close();
       await b.close();
-      await broker.close();
+      if (!brokerClosed) await broker.close();
       expect(clients.size).toBe(0);
       await rm(root, { recursive: true, force: true });
     }
