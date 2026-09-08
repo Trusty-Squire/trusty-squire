@@ -52,6 +52,7 @@ export async function runBrokerDaemon(): Promise<void> {
   const journal = new DispatchJournal(
     join(profilePathIdentity(CHROME_PROFILE_DIR), "trusty-squire-broker-dispatch.jsonl"),
   );
+  await journal.expirePendingStartDeliveries();
   await journal.assertReconciled();
   const operator = new OperatorBroker(
     {
@@ -94,6 +95,11 @@ export async function runBrokerDaemon(): Promise<void> {
       if (idleTimer !== undefined) clearTimeout(idleTimer);
       const report = await guard.inspect();
       if (report.problem !== null) throw new Error(report.problem.message);
+      if (runtime.browserLost() && (method === "recover" || method === "reclaim"))
+        throw new BrokerRefusal(
+          "browser_lost",
+          "Browser transport is lost; the pending start cannot be recovered",
+        );
       if (method === "recover") return await operator.recover(principal, params);
       if (method === "reclaim") return await operator.reclaim(principal);
       if (method === "acknowledge") {
@@ -147,7 +153,7 @@ export async function runBrokerDaemon(): Promise<void> {
         throw new Error("Identity maintenance is draining; retry after connect completes");
       if (runtime.browserLost()) {
         operator.authority.fenceRuntime();
-        await operator.authority.retryQuarantined();
+        await operator.reap();
         const inventory = operator.authority.inventory();
         if (inventory.active === 0 && inventory.quarantined === 0 && inventory.admitting === 0) {
           await journal.assertReconciled();
@@ -208,8 +214,8 @@ export async function runBrokerDaemon(): Promise<void> {
   const reap = setInterval(() => {
     if (cleanupRunning) return;
     cleanupRunning = true;
-    void operator.authority
-      .retryQuarantined()
+    void operator
+      .reap()
       .then(async () => {
         if (
           maintenanceOwner !== undefined &&

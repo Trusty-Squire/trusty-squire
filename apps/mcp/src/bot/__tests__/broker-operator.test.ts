@@ -29,7 +29,7 @@ vi.mock("../session/lifecycle.js", () => ({
 
 import { brokerAdmissionId } from "../broker/admission-context.js";
 import { installBrokerBrowserCustody } from "../broker/custody.js";
-import { DispatchJournal } from "../broker/dispatch-journal.js";
+import { DispatchJournal, START_DELIVERY_RETENTION_MS } from "../broker/dispatch-journal.js";
 import { OperatorForwarder } from "../broker/forwarder.js";
 import { forwarderId } from "../broker/lineage.js";
 import { OperatorBroker } from "../broker/operator.js";
@@ -238,6 +238,7 @@ it("retains acknowledged start control until a same-lineage follow-up", async ()
     const original = new OperatorForwarder(path, guard, "a".repeat(43));
     const foreign = new OperatorForwarder(path, guard, "b".repeat(43));
     const restarted = new OperatorForwarder(path, guard, "a".repeat(43));
+    const expired = new OperatorForwarder(path, guard, "a".repeat(43));
     try {
       const started = (await original.invoke(name, {}, "original-start-id")) as { session_id: string };
       await original.close();
@@ -247,6 +248,8 @@ it("retains acknowledged start control until a same-lineage follow-up", async ()
         admitting: 0,
       });
       expect(await journal.hasPendingStartDelivery(forwarderId("a".repeat(43)))).toBe(true);
+      await broker.reap(Date.now() + START_DELIVERY_RETENTION_MS - 1_000);
+      expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 1, admitting: 0 });
       await expect(
         foreign.invoke(name, {}, "foreign-recovery-id", { recover: true }),
       ).rejects.toThrow("No matching durable outcome");
@@ -261,10 +264,24 @@ it("retains acknowledged start control until a same-lineage follow-up", async ()
       await restarted.invoke("operate_finish", { session_id: started.session_id }, "finish-id");
       expect(state.sessions.size).toBe(0);
       expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
+      await restarted.invoke(name, {}, "expiring-start-id");
+      await restarted.close();
+      await expect.poll(() => broker.authority.inventory()).toEqual({
+        active: 0,
+        quarantined: 1,
+        admitting: 0,
+      });
+      await broker.reap(Date.now() + START_DELIVERY_RETENTION_MS);
+      expect(state.sessions.size).toBe(0);
+      expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
+      await expect(
+        expired.invoke(name, {}, "expired-recovery-id", { recover: true }),
+      ).rejects.toThrow("No matching durable outcome");
     } finally {
       await original.close();
       await foreign.close();
       await restarted.close();
+      await expired.close();
       await listener.close();
       await rm(root, { recursive: true, force: true });
     }

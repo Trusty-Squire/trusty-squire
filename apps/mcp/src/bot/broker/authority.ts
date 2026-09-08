@@ -404,12 +404,15 @@ export class BrokerAuthority {
     for (const admission of this.admissions.values()) admission.abort.abort();
   }
 
-  async retryQuarantined(): Promise<void> {
-    await Promise.all(
-      [...this.actors.values()]
-        .filter((actor) => actor.state === "quarantined")
-        .map(async (actor) => await this.closeActor(actor, actor.closeReason ?? "disconnect")),
-    );
+  async retryQuarantined(
+    shouldClose: (capability: TabCapability, principal: BrokerPrincipal) => Promise<boolean> | boolean =
+      () => true,
+  ): Promise<void> {
+    for (const actor of [...this.actors.values()]) {
+      if (actor.state !== "quarantined") continue;
+      if (!(await shouldClose(actor.capability, actor.principal))) continue;
+      await this.closeActor(actor, actor.closeReason ?? "disconnect");
+    }
   }
 
   inventory(): { active: number; quarantined: number; admitting: number } {

@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import { BrokerRefusal } from "./scheduler.js";
 
 type DispatchPhase = "entered" | "outcome" | "acknowledged" | "settled";
+export const START_DELIVERY_RETENTION_MS = 5 * 60_000;
 
 interface DispatchRecord {
   sessionId: string;
@@ -113,10 +114,11 @@ export class DispatchJournal {
     );
   }
 
-  async hasPendingStartDelivery(forwarderId: string): Promise<boolean> {
+  async hasPendingStartDelivery(forwarderId: string, sessionId?: string): Promise<boolean> {
     return [...(await this.states()).values()].some(
       (record) =>
         record.forwarderId === forwarderId &&
+        (sessionId === undefined || record.sessionId === sessionId) &&
         record.start === true &&
         record.phase === "acknowledged",
     );
@@ -230,6 +232,28 @@ export class DispatchJournal {
       ),
     );
     return starts.length > 0;
+  }
+
+  async expirePendingStartDeliveries(now = Date.now()): Promise<number> {
+    const starts = [...(await this.states()).values()].filter(
+      (record) =>
+        record.forwarderId !== undefined &&
+        record.start === true &&
+        record.phase === "acknowledged" &&
+        now - record.at >= START_DELIVERY_RETENTION_MS,
+    );
+    await Promise.all(
+      starts.map(async (record) =>
+        await this.record(record.sessionId, record.requestId, "settled", {
+          forwarderId: record.forwarderId!,
+          start: true,
+          ...(record.operation === undefined ? {} : { operation: record.operation }),
+          ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
+          ...(record.outcome === undefined ? {} : { outcome: record.outcome }),
+        }),
+      ),
+    );
+    return starts.length;
   }
 
   record(

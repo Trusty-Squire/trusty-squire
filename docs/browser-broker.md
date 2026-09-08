@@ -77,7 +77,9 @@ binding. Browser epoch changes invalidate earlier capabilities.
   recovered start returns its existing session capability without retaining page
   observations. Broker receipt alone does not prove stdio delivery: an
   acknowledged start remains same-lineage recoverable until a later
-  capability-bearing command confirms caller control.
+  capability-bearing command confirms caller control, for up to five minutes.
+  A lost browser transport cannot yield a recovered capability; its pending
+  delivery record remains a no-replay fence until that retention window expires.
 - Idle shutdown requires zero connected clients and zero active, admitting, or
   quarantined sessions. Graceful Chrome closure precedes lease release. Socket
   recovery requires process birth, endpoint inode, and old-profile-free evidence.

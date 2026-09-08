@@ -292,7 +292,11 @@ export class OperatorBroker implements BrokerTransportPort {
               return remapSession(result, internalId, id);
             },
             close: async (reason) => {
-              if (await this.journal?.hasOutstanding(id)) return false;
+              if (
+                (await this.journal?.hasOutstanding(id)) ||
+                (await this.journal?.hasPendingStartDelivery(journalForwarderId(principal), id))
+              )
+                return false;
               const pending = session.pendingThreeDs;
               if (reason === "disconnect" && pending !== null && Date.now() < pending.deadline) {
                 const resolution = await session.browser.waitForThreeDsResolution(0);
@@ -439,6 +443,19 @@ export class OperatorBroker implements BrokerTransportPort {
     if (!this.authority.hasCapability(principal, capability))
       throw new BrokerRefusal("stale_lease", "Capability does not name an owned live session");
     await this.journal?.confirmStartDelivery(capability.sessionId, journalForwarderId(principal));
+  }
+  async reap(now = Date.now()): Promise<void> {
+    await this.journal?.expirePendingStartDeliveries(now);
+    await this.authority.retryQuarantined(
+      async (capability, principal) =>
+        !(
+          principal.forwarderId !== undefined &&
+          (await this.journal?.hasPendingStartDelivery(
+            principal.forwarderId,
+            capability.sessionId,
+          ))
+        ),
+    );
   }
   async acknowledge(principal: BrokerPrincipal, requestId: string): Promise<void> {
     if (await this.journal?.acknowledge(journalForwarderId(principal), requestId))
