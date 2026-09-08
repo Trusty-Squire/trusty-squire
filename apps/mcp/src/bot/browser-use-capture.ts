@@ -238,33 +238,32 @@ export async function captureBrowserUseDOM(
       const candidates = inventory.filter((e) => (e.framePath ?? null) === path);
       const frameBindings = new Map<number, InteractiveElement>();
       const frameListeners = new Set<number>();
+      let formAssociated = new Set<string>();
       try {
-        // Read the registry in the page's own realm: isolated-world constructors
-        // do not expose the site's form-associated custom-element definitions.
-        formAssociatedTags.set(
-          frame,
-          new Set(
-            await frame.evaluate(() => {
-              const names = new Set<string>();
-              const roots: Array<Document | ShadowRoot> = [document];
-              for (let i = 0; i < roots.length; i++)
-                for (const el of Array.from(roots[i]!.querySelectorAll("*"))) {
-                  const name = el.localName;
-                  if (
-                    name.includes("-") &&
-                    (
-                      customElements.get(name) as
-                        | (CustomElementConstructor & { formAssociated?: boolean })
-                        | undefined
-                    )?.formAssociated === true
-                  )
-                    names.add(name);
-                  if (el.shadowRoot) roots.push(el.shadowRoot);
-                }
-              return [...names];
-            }),
-          ),
+        formAssociated = new Set(
+          await frame.evaluate(() => {
+            const names = new Set<string>();
+            const roots: Array<Document | ShadowRoot> = [document];
+            for (let i = 0; i < roots.length; i++)
+              for (const el of Array.from(roots[i]!.querySelectorAll("*"))) {
+                const name = el.localName;
+                if (
+                  name.includes("-") &&
+                  (
+                    customElements.get(name) as
+                      | (CustomElementConstructor & { formAssociated?: boolean })
+                      | undefined
+                  )?.formAssociated === true
+                )
+                  names.add(name);
+                if (el.shadowRoot) roots.push(el.shadowRoot);
+              }
+            return [...names];
+          }),
         );
+      } catch {}
+      formAssociatedTags.set(frame, formAssociated);
+      try {
         const context = await client.send("Page.createIsolatedWorld", {
           frameId,
           worldName: "trusty-squire-observation",
@@ -324,7 +323,7 @@ export async function captureBrowserUseDOM(
         }
         try {
           const listenerTargets = await client.send("Runtime.evaluate", {
-            expression: `(() => { const roots=[document], targets=[]; for(let i=0;i<roots.length&&targets.length<100;i++) for(const el of roots[i].querySelectorAll('*')) { if(el.localName.includes('-')) { targets.push(el); if(targets.length>=100) break; } if(el.shadowRoot) roots.push(el.shadowRoot); } return targets; })()`,
+            expression: `(() => { const roots=[document], priority=[], fallback=[], limit=100; for(let i=0;i<roots.length;i++) for(const el of roots[i].querySelectorAll('*')) { if(el.shadowRoot) roots.push(el.shadowRoot); if(!el.localName.includes('-')) continue; const r=el.getBoundingClientRect(), s=getComputedStyle(el), visible=r.width>1&&r.height>1&&r.bottom>0&&r.right>0&&r.top<innerHeight&&r.left<innerWidth&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)>0; const role=el.getAttribute('role')||''; const likely=visible&&(/(?:quick-add|add-to-cart|product-form|buy|cart)/.test(el.localName)||el.closest("form,[class*='product'],[id*='product'],[class*='price'],[id*='price']")!==null||['button','link','checkbox','radio','combobox','textbox','menuitem','option','tab'].includes(role)||el.hasAttribute('command')||el.hasAttribute('commandfor')||el.hasAttribute('popovertarget')); const targets=likely?priority:fallback; if(targets.length<limit) targets.push(el); } return [...priority,...fallback].slice(0,limit); })()`,
             contextId: context.executionContextId,
             objectGroup: "ts-observation",
           });
@@ -640,26 +639,22 @@ export async function captureBrowserUseDOM(
         n.computedStyles?.display === "none" ||
         n.computedStyles?.visibility === "hidden" ||
         Number(n.computedStyles?.opacity ?? "1") <= 0 ||
-        "inert" in n.attributes
+        "inert" in n.attributes ||
+        "disabled" in n.attributes ||
+        n.attributes["aria-disabled"] === "true" ||
+        n.axProperties.some((p) => p.name === "disabled" && Boolean(p.value))
       )
         return { count: 0 };
       if (n.contentDocument) ownedControl(n.contentDocument);
       const descendants = n.children.map(ownedControl);
-      const count = descendants.reduce((sum, child) => sum + child.count, 0);
-      const sole = count === 1 ? descendants.find((child) => child.count === 1)?.sole : undefined;
+      const descendantCount = descendants.reduce((sum, child) => sum + child.count, 0);
+      const descendantSole =
+        descendantCount === 1 ? descendants.find((child) => child.count === 1)?.sole : undefined;
       const custom = n.nodeName.includes("-");
-      const label = n.attributes["aria-label"]?.trim() || n.attributes.title?.trim();
-      if (custom && label && sole && !ownedLabels.has(sole.id)) ownedLabels.set(sole.id, label);
       const nativeTag =
         ["BUTTON", "SELECT", "TEXTAREA"].includes(n.nodeName) ||
         (n.nodeName === "A" && "href" in n.attributes) ||
         (n.nodeName === "INPUT" && n.attributes.type?.toLowerCase() !== "hidden");
-      const disabledNative =
-        nativeTag &&
-        ("disabled" in n.attributes ||
-          n.attributes["aria-disabled"] === "true" ||
-          n.axProperties.some((p) => p.name === "disabled" && Boolean(p.value)));
-      const native = nativeTag && !disabledNative;
       const explicit =
         n.clickListener ||
         [
@@ -682,11 +677,11 @@ export async function captureBrowserUseDOM(
           "option",
           "tab",
         ].includes(n.attributes.role ?? n.axRole ?? "");
-      if (
-        native ||
-        (!disabledNative && (explicit || (custom && browserUseInteractive(n))) && count === 0)
-      )
-        return { count: 1, sole: n };
+      const self = nativeTag || explicit || (custom && browserUseInteractive(n));
+      const count = descendantCount + Number(self);
+      const sole = count === 1 ? (self ? n : descendantSole) : undefined;
+      const label = n.attributes["aria-label"]?.trim() || n.attributes.title?.trim();
+      if (custom && label && sole && !ownedLabels.has(sole.id)) ownedLabels.set(sole.id, label);
       return { count, ...(sole ? { sole } : {}) };
     };
     ownedControl(root);

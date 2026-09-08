@@ -192,6 +192,7 @@ export function browserUseInteractive(n: BrowserUseNode, canonical = false): boo
         "onkeydown",
         "onkeyup",
       ].some((key) => key in a) ||
+      ["command", "commandfor", "popovertarget"].some((key) => key in a) ||
       customInteractiveRoles.has(a.role ?? "") ||
       customInteractiveRoles.has(n.axRole ?? "") ||
       n.axRole === "listbox" ||

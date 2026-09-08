@@ -385,6 +385,7 @@ describe("interleaved observation DOM", () => {
         <form id="cart-form"><add-to-cart-component aria-label="Add to cart">
           <button id="sold-out" disabled>Sold out</button>
           <a class="icon"></a>
+          <quick-add-component aria-disabled="true" role="button"></quick-add-component>
           <button id="buy" type="submit" name="add"></button>
         </add-to-cart-component></form>
         <slideshow-slide id="focus-only" tabindex="0">Focus-only slide</slideshow-slide>`);
@@ -525,6 +526,55 @@ describe("interleaved observation DOM", () => {
         .evaluate((element) => element.removeAttribute("formnovalidate"));
       const afterValidationRestore = await read();
       expect(afterValidationRestore.ref).not.toBe(held.ref);
+  it("does not transfer wrapper labels across an enabled wrapper control", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<style>add-to-cart-component { display:block }</style>
+        <form><add-to-cart-component id="owner" aria-label="Add to cart" onclick="this.dataset.clicked='yes'">
+          <button id="nested-buy" type="submit" name="add"></button>
+        </add-to-cart-component></form>`);
+      const capture = await captureThroughController(page);
+      const buy = capture.elements.filter((el) => controlMatchesPrivateQueryV2(el, "add to cart"));
+      expect(buy.map((el) => el.id)).toEqual(["owner"]);
+      await page.locator(buy[0]!.selector).click();
+      expect(await page.locator("#owner").getAttribute("data-clicked")).toBe("yes");
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("prioritizes late custom buy controls over decorative elements", async () => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    try {
+      await page.setContent(`<style>quick-add-component, late-form-buy { display:block; height:24px }</style>
+        <div id="decorations"></div>
+        <late-form-buy id="late-form" aria-label="Add to cart late form"></late-form-buy>
+        <quick-add-component id="late-role" role="button" aria-label="Add to cart late role"></quick-add-component>
+        <quick-add-component id="late-listener" aria-label="Add to cart late listener"></quick-add-component>`);
+      await page.locator("#decorations").evaluate((decorations) => {
+        decorations.innerHTML = Array.from({ length: 120 }, () => "<decorative-control></decorative-control>").join("");
+      });
+      await page.evaluate(() => {
+        customElements.define(
+          "late-form-buy",
+          class extends HTMLElement {
+            static formAssociated = true;
+            constructor() {
+              super();
+              this.attachInternals();
+            }
+          },
+        );
+      });
+      await page.locator("#late-listener").evaluate((el) =>
+        el.addEventListener("click", () => el.setAttribute("data-clicked", "yes")),
+      );
+      const capture = await captureThroughController(page);
+      const buy = capture.elements.filter((el) => controlMatchesPrivateQueryV2(el, "add to cart"));
+      expect(buy.map((el) => el.id).sort()).toEqual(["late-form", "late-listener", "late-role"]);
+      const listener = buy.find((el) => el.id === "late-listener")!;
+      await page.locator(listener.selector).click();
+      expect(await page.locator("#late-listener").getAttribute("data-clicked")).toBe("yes");
     } finally {
       await page.close();
     }

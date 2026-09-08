@@ -94,14 +94,19 @@ annotations, never action capabilities. Grouping is used only when its UTF-8
 output is smaller than the normal rendering. It never shares an interactive
 subtree, crosses frame/shadow boundaries, or coalesces distinct action refs.
 
-Custom elements require real interaction evidence (authored interaction role or
-handler, focusability, or registered form association); their tag, search-like
-class, small dimensions and inherited pointer cursor are insufficient.
-Capture uses `DOMDebugger.getEventListeners` with `pierce` to read handlers from
-the page's main world and shadow roots. The old isolated-world console helper
-could not see these handlers. A custom wrapper's explicit label can name its
-sole owned descendant control; the wrapper is not manufactured into a second
-click target, and competing descendants prevent label inheritance.
+Custom elements require real activation evidence: an authored interaction role,
+handler, command/popover trigger, or registered form association. Focusability
+alone, including `tabindex` and AX focusability, is insufficient; nor are a tag,
+search-like class, small dimensions or inherited pointer cursor.
+Capture checks form association, roles and command/popover triggers across all
+open DOM roots. Expensive handler discovery uses `DOMDebugger.getEventListeners`
+with `pierce` on at most 100 likely-actionable custom elements, prioritizing
+visible product, price, form and interaction-role context ahead of decorative
+elements. It traverses open shadow roots; closed roots remain uninspectable. A
+listener-only custom element outside that prioritized budget fails closed rather
+than being inferred interactive. A custom wrapper's explicit label can name its
+sole enabled control only after the wrapper and every descendant are counted;
+competing controls prevent label inheritance.
 
 
 Unlabelled, non-interactive SVG rows are omitted. Interactive SVG descendants
