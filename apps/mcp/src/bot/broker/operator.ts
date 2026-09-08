@@ -13,7 +13,7 @@ import {
   sessionForCall,
   withProvisionSessionCall,
 } from "../session/lifecycle.js";
-import { BrokerAuthority, type BrokerPrincipal } from "./authority.js";
+import { BrokerAuthority, type BrokerPrincipal, type TabCapability } from "./authority.js";
 import { BrokerRefusal, siteResources } from "./scheduler.js";
 import type { BrokerTransportPort } from "./transport.js";
 import { forwarderId } from "./lineage.js";
@@ -66,6 +66,22 @@ function inputHash(input: unknown): string {
 function callerRequestHash(requestId: string): string | undefined {
   const value = requestId.split(":").at(-1);
   return value !== undefined && /^[a-f0-9]{64}$/.test(value) ? value : undefined;
+}
+
+function dispatchDetail(
+  principal: BrokerPrincipal,
+  requestId: string,
+  operation: string,
+  inputHashValue: string,
+) {
+  const requestHash = callerRequestHash(requestId);
+  return {
+    agentId: principal.agentId,
+    forwarderId: principal.forwarderId ?? principal.agentId,
+    ...(requestHash === undefined ? {} : { callerRequestHash: requestHash }),
+    operation,
+    inputHash: inputHashValue,
+  };
 }
 
 export function reconciliationOutcome(
@@ -154,13 +170,12 @@ export class OperatorBroker implements BrokerTransportPort {
     if (tool === null || !tool.name.startsWith("operate_"))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
-    const dispatch = {
-      agentId: principal.agentId,
-      forwarderId: principal.forwarderId ?? principal.agentId,
-      callerRequestHash: callerRequestHash(requestId),
-      operation: tool.name,
-      inputHash: inputHash({ name: tool.name, args, capability: input.capability }),
-    };
+    const dispatch = dispatchDetail(
+      principal,
+      requestId,
+      tool.name,
+      inputHash({ name: tool.name, args, capability: input.capability }),
+    );
     const completed = await this.journal?.completedOutcome(
       principal.forwarderId ?? principal.agentId,
       requestId,
@@ -242,13 +257,12 @@ export class OperatorBroker implements BrokerTransportPort {
               const translated = { ...commandArgs, session_id: internalId };
               const execute = async () => await command.handler(translated, pinnedApi);
               const mutating = brokerCommandMutates(name, commandArgs);
-              const commandDispatch = {
-                agentId: principal.agentId,
-                forwarderId: principal.forwarderId ?? principal.agentId,
-                callerRequestHash: callerRequestHash(commandId),
-                operation: name,
-                inputHash: inputHash({ name, args: commandArgs, capability }),
-              };
+              const commandDispatch = dispatchDetail(
+                principal,
+                commandId,
+                name,
+                inputHash({ name, args: commandArgs, capability }),
+              );
               if (mutating)
                 await this.journal?.record(id, commandId, "entered", commandDispatch);
               const result =

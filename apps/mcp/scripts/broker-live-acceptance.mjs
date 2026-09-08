@@ -119,6 +119,9 @@ export async function runLiveAcceptance(configPath) {
     config.accountId && config.configHome,
     "Pinned account and isolated session-store path are required",
   );
+  const qualification = await import("../dist/bot/broker/qualification.js");
+  const runId = await qualification.beginBrokerQualification(profile, config.accountId);
+  let qualified = false;
   const lab = resolve(root, ".broker-acceptance", `live-${Date.now()}`);
   await mkdir(lab, { recursive: true, mode: 0o700 });
   await mkdir(join(root, ".t"), { recursive: true, mode: 0o700 });
@@ -130,6 +133,7 @@ export async function runLiveAcceptance(configPath) {
     TRUSTY_SQUIRE_ACCOUNT_ID: config.accountId,
     TRUSTY_SQUIRE_PROFILE_DIR: profile,
     TRUSTY_SQUIRE_BROKER_SOCKET: socket,
+    TRUSTY_SQUIRE_BROKER_QUALIFICATION_RUN_ID: runId,
     TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION: "0",
     TRUSTY_SQUIRE_REAPER_DIR: join(lab, "reapers"),
     TMPDIR: join(root, ".t"),
@@ -210,11 +214,21 @@ export async function runLiveAcceptance(configPath) {
       baseline,
       after,
     };
-    await writeFile(join(lab, "evidence.json"), JSON.stringify(evidence, null, 2));
-    return { evidencePath: join(lab, "evidence.json"), ...evidence };
+    const evidencePath = join(lab, "evidence.json");
+    await writeFile(evidencePath, JSON.stringify(evidence, null, 2));
+    await qualification.completeBrokerQualification(
+      profile,
+      config.accountId,
+      runId,
+      evidencePath,
+      config.services.map((service) => new URL(service.url).hostname),
+    );
+    qualified = true;
+    return { evidencePath, ...evidence };
   } finally {
     for (const child of children) if (child.exitCode === null) child.kill("SIGTERM");
     await Promise.allSettled(children.map((child) => child.done));
+    if (!qualified) await qualification.abandonBrokerQualification(profile, config.accountId, runId);
   }
 }
 if (process.argv[2] === "client") await runClient(process.argv[3], Number(process.argv[4]));

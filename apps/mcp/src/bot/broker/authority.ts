@@ -101,7 +101,9 @@ export class BrokerAuthority {
   }
 
   beginForwarderRelease(principal: BrokerPrincipal): void {
-    const holder = this.forwarderConnections.get(principal.forwarderId);
+    const forwarderId = principal.forwarderId;
+    if (forwarderId === undefined) return;
+    const holder = this.forwarderConnections.get(forwarderId);
     if (holder === undefined || holder.clientId !== principal.clientId || holder.detach !== undefined)
       return;
     let resolve!: () => void;
@@ -130,9 +132,11 @@ export class BrokerAuthority {
   }
 
   releaseForwarder(principal: BrokerPrincipal): void {
-    const holder = this.forwarderConnections.get(principal.forwarderId);
+    const forwarderId = principal.forwarderId;
+    if (forwarderId === undefined) return;
+    const holder = this.forwarderConnections.get(forwarderId);
     if (holder?.clientId === principal.clientId) {
-      this.forwarderConnections.delete(principal.forwarderId!);
+      this.forwarderConnections.delete(forwarderId);
       holder.detach?.resolve();
     }
   }

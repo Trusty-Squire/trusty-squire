@@ -71,7 +71,7 @@ export class OperatorForwarder {
       name,
       args,
       ...(capability === undefined ? {} : { capability }),
-    })) as { requestId?: unknown; result?: unknown } | null;
+    })) as { requestId?: unknown; result?: unknown; capability?: unknown } | null;
     return typeof reply?.requestId === "string"
       ? {
           requestId: reply.requestId,

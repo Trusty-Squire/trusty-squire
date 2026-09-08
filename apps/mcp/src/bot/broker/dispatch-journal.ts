@@ -191,11 +191,14 @@ export class DispatchJournal {
     await Promise.all(
       outcomes.map(async (record) =>
         await this.record(record.sessionId, record.requestId, "acknowledged", {
-          agentId: record.agentId,
           forwarderId,
-          operation: record.operation,
-          inputHash: record.inputHash,
-          outcome: record.outcome,
+          ...(record.agentId === undefined ? {} : { agentId: record.agentId }),
+          ...(record.callerRequestHash === undefined
+            ? {}
+            : { callerRequestHash: record.callerRequestHash }),
+          ...(record.operation === undefined ? {} : { operation: record.operation }),
+          ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
+          ...(record.outcome === undefined ? {} : { outcome: record.outcome }),
         }),
       ),
     );

@@ -1,4 +1,5 @@
 import { OperatorForwarder } from "./bot/broker/forwarder.js";
+import { brokerForwardingEnabled } from "./bot/broker/qualification.js";
 // MCP server: reads its account's session from the session file, sets up an ApiClient
 // against the configured API base URL, and exposes the registered tools
 // over stdio.
@@ -19,6 +20,7 @@ import { ApiClient } from "./api-client.js";
 import { setSelfManagedChromeTerminationSignalExitEnabled } from "./bot/browser.js";
 import { cancelActiveLoginBrowsers } from "./bot/google-login.js";
 import { startOwnerProcessReaper } from "./bot/owner-process-reaper.js";
+import { CHROME_PROFILE_DIR } from "./bot/profile.js";
 import {
   activeSessionCount,
   closeAllProvisionSessions,
@@ -183,7 +185,7 @@ export async function buildServer(
     })),
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     const tool = findTool(req.params.name, tools);
     if (tool === null) {
       return errorContent("unknown_tool", `unknown tool '${req.params.name}'`);
@@ -236,7 +238,7 @@ export async function buildServer(
       activeApi.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
       if (operatorForwarder !== undefined && tool.name.startsWith("operate_")) {
         return toolResultContent(
-          await operatorForwarder.invoke(tool.name, parsed.data, String(req.id), {
+          await operatorForwarder.invoke(tool.name, parsed.data, String(extra.requestId), {
             recover: brokerRecoveryRequested((req.params as { _meta?: unknown })._meta),
           }),
         );
@@ -427,8 +429,13 @@ export async function runServer(): Promise<void> {
 
   const callAdmission = createServerCallAdmission();
   const brokerPath = process.env.TRUSTY_SQUIRE_BROKER_SOCKET;
+  const brokerEnabled = await brokerForwardingEnabled(
+    brokerPath,
+    CHROME_PROFILE_DIR,
+    sessionGuard.boundAccountId(),
+  );
   const forwarder =
-    brokerPath === undefined ? undefined : new OperatorForwarder(brokerPath, sessionGuard);
+    brokerPath === undefined || !brokerEnabled ? undefined : new OperatorForwarder(brokerPath, sessionGuard);
   const server = await buildServer(
     api,
     callAdmission,

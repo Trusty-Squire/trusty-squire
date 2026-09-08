@@ -120,6 +120,12 @@ describe("broker dispatch custody", () => {
       await expect(journal.acknowledge("forwarder", "request")).resolves.toBe(true);
       expect(await journal.hasOutstanding("session")).toBe(false);
       expect(await journal.hasCompleted("forwarder", "request")).toBe(true);
+      await expect(
+        new DispatchJournal(path).recoveryOutcome("forwarder", callerRequestHash, {
+          operation: "operate_pay",
+          inputHash: "payment-input",
+        }),
+      ).resolves.toMatchObject({ sessionId: "session", requestId: "request" });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
