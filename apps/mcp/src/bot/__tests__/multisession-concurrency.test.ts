@@ -95,6 +95,9 @@ vi.mock("../browser.js", async (importOriginal) => {
     currentUrl(): string {
       return "";
     }
+    activePage(): { isClosed: () => boolean; url: () => string } {
+      return { isClosed: () => false, url: () => this.currentUrl() };
+    }
     mainDocumentIdentity(): string {
       return "1";
     }

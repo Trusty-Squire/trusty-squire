@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type Page } from "playwright";
+import { checkoutFieldSetSignature } from "@trusty-squire/recipe-schema";
 import {
   BrowserController,
   OAuthAwaitingHumanError,
@@ -16,11 +17,23 @@ import {
 } from "../browser.js";
 import {
   act,
+  activeProvisionBrowserForPayment,
+  awaitVerification,
+  cartAdd,
+  cartClear,
+  captureScreenshot,
+  checkoutShapeSignatureForSession,
+  extractCredentials,
   finishProvisionSession,
+  formSelectMany,
   observe,
   parseElementsTable,
+  replayOperatorRecipe,
   startHarnessProvisionSession,
+  verifyPostcondition,
 } from "../provision-session.js";
+import type { OperatorRecipe } from "../operator-recipe.js";
+import { sessionForCall } from "../session/lifecycle.js";
 
 const PRODUCT_URL = `data:text/html,${encodeURIComponent(`
   <!doctype html>
@@ -31,6 +44,20 @@ const PRODUCT_URL = `data:text/html,${encodeURIComponent(`
 `)}`;
 
 let browser: Browser;
+
+const PAYMENT_FIXTURE_CARD = {
+  pan: "4242424242424242",
+  exp_month: "12",
+  exp_year: "30",
+  cvv: "123",
+  name: "Synthetic Cardholder",
+  billing: {
+    line1: "123 Synthetic Street",
+    city: "Testville",
+    postal_code: "10001",
+    country: "US",
+  },
+};
 
 async function controllerForProduct(): Promise<{ controller: BrowserController; product: Page }> {
   const context = await browser.newContext();
@@ -78,6 +105,79 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it("binds payment checkout work to an OAuth completion page", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://product.test/checkout";
+    const returnUrl = "https://console.product.test/return";
+    const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+    const previousCooldown = process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "5000";
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
+    let sessionId: string | undefined;
+    const checkout = (total: string, submit: string) => `
+      <main>Order total ${total}</main>
+      <form>
+        <input id="pan" autocomplete="cc-number">
+        <input id="expiry" autocomplete="cc-exp">
+        <input id="cvv" autocomplete="cc-csc">
+        <input id="name" autocomplete="cc-name">
+        <button type="button" onclick="fetch('/payments', { method: 'POST' }); history.pushState({}, '', '${submit}'); document.querySelector('main').textContent = 'Your order is confirmed Confirmation # source-123'">Pay now</button>
+      </form>`;
+    try {
+      await context.route("https://product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `${checkout("$98.76", "/thank-you/product-987")}<button id="oauth" onclick='window.open(${JSON.stringify(
+            `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(returnUrl)}`,
+          )})'>Continue with Google</button>`,
+        }),
+      );
+      await context.route("https://accounts.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<script>location.replace(${JSON.stringify(returnUrl)})</script>`,
+        }),
+      );
+      await context.route("https://console.product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: checkout("$12.34", "/thank-you/source-123"),
+        }),
+      );
+      await product.goto(productUrl);
+      const controller = BrowserController.fromHarnessPage(product);
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+      });
+      sessionId = started.session_id;
+      const oauthRef = parseElementsTable(started.el_table ?? "").find(
+        (element) => element.label === "Continue with Google",
+      )?.ref;
+      expect(oauthRef).toBeDefined();
+      await act(sessionId, { kind: "oauth_login", target: oauthRef!, provider: "google" });
+
+      const payment = await activeProvisionBrowserForPayment(sessionForCall(sessionId)!);
+      await expect(payment.fillAndSubmitCheckout(PAYMENT_FIXTURE_CARD)).resolves.toMatchObject({
+        order_confirmed: true,
+      });
+      const source = controller.completedOAuthPage()!;
+      expect(source.url()).toContain("/thank-you/source-123");
+      expect(product.url()).toBe(productUrl);
+      expect(await product.locator("#pan").inputValue()).toBe("");
+      expect(await product.locator("#expiry").inputValue()).toBe("");
+      expect(await product.locator("#cvv").inputValue()).toBe("");
+    } finally {
+      if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
+      if (previousCooldown === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = previousCooldown;
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  }, 20_000);
+
   it("reattaches the active controller page when a provider closes its OAuth-return popup", async () => {
     const { controller, product } = await controllerForProduct();
     const context = product.context();
@@ -119,7 +219,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const { controller, product } = await controllerForProduct();
     const context = product.context();
     const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+    const previousCooldown = process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
     process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1000";
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
     const providerReturned = product.waitForEvent("popup").then(async (popup) => {
       await popup.goto("data:text/html,provider-token-exchange");
       await product.locator("#state").evaluate((el) => {
@@ -150,6 +252,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
     } finally {
       if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
       else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
+      if (previousCooldown === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = previousCooldown;
       if (sessionId !== null) await finishProvisionSession(sessionId).catch(() => undefined);
       await context.close().catch(() => undefined);
     }
@@ -198,7 +302,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     try {
       await controller.startOAuth("#oauth");
       const popup = (controller as unknown as { page: Page }).page;
-      const settling = controller.settleAfterOAuth();
+      const settling = controller.settleAfterOAuth(popup);
       await popup.close();
       await settling;
 
@@ -206,6 +310,231 @@ describe("BrowserController OAuth popup lifecycle", () => {
       expect((controller as unknown as { page: Page }).page).toBe(product);
     } finally {
       await context.close().catch(() => undefined);
+    }
+  });
+
+  it("refuses a legacy settle after a foreign tab is adopted", async () => {
+    const { controller, product } = await controllerForProduct();
+    const context = product.context();
+    const foreignUrl = "https://foreign.test/adopted";
+    let sessionId: string | undefined;
+    try {
+      await context.route("https://foreign.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: '<main id="foreign-state">Foreign tab</main>',
+        }),
+      );
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: PRODUCT_URL,
+      });
+      sessionId = started.session_id;
+      await controller.startOAuth("#oauth");
+      const source = (controller as unknown as { page: Page }).page;
+      await source.setContent(
+        `<button id="open-foreign" onclick="window.open('${foreignUrl}')">Open foreign tab</button>`,
+      );
+
+      const opened = await act(sessionId, { kind: "click", target: "Open foreign tab" });
+      const foreign = context.pages().find((page) => page.url() === foreignUrl);
+      expect(opened.url).toBe(foreignUrl);
+      expect(foreign).toBeDefined();
+
+      await expect(act(sessionId, { kind: "oauth_settle" })).rejects.toThrow(
+        "OAuth lifecycle no longer matches the resolved operation page",
+      );
+      expect(product.isClosed()).toBe(false);
+      expect(source.isClosed()).toBe(false);
+      await expect(foreign!.locator("#foreign-state").textContent()).resolves.toBe("Foreign tab");
+      expect((controller as unknown as { page: Page }).page).toBe(foreign);
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("refuses settlement when the product page closed before waiting", async () => {
+    const { controller, product } = await controllerForProduct();
+    const context = product.context();
+    try {
+      await controller.startOAuth("#oauth");
+      const provider = (controller as unknown as { page: Page }).page;
+      const unrelatedPromise = product.waitForEvent("popup");
+      await product.evaluate(() => window.open("about:blank"));
+      const unrelated = await unrelatedPromise;
+      await unrelated.setContent('<main id="unrelated-state">Unrelated tab</main>');
+      await product.close();
+
+      await expect(controller.settleAfterOAuth(provider)).rejects.toThrow(
+        "OAuth lifecycle no longer matches the resolved operation page",
+      );
+      expect(provider.isClosed()).toBe(false);
+      await expect(unrelated.locator("#unrelated-state").textContent()).resolves.toBe(
+        "Unrelated tab",
+      );
+      expect((controller as unknown as { page: Page }).page).toBe(provider);
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("refuses settlement when the product page closes during its wait", async () => {
+    const { controller, product } = await controllerForProduct();
+    const context = product.context();
+    try {
+      await controller.startOAuth("#oauth");
+      const provider = (controller as unknown as { page: Page }).page;
+      const unrelatedPromise = product.waitForEvent("popup");
+      await product.evaluate(() => window.open("about:blank"));
+      const unrelated = await unrelatedPromise;
+      await unrelated.setContent('<main id="unrelated-state">Unrelated tab</main>');
+
+      const settling = controller.settleAfterOAuth(provider);
+      await product.close();
+      await expect(settling).rejects.toThrow("OAuth lifecycle product page became unavailable");
+      expect(provider.isClosed()).toBe(false);
+      await expect(unrelated.locator("#unrelated-state").textContent()).resolves.toBe(
+        "Unrelated tab",
+      );
+      expect((controller as unknown as { page: Page }).page).toBe(provider);
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("closes a live provider when its product lineage remains proven", async () => {
+    const { controller, product } = await controllerForProduct();
+    const context = product.context();
+    try {
+      await controller.startOAuth("#oauth");
+      const provider = (controller as unknown as { page: Page }).page;
+      const sleepSpy = vi
+        .spyOn(controller as unknown as { sleep(ms: number): Promise<void> }, "sleep")
+        .mockResolvedValue();
+      try {
+        await controller.settleAfterOAuth(provider);
+
+        expect(product.isClosed()).toBe(false);
+        expect(provider.isClosed()).toBe(true);
+        expect((controller as unknown as { page: Page }).page).toBe(product);
+      } finally {
+        sleepSpy.mockRestore();
+      }
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("retains the provider when the product closes at teardown dispatch", async () => {
+    const { controller, product } = await controllerForProduct();
+    const context = product.context();
+    try {
+      await controller.startOAuth("#oauth");
+      const provider = (controller as unknown as { page: Page }).page;
+      let sleeps = 0;
+      const sleepSpy = vi
+        .spyOn(controller as unknown as { sleep(ms: number): Promise<void> }, "sleep")
+        .mockImplementation(async () => {
+          sleeps += 1;
+          if (sleeps === 12) await product.close();
+        });
+      try {
+        await expect(controller.settleAfterOAuth(provider)).rejects.toThrow(
+          "OAuth lifecycle product page became unavailable",
+        );
+        expect(provider.isClosed()).toBe(false);
+      } finally {
+        sleepSpy.mockRestore();
+      }
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("returns a source-page scroll observation despite concurrent tab adoption", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://product.test/login";
+    const sourceUrl = "https://console.product.test/source";
+    const ordinaryUrl = "https://console.product.test/ordinary";
+    let sessionId: string | undefined;
+    try {
+      await context.route("https://product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<button id="oauth" onclick='window.open(${JSON.stringify(
+            `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(sourceUrl)}`,
+          )})'>Continue</button>`,
+        }),
+      );
+      await context.route("https://accounts.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<script>location.replace(${JSON.stringify(sourceUrl)})</script>`,
+        }),
+      );
+      await context.route("https://console.product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body:
+            route.request().url() === ordinaryUrl
+              ? "<main>Ordinary tab</main>"
+              : `<!doctype html><html><body style="min-height: 5000px"><main>Source tab</main><button id="open" onclick="window.open('${ordinaryUrl}')">Open ordinary tab</button></body></html>`,
+        }),
+      );
+      await product.goto(productUrl);
+      const controller = BrowserController.fromHarnessPage(product);
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+      });
+      sessionId = started.session_id;
+      const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+      expect(oauthRef).toBeDefined();
+      const returned = await act(sessionId, {
+        kind: "oauth_login",
+        target: oauthRef!,
+        provider: "google",
+      });
+      const ordinaryRef = parseElementsTable(returned.el_table ?? "").find(
+        (element) => element.label === "Open ordinary tab",
+      )?.ref;
+      expect(ordinaryRef).toBeDefined();
+      const source = controller.completedOAuthPage()!;
+
+      let scrollEntered!: () => void;
+      let resumeScroll!: () => void;
+      const scrollStarted = new Promise<void>((resolve) => {
+        scrollEntered = resolve;
+      });
+      const scrollResume = new Promise<void>((resolve) => {
+        resumeScroll = resolve;
+      });
+      const originalScroll = controller.scrollViewport.bind(controller);
+      const scrollSpy = vi
+        .spyOn(controller, "scrollViewport")
+        .mockImplementation(async (direction = "down", page = null): Promise<void> => {
+          await originalScroll(direction, page);
+          scrollEntered();
+          await scrollResume;
+        });
+
+      const scrolling = act(sessionId, { kind: "scroll", direction: "bottom" });
+      await scrollStarted;
+      const opened = await act(sessionId, { kind: "click", target: ordinaryRef! });
+      resumeScroll();
+      const scrolled = await scrolling;
+
+      expect(opened.url).toBe(ordinaryUrl);
+      expect(scrolled.url).toBe(sourceUrl);
+      expect(scrolled.text).toContain("Source tab");
+      expect(scrollSpy).toHaveBeenCalledWith("bottom", source);
+      expect((await observe(sessionId)).url).toBe(ordinaryUrl);
+      scrollSpy.mockRestore();
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close();
     }
   });
 
@@ -724,6 +1053,77 @@ describe("BrowserController OAuth popup lifecycle", () => {
     },
   );
 
+  it("settles an atomic popup return on its retained product page", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects";
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body:
+          route.request().url() === "https://product.test/other"
+            ? "<main>Other product page</main>"
+            : `<button id="oauth" onclick='window.open(${JSON.stringify(
+                `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+              )})'>Continue</button><button id="product-action" onclick="document.body.dataset.productAction = 'yes'">Product action</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<script>location.replace(${JSON.stringify(expectedReturnUrl)})</script>`,
+      }),
+    );
+    await context.route("https://console.product.test/**", (route) =>
+      route.fulfill({ contentType: "text/html", body: "<main>Projects</main>" }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    let sessionId: string | undefined;
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: "https://product.test/login",
+      });
+      sessionId = started.session_id;
+      const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+      expect(oauthRef).toBeDefined();
+      await act(sessionId, { kind: "oauth_login", target: oauthRef!, provider: "google" });
+      const provider = controller.completedOAuthPage();
+      expect(provider).not.toBeNull();
+      const sleepSpy = vi
+        .spyOn(controller as unknown as { sleep(ms: number): Promise<void> }, "sleep")
+        .mockResolvedValue();
+      try {
+        const settled = await act(sessionId, { kind: "oauth_settle" });
+        expect(settled.url).toBe("https://product.test/login");
+        expect(settled.el_table).toContain("Continue");
+        expect(provider?.isClosed()).toBe(true);
+        expect(product.isClosed()).toBe(false);
+        expect((controller as unknown as { page: Page }).page).toBe(product);
+        const productActionRef = parseElementsTable(settled.el_table ?? "").find(
+          (element) => element.label === "Product action",
+        )?.ref;
+        expect(productActionRef).toBeDefined();
+        await act(sessionId, { kind: "click", target: productActionRef! });
+        expect(await product.locator("body").getAttribute("data-product-action")).toBe("yes");
+        await expect(act(sessionId, { kind: "press", key: "Enter" })).resolves.toMatchObject({
+          url: "https://product.test/login",
+        });
+        await expect(
+          act(sessionId, { kind: "goto", url: "https://product.test/other" }),
+        ).resolves.toMatchObject({
+          url: "https://product.test/other",
+        });
+      } finally {
+        sleepSpy.mockRestore();
+      }
+    } finally {
+      if (sessionId) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
+
   it.each(["completed", "awaiting_human"] as const)(
     "reports a reused-session popup as %s while the initiating click is still pending",
     async (outcome) => {
@@ -796,10 +1196,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
         releaseClick();
         if (outcome === "completed") {
           await vi.waitFor(() => expect(controller.completedOAuthPage()?.url()).toBe(returnUrl));
-          // A plain observe intentionally retires the completion source and
-          // reads the retained opener; it must not resurrect awaiting_human.
           const next = await observe(sessionId);
-          expect(next.url).toBe(product.url());
+          expect(next.url).toBe(returnUrl);
           expect(next.oauth?.state).not.toBe("awaiting_human");
         }
       } finally {
@@ -935,6 +1333,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         await context.close();
       }
     },
+    15_000,
   );
 
   it.each([
@@ -1121,13 +1520,66 @@ describe("BrowserController OAuth popup lifecycle", () => {
     async (kind) => {
       const context = await browser.newContext();
       const product = await context.newPage();
-      const expectedReturnUrl = "https://console.product.test/projects";
-      await context.route("https://product.test/**", (route) =>
+      const productUrl = "https://mail.google.com/checkout";
+      const expectedReturnUrl = "https://console.product.test/checkout";
+      const cartUrl = "https://console.product.test/cart";
+      const controls = `<form onsubmit="event.preventDefault(); document.body.dataset.submits = String(+(document.body.dataset.submits || 0) + 1)">
+        <label>Project name<input id="name"></label><button>Create</button></form>
+        <label>Phone country
+          <select id="phone-country" name="phone_country">
+            <option value="CA" selected>Canada (+1)</option>
+            <option value="US">United States (+1)</option>
+          </select>
+        </label>
+        <label>Workspace
+          <select id="workspace" name="workspace" data-testid="workspace">
+            <option value="alpha" selected>Alpha</option>
+            <option value="beta">Beta</option>
+          </select>
+        </label>
+        <label>Region
+          <select id="region" name="region" data-testid="region">
+            <option value="us" selected>US</option>
+            <option value="eu">EU</option>
+          </select>
+        </label>
+        <label>Replay name<input id="replay-name" name="full_name" type="text" autocomplete="name" data-testid="replay-name"></label>
+        <input type="hidden" name="__CHECKOUT_FIELD__">
+        <div>Total USD $__TOTAL__</div>
+        <div>API Key <span id="credential">••••</span><button id="reveal" onclick="document.querySelector('#credential').textContent = window.credentialValue">Show API key</button></div>
+        <button id="add" onclick="window.open('${cartUrl}')">Add to Cart</button>
+        <div id="line" data-testid="line-item" hidden>
+          <a href="/products/popup" data-product-identity="popup-product">Popup product</a>
+          <span>Quantity 1</span><span data-options-hash="popup-options"></span>
+        </div>
+        <button id="open-new-tab" onclick="window.open('https://console.product.test/opened')">Open settings</button>
+        <button id="open-replay-tab" onclick="window.open('https://console.product.test/replay-opened')">Open replay tab</button>
+        <div style="height:4000px"></div>
+        <script>
+          document.body.dataset.enters = '0';
+          document.body.dataset.scrolls = '0';
+          window.credentialValue = '__CREDENTIAL__';
+          document.addEventListener('keydown', e => {
+            if (e.key === 'Enter') document.body.dataset.enters = String(+document.body.dataset.enters + 1);
+          });
+          window.addEventListener('scroll', () => document.body.dataset.scrolls = String(+document.body.dataset.scrolls + 1));
+          const nativeFetch = window.fetch.bind(window);
+          window.fetch = (...args) => {
+            if (new URL(args[0], location.href).pathname === '/cart/clear.js') {
+              document.body.dataset.cartClears = String(+(document.body.dataset.cartClears || 0) + 1);
+            }
+            return nativeFetch(...args);
+          };
+        </script>`;
+      await context.route("https://mail.google.com/**", (route) =>
         route.fulfill({
           contentType: "text/html",
           body: `<button id="oauth" onclick='window.open(${JSON.stringify(
             `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
-          )})'>Continue</button>`,
+          )})'>Continue</button>${controls
+            .replaceAll("__CHECKOUT_FIELD__", "product_checkout_marker")
+            .replaceAll("__TOTAL__", "99.99")
+            .replaceAll("__CREDENTIAL__", "sk_product_abcdefgh1234567890")}`,
         }),
       );
       await context.route("https://accounts.google.com/**", (route) =>
@@ -1136,19 +1588,31 @@ describe("BrowserController OAuth popup lifecycle", () => {
           body: `<script>setTimeout(() => location.href=${JSON.stringify(expectedReturnUrl)}, 50)</script>`,
         }),
       );
-      await context.route("https://console.product.test/**", (route) =>
-        route.fulfill({
+      await context.route("https://console.product.test/**", (route) => {
+        const sourceControls = controls
+          .replaceAll("__CHECKOUT_FIELD__", "source_checkout_marker")
+          .replaceAll("__TOTAL__", "12.34")
+          .replaceAll("__CREDENTIAL__", "sk_source_abcdefgh1234567890");
+        return route.fulfill({
           contentType: "text/html",
-          body: "<main>Projects</main><button>New project</button>",
-        }),
-      );
-      await product.goto("https://product.test/login");
+          body:
+            route.request().url() === "https://console.product.test/opened"
+              ? '<label>Opened setting<input id="opened-setting"></label>'
+              : route.request().url() === "https://console.product.test/replay-opened"
+                ? '<main>Projects</main><label>Replay name<input id="replay-name" name="full_name" type="text" autocomplete="name" data-testid="replay-name"></label><button id="open-new-tab" onclick="window.open(\'https://console.product.test/opened\')">Open settings</button>'
+                : route.request().url() === cartUrl
+                  ? `<main>Projects</main>${sourceControls}<script>document.querySelector('#line')?.removeAttribute('hidden')</script>`
+                  : `<main>Projects</main><button>New project</button>${sourceControls}`,
+        });
+      });
+      await product.goto(productUrl);
+      const productCredentialBefore = await product.locator("#credential").textContent();
       const controller = BrowserController.fromHarnessPage(product);
       let sessionId: string | undefined;
       try {
         const started = await startHarnessProvisionSession({
           browser: controller,
-          serviceUrl: "https://product.test/login",
+          serviceUrl: productUrl,
         });
         sessionId = started.session_id;
         const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
@@ -1161,13 +1625,809 @@ describe("BrowserController OAuth popup lifecycle", () => {
         expect(result.url).toBe(expectedReturnUrl);
         expect(result.text).toContain("Projects");
         expect((controller as unknown as { page: Page }).page).toBe(product);
-        expect(controller.completedOAuthPage()?.url()).toBe(expectedReturnUrl);
+        const source = controller.completedOAuthPage()!;
+        expect(source.url()).toBe(expectedReturnUrl);
+        const reobserved = await observe(sessionId, "full");
+        expect(reobserved.url).toBe(expectedReturnUrl);
+        expect(reobserved.checkout_state?.payable_total).toEqual({
+          amount_cents: 1234,
+          currency: "USD",
+        });
+        expect(await product.locator("body").innerText()).toContain("Total USD $99.99");
+        const screenshot = await captureScreenshot(sessionId);
+        expect(screenshot.url).toBe(expectedReturnUrl);
+        const postcondition = await verifyPostcondition(sessionId, {
+          kind: "execute_capability",
+          describe: "Projects are visible",
+          success_signal: { text_present: "Projects" },
+        });
+        expect(postcondition).toMatchObject({ confirmed: true });
+        const checkoutSignature = await checkoutShapeSignatureForSession(sessionId);
+        const productSignature = checkoutFieldSetSignature(
+          await product
+            .locator("input,select,textarea")
+            .evaluateAll((elements) =>
+              elements
+                .map((element) => element.getAttribute("name") ?? element.getAttribute("id") ?? "")
+                .filter((name) => name.length > 0),
+            ),
+        );
+        expect(checkoutSignature).not.toBe(productSignature);
+        const extracted = await extractCredentials(sessionId);
+        expect(extracted.url).toBe(expectedReturnUrl);
+        expect(Object.values(extracted.credentials)).toContain("sk_source_abcdefgh1234567890");
+        expect(await source.locator("#credential").textContent()).toBe(
+          "sk_source_abcdefgh1234567890",
+        );
+        expect(await product.locator("#credential").textContent()).toBe(productCredentialBefore);
+        await source.evaluate(() => {
+          document.body.insertAdjacentHTML(
+            "beforeend",
+            '<div><span>••••</span><button id="concurrent-reveal" onclick="document.body.dataset.concurrentReveal = \'started\'; this.previousElementSibling.textContent = window.credentialValue">Show API key</button></div>',
+          );
+        });
+        const concurrentExtract = extractCredentials(sessionId);
+        await source.waitForFunction(() => document.body.dataset.concurrentReveal === "started");
+        await controller.goto("https://mail.google.com/concurrent-original");
+        expect(source.url()).toBe(expectedReturnUrl);
+        expect(product.url()).toBe("https://mail.google.com/concurrent-original");
+        expect(Object.values((await concurrentExtract).credentials)).toContain(
+          "sk_source_abcdefgh1234567890",
+        );
+        await controller.goto(productUrl);
+        const inputRef = parseElementsTable(result.el_table ?? "").find(
+          (el) => el.label === "Project name",
+        )?.ref;
+        expect(inputRef).toBeDefined();
+        await act(sessionId, { kind: "type", target: inputRef!, text: "Popup project" });
+        expect(await source.locator("#name").inputValue()).toBe("Popup project");
+        expect(await product.locator("#name").inputValue()).toBe("");
+        expect(await controller.focusedElementLabels(source)).toContain("Project name");
+        expect(await controller.focusedElementLabels(product)).not.toContain("Project name");
+        const pressed = await act(sessionId, { kind: "press", key: "Enter" });
+        expect(pressed.url).toBe(expectedReturnUrl);
+        expect(await source.locator("body").getAttribute("data-enters")).toBe("1");
+        expect(await source.locator("body").getAttribute("data-submits")).toBe("1");
+        expect(await product.locator("body").getAttribute("data-enters")).toBe("0");
+        expect(await product.locator("body").getAttribute("data-submits")).toBeNull();
+        const scrolled = await act(sessionId, { kind: "scroll", direction: "bottom" });
+        expect(scrolled.url).toBe(expectedReturnUrl);
+        expect(await source.evaluate(() => scrollY)).toBeGreaterThan(0);
+        expect(+(await source.locator("body").getAttribute("data-scrolls"))!).toBeGreaterThan(0);
+        expect(await product.evaluate(() => scrollY)).toBe(0);
+        expect(await product.locator("body").getAttribute("data-scrolls")).toBe("0");
+        const countrySet = await act(sessionId, { kind: "set_phone_country", country: "US" });
+        expect(countrySet.url).toBe(expectedReturnUrl);
+        expect(await source.locator("#phone-country").inputValue()).toBe("US");
+        expect(await product.locator("#phone-country").inputValue()).toBe("CA");
+        const controlRefs = reobserved.elements ?? [];
+        const workspaceRef = controlRefs.find(
+          (el) => el.tag === "select" && el.testId === "workspace",
+        )?.ref;
+        const regionRef = controlRefs.find(
+          (el) => el.tag === "select" && el.testId === "region",
+        )?.ref;
+        expect(workspaceRef).toBeDefined();
+        expect(regionRef).toBeDefined();
+        const selected = await formSelectMany(sessionId, {
+          [workspaceRef!]: "beta",
+          [regionRef!]: "eu",
+        });
+        expect(selected.observation.url).toBe(expectedReturnUrl);
+        expect(await source.locator("#workspace").inputValue()).toBe("beta");
+        expect(await source.locator("#region").inputValue()).toBe("eu");
+        expect(await product.locator("#workspace").inputValue()).toBe("alpha");
+        expect(await product.locator("#region").inputValue()).toBe("us");
+        const cartPagePromise = source.waitForEvent("popup");
+        const cart = await cartAdd(sessionId, "popup-product", "popup-options", "popup-cart");
+        const cartPage = await cartPagePromise;
+        expect(cart).toMatchObject({
+          status: "added",
+          cart_delta: "+1",
+          postcondition: { quantity: 1 },
+        });
+        expect(cart.cart_url).toBe(cartUrl);
+        expect(cartPage.url()).toBe(cartUrl);
+        expect(await cartPage.locator("#line").isVisible()).toBe(true);
+        expect(await source.locator("#line").isHidden()).toBe(true);
+        expect(await product.locator("#line").isHidden()).toBe(true);
+        await cartClear(sessionId);
+        expect(await cartPage.locator("body").getAttribute("data-cart-clears")).toBe("1");
+        expect(await source.locator("body").getAttribute("data-cart-clears")).toBeNull();
+        expect(await product.locator("body").getAttribute("data-cart-clears")).toBeNull();
+        const replayRecipe: OperatorRecipe = {
+          name: "set-popup-contact",
+          schema_version: 1,
+          goal: "Set the contact name",
+          verb: "configure",
+          domain: "product.test",
+          entry_url: expectedReturnUrl,
+          allowed_hosts: ["console.product.test"],
+          trace: [
+            {
+              action: {
+                kind: "click",
+                target: {
+                  dom_hint: { id: "open-replay-tab" },
+                  accessible_name: "Open replay tab",
+                  css: "#open-replay-tab",
+                },
+              },
+            },
+            {
+              action: {
+                kind: "type",
+                target: {
+                  dom_hint: { testid: "replay-name", name: "full_name" },
+                  accessible_name: "Replay name",
+                  css: "#replay-name",
+                  field_role: "ac:name",
+                },
+                value: { hole: "contact.name" },
+              },
+            },
+          ],
+          secrets: [],
+          postcondition: {
+            kind: "execute_capability",
+            describe: "Contact name is set",
+            success_signal: { text_present: "Projects" },
+          },
+        };
+        const replayPagePromise = cartPage.waitForEvent("popup");
+        const replayed = await replayOperatorRecipe(sessionId, replayRecipe, {
+          "contact.name": "Popup replay",
+        });
+        const replayPage = await replayPagePromise;
+        expect(replayed).toMatchObject({
+          status: "complete",
+          observation: { url: "https://console.product.test/replay-opened" },
+        });
+        expect(await replayPage.locator("#replay-name").inputValue()).toBe("Popup replay");
+        expect(await cartPage.locator("#replay-name").inputValue()).toBe("");
+        expect(await source.locator("#replay-name").inputValue()).toBe("");
+        expect(await product.locator("#replay-name").inputValue()).toBe("");
+        expect(
+          sessionForCall(sessionId)?.actionTrace.some((entry) => entry.action.kind === "type"),
+        ).toBe(true);
+        const beforeOpen = await observe(sessionId, "full");
+        const openRef = (beforeOpen.elements ?? []).find((el) => el.label === "Open settings")?.ref;
+        expect(openRef).toBeDefined();
+        const openedPagePromise = replayPage.waitForEvent("popup");
+        const opened = await act(sessionId, { kind: "click", target: openRef! });
+        const openedPage = await openedPagePromise;
+        expect(opened.url).toBe("https://console.product.test/opened");
+        expect(openedPage.url()).toBe("https://console.product.test/opened");
+        const openedInputRef = parseElementsTable(opened.el_table ?? "").find(
+          (el) => el.label === "Opened setting",
+        )?.ref;
+        expect(openedInputRef).toBeDefined();
+        await act(sessionId, { kind: "type", target: openedInputRef!, text: "New tab setting" });
+        expect(await openedPage.locator("#opened-setting").inputValue()).toBe("New tab setting");
+        expect(source.url()).toBe(expectedReturnUrl);
+        expect(cartPage.url()).toBe(cartUrl);
+        expect(replayPage.url()).toBe("https://console.product.test/replay-opened");
+        expect(product.url()).toBe(productUrl);
+        const destination = "https://console.product.test/settings";
+        await act(sessionId, { kind: "allow_host", host: "console.product.test" });
+        const navigated = await act(sessionId, { kind: "goto", url: destination });
+        expect(navigated.url).toBe(destination);
+        expect(openedPage.url()).toBe(destination);
+        expect(source.url()).toBe(expectedReturnUrl);
+        expect(cartPage.url()).toBe(cartUrl);
+        expect(replayPage.url()).toBe("https://console.product.test/replay-opened");
+        expect(product.url()).toBe(productUrl);
       } finally {
         if (sessionId) await finishProvisionSession(sessionId);
         await context.close();
       }
     },
+    20_000,
   );
+
+  it("keeps concurrent inbox verification on its captured page after source-tab adoption", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://mail.google.com/product";
+    const returnUrl = "https://console.product.test/return";
+    const openedUrl = "https://console.product.test/opened";
+    const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "5000";
+    let sessionId: string | undefined;
+    try {
+      await context.route("https://mail.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<button id="oauth" onclick='window.open(${JSON.stringify(
+            `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(returnUrl)}`,
+          )})'>Continue</button>`,
+        }),
+      );
+      await context.route("https://accounts.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<script>setTimeout(() => location.href=${JSON.stringify(returnUrl)}, 20)</script>`,
+        }),
+      );
+      await context.route("https://console.product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body:
+            route.request().url() === openedUrl
+              ? '<main>Opened operator tab</main><button id="queued-oauth" onclick="document.body.dataset.oauthClicked = \'1\'">Continue with Google</button>'
+              : `<main>Returned operator tab</main><button id="open" onclick="window.open('${openedUrl}')">Open tab</button><button id="queued-oauth">Continue with Google</button>`,
+        }),
+      );
+      await context.route("https://mail.google.com/mail/u/0/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<div role="link" id="mail-row" onclick="location.hash = 'search/verification/abcdefghijkl'">Verification message for the newly created operator account</div><main>Your verification code is 481920. This verification message remains available while the account setup finishes, so return to the operator after entering the code and continue configuring the new workspace.</main>`,
+        }),
+      );
+      await product.goto(productUrl);
+      const controller = BrowserController.fromHarnessPage(product);
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+      });
+      sessionId = started.session_id;
+      const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+      expect(oauthRef).toBeDefined();
+      const returned = await act(sessionId, {
+        kind: "oauth_login",
+        target: oauthRef!,
+        provider: "google",
+      });
+      const source = controller.completedOAuthPage()!;
+      const openRef = parseElementsTable(returned.el_table ?? "").find(
+        (element) => element.label === "Open tab",
+      )?.ref;
+      const queuedOauthRef = parseElementsTable(returned.el_table ?? "").find(
+        (element) => element.label === "Continue with Google",
+      )?.ref;
+      expect(openRef).toBeDefined();
+      expect(queuedOauthRef).toBeDefined();
+
+      let enteredInbox!: () => void;
+      let resumeInbox!: () => void;
+      const inboxEntered = new Promise<void>((resolve) => {
+        enteredInbox = resolve;
+      });
+      const inboxResume = new Promise<void>((resolve) => {
+        resumeInbox = resolve;
+      });
+      const originalTemporaryScope = controller.withTemporaryHostScopeAllowedHosts.bind(controller);
+      const temporaryScopeSpy = vi
+        .spyOn(controller, "withTemporaryHostScopeAllowedHosts")
+        .mockImplementation(
+          async <T>(hosts: readonly string[], operation: () => Promise<T>): Promise<T> => {
+            if (hosts.includes("mail.google.com")) {
+              enteredInbox();
+              await inboxResume;
+            }
+            return await originalTemporaryScope(hosts, operation);
+          },
+        );
+
+      const verification = awaitVerification(sessionId);
+      await inboxEntered;
+      const queuedOauth = act(sessionId, {
+        kind: "oauth_login",
+        target: queuedOauthRef!,
+        provider: "google",
+      });
+      const openedPagePromise = source.waitForEvent("popup");
+      const opened = await act(sessionId, { kind: "click", target: openRef! });
+      const openedPage = await openedPagePromise;
+      expect(opened.url).toBe(openedUrl);
+      resumeInbox();
+      const result = await verification;
+      temporaryScopeSpy.mockRestore();
+
+      expect(result).toMatchObject({ found: true, code: "481920" });
+      await expect(queuedOauth).rejects.toThrow("stale_ref");
+      expect(source.url()).toContain("mail.google.com/mail/u/0/#search/");
+      expect(product.url()).toBe(productUrl);
+      expect(openedPage.url()).toBe(openedUrl);
+      expect(await openedPage.locator("main").innerText()).toBe("Opened operator tab");
+      expect(await openedPage.locator("body").getAttribute("data-oauth-clicked")).toBeNull();
+    } finally {
+      if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
+      if (sessionId) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  }, 20_000);
+
+  it("keeps concurrent source-page clicks paired with their own tabs", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://product.test/login";
+    const returnUrl = "https://console.product.test/return";
+    const firstUrl = "https://console.product.test/first";
+    const secondUrl = "https://console.product.test/second";
+    let sessionId: string | undefined;
+    try {
+      await context.route("https://product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<button id="oauth" onclick='window.open(${JSON.stringify(
+            `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(returnUrl)}`,
+          )})'>Continue</button>`,
+        }),
+      );
+      await context.route("https://accounts.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<script>location.replace(${JSON.stringify(returnUrl)})</script>`,
+        }),
+      );
+      await context.route("https://console.product.test/**", (route) => {
+        const url = route.request().url();
+        const body =
+          url === firstUrl
+            ? "<main>First tab</main>"
+            : url === secondUrl
+              ? "<main>Second tab</main>"
+              : `<button id="first" onclick="window.open('${firstUrl}')">Open first tab</button><button id="second" onclick="window.open('${secondUrl}')">Open second tab</button>`;
+        return route.fulfill({ contentType: "text/html", body });
+      });
+      await product.goto(productUrl);
+      const controller = BrowserController.fromHarnessPage(product);
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+      });
+      sessionId = started.session_id;
+      const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+      expect(oauthRef).toBeDefined();
+      const returned = await act(sessionId, {
+        kind: "oauth_login",
+        target: oauthRef!,
+        provider: "google",
+      });
+      const firstRef = parseElementsTable(returned.el_table ?? "").find(
+        (element) => element.label === "Open first tab",
+      )?.ref;
+      const secondRef = parseElementsTable(returned.el_table ?? "").find(
+        (element) => element.label === "Open second tab",
+      )?.ref;
+      expect(firstRef).toBeDefined();
+      expect(secondRef).toBeDefined();
+
+      let firstAdoptionEntered!: () => void;
+      let resumeFirstAdoption!: () => void;
+      const firstAdoption = new Promise<void>((resolve) => {
+        firstAdoptionEntered = resolve;
+      });
+      const firstAdoptionResume = new Promise<void>((resolve) => {
+        resumeFirstAdoption = resolve;
+      });
+      const originalAdopt = controller.adoptOpenedTab.bind(controller);
+      let firstCall = true;
+      const adoptionSpy = vi
+        .spyOn(controller, "adoptOpenedTab")
+        .mockImplementation(async (graceMs?: number): Promise<string | null> => {
+          if (firstCall) {
+            firstCall = false;
+            firstAdoptionEntered();
+            await firstAdoptionResume;
+          }
+          return await originalAdopt(graceMs);
+        });
+
+      const first = act(sessionId, { kind: "click", target: firstRef! });
+      await firstAdoption;
+      const second = act(sessionId, { kind: "click", target: secondRef! });
+      resumeFirstAdoption();
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      adoptionSpy.mockRestore();
+
+      expect(firstResult.url).toBe(firstUrl);
+      expect(secondResult.url).toBe(secondUrl);
+      await expect(
+        context
+          .pages()
+          .find((page) => page.url() === firstUrl)!
+          .locator("main")
+          .textContent(),
+      ).resolves.toBe("First tab");
+      await expect(
+        context
+          .pages()
+          .find((page) => page.url() === secondUrl)!
+          .locator("main")
+          .textContent(),
+      ).resolves.toBe("Second tab");
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
+
+  it("does not let an OAuth popup replace a queued ordinary click", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://product.test/login";
+    const ordinaryUrl = "https://console.product.test/ordinary";
+    const oauthReturnUrl = "https://console.product.test/oauth-return";
+    let sessionId: string | undefined;
+    try {
+      await context.route("https://product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<button id="ordinary" onclick="window.open('${ordinaryUrl}')">Open ordinary tab</button><button id="oauth" onclick='window.open(${JSON.stringify(
+            `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(oauthReturnUrl)}`,
+          )})'>Continue with Google</button>`,
+        }),
+      );
+      await context.route("https://accounts.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<script>location.replace(${JSON.stringify(oauthReturnUrl)})</script>`,
+        }),
+      );
+      await context.route("https://console.product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body:
+            route.request().url() === ordinaryUrl
+              ? "<main>Ordinary tab</main>"
+              : "<main>OAuth return tab</main>",
+        }),
+      );
+      await product.goto(productUrl);
+      const controller = BrowserController.fromHarnessPage(product);
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+      });
+      sessionId = started.session_id;
+      const ordinaryRef = parseElementsTable(started.el_table ?? "").find(
+        (element) => element.label === "Open ordinary tab",
+      )?.ref;
+      const oauthRef = parseElementsTable(started.el_table ?? "").find(
+        (element) => element.label === "Continue with Google",
+      )?.ref;
+      expect(ordinaryRef).toBeDefined();
+      expect(oauthRef).toBeDefined();
+
+      let ordinaryAdoptionEntered!: () => void;
+      let resumeOrdinaryAdoption!: () => void;
+      const ordinaryAdoption = new Promise<void>((resolve) => {
+        ordinaryAdoptionEntered = resolve;
+      });
+      const ordinaryAdoptionResume = new Promise<void>((resolve) => {
+        resumeOrdinaryAdoption = resolve;
+      });
+      const originalAdopt = controller.adoptOpenedTab.bind(controller);
+      let firstCall = true;
+      const adoptionSpy = vi
+        .spyOn(controller, "adoptOpenedTab")
+        .mockImplementation(async (graceMs?: number): Promise<string | null> => {
+          if (firstCall) {
+            firstCall = false;
+            ordinaryAdoptionEntered();
+            await ordinaryAdoptionResume;
+          }
+          return await originalAdopt(graceMs);
+        });
+
+      const ordinary = act(sessionId, { kind: "click", target: ordinaryRef! });
+      await ordinaryAdoption;
+      const popupBeforeRelease = product
+        .waitForEvent("popup")
+        .then(() => true)
+        .catch(() => false);
+      const oauth = act(sessionId, {
+        kind: "oauth_login",
+        target: oauthRef!,
+        provider: "google",
+      });
+      await expect(
+        Promise.race([
+          popupBeforeRelease,
+          new Promise<false>((resolve) => setTimeout(() => resolve(false), 100)),
+        ]),
+      ).resolves.toBe(false);
+      resumeOrdinaryAdoption();
+
+      const ordinaryResult = await ordinary;
+      adoptionSpy.mockRestore();
+      expect(ordinaryResult.url).toBe(ordinaryUrl);
+      await expect(oauth).rejects.toThrow("stale_ref");
+      expect(context.pages().some((page) => page.url() === oauthReturnUrl)).toBe(false);
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
+
+  it("keeps queued ordinary clicks on their captured page", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://product.test/editor";
+    const firstUrl = "https://product.test/first";
+    const secondUrl = "https://product.test/second";
+    let sessionId: string | undefined;
+    try {
+      await context.route("https://product.test/**", (route) => {
+        const url = route.request().url();
+        const body =
+          url === firstUrl
+            ? "<main>First tab</main><button onclick=\"document.body.dataset.wrongTabClicked = 'yes'\">Open second tab</button>"
+            : url === secondUrl
+              ? "<main>Second tab</main>"
+              : `<button id="first" onclick="window.open('${firstUrl}')">Open first tab</button><button id="second" onclick="window.open('${secondUrl}')">Open second tab</button>`;
+        return route.fulfill({ contentType: "text/html", body });
+      });
+      await product.goto(productUrl);
+      const controller = BrowserController.fromHarnessPage(product);
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+      });
+      sessionId = started.session_id;
+      const firstRef = parseElementsTable(started.el_table ?? "").find(
+        (element) => element.label === "Open first tab",
+      )?.ref;
+      const secondRef = parseElementsTable(started.el_table ?? "").find(
+        (element) => element.label === "Open second tab",
+      )?.ref;
+      expect(firstRef).toBeDefined();
+      expect(secondRef).toBeDefined();
+
+      let firstAdoptionEntered!: () => void;
+      let resumeFirstAdoption!: () => void;
+      const firstAdoption = new Promise<void>((resolve) => {
+        firstAdoptionEntered = resolve;
+      });
+      const firstAdoptionResume = new Promise<void>((resolve) => {
+        resumeFirstAdoption = resolve;
+      });
+      const originalAdopt = controller.adoptOpenedTab.bind(controller);
+      let firstCall = true;
+      const adoptionSpy = vi
+        .spyOn(controller, "adoptOpenedTab")
+        .mockImplementation(async (graceMs?: number): Promise<string | null> => {
+          if (firstCall) {
+            firstCall = false;
+            firstAdoptionEntered();
+            await firstAdoptionResume;
+          }
+          return await originalAdopt(graceMs);
+        });
+
+      const first = act(sessionId, { kind: "click", target: firstRef! });
+      await firstAdoption;
+      const second = act(sessionId, { kind: "click", target: secondRef! });
+      resumeFirstAdoption();
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      adoptionSpy.mockRestore();
+
+      const firstPage = context.pages().find((page) => page.url() === firstUrl)!;
+      expect(firstResult.url).toBe(firstUrl);
+      expect(secondResult.url).toBe(secondUrl);
+      await expect(
+        firstPage.locator("body").getAttribute("data-wrong-tab-clicked"),
+      ).resolves.toBeNull();
+      await expect(product.locator("#second").count()).resolves.toBe(1);
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
+
+  it("adopts an ordinary newly opened tab for the resulting and next action", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://product.test/editor";
+    const openedUrl = "https://product.test/opened-editor";
+    await context.route("https://product.test/editor", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<button id="open" onclick='window.open(${JSON.stringify(openedUrl)})'>Open editor</button>`,
+      }),
+    );
+    await context.route("https://product.test/opened-editor", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<label>Opened title<input id="opened-title"></label>`,
+      }),
+    );
+    await product.goto(productUrl);
+    const controller = BrowserController.fromHarnessPage(product);
+    let sessionId: string | undefined;
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+      });
+      sessionId = started.session_id;
+      const openRef = parseElementsTable(started.el_table ?? "").find(
+        (element) => element.label === "Open editor",
+      )?.ref;
+      expect(openRef).toBeDefined();
+      const popupPromise = product.waitForEvent("popup");
+      const opened = await act(sessionId, { kind: "click", target: openRef! });
+      const popup = await popupPromise;
+      expect(opened.url).toBe(openedUrl);
+      expect(controller.currentUrl()).toBe(openedUrl);
+      const observed = await observe(sessionId);
+      expect(observed.url).toBe(openedUrl);
+      const openedTitleRef = parseElementsTable(opened.el_table ?? "").find(
+        (element) => element.label === "Opened title",
+      )?.ref;
+      expect(openedTitleRef).toBeDefined();
+      const typed = await act(sessionId, {
+        kind: "type",
+        target: openedTitleRef!,
+        text: "New tab title",
+      });
+      expect(typed.url).toBe(openedUrl);
+      expect(await popup.locator("#opened-title").inputValue()).toBe("New tab title");
+      expect(await product.locator("#opened-title").count()).toBe(0);
+    } finally {
+      if (sessionId) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
+
+  it("keeps cart add bookkeeping on its adopted tab during a concurrent click", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://product.test/cart-source";
+    const cartUrl = "https://product.test/cart";
+    const distractionUrl = "https://product.test/distraction";
+    await context.route("https://product.test/**", (route) => {
+      const url = route.request().url();
+      return route.fulfill({
+        contentType: "text/html",
+        body:
+          url === cartUrl
+            ? `<main>Cart</main><div id="line" data-testid="line-item"><a href="/products/popup" data-product-identity="popup-product">Popup product</a> <span>Quantity 1</span> <span data-options-hash="popup-options"></span></div><button id="distraction" onclick="window.open('${distractionUrl}')">Open distraction</button>`
+            : url === distractionUrl
+              ? "<main>Distraction</main>"
+              : `<button id="add" onclick="window.open('${cartUrl}')">Add to Cart</button>`,
+      });
+    });
+    await product.goto(productUrl);
+    const controller = BrowserController.fromHarnessPage(product);
+    const lineReader = controller as unknown as {
+      readCheckoutReviewLineItems: (...args: unknown[]) => Promise<unknown>;
+    };
+    const originalRead = lineReader.readCheckoutReviewLineItems;
+    let releaseCartRead: () => void = () => undefined;
+    const cartReadPaused = new Promise<void>((resolve) => {
+      let paused = false;
+      lineReader.readCheckoutReviewLineItems = async (...args) => {
+        const page = args[1] as Page | undefined;
+        if (!paused && page?.url() === cartUrl) {
+          paused = true;
+          resolve();
+          await new Promise<void>((release) => {
+            releaseCartRead = release;
+          });
+        }
+        return await originalRead.apply(controller, args);
+      };
+    });
+    let sessionId: string | undefined;
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+      });
+      sessionId = started.session_id;
+      const adding = cartAdd(sessionId, "popup-product", "popup-options", "popup-cart");
+      await cartReadPaused;
+      const distraction = await act(sessionId, { kind: "click", target: "Open distraction" });
+      expect(distraction.url).toBe(distractionUrl);
+      releaseCartRead();
+      const added = await adding;
+      expect(added).toMatchObject({
+        status: "added",
+        cart_url: cartUrl,
+        postcondition: { quantity: 1 },
+      });
+      expect(product.url()).toBe(productUrl);
+      await expect(product.locator("text=Popup product").count()).resolves.toBe(0);
+    } finally {
+      releaseCartRead();
+      lineReader.readCheckoutReviewLineItems = originalRead;
+      if (sessionId) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
+
+  it("keeps recipe continuation on its adopted tab during a concurrent click", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://product.test/replay-source";
+    const replayUrl = "https://product.test/replay";
+    const distractionUrl = "https://product.test/replay-distraction";
+    await context.route("https://product.test/**", (route) => {
+      const url = route.request().url();
+      return route.fulfill({
+        contentType: "text/html",
+        body:
+          url === replayUrl
+            ? `<main>Replay</main><label>Replay name<input id="replay-name" name="full_name" type="text" autocomplete="name" data-testid="replay-name"></label><button id="distraction" onclick="window.open('${distractionUrl}')">Open distraction</button>`
+            : url === distractionUrl
+              ? '<main>Distraction</main><label>Replay name<input id="replay-name" name="full_name" type="text" autocomplete="name" data-testid="replay-name"></label>'
+              : `<button id="open-replay" onclick="window.open('${replayUrl}')">Open replay</button>`,
+      });
+    });
+    await product.goto(productUrl);
+    const controller = BrowserController.fromHarnessPage(product);
+    let sessionId: string | undefined;
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+      });
+      sessionId = started.session_id;
+      const recipe: OperatorRecipe = {
+        name: "replay-adoption",
+        schema_version: 1,
+        goal: "Set replay name",
+        verb: "configure",
+        domain: "product.test",
+        entry_url: productUrl,
+        allowed_hosts: ["product.test"],
+        trace: [
+          {
+            action: {
+              kind: "click",
+              target: { dom_hint: { id: "open-replay" }, css: "#open-replay" },
+            },
+          },
+          {
+            action: {
+              kind: "type",
+              target: {
+                dom_hint: { testid: "replay-name", name: "full_name" },
+                accessible_name: "Replay name",
+                css: "#replay-name",
+                field_role: "ac:name",
+              },
+              value: { hole: "contact.name" },
+            },
+          },
+        ],
+        secrets: [],
+        postcondition: {
+          kind: "execute_capability",
+          describe: "Replay name is set",
+          success_signal: { text_present: "Replay" },
+        },
+      };
+      const replayed = await replayOperatorRecipe(
+        sessionId,
+        recipe,
+        { "contact.name": "Adopted replay" },
+        0,
+        {
+          beforeStep: async ({ step_index }) => {
+            if (step_index !== 1) return;
+            const distraction = await act(sessionId!, {
+              kind: "click",
+              target: "Open distraction",
+            });
+            expect(distraction.url).toBe(distractionUrl);
+          },
+        },
+      );
+      const replay = context.pages().find((page) => page.url() === replayUrl)!;
+      const distraction = context.pages().find((page) => page.url() === distractionUrl)!;
+      expect(replayed).toMatchObject({ status: "complete", observation: { url: replayUrl } });
+      expect(await replay.locator("#replay-name").inputValue()).toBe("Adopted replay");
+      expect(await distraction.locator("#replay-name").inputValue()).toBe("");
+    } finally {
+      if (sessionId) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
 
   it("rejects a closed completion source instead of clicking a colliding product control", async () => {
     const context = await browser.newContext();
@@ -1219,6 +2479,19 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await expect(act(sessionId, { kind: "click", target: sourceRef! })).rejects.toMatchObject({
         code: "target_stale",
       });
+      await expect(act(sessionId, { kind: "press", key: "Enter" })).rejects.toThrow(
+        "action source page is closed",
+      );
+      await expect(act(sessionId, { kind: "scroll", direction: "bottom" })).rejects.toThrow(
+        "action source page is closed",
+      );
+      await expect(
+        act(sessionId, { kind: "goto", url: "https://product.test/other" }),
+      ).rejects.toThrow("action source page is closed");
+      const recovered = await observe(sessionId);
+      expect(recovered.url).toBe("https://product.test/login");
+      expect(recovered.el_table).toContain("Continue");
+      expect(product.url()).toBe("https://product.test/login");
       expect(await product.locator("body").getAttribute("data-product-clicked")).toBeNull();
     } finally {
       if (sessionId) await finishProvisionSession(sessionId);

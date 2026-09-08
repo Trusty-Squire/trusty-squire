@@ -51,6 +51,56 @@ try {
   chromiumAvailable = false;
 }
 
+describe("page-bound payment browser", () => {
+  it.skipIf(!chromiumAvailable)("fills and submits only its captured checkout page", async () => {
+    const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const source = await context.newPage();
+    const checkout = (total: string, submit: string) => `
+      <main>Order total ${total}</main>
+      <form>
+        <input id="pan" autocomplete="cc-number">
+        <input id="expiry" autocomplete="cc-exp">
+        <input id="cvv" autocomplete="cc-csc">
+        <input id="name" autocomplete="cc-name">
+        <button type="button" onclick="fetch('/payments', { method: 'POST' }); history.pushState({}, '', '${submit}'); document.querySelector('main').textContent = 'Your order is confirmed Confirmation # source-123'">Pay now</button>
+      </form>`;
+    await context.route("https://payment-source.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: route.request().url().includes("thank-you")
+          ? "<main>Your order is confirmed Confirmation # source-123</main>"
+          : checkout("$12.34", "/thank-you/source-123"),
+      }),
+    );
+    await context.route("https://retained-product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: checkout("$98.76", "/thank-you/product-987"),
+      }),
+    );
+    try {
+      await product.goto("https://retained-product.test/checkout");
+      await source.goto("https://payment-source.test/checkout");
+      const controller = BrowserController.fromHarnessPage(product);
+      await expect(
+        controller.paymentBrowser(source).fillAndSubmitCheckout(APPROVAL_CARD),
+      ).resolves.toMatchObject({
+        order_confirmed: true,
+      });
+      expect(source.url()).toContain("/thank-you/source-123");
+      expect(product.url()).toBe("https://retained-product.test/checkout");
+      expect(await product.locator("#pan").inputValue()).toBe("");
+      expect(await product.locator("#expiry").inputValue()).toBe("");
+      expect(await product.locator("#cvv").inputValue()).toBe("");
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  });
+});
+
 describe("captured payment submit dispatch", () => {
   it("does not report dispatch when the click fails before capture", async () => {
     const onSubmitDispatched = vi.fn();

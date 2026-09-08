@@ -40,6 +40,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       extractInteractiveElements: vi.fn().mockResolvedValue([]),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
       currentUrl: vi.fn().mockReturnValue(url),
+      activePage: vi.fn().mockReturnValue({ isClosed: () => false, url: () => url }),
       takeOAuthTerminalCompletionUrl: vi.fn().mockReturnValue(null),
       readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
       close: vi.fn().mockResolvedValue(undefined),
@@ -84,7 +85,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       expect(textBlock?.text ?? "").not.toContain(TINY_JPEG_BASE64);
 
       expect((browser.captureOperatorScreenshot as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual(
-        [{}],
+        [{}, expect.any(Object)],
       );
     } finally {
       await client.close();
@@ -104,6 +105,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
         .mockResolvedValue([{ selector: "#otp-code" }, { selector: "#promo-code" }]),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
       currentUrl: vi.fn().mockReturnValue(url),
+      activePage: vi.fn().mockReturnValue({ isClosed: () => false, url: () => url }),
       takeOAuthTerminalCompletionUrl: vi.fn().mockReturnValue(null),
       readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
       close: vi.fn().mockResolvedValue(undefined),
@@ -126,7 +128,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
         },
       });
       expect((browser.captureOperatorScreenshot as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual(
-        [{ frameUrlContains: "cardinalcommerce.com", fullPage: true }],
+        [{ frameUrlContains: "cardinalcommerce.com", fullPage: true }, expect.any(Object)],
       );
     } finally {
       await client.close();
@@ -151,6 +153,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
         ),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
       currentUrl: vi.fn().mockReturnValue(url),
+      activePage: vi.fn().mockReturnValue({ isClosed: () => false, url: () => url }),
       takeOAuthTerminalCompletionUrl: vi.fn().mockReturnValue(null),
       readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
       close: vi.fn().mockResolvedValue(undefined),
@@ -172,7 +175,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
         arguments: { session_id: started.session_id },
       });
       expect(result.isError).not.toBe(true);
-      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({});
+      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({}, expect.any(Object));
       expect(
         (browser.extractInteractiveElements as ReturnType<typeof vi.fn>).mock.calls.length,
       ).toBe(extractionCalls);
@@ -192,6 +195,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       extractInteractiveElements: vi.fn().mockResolvedValue([]),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
       currentUrl: vi.fn().mockReturnValue(url),
+      activePage: vi.fn().mockReturnValue({ isClosed: () => false, url: () => url }),
       takeOAuthTerminalCompletionUrl: vi.fn().mockReturnValue(null),
       readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
       close: vi.fn().mockResolvedValue(undefined),
@@ -213,7 +217,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       });
 
       expect(result.isError).not.toBe(true);
-      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({});
+      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({}, expect.any(Object));
     } finally {
       await client.close();
       await closeAllProvisionSessions();
@@ -230,6 +234,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       extractInteractiveElements: vi.fn().mockResolvedValue([]),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
       currentUrl: vi.fn().mockReturnValue(url),
+      activePage: vi.fn().mockReturnValue({ isClosed: () => false, url: () => url }),
       takeOAuthTerminalCompletionUrl: vi.fn().mockReturnValue(null),
       readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
       close: vi.fn().mockResolvedValue(undefined),
@@ -251,7 +256,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       });
 
       expect(result.isError).not.toBe(true);
-      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({});
+      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({}, expect.any(Object));
     } finally {
       await client.close();
       await closeAllProvisionSessions();

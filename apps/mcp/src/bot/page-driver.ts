@@ -195,8 +195,8 @@ export class PageDriver {
     return this.page !== null;
   }
 
-  async goto(url: string): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
+  async goto(url: string, page: Page | null = this.page): Promise<void> {
+    if (!page) throw new Error("Browser not started");
     // Retry transient network/proxy drops. A residential SOCKS tunnel
     // intermittently resets a connection mid-navigation (Chrome surfaces
     // net::ERR_SOCKS_CONNECTION_FAILED / ERR_CONNECTION_RESET / ERR_NETWORK_
@@ -238,7 +238,7 @@ export class PageDriver {
     };
     for (let attempt = 1; ; attempt++) {
       try {
-        await this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
         // A SOCKS/connection drop does NOT always throw: Chrome resolves
         // domcontentloaded on its own `chrome-error://chromewebdata/`
         // interstitial and goto returns cleanly. The bot then ran the whole
@@ -246,7 +246,7 @@ export class PageDriver {
         // 2026-06-11: galileo/lancedb landed on chrome-error with the app
         // host as the title, never retried). Treat a chrome-error landing as
         // the same transient class and retry it like a thrown net error.
-        const landed = this.page.url();
+        const landed = page.url();
         if (landed.startsWith("chrome-error://")) {
           if (attempt >= MAX_GOTO_ATTEMPTS) {
             throw new Error(
@@ -266,16 +266,16 @@ export class PageDriver {
         // the DOM and have their own element-level waits.
         if (/Timeout \d+ms exceeded/i.test(msg)) {
           await this.sleep(500);
-          if (sameOriginPathAndSearch(this.page.url(), url)) break;
-          if (landedAuthGateForTarget(this.page.url(), url)) break;
-          await this.page
+          if (sameOriginPathAndSearch(page.url(), url)) break;
+          if (landedAuthGateForTarget(page.url(), url)) break;
+          await page
             .waitForURL((landed) => sameOriginPathAndSearch(landed.toString(), url), {
               timeout: 5000,
             })
             .then(() => undefined)
             .catch(() => undefined);
-          if (sameOriginPathAndSearch(this.page.url(), url)) break;
-          if (landedAuthGateForTarget(this.page.url(), url)) break;
+          if (sameOriginPathAndSearch(page.url(), url)) break;
+          if (landedAuthGateForTarget(page.url(), url)) break;
         }
         if (attempt >= MAX_GOTO_ATTEMPTS || !TRANSIENT_NET.test(msg)) throw err;
         // Linear backoff — give the tunnel a moment to recover a slot.

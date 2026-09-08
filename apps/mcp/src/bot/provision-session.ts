@@ -43,6 +43,7 @@ import type {
   PendingApprovalWait,
   PendingCardFill,
   PendingThreeDsWait,
+  PaymentBrowser,
   TerminalPaymentApprovalStatus,
 } from "./pay-operator.js";
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
@@ -1307,6 +1308,15 @@ function oauthCompletionSourcePage(session: object): OAuthCompletionEvidence["pa
   return oauthCompletionSourcePages.get(session);
 }
 
+function operationPageForSession(session: Session): Page | undefined {
+  return (
+    oauthCompletionSourcePage(session) ??
+    (session.compactV2Active ? compactV2SourcePage(session) : undefined) ??
+    session.browser.activePage() ??
+    undefined
+  );
+}
+
 function rememberOAuthCompletionSourcePage(
   session: object,
   page: OAuthCompletionEvidence["page"] | undefined,
@@ -2230,7 +2240,23 @@ export async function observe(
 ): Promise<Observation> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  return await observeSession(session, detail);
+  const completionSource = oauthCompletionSourcePage(session);
+  if (completionSource?.isClosed() === true) {
+    session.browser.completeOAuthTransitionRecovery();
+  }
+  const transition = session.browser.oauthTransitionStatus?.();
+  const sourcePage =
+    transition?.providerPageClosed === true &&
+    transition.productPageViable &&
+    transition.browserConnected
+      ? undefined
+      : operationPageForSession(session);
+  return await observeSession(
+    session,
+    detail,
+    undefined,
+    sourcePage?.isClosed() === true ? undefined : sourcePage,
+  );
 }
 
 export interface ScreenshotCapture {
@@ -2249,10 +2275,11 @@ export async function captureScreenshot(
 ): Promise<ScreenshotCapture> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const captured = await session.browser.captureOperatorScreenshot(opts);
+  const page = operationPageForSession(session);
+  const captured = await session.browser.captureOperatorScreenshot(opts, page);
   return {
     session_id: sessionId,
-    url: session.browser.currentUrl(),
+    url: page?.url() ?? session.browser.currentUrl(),
     frame_url: captured.frameUrl,
     frame_count: captured.frameCount,
     image: { mime_type: "image/jpeg", data_base64: captured.base64 },
@@ -2265,7 +2292,10 @@ export async function captureScreenshot(
 export function observedHostsForSession(sessionId: string): string[] {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  widenAllowedHostsFromUrl(session, session.browser.currentUrl());
+  widenAllowedHostsFromUrl(
+    session,
+    operationPageForSession(session)?.url() ?? session.browser.currentUrl(),
+  );
   return [...new Set(egressSeedHosts(session))];
 }
 
@@ -2314,7 +2344,7 @@ export function readSecretSlotValue(sessionId: string, slot: string): string {
 export function currentProvisionUrl(sessionId: string): string {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  return session.browser.currentUrl();
+  return operationPageForSession(session)?.url() ?? session.browser.currentUrl();
 }
 
 export function isCompactV2ProvisionSession(sessionId: string): boolean {
@@ -2333,10 +2363,14 @@ export function activeProvisionBrowser(): BrowserController {
 
 export async function activeProvisionBrowserForPayment(
   selectedSession?: Session,
-): Promise<BrowserController> {
+): Promise<PaymentBrowser> {
   const session = selectedSession ?? activeProvisionSession();
+  const page = operationPageForSession(session);
+  if (page === undefined || page.isClosed()) {
+    throw new Error("payment page is unavailable");
+  }
   invalidateCompactV2Snapshot(session);
-  return session.browser;
+  return session.browser.paymentBrowser(page);
 }
 
 function placeOrderApprovalFromPendingFill(
@@ -2711,8 +2745,9 @@ async function cartLineQuantity(
   session: Session,
   productIdentity: string,
   optionsHash: string,
+  page?: Page,
 ): Promise<number | null> {
-  const lines = await session.browser.readCheckoutReviewLineItems(true);
+  const lines = await session.browser.readCheckoutReviewLineItems(true, page);
   const matching = lines.filter((line) => cartLineMatches(line, productIdentity, optionsHash));
   if (matching.length !== 1) return null;
   return matching[0]!.quantity;
@@ -2727,18 +2762,22 @@ function alreadyInCartResult(result: CartAddResult): CartAddResult {
   };
 }
 
-async function capturePrivateCheckoutState(session: Session): Promise<CheckoutState | undefined> {
-  const elements = await session.browser.extractInteractiveElements();
+async function capturePrivateCheckoutState(
+  session: Session,
+  page?: Page,
+): Promise<CheckoutState | undefined> {
+  const elements = await session.browser.extractInteractiveElements(page);
   retainSessionElements(session, elements);
-  const url = session.browser.currentUrl();
-  const text = await session.browser.extractVisibleText();
-  const liveCheckout = await captureCartCheckoutForFillCardFallback(session, url);
+  const url = page?.url() ?? session.browser.currentUrl();
+  const text = await session.browser.extractVisibleText(page);
+  const liveCheckout = await captureCartCheckoutForFillCardFallback(session, url, page);
   return checkoutStateForObservation(session, url, text.slice(0, 12_000), elements, liveCheckout);
 }
 
 async function reconcileReservedCartAdd(
   session: Session,
   record: CartAddRecord,
+  page?: Page,
 ): Promise<CartAddResult> {
   if (record.result !== null) return alreadyInCartResult(record.result);
   if (record.promise !== null) {
@@ -2752,15 +2791,21 @@ async function reconcileReservedCartAdd(
           record.optionsHash,
           record.idempotencyKey,
         );
-      const quantity = await cartLineQuantity(session, record.productIdentity, record.optionsHash);
+      const pageAfterAction = page;
+      const quantity = await cartLineQuantity(
+        session,
+        record.productIdentity,
+        record.optionsHash,
+        pageAfterAction,
+      );
       if (quantity === null) throw error;
       session.lastCartMutation = {
         productIdentity: record.productIdentity,
         optionsHash: record.optionsHash,
         cartDelta: "0",
-        origin: originForUrl(session.browser.currentUrl()) ?? "",
+        origin: originForUrl(pageAfterAction?.url() ?? session.browser.currentUrl()) ?? "",
       };
-      const checkoutState = await capturePrivateCheckoutState(session);
+      const checkoutState = await capturePrivateCheckoutState(session, pageAfterAction);
       if (checkoutState === undefined) throw error;
       const result: CartAddResult = {
         status: "already_in_cart",
@@ -2781,20 +2826,25 @@ async function reconcileReservedCartAdd(
   throw new Error("cart add reservation has no operation");
 }
 
-async function performCartAdd(session: Session, record: CartAddRecord): Promise<CartAddResult> {
+async function performCartAdd(
+  session: Session,
+  record: CartAddRecord,
+  page?: Page,
+): Promise<CartAddResult> {
   const beforeQuantity = await cartLineQuantity(
     session,
     record.productIdentity,
     record.optionsHash,
+    page,
   );
   if (beforeQuantity !== null && beforeQuantity > 0) {
     session.lastCartMutation = {
       productIdentity: record.productIdentity,
       optionsHash: record.optionsHash,
       cartDelta: "0",
-      origin: originForUrl(session.browser.currentUrl()) ?? "",
+      origin: originForUrl(page?.url() ?? session.browser.currentUrl()) ?? "",
     };
-    const checkoutState = await capturePrivateCheckoutState(session);
+    const checkoutState = await capturePrivateCheckoutState(session, page);
     if (checkoutState === undefined) throw new Error("cart state was not observable");
     return {
       status: "already_in_cart",
@@ -2831,6 +2881,8 @@ async function performCartAdd(session: Session, record: CartAddRecord): Promise<
           },
         },
         true,
+        undefined,
+        page,
       );
       addError = undefined;
       break;
@@ -2842,7 +2894,13 @@ async function performCartAdd(session: Session, record: CartAddRecord): Promise<
     }
   }
   if (addError !== undefined || actionResult === null) throw addError;
-  const afterQuantity = await cartLineQuantity(session, record.productIdentity, record.optionsHash);
+  const pageAfterAction = actionResult.operationPage ?? page;
+  const afterQuantity = await cartLineQuantity(
+    session,
+    record.productIdentity,
+    record.optionsHash,
+    pageAfterAction,
+  );
   if (afterQuantity === null || afterQuantity <= 0) {
     throw new Error("requested product/variant line was not observable after add");
   }
@@ -2860,7 +2918,7 @@ async function performCartAdd(session: Session, record: CartAddRecord): Promise<
     productIdentity: record.productIdentity,
     optionsHash: record.optionsHash,
     cartDelta,
-    origin: originForUrl(session.browser.currentUrl()) ?? "",
+    origin: originForUrl(pageAfterAction?.url() ?? session.browser.currentUrl()) ?? "",
   };
   return {
     status: "added",
@@ -2889,13 +2947,14 @@ export interface CartClearResult {
 export async function cartClear(sessionId: string): Promise<CartClearResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const cleared = await session.browser.clearCart();
+  const operationPage = operationPageForSession(session);
+  const cleared = await session.browser.clearCart(operationPage);
   if (!cleared) throw new Error("cart_clear failed to reach the cart-clear endpoint");
   session.cartAdds.clear();
   session.cartAddsByIdempotencyKey.clear();
   session.lastCartMutation = null;
   session.lastCartCheckout = null;
-  const observed = await observeSession(session);
+  const observed = await observeSession(session, "compact", undefined, operationPage);
   return {
     status: "cleared",
     cart_url: observed.checkout_state?.cart_url ?? null,
@@ -2911,6 +2970,7 @@ export async function cartAdd(
 ): Promise<CartAddResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const operationPage = operationPageForSession(session);
   const lineKey = `${productIdentity}\u0000${optionsHash}`;
   const byIdempotencyKey = session.cartAddsByIdempotencyKey.get(idempotencyKey);
   if (
@@ -2923,7 +2983,7 @@ export async function cartAdd(
   const existing = byIdempotencyKey ?? session.cartAdds.get(lineKey);
   if (existing !== undefined) {
     session.cartAddsByIdempotencyKey.set(idempotencyKey, existing);
-    return await reconcileReservedCartAdd(session, existing);
+    return await reconcileReservedCartAdd(session, existing, operationPage);
   }
 
   const record: CartAddRecord = {
@@ -2936,7 +2996,7 @@ export async function cartAdd(
   };
   session.cartAdds.set(lineKey, record);
   session.cartAddsByIdempotencyKey.set(idempotencyKey, record);
-  record.promise = performCartAdd(session, record)
+  record.promise = performCartAdd(session, record, operationPage)
     .then((result) => {
       record.phase = "complete";
       record.result = result;
@@ -3550,6 +3610,7 @@ export function buildCompactObservation(args: {
 async function captureCartCheckoutForFillCardFallback(
   session: Session,
   url: string,
+  page?: Page,
 ): Promise<CheckoutSummary | null> {
   let origin: string;
   try {
@@ -3558,7 +3619,7 @@ async function captureCartCheckoutForFillCardFallback(
     return null;
   }
   try {
-    const checkout = await session.browser.readCheckoutSummary();
+    const checkout = await session.browser.readCheckoutSummary(undefined, page);
     if (checkout.checkout_origin === origin) {
       session.lastCartCheckout = { checkout, url, observedAt: Date.now() };
       return checkout;
@@ -4050,7 +4111,7 @@ function normalizeVolatileCheckoutPath(pathname: string): string {
 // token churn on the same logical page must not invalidate.
 function compactV2EpochDoc(
   session: Session,
-  page: OAuthCompletionEvidence["page"] | undefined = compactV2SourcePage(session),
+  page: OAuthCompletionEvidence["page"] | undefined = operationPageForSession(session),
 ): string {
   let location = page?.url() ?? session.browser.currentUrl();
   try {
@@ -4302,6 +4363,7 @@ async function exerciseCompactV2Shadow(
   generation: number,
   elements: readonly InteractiveElement[],
   semanticSource: ObservationSemanticSourceV2,
+  sourcePage: OAuthCompletionEvidence["page"] | undefined,
 ): Promise<void> {
   const saved = {
     compactV2Active: session.compactV2Active,
@@ -4314,8 +4376,10 @@ async function exerciseCompactV2Shadow(
     compactV2Observation(
       session,
       generation,
-      await session.browser.extractBrowserUseObservation(),
+      await session.browser.extractBrowserUseObservation(sourcePage),
       semanticSource,
+      undefined,
+      sourcePage,
     );
   } catch {
   } finally {
@@ -4335,7 +4399,7 @@ export async function observeQuery(
 ): Promise<Record<string, unknown>> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const sourcePage = compactV2SourcePage(session);
+  const sourcePage = operationPageForSession(session);
   const index = session.compactV2Index;
   if (index === null || index.expiresAt < Date.now()) throw new Error("stale_cursor");
   // Query/paging is part of the same session-bound action-map protocol: never return
@@ -4502,6 +4566,7 @@ async function observeSession(
   detail: "compact" | "full" = "compact",
   startMetadata?: CompactV2StartMetadata,
   sourcePage?: OAuthCompletionEvidence["page"],
+  preserveSourceBinding = false,
 ): Promise<Observation> {
   if (sourcePage === undefined) {
     const hadOAuthCompletionSource =
@@ -4512,7 +4577,7 @@ async function observeSession(
     rememberCompactV2SourcePage(session, undefined);
     if (hadOAuthCompletionSource) invalidateCompactV2Snapshot(session);
   }
-  rememberOAuthCompletionSourcePage(session, sourcePage);
+  if (!preserveSourceBinding) rememberOAuthCompletionSourcePage(session, sourcePage);
   const oauthInProgress = (): Observation => {
     session.prevObserve = null;
     invalidateCompactV2Snapshot(session);
@@ -4583,7 +4648,7 @@ async function observeSession(
       );
     }
     if (v2Mode === "shadow")
-      await exerciseCompactV2Shadow(session, generation, elements, semanticSource);
+      await exerciseCompactV2Shadow(session, generation, elements, semanticSource, sourcePage);
     session.compactV2Active = false;
     invalidateCompactV2Snapshot(session);
     const text = await session.browser.extractVisibleText(sourcePage);
@@ -4591,8 +4656,7 @@ async function observeSession(
     const normalizedText = normalizedFull.slice(0, 4000);
     const guidance = provisionPerceptionGuidance(normalizedText);
     const url = sourcePage?.url() ?? session.browser.currentUrl();
-    const liveCheckout =
-      sourcePage === undefined ? await captureCartCheckoutForFillCardFallback(session, url) : null;
+    const liveCheckout = await captureCartCheckoutForFillCardFallback(session, url, sourcePage);
     const checkoutState = checkoutStateForObservation(
       session,
       url,
@@ -4842,6 +4906,7 @@ async function runClickWithPlaceOrderGuard(
 
 interface InternalActResult {
   observation: Observation;
+  operationPage?: Page;
   outcome: {
     selectedOption?: string;
     checkoutState?: CheckoutState;
@@ -4892,22 +4957,35 @@ async function actInternally(
   cartIdentity?: CartIdentityContext,
   collectCheckoutState = false,
   compactV2Authorization?: CompactV2TargetAuthorization,
+  operationPage?: Page,
 ): Promise<InternalActResult> {
   const session = sessionForCall(sessionId);
+  const capturedOperationPage =
+    operationPage ?? (session === undefined ? undefined : operationPageForSession(session));
   const oauthProvider =
     action.kind === "oauth_login" || action.kind === "oauth_click" ? action.provider : undefined;
   try {
-    const execute = async (deadline?: OAuthActionDeadline): Promise<InternalActResult> =>
-      await executeAct(
-        sessionId,
-        action,
-        detail,
-        cartIdentity,
-        true,
-        collectCheckoutState,
-        compactV2Authorization,
-        deadline,
-      );
+    const execute = async (deadline?: OAuthActionDeadline): Promise<InternalActResult> => {
+      const run = async (): Promise<InternalActResult> =>
+        await executeAct(
+          sessionId,
+          action,
+          detail,
+          cartIdentity,
+          true,
+          collectCheckoutState,
+          compactV2Authorization,
+          deadline,
+          capturedOperationPage,
+        );
+      return (action.kind === "click" ||
+        action.kind === "js_click" ||
+        action.kind === "oauth_login" ||
+        action.kind === "oauth_click") &&
+        session !== undefined
+        ? await withOpenedTabAdoptionLease(session.browser, run)
+        : await run();
+    };
     return session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")
       ? await withOAuthActionBoundary(session, oauthProvider, execute)
       : await execute(undefined);
@@ -4935,11 +5013,32 @@ export async function act(
   cartIdentity?: CartIdentityContext,
 ): Promise<Observation> {
   const session = sessionForCall(sessionId);
+  const capturedOperationPage =
+    session === undefined ? undefined : operationPageForSession(session);
   const oauthProvider =
     action.kind === "oauth_login" || action.kind === "oauth_click" ? action.provider : undefined;
   try {
-    const execute = async (deadline?: OAuthActionDeadline): Promise<InternalActResult> =>
-      await executeAct(sessionId, action, detail, cartIdentity, false, false, undefined, deadline);
+    const execute = async (deadline?: OAuthActionDeadline): Promise<InternalActResult> => {
+      const run = async (): Promise<InternalActResult> =>
+        await executeAct(
+          sessionId,
+          action,
+          detail,
+          cartIdentity,
+          false,
+          false,
+          undefined,
+          deadline,
+          capturedOperationPage,
+        );
+      return (action.kind === "click" ||
+        action.kind === "js_click" ||
+        action.kind === "oauth_login" ||
+        action.kind === "oauth_click") &&
+        session !== undefined
+        ? await withOpenedTabAdoptionLease(session.browser, run)
+        : await run();
+    };
     const result =
       session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")
         ? await withOAuthActionBoundary(session, oauthProvider, execute)
@@ -4980,6 +5079,7 @@ async function executeAct(
   collectCheckoutState: boolean,
   internalAuthorization?: CompactV2TargetAuthorization,
   oauthDeadline?: OAuthActionDeadline,
+  operationPage?: Page,
 ): Promise<InternalActResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
@@ -4999,9 +5099,8 @@ async function executeAct(
     if (cardBlock !== null) throw new ManualCardEntryBlockedError(cardBlock);
   }
   let browser = session.browser;
-  const oauthCompletionSource = oauthCompletionSourcePage(session);
-  const compactV2ActionPage =
-    oauthCompletionSource ?? (session.compactV2Active ? compactV2SourcePage(session) : undefined);
+  const compactV2ActionPage = operationPage ?? operationPageForSession(session);
+  let actionPageAfter = compactV2ActionPage;
   let completedAction: ProvisionAction = action;
   let sensitiveSource: RecordedValueSource | undefined;
   let cartAffecting = false;
@@ -5036,7 +5135,8 @@ async function executeAct(
             : action.target;
     }
   }
-  if (oauthCompletionSource?.isClosed() && "target" in action) {
+  if (compactV2ActionPage?.isClosed()) {
+    if (!("target" in action)) throw new Error("action source page is closed");
     if (session.compactV2Active) throwCompactV2StaleRef();
     throw new TargetStaleError({
       status: "target_stale",
@@ -5082,7 +5182,11 @@ async function executeAct(
     }
   }
 
-  const recordingTransitionFields = await attestRecordedFieldsBeforeTransition(session, action);
+  const recordingTransitionFields = await attestRecordedFieldsBeforeTransition(
+    session,
+    action,
+    compactV2ActionPage,
+  );
 
   // Captured for the operator-recipe trace: the element a target action
   // resolved to, so we record the VISIBLE text it acted on (not the ref).
@@ -5097,7 +5201,7 @@ async function executeAct(
               `Declare it first with an allow_host action if this task spans it.`,
           );
         }
-        await browser.goto(action.url);
+        await browser.goto(action.url, compactV2ActionPage);
         break;
       }
       case "allow_host": {
@@ -5117,15 +5221,16 @@ async function executeAct(
         break;
       }
       case "press": {
-        await browser.pressKey(action.key);
+        await browser.pressKey(action.key, compactV2ActionPage);
         break;
       }
       case "oauth_settle": {
-        await browser.settleAfterOAuth();
+        actionPageAfter = await browser.settleAfterOAuth(compactV2ActionPage);
+        rememberOAuthCompletionSourcePage(session, actionPageAfter);
         break;
       }
       case "scroll": {
-        await browser.scrollViewport(action.direction ?? "down");
+        await browser.scrollViewport(action.direction ?? "down", compactV2ActionPage);
         break;
       }
       case "type_secret": {
@@ -5266,17 +5371,15 @@ async function executeAct(
           compactV2CommittedSelectValue(session, committedText),
         );
         completedAction = { ...action, text: committedText };
-        if (compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage)) {
-          await settleAfterStateChange(browser);
-        }
+        await settleAfterStateChange(browser, compactV2ActionPage);
         break;
       }
       case "set_phone_country": {
         // No captured element — the bot finds the phone-local native <select>.
         // resolvedEl stays null; the step records without a captured-element
         // trace (the country is host-replannable, not a replay recipe).
-        await browser.setPhoneCountry(action.country);
-        await settleAfterStateChange(browser);
+        await browser.setPhoneCountry(action.country, compactV2ActionPage);
+        await settleAfterStateChange(browser, compactV2ActionPage);
         break;
       }
       case "click":
@@ -5364,18 +5467,22 @@ async function executeAct(
             } else if (action.kind === "click" || action.kind === "js_click") {
               const method = action.kind;
               if (compactV2ActionPage !== undefined && !browser.isActivePage(compactV2ActionPage)) {
-                if (method === "click") await browser.clickHandle(resolved.handle);
-                else await browser.jsClickHandle(resolved.handle);
+                actionPageAfter =
+                  (await adoptTabOpenedByClick(session, browser, async () => {
+                    if (method === "click") await browser.clickHandle(resolved.handle);
+                    else await browser.jsClickHandle(resolved.handle);
+                  })) ?? actionPageAfter;
               } else {
-                await adoptTabOpenedByClick(session, browser, async () => {
-                  if (method === "click")
-                    await browser.clickWithDispatchTracking({
-                      kind: "handle",
-                      handle: resolved.handle,
-                      method,
-                    });
-                  else await browser.jsClickHandle(resolved.handle);
-                });
+                actionPageAfter =
+                  (await adoptTabOpenedByClick(session, browser, async () => {
+                    if (method === "click")
+                      await browser.clickWithDispatchTracking({
+                        kind: "handle",
+                        handle: resolved.handle,
+                        method,
+                      });
+                    else await browser.jsClickHandle(resolved.handle);
+                  })) ?? actionPageAfter;
               }
             } else await browser.typeHandle(resolved.handle, action.text);
           } finally {
@@ -5386,14 +5493,12 @@ async function executeAct(
             host: registrableHost(urlBeforeAction),
           });
           if (action.kind !== "type") {
-            if (compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage)) {
-              await settleAfterStateChange(browser);
-            }
+            await settleAfterStateChange(browser, compactV2ActionPage);
             // A tab opened by JS a tick after the click lands during the
             // settle above, not inside the click's own grace window. Drain it
             // here — the queue is already populated, so this costs nothing.
             if (compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage)) {
-              await adoptOpenedTab(session, browser, 0);
+              actionPageAfter = (await adoptOpenedTab(session, browser, 0)) ?? actionPageAfter;
             }
           }
           break;
@@ -5450,35 +5555,40 @@ async function executeAct(
               ),
             );
           } else if (!sourcePageIsActive && compactV2ActionPage !== undefined) {
-            if (target !== null) {
-              if (action.kind === "click") {
-                await browser.clickInFrame(target, el.selector, compactV2ActionPage);
-              } else {
-                await browser.clickViaJsInFrame(target, el.selector, 0, compactV2ActionPage);
-              }
-            } else if (action.kind === "click") {
-              await browser.clickOnPage(compactV2ActionPage, el.selector);
-            } else {
-              await browser.clickViaJsOnPage(compactV2ActionPage, el.selector);
-            }
+            actionPageAfter =
+              (await adoptTabOpenedByClick(session, browser, async () => {
+                if (target !== null) {
+                  if (action.kind === "click") {
+                    await browser.clickInFrame(target, el.selector, compactV2ActionPage);
+                  } else {
+                    await browser.clickViaJsInFrame(target, el.selector, 0, compactV2ActionPage);
+                  }
+                } else if (action.kind === "click") {
+                  await browser.clickOnPage(compactV2ActionPage, el.selector);
+                } else {
+                  await browser.clickViaJsOnPage(compactV2ActionPage, el.selector);
+                }
+              })) ?? actionPageAfter;
           } else if (action.kind === "click") {
-            await adoptTabOpenedByClick(session, browser, async () => {
-              await browser.clickWithDispatchTracking(
-                target !== null
-                  ? { kind: "frame", frame: target, selector: el.selector, method: "click" }
-                  : { kind: "selector", selector: el.selector, method: "click" },
-                undefined,
-                async () => {
-                  if (target !== null) await browser.clickInFrame(target, el.selector);
-                  else await browser.click(el.selector);
-                },
-              );
-            });
+            actionPageAfter =
+              (await adoptTabOpenedByClick(session, browser, async () => {
+                await browser.clickWithDispatchTracking(
+                  target !== null
+                    ? { kind: "frame", frame: target, selector: el.selector, method: "click" }
+                    : { kind: "selector", selector: el.selector, method: "click" },
+                  undefined,
+                  async () => {
+                    if (target !== null) await browser.clickInFrame(target, el.selector);
+                    else await browser.click(el.selector);
+                  },
+                );
+              })) ?? actionPageAfter;
           } else {
-            await adoptTabOpenedByClick(session, browser, async () => {
-              if (target !== null) await browser.clickViaJsInFrame(target, el.selector);
-              else await browser.clickViaJs(el.selector);
-            });
+            actionPageAfter =
+              (await adoptTabOpenedByClick(session, browser, async () => {
+                if (target !== null) await browser.clickViaJsInFrame(target, el.selector);
+                else await browser.clickViaJs(el.selector);
+              })) ?? actionPageAfter;
           }
         } else if (action.kind === "type" && frameTargetFor(el) !== null) {
           // Frame targets skip the autocomplete-popup-commit machinery below —
@@ -5638,13 +5748,12 @@ async function executeAct(
             action.provider,
             oauthDeadline,
           );
-          rememberOAuthCompletionSourcePage(session, browser.completedOAuthPage() ?? undefined);
+          const completedPage = browser.completedOAuthPage() ?? undefined;
+          rememberOAuthCompletionSourcePage(session, completedPage);
+          actionPageAfter = completedPage ?? actionPageAfter;
         }
-        if (
-          action.kind !== "type" &&
-          (compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage))
-        ) {
-          await settleAfterStateChange(browser);
+        if (action.kind !== "type") {
+          await settleAfterStateChange(browser, compactV2ActionPage);
         }
         // Only a plain click follows a tab it opened. oauth_click owns its own
         // provider-page lifecycle and upload never opens one.
@@ -5652,7 +5761,7 @@ async function executeAct(
           (action.kind === "click" || action.kind === "js_click") &&
           (compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage))
         ) {
-          await adoptOpenedTab(session, browser, 0);
+          actionPageAfter = (await adoptOpenedTab(session, browser, 0)) ?? actionPageAfter;
         }
         break;
       }
@@ -5696,7 +5805,9 @@ async function executeAct(
           action.provider,
           oauthDeadline,
         );
-        rememberOAuthCompletionSourcePage(session, browser.completedOAuthPage() ?? undefined);
+        const completedPage = browser.completedOAuthPage() ?? undefined;
+        rememberOAuthCompletionSourcePage(session, completedPage);
+        actionPageAfter = completedPage ?? actionPageAfter;
         break;
       }
     }
@@ -5714,11 +5825,17 @@ async function executeAct(
       if (!stillObservedDocument) invalidateCompactV2Snapshot(session);
     }
   }
-  await verifyRecordedFieldsAfterTransition(session, action, recordingTransitionFields);
+  await verifyRecordedFieldsAfterTransition(
+    session,
+    action,
+    recordingTransitionFields,
+    compactV2ActionPage,
+  );
   // Don't fold inbox-provider steps into the replayable recipe (see
   // INBOX_READ_HOSTS): replay re-reads the code via awaitVerification, and a
   // recorded inbox click would bake the email's subject into a shared recipe.
-  if (!isInboxReadHost(browser.currentUrl())) {
+  const urlAfterAction = actionPageAfter?.url() ?? browser.currentUrl();
+  if (!isInboxReadHost(urlAfterAction)) {
     const replayElement = replaySafeElementForSession(session, resolvedEl);
     recordTrace(session, completedAction, replayElement, sensitiveSource);
     recordCaptureRound(session, completedAction, replayElement, urlBeforeAction);
@@ -5728,19 +5845,18 @@ async function executeAct(
       productIdentity: cartIdentity!.productIdentity,
       optionsHash: cartIdentity!.optionsHash,
       cartDelta: "unknown",
-      origin: originForUrl(browser.currentUrl()) ?? "",
+      origin: originForUrl(urlAfterAction) ?? "",
     };
   }
   // `detail:"none"` returns a minimal ack (the action ran; no perception emitted)
   // so multi-field fills don't each echo the page. The host must call
   // operate_observe before its next ref-targeted act (refs aren't refreshed here).
   const checkoutState =
-    internalAccess && collectCheckoutState ? await capturePrivateCheckoutState(session) : undefined;
+    internalAccess && collectCheckoutState
+      ? await capturePrivateCheckoutState(session, actionPageAfter)
+      : undefined;
   const terminalOAuthCompletionUrl = browser.takeOAuthTerminalCompletionUrl();
-  const actionObservationPage =
-    action.kind === "oauth_login" || action.kind === "oauth_click"
-      ? (oauthCompletionSourcePage(session) ?? compactV2ActionPage)
-      : compactV2ActionPage;
+  const actionObservationPage = actionPageAfter;
   const observation =
     terminalOAuthCompletionUrl !== null
       ? terminalOAuthCompletionObservation(session, terminalOAuthCompletionUrl)
@@ -5768,8 +5884,10 @@ async function executeAct(
             detail === "none" ? "compact" : detail,
             undefined,
             actionObservationPage,
+            true,
           );
   return {
+    ...(actionPageAfter === undefined ? {} : { operationPage: actionPageAfter }),
     observation:
       completedAction.kind === "select" && observation.format !== "browser-use-dom"
         ? { ...observation, selected_option: completedAction.text }
@@ -5797,6 +5915,7 @@ export async function formSelectMany(
   const fields: FormSelectManyFieldResult[] = [];
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const operationPage = operationPageForSession(session);
   const selectionEntries = Object.entries(selections);
 
   for (let index = 0; index < selectionEntries.length; index += 1) {
@@ -5820,7 +5939,9 @@ export async function formSelectMany(
           status: "failed",
           reason: compactV2SelectionFailureReason(error),
         });
-        if (index + 1 < selectionEntries.length) await observe(sessionId, "compact");
+        if (index + 1 < selectionEntries.length) {
+          await observeSession(session, "compact", undefined, operationPage);
+        }
         continue;
       }
     }
@@ -5833,6 +5954,7 @@ export async function formSelectMany(
         undefined,
         false,
         authorization,
+        operationPage,
       );
       const selectedOption = actionResult.outcome.selectedOption;
       if (selectedOption === undefined) {
@@ -5840,7 +5962,7 @@ export async function formSelectMany(
       }
       // `detail:none` is intentionally a minimal ack. The explicit observe here
       // refreshes the DOM generation between every potentially mutating select.
-      await observe(sessionId, "compact");
+      await observeSession(session, "compact", undefined, operationPage);
       const publicSelectedOption = session.compactV2Active
         ? safeDescriptionV2(selectedOption)
         : selectedOption;
@@ -5871,7 +5993,7 @@ export async function formSelectMany(
         });
       }
       if (session.compactV2Active && index + 1 < selectionEntries.length) {
-        await observe(sessionId, "compact");
+        await observeSession(session, "compact", undefined, operationPage);
       }
     }
   }
@@ -5879,7 +6001,7 @@ export async function formSelectMany(
   return {
     session_id: sessionId,
     fields,
-    observation: await observe(sessionId, "compact"),
+    observation: await observeSession(session, "compact", undefined, operationPage),
   };
 }
 
@@ -6473,18 +6595,19 @@ function recordCaptureRound(
 // The EXTRACT round is the one round that keeps raw html — the key-extraction
 // step is synthesized from the page where the credential is shown.
 async function recordExtractRound(session: Session): Promise<boolean> {
+  const page = operationPageForSession(session);
   let html = "";
   if (session.compactV2Mode !== "on") {
     try {
-      html = (await session.browser.getState()).html;
+      html = (await session.browser.getState(page)).html;
     } catch {
       /* best-effort — the copy-button/inventory extract path still works */
     }
   }
   const stateUrl =
     session.compactV2Mode === "on"
-      ? compactV2ReplaySafeUrl(session.browser.currentUrl())
-      : session.browser.currentUrl();
+      ? compactV2ReplaySafeUrl(page?.url() ?? session.browser.currentUrl())
+      : (page?.url() ?? session.browser.currentUrl());
   if (stateUrl === null) {
     rejectRecipeRecording(session, "compact_v2_unrepresentable_page_url");
     return false;
@@ -6620,6 +6743,32 @@ export function emitProvisionMeasurement(
 // arrives later than this is still caught by that drain.
 const OPENED_TAB_GRACE_MS = 300;
 
+const openedTabAdoptionTails = new WeakMap<BrowserController, Promise<void>>();
+
+async function withOpenedTabAdoptionLease<T>(
+  browser: BrowserController,
+  run: () => Promise<T>,
+): Promise<T> {
+  const previous = openedTabAdoptionTails.get(browser) ?? Promise.resolve();
+  let release!: () => void;
+  const turn = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  openedTabAdoptionTails.set(
+    browser,
+    previous.then(
+      () => turn,
+      () => turn,
+    ),
+  );
+  await previous.catch(() => undefined);
+  try {
+    return await run();
+  } finally {
+    release();
+  }
+}
+
 // Payment is deliberately out of scope. A sealed card fill and a live
 // place-order/3DS approval both own their page identity, so leave the operator
 // anchored where those flows put it rather than following a tab into them.
@@ -6635,36 +6784,45 @@ async function adoptOpenedTab(
   session: Session,
   browser: BrowserController,
   graceMs: number,
-): Promise<void> {
-  if (!newTabAdoptionAllowed(session)) return;
+): Promise<Page | undefined> {
+  if (!newTabAdoptionAllowed(session)) return undefined;
   const url = await browser.adoptOpenedTab(graceMs).catch(() => null);
-  if (url === null) return;
+  if (url === null) return undefined;
+  const page = browser.activePage();
+  if (page !== null && oauthCompletionSourcePage(session) !== undefined) {
+    rememberOAuthCompletionSourcePage(session, page);
+  } else if (page !== null && session.compactV2Active) {
+    rememberCompactV2SourcePage(session, page);
+  }
   audit(session.id, "new_tab_adopted", { host: registrableHost(url) });
+  return page ?? undefined;
 }
 
 async function adoptTabOpenedByClick(
   session: Session,
   browser: BrowserController,
   click: () => Promise<void>,
-): Promise<void> {
+): Promise<Page | undefined> {
   if (!newTabAdoptionAllowed(session)) {
     await click();
-    return;
+    return undefined;
   }
   browser.armOpenedTabAdoption();
+  let adopted: Page | undefined;
   try {
     await click();
   } finally {
-    await adoptOpenedTab(session, browser, OPENED_TAB_GRACE_MS);
+    adopted = await adoptOpenedTab(session, browser, OPENED_TAB_GRACE_MS);
   }
+  return adopted;
 }
 
-async function settleAfterStateChange(browser: BrowserController): Promise<void> {
+async function settleAfterStateChange(browser: BrowserController, page?: Page): Promise<void> {
   // A fixed dwell here used to consume the OAuth action's completion window
   // after the provider had already returned. Wait for the page's actual
   // interactive state instead; it resolves immediately when the redirect has
   // rendered and remains bounded for slow SPAs.
-  await browser.waitForInteractiveDom(1, 2_000).catch(() => undefined);
+  await browser.waitForInteractiveDom(1, 2_000, page).catch(() => undefined);
 }
 
 // ── operator-recipe: remember a successful run, verify a postcondition ──
@@ -6955,7 +7113,9 @@ async function rememberCheckoutLeg(
   const legStart = checkoutLegStartIndex(trace);
   if (legStart === null) return null;
   const legTrace = trace.slice(legStart);
-  const fieldNames = await session.browser.extractCheckoutFieldNames();
+  const fieldNames = await session.browser.extractCheckoutFieldNames(
+    operationPageForSession(session),
+  );
   const signature = checkoutFieldSetSignature(fieldNames);
   if (signature === null) return null;
   const legSlots = new Set(
@@ -6980,10 +7140,13 @@ async function rememberCheckoutLeg(
 
 // Read a single page snapshot for postcondition checking. Field VALUES are
 // reduced to lengths here so a token/secret success-signal can't leak.
-async function snapshotForPostcondition(session: Session): Promise<PostconditionSnapshot> {
+async function snapshotForPostcondition(
+  session: Session,
+  sourcePage: Page | undefined,
+): Promise<PostconditionSnapshot> {
   const privateFields =
     session.compactV2Mode === "on"
-      ? (await session.browser.extractInteractiveElements())
+      ? (await session.browser.extractInteractiveElements(sourcePage))
           .filter((element) => typeof element.value === "string" && element.value.length > 0)
           .map((element) => {
             const sealed = sealRetainedInteractiveElementsV2([element])[0]!;
@@ -7005,7 +7168,7 @@ async function snapshotForPostcondition(session: Session): Promise<Postcondition
           })
           .filter((field) => field.label.length > 0)
       : null;
-  const obs = await observeSession(session);
+  const obs = await observeSession(session, "compact", undefined, sourcePage);
   const fields =
     privateFields ??
     session.lastElements
@@ -7015,10 +7178,13 @@ async function snapshotForPostcondition(session: Session): Promise<Postcondition
         value_len: element.value!.length,
       }));
   return {
-    url: obs.format === "browser-use-dom" ? session.browser.currentUrl() : obs.url,
+    url:
+      obs.format === "browser-use-dom"
+        ? (sourcePage?.url() ?? session.browser.currentUrl())
+        : obs.url,
     text:
       obs.format === "browser-use-dom"
-        ? await session.browser.extractVisibleText()
+        ? await session.browser.extractVisibleText(sourcePage)
         : (session.prevObserve?.text ?? obs.text ?? ""),
     fields,
   };
@@ -7033,16 +7199,17 @@ export async function verifyPostcondition(
 ): Promise<PostconditionResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const sourcePage = operationPageForSession(session);
   if (postcondition.kind === "observe_artifact" && postcondition.probe_url !== undefined) {
     const host = registrableHost(postcondition.probe_url);
     if (host !== null && !session.allowedHosts.some((e) => e.host === host)) {
       session.allowedHosts.push({ host, source: "mid_session" });
     }
     invalidateCompactV2Snapshot(session);
-    await session.browser.goto(postcondition.probe_url);
+    await session.browser.goto(postcondition.probe_url, sourcePage);
     await settle(1500);
   }
-  const snap = await snapshotForPostcondition(session);
+  const snap = await snapshotForPostcondition(session, sourcePage);
   const result = checkSuccessSignal(postcondition.success_signal, snap);
   audit(sessionId, "verify_postcondition", {
     kind: postcondition.kind,
@@ -7096,7 +7263,9 @@ export async function verifyActiveRecipePostcondition(
 export async function checkoutShapeSignatureForSession(sessionId: string): Promise<string | null> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const fieldNames = await session.browser.extractCheckoutFieldNames();
+  const fieldNames = await session.browser.extractCheckoutFieldNames(
+    operationPageForSession(session),
+  );
   return checkoutFieldSetSignature(fieldNames);
 }
 
@@ -7376,15 +7545,16 @@ async function verifyReplayField(
   session: Session,
   expected: ReplayExpectedField,
   allowCommittedSelect = false,
+  page?: Page,
 ): Promise<{ ok: true } | { ok: false; reason: "field_missing" | "field_value_mismatch" }> {
   if (expected.kind === "set_phone_country") {
-    return (await session.browser.verifyPhoneCountry(expected.expected))
+    return (await session.browser.verifyPhoneCountry(expected.expected, page))
       ? { ok: true }
       : { ok: false, reason: "field_value_mismatch" };
   }
   const target = expected.target;
   if (target === null) return { ok: false, reason: "field_missing" };
-  const fresh = await session.browser.extractInteractiveElements();
+  const fresh = await session.browser.extractInteractiveElements(page);
   retainSessionElements(session, fresh);
   return verifyReplayFieldInElements(session, expected, fresh, allowCommittedSelect);
 }
@@ -7394,9 +7564,10 @@ async function verifyReplayFieldWithElements(
   expected: ReplayExpectedField,
   elements: readonly InteractiveElement[],
   allowCommittedSelect = false,
+  page?: Page,
 ): Promise<{ ok: true } | { ok: false; reason: "field_missing" | "field_value_mismatch" }> {
   if (expected.kind === "set_phone_country") {
-    return (await session.browser.verifyPhoneCountry(expected.expected))
+    return (await session.browser.verifyPhoneCountry(expected.expected, page))
       ? { ok: true }
       : { ok: false, reason: "field_value_mismatch" };
   }
@@ -7407,9 +7578,10 @@ async function isReplayFieldMounted(
   session: Session,
   expected: ReplayExpectedField,
   elements: readonly InteractiveElement[],
+  page?: Page,
 ): Promise<boolean> {
   if (expected.kind === "set_phone_country") {
-    return await session.browser.hasPhoneCountryControl();
+    return await session.browser.hasPhoneCountryControl(page);
   }
   return expected.target !== null && hasRecipeTargetCandidate(elements, expected.target);
 }
@@ -7463,14 +7635,15 @@ function recordedMoneyFields(session: Session): ReplayExpectedField[] {
 async function attestRecordedFieldsBeforeTransition(
   session: Session,
   action: ProvisionAction,
+  page?: Page,
 ): Promise<ReplayExpectedField[]> {
   if (session.replayState !== null || !isReplayTransitionAction(action)) return [];
   const fields = recordedMoneyFields(session);
   if (fields.length === 0) return fields;
-  const fresh = await session.browser.extractInteractiveElements();
+  const fresh = await session.browser.extractInteractiveElements(page);
   retainSessionElements(session, fresh);
   for (const expected of fields) {
-    const guard = await verifyReplayFieldWithElements(session, expected, fresh);
+    const guard = await verifyReplayFieldWithElements(session, expected, fresh, false, page);
     if (!guard.ok) {
       rejectRecipeRecording(
         session,
@@ -7486,21 +7659,22 @@ async function verifyRecordedFieldsAfterTransition(
   session: Session,
   action: ProvisionAction,
   fields: readonly ReplayExpectedField[],
+  page?: Page,
 ): Promise<void> {
   if (session.replayState !== null || !isReplayTransitionAction(action) || fields.length === 0) {
     return;
   }
-  const fresh = await session.browser.extractInteractiveElements();
+  const fresh = await session.browser.extractInteractiveElements(page);
   retainSessionElements(session, fresh);
   for (const expected of fields) {
-    if (!(await isReplayFieldMounted(session, expected, fresh))) {
+    if (!(await isReplayFieldMounted(session, expected, fresh, page))) {
       rejectRecipeRecording(
         session,
         `checkout transition could not be attested (${expected.hole}: field_missing)`,
       );
       return;
     }
-    const guard = await verifyReplayFieldWithElements(session, expected, fresh);
+    const guard = await verifyReplayFieldWithElements(session, expected, fresh, false, page);
     if (!guard.ok) {
       rejectRecipeRecording(
         session,
@@ -7528,6 +7702,7 @@ export async function replayOperatorRecipe(
 ): Promise<OperatorReplayResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  let operationPage = operationPageForSession(session);
   const recipeHash = replayDigest(recipe);
   const bindingsHash = bindingDigest(bindings);
   const boundPostcondition = bindRecipePostcondition(recipe.postcondition, bindings);
@@ -7564,14 +7739,19 @@ export async function replayOperatorRecipe(
       audit(sessionId, "replay_leg_fallback", { reason, field, from_step_index: fromStepIndex });
       return {
         status: "leg_fallback_required",
-        observation: await observe(sessionId),
+        observation: await observeSession(session, "compact", undefined, operationPage),
         leg: "checkout",
         from_step_index: fromStepIndex,
         reason: `${reason}: ${field}`,
       };
     }
     markReplayFailure(session, reason, field);
-    return { status: "human_required", observation: await observe(sessionId), reason, field };
+    return {
+      status: "human_required",
+      observation: await observeSession(session, "compact", undefined, operationPage),
+      reason,
+      field,
+    };
   };
 
   if (fromIndex === 0) {
@@ -7607,7 +7787,7 @@ export async function replayOperatorRecipe(
     }
     const repairedField = state.expectedFields.get(fromIndex - 1);
     if (repairedField !== undefined && !state.verifiedFields.has(fromIndex - 1)) {
-      const guard = await verifyReplayField(session, repairedField);
+      const guard = await verifyReplayField(session, repairedField, false, operationPage);
       if (!guard.ok) return await humanRequired(guard.reason, repairedField.hole);
       state.verifiedFields.add(fromIndex - 1);
     }
@@ -7624,7 +7804,7 @@ export async function replayOperatorRecipe(
     state.nextIndex = stepIndex + 1;
     return {
       status: "fallback_required",
-      observation: await observe(sessionId),
+      observation: await observeSession(session, "compact", undefined, operationPage),
       step_index: stepIndex,
       next_index: stepIndex + 1,
       step,
@@ -7644,7 +7824,7 @@ export async function replayOperatorRecipe(
       : recipeDomain;
     return {
       status: "domain_lock_violation",
-      observation: await observe(sessionId),
+      observation: await observeSession(session, "compact", undefined, operationPage),
       step_index: stepIndex,
       host: publicHost,
       recipe_domain: publicRecipeDomain,
@@ -7746,7 +7926,7 @@ export async function replayOperatorRecipe(
       }
       // Structural pre-check: resolve against the live inventory before every
       // deterministic act. This is especially load-bearing on money paths.
-      const fresh = await session.browser.extractInteractiveElements();
+      const fresh = await session.browser.extractInteractiveElements(operationPage);
       retainSessionElements(session, fresh);
       const expectedForStep = state.expectedFields.get(i);
       const resolution =
@@ -7807,7 +7987,16 @@ export async function replayOperatorRecipe(
 
     try {
       await options.beforeAction?.({ step_index: i, action });
-      const acted = await actInternally(sessionId, action, "none");
+      const acted = await actInternally(
+        sessionId,
+        action,
+        "none",
+        undefined,
+        false,
+        undefined,
+        operationPage,
+      );
+      operationPage = acted.operationPage ?? operationPage;
       if (acted.observation.oauth?.state === "awaiting_human") {
         return await fallback(
           step,
@@ -7818,7 +8007,12 @@ export async function replayOperatorRecipe(
       replayed += 1;
       const expected = state.expectedFields.get(i);
       if (expected !== undefined) {
-        const guard = await verifyReplayField(session, expected, expected.kind === "select");
+        const guard = await verifyReplayField(
+          session,
+          expected,
+          expected.kind === "select",
+          operationPage,
+        );
         if (!guard.ok) return await humanRequired(guard.reason, expected.hole);
         state.verifiedFields.add(i);
       }
@@ -7838,7 +8032,7 @@ export async function replayOperatorRecipe(
 
   return {
     status: "complete",
-    observation: await observe(sessionId),
+    observation: await observeSession(session, "compact", undefined, operationPage),
     replayed_steps: replayed,
     field_values_verified: true,
   };
@@ -7975,15 +8169,16 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const { browser } = session;
+  const page = operationPageForSession(session);
   invalidateCompactV2Snapshot(session);
 
   // The masked-display trap: click reveal/show toggles before reading.
-  await browser.revealMaskedCredentials();
+  await browser.revealMaskedCredentials(page);
 
-  const labeled = await browser.extractLabeledCredentialCandidates();
-  const inputs = await browser.extractAllInputValues();
-  const nearCopy = await browser.extractCredentialsNearCopyButtons();
-  const text = await browser.extractVisibleText();
+  const labeled = await browser.extractLabeledCredentialCandidates(page);
+  const inputs = await browser.extractAllInputValues(page);
+  const nearCopy = await browser.extractCredentialsNearCopyButtons(page);
+  const text = await browser.extractVisibleText(page);
 
   // Fail CLOSED on a login wall / anti-bot interstitial: scraping it yields only
   // session/CSRF/asset tokens, and handing one back is a false-green. Refuse,
@@ -7993,7 +8188,7 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     audit(sessionId, "extract", { found: false, blocked_reason: blocked });
     return {
       session_id: sessionId,
-      url: browser.currentUrl(),
+      url: page?.url() ?? browser.currentUrl(),
       credentials: {},
       candidate_count: 0,
       blocked_reason: blocked,
@@ -8003,7 +8198,7 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   // Copy-only key surfaces (e.g. LangWatch's /settings/api-keys) never render
   // the value into the DOM — it goes to the clipboard on a "Copy" click. Read
   // it (clipboard-read is granted at context creation).
-  const clip = await browser.readClipboard().catch(() => "");
+  const clip = await browser.readClipboard(page).catch(() => "");
 
   // Primary api_key: first FULL hit wins; a truncated/masked hit is the fallback.
   let state = initialExtractionState();
@@ -8085,12 +8280,16 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     n += 1;
     credentials[`api_key_${n}`] = tok;
   }
-  const sanitized = sanitizeExtractedCredentials(credentials, browser.currentUrl(), haystack);
+  const sanitized = sanitizeExtractedCredentials(
+    credentials,
+    page?.url() ?? browser.currentUrl(),
+    haystack,
+  );
   const found = Object.keys(sanitized).length > 0;
   audit(sessionId, "extract", { found, candidate_count: labeled.length });
   return {
     session_id: sessionId,
-    url: browser.currentUrl(),
+    url: page?.url() ?? browser.currentUrl(),
     credentials: sanitized,
     candidate_count: labeled.length,
   };
@@ -8174,55 +8373,59 @@ async function solveCaptchaWithTokenSolver(
   solver: TwoCaptchaSolver,
   browser: BrowserController,
   variant: string,
+  page?: Page,
 ): Promise<{ solved: boolean; outcome: string }> {
   if (!solver.isAvailable()) return { solved: false, outcome: "no_key" };
 
   if (variant === "recaptcha_v2" || variant === "recaptcha_v3") {
-    const sitekey = await browser.extractRecaptchaSitekey();
+    const sitekey = await browser.extractRecaptchaSitekey(page);
     if (sitekey === null) return { solved: false, outcome: "missing_sitekey" };
     const res = await solver.solveRecaptchaV2({
       sitekey,
-      pageUrl: browser.currentUrl(),
+      pageUrl: page?.url() ?? browser.currentUrl(),
       ...(variant === "recaptcha_v3" ? { invisible: true } : {}),
     });
     if (res.kind !== "ok") return { solved: false, outcome: res.kind };
-    const injected = await browser.injectRecaptchaToken(res.token);
+    const injected = await browser.injectRecaptchaToken(res.token, page);
     if (!injected) return { solved: false, outcome: "inject_failed" };
     return {
-      solved: await browser.waitForCaptchaResponseToken(2_000),
+      solved: await browser.waitForCaptchaResponseToken(2_000, page),
       outcome: "ok",
     };
   }
 
   if (variant === "hcaptcha") {
-    const sitekey = await browser.extractHcaptchaSitekey();
+    const sitekey = await browser.extractHcaptchaSitekey(page);
     if (sitekey === null) return { solved: false, outcome: "missing_sitekey" };
-    const ctx = await browser.getHcaptchaSolveContext();
+    const ctx = await browser.getHcaptchaSolveContext(page);
     const res = await solver.solveHcaptcha({
       sitekey,
-      pageUrl: browser.currentUrl(),
+      pageUrl: page?.url() ?? browser.currentUrl(),
       invisible: ctx.invisible,
       ...(ctx.userAgent !== null ? { userAgent: ctx.userAgent } : {}),
       ...(ctx.rqdata !== null ? { data: ctx.rqdata } : {}),
     });
     if (res.kind !== "ok") return { solved: false, outcome: res.kind };
-    const injected = await browser.injectHcaptchaToken(res.token);
+    const injected = await browser.injectHcaptchaToken(res.token, page);
     if (!injected) return { solved: false, outcome: "inject_failed" };
     return {
-      solved: await browser.waitForCaptchaResponseToken(2_000),
+      solved: await browser.waitForCaptchaResponseToken(2_000, page),
       outcome: "ok",
     };
   }
 
   if (variant === "turnstile") {
-    const sitekey = await browser.extractTurnstileSitekey();
+    const sitekey = await browser.extractTurnstileSitekey(page);
     if (sitekey === null) return { solved: false, outcome: "missing_sitekey" };
-    const res = await solver.solveTurnstile({ sitekey, pageUrl: browser.currentUrl() });
+    const res = await solver.solveTurnstile({
+      sitekey,
+      pageUrl: page?.url() ?? browser.currentUrl(),
+    });
     if (res.kind !== "ok") return { solved: false, outcome: res.kind };
-    const injected = await browser.injectTurnstileToken(res.token);
+    const injected = await browser.injectTurnstileToken(res.token, page);
     if (!injected) return { solved: false, outcome: "inject_failed" };
     return {
-      solved: await browser.waitForCaptchaResponseToken(2_000),
+      solved: await browser.waitForCaptchaResponseToken(2_000, page),
       outcome: "ok",
     };
   }
@@ -8236,15 +8439,16 @@ async function solveCaptchaWithTokenSolver(
 export async function captchaGate(sessionId: string): Promise<CaptchaGateResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const page = operationPageForSession(session);
   invalidateCompactV2Snapshot(session);
-  const det = await session.browser.detectCaptchaVariant();
+  const det = await session.browser.detectCaptchaVariant(page);
   const found = det.variant !== "unknown" || det.challengeRendered;
   if (!found) {
     audit(sessionId, "captcha_gate", { found: false });
     return { session_id: sessionId, found: false, variant: "none", settled: true };
   }
 
-  let token = await session.browser.waitForCaptchaResponseToken(750);
+  let token = await session.browser.waitForCaptchaResponseToken(750, page);
   let solvedBySubstrate = false;
   let tokenSolverOutcome: string | null = null;
 
@@ -8254,11 +8458,16 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
     // #279). With NO solver configured, solveCaptchaWithTokenSolver returns
     // "no_key" and a v3 failure stays an IP/behavior scoring wall (needs_user →
     // captcha_wall below), NOT a "set up 2Captcha" prompt.
-    solvedBySubstrate = await session.browser.triggerInvisibleRecaptcha(9_000);
-    token = solvedBySubstrate || (await session.browser.waitForCaptchaResponseToken(2_000));
+    solvedBySubstrate = await session.browser.triggerInvisibleRecaptcha(9_000, page);
+    token = solvedBySubstrate || (await session.browser.waitForCaptchaResponseToken(2_000, page));
     if (!token) {
       const solver = await buildTwoCaptchaSolver(session);
-      const tokenSolved = await solveCaptchaWithTokenSolver(solver, session.browser, det.variant);
+      const tokenSolved = await solveCaptchaWithTokenSolver(
+        solver,
+        session.browser,
+        det.variant,
+        page,
+      );
       tokenSolverOutcome = tokenSolved.outcome;
       token = tokenSolved.solved;
     }
@@ -8270,17 +8479,26 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
     // captchas; solveCaptchaWithTokenSolver returns outcome "no_key" when none
     // is configured, so we fall through to the visible-captcha click below.
     const solver = await buildTwoCaptchaSolver(session);
-    const tokenSolved = await solveCaptchaWithTokenSolver(solver, session.browser, det.variant);
+    const tokenSolved = await solveCaptchaWithTokenSolver(
+      solver,
+      session.browser,
+      det.variant,
+      page,
+    );
     tokenSolverOutcome = tokenSolved.outcome;
     token = tokenSolved.solved;
     if (!token) {
-      const solved = await session.browser.solveVisibleCaptcha(30_000);
+      const solved = await session.browser.solveVisibleCaptcha(30_000, page);
       solvedBySubstrate = solved.found && solved.solved;
-      token = solvedBySubstrate || (await session.browser.waitForCaptchaResponseToken(2_000));
+      token = solvedBySubstrate || (await session.browser.waitForCaptchaResponseToken(2_000, page));
     }
   }
 
-  const clear = await session.browser.waitForCaptchaChallengeToSettle(token ? 5_000 : 15_000);
+  const clear = await session.browser.waitForCaptchaChallengeToSettle(
+    token ? 5_000 : 15_000,
+    2_500,
+    page,
+  );
   const settled =
     det.variant === "unknown" ? clear : token && (clear || tokenSolverOutcome === "ok");
 
@@ -8526,6 +8744,7 @@ const GMAIL_TRANSIENT_MAX_RETRIES = 3;
 async function readGmailSearchResultsResilient(
   browser: BrowserController,
   searchUrl: string,
+  page: Page,
   linkCandidatesOf: (
     els: readonly {
       href?: string | null;
@@ -8540,16 +8759,16 @@ async function readGmailSearchResultsResilient(
   for (let retry = 0; retry <= GMAIL_TRANSIENT_MAX_RETRIES; retry++) {
     if (retry > 0) {
       await browser
-        .waitForCaptchaChallengeToSettle(gmailTransientBackoffMs(retry - 1), 0)
+        .waitForCaptchaChallengeToSettle(gmailTransientBackoffMs(retry - 1), 0, page)
         .catch(() => false);
-      await browser.goto(searchUrl);
+      await browser.goto(searchUrl, page);
     }
     for (let i = 0; i < 6; i++) {
-      text = await browser.extractVisibleText();
+      text = await browser.extractVisibleText(page);
       if (text.length > 200) break;
-      await browser.waitForCaptchaChallengeToSettle(1200, 0).catch(() => false);
+      await browser.waitForCaptchaChallengeToSettle(1200, 0, page).catch(() => false);
     }
-    links = linkCandidatesOf(await browser.extractInteractiveElements());
+    links = linkCandidatesOf(await browser.extractInteractiveElements(page));
     const transientOrEmpty =
       isGmailTransientErrorText(text) || (isEmptyGmailResultText(text) && links.length === 0);
     if (!transientOrEmpty || retry === GMAIL_TRANSIENT_MAX_RETRIES) break;
@@ -8580,6 +8799,10 @@ export async function awaitVerification(
   }
 
   invalidateCompactV2Snapshot(session);
+  const inboxPage = operationPageForSession(session);
+  if (inboxPage === undefined || inboxPage.isClosed()) {
+    throw new Error("inbox page is unavailable");
+  }
 
   const verification = await runDetachedGoogleIdentityOperation(session, async (browser) => {
     return await browser.withTemporaryHostScopeAllowedHosts(["mail.google.com"], async () => {
@@ -8604,17 +8827,19 @@ export async function awaitVerification(
       let sourceFrom: string | null = null;
       for (let attempt = 0; attempt < 3 && code === null && link === null; attempt++) {
         sourceFrom = null;
-        if (attempt > 0) await browser.waitForCaptchaChallengeToSettle(4000, 0).catch(() => false);
-        await browser.goto(searchUrl);
+        if (attempt > 0)
+          await browser.waitForCaptchaChallengeToSettle(4000, 0, inboxPage).catch(() => false);
+        await browser.goto(searchUrl, inboxPage);
         const { text: listText, links: listLinks } = await readGmailSearchResultsResilient(
           browser,
           searchUrl,
+          inboxPage,
           linkCandidatesOf,
         );
-        const opened = await browser.openFirstMailResult().catch(() => false);
+        const opened = await browser.openFirstMailResult(inboxPage).catch(() => false);
         if (opened) {
-          const openedText = await browser.extractVisibleText();
-          const openedLinks = linkCandidatesOf(await browser.extractInteractiveElements());
+          const openedText = await browser.extractVisibleText(inboxPage);
+          const openedLinks = linkCandidatesOf(await browser.extractInteractiveElements(inboxPage));
           sourceFrom = extractSenderEmail(openedText);
           const expectedDomains = expectedVerificationDomains(opts.sender, sourceFrom);
           ({ code, link } = parseVerification(
