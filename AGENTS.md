@@ -688,46 +688,17 @@ virgin signup succeeds on an UNCOVERED service (no active skill in registry)
   operator paths.
 - `apps/mcp/src/bot/identity-runtime.ts` owns Chrome's lifetime independent of
   any one session (single-flight launch + epoch + tab acquire/release, wired
-  into `session/lifecycle.ts`). By default (flag below unset) production still
+  into `session/lifecycle.ts`). Outside socket-configured broker mode, production
   tears the identity's Chrome down at every finish of a session whose browser
   came from the runtime (`forgetAfterShutdown()` after the close). Don't skip
   `forgetAfterShutdown()` at finish without also resetting
   `BrowserController`/`PageDriver` per-session state to a clean baseline; see
   `docs/browser-process-page-boundary.md#identity-runtime-step-3--chrome-lifetime-independent-of-one-session`.
-- `TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION` (default off — `session/multisession-flag.ts`)
-  is the one place two `operate_start` sessions are allowed to share that same
-  identity's Chrome concurrently, for a controlled two-agent auth-preservation
-  test. Off, `session/lifecycle.ts` is unchanged (one profile-operation lease
-  admits one session; a second gets `PROFILE_BUSY`). On, a session that loses
-  the profile-operation guard to an already-live-or-launching in-process
-  identity joins it as a SATELLITE: `BrowserController.attachSatellite()`
-  (`browser.ts`) constructs a second controller sharing the primary's
-  `BrowserProcessOwner` (same Chrome process/context) but with its OWN
-  `PageDriver`/`OwnedPages`, so tab-family isolation falls out of the existing
-  tab-ownership registry (`owned-pages.ts` gained only the read-only
-  `claimedByAnother()` accessor the guard below uses); the satellite's page
-  gets the same per-page normalization as the primary's
-  (`installPageNormalization`). `SharedIdentityGroup` in
-  `session/lifecycle.ts` refcounts the group so whichever session's finish
-  empties it runs the real teardown (via the group's `primary`, even when a
-  satellite finishes last) — every other finish calls
-  `closeOwnPagesOnly()` (closing that session's whole tab family and
-  unrouting its guard) and leaves the shared browser running. A forced
-  teardown of a grouped session is wholly `forceReleaseWarmBrowserPage`'s: a
-  preempted `releaseWarmBrowserPage` throws before touching the refcount or
-  the lease, so the shared Chrome is never orphaned by the race. The
-  host-scope network guard (`installHostScopeGuard`) judges every request
-  unconditionally with the flag off, exactly as before. Under the flag it is
-  page-aware: a page another session's `OwnedPages` has definitely claimed
-  falls through (`route.fallback`) to that session's own guard; everything
-  else — an unclaimed page, or a frameless service-worker request — is judged
-  by every guard on the context and must pass all of them. Every popup is
-  unclaimed between its first navigation commit and its opener's `popup`
-  event, so a popup's earliest XHR/fetch must be in scope for every live
-  session. Known, accepted limitation (test scaffolding, not a production
-  concurrency feature): two sessions on the same site under the same login
-  share cookies and can collide. Do not build a site-workflow
-  scheduler/broker on top of this — that is out of scope for the flag.
+- `TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION` remains default-off, in-process
+  auth-preservation test scaffolding; it neither enables nor governs the
+  socket-configured broker. Its direct-runtime details are in
+  `docs/browser-process-page-boundary.md`; broker behavior is owned by
+  `docs/browser-broker.md`.
 - Interactive human login is the deliberate exception. When `connect` (the one
   onboarding and re-auth pathway, including `--force-relogin`) runs without a
   user-visible display,

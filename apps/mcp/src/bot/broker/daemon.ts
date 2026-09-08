@@ -114,10 +114,7 @@ export async function runBrokerDaemon(): Promise<void> {
       }
       if (
         (await journal.hasOutstanding(undefined, principal.forwarderId)) &&
-        !(
-          method === "tool" &&
-          (await operator.canContinuePaymentStatus(principal, params))
-        )
+        !(method === "tool" && (await operator.canContinuePaymentStatus(principal, params)))
       )
         throw new BrokerRefusal(
           "outcome_unknown",

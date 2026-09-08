@@ -427,7 +427,8 @@ export async function runServer(): Promise<void> {
 
   const callAdmission = createServerCallAdmission();
   const brokerPath = process.env.TRUSTY_SQUIRE_BROKER_SOCKET;
-  const forwarder = brokerPath === undefined ? undefined : new OperatorForwarder(brokerPath, sessionGuard);
+  const forwarder =
+    brokerPath === undefined ? undefined : new OperatorForwarder(brokerPath, sessionGuard);
   const server = await buildServer(
     api,
     callAdmission,

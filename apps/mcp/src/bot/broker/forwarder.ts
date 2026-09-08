@@ -51,7 +51,8 @@ export class OperatorForwarder {
   }
   private async reclaim(client: BrokerClient): Promise<void> {
     const reply = (await client.call("reclaim", {})) as { capabilities?: TabCapability[] };
-    for (const capability of reply.capabilities ?? []) this.sessions.set(capability.sessionId, capability);
+    for (const capability of reply.capabilities ?? [])
+      this.sessions.set(capability.sessionId, capability);
   }
   private callerRequestHash(requestId: string): string {
     return createHash("sha256").update(requestId).digest("hex");

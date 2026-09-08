@@ -71,17 +71,15 @@ describe("broker authority", () => {
       clientId: "first",
     };
     const second = { ...first, clientId: "second" };
-    broker.claimForwarder(first);
+    void broker.claimForwarder(first);
     const capability = await broker.open(first, ["site:a"], async () => port("a"));
 
     expect(() => broker.claimForwarder(second)).toThrow("Forwarder identity is already active");
-    expect(() => broker.invoke(second, capability, "foreign", "read", {})).toThrow(
-      "not admitted",
-    );
+    expect(() => broker.invoke(second, capability, "foreign", "read", {})).toThrow("not admitted");
 
     broker.detach(first);
     broker.releaseForwarder(first);
-    broker.claimForwarder(second);
+    void broker.claimForwarder(second);
     expect(broker.reclaim(second)).toEqual([capability]);
     await expect(broker.invoke(second, capability, "resumed", "read", {})).resolves.toBe("a");
   });
@@ -100,10 +98,10 @@ describe("broker authority", () => {
       forwarderId: forwarderId(owner.forwarderId!),
       clientId: "forged",
     };
-    broker.claimForwarder(owner);
+    void broker.claimForwarder(owner);
     const capability = await broker.open(owner, ["site:a"], async () => port("a"));
 
-    broker.claimForwarder(forged);
+    void broker.claimForwarder(forged);
     expect(broker.reclaim(forged)).toEqual([]);
     expect(() => broker.invoke(forged, capability, "foreign", "read", {})).toThrow(
       "owned live session",
@@ -112,7 +110,7 @@ describe("broker authority", () => {
     broker.detach(owner);
     broker.releaseForwarder(owner);
     const restarted = { ...owner, clientId: "restarted" };
-    broker.claimForwarder(restarted);
+    void broker.claimForwarder(restarted);
     expect(broker.reclaim(restarted)).toEqual([capability]);
     await expect(broker.invoke(restarted, capability, "resumed", "read", {})).resolves.toBe("a");
   });

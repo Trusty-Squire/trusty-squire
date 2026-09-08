@@ -173,14 +173,16 @@ export class DispatchJournal {
     forwarderId: string,
     expected: Pick<DispatchRecord, "operation" | "inputHash">,
   ): Promise<CompletedDispatchOutcome | undefined> {
-    const record = [...(await this.states()).values()].reverse().find(
-      (record) =>
-        record.forwarderId === forwarderId &&
-        record.operation === expected.operation &&
-        record.inputHash === expected.inputHash &&
-        record.outcome !== undefined &&
-        (record.phase === "outcome" || record.phase === "acknowledged"),
-    );
+    const record = [...(await this.states()).values()]
+      .reverse()
+      .find(
+        (record) =>
+          record.forwarderId === forwarderId &&
+          record.operation === expected.operation &&
+          record.inputHash === expected.inputHash &&
+          record.outcome !== undefined &&
+          (record.phase === "outcome" || record.phase === "acknowledged"),
+      );
     return record === undefined
       ? undefined
       : {
@@ -200,14 +202,15 @@ export class DispatchJournal {
         record.phase === "outcome",
     );
     await Promise.all(
-      outcomes.map(async (record) =>
-        await this.record(record.sessionId, record.requestId, "acknowledged", {
-          forwarderId,
-          ...(record.start === true ? { start: true } : {}),
-          ...(record.operation === undefined ? {} : { operation: record.operation }),
-          ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
-          ...(record.outcome === undefined ? {} : { outcome: record.outcome }),
-        }),
+      outcomes.map(
+        async (record) =>
+          await this.record(record.sessionId, record.requestId, "acknowledged", {
+            forwarderId,
+            ...(record.start === true ? { start: true } : {}),
+            ...(record.operation === undefined ? {} : { operation: record.operation }),
+            ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
+            ...(record.outcome === undefined ? {} : { outcome: record.outcome }),
+          }),
       ),
     );
     return outcomes.length > 0;
@@ -222,14 +225,15 @@ export class DispatchJournal {
         record.phase === "acknowledged",
     );
     await Promise.all(
-      starts.map(async (record) =>
-        await this.record(record.sessionId, record.requestId, "settled", {
-          forwarderId,
-          start: true,
-          ...(record.operation === undefined ? {} : { operation: record.operation }),
-          ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
-          ...(record.outcome === undefined ? {} : { outcome: record.outcome }),
-        }),
+      starts.map(
+        async (record) =>
+          await this.record(record.sessionId, record.requestId, "settled", {
+            forwarderId,
+            start: true,
+            ...(record.operation === undefined ? {} : { operation: record.operation }),
+            ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
+            ...(record.outcome === undefined ? {} : { outcome: record.outcome }),
+          }),
       ),
     );
     return starts.length > 0;
@@ -244,14 +248,15 @@ export class DispatchJournal {
         now - record.at >= START_DELIVERY_RETENTION_MS,
     );
     await Promise.all(
-      starts.map(async (record) =>
-        await this.record(record.sessionId, record.requestId, "settled", {
-          forwarderId: record.forwarderId!,
-          start: true,
-          ...(record.operation === undefined ? {} : { operation: record.operation }),
-          ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
-          ...(record.outcome === undefined ? {} : { outcome: record.outcome }),
-        }),
+      starts.map(
+        async (record) =>
+          await this.record(record.sessionId, record.requestId, "settled", {
+            forwarderId: record.forwarderId!,
+            start: true,
+            ...(record.operation === undefined ? {} : { operation: record.operation }),
+            ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
+            ...(record.outcome === undefined ? {} : { outcome: record.outcome }),
+          }),
       ),
     );
     return starts.length;
@@ -270,18 +275,20 @@ export class DispatchJournal {
     sessionId: string,
     requestId: string,
     phase: DispatchPhase,
-    detail?: Pick<
-      DispatchRecord,
-      "forwarderId" | "start" | "operation" | "inputHash" | "outcome"
-    >,
+    detail?: Pick<DispatchRecord, "forwarderId" | "start" | "operation" | "inputHash" | "outcome">,
   ): Promise<void> {
     const operation = this.tail.then(async () => {
       await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
       const file = await open(this.path, "a", 0o600);
       try {
         await file.write(
-          JSON.stringify({ sessionId, requestId, phase, at: Date.now(), ...detail } satisfies DispatchRecord) +
-            "\n",
+          JSON.stringify({
+            sessionId,
+            requestId,
+            phase,
+            at: Date.now(),
+            ...detail,
+          } satisfies DispatchRecord) + "\n",
         );
         await file.sync();
       } finally {

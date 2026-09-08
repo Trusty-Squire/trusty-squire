@@ -139,7 +139,11 @@ it("settles no-page starts without retaining a recoverable mutation", async () =
   Object.defineProperty(broker, "tools", {
     value: [noPageTool("operate_start"), noPageTool("operate_recipe_run")],
   });
-  state.finish.mockImplementation(async (sessionId: string) => ({ session_id: sessionId, url: "", closed: true }));
+  state.finish.mockImplementation(async (sessionId: string) => ({
+    session_id: sessionId,
+    url: "",
+    closed: true,
+  }));
   try {
     await broker.authority.claimForwarder(principal);
     await expect(
@@ -240,13 +244,17 @@ it("retains acknowledged start control until a same-lineage follow-up", async ()
     const restarted = new OperatorForwarder(path, guard, "a".repeat(43));
     const expired = new OperatorForwarder(path, guard, "a".repeat(43));
     try {
-      const started = (await original.invoke(name, {}, "original-start-id")) as { session_id: string };
+      const started = (await original.invoke(name, {}, "original-start-id")) as {
+        session_id: string;
+      };
       await original.close();
-      await expect.poll(() => broker.authority.inventory()).toEqual({
-        active: 0,
-        quarantined: 1,
-        admitting: 0,
-      });
+      await expect
+        .poll(() => broker.authority.inventory())
+        .toEqual({
+          active: 0,
+          quarantined: 1,
+          admitting: 0,
+        });
       expect(await journal.hasPendingStartDelivery(forwarderId("a".repeat(43)))).toBe(true);
       await broker.reap(Date.now() + START_DELIVERY_RETENTION_MS - 1_000);
       expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 1, admitting: 0 });
@@ -266,11 +274,13 @@ it("retains acknowledged start control until a same-lineage follow-up", async ()
       expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
       await restarted.invoke(name, {}, "expiring-start-id");
       await restarted.close();
-      await expect.poll(() => broker.authority.inventory()).toEqual({
-        active: 0,
-        quarantined: 1,
-        admitting: 0,
-      });
+      await expect
+        .poll(() => broker.authority.inventory())
+        .toEqual({
+          active: 0,
+          quarantined: 1,
+          admitting: 0,
+        });
       await broker.reap(Date.now() + START_DELIVERY_RETENTION_MS);
       expect(state.sessions.size).toBe(0);
       expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });

@@ -134,8 +134,8 @@ describeChromium("experimental multisession — real tab-family isolation", () =
         via: "none",
       });
       expect(
-        await satellitePage.evaluate(
-          () => (globalThis as typeof globalThis & { gsiPrompts: () => number }).gsiPrompts(),
+        await satellitePage.evaluate(() =>
+          (globalThis as typeof globalThis & { gsiPrompts: () => number }).gsiPrompts(),
         ),
       ).toBe(1);
     } finally {

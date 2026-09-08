@@ -104,7 +104,11 @@ export class BrokerAuthority {
     const forwarderId = principal.forwarderId;
     if (forwarderId === undefined) return;
     const holder = this.forwarderConnections.get(forwarderId);
-    if (holder === undefined || holder.clientId !== principal.clientId || holder.detach !== undefined)
+    if (
+      holder === undefined ||
+      holder.clientId !== principal.clientId ||
+      holder.detach !== undefined
+    )
       return;
     let resolve!: () => void;
     const promise = new Promise<void>((settled) => {
@@ -121,7 +125,13 @@ export class BrokerAuthority {
         detach.promise,
         new Promise<never>((_, reject) => {
           timeout = setTimeout(
-            () => reject(new BrokerRefusal("forwarder_handoff_timeout", "Forwarder cleanup did not complete")),
+            () =>
+              reject(
+                new BrokerRefusal(
+                  "forwarder_handoff_timeout",
+                  "Forwarder cleanup did not complete",
+                ),
+              ),
             FORWARDER_HANDOFF_TIMEOUT_MS,
           );
         }),
@@ -249,7 +259,11 @@ export class BrokerAuthority {
     const owned = [...this.actors.values()].filter(
       (actor) => actor.principal.forwarderId === principal.forwarderId,
     );
-    if (owned.some((actor) => actor.state === "active" && actor.principal.clientId !== principal.clientId))
+    if (
+      owned.some(
+        (actor) => actor.state === "active" && actor.principal.clientId !== principal.clientId,
+      )
+    )
       throw new BrokerRefusal("forwarder_in_use", "Forwarder identity is already active");
     return owned.map((actor) => {
       actor.principal = { ...principal };
@@ -405,8 +419,10 @@ export class BrokerAuthority {
   }
 
   async retryQuarantined(
-    shouldClose: (capability: TabCapability, principal: BrokerPrincipal) => Promise<boolean> | boolean =
-      () => true,
+    shouldClose: (
+      capability: TabCapability,
+      principal: BrokerPrincipal,
+    ) => Promise<boolean> | boolean = () => true,
   ): Promise<void> {
     for (const actor of [...this.actors.values()]) {
       if (actor.state !== "quarantined") continue;

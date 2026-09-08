@@ -1,9 +1,6 @@
 import { withBrokerAdmission } from "./admission-context.js";
 import { brokerBrowserCustody } from "./custody.js";
-import type {
-  DispatchJournal,
-  ReconciledDispatchOutcome,
-} from "./dispatch-journal.js";
+import type { DispatchJournal, ReconciledDispatchOutcome } from "./dispatch-journal.js";
 import { timingSafeEqual, createHash, createHmac } from "node:crypto";
 import { z } from "zod";
 import { ApiClient, type ApiClientConfig } from "../../api-client.js";
@@ -88,10 +85,7 @@ export function reconciliationOutcome(
     return { status: "completed" };
   const payment = result as Record<string, unknown>;
   if (payment.status === "payment_submitted") return { status: "done" };
-  if (
-    payment.status !== "payment_3ds_required" &&
-    payment.status !== "payment_outcome_unknown"
-  )
+  if (payment.status !== "payment_3ds_required" && payment.status !== "payment_outcome_unknown")
     return { status: "completed" };
   const outcome: ReconciledDispatchOutcome = { status: payment.status };
   if (payment.next !== null && typeof payment.next === "object") {
@@ -237,7 +231,8 @@ export class OperatorBroker implements BrokerTransportPort {
           const session = sessionForCall(internalId);
           if (session === undefined) {
             await finishProvisionSession(internalId);
-            if (mutationCapableStart) await this.journal?.record(id, requestId, "settled", dispatch);
+            if (mutationCapableStart)
+              await this.journal?.record(id, requestId, "settled", dispatch);
             return {
               targetId: "no-page",
               invoke: async () => {
@@ -271,8 +266,7 @@ export class OperatorBroker implements BrokerTransportPort {
                 name,
                 this.inputHash(principal, { name, args: commandArgs, capability }),
               );
-              if (mutating)
-                await this.journal?.record(id, commandId, "entered", commandDispatch);
+              if (mutating) await this.journal?.record(id, commandId, "entered", commandDispatch);
               const result =
                 name === "operate_finish"
                   ? await execute()
@@ -319,7 +313,8 @@ export class OperatorBroker implements BrokerTransportPort {
         async (id) => {
           const sessionId = internalId === "" ? id : internalId;
           const session = sessionForCall(sessionId);
-          if (session !== undefined && !(await finishProvisionSession(sessionId)).closed) return false;
+          if (session !== undefined && !(await finishProvisionSession(sessionId)).closed)
+            return false;
           return (await brokerBrowserCustody()?.cleanupAdmission(id)) ?? false;
         },
       );
@@ -380,30 +375,24 @@ export class OperatorBroker implements BrokerTransportPort {
   async recover(
     principal: BrokerPrincipal,
     params: Record<string, unknown>,
-  ): Promise<
-    | {
-        requestId: string;
-        capability?: TabCapability;
-        result:
-          | {
-              reconciliation: ReconciledDispatchOutcome & { request_id: string; operation: string };
-            }
-          | Record<string, unknown>;
-      }
-    | null
-  > {
+  ): Promise<{
+    requestId: string;
+    capability?: TabCapability;
+    result:
+      | {
+          reconciliation: ReconciledDispatchOutcome & { request_id: string; operation: string };
+        }
+      | Record<string, unknown>;
+  } | null> {
     const input = callSchema.parse(params);
     const tool = findTool(input.name, this.tools);
     if (tool === null || !tool.name.startsWith("operate_"))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
-    const completed = await this.journal?.recoveryOutcome(
-      journalForwarderId(principal),
-      {
-        operation: tool.name,
-        inputHash: this.inputHash(principal, { name: tool.name, args, capability: input.capability }),
-      },
-    );
+    const completed = await this.journal?.recoveryOutcome(journalForwarderId(principal), {
+      operation: tool.name,
+      inputHash: this.inputHash(principal, { name: tool.name, args, capability: input.capability }),
+    });
     if (completed === undefined) return null;
     await this.journal?.recordRecovery(journalForwarderId(principal), completed);
     if (completed.start === true) {
@@ -467,10 +456,7 @@ export class OperatorBroker implements BrokerTransportPort {
       async (capability, principal) =>
         !(
           principal.forwarderId !== undefined &&
-          (await this.journal?.hasPendingStartDelivery(
-            principal.forwarderId,
-            capability.sessionId,
-          ))
+          (await this.journal?.hasPendingStartDelivery(principal.forwarderId, capability.sessionId))
         ),
     );
   }

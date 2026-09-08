@@ -3,7 +3,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { OperatorForwarder } from "../broker/forwarder.js";
-import { BrokerClient, listenBroker } from "../broker/transport.js";
+import { listenBroker } from "../broker/transport.js";
+import type { BrokerClient } from "../broker/transport.js";
 import type { SessionGuard } from "../../session-guard.js";
 
 const credential = (character: string) => character.repeat(43);
@@ -161,7 +162,9 @@ describe("MCP broker forwarding", () => {
       await recorded;
       await expect(lost).rejects.toThrow("connection lost");
       await expect(
-        restarted.invoke("operate_pay", { session_id: "session" }, "reset-payment-id", { recover: true }),
+        restarted.invoke("operate_pay", { session_id: "session" }, "reset-payment-id", {
+          recover: true,
+        }),
       ).resolves.toEqual({
         reconciliation: {
           request_id: paymentRequest,
@@ -299,7 +302,8 @@ describe("MCP broker forwarding", () => {
           await released;
           return { capability, result: { session_id: "session" } };
         }
-        if (params.name === "operate_observe") return { result: { session_id: "session", dom: "ready" } };
+        if (params.name === "operate_observe")
+          return { result: { session_id: "session", dom: "ready" } };
         throw new Error(`Unexpected ${method}`);
       },
       disconnect: async () => undefined,
@@ -322,10 +326,14 @@ describe("MCP broker forwarding", () => {
       await (forwarder as unknown as { client?: BrokerClient }).client?.close();
       releaseStart();
       await expect(lost).rejects.toThrow("connection lost");
-      await expect(restarted.invoke("operate_start", {}, "reset-start-id", { recover: true })).resolves.toMatchObject({
+      await expect(
+        restarted.invoke("operate_start", {}, "reset-start-id", { recover: true }),
+      ).resolves.toMatchObject({
         session_id: "session",
       });
-      await expect(restarted.invoke("operate_observe", { session_id: "session" }, "2")).resolves.toMatchObject({
+      await expect(
+        restarted.invoke("operate_observe", { session_id: "session" }, "2"),
+      ).resolves.toMatchObject({
         dom: "ready",
       });
       expect(starts).toBe(1);
@@ -449,10 +457,14 @@ describe("MCP broker forwarding", () => {
       await a.invoke("operate_finish", { session_id: first.session_id });
       expect(a.sessionCount()).toBe(0);
       expect(b.sessionCount()).toBe(1);
-      const rejected = new OperatorForwarder(path, {
-        ...guard,
-        bind: async () => null,
-      }, credential("c"));
+      const rejected = new OperatorForwarder(
+        path,
+        {
+          ...guard,
+          bind: async () => null,
+        },
+        credential("c"),
+      );
       await expect(rejected.invoke("operate_start", {})).rejects.toThrow("Connect before");
       expect(rejected.connected()).toBe(false);
       await expect(rejected.close()).resolves.toBeUndefined();

@@ -21,7 +21,9 @@ export function brokerQualificationPath(profileDir: string): string {
 
 async function readQualification(profileDir: string): Promise<QualificationRecord | null> {
   try {
-    const record = JSON.parse(await readFile(brokerQualificationPath(profileDir), "utf8")) as QualificationRecord;
+    const record = JSON.parse(
+      await readFile(brokerQualificationPath(profileDir), "utf8"),
+    ) as QualificationRecord;
     if (
       record.version !== 1 ||
       typeof record.accountId !== "string" ||
@@ -30,7 +32,8 @@ async function readQualification(profileDir: string): Promise<QualificationRecor
       (record.completedAt !== undefined && typeof record.completedAt !== "string") ||
       (record.evidencePath !== undefined && typeof record.evidencePath !== "string") ||
       (record.serviceHosts !== undefined &&
-        (!Array.isArray(record.serviceHosts) || !record.serviceHosts.every((host) => typeof host === "string")))
+        (!Array.isArray(record.serviceHosts) ||
+          !record.serviceHosts.every((host) => typeof host === "string")))
     )
       return null;
     return record;
@@ -40,11 +43,19 @@ async function readQualification(profileDir: string): Promise<QualificationRecor
   }
 }
 
-export async function beginBrokerQualification(profileDir: string, accountId: string): Promise<string> {
+export async function beginBrokerQualification(
+  profileDir: string,
+  accountId: string,
+): Promise<string> {
   const runId = randomUUID();
   await writeFile(
     brokerQualificationPath(profileDir),
-    JSON.stringify({ version: 1, accountId, state: "qualifying", runId } satisfies QualificationRecord),
+    JSON.stringify({
+      version: 1,
+      accountId,
+      state: "qualifying",
+      runId,
+    } satisfies QualificationRecord),
     { encoding: "utf8", mode: 0o600, flag: "wx" },
   );
   return runId;

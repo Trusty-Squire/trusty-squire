@@ -81,19 +81,14 @@ describe("broker dispatch custody", () => {
       value: [failedTool("operate_start"), failedTool("operate_recipe_run")],
     });
     const principal = await authenticate(broker, "client");
-    broker.authority.claimForwarder(principal);
+    void broker.authority.claimForwarder(principal);
     try {
       await expect(
         broker.call(principal, "tool", { name: "operate_start", args: {} }, "start-request"),
       ).rejects.toThrow("operate_start failed");
       await expect(journal.assertReconciled()).resolves.toBeUndefined();
       await expect(
-        broker.call(
-          principal,
-          "tool",
-          { name: "operate_recipe_run", args: {} },
-          "recipe-request",
-        ),
+        broker.call(principal, "tool", { name: "operate_recipe_run", args: {} }, "recipe-request"),
       ).rejects.toThrow("operate_recipe_run failed");
       await expect(journal.assertReconciled()).rejects.toThrow("lost mutation custody");
     } finally {
@@ -142,7 +137,10 @@ describe("broker dispatch custody", () => {
   it("treats extraction as mutating only when it writes to the vault", () => {
     expect(brokerCommandMutates("operate_extract", { session_id: "session" })).toBe(false);
     expect(
-      brokerCommandMutates("operate_extract", { session_id: "session", store: { service: "example" } }),
+      brokerCommandMutates("operate_extract", {
+        session_id: "session",
+        store: { service: "example" },
+      }),
     ).toBe(true);
     expect(brokerCommandMutates("operate_pay", { session_id: "session" })).toBe(true);
   });
@@ -199,7 +197,7 @@ describe("broker dispatch custody", () => {
     const forwarderId = principal.forwarderId;
     const args = { service_url: "https://example.test", otp: "123456" };
     try {
-      broker.authority.claimForwarder(principal);
+      void broker.authority.claimForwarder(principal);
       Object.defineProperty(broker, "tools", {
         value: [
           {
@@ -243,9 +241,7 @@ describe("broker dispatch custody", () => {
         }),
       ).resolves.toBeNull();
       const foreign = await authenticate(broker, "foreign", credential("b"));
-      await expect(
-        broker.recover(foreign, { name: "operate_start", args }),
-      ).resolves.toBeNull();
+      await expect(broker.recover(foreign, { name: "operate_start", args })).resolves.toBeNull();
       await expect(readFile(path, "utf8")).resolves.not.toContain("123456");
       expect(broker.authority.inventory()).toEqual({ active: 1, quarantined: 0, admitting: 0 });
     } finally {
@@ -273,7 +269,8 @@ describe("broker dispatch custody", () => {
     try {
       const original = new OperatorBroker(config, "cell", journal);
       const originalPrincipal = await authenticate(original, "original");
-      if (originalPrincipal.forwarderId === undefined) throw new Error("Test broker lineage is missing");
+      if (originalPrincipal.forwarderId === undefined)
+        throw new Error("Test broker lineage is missing");
       await journal.record("lost-session", "old-process-request", "outcome", {
         forwarderId: originalPrincipal.forwarderId,
         start: true,
@@ -299,9 +296,11 @@ describe("broker dispatch custody", () => {
       });
       const sameLineage = await authenticate(restarted, "restarted");
       const foreign = await authenticate(restarted, "foreign", credential("b"));
-      restarted.authority.claimForwarder(sameLineage);
+      void restarted.authority.claimForwarder(sameLineage);
 
-      await expect(restarted.recover(sameLineage, { name: "operate_start", args })).resolves.toEqual({
+      await expect(
+        restarted.recover(sameLineage, { name: "operate_start", args }),
+      ).resolves.toEqual({
         requestId: "old-process-request",
         result: {
           reconciliation: {
@@ -329,7 +328,9 @@ describe("broker dispatch custody", () => {
       const records = (await readFile(path, "utf8"))
         .trim()
         .split("\n")
-        .map((line) => JSON.parse(line) as { phase: string; inputHash?: string; outcome?: unknown });
+        .map(
+          (line) => JSON.parse(line) as { phase: string; inputHash?: string; outcome?: unknown },
+        );
       expect(records.some((record) => record.phase === "recovered")).toBe(true);
       expect(records.every((record) => record.inputHash !== "123456")).toBe(true);
     } finally {
@@ -379,7 +380,7 @@ describe("broker dispatch custody", () => {
       clientId: "reclaimed",
     };
     try {
-      broker.authority.claimForwarder(principal);
+      void broker.authority.claimForwarder(principal);
       const capability = await broker.authority.open(principal, ["site:a"], async () => ({
         targetId: "target",
         invoke: async () => undefined,
@@ -485,9 +486,9 @@ describe("broker dispatch custody", () => {
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line) as { phase: string; outcome?: unknown; agentId?: unknown });
-      expect(records.filter((record) => record.phase === "outcome").map((record) => record.outcome)).toEqual(
-        outcomes.map((entry) => entry.expected),
-      );
+      expect(
+        records.filter((record) => record.phase === "outcome").map((record) => record.outcome),
+      ).toEqual(outcomes.map((entry) => entry.expected));
       expect(records.every((record) => record.agentId === undefined)).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });

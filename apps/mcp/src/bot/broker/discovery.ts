@@ -21,7 +21,8 @@ interface EndpointOwner {
 }
 
 export function brokerEnvironment(env: NodeJS.ProcessEnv, path: string): NodeJS.ProcessEnv {
-  const { TRUSTY_SQUIRE_FORWARDER_CREDENTIAL: _lineageCredential, ...brokerEnv } = env;
+  const brokerEnv = { ...env };
+  delete brokerEnv.TRUSTY_SQUIRE_FORWARDER_CREDENTIAL;
   return { ...brokerEnv, TRUSTY_SQUIRE_BROKER_SOCKET: path };
 }
 

@@ -228,7 +228,8 @@ export async function runLiveAcceptance(configPath) {
   } finally {
     for (const child of children) if (child.exitCode === null) child.kill("SIGTERM");
     await Promise.allSettled(children.map((child) => child.done));
-    if (!evidenceRecorded) await qualification.abandonBrokerQualification(profile, config.accountId, runId);
+    if (!evidenceRecorded)
+      await qualification.abandonBrokerQualification(profile, config.accountId, runId);
   }
 }
 if (process.argv[2] === "client") await runClient(process.argv[3], Number(process.argv[4]));

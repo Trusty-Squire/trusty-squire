@@ -39,7 +39,9 @@ it("returns only a durable start outcome after daemon death", async () => {
   const journal = new DispatchJournal(join(profile, "trusty-squire-broker-dispatch.jsonl"));
   const lineage = forwarderId(credential);
   const inputHash = createHmac("sha256", createHash("sha256").update(credential).digest())
-    .update('{"args":{"service_url":"https://example.test"},"capability":null,"name":"operate_start"}')
+    .update(
+      '{"args":{"service_url":"https://example.test"},"capability":null,"name":"operate_start"}',
+    )
     .digest("hex");
   await mkdir(profile);
   await mkdir(join(root, "home"));
@@ -82,7 +84,13 @@ it("returns only a durable start outcome after daemon death", async () => {
   let foreign: BrokerClient | undefined;
   try {
     for (let attempt = 0; attempt < 200; attempt++) {
-      if (await lstat(socket).then(() => true, () => false)) break;
+      if (
+        await lstat(socket).then(
+          () => true,
+          () => false,
+        )
+      )
+        break;
       if (child.exitCode !== null) throw new Error(diagnostic);
       await sleep(25);
     }

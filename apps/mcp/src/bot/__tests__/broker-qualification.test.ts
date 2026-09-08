@@ -10,7 +10,9 @@ import {
 const roots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })));
+  await Promise.all(
+    roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })),
+  );
 });
 
 async function profile(): Promise<string> {
@@ -32,7 +34,10 @@ it("records only extant qualification evidence", async () => {
       "three.example",
     ]),
   ).rejects.toThrow("Qualification evidence is missing");
-  await writeFile(evidencePath, JSON.stringify({ kind: "real-service-three-MCP-process-acceptance" }));
+  await writeFile(
+    evidencePath,
+    JSON.stringify({ kind: "real-service-three-MCP-process-acceptance" }),
+  );
   await recordBrokerQualificationEvidence(dir, "account", runId, evidencePath, [
     "one.example",
     "two.example",
