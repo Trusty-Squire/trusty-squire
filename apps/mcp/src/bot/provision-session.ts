@@ -2768,15 +2768,21 @@ async function reconcileReservedCartAdd(
           record.optionsHash,
           record.idempotencyKey,
         );
-      const quantity = await cartLineQuantity(session, record.productIdentity, record.optionsHash, page);
+      const pageAfterAction = operationPageForSession(session) ?? page;
+      const quantity = await cartLineQuantity(
+        session,
+        record.productIdentity,
+        record.optionsHash,
+        pageAfterAction,
+      );
       if (quantity === null) throw error;
       session.lastCartMutation = {
         productIdentity: record.productIdentity,
         optionsHash: record.optionsHash,
         cartDelta: "0",
-        origin: originForUrl(page?.url() ?? session.browser.currentUrl()) ?? "",
+        origin: originForUrl(pageAfterAction?.url() ?? session.browser.currentUrl()) ?? "",
       };
-      const checkoutState = await capturePrivateCheckoutState(session, page);
+      const checkoutState = await capturePrivateCheckoutState(session, pageAfterAction);
       if (checkoutState === undefined) throw error;
       const result: CartAddResult = {
         status: "already_in_cart",
@@ -2865,11 +2871,12 @@ async function performCartAdd(
     }
   }
   if (addError !== undefined || actionResult === null) throw addError;
+  const pageAfterAction = operationPageForSession(session) ?? page;
   const afterQuantity = await cartLineQuantity(
     session,
     record.productIdentity,
     record.optionsHash,
-    page,
+    pageAfterAction,
   );
   if (afterQuantity === null || afterQuantity <= 0) {
     throw new Error("requested product/variant line was not observable after add");
@@ -2888,7 +2895,7 @@ async function performCartAdd(
     productIdentity: record.productIdentity,
     optionsHash: record.optionsHash,
     cartDelta,
-    origin: originForUrl(page?.url() ?? session.browser.currentUrl()) ?? "",
+    origin: originForUrl(pageAfterAction?.url() ?? session.browser.currentUrl()) ?? "",
   };
   return {
     status: "added",
@@ -7593,7 +7600,7 @@ export async function replayOperatorRecipe(
 ): Promise<OperatorReplayResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const operationPage = operationPageForSession(session);
+  let operationPage = operationPageForSession(session);
   const recipeHash = replayDigest(recipe);
   const bindingsHash = bindingDigest(bindings);
   const boundPostcondition = bindRecipePostcondition(recipe.postcondition, bindings);
@@ -7887,6 +7894,7 @@ export async function replayOperatorRecipe(
         undefined,
         operationPage,
       );
+      operationPage = operationPageForSession(session) ?? operationPage;
       if (acted.observation.oauth?.state === "awaiting_human") {
         return await fallback(
           step,

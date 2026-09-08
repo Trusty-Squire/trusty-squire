@@ -1134,6 +1134,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const product = await context.newPage();
       const productUrl = "https://mail.google.com/checkout";
       const expectedReturnUrl = "https://console.product.test/checkout";
+      const cartUrl = "https://console.product.test/cart";
       const controls = `<form onsubmit="event.preventDefault(); document.body.dataset.submits = String(+(document.body.dataset.submits || 0) + 1)">
         <label>Project name<input id="name"></label><button>Create</button></form>
         <label>Phone country
@@ -1158,12 +1159,13 @@ describe("BrowserController OAuth popup lifecycle", () => {
         <input type="hidden" name="__CHECKOUT_FIELD__">
         <div>Total USD $__TOTAL__</div>
         <div>API Key <span id="credential">••••</span><button id="reveal" onclick="document.querySelector('#credential').textContent = window.credentialValue">Show API key</button></div>
-        <button id="add" onclick="document.querySelector('#line')?.removeAttribute('hidden')">Add to Cart</button>
+        <button id="add" onclick="window.open('${cartUrl}')">Add to Cart</button>
         <div id="line" data-testid="line-item" hidden>
           <a href="/products/popup" data-product-identity="popup-product">Popup product</a>
           <span>Quantity 1</span><span data-options-hash="popup-options"></span>
         </div>
         <button id="open-new-tab" onclick="window.open('https://console.product.test/opened')">Open settings</button>
+        <button id="open-replay-tab" onclick="window.open('https://console.product.test/replay-opened')">Open replay tab</button>
         <div style="height:4000px"></div>
         <script>
           document.body.dataset.enters = '0';
@@ -1198,18 +1200,23 @@ describe("BrowserController OAuth popup lifecycle", () => {
           body: `<script>setTimeout(() => location.href=${JSON.stringify(expectedReturnUrl)}, 50)</script>`,
         }),
       );
-      await context.route("https://console.product.test/**", (route) =>
-        route.fulfill({
+      await context.route("https://console.product.test/**", (route) => {
+        const sourceControls = controls
+          .replaceAll("__CHECKOUT_FIELD__", "source_checkout_marker")
+          .replaceAll("__TOTAL__", "12.34")
+          .replaceAll("__CREDENTIAL__", "sk_source_abcdefgh1234567890");
+        return route.fulfill({
           contentType: "text/html",
           body:
             route.request().url() === "https://console.product.test/opened"
               ? '<label>Opened setting<input id="opened-setting"></label>'
-              : `<main>Projects</main><button>New project</button>${controls
-                  .replaceAll("__CHECKOUT_FIELD__", "source_checkout_marker")
-                  .replaceAll("__TOTAL__", "12.34")
-                  .replaceAll("__CREDENTIAL__", "sk_source_abcdefgh1234567890")}`,
-        }),
-      );
+              : route.request().url() === "https://console.product.test/replay-opened"
+                ? '<main>Projects</main><label>Replay name<input id="replay-name" name="full_name" data-testid="replay-name"></label><button id="open-new-tab" onclick="window.open(\'https://console.product.test/opened\')">Open settings</button>'
+              : route.request().url() === cartUrl
+                ? `<main>Projects</main>${sourceControls}<script>document.querySelector('#line')?.removeAttribute('hidden')</script>`
+                : `<main>Projects</main><button>New project</button>${sourceControls}`,
+        });
+      });
       await product.goto(productUrl);
       const controller = BrowserController.fromHarnessPage(product);
       let sessionId: string | undefined;
@@ -1316,12 +1323,18 @@ describe("BrowserController OAuth popup lifecycle", () => {
         expect(await source.locator("#region").inputValue()).toBe("eu");
         expect(await product.locator("#workspace").inputValue()).toBe("alpha");
         expect(await product.locator("#region").inputValue()).toBe("us");
+        const cartPagePromise = source.waitForEvent("popup");
         const cart = await cartAdd(sessionId, "popup-product", "popup-options", "popup-cart");
+        const cartPage = await cartPagePromise;
         expect(cart).toMatchObject({ status: "added", cart_delta: "+1", postcondition: { quantity: 1 } });
-        expect(await source.locator("#line").isVisible()).toBe(true);
+        expect(cart.cart_url).toBe(cartUrl);
+        expect(cartPage.url()).toBe(cartUrl);
+        expect(await cartPage.locator("#line").isVisible()).toBe(true);
+        expect(await source.locator("#line").isHidden()).toBe(true);
         expect(await product.locator("#line").isHidden()).toBe(true);
         await cartClear(sessionId);
-        expect(await source.locator("body").getAttribute("data-cart-clears")).toBe("1");
+        expect(await cartPage.locator("body").getAttribute("data-cart-clears")).toBe("1");
+        expect(await source.locator("body").getAttribute("data-cart-clears")).toBeNull();
         expect(await product.locator("body").getAttribute("data-cart-clears")).toBeNull();
         const replayRecipe: OperatorRecipe = {
           name: "set-popup-contact",
@@ -1332,6 +1345,16 @@ describe("BrowserController OAuth popup lifecycle", () => {
           entry_url: expectedReturnUrl,
           allowed_hosts: ["console.product.test"],
           trace: [
+            {
+              action: {
+                kind: "click",
+                target: {
+                  dom_hint: { id: "open-replay-tab" },
+                  accessible_name: "Open replay tab",
+                  css: "#open-replay-tab",
+                },
+              },
+            },
             {
               action: {
                 kind: "type",
@@ -1351,11 +1374,18 @@ describe("BrowserController OAuth popup lifecycle", () => {
             success_signal: { text_present: "Projects" },
           },
         };
+        const replayPagePromise = cartPage.waitForEvent("popup");
         const replayed = await replayOperatorRecipe(sessionId, replayRecipe, {
           "contact.name": "Popup replay",
         });
-        expect(replayed).toMatchObject({ status: "complete", observation: { url: expectedReturnUrl } });
-        expect(await source.locator("#replay-name").inputValue()).toBe("Popup replay");
+        const replayPage = await replayPagePromise;
+        expect(replayed).toMatchObject({
+          status: "complete",
+          observation: { url: "https://console.product.test/replay-opened" },
+        });
+        expect(await replayPage.locator("#replay-name").inputValue()).toBe("Popup replay");
+        expect(await cartPage.locator("#replay-name").inputValue()).toBe("");
+        expect(await source.locator("#replay-name").inputValue()).toBe("");
         expect(await product.locator("#replay-name").inputValue()).toBe("");
         expect(sessionForCall(sessionId)?.actionTrace.some((entry) => entry.action.kind === "type")).toBe(
           true,
@@ -1365,7 +1395,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
           (el) => el.label === "Open settings",
         )?.ref;
         expect(openRef).toBeDefined();
-        const openedPagePromise = source.waitForEvent("popup");
+        const openedPagePromise = replayPage.waitForEvent("popup");
         const opened = await act(sessionId, { kind: "click", target: openRef! });
         const openedPage = await openedPagePromise;
         expect(opened.url).toBe("https://console.product.test/opened");
@@ -1377,12 +1407,16 @@ describe("BrowserController OAuth popup lifecycle", () => {
         await act(sessionId, { kind: "type", target: openedInputRef!, text: "New tab setting" });
         expect(await openedPage.locator("#opened-setting").inputValue()).toBe("New tab setting");
         expect(source.url()).toBe(expectedReturnUrl);
+        expect(cartPage.url()).toBe(cartUrl);
+        expect(replayPage.url()).toBe("https://console.product.test/replay-opened");
         expect(product.url()).toBe(productUrl);
         const destination = "https://console.product.test/settings";
         const navigated = await act(sessionId, { kind: "goto", url: destination });
         expect(navigated.url).toBe(destination);
         expect(openedPage.url()).toBe(destination);
         expect(source.url()).toBe(expectedReturnUrl);
+        expect(cartPage.url()).toBe(cartUrl);
+        expect(replayPage.url()).toBe("https://console.product.test/replay-opened");
         expect(product.url()).toBe(productUrl);
       } finally {
         if (sessionId) await finishProvisionSession(sessionId);
