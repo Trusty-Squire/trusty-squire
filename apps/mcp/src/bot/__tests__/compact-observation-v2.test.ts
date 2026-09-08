@@ -704,6 +704,12 @@ describe("compact observation v2", () => {
       ).toEqual(["@checkout"]);
     });
 
+    it("uses a descendant icon label before a control title", () => {
+      expect(labelsFor(element({ iconLabel: "Profile", title: "Open settings" }))).toEqual([
+        "@profile",
+      ]);
+    });
+
     it("uses a text-content button's own visible name", () => {
       expect(labelsFor(element({ visibleText: "Create account" }))).toEqual([
         "@create-account",

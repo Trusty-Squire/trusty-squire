@@ -944,17 +944,31 @@ function controlNamingTexts(el: InteractiveElement): Array<string | null | undef
 
 function controlLabelNamingTexts(el: InteractiveElement): Array<string | null | undefined> {
   const role = roleOf(el);
+  const names = el.compactNames;
+  if (names) {
+    return [
+      names.ariaLabel,
+      (el.type ?? "").toLowerCase() === "image" ? names.alt : undefined,
+      names.labelledByText,
+      names.labelText,
+      names.visibleText,
+      isButtonInput(el) ? names.value : undefined,
+      names.iconLabel,
+      names.title,
+      role === "textbox" ? names.placeholder : undefined,
+      role === "textbox" ? names.name : undefined,
+    ];
+  }
   return [
     el.ariaLabel,
     (el.type ?? "").toLowerCase() === "image" ? el.alt : undefined,
-    el.labelledByText,
     el.labelText,
     el.visibleText,
     isButtonInput(el) ? el.value : undefined,
+    el.iconLabel,
     el.title,
     role === "textbox" ? el.placeholder : undefined,
     role === "textbox" ? el.name : undefined,
-    el.iconLabel,
   ];
 }
 

@@ -870,7 +870,6 @@ export async function captureBrowserUseDOM(
             name: a.name ?? null,
             placeholder: a.placeholder ?? null,
             ariaLabel: explicitAriaLabel || null,
-            labelledByText: labelledByText(n),
             role:
               a.role ??
               (["a", "button", "input", "select", "textarea"].includes(t) ? null : "button"),
@@ -938,18 +937,23 @@ export async function captureBrowserUseDOM(
         }
       }
       if (el) {
-        const explicitAriaLabel = el.ariaLabel?.trim();
-        const scopedLabelledBy = labelledByText(n);
-        if (!explicitAriaLabel) el.labelledByText = scopedLabelledBy;
-        const scopedAssociation = associatedLabelText(n);
-        if (bindings.has(raw.backendNodeId) && labelScopeFor.get(n) !== rootScope)
-          el.labelText = scopedAssociation;
-        else if (!el.labelText?.trim() && scopedAssociation) el.labelText = scopedAssociation;
         const ownedLabel = ownedLabels.get(n.id);
         if (ownedLabel && !el.ariaLabel && !n.attributes["aria-labelledby"]) {
           el.ariaLabel = ownedLabel;
           n.attributes.ax_name ??= ownedLabel;
         }
+        el.compactNames = {
+          ariaLabel: n.attributes["aria-label"]?.trim() || ownedLabel || null,
+          labelledByText: labelledByText(n),
+          labelText: associatedLabelText(n),
+          visibleText: visibleText(n).trim() || null,
+          alt: n.attributes.alt ?? null,
+          iconLabel: iconLabel(n),
+          title: n.attributes.title ?? null,
+          placeholder: n.attributes.placeholder ?? null,
+          name: n.attributes.name ?? null,
+          value: n.attributes.value ?? null,
+        };
         if (!elements.includes(el)) elements.push(el);
         nodeElements.set(n.id, el);
       }
