@@ -4935,6 +4935,8 @@ async function actInternally(
   operationPage?: Page,
 ): Promise<InternalActResult> {
   const session = sessionForCall(sessionId);
+  const capturedOperationPage =
+    operationPage ?? (session === undefined ? undefined : operationPageForSession(session));
   const oauthProvider =
     action.kind === "oauth_login" || action.kind === "oauth_click" ? action.provider : undefined;
   try {
@@ -4948,7 +4950,7 @@ async function actInternally(
         collectCheckoutState,
         compactV2Authorization,
         deadline,
-        operationPage,
+        capturedOperationPage,
       );
     return session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")
       ? await withOAuthActionBoundary(session, oauthProvider, execute)
@@ -4977,11 +4979,22 @@ export async function act(
   cartIdentity?: CartIdentityContext,
 ): Promise<Observation> {
   const session = sessionForCall(sessionId);
+  const capturedOperationPage = session === undefined ? undefined : operationPageForSession(session);
   const oauthProvider =
     action.kind === "oauth_login" || action.kind === "oauth_click" ? action.provider : undefined;
   try {
     const execute = async (deadline?: OAuthActionDeadline): Promise<InternalActResult> =>
-      await executeAct(sessionId, action, detail, cartIdentity, false, false, undefined, deadline);
+      await executeAct(
+        sessionId,
+        action,
+        detail,
+        cartIdentity,
+        false,
+        false,
+        undefined,
+        deadline,
+        capturedOperationPage,
+      );
     const result =
       session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")
         ? await withOAuthActionBoundary(session, oauthProvider, execute)

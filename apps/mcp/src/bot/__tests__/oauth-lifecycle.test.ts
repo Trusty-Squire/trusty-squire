@@ -1445,6 +1445,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const productUrl = "https://mail.google.com/product";
     const returnUrl = "https://console.product.test/return";
     const openedUrl = "https://console.product.test/opened";
+    const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "5000";
     let sessionId: string | undefined;
     try {
       await context.route("https://mail.google.com/**", (route) =>
@@ -1466,8 +1468,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
           contentType: "text/html",
           body:
             route.request().url() === openedUrl
-              ? "<main>Opened operator tab</main>"
-              : `<main>Returned operator tab</main><button id="open" onclick="window.open('${openedUrl}')">Open tab</button>`,
+              ? '<main>Opened operator tab</main><button id="queued-oauth" onclick="document.body.dataset.oauthClicked = \'1\'">Continue with Google</button>'
+              : `<main>Returned operator tab</main><button id="open" onclick="window.open('${openedUrl}')">Open tab</button><button id="queued-oauth">Continue with Google</button>`,
         }),
       );
       await context.route("https://mail.google.com/mail/u/0/**", (route) =>
@@ -1494,7 +1496,11 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const openRef = parseElementsTable(returned.el_table ?? "").find(
         (element) => element.label === "Open tab",
       )?.ref;
+      const queuedOauthRef = parseElementsTable(returned.el_table ?? "").find(
+        (element) => element.label === "Continue with Google",
+      )?.ref;
       expect(openRef).toBeDefined();
+      expect(queuedOauthRef).toBeDefined();
 
       let enteredInbox!: () => void;
       let resumeInbox!: () => void;
@@ -1519,6 +1525,11 @@ describe("BrowserController OAuth popup lifecycle", () => {
 
       const verification = awaitVerification(sessionId);
       await inboxEntered;
+      const queuedOauth = act(sessionId, {
+        kind: "oauth_login",
+        target: queuedOauthRef!,
+        provider: "google",
+      });
       const openedPagePromise = source.waitForEvent("popup");
       const opened = await act(sessionId, { kind: "click", target: openRef! });
       const openedPage = await openedPagePromise;
@@ -1528,10 +1539,14 @@ describe("BrowserController OAuth popup lifecycle", () => {
       temporaryScopeSpy.mockRestore();
 
       expect(result).toMatchObject({ found: true, code: "481920" });
+      await expect(queuedOauth).rejects.toThrow("stale_ref");
       expect(product.url()).toContain("mail.google.com/mail/u/0/#search/");
       expect(openedPage.url()).toBe(openedUrl);
       expect(await openedPage.locator("main").innerText()).toBe("Opened operator tab");
+      expect(await openedPage.locator("body").getAttribute("data-oauth-clicked")).toBeNull();
     } finally {
+      if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
       if (sessionId) await finishProvisionSession(sessionId);
       await context.close();
     }
