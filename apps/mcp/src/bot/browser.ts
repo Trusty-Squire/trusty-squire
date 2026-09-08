@@ -7487,7 +7487,7 @@ export class BrowserController {
       frameUrlContains?: string;
       fullPage?: boolean;
     } = {},
-  }, page: Page | null = this.page): Promise<{
+    page: Page | null = this.page): Promise<{
     base64: string;
     frameUrl: string | null;
     frameCount: number;
@@ -7501,7 +7501,7 @@ export class BrowserController {
       frameUrlContains?: string;
       fullPage?: boolean;
     } = {},
-  }, page: Page | null = this.page): Promise<{
+    page: Page | null = this.page): Promise<{
     base64: string;
     frameUrl: string | null;
     frameCount: number;
