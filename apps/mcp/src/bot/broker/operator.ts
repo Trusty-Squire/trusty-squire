@@ -495,13 +495,12 @@ export class OperatorBroker implements BrokerTransportPort {
     this.authority.beginForwarderRelease(principal);
     const forwarder = principal.forwarderId;
     if (!explicit) this.authority.detach(principal);
-    else if (
-      forwarder !== undefined &&
-      ((await this.journal?.hasOutstanding(undefined, forwarder)) ||
-        (await this.journal?.hasPendingStartDelivery(forwarder)))
-    )
+    else if (forwarder !== undefined && (await this.journal?.hasOutstanding(undefined, forwarder)))
       this.authority.detach(principal, Date.now(), 0);
-    else await this.authority.disconnect(principal);
+    else {
+      if (forwarder !== undefined) await this.journal?.settleExplicitStartDeliveries(forwarder);
+      await this.authority.disconnect(principal);
+    }
     this.authority.releaseForwarder(principal);
     this.apis.delete(principal.clientId);
   }

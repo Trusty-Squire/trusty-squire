@@ -164,6 +164,8 @@ it("settles no-page starts without retaining a recoverable mutation", async () =
 });
 
 it("closes an explicitly released client session immediately", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ts-broker-explicit-start-"));
+  const journal = new DispatchJournal(join(root, "dispatch.jsonl"));
   const broker = new OperatorBroker(
     {
       accountId: "account",
@@ -172,6 +174,7 @@ it("closes an explicitly released client session immediately", async () => {
       registryBaseUrl: "http://unused.test",
     },
     "cell",
+    journal,
   );
   const identity = await broker.authenticate("token", "agent", "a".repeat(43));
   if (identity === null) throw new Error("Test broker authentication failed");
@@ -200,19 +203,27 @@ it("closes an explicitly released client session immediately", async () => {
     return { session_id: sessionId, url: "", closed: true };
   });
 
-  await broker.connected(principal);
-  const started = (await broker.call(
-    principal,
-    "tool",
-    { name: "operate_start", args: {} },
-    "start-request",
-  )) as { capability: TabCapability };
-  await broker.disconnect(principal, true);
+  try {
+    await broker.connected(principal);
+    const started = (await broker.call(
+      principal,
+      "tool",
+      { name: "operate_start", args: {} },
+      "start-request",
+    )) as { capability: TabCapability };
+    await broker.acknowledge(principal, "start-request");
+    expect(await journal.hasPendingStartDelivery(principal.forwarderId!)).toBe(true);
 
-  expect(started.capability.sessionId).toBeDefined();
-  expect(state.finish).toHaveBeenCalledWith(internalId);
-  expect(state.sessions.size).toBe(0);
-  expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
+    await broker.disconnect(principal, true);
+
+    expect(started.capability.sessionId).toBeDefined();
+    expect(state.finish).toHaveBeenCalledWith(internalId);
+    expect(state.sessions.size).toBe(0);
+    expect(await journal.hasPendingStartDelivery(principal.forwarderId!)).toBe(false);
+    expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 it("quarantines an uncertain payment after explicit close and returns its recovery", async () => {

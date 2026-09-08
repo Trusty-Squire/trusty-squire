@@ -239,6 +239,29 @@ export class DispatchJournal {
     return starts.length > 0;
   }
 
+  async settleExplicitStartDeliveries(forwarderId: string): Promise<boolean> {
+    const starts = [...(await this.states()).values()].filter(
+      (record) =>
+        record.forwarderId === forwarderId &&
+        record.start === true &&
+        record.operation === "operate_start" &&
+        record.phase === "acknowledged",
+    );
+    await Promise.all(
+      starts.map(
+        async (record) =>
+          await this.record(record.sessionId, record.requestId, "settled", {
+            forwarderId,
+            start: true,
+            operation: record.operation,
+            ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
+            ...(record.outcome === undefined ? {} : { outcome: record.outcome }),
+          }),
+      ),
+    );
+    return starts.length > 0;
+  }
+
   async expirePendingStartDeliveries(now = Date.now()): Promise<number> {
     const starts = [...(await this.states()).values()].filter(
       (record) =>
