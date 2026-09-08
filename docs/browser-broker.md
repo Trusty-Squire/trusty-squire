@@ -71,7 +71,9 @@ binding. Browser epoch changes invalidate earlier capabilities.
   recording command arguments or credentials. A lost mutation response is never
   replayed. Unsettled or malformed journal state refuses browser replacement and
   requires reconciliation against actual outcomes; there is no automatic
-  erase-and-retry recovery for uncertain payments.
+  erase-and-retry recovery for uncertain payments. Reconciliation keeps a
+  confirmed payment submission as `done`, distinct from 3-D Secure-required and
+  unknown outcomes.
 - After a restarted MCP process loses an operator reply, its retry must set MCP
   request metadata `"trusty-squire/recover": true`. This explicitly asks the
   broker to reconcile its authenticated lineage's newest matching durable

@@ -1,4 +1,5 @@
 import { lstat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
@@ -83,6 +84,50 @@ it("reclaims a verified stale endpoint before the plain login lifecycle", async 
     await expect(lstat(`${path}.owner.json`)).rejects.toMatchObject({ code: "ENOENT" });
   } finally {
     vi.unstubAllEnvs();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("reclaims a verified endpoint after its hello response is lost", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ts-maint-handshake-loss-"));
+  const profile = join(root, "profile");
+  const path = join(root, "b.sock");
+  await mkdir(profile);
+  const server = createServer((socket) => {
+    socket.destroy();
+    server.close();
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(path, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  const socket = await lstat(path);
+  await writeFile(
+    `${path}.owner.json`,
+    JSON.stringify({
+      version: 1,
+      pid: process.pid,
+      start_time: "not-this-process",
+      profileDir: profile,
+      inode: socket.ino,
+      device: socket.dev,
+    }),
+  );
+  vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", path);
+  vi.stubEnv("TRUSTY_SQUIRE_FORWARDER_CREDENTIAL", undefined);
+  vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profile);
+  try {
+    vi.resetModules();
+    const { withBrokerMaintenance: recoverMaintenance } = await import("../broker/maintenance.js");
+    await expect(recoverMaintenance(async () => "plain-login")).resolves.toBe("plain-login");
+    await expect(lstat(path)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(`${path}.owner.json`)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    vi.unstubAllEnvs();
+    server.close();
     await rm(root, { recursive: true, force: true });
   }
 });

@@ -416,6 +416,15 @@ describe("broker dispatch custody", () => {
     const path = join(root, "dispatch.jsonl");
     const outcomes = [
       {
+        requestId: "done",
+        result: {
+          status: "payment_submitted",
+          approval_url: "https://approval.test/private",
+          merchant: "Private Merchant",
+        },
+        expected: { status: "done" as const },
+      },
+      {
         requestId: "three-ds",
         result: {
           status: "payment_3ds_required",
@@ -459,6 +468,9 @@ describe("broker dispatch custody", () => {
           outcome,
         });
       }
+      expect(reconciliationOutcome("operate_pay", { status: "succeeded" })).toEqual({
+        status: "completed",
+      });
       const restarted = new DispatchJournal(path);
       for (const { requestId, expected } of outcomes) {
         await expect(

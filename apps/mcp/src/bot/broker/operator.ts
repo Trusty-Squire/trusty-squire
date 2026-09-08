@@ -87,6 +87,7 @@ export function reconciliationOutcome(
   if (operation !== "operate_pay" || result === null || typeof result !== "object")
     return { status: "completed" };
   const payment = result as Record<string, unknown>;
+  if (payment.status === "payment_submitted") return { status: "done" };
   if (
     payment.status !== "payment_3ds_required" &&
     payment.status !== "payment_outcome_unknown"

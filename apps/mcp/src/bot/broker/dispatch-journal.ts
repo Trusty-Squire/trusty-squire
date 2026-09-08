@@ -18,7 +18,7 @@ interface DispatchRecord {
 }
 
 export interface ReconciledDispatchOutcome {
-  status: "completed" | "payment_3ds_required" | "payment_outcome_unknown";
+  status: "completed" | "done" | "payment_3ds_required" | "payment_outcome_unknown";
   next?: { tool: "operate_payment_status"; wait_seconds: number };
 }
 
@@ -37,7 +37,7 @@ function validOutcome(value: unknown): value is ReconciledDispatchOutcome {
   if (value === null || typeof value !== "object") return false;
   const outcome = value as Record<string, unknown>;
   if (
-    !["completed", "payment_3ds_required", "payment_outcome_unknown"].includes(
+    !["completed", "done", "payment_3ds_required", "payment_outcome_unknown"].includes(
       String(outcome.status),
     ) ||
     !Object.keys(outcome).every((key) => key === "status" || key === "next")

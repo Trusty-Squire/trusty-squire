@@ -29,7 +29,7 @@ export async function withBrokerMaintenance<T>(operation: () => Promise<T>): Pro
     );
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ECONNREFUSED") throw error;
+    if (code !== "ECONNREFUSED" && code !== "broker_lost") throw error;
     await reclaimDeadBrokerEndpoint(path);
     return await operation();
   }
