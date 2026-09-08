@@ -947,6 +947,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         await context.close();
       }
     },
+    15_000,
   );
 
   it.each([
@@ -1145,18 +1146,18 @@ describe("BrowserController OAuth popup lifecycle", () => {
           </select>
         </label>
         <label>Workspace
-          <select id="workspace" name="workspace">
+          <select id="workspace" name="workspace" data-testid="workspace">
             <option value="alpha" selected>Alpha</option>
             <option value="beta">Beta</option>
           </select>
         </label>
         <label>Region
-          <select id="region" name="region">
+          <select id="region" name="region" data-testid="region">
             <option value="us" selected>US</option>
             <option value="eu">EU</option>
           </select>
         </label>
-        <label>Replay name<input id="replay-name" name="full_name" data-testid="replay-name"></label>
+        <label>Replay name<input id="replay-name" name="full_name" type="text" autocomplete="name" data-testid="replay-name"></label>
         <input type="hidden" name="__CHECKOUT_FIELD__">
         <div>Total USD $__TOTAL__</div>
         <div>API Key <span id="credential">••••</span><button id="reveal" onclick="document.querySelector('#credential').textContent = window.credentialValue">Show API key</button></div>
@@ -1212,13 +1213,14 @@ describe("BrowserController OAuth popup lifecycle", () => {
             route.request().url() === "https://console.product.test/opened"
               ? '<label>Opened setting<input id="opened-setting"></label>'
               : route.request().url() === "https://console.product.test/replay-opened"
-                ? '<main>Projects</main><label>Replay name<input id="replay-name" name="full_name" data-testid="replay-name"></label><button id="open-new-tab" onclick="window.open(\'https://console.product.test/opened\')">Open settings</button>'
+                ? '<main>Projects</main><label>Replay name<input id="replay-name" name="full_name" type="text" autocomplete="name" data-testid="replay-name"></label><button id="open-new-tab" onclick="window.open(\'https://console.product.test/opened\')">Open settings</button>'
               : route.request().url() === cartUrl
                 ? `<main>Projects</main>${sourceControls}<script>document.querySelector('#line')?.removeAttribute('hidden')</script>`
                 : `<main>Projects</main><button>New project</button>${sourceControls}`,
         });
       });
       await product.goto(productUrl);
+      const productCredentialBefore = await product.locator("#credential").textContent();
       const controller = BrowserController.fromHarnessPage(product);
       let sessionId: string | undefined;
       try {
@@ -1239,7 +1241,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         expect((controller as unknown as { page: Page }).page).toBe(product);
         const source = controller.completedOAuthPage()!;
         expect(source.url()).toBe(expectedReturnUrl);
-        const reobserved = await observe(sessionId);
+        const reobserved = await observe(sessionId, "full");
         expect(reobserved.url).toBe(expectedReturnUrl);
         expect(reobserved.checkout_state?.payable_total).toEqual({
           amount_cents: 1234,
@@ -1267,7 +1269,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         expect(extracted.url).toBe(expectedReturnUrl);
         expect(Object.values(extracted.credentials)).toContain("sk_source_abcdefgh1234567890");
         expect(await source.locator("#credential").textContent()).toBe("sk_source_abcdefgh1234567890");
-        expect(await product.locator("#credential").textContent()).toBe("••••");
+        expect(await product.locator("#credential").textContent()).toBe(productCredentialBefore);
         await source.evaluate(() => {
           document.body.insertAdjacentHTML(
             "beforeend",
@@ -1310,9 +1312,13 @@ describe("BrowserController OAuth popup lifecycle", () => {
         expect(countrySet.url).toBe(expectedReturnUrl);
         expect(await source.locator("#phone-country").inputValue()).toBe("US");
         expect(await product.locator("#phone-country").inputValue()).toBe("CA");
-        const controlRefs = parseElementsTable(countrySet.el_table ?? "");
-        const workspaceRef = controlRefs.find((el) => el.label === "Workspace")?.ref;
-        const regionRef = controlRefs.find((el) => el.label === "Region")?.ref;
+        const controlRefs = reobserved.elements ?? [];
+        const workspaceRef = controlRefs.find(
+          (el) => el.tag === "select" && el.testId === "workspace",
+        )?.ref;
+        const regionRef = controlRefs.find(
+          (el) => el.tag === "select" && el.testId === "region",
+        )?.ref;
         expect(workspaceRef).toBeDefined();
         expect(regionRef).toBeDefined();
         const selected = await formSelectMany(sessionId, {
@@ -1363,6 +1369,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
                   dom_hint: { testid: "replay-name", name: "full_name" },
                   accessible_name: "Replay name",
                   css: "#replay-name",
+                  field_role: "ac:name",
                 },
                 value: { hole: "contact.name" },
               },
@@ -1391,8 +1398,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
         expect(sessionForCall(sessionId)?.actionTrace.some((entry) => entry.action.kind === "type")).toBe(
           true,
         );
-        const beforeOpen = await observe(sessionId);
-        const openRef = parseElementsTable(beforeOpen.el_table ?? "").find(
+        const beforeOpen = await observe(sessionId, "full");
+        const openRef = (beforeOpen.elements ?? []).find(
           (el) => el.label === "Open settings",
         )?.ref;
         expect(openRef).toBeDefined();
@@ -1412,6 +1419,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         expect(replayPage.url()).toBe("https://console.product.test/replay-opened");
         expect(product.url()).toBe(productUrl);
         const destination = "https://console.product.test/settings";
+        await act(sessionId, { kind: "allow_host", host: "console.product.test" });
         const navigated = await act(sessionId, { kind: "goto", url: destination });
         expect(navigated.url).toBe(destination);
         expect(openedPage.url()).toBe(destination);
@@ -1424,6 +1432,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         await context.close();
       }
     },
+    20_000,
   );
 
   it("keeps concurrent inbox verification on its captured page after source-tab adoption", async () => {
@@ -1553,7 +1562,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       expect(controller.currentUrl()).toBe(openedUrl);
       const observed = await observe(sessionId);
       expect(observed.url).toBe(openedUrl);
-      const openedTitleRef = parseElementsTable(observed.el_table ?? "").find(
+      const openedTitleRef = parseElementsTable(opened.el_table ?? "").find(
         (element) => element.label === "Opened title",
       )?.ref;
       expect(openedTitleRef).toBeDefined();

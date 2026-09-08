@@ -11532,10 +11532,17 @@ export class BrowserController {
         masked.push({ el, row: rowAncestor(el) });
       });
       const selectorFor = (el: Element): string => {
-        const tag = el.tagName.toLowerCase();
-        const all = Array.from(document.querySelectorAll(tag));
-        const idx = all.indexOf(el);
-        return `${tag}:nth-of-type(${idx + 1})`;
+        const parts: string[] = [];
+        let current: Element | null = el;
+        while (current !== null && current !== document.body) {
+          const tag = current.tagName.toLowerCase();
+          const siblings = Array.from(current.parentElement?.children ?? []).filter(
+            (sibling) => sibling.tagName === current!.tagName,
+          );
+          parts.unshift(`${tag}:nth-of-type(${siblings.indexOf(current) + 1})`);
+          current = current.parentElement;
+        }
+        return `body > ${parts.join(" > ")}`;
       };
 
       // No masked placeholder anywhere — but some consoles hide the key

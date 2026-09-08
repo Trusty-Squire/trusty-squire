@@ -84,7 +84,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       expect(textBlock?.text ?? "").not.toContain(TINY_JPEG_BASE64);
 
       expect((browser.captureOperatorScreenshot as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual(
-        [{}],
+        [{}, undefined],
       );
     } finally {
       await client.close();
@@ -126,7 +126,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
         },
       });
       expect((browser.captureOperatorScreenshot as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual(
-        [{ frameUrlContains: "cardinalcommerce.com", fullPage: true }],
+        [{ frameUrlContains: "cardinalcommerce.com", fullPage: true }, undefined],
       );
     } finally {
       await client.close();
@@ -172,7 +172,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
         arguments: { session_id: started.session_id },
       });
       expect(result.isError).not.toBe(true);
-      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({});
+      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({}, undefined);
       expect(
         (browser.extractInteractiveElements as ReturnType<typeof vi.fn>).mock.calls.length,
       ).toBe(extractionCalls);
@@ -213,7 +213,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       });
 
       expect(result.isError).not.toBe(true);
-      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({});
+      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({}, undefined);
     } finally {
       await client.close();
       await closeAllProvisionSessions();
@@ -251,7 +251,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       });
 
       expect(result.isError).not.toBe(true);
-      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({});
+      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({}, undefined);
     } finally {
       await client.close();
       await closeAllProvisionSessions();
