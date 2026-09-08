@@ -24,7 +24,10 @@ for that client's restart recovery and never shared with sibling clients. The
 socket parent must already exist, belong to the current user, and have mode 0700.
 The account must already be enrolled through `connect`; authentication reads its
 existing agent session token from session storage, never command-line token
-arguments.
+arguments. `connect` maintenance does not require an MCP lineage credential:
+after validating that enrolled token, it creates a one-use local identity solely
+to drain and resume maintenance. That identity cannot recover or reclaim MCP
+sessions.
 
 The first client starts `node apps/mcp/dist/bin.js broker` if necessary. It can
 also run as a foreground service. Socket mode is 0600. No CDP endpoint or browser

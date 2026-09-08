@@ -6,16 +6,21 @@ vi.mock("../../session-guard.js", () => ({
   createSessionGuard: () => ({ bind: async () => ({ agent_session_token: "test" }) }),
 }));
 import { withBrokerMaintenance } from "../broker/maintenance.js";
-import { listenBroker } from "../broker/transport.js";
+import { BrokerClient, listenBroker } from "../broker/transport.js";
 
 describe("plain-login broker maintenance", () => {
   it("drains before running plain login, retains the connection, and resumes even when login fails", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-maint-"));
     const path = join(root, "b.sock");
     const events: string[] = [];
+    const maintenanceCredentials: string[] = [];
     let probes = 0;
     const broker = await listenBroker(path, {
-      authenticate: async () => ({ accountId: "account", agentId: "connect" }),
+      authenticate: async (token, _agentId, lineageCredential) => {
+        if (token !== "test" || lineageCredential === undefined) return null;
+        maintenanceCredentials.push(lineageCredential);
+        return { accountId: "account", agentId: "connect" };
+      },
       call: async (_principal, method) => {
         events.push(method);
         return {
@@ -27,8 +32,11 @@ describe("plain-login broker maintenance", () => {
       },
     });
     vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", path);
-    vi.stubEnv("TRUSTY_SQUIRE_FORWARDER_CREDENTIAL", "a".repeat(43));
+    vi.stubEnv("TRUSTY_SQUIRE_FORWARDER_CREDENTIAL", undefined);
     try {
+      await expect(BrokerClient.connect(path, "invalid", "b".repeat(43))).rejects.toThrow(
+        "Invalid broker credential",
+      );
       await expect(
         withBrokerMaintenance(async () => {
           events.push("plain-login");
@@ -41,6 +49,8 @@ describe("plain-login broker maintenance", () => {
       await rm(root, { recursive: true, force: true });
     }
     expect(events).toEqual(["maintenance", "maintenance", "plain-login", "resume", "disconnect"]);
+    expect(maintenanceCredentials).toHaveLength(1);
+    expect(maintenanceCredentials[0]).toMatch(/^[A-Za-z0-9_-]{43}$/);
   });
 });
 

@@ -1,8 +1,8 @@
 import { lstat } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { createSessionGuard } from "../../session-guard.js";
 import { BrokerClient } from "./transport.js";
 import { BrokerRefusal } from "./scheduler.js";
-import { requireLineageCredential } from "./lineage.js";
 import { reclaimDeadBrokerEndpoint } from "./discovery.js";
 
 /** Connect retains the maintenance connection throughout the existing plain,
@@ -25,7 +25,7 @@ export async function withBrokerMaintenance<T>(operation: () => Promise<T>): Pro
     client = await BrokerClient.connect(
       path,
       session.agent_session_token,
-      requireLineageCredential(),
+      randomBytes(32).toString("base64url"),
     );
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
