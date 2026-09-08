@@ -668,8 +668,8 @@ export async function captureBrowserUseDOM(
         nodeElements.set(n.id, el);
       }
       const closed = inClosedShadow || n.shadowType?.toLowerCase() === "closed";
-      n.children.forEach((child) => visit(child, closed, form));
-      if (n.contentDocument) visit(n.contentDocument);
+      n.children.forEach((child) => visit(child, closed, child.shadowType ? undefined : form));
+      if (n.contentDocument) visit(n.contentDocument, closed, undefined);
     };
     visit(root);
     return root;

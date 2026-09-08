@@ -126,6 +126,30 @@ describe("interleaved observation DOM", () => {
     }
   });
 
+  it("does not inherit form intent across an open shadow boundary", async () => {
+    const page = await browser.newPage();
+    const refs = new StableObservationRefs();
+    const read = async () => {
+      const capture = await captureThroughController(page);
+      const control = capture.elements.find((element) => element.id === "shadow-control")!;
+      return { element: control, ref: refs.actions("doc", capture.elements).get(control)! };
+    };
+    try {
+      await page.setContent('<form id="form" action="/safe"><div id="host"></div></form>');
+      await page.locator("#host").evaluate((host) => {
+        const root = host.attachShadow({ mode: "open" });
+        root.innerHTML = '<button id="shadow-control" type="button">Continue</button>';
+      });
+      const held = await read();
+      await page.locator("#form").evaluate((form) => form.setAttribute("action", "/other"));
+      const afterParentChange = await read();
+      expect(afterParentChange.element.observationIdentity).toBe(held.element.observationIdentity);
+      expect(afterParentChange.ref).toBe(held.ref);
+    } finally {
+      await page.close();
+    }
+  });
+
   it("retires persistent anchors when only a base URL retargets relative actions", async () => {
     const page = await browser.newPage();
     const refs = new StableObservationRefs();

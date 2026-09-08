@@ -101,6 +101,8 @@ a download. Ordinary editable-field values remain non-material.
 Explicit `form=` ownership is resolved through the browser's effective form
 association, not by matching every duplicate ID. A non-owner form can change
 without retiring the control's capability; an actual owner change still does.
+Inherited form context stops at shadow-root and nested-document boundaries, so
+parent form changes do not stale controls the browser does not associate with it.
 
 ## Deferred native activation concerns
 
