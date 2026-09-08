@@ -746,9 +746,14 @@ export async function captureBrowserUseDOM(
       return null;
     };
     const syntheticContainer = (n: BrowserUseNode): string | null => {
-      const scope = labelScopeFor.get(n);
-      let parent = parentByNode.get(n);
-      while (parent && labelScopeFor.get(parent) === scope) {
+      let scope = labelScopeFor.get(n);
+      let child = n;
+      let parent = parentByNode.get(child);
+      while (parent) {
+        if (labelScopeFor.get(parent) !== scope) {
+          if (child.shadowType?.toLowerCase() !== "open") return null;
+          scope = labelScopeFor.get(parent);
+        }
         const tag = parent.nodeName.toLowerCase();
         if (["section", "nav", "form", "fieldset", "main", "aside", "article", "dialog"].includes(tag)) {
           const heading = parent.children
@@ -758,7 +763,8 @@ export async function captureBrowserUseDOM(
           const label = parent.attributes["aria-label"]?.trim() || labelledByText(parent) || heading;
           return `${tag}:${label ?? tag}`;
         }
-        parent = parentByNode.get(parent);
+        child = parent;
+        parent = parentByNode.get(child);
       }
       return null;
     };

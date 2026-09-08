@@ -37,14 +37,13 @@ describe("interleaved observation DOM", () => {
         <button id="preferences" aria-label="設定"></button>
         <span id="empty-name">Master volume</span><div id="empty-volume" role="slider" aria-label="" aria-labelledby="empty-name" tabindex="0" style="display:block;width:20px;height:20px"></div>
         <section><h2>Volume controls</h2><div id="volume" role="slider" tabindex="0" style="display:block;width:20px;height:20px"></div></section>
+        <section id="shadow-section"><h2>Shadow volume controls</h2><x-slider id="shadow-host"></x-slider></section>
       `);
       await page.locator("body").evaluate((body) => {
-        const host = document.createElement("div");
-        host.id = "shadow-host";
+        const host = body.querySelector("#shadow-host")!;
         host.attachShadow({ mode: "open" }).innerHTML =
-          '<span id="shared-name">Shadow volume</span><div id="shadow-volume" role="slider" aria-labelledby="shared-name" tabindex="0" style="display:block;width:20px;height:20px"></div>';
+          '<span id="shared-name">Shadow volume</span><div id="shadow-volume" role="slider" aria-labelledby="shared-name" tabindex="0" style="display:block;width:20px;height:20px"></div><div id="shadow-floor" role="slider" tabindex="0" style="display:block;width:20px;height:20px"></div>';
         body.insertAdjacentHTML("afterbegin", '<span id="shared-name">Outer volume</span>');
-        body.append(host);
       });
       const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
       const handles = new Map(capture.elements.map((element) => [element, `@e:${element.index}`]));
@@ -67,6 +66,7 @@ describe("interleaved observation DOM", () => {
       expect(labelFor("empty-volume")).toBe("@master-volume");
       expect(labelFor("volume")).toBe("@volume-controls-button");
       expect(labelFor("shadow-volume")).toBe("@shadow-volume");
+      expect(labelFor("shadow-floor")).toBe("@shadow-volume-controls-button");
     } finally {
       await page.close();
     }

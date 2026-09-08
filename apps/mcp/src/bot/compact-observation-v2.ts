@@ -223,7 +223,7 @@ export class StableObservationRefs {
     if (existing !== undefined || preferred === undefined) return existing;
     let candidate = preferred;
     for (let suffix = 2; this.aliasOwners.has(candidate); suffix++)
-      candidate = `${preferred}-${suffix}`;
+      candidate = labelWithOrdinalV2(preferred, suffix);
     this.aliases.set(ref, candidate);
     this.aliasOwners.set(candidate, ref);
     return candidate;
@@ -257,7 +257,8 @@ export class StableObservationRefs {
     return ref;
   }
 }
-const COMPACT_V2_LABEL_RE = /^@[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const LABEL_MAX_CHARS = 32;
+const COMPACT_V2_LABEL_RE = /^@[\p{L}\p{M}\p{N}]+(?:-[\p{L}\p{M}\p{N}]+)*(?:…)?$/u;
 
 export function isCompactV2Handle(target: string): boolean {
   return COMPACT_V2_HANDLE_RE.test(target);
@@ -265,7 +266,7 @@ export function isCompactV2Handle(target: string): boolean {
 
 /** The `@label` alias form, distinguishable from a handle by its `@e:` prefix. */
 export function isCompactV2Label(target: string): boolean {
-  return COMPACT_V2_LABEL_RE.test(target);
+  return COMPACT_V2_LABEL_RE.test(target) && Array.from(target.slice(1)).length <= LABEL_MAX_CHARS;
 }
 
 /**
@@ -282,8 +283,6 @@ export function compactV2LegacyRefForHandle(
   if (!isCompactV2Handle(target)) return null;
   return handles.get(target) ?? null;
 }
-
-const LABEL_MAX_CHARS = 32;
 
 /**
  * Split a glued "Title + description" accessible name into its leading title,
@@ -354,8 +353,28 @@ export function controlLabelV2(description: string | undefined): string | undefi
     if (lastBoundary > 0) slug = slug.slice(0, lastBoundary);
   }
   slug = slug.replace(/-+$/g, "");
-  if (slug.length === 0) return /[\p{L}\p{N}]/u.test(titled) ? `@${titled}` : undefined;
+  if (slug.length === 0) {
+    let unicodeSlug = titled
+      .normalize("NFKC")
+      .replace(/[^\p{L}\p{M}\p{N}]+/gu, "-")
+      .replace(/^-+|-+$/gu, "");
+    if (unicodeSlug.length === 0) return undefined;
+    const characters = Array.from(unicodeSlug);
+    if (characters.length > LABEL_MAX_CHARS)
+      unicodeSlug = `${characters.slice(0, LABEL_MAX_CHARS - 1).join("")}…`;
+    return `@${unicodeSlug}`;
+  }
   return `@${slug}`;
+}
+
+function labelWithOrdinalV2(label: string, suffix: number): string {
+  const tail = `-${suffix}`;
+  const characters = Array.from(label.slice(1));
+  const truncated =
+    characters.length > LABEL_MAX_CHARS - Array.from(tail).length || characters.at(-1) === "…";
+  const body = truncated ? characters.slice(0, -1) : characters;
+  const limit = LABEL_MAX_CHARS - Array.from(tail).length - Number(truncated);
+  return `@${body.slice(0, limit).join("")}${tail}${truncated ? "…" : ""}`;
 }
 
 type WireControlV2 = [string, string, string?];
@@ -367,7 +386,7 @@ type WireControlV2 = [string, string, string?];
 // is deliberately one sparse string rather than nullable columns:
 // checked/unchecked, disabled, action, field, card choice, and frame context
 // remain distinguishable without paying for empty slots on every row. The
-// label's slug charset excludes `|` and `=`, so no escaping is needed.
+// label grammar excludes `|` and `=`, so no escaping is needed.
 function wireControl(row: SafeControlV2): WireControlV2 {
   const role: Record<SafeRoleV2, string> = {
     button: "b",
@@ -1310,10 +1329,10 @@ export function disambiguateDuplicateLabelsV2(
     seen.set(label, occurrence);
     if (occurrence === 1) return label;
     let suffix = occurrence;
-    let candidate = `${label}-${suffix}`;
+    let candidate = labelWithOrdinalV2(label, suffix);
     while (assigned.has(candidate)) {
       suffix += 1;
-      candidate = `${label}-${suffix}`;
+      candidate = labelWithOrdinalV2(label, suffix);
     }
     assigned.add(candidate);
     return candidate;

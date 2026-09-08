@@ -646,6 +646,35 @@ describe("compact observation v2", () => {
       expect(labelsFor(element({ ariaLabel: "設定" }))).toEqual(["@設定"]);
     });
 
+    it("keeps Unicode aliases bounded and wire-safe", () => {
+      const piped = labelsFor(element({ ariaLabel: "設定|詳細" }))[0]!;
+      const long = labelsFor(element({ ariaLabel: "設定".repeat(40) }))[0]!;
+      const { payload } = encodeV2QueryPage({
+        sessionId: "session",
+        stage: "browse",
+        rows: [
+          { ref: "@e:unicode", role: "button", visibility: "viewport", frame: "main", label: piped },
+          { ref: "@e:long", role: "button", visibility: "viewport", frame: "main", label: long },
+        ],
+        cursorFor: () => "cursor",
+      });
+
+      expect(piped).toBe("@設定-詳細");
+      expect(long.endsWith("…")).toBe(true);
+      expect(Array.from(long.slice(1))).toHaveLength(32);
+      expect(isCompactV2Label(piped)).toBe(true);
+      expect(isCompactV2Label(long)).toBe(true);
+      const stable = new StableObservationRefs();
+      stable.label("@e:first", long);
+      const duplicate = stable.label("@e:second", long)!;
+      expect(isCompactV2Label(duplicate)).toBe(true);
+      expect(Array.from(duplicate.slice(1))).toHaveLength(32);
+      expect(payload.safe_table).toEqual([
+        ["@e:unicode", "b", "@設定-詳細"],
+        ["@e:long", "b", long],
+      ]);
+    });
+
     it("falls back to the emitted role when punctuation cannot form a label", () => {
       expect(labelsFor(element({ ariaLabel: "!!!" }))).toEqual(["@button-1"]);
     });
