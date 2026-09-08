@@ -13464,6 +13464,7 @@ export class BrowserController {
     });
     const recordTopLevelNavigation = (page: Page, frame: Frame): void => {
       if (!actionStarted || frame !== page.mainFrame()) return;
+      if (page === popupCapture.page) transientNavigated = true;
       const url = frame.url();
       captureExpectedReturnUrl(url);
       observedReturn =
@@ -13478,7 +13479,10 @@ export class BrowserController {
       resolveProductNavigation();
     };
     const completionPage = (): Page | null => {
-      for (const page of [product, providerPage]) {
+      // The creation-attributed popup can finish a reused-session redirect
+      // before the initiating click resolves and assigns providerPage. The
+      // outer deadline must inspect that same owned source in the meantime.
+      for (const page of [product, providerPage ?? popupCapture.page]) {
         if (
           page === null ||
           page.isClosed() ||
