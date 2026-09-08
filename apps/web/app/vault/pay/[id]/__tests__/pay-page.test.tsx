@@ -109,6 +109,7 @@ function approvalBody() {
     nonce: "nonce",
     card_ref: bound ? lostResponseCardRef : null,
     operator_pubkey: "AAAA",
+    account_binding: "opaque-account-binding",
     expires_at: "2026-07-01T00:10:00.000Z",
     item: "phone case",
     reason: "gift",
@@ -245,6 +246,11 @@ describe("pay page — JIT add-card ceremony", () => {
 
     await user.click(approve);
     await waitFor(() => expect(vouchflow.signPayload).toHaveBeenCalledTimes(1));
+    expect(vouchflow.signPayload).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({ account_binding: "opaque-account-binding" }),
+      }),
+    );
   });
 
   it("discloses server-record details before authorization without OAuth or account navigation", async () => {

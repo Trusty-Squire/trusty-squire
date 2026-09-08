@@ -71,6 +71,7 @@ describe("payment approval relay", () => {
     id: string;
     nonce: string;
     agent: string;
+    account_binding: string;
     expires_at: string;
   }> {
     const response = await server.inject({
@@ -96,6 +97,7 @@ describe("payment approval relay", () => {
       id: string;
       nonce: string;
       agent: string;
+      account_binding: string;
       expires_at: string;
     };
   }
@@ -143,6 +145,7 @@ describe("payment approval relay", () => {
   function makeSubmission(input: {
     id: string;
     nonce: string;
+    account_binding: string;
     card_ref?: string;
     merchant?: string;
     checkout_origin?: string;
@@ -155,10 +158,7 @@ describe("payment approval relay", () => {
   }): { jws: string; sealed_card: string } {
     const operatorPubkey = input.operator_pubkey ?? "c3ludGhldGljLW9wZXJhdG9yLWtleQ";
     const payload = {
-      account_binding: createHash("sha256")
-        .update("trusty-squire/payment/account/v1\n")
-        .update(accountId)
-        .digest("base64url"),
+      account_binding: input.account_binding,
       approval_id: input.id,
       merchant: input.merchant ?? "Synthetic Books",
       checkout_origin: input.checkout_origin ?? "https://checkout.synthetic.test",
@@ -287,6 +287,7 @@ describe("payment approval relay", () => {
       reason: "Synthetic test purchase",
       card_ref: cardId,
       operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
+      account_binding: created.account_binding,
       approval_payload_sha256: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
     });
     expect(response.json().card).toEqual({
@@ -308,7 +309,12 @@ describe("payment approval relay", () => {
       headers: { cookie: webCookie },
     });
     expect(ownerCeremony.statusCode).toBe(200);
-    const submission = makeSubmission({ ...created, card_ref: cardId });
+    const ownerTerms = ownerCeremony.json() as { account_binding: string };
+    const submission = makeSubmission({
+      ...created,
+      account_binding: ownerTerms.account_binding,
+      card_ref: cardId,
+    });
     const claims = JSON.parse(
       Buffer.from(submission.jws.split(".")[1]!, "base64url").toString(),
     ) as {
@@ -741,10 +747,7 @@ describe("payment approval relay", () => {
                 .update(
                   JSON.stringify({
                     agent: "synthetic-payment-test-agent",
-                    account_binding: createHash("sha256")
-                      .update("trusty-squire/payment/account/v1\n")
-                      .update(accountId)
-                      .digest("base64url"),
+                    account_binding: created.account_binding,
                     amount_cents: 2599,
                     approval_id: created.id,
                     card_ref: "card_synthetic_1",
@@ -1225,7 +1228,12 @@ describe("payment approval relay", () => {
     });
     expect(get.json()).toMatchObject({ card_ref: cardId });
 
-    const bound = get.json() as { id: string; nonce: string; card_ref: string };
+    const bound = get.json() as {
+      id: string;
+      nonce: string;
+      account_binding: string;
+      card_ref: string;
+    };
     const submission = makeSubmission(bound);
     const approve = await relaySubmission(created.id, submission);
     expect(approve.approvalStatus).toBe(202);
@@ -1446,7 +1454,11 @@ describe("payment approval relay", () => {
         reason: "Other reason",
       },
     });
-    const otherCreated = otherCreatedResponse.json() as { id: string; nonce: string };
+    const otherCreated = otherCreatedResponse.json() as {
+      id: string;
+      nonce: string;
+      account_binding: string;
+    };
     const approve = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/approve`,

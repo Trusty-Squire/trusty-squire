@@ -93,12 +93,14 @@ pending-only, write-once, rejects an expired approval, and accepts only an
 disclosure of the exact server-recorded merchant, checkout origin,
 amount, currency, nonce, item, reason, requesting agent, and expiry. It also
 contains the approval id and status, bound card reference, operator public key,
-opaque approval-payload digest, and encrypted card blob, but no card display
+opaque account binding, approval-payload digest, and encrypted card blob, but no card display
 metadata. The owner web approval page renders those canonical values before one
 payment-context passkey action signs them, derives the card key, and seals the card
 to the operator.
 
-`POST /approve` accepts a final, server-bound JWS and operator-sealed ciphertext
+The same opaque account binding appears in authenticated agent approval reads and
+is carried verbatim by the owner page and MCP when they construct the signed
+payload. `POST /approve` accepts a final, server-bound JWS and operator-sealed ciphertext
 only while the approval is pending. `POST /deny` requires the owning web session
 to atomically move an unexpired pending approval to `denied` and
 clear every staged JWS and ciphertext. Confirmation rechecks that terminal state,

@@ -73,7 +73,7 @@ identity, and fixture contract is in
 **Payment approval**
 
 A short-lived handoff from an active operate session to the user's phone. The
-phone can add and bind a card when needed. The anonymous approval shell displays
+phone can add and bind a card when needed. The owner-authenticated approval page displays
 the exact server-recorded purchase details and identifies the bound card by its
 non-secret label and last four digits for an amount-bound approval. One
 payment-context passkey authorization signs that approval. The API relays the
@@ -216,7 +216,7 @@ agent starts operate_pay in the addressed checkout session
      again with the same arguments, never by minting another approval
   -> if the approval has no card, the user adds one and the API binds that saved
      card to the still-pending approval
-  -> the anonymous approval shell displays merchant, checkout origin, item, reason,
+  -> the owner-authenticated approval page displays merchant, checkout origin, item, reason,
      requesting agent, amount, and currency from the short-lived server record
   -> the user reviews that intent and one passkey ceremony signs the canonical
      payload, unlocks the card, and seals it to the ephemeral operator

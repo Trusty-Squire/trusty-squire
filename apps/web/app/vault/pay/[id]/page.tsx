@@ -27,6 +27,7 @@ interface CeremonyApproval extends ApprovalDetails {
   status: string;
   card_ref: string | null;
   operator_pubkey: string;
+  account_binding: string;
   approval_payload_sha256: string | null;
   card: CeremonyCard | null;
 }
@@ -118,9 +119,6 @@ export default function PaymentApprovalPage() {
   const applyCeremony = useCallback((current: CeremonyApproval) => {
     setJitOrigin((origin) => origin ?? current.card_ref === null);
     setCeremony(current);
-    // Details are capability-link disclosure from the server record. Rendering
-    // them never signs anything; the single payment signature happens only in
-    // the explicit Approve payment handler below.
     setApproval({ ...current, card: { brand: null, last4: null } });
     setCardMetadataError(null);
   }, []);
@@ -231,6 +229,7 @@ export default function PaymentApprovalPage() {
       // The only payment-context ceremony: it follows rendered server details
       // and binds exactly those canonical values.
       const payload = {
+        account_binding: ceremony.account_binding,
         approval_id: ceremony.id,
         merchant: ceremony.merchant,
         checkout_origin: ceremony.checkout_origin,

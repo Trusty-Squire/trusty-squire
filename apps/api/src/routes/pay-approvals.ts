@@ -360,7 +360,13 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       void sendTelegramMessage(account.telegram_chat_id, text).catch(() => {});
     }
 
-    return reply.code(201).send({ id, nonce, agent, expires_at: expiresAt.toISOString() });
+    return reply.code(201).send({
+      id,
+      nonce,
+      agent,
+      account_binding: accountBinding(auth.account_id),
+      expires_at: expiresAt.toISOString(),
+    });
   });
 
   fastify.post<{ Params: { id: string }; Body: unknown }>(
@@ -453,6 +459,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       nonce: record.nonce,
       card_ref: record.cardRef,
       operator_pubkey: record.operatorPubkey,
+      account_binding: accountBinding(record.accountId),
       item: record.item,
       reason: record.reason,
       agent: record.agent,
@@ -502,6 +509,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         nonce: record.nonce,
         card_ref: record.cardRef,
         operator_pubkey: record.operatorPubkey,
+        account_binding: accountBinding(record.accountId),
         item: record.item,
         reason: record.reason,
         agent: record.agent,

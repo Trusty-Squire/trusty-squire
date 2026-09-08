@@ -842,15 +842,17 @@ describe("vouch-gated credential mutations", () => {
       },
     });
     expect(paymentCreated.statusCode).toBe(201);
-    const payment = paymentCreated.json() as { id: string; nonce: string; agent: string };
+    const payment = paymentCreated.json() as {
+      id: string;
+      nonce: string;
+      agent: string;
+      account_binding: string;
+    };
     const recipientHash = createHash("sha256")
       .update(Buffer.from("c3ludGhldGljLW9wZXJhdG9yLWtleQ", "base64url"))
       .digest("base64url");
     const paymentHash = hashVouchPayload({
-      account_binding: createHash("sha256")
-        .update("trusty-squire/payment/account/v1\n")
-        .update(accountId)
-        .digest("base64url"),
+      account_binding: payment.account_binding,
       agent: payment.agent,
       amount_cents: 1200,
       approval_id: payment.id,

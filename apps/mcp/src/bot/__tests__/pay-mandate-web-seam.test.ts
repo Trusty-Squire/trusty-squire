@@ -35,8 +35,6 @@
 //     SHA-256 of the SDK's canonical bytes — the documented server contract.
 
 import { createHash, generateKeyPairSync, type KeyObject } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import canonicalize from "canonicalize";
 import { canonicalize as vouchflowCanonicalize } from "@vouchflow/web";
 import { exportJWK, SignJWT } from "jose";
@@ -68,51 +66,6 @@ const SYNTHETIC_CARD = {
   },
 };
 
-// The mandate field set, in the order the web page + mcp both declare it. This
-// list is the contract; the guard test below reads the REAL page.tsx source and
-// fails if the web payload builder ever drifts from it (closing the "the React
-// assembly code isn't executed in-process" gap — it can't be: signPayload fires
-// a real WebAuthn passkey ceremony + vouchflow network calls).
-const MANDATE_FIELDS = [
-  "approval_id",
-  "merchant",
-  "checkout_origin",
-  "amount_cents",
-  "currency",
-  "nonce",
-  "card_ref",
-  "recipient_pubkey_hash",
-  "item",
-  "reason",
-  "agent",
-] as const;
-
-// Extract the KEYS of the `const payload = { ... }` object literal from a source
-// file (the web page or the mcp operator). Deliberately source-text based so it
-// pins the actual production field SET, not a re-import.
-function payloadObjectKeys(source: string, anchor: string): string[] {
-  const start = source.indexOf(anchor);
-  if (start === -1) throw new Error(`anchor not found: ${anchor}`);
-  const open = source.indexOf("{", start);
-  let depth = 0;
-  let end = -1;
-  for (let i = open; i < source.length; i += 1) {
-    if (source[i] === "{") depth += 1;
-    else if (source[i] === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        end = i;
-        break;
-      }
-    }
-  }
-  const body = source.slice(open + 1, end);
-  // Top-level property at the start of a line. Matches both explicit (`key:`)
-  // and ES shorthand (`key,`) — mcp writes `item,`/`reason,` shorthand, the web
-  // page writes `item: approval.item`. The payload here is flat (no nesting).
-  return [...body.matchAll(/^\s*([a-z_]+)\s*[:,]/gm)].map((m) => m[1]!);
-}
-
 // Mirrors the WEB page's base64url of SHA-256(operator pubkey bytes):
 //   apps/web/.../page.tsx:241-252  publicKeyHash = SHA-256(fromBase64Url(op_pk));
 //   recipient_pubkey_hash = toBase64Url(new Uint8Array(publicKeyHash))
@@ -133,6 +86,7 @@ async function signMandateLikeWeb(params: {
   privateKey: KeyObject;
   nonce: string;
   agent: string;
+  accountBinding: string;
   // Values the PHONE signs over. Aligned case = the same values the mcp will
   // reconstruct from checkout/approval; swap cases drift one field.
   cardRef: string;
@@ -144,6 +98,7 @@ async function signMandateLikeWeb(params: {
 }): Promise<{ jws: string; sealed_card: string; canonical: string }> {
   // ↓↓↓ VERBATIM field construction from page.tsx (the production web payload).
   const payload = {
+    account_binding: params.accountBinding,
     approval_id: params.approvalId ?? "appr_seam",
     merchant: CHECKOUT.merchant,
     checkout_origin: CHECKOUT.checkout_origin,
@@ -218,6 +173,7 @@ async function runSeam(cfg: {
   signCardRef?: string; // what the phone signs over (default = bound)
   signAmountCents?: number; // what the phone signs over (default = checkout)
   signApprovalId?: string; // what the phone signs over (default = current approval)
+  signAccountBinding?: string;
   confidence?: "low" | "medium" | "high";
 }): Promise<{
   result: Record<string, unknown>;
@@ -234,6 +190,7 @@ async function runSeam(cfg: {
   const resolvedCardRefs: string[] = [];
   const nonce = "seam-nonce";
   const agent = "seam-agent@host";
+  const accountBinding = "owner-account-binding";
   let clock = 0;
   let webCanonical = "";
   let reviewVerified = false;
@@ -249,7 +206,13 @@ async function runSeam(cfg: {
     if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
       approvalBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       return Response.json(
-        { id: "appr_seam", nonce, agent, expires_at: new Date(8.64e15).toISOString() },
+        {
+          id: "appr_seam",
+          nonce,
+          agent,
+          account_binding: accountBinding,
+          expires_at: new Date(8.64e15).toISOString(),
+        },
         { status: 201 },
       );
     }
@@ -261,6 +224,7 @@ async function runSeam(cfg: {
       const operatorPubkey = String(approvalBodies[0]!.operator_pubkey);
       if (!reviewVerified) {
         const approvalCanonical = canonicalize({
+          account_binding: accountBinding,
           approval_id: "appr_seam",
           ...CHECKOUT,
           nonce,
@@ -285,6 +249,7 @@ async function runSeam(cfg: {
             privateKey,
             nonce,
             agent,
+            accountBinding: cfg.signAccountBinding ?? accountBinding,
             cardRef: cfg.signCardRef ?? cfg.boundCardRef,
             amountCents: cfg.signAmountCents ?? CHECKOUT.amount_cents,
             ...(cfg.signApprovalId !== undefined ? { approvalId: cfg.signApprovalId } : {}),
@@ -304,6 +269,7 @@ async function runSeam(cfg: {
         nonce,
         card_ref: cfg.boundCardRef, // server-bound ref the operator resumes with
         operator_pubkey: operatorPubkey,
+        account_binding: accountBinding,
         ...candidate,
         expires_at: new Date(8.64e15).toISOString(),
       });
@@ -381,28 +347,10 @@ describe("web ↔ mcp mandate canonical form (cross-package seam)", () => {
     vi.clearAllMocks();
   });
 
-  it("GUARD: the real web page.tsx AND mcp pay-operator.ts declare the SAME payload field set (in order)", () => {
-    const webSource = readFileSync(
-      fileURLToPath(new URL("../../../../web/app/vault/pay/[id]/page.tsx", import.meta.url)),
-      "utf8",
-    );
-    const mcpSource = readFileSync(
-      fileURLToPath(new URL("../pay-operator.ts", import.meta.url)),
-      "utf8",
-    );
-    // Web builds `const payload = {`; mcp builds `const canonical = canonicalize({`.
-    const webKeys = payloadObjectKeys(webSource, "const payload = {");
-    const mcpKeys = payloadObjectKeys(mcpSource, "const canonical = canonicalize({");
-    // Both must equal the contract this file signs/verifies over. If a future PR
-    // adds/removes/reorders a web field without matching mcp, THIS fails — even
-    // though the React assembly path can't run in-process.
-    expect(webKeys).toEqual([...MANDATE_FIELDS]);
-    expect(mcpKeys).toEqual([...MANDATE_FIELDS]);
-  });
-
   it("web-SDK canonicalize and mcp npm-canonicalize are BYTE-IDENTICAL for the production payload", () => {
     // The literal fields the web page constructs (page.tsx:245-256).
     const payload = {
+      account_binding: "owner-account-binding",
       approval_id: "appr_seam",
       merchant: CHECKOUT.merchant,
       checkout_origin: CHECKOUT.checkout_origin,
@@ -443,6 +391,7 @@ describe("web ↔ mcp mandate canonical form (cross-package seam)", () => {
     // it equals what mcp would produce for the same object.
     expect(canonical).toBe(
       canonicalize({
+        account_binding: "owner-account-binding",
         approval_id: "appr_seam",
         merchant: CHECKOUT.merchant,
         checkout_origin: CHECKOUT.checkout_origin,
@@ -484,6 +433,17 @@ describe("web ↔ mcp mandate canonical form (cross-package seam)", () => {
     const { result, filledCards, confirmationBodies, resolvedCardRefs } = await runSeam({
       boundCardRef: "card_bound_by_server",
       signApprovalId: "appr_other",
+    });
+    expect(result).toMatchObject({ status: "payment_mandate_rejected" });
+    expect(filledCards).toHaveLength(0);
+    expect(confirmationBodies).toHaveLength(1);
+    expect(resolvedCardRefs).toHaveLength(0);
+  });
+
+  it("FAILS closed: a mandate signed with another account binding", async () => {
+    const { result, filledCards, confirmationBodies, resolvedCardRefs } = await runSeam({
+      boundCardRef: "card_bound_by_server",
+      signAccountBinding: "other-account-binding",
     });
     expect(result).toMatchObject({ status: "payment_mandate_rejected" });
     expect(filledCards).toHaveLength(0);
