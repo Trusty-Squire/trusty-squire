@@ -29,6 +29,12 @@ it("uses a minutes-scale idle policy and disables it for supervised brokers", ()
   expect(brokerIdleTimeoutMs({})).toBe(5 * 60_000);
   expect(brokerIdleTimeoutMs({ TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS: "1000" })).toBe(60_000);
   expect(brokerIdleTimeoutMs({ TRUSTY_SQUIRE_BROKER_SUPERVISED: "true" })).toBeUndefined();
+  expect(
+    brokerIdleTimeoutMs({
+      TRUSTY_SQUIRE_BROKER_SUPERVISED: "true",
+      TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS: "60000",
+    }),
+  ).toBeUndefined();
   expect(brokerIsSupervised({ TRUSTY_SQUIRE_BROKER_SUPERVISED: "1" })).toBe(true);
 });
 
