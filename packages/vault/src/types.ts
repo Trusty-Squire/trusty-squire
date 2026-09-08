@@ -106,15 +106,17 @@ export type VaultRequester = "agent" | "user" | "system";
 
 export interface VaultAuditAttribution {
   /** Stable host-task identifier; callers may group multiple tool calls under it. */
-  task_id: string;
+  task_id: string | null;
   /** Authenticated caller identity, never a caller-overridable display header. */
-  agent_identity: string;
+  agent_identity: string | null;
   /** One MCP/API invocation, approval, or standing egress grant. */
-  invocation_id: string;
+  invocation_id: string | null;
   /** Standing egress grant when the invocation is workload traffic. */
   grant_id?: string;
   /** Human-readable reason this caller touched the credential. */
   purpose: string;
+  /** The producer had no authenticated caller context. */
+  caller_missing?: boolean;
 }
 
 export interface VaultAuditPayload {
@@ -192,20 +194,24 @@ export interface VaultAuditPayload {
 export function attributedVaultAuditPayload(
   payload: VaultAuditPayload,
   type: VaultAuditType,
-  rowId: string,
+  _rowId: string,
 ): VaultAuditPayload {
   const purpose = payload.purpose ?? type.replace(/^vault\./, "");
-  const attribution = payload.attribution ?? {
-    task_id: purpose,
-    agent_identity: payload.requester === "agent" ? "unknown-agent" : payload.requester,
-    invocation_id: payload.approval_id ?? payload.grant_id ?? rowId,
-    ...(payload.grant_id !== undefined ? { grant_id: payload.grant_id } : {}),
-    purpose,
-  };
+  const attribution = payload.attribution ?? unattributedVaultAuditAttribution(purpose);
   return {
     ...payload,
     purpose,
     attribution: { ...attribution, purpose: attribution.purpose ?? purpose },
+  };
+}
+
+export function unattributedVaultAuditAttribution(purpose: string): VaultAuditAttribution {
+  return {
+    task_id: null,
+    agent_identity: null,
+    invocation_id: null,
+    purpose,
+    caller_missing: true,
   };
 }
 

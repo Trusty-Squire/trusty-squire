@@ -10,6 +10,7 @@ import {
   CredentialSlotConflictError,
   VAULT_AUDIT_TYPES,
   attributedVaultAuditPayload,
+  unattributedVaultAuditAttribution,
   type CredentialRecord,
   type CredentialStore,
 } from "@trusty-squire/vault";
@@ -187,6 +188,8 @@ export class PrismaCredentialStore implements CredentialStore {
                 requester: "system",
                 service: survivor.service,
                 label,
+                purpose: "credential.deduplicate",
+                attribution: unattributedVaultAuditAttribution("credential.deduplicate"),
               },
               VAULT_AUDIT_TYPES.collapsed,
               auditId,

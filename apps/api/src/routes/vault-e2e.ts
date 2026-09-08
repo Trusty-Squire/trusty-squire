@@ -6,6 +6,7 @@ import {
   notifyVaultAuditAfterCommit,
   recordVaultAuditAfterPersist,
 } from "../services/vault-notify.js";
+import { requestAuditAttribution } from "../services/vault-audit-attribution.js";
 
 const e2eBody = z.object({
   label: z.string().min(1).max(256),
@@ -81,6 +82,8 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
         payload: {
           reference: `card://${id}`,
           requester: "user",
+          purpose: "card.store",
+          attribution: requestAuditAttribution(req, "vault.card.store", "card.store"),
           label: parsed.data.label,
           ...(parsed.data.brand !== undefined ? { brand: parsed.data.brand } : {}),
           ...(parsed.data.last4 !== undefined ? { last4: parsed.data.last4 } : {}),
@@ -190,6 +193,8 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
         payload: {
           reference: `card://${req.params.id}`,
           requester: "user",
+          purpose: "card.delete",
+          attribution: requestAuditAttribution(req, "vault.card.delete", "card.delete"),
           ...(record !== null ? { label: record.label } : {}),
           ...(record?.brand != null ? { brand: record.brand } : {}),
           ...(record?.last4 != null ? { last4: record.last4 } : {}),
@@ -234,6 +239,8 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
           payload: {
             reference: `pay://${id}`,
             requester: "agent",
+            purpose: "payment.audit",
+            attribution: requestAuditAttribution(req, "vault.payment.audit", "payment.audit"),
             merchant: parsed.data.merchant,
             amount_cents: parsed.data.amountCents,
             currency: parsed.data.currency,

@@ -301,6 +301,8 @@ export const registerVaultAccessRoute: FastifyPluginAsync<{
       const fields = await opts.deps.vault.retrieveForAgentBrowserFill(
         selected.reference,
         auth.account_id,
+        "browser_login_fill",
+        requestAuditAttribution(req, "vault.browser_fill", "browser_login_fill"),
       );
       const missing = data.fields.filter((field) => fields[field] === undefined);
       if (missing.length > 0) {

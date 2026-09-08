@@ -142,15 +142,16 @@ describe("PrismaVaultAuditStore", () => {
       expect(row.payload).toMatchObject({
         purpose: row.type.replace(/^vault\./, ""),
         attribution: {
-          task_id: row.type.replace(/^vault\./, ""),
-          agent_identity: "system",
-          invocation_id: row.id,
+          task_id: null,
+          agent_identity: null,
+          invocation_id: null,
+          caller_missing: true,
         },
       });
     }
   });
 
-  it("surfaces deterministic attribution for rows written before provenance existed", async () => {
+  it("surfaces an explicit missing caller for rows written before provenance existed", async () => {
     const fake = fakePrisma();
     fake.findRows = [
       {
@@ -166,10 +167,11 @@ describe("PrismaVaultAuditStore", () => {
     expect(row?.payload).toMatchObject({
       purpose: "credential_deleted",
       attribution: {
-        task_id: "credential_deleted",
-        agent_identity: "user",
-        invocation_id: "01HLEGACYAAAAAAAAAAAAAAAAAA",
+        task_id: null,
+        agent_identity: null,
+        invocation_id: null,
         purpose: "credential_deleted",
+        caller_missing: true,
       },
     });
   });

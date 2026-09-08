@@ -16,7 +16,7 @@
 // When we shard the API, move this to a separate worker or use
 // pg_cron.
 
-import type { VaultAuditStore } from "@trusty-squire/vault";
+import { unattributedVaultAuditAttribution, type VaultAuditStore } from "@trusty-squire/vault";
 import type { ApiPrismaClient } from "./api-prisma-client.js";
 import { recordCredentialFetchOutcome } from "./credential-fetch-audit.js";
 
@@ -174,12 +174,17 @@ export class RetentionCron {
             credentialService: row.credential_service,
             credentialLabel: row.credential_label,
             requesterKind: row.requester_kind === "web" ? "web" : "agent",
-            auditAttribution: {
-              task_id: row.audit_task_id ?? "fetch_credential",
-              agent_identity: row.audit_agent_identity ?? row.agent,
-              invocation_id: row.audit_invocation_id ?? row.id,
-              purpose: row.audit_purpose ?? "reveal",
-            },
+            auditAttribution:
+              row.audit_task_id !== null &&
+              row.audit_agent_identity !== null &&
+              row.audit_invocation_id !== null
+                ? {
+                    task_id: row.audit_task_id,
+                    agent_identity: row.audit_agent_identity,
+                    invocation_id: row.audit_invocation_id,
+                    purpose: row.audit_purpose ?? "reveal",
+                  }
+                : unattributedVaultAuditAttribution(row.audit_purpose ?? "reveal"),
             auditPurpose: row.audit_purpose ?? "reveal",
           },
           "expired",

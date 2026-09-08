@@ -32,6 +32,7 @@ import type { EmailForwarder } from "../services/email-forwarder.js";
 import { buildEmailForwarder } from "../services/webhook-forwarder.js";
 import { clearSessionCookie } from "../auth/middleware.js";
 import { credentialLabelSchema } from "../services/credential-metadata.js";
+import { requestAuditAttribution } from "../services/vault-audit-attribution.js";
 
 const AUDIT_TYPE_VALUES = Object.values(VAULT_AUDIT_TYPES) as [VaultAuditType, ...VaultAuditType[]];
 
@@ -256,7 +257,11 @@ export const registerVaultRoute: FastifyPluginAsync<{
         return;
       }
       try {
-        const fields = await opts.deps.vault.reveal(target.reference, auth.account_id);
+        const fields = await opts.deps.vault.reveal(
+          target.reference,
+          auth.account_id,
+          requestAuditAttribution(req, "vault.credential.reveal", "credential.reveal"),
+        );
         return reply
           .code(200)
           .send({ id: target.id, fields, revealed_at: new Date().toISOString() });
@@ -318,6 +323,7 @@ export const registerVaultRoute: FastifyPluginAsync<{
           target.reference,
           auth.account_id,
           fieldsFrom(parsed.data),
+          requestAuditAttribution(req, "vault.credential.rotate", "credential.rotate"),
         );
         return reply.code(200).send(result);
       } catch (err) {
@@ -345,7 +351,12 @@ export const registerVaultRoute: FastifyPluginAsync<{
         reply.code(404).send({ error: "credential_not_found" });
         return;
       }
-      await opts.deps.vault.delete(target.reference, auth.account_id);
+      await opts.deps.vault.delete(
+        target.reference,
+        auth.account_id,
+        "user",
+        requestAuditAttribution(req, "vault.credential.delete", "credential.delete"),
+      );
       return reply.code(204).send();
     },
   );
@@ -464,7 +475,11 @@ export const registerVaultRoute: FastifyPluginAsync<{
         return;
       }
       try {
-        await opts.deps.vault.restore(target.reference, auth.account_id);
+        await opts.deps.vault.restore(
+          target.reference,
+          auth.account_id,
+          requestAuditAttribution(req, "vault.credential.restore", "credential.restore"),
+        );
         return reply.code(200).send({ id: target.id, restored: true });
       } catch (err) {
         if (err instanceof RestoreConflictError) {
@@ -509,6 +524,7 @@ export const registerVaultRoute: FastifyPluginAsync<{
           auth.account_id,
           parsed.data.name,
           parsed.data.value,
+          requestAuditAttribution(req, "vault.credential.add_field", "credential.add_field"),
         );
         return reply.code(200).send(result);
       } catch (err) {
@@ -573,6 +589,7 @@ async function storeUpsert(
       ...(data.signin_url !== undefined ? { signin_url: data.signin_url } : {}),
       ...(loginHosts !== undefined ? { login_hosts: loginHosts } : {}),
     },
+    audit_attribution: requestAuditAttribution(req, "vault.credential.store", "credential.store"),
   });
   // Send the legacy email when a key lands unattended. Only on a fresh
   // create (not a rotation), and never fatal to the store. Telegram
