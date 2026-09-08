@@ -193,6 +193,50 @@ describe("broker authority", () => {
     await running;
   });
 
+  it("bounds a hung expiry close without releasing its physical session slot", async () => {
+    const broker = new BrokerAuthority("account", "cell", 2, 5);
+    const owner = principal("stuck");
+    const entered = deferred<void>();
+    const neverFinishes = new Promise<boolean>(() => undefined);
+    let closeAttempts = 0;
+    const capability = await broker.open(owner, ["site:a"], async () => ({
+      ...port("stuck"),
+      invoke: async () => {
+        entered.resolve();
+        await new Promise<void>(() => undefined);
+      },
+      close: async () => {
+        closeAttempts += 1;
+        return await neverFinishes;
+      },
+    }));
+    void broker.invoke(owner, capability, "stuck", "operate_pay", {});
+    await entered.promise;
+
+    const now = Date.now();
+    broker.detach(owner, now, 0);
+    await Promise.race([
+      broker.expireDetached(now),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("hung expiry close blocked reaping")), 100),
+      ),
+    ]);
+
+    expect(closeAttempts).toBe(1);
+    expect(broker.inventory()).toEqual({ active: 0, quarantined: 1, admitting: 0 });
+    const replacementOwner = principal("replacement");
+    const replacement = await broker.open(replacementOwner, ["site:b"], async () =>
+      port("replacement"),
+    );
+    await expect(
+      broker.open(principal("overflow"), ["site:c"], async () => port("overflow")),
+    ).rejects.toThrow("capacity");
+
+    broker.detach(replacementOwner, now + 1, 0);
+    await broker.expireDetached(now + 1);
+    expect(broker.inventory()).toEqual({ active: 0, quarantined: 1, admitting: 0 });
+  });
+
   it("requires possession of a stable lineage credential to reclaim", async () => {
     const broker = new BrokerAuthority("account", "cell");
     const credential = "a".repeat(43);

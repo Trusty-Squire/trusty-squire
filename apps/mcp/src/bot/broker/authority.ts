@@ -427,29 +427,53 @@ export class BrokerAuthority {
     return actor.closePromise;
   }
 
-  private async quarantineExpiredActor(actor: Actor): Promise<void> {
+  private async completeWithinDetachedExpiryTimeout<T>(
+    work: () => Promise<T>,
+  ): Promise<{ completed: true; value: T } | { completed: false }> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
+      return await Promise.race([
+        Promise.resolve()
+          .then(work)
+          .then(
+            (value) => ({ completed: true as const, value }),
+            () => ({ completed: false as const }),
+          ),
+        new Promise<{ completed: false }>((resolve) => {
+          timeout = setTimeout(
+            () => resolve({ completed: false }),
+            this.detachedExpiryCloseTimeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
+  }
+
+  private markExpiryQuarantined(actor: Actor): void {
+    actor.state = "quarantined";
+    actor.expiryQuarantined = true;
+    delete actor.reconnectDeadline;
+  }
+
+  private async quarantineExpiredActor(actor: Actor): Promise<void> {
+    const handled = await this.completeWithinDetachedExpiryTimeout(async () => {
       await this.detachedExpiryHandler?.(actor.capability, actor.principal);
-    } catch {
-      actor.state = "quarantined";
-      actor.expiryQuarantined = true;
-      delete actor.reconnectDeadline;
+    });
+    if (!handled.completed) {
+      this.markExpiryQuarantined(actor);
       return;
     }
-    if (await actor.port.close("expiry").catch(() => false)) {
+    const closed = await this.completeWithinDetachedExpiryTimeout(
+      async () => await actor.port.close("expiry"),
+    );
+    if (closed.completed && closed.value) {
       this.actors.delete(actor.capability.sessionId);
       this.scheduler.release(actor.capability.sessionId);
       return;
     }
-    actor.state = "quarantined";
-    actor.expiryQuarantined = true;
-    delete actor.reconnectDeadline;
-    const closeWhenDrained = () => {
-      if (!actor.expiryQuarantined || actor.state !== "quarantined") return;
-      actor.expiryQuarantined = false;
-      void this.closeActor(actor, actor.closeReason ?? "disconnect");
-    };
-    void actor.tail.then(closeWhenDrained, closeWhenDrained);
+    this.markExpiryQuarantined(actor);
   }
 
   async disconnect(principal: BrokerPrincipal): Promise<void> {
