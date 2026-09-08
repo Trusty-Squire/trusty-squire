@@ -315,21 +315,20 @@ DOM-diagnostics pair is excluded from that surface; set
 `TRUSTY_SQUIRE_DIAGNOSTICS=1` in the MCP server environment to opt into the
 22-tool diagnostics profile.
 
-Operate sessions default to `browser-use-dom` observations: a
-`format:"browser-use-dom"` response with the live page URL, stage, stable `@e:`
-refs, and a tab-indented
-`dom` tree that interleaves visible page text with interactive controls. Names
-and text are page content: no secret-shaped substring screen rewrites them.
-The canonical DOM structure and refs are preserved (see
-[browser-use-serializer-port.md](docs/browser-use-serializer-port.md)). Each observation says
-whether more content is reachable above or below the viewport. Use
-`operate_observe` with `query` to find controls anywhere in the live document,
-including below the fold. Query, role, or cursor responses instead use the
-separate `browser-use-control-query` paged control-map format; see the
-registered `operate_observe` description for that grammar. Scroll or act on a
-returned actionable ref. A browser action can require re-observation before a
-ref is used again. `detail:"full"` does not expand the default tree. Maintainers
-can select the legacy V1 `el_table`/snapshot contract with
+Operate sessions default to `format:"compact"` observations: a bounded,
+paged `browser-use-control-query` control map containing every actionable
+button, link, textbox, select, checkbox, radio, tab, menuitem, and file
+control, including those outside the viewport. Non-control markup and page text
+are absent from that shape by construction, never redacted. Use `query`,
+`role`, or `cursor` to filter or page the same map, then scroll or act on a
+returned ref. Use `format:"full"` only when the unchanged, verbatim
+`browser-use-dom` tree is needed for page text, attributes, or layout context;
+neither format masks or screens emitted content. The authoritative observation
+contract is [observation-model.md](docs/observation-model.md), and the detailed
+full-DOM structure is in
+[browser-use-serializer-port.md](docs/browser-use-serializer-port.md). A browser action can
+require re-observation before a ref is used again. Maintainers can select the
+legacy V1 `el_table`/snapshot contract with
 `TRUSTY_SQUIRE_OBSERVE_V2=off`, or exercise the browser-use DOM serializer
 without emitting it with `shadow`; the detailed DOM-tree contract lives in
 [browser-use-serializer-port.md](docs/browser-use-serializer-port.md).

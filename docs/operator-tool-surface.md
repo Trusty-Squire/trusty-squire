@@ -11,10 +11,13 @@ lists, not to other MCP surfaces. The two recipe tools and nine other vault/acco
 tools remain separately exposed, as explicitly reconfirmed during implementation:
 29 default tools total, or 31 with maintainer diagnostics enabled.
 
-Actions use `ref` from the current observation. `operate_observe` is the single
-general reader; `query`, `role`, and `cursor` retain the existing query/paging
-semantics. `operate_extract(store=...)` still vaults credentials and strips their
-values from its response. Extraction without `store` retains its existing behavior.
+Actions use `ref` from the current observation. `operate_start` and
+`operate_observe` default to `format:"compact"`, the paged control map;
+`format:"full"` is the explicit verbatim-DOM escape hatch. `query`, `role`, and
+`cursor` retain the compact map's query/paging semantics. The authoritative
+observation contract is [observation-model.md](observation-model.md).
+`operate_extract(store=...)` still vaults credentials and strips their values
+from its response. Extraction without `store` retains its existing behavior.
 
 `operate_fill_credential` is only a rename and description change. It retains the
 existing `reference`/`service`, `fields`, and `slot_prefix` schema and encrypted,
@@ -40,9 +43,9 @@ unchanged. Refusals retain the blocked host and a remedy.
 
 | Old kind/tool | New tool or explicit removal |
 | --- | --- |
-| `operate_start` | Unchanged |
+| `operate_start` | `operate_start(service_url, format?)`, where `format` is `compact` (default) or `full` |
 | `operate_finish`, `operate_finish_task` | `operate_finish(session_id, outcome?, store?, summary?, data?, verify_recipe?)`; outcome is `none`, `credentials`, or `result`, replacing the nested kind union; terminal preparation and teardown are unchanged |
-| `operate_observe` | `operate_observe(session_id, query?, role?, cursor?, detail?)` |
+| `operate_observe` | `operate_observe(session_id, query?, role?, cursor?, format?)`, where `format` is `compact` (default) or `full` |
 | `operate_screenshot` | Same capture handler/schema and cost warning; reader name in guidance updated |
 | `operate_act` | Removed public union; use the verbs below |
 | `goto`, `navigate` | `operate_navigate(session_id, url)` (`navigate` was already absent in this checkout) |

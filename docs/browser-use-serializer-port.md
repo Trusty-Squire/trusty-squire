@@ -1,15 +1,16 @@
 # Canonical DOM serialization
 
-Compact-v2 observations use the TypeScript port of browser-use 0.13.10 in
+`format:"full"` compact-v2 observations use the TypeScript port of browser-use 0.13.10 in
 `apps/mcp/src/bot/browser-use-serializer.ts`. `browser-use-capture.ts` adapts
 Chrome's DOM, layout snapshot and accessibility trees to its input. Python is
 used only by the committed fixture generator, never by the MCP runtime.
 
-The former flat observation table and separate `text` / `text_unavailable`
-channel are replaced by `dom`: tab-indented nodes with interleaved visible text.
-There is no observation byte-count acceptance target and no tail truncation to
-meet one. The exact output contract is the mechanically generated corpus in
-`fixtures/browser-use/`; see its README for regeneration and drift checks.
+The full-DOM response uses `dom`: tab-indented nodes with interleaved visible
+text. It has no byte-count acceptance target or tail truncation. The default
+`format:"compact"` response is instead the bounded paged control map specified
+in [`observation-model.md`](observation-model.md). The exact full-DOM output
+contract is the mechanically generated corpus in `fixtures/browser-use/`; see
+its README for regeneration and drift checks.
 
 ## Identity, deltas and query
 
