@@ -56,6 +56,7 @@ export class BrokerAuthority {
     string,
     { principal: BrokerPrincipal; abort: AbortController }
   >();
+  private readonly forwarderConnections = new Map<string, string>();
   private readonly fencedClients = new Set<string>();
   private readonly scheduler = new ScopeScheduler();
   private readonly lanes = new ScopeScheduler();
@@ -67,9 +68,31 @@ export class BrokerAuthority {
   ) {}
 
   private assertPrincipal(principal: BrokerPrincipal): void {
-    if (principal.accountId !== this.accountId || this.fencedClients.has(principal.clientId)) {
+    if (
+      principal.accountId !== this.accountId ||
+      this.fencedClients.has(principal.clientId) ||
+      (principal.forwarderId !== undefined &&
+        this.forwarderConnections.get(principal.forwarderId) !== principal.clientId)
+    ) {
       throw new BrokerRefusal("unauthorized", "Client is not admitted to this identity cell");
     }
+  }
+
+  claimForwarder(principal: BrokerPrincipal): void {
+    if (principal.accountId !== this.accountId)
+      throw new BrokerRefusal("unauthorized", "Client is not admitted to this identity cell");
+    const forwarderId = principal.forwarderId;
+    if (forwarderId === undefined)
+      throw new BrokerRefusal("unauthorized", "Client has no forwarder lineage");
+    const holder = this.forwarderConnections.get(forwarderId);
+    if (holder !== undefined && holder !== principal.clientId)
+      throw new BrokerRefusal("forwarder_in_use", "Forwarder identity is already active");
+    this.forwarderConnections.set(forwarderId, principal.clientId);
+  }
+
+  releaseForwarder(principal: BrokerPrincipal): void {
+    if (this.forwarderConnections.get(principal.forwarderId) === principal.clientId)
+      this.forwarderConnections.delete(principal.forwarderId!);
   }
 
   async open(

@@ -57,7 +57,7 @@ export interface BrokerTransportPort {
     agentId?: string,
     lineageCredential?: string,
   ): Promise<Omit<BrokerPrincipal, "clientId"> | null>;
-  connected?(principal: BrokerPrincipal): void;
+  connected?(principal: BrokerPrincipal): Promise<void> | void;
   call(
     principal: BrokerPrincipal,
     method: string,
@@ -114,12 +114,13 @@ export async function listenBroker(
           throw new BrokerRefusal("unauthorized", "Invalid agent identity");
         const identity = await port.authenticate(request.params.token, agentId, lineageCredential);
         if (identity === null) throw new BrokerRefusal("unauthorized", "Invalid broker credential");
-        principal = { ...identity, clientId: randomUUID() };
-        port.connected?.(principal);
+        const candidate = { ...identity, clientId: randomUUID() };
+        await port.connected?.(candidate);
         if (closed) {
-          disconnect(principal);
+          await port.disconnect(candidate);
           throw new BrokerRefusal("cancelled", "Client disconnected");
         }
+        principal = candidate;
         return { version: 1, clientId: principal.clientId };
       }
       if (request.method === "hello")

@@ -84,6 +84,7 @@ export async function runBrokerDaemon(): Promise<void> {
     authenticate: async (token, agentId, lineageCredential) =>
       await operator.authenticate(token, agentId, lineageCredential),
     connected: (principal) => {
+      operator.connected(principal);
       connected.add(principal.clientId);
       if (idleTimer !== undefined) clearTimeout(idleTimer);
     },

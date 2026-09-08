@@ -128,6 +128,9 @@ export class OperatorBroker implements BrokerTransportPort {
       forwarderId: forwarderId(lineageCredential),
     };
   }
+  connected(principal: BrokerPrincipal): void {
+    this.authority.claimForwarder(principal);
+  }
   async call(
     principal: BrokerPrincipal,
     method: string,
@@ -374,6 +377,7 @@ export class OperatorBroker implements BrokerTransportPort {
     if (await this.journal?.hasOutstanding(undefined, principal.forwarderId))
       this.authority.detach(principal);
     else await this.authority.disconnect(principal);
+    this.authority.releaseForwarder(principal);
     this.apis.delete(principal.clientId);
   }
 }

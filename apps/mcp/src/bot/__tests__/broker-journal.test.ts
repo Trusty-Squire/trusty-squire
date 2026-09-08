@@ -158,6 +158,7 @@ describe("broker dispatch custody", () => {
       clientId: "reclaimed",
     };
     try {
+      broker.authority.claimForwarder(principal);
       const capability = await broker.authority.open(principal, ["site:a"], async () => ({
         targetId: "target",
         invoke: async () => undefined,

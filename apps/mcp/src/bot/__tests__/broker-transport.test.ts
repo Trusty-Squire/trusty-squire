@@ -6,9 +6,68 @@ import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 import { BrokerClient, listenBroker } from "../broker/transport.js";
+import { BrokerAuthority } from "../broker/authority.js";
 const require = createRequire(import.meta.url);
 
 describe("authenticated broker IPC", () => {
+  it("claims a lineage at hello and hands it off only after disconnect completes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-ipc-lineage-"));
+    const path = join(root, "b.sock");
+    const authority = new BrokerAuthority("account", "cell");
+    let releaseDisconnect!: () => void;
+    let disconnected!: () => void;
+    let finishedDisconnect!: () => void;
+    const disconnectGate = new Promise<void>((resolve) => {
+      releaseDisconnect = resolve;
+    });
+    const disconnectStarted = new Promise<void>((resolve) => {
+      disconnected = resolve;
+    });
+    const disconnectFinished = new Promise<void>((resolve) => {
+      finishedDisconnect = resolve;
+    });
+    const broker = await listenBroker(path, {
+      authenticate: async () => ({
+        accountId: "account",
+        agentId: "local-agent",
+        forwarderId: "lineage",
+      }),
+      connected: (principal) => authority.claimForwarder(principal),
+      call: async () => ({}),
+      disconnect: async (principal) => {
+        disconnected();
+        await disconnectGate;
+        authority.releaseForwarder(principal);
+        finishedDisconnect();
+      },
+    });
+    let first: BrokerClient | undefined;
+    let restarted: BrokerClient | undefined;
+    try {
+      const contenders = await Promise.allSettled([
+        BrokerClient.connect(path, "test"),
+        BrokerClient.connect(path, "test"),
+      ]);
+      expect(contenders.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(contenders.filter((result) => result.status === "rejected")).toHaveLength(1);
+      first = contenders.find(
+        (result): result is PromiseFulfilledResult<BrokerClient> => result.status === "fulfilled",
+      )?.value;
+      await first?.close();
+      await disconnectStarted;
+      await expect(BrokerClient.connect(path, "test")).rejects.toThrow("already active");
+      releaseDisconnect();
+      await disconnectFinished;
+      restarted = await BrokerClient.connect(path, "test");
+    } finally {
+      releaseDisconnect();
+      await first?.close();
+      await restarted?.close();
+      await broker.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("serves three separate OS processes with overlapping calls and closes only disconnected clients", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-ipc-"));
     const path = join(root, "b.sock");
