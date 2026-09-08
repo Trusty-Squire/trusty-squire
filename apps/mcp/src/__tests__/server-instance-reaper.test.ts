@@ -64,18 +64,22 @@ const decide = (
 ) => serverInstanceReapDecision(entry, self, liveness, parentPid, NOW, BOUNDS);
 
 describe("serverInstanceReapDecision", () => {
-  it("derives ordinary-launch lineage from profile, account, and agent identity", () => {
+  it("fails closed for process signalling without an explicit launcher lineage", () => {
     const options = {
       profileDir: "/tmp/trusty-squire-profile",
       accountId: "account-a",
       identity: "claude-code",
       env: {},
     };
-    const lineage = serverLauncherLineage(options);
-    expect(lineage).not.toBe("");
-    expect(serverLauncherLineage(options)).toBe(lineage);
-    expect(serverLauncherLineage({ ...options, accountId: "account-b" })).not.toBe(lineage);
-    expect(serverLauncherLineage({ ...options, identity: "codex" })).not.toBe(lineage);
+    expect(serverLauncherLineage(options)).toBe("");
+    const explicit = serverLauncherLineage({
+      ...options,
+      env: { TRUSTY_SQUIRE_SERVER_LINEAGE: "lane-secret" },
+    });
+    expect(explicit).not.toBe("");
+    expect(
+      serverLauncherLineage({ ...options, env: { TRUSTY_SQUIRE_SERVER_LINEAGE: "other-lane" } }),
+    ).not.toBe(explicit);
   });
 
   it("never touches a different agent identity, however orphaned and stale", () => {
@@ -116,7 +120,7 @@ describe("serverInstanceReapDecision", () => {
       profileDir: "/tmp/trusty-squire-profile",
       accountId: "account-a",
       identity: "claude-code",
-      env: {},
+      env: { TRUSTY_SQUIRE_SERVER_LINEAGE: "lane-a" },
     });
     const self = { ...SELF, launcher_lineage: lineage };
     const draining = record({

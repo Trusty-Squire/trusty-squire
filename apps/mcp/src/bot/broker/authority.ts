@@ -476,6 +476,18 @@ export class BrokerAuthority {
     this.markExpiryQuarantined(actor);
   }
 
+  private async closeSettledExpiredActor(actor: Actor): Promise<void> {
+    const closed = await this.completeWithinDetachedExpiryTimeout(
+      async () => await actor.port.close("expiry"),
+    );
+    if (closed.completed && closed.value) {
+      this.actors.delete(actor.capability.sessionId);
+      this.scheduler.release(actor.capability.sessionId);
+      return;
+    }
+    this.markExpiryQuarantined(actor);
+  }
+
   async disconnect(principal: BrokerPrincipal): Promise<void> {
     this.assertPrincipal(principal);
     this.fencedClients.add(principal.clientId);
@@ -537,7 +549,7 @@ export class BrokerAuthority {
         } finally {
           if (timeout !== undefined) clearTimeout(timeout);
         }
-        await this.closeActor(actor, "disconnect");
+        await this.closeSettledExpiredActor(actor);
       }),
     );
   }

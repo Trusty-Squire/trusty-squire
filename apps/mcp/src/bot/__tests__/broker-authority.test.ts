@@ -237,6 +237,35 @@ describe("broker authority", () => {
     expect(broker.inventory()).toEqual({ active: 0, quarantined: 1, admitting: 0 });
   });
 
+  it("bounds a hung settled detached close without releasing its physical session slot", async () => {
+    const broker = new BrokerAuthority("account", "cell", 1, 5);
+    const owner = principal("settled");
+    let closeAttempts = 0;
+    await broker.open(owner, ["site:a"], async () => ({
+      ...port("settled"),
+      close: async () => {
+        closeAttempts += 1;
+        return await new Promise<boolean>(() => undefined);
+      },
+    }));
+
+    const now = Date.now();
+    broker.detach(owner, now, 0);
+    await Promise.race([
+      broker.expireDetached(now),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("settled hung close blocked reaping")), 100),
+      ),
+    ]);
+
+    expect(closeAttempts).toBe(1);
+    expect(broker.inventory()).toEqual({ active: 0, quarantined: 1, admitting: 0 });
+    await expect(
+      broker.open(principal("replacement"), ["site:b"], async () => port("replacement")),
+    ).rejects.toThrow("capacity");
+    await expect(broker.expireDetached(now + 1)).resolves.toBeUndefined();
+  });
+
   it("requires possession of a stable lineage credential to reclaim", async () => {
     const broker = new BrokerAuthority("account", "cell");
     const credential = "a".repeat(43);

@@ -517,7 +517,6 @@ export class OperatorBroker implements BrokerTransportPort {
     );
   }
   async disconnect(principal: BrokerPrincipal, explicit = false): Promise<void> {
-    if (principal.forwarderId !== undefined) this.inputBindingKeys.delete(principal.forwarderId);
     this.authority.beginForwarderRelease(principal);
     const forwarder = principal.forwarderId;
     if (!explicit) this.authority.detach(principal);

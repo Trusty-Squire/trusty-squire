@@ -110,20 +110,11 @@ it("keeps the real daemon endpoint recoverable when drain retains quarantined cu
     api_base_url: "http://127.0.0.1:1",
     saved_at: new Date().toISOString(),
   };
-  const paymentArgs = {
-    session_id: "00000000-0000-4000-8000-000000000001",
-    item: "fixture purchase",
-    reason: "drain recovery",
-  };
+  const actorPath = join(root, "actor-id");
   const journal = new DispatchJournal(join(profile, "trusty-squire-broker-dispatch.jsonl"));
   await mkdir(profile);
   await mkdir(join(root, "home"));
   await new SessionStore(join(config, "trusty-squire", "session.json")).write(account);
-  await journal.record(paymentArgs.session_id, "stuck-payment", "outcome", {
-    forwarderId: forwarderId(credential),
-    operation: "operate_pay",
-    outcome: { status: "payment_outcome_unknown" },
-  });
   const child = spawn(
     process.execPath,
     [
@@ -141,6 +132,7 @@ it("keeps the real daemon endpoint recoverable when drain retains quarantined cu
         TRUSTY_SQUIRE_REAPER_DIR: join(root, "reapers"),
         TRUSTY_SQUIRE_BROKER_SOCKET: socket,
         TRUSTY_SQUIRE_BROKER_SUPERVISED: "1",
+        TRUSTY_SQUIRE_BROKER_TEST_ACTOR_PATH: actorPath,
         BOT_CDP_ENDPOINT: "",
       },
       stdio: ["ignore", "ignore", "pipe"],
@@ -154,6 +146,7 @@ it("keeps the real daemon endpoint recoverable when drain retains quarantined cu
     child.once("error", reject);
     child.once("exit", () => resolve());
   });
+  let initial: BrokerClient | undefined;
   let client: BrokerClient | undefined;
   try {
     for (let attempt = 0; attempt < 200; attempt++) {
@@ -167,6 +160,23 @@ it("keeps the real daemon endpoint recoverable when drain retains quarantined cu
       if (child.exitCode !== null) throw new Error(diagnostic);
       await sleep(25);
     }
+    initial = await BrokerClient.connect(socket, account.agent_session_token, credential);
+    let sessionId = "";
+    for (let attempt = 0; attempt < 200; attempt++) {
+      sessionId = await readFile(actorPath, "utf8").catch(() => "");
+      if (sessionId.length > 0) break;
+      if (child.exitCode !== null) throw new Error(diagnostic);
+      await sleep(25);
+    }
+    if (sessionId.length === 0) throw new Error("fixture actor was not created");
+    const paymentArgs = { session_id: sessionId, item: "fixture purchase", reason: "drain recovery" };
+    await journal.record(sessionId, "stuck-payment", "outcome", {
+      forwarderId: forwarderId(credential),
+      operation: "operate_pay",
+      outcome: { status: "payment_outcome_unknown" },
+    });
+    await initial.close();
+    initial = undefined;
     child.kill("SIGTERM");
     for (let attempt = 0; attempt < 200; attempt++) {
       if (diagnostic.includes("cleanup unproven")) break;
@@ -189,6 +199,7 @@ it("keeps the real daemon endpoint recoverable when drain retains quarantined cu
       client.call("tool", { name: "operate_start", args: { service_url: "https://example.test" } }),
     ).rejects.toMatchObject({ code: "broker_draining" });
   } finally {
+    await initial?.close();
     await client?.close();
     if (child.exitCode === null) child.kill("SIGKILL");
     await exited;

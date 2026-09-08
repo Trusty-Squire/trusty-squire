@@ -30,10 +30,8 @@ import { join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { sweepOrphanedOwnerProcesses } from "./bot/owner-process-reaper.js";
 import {
-  CHROME_PROFILE_DIR,
   processBirthIdentity,
   processBirthIdentityState,
-  profilePathIdentity,
   type ProcessIdentityState,
 } from "./bot/profile.js";
 import { VERSION } from "./version.js";
@@ -150,18 +148,7 @@ export function serverLauncherLineage(
     ""
   ).trim();
   if (value.length > 0) return createHash("sha256").update(value).digest("hex");
-  const identity = (options.identity ?? agentIdentity()).trim();
-  const accountId = (options.accountId ?? env.TRUSTY_SQUIRE_ACCOUNT_ID ?? "").trim();
-  if (identity.length === 0 || accountId.length === 0) return "";
-  return createHash("sha256")
-    .update(
-      JSON.stringify([
-        profilePathIdentity(options.profileDir ?? CHROME_PROFILE_DIR),
-        accountId,
-        identity,
-      ]),
-    )
-    .digest("hex");
+  return "";
 }
 
 function ensurePrivateDir(path: string): void {

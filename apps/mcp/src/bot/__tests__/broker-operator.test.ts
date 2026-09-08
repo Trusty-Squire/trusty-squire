@@ -48,6 +48,35 @@ afterEach(() => {
   state.sessions.clear();
 });
 
+it("retains a replacement lineage binding through the old socket handoff", async () => {
+  const broker = new OperatorBroker(
+    {
+      accountId: "account",
+      agentSessionToken: "token",
+      apiBaseUrl: "http://unused.test",
+      registryBaseUrl: "http://unused.test",
+    },
+    "cell",
+  );
+  const identity = await broker.authenticate("token", "agent", "a".repeat(43));
+  if (identity === null) throw new Error("Test broker authentication failed");
+  const first = { ...identity, clientId: "first" };
+  await broker.connected(first);
+  const replacementIdentity = await broker.authenticate("token", "agent", "a".repeat(43));
+  if (replacementIdentity === null) throw new Error("Test replacement authentication failed");
+  const replacement = { ...replacementIdentity, clientId: "replacement" };
+  const handoff = Promise.resolve(broker.connected(replacement));
+  await broker.disconnect(first);
+  await handoff;
+
+  await expect(
+    broker.recover(replacement, {
+      name: "operate_start",
+      args: { service_url: "https://example.test" },
+    }),
+  ).resolves.toBeNull();
+});
+
 it("deregisters the lifecycle session when target discovery fails after start", async () => {
   const events: string[] = [];
   state.finish.mockImplementation(async (sessionId: string) => {
