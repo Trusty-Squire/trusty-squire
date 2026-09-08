@@ -17,16 +17,22 @@ mechanical increment while that human-gated qualification remains pending.
 
 Build with `pnpm --filter @trusty-squire/mcp build`. Set the same
 `TRUSTY_SQUIRE_BROKER_SOCKET`, `TRUSTY_SQUIRE_PROFILE_DIR`, and pinned
-`TRUSTY_SQUIRE_ACCOUNT_ID` in each participating MCP process. The socket parent
-must already exist, belong to the current user, and have mode 0700. The account
-must already be enrolled through `connect`; authentication reads its existing
-agent session token from session storage, never command-line token arguments.
+`TRUSTY_SQUIRE_ACCOUNT_ID` in each participating MCP process. Each MCP client
+lineage must also receive its own stable, random base64url
+`TRUSTY_SQUIRE_FORWARDER_CREDENTIAL` (at least 32 random bytes), retained only
+for that client's restart recovery and never shared with sibling clients. The
+socket parent must already exist, belong to the current user, and have mode 0700.
+The account must already be enrolled through `connect`; authentication reads its
+existing agent session token from session storage, never command-line token
+arguments.
 
 The first client starts `node apps/mcp/dist/bin.js broker` if necessary. It can
 also run as a foreground service. Socket mode is 0600. No CDP endpoint or browser
 handle crosses IPC. `TRUSTY_SQUIRE_AGENT_IDENTITY` supplies a connection's agent
-label; authentication and capability ownership are enforced independently of
-that label. The broker admits at most three concurrent sessions.
+label. The lineage credential proves reconnect ownership independently of that
+label; a caller with only a session ID, agent label, or credential hash cannot
+reclaim another client's capability. The broker admits at most three concurrent
+sessions.
 
 `connect` requests maintenance over the existing socket, prevents new admissions,
 and waits for existing sessions and payment outcomes to drain. It closes Chrome

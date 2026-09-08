@@ -81,8 +81,8 @@ export async function runBrokerDaemon(): Promise<void> {
     maintenanceReady = false;
   };
   const listener = await listenBroker(path, {
-    authenticate: async (token, agentId, forwarderId) =>
-      await operator.authenticate(token, agentId, forwarderId),
+    authenticate: async (token, agentId, lineageCredential) =>
+      await operator.authenticate(token, agentId, lineageCredential),
     connected: (principal) => {
       connected.add(principal.clientId);
       if (idleTimer !== undefined) clearTimeout(idleTimer);
@@ -103,7 +103,11 @@ export async function runBrokerDaemon(): Promise<void> {
       }
       if (
         (await journal.hasOutstanding(undefined, principal.forwarderId)) &&
-        !(method === "tool" && (await operator.canReconcile(principal, id, params)))
+        !(
+          method === "tool" &&
+          ((await operator.canReconcile(principal, id, params)) ||
+            (await operator.canContinuePaymentStatus(principal, params)))
+        )
       )
         throw new BrokerRefusal(
           "outcome_unknown",

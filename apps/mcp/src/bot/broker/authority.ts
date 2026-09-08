@@ -189,6 +189,22 @@ export class BrokerAuthority {
     });
   }
 
+  hasCapability(principal: BrokerPrincipal, capability: TabCapability): boolean {
+    this.assertPrincipal(principal);
+    const actor = this.actors.get(capability.sessionId);
+    return (
+      actor !== undefined &&
+      actor.state === "active" &&
+      actor.principal.clientId === principal.clientId &&
+      actor.principal.forwarderId === principal.forwarderId &&
+      actor.principal.agentId === principal.agentId &&
+      capability.cellId === this.cellId &&
+      capability.browserEpoch === this.epoch &&
+      capability.leaseGeneration === actor.capability.leaseGeneration &&
+      capability.targetId === actor.capability.targetId
+    );
+  }
+
   invoke(
     principal: BrokerPrincipal,
     capability: TabCapability,

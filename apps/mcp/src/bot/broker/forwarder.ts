@@ -1,10 +1,10 @@
 import { connectOrLaunchBroker } from "./discovery.js";
 import { createHash, randomUUID } from "node:crypto";
-import { fstatSync, readFileSync, writeFileSync } from "node:fs";
 import type { SessionGuard } from "../../session-guard.js";
 import type { BrokerClient } from "./transport.js";
 import type { TabCapability } from "./authority.js";
 import { BrokerRefusal } from "./scheduler.js";
+import { forwarderId, requireLineageCredential } from "./lineage.js";
 
 /** The MCP process holds only opaque capabilities. Never reconnect/replay a
  * dispatched request after transport loss: its side effect may have happened. */
@@ -13,43 +13,18 @@ export class OperatorForwarder {
   private client: BrokerClient | undefined;
   private connecting = false;
   private readonly sessions = new Map<string, TabCapability>();
+  private readonly lineageCredential: string;
   private readonly idempotencyNamespace: string;
   constructor(
     private readonly path: string,
     private readonly guard: SessionGuard,
-    identity?: string,
+    credential?: string,
   ) {
-    this.idempotencyNamespace = identity ?? this.loadIdentity();
+    this.lineageCredential = credential ?? this.loadCredential();
+    this.idempotencyNamespace = forwarderId(this.lineageCredential);
   }
-  private loadIdentity(): string {
-    if (process.env.TRUSTY_SQUIRE_FORWARDER_IDENTITY !== undefined)
-      return process.env.TRUSTY_SQUIRE_FORWARDER_IDENTITY;
-    let stdin: { dev: number; ino: number };
-    try {
-      stdin = fstatSync(0);
-    } catch {
-      throw new BrokerRefusal(
-        "forwarder_identity_required",
-        "Set a stable forwarder identity when stdin lineage cannot be established",
-      );
-    }
-    const scope = createHash("sha256")
-      .update(
-        `${process.ppid}:${stdin.dev}:${stdin.ino}:${process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "local-agent"}`,
-      )
-      .digest("hex");
-    const statePath = `${this.path}.forwarder-${scope}.id`;
-    try {
-      const identity = readFileSync(statePath, "utf8").trim();
-      if (/^[0-9a-f-]{36}$/i.test(identity)) return identity;
-    } catch {}
-    const identity = randomUUID();
-    try {
-      writeFileSync(statePath, `${identity}\n`, { mode: 0o600, flag: "wx" });
-      return identity;
-    } catch {
-      return readFileSync(statePath, "utf8").trim();
-    }
+  private loadCredential(): string {
+    return requireLineageCredential();
   }
   private connect(): Promise<BrokerClient> {
     if (this.connection === undefined) {
@@ -61,7 +36,7 @@ export class OperatorForwarder {
         const client = await connectOrLaunchBroker(
           this.path,
           session.agent_session_token,
-          this.idempotencyNamespace,
+          this.lineageCredential,
         );
         this.client = client;
         return client;
@@ -132,7 +107,7 @@ export class OperatorForwarder {
     )) as { result: unknown; capability?: TabCapability };
     if (reply.capability !== undefined)
       this.sessions.set(reply.capability.sessionId, reply.capability);
-    client.acknowledge(idempotencyKey);
+    await client.acknowledge(idempotencyKey);
     if (name === "operate_finish" && id !== undefined) this.sessions.delete(id);
     return reply.result;
   }

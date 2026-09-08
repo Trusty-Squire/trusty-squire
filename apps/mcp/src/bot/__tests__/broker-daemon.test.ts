@@ -9,6 +9,7 @@ import { SessionStore } from "../../session.js";
 import { BrokerClient } from "../broker/transport.js";
 const require = createRequire(import.meta.url);
 const sleep = async (ms: number) => await new Promise((r) => setTimeout(r, ms));
+const credential = "a".repeat(43);
 it("keeps a live control client, coordinates plain maintenance, refreshes credentials, and removes its endpoint", async () => {
   const root = await mkdtemp(join(tmpdir(), "ts-broker-daemon-"));
   const socket = join(root, "b.sock");
@@ -35,6 +36,7 @@ it("keeps a live control client, coordinates plain maintenance, refreshes creden
         TRUSTY_SQUIRE_PROFILE_DIR: join(root, "profile"),
         TRUSTY_SQUIRE_REAPER_DIR: join(root, "reapers"),
         TRUSTY_SQUIRE_BROKER_SOCKET: socket,
+        TRUSTY_SQUIRE_FORWARDER_CREDENTIAL: credential,
         BOT_CDP_ENDPOINT: "",
       },
       stdio: ["ignore", "ignore", "pipe"],
@@ -62,16 +64,16 @@ it("keeps a live control client, coordinates plain maintenance, refreshes creden
       if (child.exitCode !== null) throw new Error(diagnostic);
       await sleep(25);
     }
-    first = await BrokerClient.connect(socket, "before");
+    first = await BrokerClient.connect(socket, "before", credential);
     await sleep(1200);
     expect(child.exitCode).toBeNull();
     expect(await first.call("maintenance", {})).toMatchObject({ state: "ready" });
     await store.write({ ...account, agent_session_token: "after" });
     expect(await first.call("resume", {})).toEqual({ state: "resumed" });
-    await expect(BrokerClient.connect(socket, "before")).rejects.toThrow(
+    await expect(BrokerClient.connect(socket, "before", credential)).rejects.toThrow(
       "Invalid broker credential",
     );
-    replacement = await BrokerClient.connect(socket, "after");
+    replacement = await BrokerClient.connect(socket, "after", credential);
     await first.close();
     await sleep(1200);
     expect(child.exitCode).toBeNull();
@@ -82,7 +84,7 @@ it("keeps a live control client, coordinates plain maintenance, refreshes creden
     // its refreshed credential after the plain browser is proven closed.
     for (let attempt = 0; attempt < 40; attempt++) {
       try {
-        replacement = await BrokerClient.connect(socket, "after-disconnect");
+        replacement = await BrokerClient.connect(socket, "after-disconnect", credential);
         break;
       } catch {
         await sleep(25);

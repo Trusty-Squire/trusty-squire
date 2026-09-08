@@ -5,6 +5,7 @@ import {
   type BrokerPrincipal,
 } from "../broker/authority.js";
 import { ScopeScheduler, siteResources } from "../broker/scheduler.js";
+import { forwarderId } from "../broker/lineage.js";
 
 const principal = (clientId: string): BrokerPrincipal => ({
   accountId: "account",
@@ -80,6 +81,33 @@ describe("broker authority", () => {
     broker.detach(first);
     expect(broker.reclaim(second)).toEqual([capability]);
     await expect(broker.invoke(second, capability, "resumed", "read", {})).resolves.toBe("a");
+  });
+
+  it("requires possession of a stable lineage credential to reclaim", async () => {
+    const broker = new BrokerAuthority("account", "cell");
+    const credential = "a".repeat(43);
+    const owner: BrokerPrincipal = {
+      accountId: "account",
+      agentId: "local-agent",
+      forwarderId: forwarderId(credential),
+      clientId: "first",
+    };
+    const forged: BrokerPrincipal = {
+      ...owner,
+      forwarderId: forwarderId(owner.forwarderId!),
+      clientId: "forged",
+    };
+    const capability = await broker.open(owner, ["site:a"], async () => port("a"));
+
+    expect(broker.reclaim(forged)).toEqual([]);
+    expect(() => broker.invoke(forged, capability, "foreign", "read", {})).toThrow(
+      "owned live session",
+    );
+
+    broker.detach(owner);
+    const restarted = { ...owner, clientId: "restarted" };
+    expect(broker.reclaim(restarted)).toEqual([capability]);
+    await expect(broker.invoke(restarted, capability, "resumed", "read", {})).resolves.toBe("a");
   });
 
   it("retries failed admission cleanup without releasing site custody early", async () => {

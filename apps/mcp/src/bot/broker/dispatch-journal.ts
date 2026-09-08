@@ -112,6 +112,21 @@ export class DispatchJournal {
     );
   }
 
+  async hasOnlyPaymentCustody(sessionId: string, forwarderId: string): Promise<boolean> {
+    const outstanding = [...(await this.states()).values()].filter(
+      (record) =>
+        record.sessionId === sessionId &&
+        record.forwarderId === forwarderId &&
+        (record.phase === "entered" || record.phase === "outcome"),
+    );
+    return (
+      outstanding.length > 0 &&
+      outstanding.every(
+        (record) => record.requestId === "payment-custody" && record.phase === "entered",
+      )
+    );
+  }
+
   async pendingOutcomes(forwarderId: string): Promise<PendingDispatchOutcome[]> {
     return [...(await this.states()).values()]
       .filter((record) => record.phase === "outcome" && record.forwarderId === forwarderId)

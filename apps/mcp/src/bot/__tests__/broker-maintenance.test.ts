@@ -27,6 +27,7 @@ describe("plain-login broker maintenance", () => {
       },
     });
     vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", path);
+    vi.stubEnv("TRUSTY_SQUIRE_FORWARDER_CREDENTIAL", "a".repeat(43));
     try {
       await expect(
         withBrokerMaintenance(async () => {

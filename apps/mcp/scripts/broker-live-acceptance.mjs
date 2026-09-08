@@ -3,6 +3,7 @@
 // Google admission gate. Invoke through chrome-devtools-axi run.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -137,9 +138,9 @@ export async function runLiveAcceptance(configPath) {
   const baseline = await ownedProcesses(profile);
   assert.deepEqual(baseline, [], "Test identity is already in use");
   const children = [];
-  const spawnChild = (args, ipc = true) => {
+  const spawnChild = (args, ipc = true, extraEnv = {}) => {
     const child = spawn(process.execPath, args, {
-      env,
+      env: { ...env, ...extraEnv },
       stdio: ["ignore", "pipe", "pipe", ...(ipc ? ["ipc"] : [])],
     });
     children.push(child);
@@ -178,7 +179,9 @@ export async function runLiveAcceptance(configPath) {
       await delay(100);
     }
     const clients = [0, 1, 2].map((index) =>
-      spawnChild([script, "client", resolve(configPath), String(index)]),
+      spawnChild([script, "client", resolve(configPath), String(index)], true, {
+        TRUSTY_SQUIRE_FORWARDER_CREDENTIAL: randomBytes(32).toString("base64url"),
+      }),
     );
     const ready = await Promise.all(clients.map((child) => receive(child, "ready")));
     assert.equal(new Set(ready.map((row) => row.mcpPid)).size, 3);

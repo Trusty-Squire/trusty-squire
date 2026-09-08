@@ -116,6 +116,79 @@ describe("broker dispatch custody", () => {
     }
   });
 
+  it("allows only an acknowledged payment's scoped status custody", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-journal-payment-custody-"));
+    const path = join(root, "dispatch.jsonl");
+    const journal = new DispatchJournal(path);
+    try {
+      await journal.record("session", "payment-custody", "entered", {
+        forwarderId: "forwarder-a",
+      });
+      await expect(journal.hasOnlyPaymentCustody("session", "forwarder-a")).resolves.toBe(true);
+      await expect(journal.hasOnlyPaymentCustody("session", "forwarder-b")).resolves.toBe(false);
+      await journal.record("session", "payment", "outcome", {
+        forwarderId: "forwarder-a",
+        operation: "operate_pay",
+        outcome: { status: "payment_3ds_required" },
+      });
+      await expect(journal.hasOnlyPaymentCustody("session", "forwarder-a")).resolves.toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("permits only the reclaimed session's pending payment status", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-journal-payment-status-"));
+    const path = join(root, "dispatch.jsonl");
+    const journal = new DispatchJournal(path);
+    const broker = new OperatorBroker(
+      {
+        accountId: "account",
+        agentSessionToken: "token",
+        apiBaseUrl: "http://unused.test",
+        registryBaseUrl: "http://unused.test",
+      },
+      "cell",
+      journal,
+    );
+    const principal = {
+      accountId: "account",
+      agentId: "local-agent",
+      forwarderId: "forwarder-a",
+      clientId: "reclaimed",
+    };
+    try {
+      const capability = await broker.authority.open(principal, ["site:a"], async () => ({
+        targetId: "target",
+        invoke: async () => undefined,
+        close: async () => true,
+      }));
+      await journal.record(capability.sessionId, "payment-custody", "entered", {
+        forwarderId: principal.forwarderId,
+      });
+      const params = {
+        name: "operate_payment_status",
+        args: { session_id: capability.sessionId },
+        capability,
+      };
+      await expect(broker.canContinuePaymentStatus(principal, params)).resolves.toBe(true);
+      await expect(
+        broker.canContinuePaymentStatus(
+          { ...principal, forwarderId: "forwarder-b", clientId: "foreign" },
+          params,
+        ),
+      ).resolves.toBe(false);
+      await journal.record(capability.sessionId, "pay", "outcome", {
+        forwarderId: principal.forwarderId,
+        operation: "operate_pay",
+        outcome: { status: "payment_3ds_required" },
+      });
+      await expect(broker.canContinuePaymentStatus(principal, params)).resolves.toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("preserves scrubbed pending payment outcomes across journal restart", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-journal-payment-outcomes-"));
     const path = join(root, "dispatch.jsonl");

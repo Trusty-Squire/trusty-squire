@@ -55,7 +55,7 @@ export interface BrokerTransportPort {
   authenticate(
     token: string,
     agentId?: string,
-    forwarderId?: string,
+    lineageCredential?: string,
   ): Promise<Omit<BrokerPrincipal, "clientId"> | null>;
   connected?(principal: BrokerPrincipal): void;
   call(
@@ -106,11 +106,13 @@ export async function listenBroker(
         authenticating = true;
         const agentId =
           typeof request.params.agentId === "string" ? request.params.agentId : "local-agent";
-        const forwarderId =
-          typeof request.params.forwarderId === "string" ? request.params.forwarderId : undefined;
+        const lineageCredential =
+          typeof request.params.lineageCredential === "string"
+            ? request.params.lineageCredential
+            : undefined;
         if (agentId.length === 0 || agentId.length > 128)
           throw new BrokerRefusal("unauthorized", "Invalid agent identity");
-        const identity = await port.authenticate(request.params.token, agentId, forwarderId);
+        const identity = await port.authenticate(request.params.token, agentId, lineageCredential);
         if (identity === null) throw new BrokerRefusal("unauthorized", "Invalid broker credential");
         principal = { ...identity, clientId: randomUUID() };
         port.connected?.(principal);
@@ -131,10 +133,6 @@ export async function listenBroker(
         return;
       }
       const request = parsed.data;
-      if (request.method === "acknowledge") {
-        void dispatch(request).catch(() => socket.destroy());
-        return;
-      }
       const input = JSON.stringify([request.method, request.params]);
       const previous = replies.get(request.id);
       let result: Promise<unknown>;
@@ -228,7 +226,11 @@ export class BrokerClient {
       }
     });
   }
-  static async connect(path: string, token: string, forwarderId?: string): Promise<BrokerClient> {
+  static async connect(
+    path: string,
+    token: string,
+    lineageCredential?: string,
+  ): Promise<BrokerClient> {
     const socket = createConnection(path);
     const client = new BrokerClient(socket);
     const deadline = setTimeout(
@@ -243,7 +245,7 @@ export class BrokerClient {
       await client.call("hello", {
         token,
         agentId: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "local-agent",
-        ...(forwarderId === undefined ? {} : { forwarderId }),
+        ...(lineageCredential === undefined ? {} : { lineageCredential }),
       });
       return client;
     } catch (error) {
@@ -269,14 +271,8 @@ export class BrokerClient {
       send(this.socket, { version: 1, id, method, params });
     });
   }
-  acknowledge(requestId: string): void {
-    if (this.ended || this.socket.destroyed) return;
-    send(this.socket, {
-      version: 1,
-      id: randomUUID(),
-      method: "acknowledge",
-      params: { requestId },
-    });
+  async acknowledge(requestId: string): Promise<void> {
+    await this.call("acknowledge", { requestId });
   }
   isConnected(): boolean {
     return !this.ended && !this.socket.destroyed;

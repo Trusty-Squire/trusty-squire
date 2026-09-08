@@ -17,6 +17,7 @@ import {
 import { BrokerAuthority, type BrokerPrincipal } from "./authority.js";
 import { BrokerRefusal, siteResources } from "./scheduler.js";
 import type { BrokerTransportPort } from "./transport.js";
+import { forwarderId } from "./lineage.js";
 
 const capabilitySchema = z
   .object({
@@ -117,13 +118,14 @@ export class OperatorBroker implements BrokerTransportPort {
   async authenticate(
     token: string,
     agentId?: string,
-    forwarderId?: string,
+    lineageCredential?: string,
   ): Promise<Omit<BrokerPrincipal, "clientId"> | null> {
     if (!timingSafeEqual(createHash("sha256").update(token).digest(), this.token)) return null;
+    if (lineageCredential === undefined) return null;
     return {
       accountId: this.config.accountId,
       agentId: agentId ?? this.config.agentIdentity ?? "local-agent",
-      forwarderId: forwarderId ?? agentId ?? this.config.agentIdentity ?? "local-agent",
+      forwarderId: forwarderId(lineageCredential),
     };
   }
   async call(
@@ -347,6 +349,26 @@ export class OperatorBroker implements BrokerTransportPort {
   async acknowledge(principal: BrokerPrincipal, requestId: string): Promise<void> {
     if (await this.journal?.acknowledge(principal.forwarderId ?? principal.agentId, requestId))
       await this.authority.retryQuarantined();
+  }
+  async canContinuePaymentStatus(
+    principal: BrokerPrincipal,
+    params: Record<string, unknown>,
+  ): Promise<boolean> {
+    const input = callSchema.safeParse(params);
+    if (!input.success || input.data.name !== "operate_payment_status") return false;
+    const capability = input.data.capability;
+    if (
+      capability === undefined ||
+      typeof input.data.args.session_id !== "string" ||
+      input.data.args.session_id !== capability.sessionId ||
+      !this.authority.hasCapability(principal, capability)
+    )
+      return false;
+    if (this.journal === undefined) return false;
+    return await this.journal.hasOnlyPaymentCustody(
+      capability.sessionId,
+      principal.forwarderId ?? principal.agentId,
+    );
   }
   async disconnect(principal: BrokerPrincipal): Promise<void> {
     if (await this.journal?.hasOutstanding(undefined, principal.forwarderId))

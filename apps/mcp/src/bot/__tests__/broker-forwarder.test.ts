@@ -6,7 +6,58 @@ import { OperatorForwarder } from "../broker/forwarder.js";
 import { BrokerClient, listenBroker } from "../broker/transport.js";
 import type { SessionGuard } from "../../session-guard.js";
 
+const credential = (character: string) => character.repeat(43);
+
 describe("MCP broker forwarding", () => {
+  it("waits for broker acknowledgement before resolving a forwarded call", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-forward-ack-"));
+    const path = join(root, "b.sock");
+    let release!: () => void;
+    let acknowledged = false;
+    const persisted = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const broker = await listenBroker(path, {
+      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
+      call: async (_principal, method) => {
+        if (method === "reconcile") return { outcomes: [] };
+        if (method === "acknowledge") {
+          acknowledged = true;
+          await persisted;
+          return {};
+        }
+        return { result: { accepted: true } };
+      },
+      disconnect: async () => undefined,
+    });
+    const guard: SessionGuard = {
+      bind: async () => ({
+        account_id: "account",
+        agent_session_token: "test",
+        api_base_url: "http://unused.test",
+        saved_at: "",
+      }),
+      inspect: async () => ({ problem: null }),
+      boundAccountId: () => "account",
+    };
+    const forwarder = new OperatorForwarder(path, guard, credential("a"));
+    try {
+      let settled = false;
+      const invocation = forwarder.invoke("operate_recipe_run", {}, "request").then((result) => {
+        settled = true;
+        return result;
+      });
+      await expect.poll(() => acknowledged).toBe(true);
+      expect(settled).toBe(false);
+      release();
+      await expect(invocation).resolves.toEqual({ accepted: true });
+    } finally {
+      await forwarder.close();
+      await broker.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("returns a lost payment outcome without redispatching its request key", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-forward-reconcile-"));
     const path = join(root, "b.sock");
@@ -86,7 +137,7 @@ describe("MCP broker forwarding", () => {
       inspect: async () => ({ problem: null }),
       boundAccountId: () => "account",
     };
-    const forwarder = new OperatorForwarder(path, guard);
+    const forwarder = new OperatorForwarder(path, guard, credential("a"));
     try {
       await forwarder.invoke("operate_start", {}, "start-request");
       await expect.poll(() => acknowledgements).toHaveLength(1);
@@ -148,9 +199,9 @@ describe("MCP broker forwarding", () => {
       boundAccountId: () => "account",
     };
     const forwarders = [
-      new OperatorForwarder(path, guard, "forwarder-a"),
-      new OperatorForwarder(path, guard, "forwarder-b"),
-      new OperatorForwarder(path, guard, "forwarder-c"),
+      new OperatorForwarder(path, guard, credential("a")),
+      new OperatorForwarder(path, guard, credential("b")),
+      new OperatorForwarder(path, guard, credential("c")),
     ];
     try {
       const results = await Promise.all(
@@ -203,8 +254,8 @@ describe("MCP broker forwarding", () => {
       inspect: async () => ({ problem: null }),
       boundAccountId: () => "account",
     };
-    const a = new OperatorForwarder(path, guard),
-      b = new OperatorForwarder(path, guard);
+    const a = new OperatorForwarder(path, guard, credential("a")),
+      b = new OperatorForwarder(path, guard, credential("b"));
     let brokerClosed = false;
     try {
       const first = (await a.invoke("operate_start", {})) as { session_id: string };
@@ -224,7 +275,7 @@ describe("MCP broker forwarding", () => {
       const rejected = new OperatorForwarder(path, {
         ...guard,
         bind: async () => null,
-      });
+      }, credential("c"));
       await expect(rejected.invoke("operate_start", {})).rejects.toThrow("Connect before");
       expect(rejected.connected()).toBe(false);
       await expect(rejected.close()).resolves.toBeUndefined();
