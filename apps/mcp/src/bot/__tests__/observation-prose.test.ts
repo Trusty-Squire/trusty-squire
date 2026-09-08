@@ -378,6 +378,31 @@ describe("interleaved observation DOM", () => {
         expect(changed.get(id)!.identity).toBe(held.get(id)!.identity);
         expect(changed.get(id)!.ref).toBe(held.get(id)!.ref);
       }
+  it("gives a labelled custom wrapper's sole enabled buy control its label", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<style>add-to-cart-component { display:block }</style>
+        <form id="cart-form"><add-to-cart-component aria-label="Add to cart">
+          <button id="sold-out" disabled>Sold out</button>
+          <button id="buy" type="submit" name="add"></button>
+        </add-to-cart-component></form>`);
+      await page.locator("#cart-form").evaluate((form) =>
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          form.setAttribute("data-submitted", "yes");
+        }),
+      );
+      const capture = await captureThroughController(page);
+      const buy = capture.elements.filter(
+        (el) => el.tag === "button" && controlMatchesPrivateQueryV2(el, "add to cart"),
+      );
+      expect(buy).toHaveLength(1);
+      expect(buy[0]).toMatchObject({ id: "buy", name: "add", type: "submit" });
+      expect(capture.elements.find((el) => el.id === "sold-out")).toMatchObject({
+        disabled: true,
+      });
+      await page.locator(buy[0]!.selector).click();
+      expect(await page.locator("#cart-form").getAttribute("data-submitted")).toBe("yes");
     } finally {
       await page.close();
     }

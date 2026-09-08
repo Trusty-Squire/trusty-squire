@@ -641,11 +641,15 @@ export async function captureBrowserUseDOM(
       const custom = n.nodeName.includes("-");
       const label = n.attributes["aria-label"]?.trim() || n.attributes.title?.trim();
       if (custom && label && sole && !ownedLabels.has(sole.id)) ownedLabels.set(sole.id, label);
-      const native =
+      const nativeTag =
         ["BUTTON", "SELECT", "TEXTAREA", "A"].includes(n.nodeName) ||
-        (n.nodeName === "INPUT" &&
-          n.attributes.type?.toLowerCase() !== "hidden" &&
-          !("disabled" in n.attributes));
+        (n.nodeName === "INPUT" && n.attributes.type?.toLowerCase() !== "hidden");
+      const disabledNative =
+        nativeTag &&
+        ("disabled" in n.attributes ||
+          n.attributes["aria-disabled"] === "true" ||
+          n.axProperties.some((p) => p.name === "disabled" && Boolean(p.value)));
+      const native = nativeTag && !disabledNative;
       const explicit =
         n.clickListener ||
         [
@@ -659,7 +663,10 @@ export async function captureBrowserUseDOM(
           "option",
           "tab",
         ].includes(n.attributes.role ?? n.axRole ?? "");
-      if (native || ((explicit || (custom && browserUseInteractive(n))) && count === 0))
+      if (
+        native ||
+        (!disabledNative && (explicit || (custom && browserUseInteractive(n))) && count === 0)
+      )
         return { count: 1, sole: n };
       return { count, ...(sole ? { sole } : {}) };
     };
