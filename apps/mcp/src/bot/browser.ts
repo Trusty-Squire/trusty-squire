@@ -6213,11 +6213,7 @@ export class BrowserController {
   // (x, y). Uses 12-25 intermediate steps with small per-step delays.
   // The curve avoids the dead-straight teleport that Playwright's
   // default move() does.
-  private async bezierMouseTo(
-    x: number,
-    y: number,
-    page: Page | null = this.page,
-  ): Promise<void> {
+  private async bezierMouseTo(x: number, y: number, page: Page | null = this.page): Promise<void> {
     if (!page) throw new Error("Browser not started");
     const steps = rand(12, 25);
     // Bezier control points: bow the curve slightly perpendicular to
@@ -7459,10 +7455,13 @@ export class BrowserController {
   // given but nothing matches — a silent fallback to the full page would
   // make operate_screenshot's frame targeting unreliable for exactly the
   // case it exists for (an unpredictable ACS/challenge iframe).
-  private resolveOperatorScreenshotFrame(opts: {
-    frameIndex?: number;
-    frameUrlContains?: string;
-  }, page: Page | null = this.page): Frame | null {
+  private resolveOperatorScreenshotFrame(
+    opts: {
+      frameIndex?: number;
+      frameUrlContains?: string;
+    },
+    page: Page | null = this.page,
+  ): Frame | null {
     if (!page) throw new Error("Browser not started");
     if (opts.frameIndex !== undefined) {
       const frame = page.frames()[opts.frameIndex];
@@ -7487,7 +7486,8 @@ export class BrowserController {
       frameUrlContains?: string;
       fullPage?: boolean;
     } = {},
-    page: Page | null = this.page): Promise<{
+    page: Page | null = this.page,
+  ): Promise<{
     base64: string;
     frameUrl: string | null;
     frameCount: number;
@@ -7501,7 +7501,8 @@ export class BrowserController {
       frameUrlContains?: string;
       fullPage?: boolean;
     } = {},
-    page: Page | null = this.page): Promise<{
+    page: Page | null = this.page,
+  ): Promise<{
     base64: string;
     frameUrl: string | null;
     frameCount: number;
@@ -7874,7 +7875,10 @@ export class BrowserController {
   }
 
   async readCheckoutReviewLineItems(): Promise<Array<{ title: string; quantity: number }>>;
-  async readCheckoutReviewLineItems(includeDetails: true, page?: Page | null): Promise<
+  async readCheckoutReviewLineItems(
+    includeDetails: true,
+    page?: Page | null,
+  ): Promise<
     Array<{
       title: string;
       quantity: number;
@@ -7883,7 +7887,10 @@ export class BrowserController {
       option_signatures: string[];
     }>
   >;
-  async readCheckoutReviewLineItems(includeDetails = false, page: Page | null = this.page): Promise<
+  async readCheckoutReviewLineItems(
+    includeDetails = false,
+    page: Page | null = this.page,
+  ): Promise<
     Array<{
       title: string;
       quantity: number;

@@ -1214,9 +1214,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
               ? '<label>Opened setting<input id="opened-setting"></label>'
               : route.request().url() === "https://console.product.test/replay-opened"
                 ? '<main>Projects</main><label>Replay name<input id="replay-name" name="full_name" type="text" autocomplete="name" data-testid="replay-name"></label><button id="open-new-tab" onclick="window.open(\'https://console.product.test/opened\')">Open settings</button>'
-              : route.request().url() === cartUrl
-                ? `<main>Projects</main>${sourceControls}<script>document.querySelector('#line')?.removeAttribute('hidden')</script>`
-                : `<main>Projects</main><button>New project</button>${sourceControls}`,
+                : route.request().url() === cartUrl
+                  ? `<main>Projects</main>${sourceControls}<script>document.querySelector('#line')?.removeAttribute('hidden')</script>`
+                  : `<main>Projects</main><button>New project</button>${sourceControls}`,
         });
       });
       await product.goto(productUrl);
@@ -1258,17 +1258,21 @@ describe("BrowserController OAuth popup lifecycle", () => {
         expect(postcondition).toMatchObject({ confirmed: true });
         const checkoutSignature = await checkoutShapeSignatureForSession(sessionId);
         const productSignature = checkoutFieldSetSignature(
-          await product.locator("input,select,textarea").evaluateAll((elements) =>
-            elements
-              .map((element) => element.getAttribute("name") ?? element.getAttribute("id") ?? "")
-              .filter((name) => name.length > 0),
-          ),
+          await product
+            .locator("input,select,textarea")
+            .evaluateAll((elements) =>
+              elements
+                .map((element) => element.getAttribute("name") ?? element.getAttribute("id") ?? "")
+                .filter((name) => name.length > 0),
+            ),
         );
         expect(checkoutSignature).not.toBe(productSignature);
         const extracted = await extractCredentials(sessionId);
         expect(extracted.url).toBe(expectedReturnUrl);
         expect(Object.values(extracted.credentials)).toContain("sk_source_abcdefgh1234567890");
-        expect(await source.locator("#credential").textContent()).toBe("sk_source_abcdefgh1234567890");
+        expect(await source.locator("#credential").textContent()).toBe(
+          "sk_source_abcdefgh1234567890",
+        );
         expect(await product.locator("#credential").textContent()).toBe(productCredentialBefore);
         await source.evaluate(() => {
           document.body.insertAdjacentHTML(
@@ -1292,9 +1296,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         await act(sessionId, { kind: "type", target: inputRef!, text: "Popup project" });
         expect(await source.locator("#name").inputValue()).toBe("Popup project");
         expect(await product.locator("#name").inputValue()).toBe("");
-        expect(
-          await controller.focusedElementLabels(source),
-        ).toContain("Project name");
+        expect(await controller.focusedElementLabels(source)).toContain("Project name");
         expect(await controller.focusedElementLabels(product)).not.toContain("Project name");
         const pressed = await act(sessionId, { kind: "press", key: "Enter" });
         expect(pressed.url).toBe(expectedReturnUrl);
@@ -1333,7 +1335,11 @@ describe("BrowserController OAuth popup lifecycle", () => {
         const cartPagePromise = source.waitForEvent("popup");
         const cart = await cartAdd(sessionId, "popup-product", "popup-options", "popup-cart");
         const cartPage = await cartPagePromise;
-        expect(cart).toMatchObject({ status: "added", cart_delta: "+1", postcondition: { quantity: 1 } });
+        expect(cart).toMatchObject({
+          status: "added",
+          cart_delta: "+1",
+          postcondition: { quantity: 1 },
+        });
         expect(cart.cart_url).toBe(cartUrl);
         expect(cartPage.url()).toBe(cartUrl);
         expect(await cartPage.locator("#line").isVisible()).toBe(true);
@@ -1395,13 +1401,11 @@ describe("BrowserController OAuth popup lifecycle", () => {
         expect(await cartPage.locator("#replay-name").inputValue()).toBe("");
         expect(await source.locator("#replay-name").inputValue()).toBe("");
         expect(await product.locator("#replay-name").inputValue()).toBe("");
-        expect(sessionForCall(sessionId)?.actionTrace.some((entry) => entry.action.kind === "type")).toBe(
-          true,
-        );
+        expect(
+          sessionForCall(sessionId)?.actionTrace.some((entry) => entry.action.kind === "type"),
+        ).toBe(true);
         const beforeOpen = await observe(sessionId, "full");
-        const openRef = (beforeOpen.elements ?? []).find(
-          (el) => el.label === "Open settings",
-        )?.ref;
+        const openRef = (beforeOpen.elements ?? []).find((el) => el.label === "Open settings")?.ref;
         expect(openRef).toBeDefined();
         const openedPagePromise = replayPage.waitForEvent("popup");
         const opened = await act(sessionId, { kind: "click", target: openRef! });
@@ -1462,7 +1466,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
           contentType: "text/html",
           body:
             route.request().url() === openedUrl
-              ? '<main>Opened operator tab</main>'
+              ? "<main>Opened operator tab</main>"
               : `<main>Returned operator tab</main><button id="open" onclick="window.open('${openedUrl}')">Open tab</button>`,
         }),
       );
@@ -1474,7 +1478,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
       );
       await product.goto(productUrl);
       const controller = BrowserController.fromHarnessPage(product);
-      const started = await startHarnessProvisionSession({ browser: controller, serviceUrl: productUrl });
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+      });
       sessionId = started.session_id;
       const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
       expect(oauthRef).toBeDefined();
@@ -1500,13 +1507,15 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const originalTemporaryScope = controller.withTemporaryHostScopeAllowedHosts.bind(controller);
       const temporaryScopeSpy = vi
         .spyOn(controller, "withTemporaryHostScopeAllowedHosts")
-        .mockImplementation(async <T>(hosts: readonly string[], operation: () => Promise<T>): Promise<T> => {
-          if (hosts.includes("mail.google.com")) {
-            enteredInbox();
-            await inboxResume;
-          }
-          return await originalTemporaryScope(hosts, operation);
-        });
+        .mockImplementation(
+          async <T>(hosts: readonly string[], operation: () => Promise<T>): Promise<T> => {
+            if (hosts.includes("mail.google.com")) {
+              enteredInbox();
+              await inboxResume;
+            }
+            return await originalTemporaryScope(hosts, operation);
+          },
+        );
 
       const verification = awaitVerification(sessionId);
       await inboxEntered;
@@ -1549,7 +1558,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const controller = BrowserController.fromHarnessPage(product);
     let sessionId: string | undefined;
     try {
-      const started = await startHarnessProvisionSession({ browser: controller, serviceUrl: productUrl });
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+      });
       sessionId = started.session_id;
       const openRef = parseElementsTable(started.el_table ?? "").find(
         (element) => element.label === "Open editor",

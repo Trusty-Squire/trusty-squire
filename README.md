@@ -346,9 +346,10 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   `operate_type` accepts either literal `text` or a protected session `slot`,
   never both. `operate_click` alone may use its guarded internal DOM-dispatch
   fallback after a proven non-dispatch; it is not a public alternative action.
-  Frame scope and stale-ref handling remain fail-closed. An owned popup becomes
-  the active page; unrelated/no-opener pages do not. Use `operate_login` for
-  atomic OAuth and the username/password lifecycle, `operate_extract` to capture
+  Frame scope and stale-ref handling remain fail-closed. For ordinary actions,
+  an owned popup becomes the active page; unrelated/no-opener pages do not.
+  Use `operate_login` for atomic OAuth and the username/password lifecycle,
+  `operate_extract` to capture
   credentials, and `operate_fill_credential` to load protected slots. CAPTCHA
   solving, inbox polling, local upload, and specialized cart mutation are not
   operator verbs; inspect and drive the page's ordinary UI or hand the task back
@@ -380,11 +381,14 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   provider login, pass the observed provider-button ref to `operate_login`.
   It retains the product tab across provider-owned popup
   redirects and closes. When it observes the authorized return destination still
-  open, it returns the normal post-login product observation even if `detail` is
-  `none`; if that observed destination closes before handoff, it returns a
-  terminal `oauth_completed` snapshot with refs unavailable and directs the host
-  to `operate_observe`. Every OAuth login is serialized
-  from action start through completion and a short release cooldown; other
+  open, that destination becomes the session's operation page: its post-login
+  observation and subsequent actions, reads, and navigation stay bound to it,
+  leaving the retained product tab untouched. An owned tab opened by a later
+  action becomes the operation page for following calls. It returns the normal
+  post-login observation even if `detail` is `none`; if that observed destination
+  closes before handoff, it returns a terminal `oauth_completed` snapshot with
+  refs unavailable and directs the host to `operate_observe`. Every OAuth login
+  is serialized from action start through completion and a short release cooldown; other
   session work remains parallel. The whole serialized action has a 30-second
   deadline. At that boundary it rechecks captured, attempt-local return evidence:
   an observed return completes the action rather than being reported as pending.
