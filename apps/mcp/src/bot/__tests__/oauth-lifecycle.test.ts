@@ -307,6 +307,34 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it("retains the provider when closing it could lose the product lineage", async () => {
+    const { controller, product } = await controllerForProduct();
+    const context = product.context();
+    try {
+      await controller.startOAuth("#oauth");
+      const provider = (controller as unknown as { page: Page }).page;
+      const sleepSpy = vi
+        .spyOn(controller as unknown as { sleep(ms: number): Promise<void> }, "sleep")
+        .mockResolvedValue();
+      const closeSpy = vi.spyOn(provider, "close").mockImplementation(async () => {
+        await product.close();
+      });
+      try {
+        await controller.settleAfterOAuth(provider);
+
+        expect(closeSpy).not.toHaveBeenCalled();
+        expect(product.isClosed()).toBe(false);
+        expect(provider.isClosed()).toBe(false);
+        expect((controller as unknown as { page: Page }).page).toBe(product);
+      } finally {
+        sleepSpy.mockRestore();
+        closeSpy.mockRestore();
+      }
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
   it("keeps a provider-less SPA OAuth control pending after its popup closes", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();

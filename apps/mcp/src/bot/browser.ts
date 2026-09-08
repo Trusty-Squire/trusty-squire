@@ -14761,9 +14761,6 @@ export class BrowserController {
       if (product.isClosed()) {
         throw new Error("OAuth lifecycle product page became unavailable");
       }
-      if (provider !== null && provider !== product && !provider.isClosed()) {
-        await provider.close().catch(() => undefined);
-      }
       if (product.isClosed()) {
         throw new Error("OAuth lifecycle product page became unavailable");
       }
