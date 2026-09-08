@@ -2780,7 +2780,7 @@ async function reconcileReservedCartAdd(
           record.optionsHash,
           record.idempotencyKey,
         );
-      const pageAfterAction = operationPageForSession(session) ?? page;
+      const pageAfterAction = page;
       const quantity = await cartLineQuantity(
         session,
         record.productIdentity,
@@ -2883,7 +2883,7 @@ async function performCartAdd(
     }
   }
   if (addError !== undefined || actionResult === null) throw addError;
-  const pageAfterAction = operationPageForSession(session) ?? page;
+  const pageAfterAction = actionResult.operationPage ?? page;
   const afterQuantity = await cartLineQuantity(
     session,
     record.productIdentity,
@@ -4895,6 +4895,7 @@ async function runClickWithPlaceOrderGuard(
 
 interface InternalActResult {
   observation: Observation;
+  operationPage?: Page;
   outcome: {
     selectedOption?: string;
     checkoutState?: CheckoutState;
@@ -5217,6 +5218,7 @@ async function executeAct(
       }
       case "oauth_settle": {
         actionPageAfter = await browser.settleAfterOAuth(compactV2ActionPage);
+        rememberOAuthCompletionSourcePage(session, actionPageAfter);
         break;
       }
       case "scroll": {
@@ -5877,6 +5879,7 @@ async function executeAct(
             true,
           );
   return {
+    operationPage: actionPageAfter,
     observation:
       completedAction.kind === "select" && observation.format !== "browser-use-dom"
         ? { ...observation, selected_option: completedAction.text }
@@ -7985,7 +7988,7 @@ export async function replayOperatorRecipe(
         undefined,
         operationPage,
       );
-      operationPage = operationPageForSession(session) ?? operationPage;
+      operationPage = acted.operationPage ?? operationPage;
       if (acted.observation.oauth?.state === "awaiting_human") {
         return await fallback(
           step,

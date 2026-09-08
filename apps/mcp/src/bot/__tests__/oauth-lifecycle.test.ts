@@ -961,9 +961,12 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await context.route("https://product.test/**", (route) =>
       route.fulfill({
         contentType: "text/html",
-        body: `<button id="oauth" onclick='window.open(${JSON.stringify(
-          `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
-        )})'>Continue</button>`,
+        body:
+          route.request().url() === "https://product.test/other"
+            ? "<main>Other product page</main>"
+            : `<button id="oauth" onclick='window.open(${JSON.stringify(
+                `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+              )})'>Continue</button><button id="product-action" onclick="document.body.dataset.productAction = 'yes'">Product action</button>`,
       }),
     );
     await context.route("https://accounts.google.com/**", (route) =>
@@ -999,6 +1002,18 @@ describe("BrowserController OAuth popup lifecycle", () => {
         expect(provider?.isClosed()).toBe(true);
         expect(product.isClosed()).toBe(false);
         expect((controller as unknown as { page: Page }).page).toBe(product);
+        const productActionRef = parseElementsTable(settled.el_table ?? "").find(
+          (element) => element.label === "Product action",
+        )?.ref;
+        expect(productActionRef).toBeDefined();
+        await act(sessionId, { kind: "click", target: productActionRef! });
+        expect(await product.locator("body").getAttribute("data-product-action")).toBe("yes");
+        await expect(act(sessionId, { kind: "press", key: "Enter" })).resolves.toMatchObject({
+          url: "https://product.test/login",
+        });
+        await expect(act(sessionId, { kind: "goto", url: "https://product.test/other" })).resolves.toMatchObject({
+          url: "https://product.test/other",
+        });
       } finally {
         sleepSpy.mockRestore();
       }
@@ -2134,6 +2149,148 @@ describe("BrowserController OAuth popup lifecycle", () => {
       expect(typed.url).toBe(openedUrl);
       expect(await popup.locator("#opened-title").inputValue()).toBe("New tab title");
       expect(await product.locator("#opened-title").count()).toBe(0);
+    } finally {
+      if (sessionId) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
+
+  it("keeps cart add bookkeeping on its adopted tab during a concurrent click", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://product.test/cart-source";
+    const cartUrl = "https://product.test/cart";
+    const distractionUrl = "https://product.test/distraction";
+    await context.route("https://product.test/**", (route) => {
+      const url = route.request().url();
+      return route.fulfill({
+        contentType: "text/html",
+        body:
+          url === cartUrl
+            ? `<main>Cart</main><div id="line" data-testid="line-item"><a href="/products/popup" data-product-identity="popup-product">Popup product</a> <span>Quantity 1</span> <span data-options-hash="popup-options"></span></div><button id="distraction" onclick="window.open('${distractionUrl}')">Open distraction</button>`
+            : url === distractionUrl
+              ? "<main>Distraction</main>"
+              : `<button id="add" onclick="window.open('${cartUrl}')">Add to Cart</button>`,
+      });
+    });
+    await product.goto(productUrl);
+    const controller = BrowserController.fromHarnessPage(product);
+    const lineReader = controller as unknown as {
+      readCheckoutReviewLineItems: (...args: unknown[]) => Promise<unknown>;
+    };
+    const originalRead = lineReader.readCheckoutReviewLineItems;
+    let releaseCartRead: () => void = () => undefined;
+    const cartReadPaused = new Promise<void>((resolve) => {
+      let paused = false;
+      lineReader.readCheckoutReviewLineItems = async (...args) => {
+        const page = args[1] as Page | undefined;
+        if (!paused && page?.url() === cartUrl) {
+          paused = true;
+          resolve();
+          await new Promise<void>((release) => {
+            releaseCartRead = release;
+          });
+        }
+        return await originalRead.apply(controller, args);
+      };
+    });
+    let sessionId: string | undefined;
+    try {
+      const started = await startHarnessProvisionSession({ browser: controller, serviceUrl: productUrl });
+      sessionId = started.session_id;
+      const adding = cartAdd(sessionId, "popup-product", "popup-options", "popup-cart");
+      await cartReadPaused;
+      const distraction = await act(sessionId, { kind: "click", target: "Open distraction" });
+      expect(distraction.url).toBe(distractionUrl);
+      releaseCartRead();
+      const added = await adding;
+      expect(added).toMatchObject({
+        status: "added",
+        cart_url: cartUrl,
+        postcondition: { quantity: 1 },
+      });
+      expect(product.url()).toBe(productUrl);
+      await expect(product.locator("text=Popup product").count()).resolves.toBe(0);
+    } finally {
+      releaseCartRead();
+      lineReader.readCheckoutReviewLineItems = originalRead;
+      if (sessionId) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
+
+  it("keeps recipe continuation on its adopted tab during a concurrent click", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://product.test/replay-source";
+    const replayUrl = "https://product.test/replay";
+    const distractionUrl = "https://product.test/replay-distraction";
+    await context.route("https://product.test/**", (route) => {
+      const url = route.request().url();
+      return route.fulfill({
+        contentType: "text/html",
+        body:
+          url === replayUrl
+            ? `<main>Replay</main><label>Replay name<input id="replay-name" name="full_name" type="text" autocomplete="name" data-testid="replay-name"></label><button id="distraction" onclick="window.open('${distractionUrl}')">Open distraction</button>`
+            : url === distractionUrl
+              ? '<main>Distraction</main><label>Replay name<input id="replay-name" name="full_name" type="text" autocomplete="name" data-testid="replay-name"></label>'
+              : `<button id="open-replay" onclick="window.open('${replayUrl}')">Open replay</button>`,
+      });
+    });
+    await product.goto(productUrl);
+    const controller = BrowserController.fromHarnessPage(product);
+    let sessionId: string | undefined;
+    try {
+      const started = await startHarnessProvisionSession({ browser: controller, serviceUrl: productUrl });
+      sessionId = started.session_id;
+      const recipe: OperatorRecipe = {
+        name: "replay-adoption",
+        schema_version: 1,
+        goal: "Set replay name",
+        verb: "configure",
+        domain: "product.test",
+        entry_url: productUrl,
+        allowed_hosts: ["product.test"],
+        trace: [
+          { action: { kind: "click", target: { dom_hint: { id: "open-replay" }, css: "#open-replay" } } },
+          {
+            action: {
+              kind: "type",
+              target: {
+                dom_hint: { testid: "replay-name", name: "full_name" },
+                accessible_name: "Replay name",
+                css: "#replay-name",
+                field_role: "ac:name",
+              },
+              value: { hole: "contact.name" },
+            },
+          },
+        ],
+        secrets: [],
+        postcondition: {
+          kind: "execute_capability",
+          describe: "Replay name is set",
+          success_signal: { text_present: "Replay" },
+        },
+      };
+      const replayed = await replayOperatorRecipe(
+        sessionId,
+        recipe,
+        { "contact.name": "Adopted replay" },
+        0,
+        {
+          beforeStep: async ({ step_index }) => {
+            if (step_index !== 1) return;
+            const distraction = await act(sessionId!, { kind: "click", target: "Open distraction" });
+            expect(distraction.url).toBe(distractionUrl);
+          },
+        },
+      );
+      const replay = context.pages().find((page) => page.url() === replayUrl)!;
+      const distraction = context.pages().find((page) => page.url() === distractionUrl)!;
+      expect(replayed).toMatchObject({ status: "complete", observation: { url: replayUrl } });
+      expect(await replay.locator("#replay-name").inputValue()).toBe("Adopted replay");
+      expect(await distraction.locator("#replay-name").inputValue()).toBe("");
     } finally {
       if (sessionId) await finishProvisionSession(sessionId);
       await context.close();
