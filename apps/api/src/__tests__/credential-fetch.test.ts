@@ -101,7 +101,12 @@ describe("passkey-gated fetch_credential", () => {
     return await server.inject({
       method: "POST",
       url: "/v1/vault/fetch-approvals",
-      headers: { authorization: `Bearer ${token}`, "x-squire-agent-identity": "Codex" },
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-squire-agent-identity": "Codex",
+        "x-squire-task-id": "task-fetch-42",
+        "x-squire-invocation-id": "invoke-fetch-7",
+      },
       payload,
     });
   }
@@ -231,6 +236,11 @@ describe("passkey-gated fetch_credential", () => {
       purpose: "reveal",
       approval_id: approval.approval_id,
       approver_account_id: accountId,
+      attribution: {
+        task_id: "task-fetch-42",
+        agent_identity: "codex",
+        invocation_id: "invoke-fetch-7",
+      },
     });
     // The delivery row names the approver too. A ledger where only the decision
     // carries it cannot answer "who released this secret?" from the row that
@@ -415,10 +425,7 @@ describe("passkey-gated fetch_credential", () => {
   it("cannot mint an approval against another account's credential", async () => {
     const other = await deps.accountStore.createAccount("victim@example.test", "Victim");
     const otherToken = await issueAgentToken(other.id, "claude");
-    const victimRef = await storeCredential(
-      { service: "OpenAI", value: SECRET_VALUE },
-      otherToken,
-    );
+    const victimRef = await storeCredential({ service: "OpenAI", value: SECRET_VALUE }, otherToken);
 
     const created = await createFetch({ reference: victimRef });
     expect(created.statusCode).toBe(404);

@@ -174,6 +174,13 @@ export class RetentionCron {
             credentialService: row.credential_service,
             credentialLabel: row.credential_label,
             requesterKind: row.requester_kind === "web" ? "web" : "agent",
+            auditAttribution: {
+              task_id: row.audit_task_id ?? "fetch_credential",
+              agent_identity: row.audit_agent_identity ?? row.agent,
+              invocation_id: row.audit_invocation_id ?? row.id,
+              purpose: row.audit_purpose ?? "reveal",
+            },
+            auditPurpose: row.audit_purpose ?? "reveal",
           },
           "expired",
         );

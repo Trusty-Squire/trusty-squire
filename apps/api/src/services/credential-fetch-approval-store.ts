@@ -14,6 +14,7 @@
 // and no value.
 
 import { ulid } from "ulid";
+import type { VaultAuditAttribution } from "@trusty-squire/vault";
 
 export type CredentialFetchApprovalStatus =
   | "pending"
@@ -35,11 +36,18 @@ export interface CredentialFetchApprovalInput {
   nonce: string;
   agent: string;
   requesterKind: CredentialFetchRequesterKind;
+  auditAttribution?: VaultAuditAttribution;
+  auditPurpose?: string;
   intentHash: string;
   expiresAt: Date;
 }
 
-export interface CredentialFetchApprovalRecord extends CredentialFetchApprovalInput {
+export interface CredentialFetchApprovalRecord extends Omit<
+  CredentialFetchApprovalInput,
+  "auditAttribution" | "auditPurpose"
+> {
+  auditAttribution: VaultAuditAttribution;
+  auditPurpose: string;
   id: string;
   accountId: string;
   status: CredentialFetchApprovalStatus;
@@ -103,6 +111,13 @@ export class InMemoryCredentialFetchApprovalStore implements CredentialFetchAppr
       id,
       accountId,
       ...cloneInput(input),
+      auditAttribution: input.auditAttribution ?? {
+        task_id: "fetch_credential",
+        agent_identity: input.agent,
+        invocation_id: id,
+        purpose: input.auditPurpose ?? "reveal",
+      },
+      auditPurpose: input.auditPurpose ?? "reveal",
       status: "pending",
       failureCode: null,
       mandateId: null,

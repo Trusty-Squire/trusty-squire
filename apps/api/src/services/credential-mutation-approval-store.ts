@@ -4,6 +4,7 @@ import {
   type CredentialStore,
   type VaultAuditEventInput,
   type VaultAuditStore,
+  type VaultAuditAttribution,
 } from "@trusty-squire/vault";
 import type { CredentialMutationMetadata } from "./credential-metadata.js";
 
@@ -21,11 +22,18 @@ export interface CredentialMutationApprovalInput {
   nonce: string;
   agent: string;
   requesterKind: CredentialMutationRequesterKind;
+  auditAttribution?: VaultAuditAttribution;
+  auditPurpose?: string;
   intentHash: string;
   expiresAt: Date;
 }
 
-export interface CredentialMutationApprovalRecord extends CredentialMutationApprovalInput {
+export interface CredentialMutationApprovalRecord extends Omit<
+  CredentialMutationApprovalInput,
+  "auditAttribution" | "auditPurpose"
+> {
+  auditAttribution: VaultAuditAttribution;
+  auditPurpose: string;
   id: string;
   accountId: string;
   status: CredentialMutationApprovalStatus;
@@ -75,6 +83,13 @@ export class InMemoryCredentialMutationApprovalStore implements CredentialMutati
       id,
       accountId,
       ...cloneInput(input),
+      auditAttribution: input.auditAttribution ?? {
+        task_id: `credential.${input.operation}`,
+        agent_identity: input.agent,
+        invocation_id: id,
+        purpose: input.auditPurpose ?? `credential.${input.operation}`,
+      },
+      auditPurpose: input.auditPurpose ?? `credential.${input.operation}`,
       status: "pending",
       failureCode: null,
       mandateId: null,
@@ -264,6 +279,8 @@ export function mutationAuditEvent(record: CredentialMutationApprovalRecord): Va
     payload: {
       reference: record.credentialReference,
       requester: record.requesterKind === "web" ? "user" : "agent",
+      purpose: record.auditPurpose,
+      attribution: record.auditAttribution,
       ...(record.credentialService !== null ? { service: record.credentialService } : {}),
       label: record.operation === "edit" ? record.after!.label : record.credentialLabel,
       approval_id: record.id,

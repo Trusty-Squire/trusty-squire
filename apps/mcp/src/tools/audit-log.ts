@@ -233,14 +233,10 @@ async function buildLedgerView(
         : {}),
     },
     grant_totals: grantTotals,
-    // Honest about what read-side attribution can and cannot know: the write
-    // side records no grant id on a proxied call, so these totals count egress
-    // on the grant's credential during its lifetime and include any direct
-    // use_credential traffic on that same credential.
     attribution:
       grants === null
         ? "grants_unavailable"
-        : "by_credential_reference_within_grant_lifetime (may include direct use_credential calls; per-event grant attribution is a planned follow-up)",
+        : "per_event (historical rows without provenance use credential-reference/lifetime fallback)",
     summary: summarize(ledgerRows.length, anomalyCount, rollups, egressCalls.length),
   };
 }

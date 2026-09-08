@@ -104,9 +104,25 @@ export interface CredentialStore {
 
 export type VaultRequester = "agent" | "user" | "system";
 
+export interface VaultAuditAttribution {
+  /** Stable host-task identifier; callers may group multiple tool calls under it. */
+  task_id: string;
+  /** Authenticated caller identity, never a caller-overridable display header. */
+  agent_identity: string;
+  /** One MCP/API invocation, approval, or standing egress grant. */
+  invocation_id: string;
+  /** Standing egress grant when the invocation is workload traffic. */
+  grant_id?: string;
+  /** Human-readable reason this caller touched the credential. */
+  purpose: string;
+}
+
 export interface VaultAuditPayload {
   reference: string;
   requester: VaultRequester;
+  // Optional only because historical JSON rows predate write-side provenance.
+  // Every new proxy/mutation/fetch event supplies both fields.
+  attribution?: VaultAuditAttribution;
   purpose?: string;
   signing_device_id?: string | null;
   ip?: string;
@@ -170,6 +186,27 @@ export interface VaultAuditPayload {
   // Egress-grant lifecycle (grant_minted / grant_revoked events).
   grant_id?: string;
   revoke_attempt_nonce?: string;
+}
+
+/** Complete new writes and make pre-attribution JSON rows legible on read. */
+export function attributedVaultAuditPayload(
+  payload: VaultAuditPayload,
+  type: VaultAuditType,
+  rowId: string,
+): VaultAuditPayload {
+  const purpose = payload.purpose ?? type.replace(/^vault\./, "");
+  const attribution = payload.attribution ?? {
+    task_id: purpose,
+    agent_identity: payload.requester === "agent" ? "unknown-agent" : payload.requester,
+    invocation_id: payload.approval_id ?? payload.grant_id ?? rowId,
+    ...(payload.grant_id !== undefined ? { grant_id: payload.grant_id } : {}),
+    purpose,
+  };
+  return {
+    ...payload,
+    purpose,
+    attribution: { ...attribution, purpose: attribution.purpose ?? purpose },
+  };
 }
 
 export const VAULT_AUDIT_TYPES = {

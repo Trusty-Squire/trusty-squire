@@ -31,6 +31,10 @@ export class PrismaCredentialFetchApprovalStore implements CredentialFetchApprov
         nonce: input.nonce,
         agent: input.agent,
         requester_kind: input.requesterKind,
+        audit_task_id: input.auditAttribution?.task_id ?? "fetch_credential",
+        audit_agent_identity: input.auditAttribution?.agent_identity ?? input.agent,
+        audit_invocation_id: input.auditAttribution?.invocation_id,
+        audit_purpose: input.auditPurpose ?? "reveal",
         intent_hash: input.intentHash,
         status: "pending",
         expires_at: input.expiresAt,
@@ -139,6 +143,10 @@ export interface CredentialFetchApprovalRow {
   nonce: string;
   agent: string;
   requester_kind: string;
+  audit_task_id: string | null;
+  audit_agent_identity: string | null;
+  audit_invocation_id: string | null;
+  audit_purpose: string | null;
   intent_hash: string;
   status: string;
   failure_code: string | null;
@@ -161,6 +169,13 @@ function toRecord(row: CredentialFetchApprovalRow): CredentialFetchApprovalRecor
     nonce: row.nonce,
     agent: row.agent,
     requesterKind: row.requester_kind === "web" ? "web" : ("agent" as CredentialFetchRequesterKind),
+    auditAttribution: {
+      task_id: row.audit_task_id ?? "fetch_credential",
+      agent_identity: row.audit_agent_identity ?? row.agent,
+      invocation_id: row.audit_invocation_id ?? row.id,
+      purpose: row.audit_purpose ?? "reveal",
+    },
+    auditPurpose: row.audit_purpose ?? "reveal",
     intentHash: row.intent_hash,
     status: row.status as CredentialFetchApprovalStatus,
     failureCode: row.failure_code,

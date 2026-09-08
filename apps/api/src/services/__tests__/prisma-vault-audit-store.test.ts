@@ -26,12 +26,13 @@ interface Fake {
   created: CreatedRow[];
   countCalls: CountCall[];
   countResult: number;
+  findRows: Array<CreatedRow & { emitted_at: Date }>;
 }
 
 function fakePrisma(): Fake {
   const created: CreatedRow[] = [];
   const countCalls: CountCall[] = [];
-  const state = { countResult: 0 };
+  const state = { countResult: 0, findRows: [] as Array<CreatedRow & { emitted_at: Date }> };
   const vaultAuditEvent = {
     async create(args: { data: Record<string, unknown> }) {
       const d = args.data;
@@ -49,7 +50,7 @@ function fakePrisma(): Fake {
       return state.countResult;
     },
     async findMany() {
-      return [];
+      return state.findRows;
     },
   };
   const prisma = { vaultAuditEvent } as unknown as ApiPrismaClient;
@@ -62,6 +63,12 @@ function fakePrisma(): Fake {
     },
     set countResult(n: number) {
       state.countResult = n;
+    },
+    get findRows() {
+      return state.findRows;
+    },
+    set findRows(rows: Array<CreatedRow & { emitted_at: Date }>) {
+      state.findRows = rows;
     },
   } as Fake;
 }
@@ -80,6 +87,12 @@ describe("PrismaVaultAuditStore", () => {
         reference: "vault://acct/sub/abc",
         requester: "user",
         purpose: "user:read",
+        attribution: {
+          task_id: "task-audit-store",
+          agent_identity: "web-session:abc",
+          invocation_id: "invoke-audit-store",
+          purpose: "user:read",
+        },
         signing_device_id: "01HDEVICE",
         outcome: "success",
       },
@@ -93,6 +106,12 @@ describe("PrismaVaultAuditStore", () => {
     expect(row.payload).toMatchObject({
       reference: "vault://acct/sub/abc",
       outcome: "success",
+      purpose: "user:read",
+      attribution: {
+        task_id: "task-audit-store",
+        agent_identity: "web-session:abc",
+        invocation_id: "invoke-audit-store",
+      },
     });
     // ULID: 26 chars, Crockford base32.
     expect(row.id).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
@@ -119,6 +138,40 @@ describe("PrismaVaultAuditStore", () => {
       "vault.credential_rotated",
       "vault.credential_deleted",
     ]);
+    for (const row of fake.created) {
+      expect(row.payload).toMatchObject({
+        purpose: row.type.replace(/^vault\./, ""),
+        attribution: {
+          task_id: row.type.replace(/^vault\./, ""),
+          agent_identity: "system",
+          invocation_id: row.id,
+        },
+      });
+    }
+  });
+
+  it("surfaces deterministic attribution for rows written before provenance existed", async () => {
+    const fake = fakePrisma();
+    fake.findRows = [
+      {
+        id: "01HLEGACYAAAAAAAAAAAAAAAAAA",
+        account_id: ACCOUNT,
+        type: VAULT_AUDIT_TYPES.deleted,
+        payload: { reference: "vault://acct/legacy", requester: "user" },
+        emitted_at: new Date("2026-01-01T00:00:00.000Z"),
+      },
+    ];
+
+    const [row] = await new PrismaVaultAuditStore(fake.prisma).list(ACCOUNT);
+    expect(row?.payload).toMatchObject({
+      purpose: "credential_deleted",
+      attribution: {
+        task_id: "credential_deleted",
+        agent_identity: "user",
+        invocation_id: "01HLEGACYAAAAAAAAAAAAAAAAAA",
+        purpose: "credential_deleted",
+      },
+    });
   });
 
   it("countRecentRetrievals() filters by account + retrieved type + emitted_at window", async () => {

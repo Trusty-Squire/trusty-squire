@@ -12,6 +12,7 @@ import type {
   VaultAuditRecord,
   VaultAuditStore,
 } from "./types.js";
+import { attributedVaultAuditPayload } from "./types.js";
 import { CredentialSlotConflictError } from "./types.js";
 
 const AUDIT_LIST_MAX = 200;
@@ -207,12 +208,13 @@ export class InMemoryVaultAuditStore implements VaultAuditStore {
   constructor(private readonly now: () => Date = () => new Date()) {}
 
   async record(event: VaultAuditEventInput): Promise<void> {
+    const id = ulid();
     this.events.push({
-      id: ulid(),
+      id,
       emitted_at: this.now(),
       account_id: event.account_id,
       type: event.type,
-      payload: clonePayload(event.payload),
+      payload: clonePayload(attributedVaultAuditPayload(event.payload, event.type, id)),
     });
   }
 

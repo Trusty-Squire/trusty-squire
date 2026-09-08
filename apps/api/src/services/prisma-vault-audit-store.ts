@@ -13,7 +13,7 @@ import type {
   VaultAuditStore,
   VaultAuditType,
 } from "@trusty-squire/vault";
-import { VAULT_AUDIT_TYPES } from "@trusty-squire/vault";
+import { VAULT_AUDIT_TYPES, attributedVaultAuditPayload } from "@trusty-squire/vault";
 import type { ApiPrismaClient } from "./api-prisma-client.js";
 
 const AUDIT_LIST_MAX = 200;
@@ -22,15 +22,19 @@ export class PrismaVaultAuditStore implements VaultAuditStore {
   constructor(private readonly prisma: ApiPrismaClient) {}
 
   async record(event: VaultAuditEventInput): Promise<void> {
+    const id = ulid();
     await this.prisma.vaultAuditEvent.create({
       data: {
-        id: ulid(),
+        id,
         account_id: event.account_id,
         type: event.type,
         // Cast through Record<string, unknown> so Prisma's Json column
         // accepts the structural payload without complaining about
         // the optional-field surface area.
-        payload: event.payload as unknown as Record<string, unknown>,
+        payload: attributedVaultAuditPayload(event.payload, event.type, id) as unknown as Record<
+          string,
+          unknown
+        >,
       },
     });
   }
@@ -65,7 +69,11 @@ export class PrismaVaultAuditStore implements VaultAuditStore {
       id: row.id,
       account_id: row.account_id,
       type: row.type as VaultAuditType,
-      payload: (row.payload ?? {}) as unknown as VaultAuditPayload,
+      payload: attributedVaultAuditPayload(
+        (row.payload ?? {}) as unknown as VaultAuditPayload,
+        row.type as VaultAuditType,
+        row.id,
+      ),
       emitted_at: row.emitted_at,
     }));
   }
@@ -79,7 +87,11 @@ export class PrismaVaultAuditStore implements VaultAuditStore {
       id: row.id,
       account_id: row.account_id,
       type: row.type as VaultAuditType,
-      payload: (row.payload ?? {}) as unknown as VaultAuditPayload,
+      payload: attributedVaultAuditPayload(
+        (row.payload ?? {}) as unknown as VaultAuditPayload,
+        row.type as VaultAuditType,
+        row.id,
+      ),
       emitted_at: row.emitted_at,
     }));
   }

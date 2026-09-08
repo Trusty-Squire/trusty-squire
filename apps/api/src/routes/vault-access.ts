@@ -18,6 +18,7 @@ import { AllowlistViolationError, CredentialNotFoundError } from "@trusty-squire
 import type { ApiDeps } from "../services/deps.js";
 import { HttpProxyExecutor, ProxyError } from "../services/http-proxy.js";
 import { resolveCredentialForAccount } from "../services/credential-resolution.js";
+import { requestAuditAttribution } from "../services/vault-audit-attribution.js";
 
 const useBody = z
   .object({
@@ -229,12 +230,17 @@ export const registerVaultAccessRoute: FastifyPluginAsync<{
       ...(data.http.query !== undefined ? { query: data.http.query } : {}),
     };
 
+    const purpose = req.headers["x-squire-purpose"]?.toString().trim() || "use_credential";
     try {
       const response = await opts.deps.vault.proxy(
         selected.reference,
         auth.account_id,
         http,
         (input) => executor.execute(input),
+        {
+          purpose,
+          attribution: requestAuditAttribution(req, "use_credential", purpose),
+        },
       );
       return reply.code(200).send({ response });
     } catch (err) {

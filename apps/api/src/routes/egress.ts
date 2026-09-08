@@ -474,6 +474,17 @@ export const registerEgressRoutes: FastifyPluginAsync<{
             };
           },
           (input) => executor.execute(input),
+          {
+            purpose: "egress_proxy",
+            grant_id: grant.id,
+            attribution: {
+              task_id: `egress-grant:${grant.id}`,
+              agent_identity: "egress-grant",
+              invocation_id: grant.id,
+              grant_id: grant.id,
+              purpose: "egress_proxy",
+            },
+          },
         );
         reply.code(response.status).send(response.body);
       } catch (err) {

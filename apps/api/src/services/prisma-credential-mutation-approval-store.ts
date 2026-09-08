@@ -26,6 +26,10 @@ export class PrismaCredentialMutationApprovalStore implements CredentialMutation
         nonce: input.nonce,
         agent: input.agent,
         requester_kind: input.requesterKind,
+        audit_task_id: input.auditAttribution?.task_id ?? `credential.${input.operation}`,
+        audit_agent_identity: input.auditAttribution?.agent_identity ?? input.agent,
+        audit_invocation_id: input.auditAttribution?.invocation_id,
+        audit_purpose: input.auditPurpose ?? `credential.${input.operation}`,
         intent_hash: input.intentHash,
         status: "pending",
         expires_at: input.expiresAt,
@@ -73,7 +77,8 @@ export class PrismaCredentialMutationApprovalStore implements CredentialMutation
         const locked = await tx.$queryRaw<CredentialMutationApprovalRow[]>`
           SELECT id, account_id, operation, credential_reference, credential_service,
                  credential_label, before_metadata, after_metadata, nonce, agent,
-                 requester_kind, intent_hash, status, failure_code, mandate_id, created_at,
+                 requester_kind, audit_task_id, audit_agent_identity, audit_invocation_id,
+                 audit_purpose, intent_hash, status, failure_code, mandate_id, created_at,
                  expires_at, executed_at
           FROM credential_mutation_approvals
           WHERE id = ${id}
@@ -185,6 +190,10 @@ interface CredentialMutationApprovalRow {
   nonce: string;
   agent: string;
   requester_kind: string;
+  audit_task_id: string | null;
+  audit_agent_identity: string | null;
+  audit_invocation_id: string | null;
+  audit_purpose: string | null;
   intent_hash: string;
   status: string;
   failure_code: string | null;
@@ -311,6 +320,10 @@ function toRecord(row: {
   nonce: string;
   agent: string;
   requester_kind: string;
+  audit_task_id: string | null;
+  audit_agent_identity: string | null;
+  audit_invocation_id: string | null;
+  audit_purpose: string | null;
   intent_hash: string;
   status: string;
   failure_code: string | null;
@@ -340,6 +353,13 @@ function toRecord(row: {
     nonce: row.nonce,
     agent: row.agent,
     requesterKind: row.requester_kind,
+    auditAttribution: {
+      task_id: row.audit_task_id ?? `credential.${row.operation}`,
+      agent_identity: row.audit_agent_identity ?? row.agent,
+      invocation_id: row.audit_invocation_id ?? row.id,
+      purpose: row.audit_purpose ?? `credential.${row.operation}`,
+    },
+    auditPurpose: row.audit_purpose ?? `credential.${row.operation}`,
     intentHash: row.intent_hash,
     status: row.status,
     failureCode: row.failure_code,
