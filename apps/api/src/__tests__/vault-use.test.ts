@@ -16,8 +16,6 @@ import { buildServer } from "../server.js";
 import { HttpProxyExecutor } from "../services/http-proxy.js";
 
 const SESSION_SECRET = "dev-test-secret-do-not-use-anywhere-else";
-const CUSTOMER_ID = "ts-test";
-
 interface Harness {
   server: FastifyInstance;
   deps: ApiDeps;
@@ -247,8 +245,6 @@ describe("POST /v1/vault/use", () => {
     const cookie = await webCookie(h.deps, account.id);
     const token = await agentToken(h.deps, account.id);
     const reference = await storeLoginCred(h, cookie, "Example", ["app.example.com"]);
-    const keys = fillKeyPair();
-
     const res = await h.server.inject({
       method: "POST",
       url: "/v1/vault/use",

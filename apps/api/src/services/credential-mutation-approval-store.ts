@@ -241,7 +241,9 @@ function metadataAfterEdit(
   current: Record<string, unknown>,
   after: CredentialMutationMetadata,
 ): Record<string, unknown> {
-  const { auth_strategy: _authStrategy, login_hosts: _loginHosts, ...preserved } = current;
+  const preserved = { ...current };
+  delete preserved.auth_strategy;
+  delete preserved.login_hosts;
   return {
     ...preserved,
     login_hosts: after.login_hosts,

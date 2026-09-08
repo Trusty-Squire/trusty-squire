@@ -235,8 +235,11 @@ export class OperatorBroker implements BrokerTransportPort {
           observation = await withBrokerAdmission(
             { sessionId: id, reserve },
             async () =>
-              await withBrokerAuditContext(pinnedApi, tool.name, requestId, async () =>
-                await tool.handler(args, pinnedApi),
+              await withBrokerAuditContext(
+                pinnedApi,
+                tool.name,
+                requestId,
+                async () => await tool.handler(args, pinnedApi),
               ),
           );
           internalId = String((observation as { session_id: string }).session_id);
@@ -272,8 +275,11 @@ export class OperatorBroker implements BrokerTransportPort {
                 throw new BrokerRefusal("unknown_tool", "Unknown operator command");
               const translated = { ...commandArgs, session_id: internalId };
               const execute = async () =>
-                await withBrokerAuditContext(pinnedApi, name, commandId, async () =>
-                  await command.handler(translated, pinnedApi),
+                await withBrokerAuditContext(
+                  pinnedApi,
+                  name,
+                  commandId,
+                  async () => await command.handler(translated, pinnedApi),
                 );
               const mutating = brokerCommandMutates(name, commandArgs);
               const commandDispatch = dispatchDetail(

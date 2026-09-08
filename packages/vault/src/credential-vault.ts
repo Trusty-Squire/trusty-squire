@@ -126,7 +126,7 @@ export const VAULT_REVEAL_PURPOSE = "reveal";
 export const DEFAULT_LABEL = "default";
 export const MAX_CREDENTIAL_LABEL_LENGTH = 60;
 
-function fallbackProxyAttribution(reference: string): {
+function fallbackProxyAttribution(): {
   purpose: string;
   attribution: VaultAuditAttribution;
   grant_id?: string;
@@ -778,7 +778,7 @@ export class CredentialVault implements VaultClient {
       purpose: string;
       attribution: VaultAuditAttribution;
       grant_id?: string;
-    } = fallbackProxyAttribution(reference),
+    } = fallbackProxyAttribution(),
   ): Promise<ProxyResponse> {
     const record = await this.deps.store.findActive(reference);
     if (record === null || record.account_id !== accountId) {
@@ -796,7 +796,7 @@ export class CredentialVault implements VaultClient {
       purpose: string;
       attribution: VaultAuditAttribution;
       grant_id?: string;
-    } = fallbackProxyAttribution(record.reference),
+    } = fallbackProxyAttribution(),
   ): Promise<ProxyResponse> {
     const current = await this.deps.store.findActive(record.reference);
     if (current === null || current.account_id !== accountId) {

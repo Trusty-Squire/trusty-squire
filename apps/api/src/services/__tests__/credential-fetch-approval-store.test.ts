@@ -51,9 +51,7 @@ describe("InMemoryCredentialFetchApprovalStore", () => {
     const id = await store.create("acct_1", input());
     expect(await store.approve(id, "mandate_1")).toBe("approved");
 
-    const outcomes = await Promise.all(
-      Array.from({ length: 8 }, () => store.claim(id, "acct_1")),
-    );
+    const outcomes = await Promise.all(Array.from({ length: 8 }, () => store.claim(id, "acct_1")));
     expect(outcomes.filter((outcome) => outcome.kind === "claimed")).toHaveLength(1);
     expect(outcomes.filter((outcome) => outcome.kind === "already_consumed")).toHaveLength(7);
   });
@@ -150,10 +148,7 @@ describe("PrismaCredentialFetchApprovalStore", () => {
         async findFirst() {
           return row;
         },
-        async updateMany(args: {
-          where: Record<string, unknown>;
-          data: Record<string, unknown>;
-        }) {
+        async updateMany(args: { where: Record<string, unknown>; data: Record<string, unknown> }) {
           updates.push(args);
           // Understands the two Prisma operators the store actually sends:
           // `{ gt | lte }` on expires_at and `{ in }` on status.

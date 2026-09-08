@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z, type Tool } from "../../tools/index.js";
+import type { ApiClient } from "../../api-client.js";
 import type { SessionGuard } from "../../session-guard.js";
 
 const state = vi.hoisted(() => ({
@@ -142,7 +143,7 @@ it("attributes broker proxy calls to their originating operator commands", async
     },
     pendingThreeDs: null,
   });
-  const proxy = async (api: import("../../api-client.js").ApiClient | null) => {
+  const proxy = async (api: ApiClient | null) => {
     if (api === null) throw new Error("Missing broker API client");
     await api.useCredential({
       reference: "vault://account/service/credential",
