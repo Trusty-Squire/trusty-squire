@@ -3174,11 +3174,6 @@ export class BrowserController {
     return this.pageDriver.mainDocumentIdentity(page);
   }
 
-  /** Capture once at the action boundary; never switch tabs during an operation. */
-  resolveOperationPage(sourcePage?: Page): Page | undefined {
-    return sourcePage;
-  }
-
   async withOperationPage<T>(page: Page | undefined, operation: () => Promise<T>): Promise<T> {
     if (page === undefined || page === this.page) return await operation();
     const previousPage = this.page;

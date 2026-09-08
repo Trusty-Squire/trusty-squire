@@ -1132,8 +1132,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
     async (kind) => {
       const context = await browser.newContext();
       const product = await context.newPage();
-      const productUrl = "https://mail.google.com/login";
-      const expectedReturnUrl = "https://console.product.test/projects";
+      const productUrl = "https://mail.google.com/checkout";
+      const expectedReturnUrl = "https://console.product.test/checkout";
       const controls = `<form onsubmit="event.preventDefault(); document.body.dataset.submits = String(+(document.body.dataset.submits || 0) + 1)">
         <label>Project name<input id="name"></label><button>Create</button></form>
         <label>Phone country
@@ -1156,6 +1156,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         </label>
         <label>Replay name<input id="replay-name" name="full_name" data-testid="replay-name"></label>
         <input type="hidden" name="__CHECKOUT_FIELD__">
+        <div>Total USD $__TOTAL__</div>
         <div>API Key <span id="credential">••••</span><button id="reveal" onclick="document.querySelector('#credential').textContent = window.credentialValue">Show API key</button></div>
         <button id="add" onclick="document.querySelector('#line')?.removeAttribute('hidden')">Add to Cart</button>
         <div id="line" data-testid="line-item" hidden>
@@ -1186,6 +1187,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
             `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
           )})'>Continue</button>${controls
             .replaceAll("__CHECKOUT_FIELD__", "product_checkout_marker")
+            .replaceAll("__TOTAL__", "99.99")
             .replaceAll("__CREDENTIAL__", "sk_product_abcdefgh1234567890")}`,
         }),
       );
@@ -1200,6 +1202,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
           contentType: "text/html",
           body: `<main>Projects</main><button>New project</button>${controls
             .replaceAll("__CHECKOUT_FIELD__", "source_checkout_marker")
+            .replaceAll("__TOTAL__", "12.34")
             .replaceAll("__CREDENTIAL__", "sk_source_abcdefgh1234567890")}`,
         }),
       );
@@ -1226,6 +1229,11 @@ describe("BrowserController OAuth popup lifecycle", () => {
         expect(source.url()).toBe(expectedReturnUrl);
         const reobserved = await observe(sessionId);
         expect(reobserved.url).toBe(expectedReturnUrl);
+        expect(reobserved.checkout_state?.payable_total).toEqual({
+          amount_cents: 1234,
+          currency: "USD",
+        });
+        expect(await product.locator("body").innerText()).toContain("Total USD $99.99");
         const screenshot = await captureScreenshot(sessionId);
         expect(screenshot.url).toBe(expectedReturnUrl);
         const postcondition = await verifyPostcondition(sessionId, {
@@ -1256,7 +1264,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         expect(await source.locator("#name").inputValue()).toBe("Popup project");
         expect(await product.locator("#name").inputValue()).toBe("");
         expect(
-          await controller.focusedElementLabels(controller.resolveOperationPage(source)),
+          await controller.focusedElementLabels(source),
         ).toContain("Project name");
         expect(await controller.focusedElementLabels(product)).not.toContain("Project name");
         const pressed = await act(sessionId, { kind: "press", key: "Enter" });

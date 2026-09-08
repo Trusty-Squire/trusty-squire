@@ -1308,10 +1308,10 @@ function oauthCompletionSourcePage(session: object): OAuthCompletionEvidence["pa
 }
 
 function operationPageForSession(session: Session): Page | undefined {
-  const sourcePage =
+  return (
     oauthCompletionSourcePage(session) ??
-    (session.compactV2Active ? compactV2SourcePage(session) : undefined);
-  return session.browser.resolveOperationPage?.(sourcePage) ?? sourcePage;
+    (session.compactV2Active ? compactV2SourcePage(session) : undefined)
+  );
 }
 
 async function withOperationPage<T>(session: Session, operation: () => Promise<T>): Promise<T> {
@@ -4630,8 +4630,7 @@ async function observeSession(
     const normalizedText = normalizedFull.slice(0, 4000);
     const guidance = provisionPerceptionGuidance(normalizedText);
     const url = sourcePage?.url() ?? session.browser.currentUrl();
-    const liveCheckout =
-      sourcePage === undefined ? await captureCartCheckoutForFillCardFallback(session, url) : null;
+    const liveCheckout = await captureCartCheckoutForFillCardFallback(session, url, sourcePage);
     const checkoutState = checkoutStateForObservation(
       session,
       url,
