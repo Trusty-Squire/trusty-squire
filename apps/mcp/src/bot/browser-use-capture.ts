@@ -498,7 +498,7 @@ export async function captureBrowserUseDOM(
       try {
         return new URL(value, baseUris.get(frame!) ?? frame?.url()).href;
       } catch {
-        return null;
+        return value;
       }
     };
     const effectiveSubmissionDestination = (
