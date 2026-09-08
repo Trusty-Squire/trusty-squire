@@ -11,6 +11,7 @@ interface DispatchRecord {
   at: number;
   agentId?: string;
   forwarderId?: string;
+  callerRequestHash?: string;
   operation?: string;
   inputHash?: string;
   outcome?: ReconciledDispatchOutcome;
@@ -78,6 +79,7 @@ export class DispatchJournal {
           !["entered", "outcome", "acknowledged", "settled"].includes(record.phase) ||
           (record.agentId !== undefined && typeof record.agentId !== "string") ||
           (record.forwarderId !== undefined && typeof record.forwarderId !== "string") ||
+          (record.callerRequestHash !== undefined && typeof record.callerRequestHash !== "string") ||
           (record.operation !== undefined && typeof record.operation !== "string") ||
           (record.inputHash !== undefined && typeof record.inputHash !== "string") ||
           (record.outcome !== undefined && !validOutcome(record.outcome))
@@ -127,16 +129,6 @@ export class DispatchJournal {
     );
   }
 
-  async pendingOutcomes(forwarderId: string): Promise<PendingDispatchOutcome[]> {
-    return [...(await this.states()).values()]
-      .filter((record) => record.phase === "outcome" && record.forwarderId === forwarderId)
-      .map((record) => ({
-        sessionId: record.sessionId,
-        requestId: record.requestId,
-        operation: record.operation ?? "operate mutation",
-      }));
-  }
-
   async hasCompleted(forwarderId: string, requestId: string): Promise<boolean> {
     return (await this.completedOutcome(forwarderId, requestId)) !== undefined;
   }
@@ -152,6 +144,30 @@ export class DispatchJournal {
         record.requestId === requestId &&
         (expected === undefined ||
           (record.operation === expected.operation && record.inputHash === expected.inputHash)) &&
+        record.outcome !== undefined &&
+        (record.phase === "outcome" || record.phase === "acknowledged"),
+    );
+    return record === undefined
+      ? undefined
+      : {
+          sessionId: record.sessionId,
+          requestId: record.requestId,
+          operation: record.operation ?? "operate mutation",
+          outcome: record.outcome!,
+        };
+  }
+
+  async recoveryOutcome(
+    forwarderId: string,
+    callerRequestHash: string,
+    expected: Pick<DispatchRecord, "operation" | "inputHash">,
+  ): Promise<CompletedDispatchOutcome | undefined> {
+    const record = [...(await this.states()).values()].find(
+      (record) =>
+        record.forwarderId === forwarderId &&
+        record.callerRequestHash === callerRequestHash &&
+        record.operation === expected.operation &&
+        record.inputHash === expected.inputHash &&
         record.outcome !== undefined &&
         (record.phase === "outcome" || record.phase === "acknowledged"),
     );
@@ -192,7 +208,7 @@ export class DispatchJournal {
     phase: DispatchPhase,
     detail?: Pick<
       DispatchRecord,
-      "agentId" | "forwarderId" | "operation" | "inputHash" | "outcome"
+      "agentId" | "forwarderId" | "callerRequestHash" | "operation" | "inputHash" | "outcome"
     >,
   ): Promise<void> {
     const operation = this.tail.then(async () => {

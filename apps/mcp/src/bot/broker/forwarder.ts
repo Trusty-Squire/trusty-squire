@@ -15,6 +15,7 @@ export class OperatorForwarder {
   private readonly sessions = new Map<string, TabCapability>();
   private readonly lineageCredential: string;
   private readonly idempotencyNamespace: string;
+  private readonly invocationNamespace = randomUUID();
   constructor(
     private readonly path: string,
     private readonly guard: SessionGuard,
@@ -46,33 +47,38 @@ export class OperatorForwarder {
     }
     return this.connection;
   }
-  private async reconcile(client: BrokerClient, requestId: string): Promise<void> {
-    const result = (await client.call("reconcile", {})) as {
-      outcomes?: Array<{ requestId: string; operation: string }>;
-    };
-    const outcomes = result.outcomes ?? [];
-    if (outcomes.length === 0) return;
-    if (outcomes.some((outcome) => outcome.requestId === requestId)) return;
-    throw new BrokerRefusal(
-      "outcome_unknown",
-      `Prior ${outcomes.map((outcome) => outcome.operation).join(", ")} completed without a delivered result; do not replay it`,
-    );
-  }
   private async reclaim(client: BrokerClient): Promise<void> {
     const reply = (await client.call("reclaim", {})) as { capabilities?: TabCapability[] };
     for (const capability of reply.capabilities ?? []) this.sessions.set(capability.sessionId, capability);
   }
-  private idempotencyKey(requestId: string): string {
-    return `${this.idempotencyNamespace}:${createHash("sha256")
-      .update(requestId)
-      .digest("hex")}`;
+  private callerRequestHash(requestId: string): string {
+    return createHash("sha256").update(requestId).digest("hex");
+  }
+  private idempotencyKey(callerRequestHash: string): string {
+    return `${this.idempotencyNamespace}:${this.invocationNamespace}:${callerRequestHash}`;
+  }
+  private async recover(
+    client: BrokerClient,
+    callerRequestHash: string,
+    name: string,
+    args: Record<string, unknown>,
+    capability: TabCapability | undefined,
+  ): Promise<{ requestId: string; result: unknown } | undefined> {
+    const reply = (await client.call("recover", {
+      callerRequestHash,
+      name,
+      args,
+      ...(capability === undefined ? {} : { capability }),
+    })) as { requestId?: unknown; result?: unknown } | null;
+    return typeof reply?.requestId === "string" ? { requestId: reply.requestId, result: reply.result } : undefined;
   }
   async invoke(
     name: string,
     args: Record<string, unknown>,
     requestId: string = randomUUID(),
   ): Promise<unknown> {
-    const idempotencyKey = this.idempotencyKey(requestId);
+    const callerRequestHash = this.callerRequestHash(requestId);
+    const idempotencyKey = this.idempotencyKey(callerRequestHash);
     const starting =
       name === "operate_start" || (name === "operate_recipe_run" && args.session_id === undefined);
     if (this.connection !== undefined) {
@@ -85,7 +91,6 @@ export class OperatorForwarder {
     }
     const client = await this.connect();
     await this.reclaim(client);
-    await this.reconcile(client, idempotencyKey);
     if (!starting && args.session_id === undefined && this.sessions.size === 1)
       args = { ...args, session_id: this.sessions.keys().next().value };
     const id = typeof args.session_id === "string" ? args.session_id : undefined;
@@ -96,6 +101,12 @@ export class OperatorForwarder {
       capability === undefined
     )
       throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
+    const recovered = await this.recover(client, callerRequestHash, name, args, capability);
+    if (recovered !== undefined) {
+      await client.acknowledge(recovered.requestId);
+      if (name === "operate_finish" && id !== undefined) this.sessions.delete(id);
+      return recovered.result;
+    }
     const reply = (await client.call(
       "tool",
       {

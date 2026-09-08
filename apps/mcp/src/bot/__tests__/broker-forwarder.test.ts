@@ -20,7 +20,7 @@ describe("MCP broker forwarding", () => {
     const broker = await listenBroker(path, {
       authenticate: async () => ({ accountId: "account", agentId: "agent" }),
       call: async (_principal, method) => {
-        if (method === "reconcile") return { outcomes: [] };
+        if (method === "recover") return null;
         if (method === "acknowledge") {
           acknowledged = true;
           await persisted;
@@ -62,6 +62,13 @@ describe("MCP broker forwarding", () => {
     const root = await mkdtemp(join(tmpdir(), "ts-forward-reconcile-"));
     const path = join(root, "b.sock");
     let paymentRequest = "";
+    const capability = {
+      cellId: "cell",
+      browserEpoch: "epoch",
+      sessionId: "session",
+      targetId: "target",
+      leaseGeneration: "one",
+    };
     let paymentDispatches = 0;
     let outcomeRecorded = false;
     let releasePayment!: () => void;
@@ -80,48 +87,48 @@ describe("MCP broker forwarding", () => {
     const broker = await listenBroker(path, {
       authenticate: async () => ({ accountId: "account", agentId: "agent" }),
       call: async (_principal, method, params, requestId) => {
-        if (method === "reconcile")
-          return {
-            outcomes: outcomeRecorded
-              ? [{ sessionId: "session", requestId: paymentRequest, operation: "operate_pay" }]
-              : [],
-          };
+        if (method === "reclaim") return { capabilities: [capability] };
+        if (method === "recover")
+          return outcomeRecorded && params.name === "operate_pay"
+            ? {
+                requestId: paymentRequest,
+                result: {
+                  reconciliation: {
+                    request_id: paymentRequest,
+                    operation: "operate_pay",
+                    status: "payment_3ds_required",
+                    next: { tool: "operate_payment_status", wait_seconds: 0 },
+                  },
+                },
+              }
+            : null;
         if (method === "acknowledge") {
           acknowledgements.push(String(params.requestId));
           return {};
         }
         if (params.name === "operate_start")
           return {
-            capability: {
-              cellId: "cell",
-              browserEpoch: "epoch",
-              sessionId: "session",
-              targetId: "target",
-              leaseGeneration: "one",
-            },
+            capability,
             result: { session_id: "session" },
           };
         if (params.name === "operate_pay") {
-          if (outcomeRecorded) {
-            if (requestId !== paymentRequest)
-              throw new Error("payment replay used a new request key");
-            return {
-              result: {
-                reconciliation: {
-                  request_id: paymentRequest,
-                  operation: "operate_pay",
-                  outcome: "completed",
-                },
-              },
-            };
-          }
           paymentRequest = requestId;
           paymentDispatches++;
           paymentEntered();
           await paymentGate;
           outcomeRecorded = true;
           paymentRecorded();
-          return { result: { charged: true } };
+          return {
+            result: {
+              status: "payment_3ds_required",
+              next: { tool: "operate_payment_status", wait_seconds: 0 },
+            },
+          };
+        }
+        if (params.name === "operate_payment_status") {
+          if (requestId === paymentRequest)
+            throw new Error("restarted status reused the payment request key");
+          return { result: { status: "completed" } };
         }
         throw new Error(`Unexpected ${method}`);
       },
@@ -138,6 +145,7 @@ describe("MCP broker forwarding", () => {
       boundAccountId: () => "account",
     };
     const forwarder = new OperatorForwarder(path, guard, credential("a"));
+    const restarted = new OperatorForwarder(path, guard, credential("a"));
     try {
       await forwarder.invoke("operate_start", {}, "start-request");
       await expect.poll(() => acknowledgements).toHaveLength(1);
@@ -149,18 +157,23 @@ describe("MCP broker forwarding", () => {
       await recorded;
       await expect(lost).rejects.toThrow("connection lost");
       await expect(
-        forwarder.invoke("operate_pay", { session_id: "session" }, "7"),
+        restarted.invoke("operate_pay", { session_id: "session" }, "7"),
       ).resolves.toEqual({
         reconciliation: {
           request_id: paymentRequest,
           operation: "operate_pay",
-          outcome: "completed",
+          status: "payment_3ds_required",
+          next: { tool: "operate_payment_status", wait_seconds: 0 },
         },
       });
+      await expect(
+        restarted.invoke("operate_payment_status", { session_id: "session" }, "7"),
+      ).resolves.toEqual({ status: "completed" });
       expect(paymentDispatches).toBe(1);
       await expect.poll(() => acknowledgements).toEqual([paymentRequest]);
     } finally {
       await forwarder.close();
+      await restarted.close();
       await broker.close();
       await rm(root, { recursive: true, force: true });
     }
@@ -174,7 +187,7 @@ describe("MCP broker forwarding", () => {
     const broker = await listenBroker(path, {
       authenticate: async () => ({ accountId: "account", agentId: "local-agent" }),
       call: async (_principal, method, _params, requestId) => {
-        if (method === "reconcile") return { outcomes: [] };
+        if (method === "recover") return null;
         if (method === "acknowledge") return {};
         if (requests.has(requestId))
           return {

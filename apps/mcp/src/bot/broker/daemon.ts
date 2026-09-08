@@ -83,8 +83,8 @@ export async function runBrokerDaemon(): Promise<void> {
   const listener = await listenBroker(path, {
     authenticate: async (token, agentId, lineageCredential) =>
       await operator.authenticate(token, agentId, lineageCredential),
-    connected: (principal) => {
-      operator.connected(principal);
+    connected: async (principal) => {
+      await operator.connected(principal);
       connected.add(principal.clientId);
       if (idleTimer !== undefined) clearTimeout(idleTimer);
     },
@@ -94,7 +94,7 @@ export async function runBrokerDaemon(): Promise<void> {
       if (idleTimer !== undefined) clearTimeout(idleTimer);
       const report = await guard.inspect();
       if (report.problem !== null) throw new Error(report.problem.message);
-      if (method === "reconcile") return await operator.reconcile(principal);
+      if (method === "recover") return await operator.recover(principal, params);
       if (method === "reclaim") return await operator.reclaim(principal);
       if (method === "acknowledge") {
         if (typeof params.requestId !== "string")
@@ -106,8 +106,7 @@ export async function runBrokerDaemon(): Promise<void> {
         (await journal.hasOutstanding(undefined, principal.forwarderId)) &&
         !(
           method === "tool" &&
-          ((await operator.canReconcile(principal, id, params)) ||
-            (await operator.canContinuePaymentStatus(principal, params)))
+          (await operator.canContinuePaymentStatus(principal, params))
         )
       )
         throw new BrokerRefusal(

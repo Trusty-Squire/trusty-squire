@@ -2,7 +2,6 @@ import { withBrokerAdmission } from "./admission-context.js";
 import { brokerBrowserCustody } from "./custody.js";
 import type {
   DispatchJournal,
-  PendingDispatchOutcome,
   ReconciledDispatchOutcome,
 } from "./dispatch-journal.js";
 import { timingSafeEqual, createHash } from "node:crypto";
@@ -62,6 +61,11 @@ function canonicalJson(value: unknown): string {
 
 function inputHash(input: unknown): string {
   return createHash("sha256").update(canonicalJson(input)).digest("hex");
+}
+
+function callerRequestHash(requestId: string): string | undefined {
+  const value = requestId.split(":").at(-1);
+  return value !== undefined && /^[a-f0-9]{64}$/.test(value) ? value : undefined;
 }
 
 export function reconciliationOutcome(
@@ -146,6 +150,7 @@ export class OperatorBroker implements BrokerTransportPort {
     const dispatch = {
       agentId: principal.agentId,
       forwarderId: principal.forwarderId ?? principal.agentId,
+      callerRequestHash: callerRequestHash(requestId),
       operation: tool.name,
       inputHash: inputHash({ name: tool.name, args, capability: input.capability }),
     };
@@ -232,6 +237,7 @@ export class OperatorBroker implements BrokerTransportPort {
               const commandDispatch = {
                 agentId: principal.agentId,
                 forwarderId: principal.forwarderId ?? principal.agentId,
+                callerRequestHash: callerRequestHash(commandId),
                 operation: name,
                 inputHash: inputHash({ name, args: commandArgs, capability }),
               };
@@ -327,27 +333,50 @@ export class OperatorBroker implements BrokerTransportPort {
     if (tool.name === "operate_finish") await this.authority.close(principal, capability);
     return { result };
   }
-  async reconcile(principal: BrokerPrincipal): Promise<{ outcomes: PendingDispatchOutcome[] }> {
-    return { outcomes: (await this.journal?.pendingOutcomes(principal.forwarderId ?? principal.agentId)) ?? [] };
+  async recover(
+    principal: BrokerPrincipal,
+    params: Record<string, unknown>,
+  ): Promise<
+    | {
+        requestId: string;
+        result: {
+          reconciliation: ReconciledDispatchOutcome & { request_id: string; operation: string };
+        };
+      }
+    | null
+  > {
+    const callerHash = params.callerRequestHash;
+    if (typeof callerHash !== "string" || !/^[a-f0-9]{64}$/.test(callerHash))
+      throw new BrokerRefusal("invalid_arguments", "Recovery requires its original caller request hash");
+    const { callerRequestHash: _callerRequestHash, ...toolParams } = params;
+    const input = callSchema.parse(toolParams);
+    const tool = findTool(input.name, this.tools);
+    if (tool === null || !tool.name.startsWith("operate_"))
+      throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
+    const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
+    const completed = await this.journal?.recoveryOutcome(
+      principal.forwarderId ?? principal.agentId,
+      callerHash,
+      {
+        operation: tool.name,
+        inputHash: inputHash({ name: tool.name, args, capability: input.capability }),
+      },
+    );
+    return completed === undefined
+      ? null
+      : {
+          requestId: completed.requestId,
+          result: {
+            reconciliation: {
+              request_id: completed.requestId,
+              operation: completed.operation,
+              ...completed.outcome,
+            },
+          },
+        };
   }
   async reclaim(principal: BrokerPrincipal): Promise<{ capabilities: TabCapability[] }> {
     return { capabilities: this.authority.reclaim(principal) };
-  }
-  async canReconcile(
-    principal: BrokerPrincipal,
-    requestId: string,
-    params: Record<string, unknown>,
-  ): Promise<boolean> {
-    const input = callSchema.parse(params);
-    const tool = findTool(input.name, this.tools);
-    if (tool === null || !tool.name.startsWith("operate_")) return false;
-    const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
-    return (
-      (await this.journal?.completedOutcome(principal.forwarderId ?? principal.agentId, requestId, {
-        operation: tool.name,
-        inputHash: inputHash({ name: tool.name, args, capability: input.capability }),
-      })) !== undefined
-    );
   }
   async acknowledge(principal: BrokerPrincipal, requestId: string): Promise<void> {
     if (await this.journal?.acknowledge(principal.forwarderId ?? principal.agentId, requestId))
