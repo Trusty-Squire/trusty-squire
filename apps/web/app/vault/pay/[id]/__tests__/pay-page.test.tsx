@@ -499,6 +499,7 @@ describe("pay page — single payment authorization", () => {
       expect(vouchflow.signPayload).toHaveBeenCalledWith({
         context: "purchase",
         payload: {
+          account_binding: "opaque-account-binding",
           approval_id: "appr_1",
           merchant: "CASETiFY",
           checkout_origin: "https://casetify.com",
