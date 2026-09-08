@@ -148,11 +148,15 @@ export default function PaymentApprovalPage() {
     try {
       applyCeremony(await fetchCeremony());
     } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        redirectToLogin();
+        return;
+      }
       setCardMetadataError(
         err instanceof Error ? err.message : "Failed to load the saved card details.",
       );
     }
-  }, [applyCeremony, fetchCeremony]);
+  }, [applyCeremony, fetchCeremony, redirectToLogin]);
 
   const bindCard = useCallback(
     async (cardId: string, cardMeta?: { label: string; last4: string | null }) => {

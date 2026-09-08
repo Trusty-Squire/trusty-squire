@@ -442,6 +442,7 @@ describe("operate_pay", () => {
     const auditBodies: unknown[] = [];
     const nonce = "fallback-nonce";
     const agent = "fallback-agent";
+    const accountBinding = "fallback-account-binding";
     const checkoutOrigin = "https://itch-style.synthetic.test";
     // What pay-operator's fallback constructs when the total can't be read:
     // merchant from the page hostname, amount/currency from the caller.
@@ -467,6 +468,7 @@ describe("operate_pay", () => {
             id: "approval_fallback",
             nonce,
             agent,
+            account_binding: accountBinding,
             expires_at: new Date(Date.now() + 60_000).toISOString(),
           },
           { status: 201 },
@@ -482,6 +484,7 @@ describe("operate_pay", () => {
           .update(Buffer.from(operatorPublicKey, "base64url"))
           .digest("base64url");
         const canonical = canonicalize({
+          account_binding: accountBinding,
           approval_id: "approval_fallback",
           merchant: FALLBACK_CHECKOUT.merchant,
           checkout_origin: FALLBACK_CHECKOUT.checkout_origin,
@@ -517,6 +520,7 @@ describe("operate_pay", () => {
           nonce,
           card_ref: "card_test",
           operator_pubkey: operatorPublicKey,
+          account_binding: accountBinding,
           jws,
           sealed_card,
           expires_at: new Date(Date.now() + 60_000).toISOString(),
@@ -1217,6 +1221,7 @@ async function buildApprovedMandate(params: {
   signCardRef: string;
   nonce: string;
   agent: string;
+  accountBinding: string;
   audience?: string;
   issuer?: string;
 }): Promise<{ jws: string; sealed_card: string }> {
@@ -1224,6 +1229,7 @@ async function buildApprovedMandate(params: {
     .update(Buffer.from(params.operatorPubkey, "base64url"))
     .digest("base64url");
   const canonical = canonicalize({
+    account_binding: params.accountBinding,
     approval_id: "appr_jit",
     merchant: JIT_CHECKOUT.merchant,
     checkout_origin: JIT_CHECKOUT.checkout_origin,
@@ -1284,6 +1290,7 @@ async function runJit(cfg: {
   const resolvedCardRefs: string[] = [];
   const nonce = "jit-nonce";
   const agent = "jit-agent";
+  const accountBinding = "jit-account-binding";
   let clock = 0;
   let summaryReads = 0;
   const serverExpiresAt = new Date(
@@ -1298,7 +1305,13 @@ async function runJit(cfg: {
     if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
       approvalBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       return Response.json(
-        { id: "appr_jit", nonce, agent, expires_at: serverExpiresAt },
+        {
+          id: "appr_jit",
+          nonce,
+          agent,
+          account_binding: accountBinding,
+          expires_at: serverExpiresAt,
+        },
         { status: 201 },
       );
     }
@@ -1316,6 +1329,7 @@ async function runJit(cfg: {
           signCardRef: cfg.signCardRef ?? cfg.boundCardRef,
           nonce,
           agent,
+          accountBinding,
         });
         return Response.json({
           id: "appr_jit",
@@ -1324,6 +1338,7 @@ async function runJit(cfg: {
           nonce,
           card_ref: state.card_ref,
           operator_pubkey: operatorPubkey,
+          account_binding: accountBinding,
           jws,
           sealed_card,
           expires_at: serverExpiresAt,
@@ -1336,6 +1351,7 @@ async function runJit(cfg: {
         nonce,
         card_ref: state.card_ref,
         operator_pubkey: operatorPubkey,
+        account_binding: accountBinding,
         jws: null,
         sealed_card: null,
         expires_at: serverExpiresAt,
@@ -1641,6 +1657,7 @@ async function runSplitFill(
   let cleanupFailureCalls = 0;
   const nonce = "split-nonce";
   const agent = "split-agent";
+  const accountBinding = "split-account-binding";
 
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -1654,6 +1671,7 @@ async function runSplitFill(
           id: "appr_split",
           nonce,
           agent,
+          account_binding: accountBinding,
           expires_at: new Date(Date.now() + 60_000).toISOString(),
         },
         { status: 201 },
@@ -1672,6 +1690,7 @@ async function runSplitFill(
         .update(Buffer.from(operatorPublicKey, "base64url"))
         .digest("base64url");
       const canonical = canonicalize({
+        account_binding: accountBinding,
         approval_id: "appr_split",
         merchant: approval.merchant,
         checkout_origin: approval.checkout_origin,
@@ -1710,6 +1729,7 @@ async function runSplitFill(
         nonce,
         card_ref: "card_split",
         operator_pubkey: operatorPublicKey,
+        account_binding: accountBinding,
         jws,
         sealed_card,
         expires_at: new Date(Date.now() + 60_000).toISOString(),
@@ -1997,6 +2017,7 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
   const filledCards: CheckoutCard[] = [];
   const nonce = "resume-nonce";
   const agent = "resume-agent";
+  const accountBinding = "resume-account-binding";
   const expiresAt = new Date(Date.now() + 600_000).toISOString();
 
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -2008,7 +2029,13 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
     if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
       approvalBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       return Response.json(
-        { id: "appr_resume", nonce, agent, expires_at: expiresAt },
+        {
+          id: "appr_resume",
+          nonce,
+          agent,
+          account_binding: accountBinding,
+          expires_at: expiresAt,
+        },
         { status: 201 },
       );
     }
@@ -2035,6 +2062,7 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
           nonce,
           card_ref: "card_resume",
           operator_pubkey: operatorPublicKey,
+          account_binding: accountBinding,
           jws: null,
           sealed_card: null,
           expires_at: expiresAt,
@@ -2044,6 +2072,7 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
         .update(Buffer.from(operatorPublicKey, "base64url"))
         .digest("base64url");
       const canonical = canonicalize({
+        account_binding: accountBinding,
         approval_id: "appr_resume",
         merchant: checkout.merchant,
         checkout_origin: checkout.checkout_origin,
@@ -2091,6 +2120,7 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
         nonce,
         card_ref: "card_resume",
         operator_pubkey: operatorPublicKey,
+        account_binding: accountBinding,
         jws,
         sealed_card: candidateState === "invalid_card" ? "invalid-sealed-card" : sealed_card,
         expires_at: expiresAt,

@@ -90,6 +90,7 @@ const OTHER_BOUND_CARD = {
 
 let bound = false;
 let cardListFailures = 0;
+let ceremonyUnauthorizedAfterBind = false;
 let failCardListAfterBind = false;
 let bindFailures = 0;
 let loseBindResponse = false;
@@ -147,6 +148,7 @@ function ceremonyBody() {
 beforeEach(() => {
   bound = false;
   cardListFailures = 0;
+  ceremonyUnauthorizedAfterBind = false;
   failCardListAfterBind = false;
   bindFailures = 0;
   loseBindResponse = false;
@@ -168,6 +170,9 @@ beforeEach(() => {
     if (path === "/v1/status") return Promise.resolve({ billing_enabled: false });
     if (path === "/v1/vault/e2e") return Promise.resolve(cardListOverride ?? [BOUND_CARD]);
     if (path === "/v1/pay/approvals/appr_1/ceremony") {
+      if (ceremonyUnauthorizedAfterBind && bound) {
+        return Promise.reject(new api.ApiError("web_session_required", 401));
+      }
       if (cardListFailures > 0) {
         cardListFailures -= 1;
         return Promise.reject(new Error("card unavailable"));
@@ -376,6 +381,19 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(
       api.apiPost.mock.calls.filter(([path]) => path === "/v1/pay/approvals/appr_1/bind-card"),
     ).toHaveLength(1);
+  });
+
+  it("sends an owner to login when the session expires after card binding", async () => {
+    ceremonyUnauthorizedAfterBind = true;
+    render(<PaymentApprovalPage />);
+    await waitFor(() => expect(screen.getByTestId("card-entry")).toBeTruthy());
+
+    await userEvent.setup().click(screen.getByTestId("card-entry"));
+
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/login?next=/vault/pay/appr_1"));
+    expect(api.apiPost).toHaveBeenCalledWith("/v1/pay/approvals/appr_1/bind-card", {
+      card_ref: "card_new",
+    });
   });
 
   it("retries binding the same saved card without reopening card entry", async () => {
