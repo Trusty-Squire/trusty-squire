@@ -16,11 +16,13 @@ import {
 } from "../browser.js";
 import {
   act,
+  cartAdd,
   finishProvisionSession,
   observe,
   parseElementsTable,
   startHarnessProvisionSession,
 } from "../provision-session.js";
+import { sessionForCall } from "../session/lifecycle.js";
 
 const PRODUCT_URL = `data:text/html,${encodeURIComponent(`
   <!doctype html>
@@ -1121,6 +1123,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     async (kind) => {
       const context = await browser.newContext();
       const product = await context.newPage();
+      const productUrl = "https://mail.google.com/login";
       const expectedReturnUrl = "https://console.product.test/projects";
       const controls = `<form onsubmit="event.preventDefault(); document.body.dataset.submits = String(+(document.body.dataset.submits || 0) + 1)">
         <label>Project name<input id="name"></label><button>Create</button></form>
@@ -1130,6 +1133,11 @@ describe("BrowserController OAuth popup lifecycle", () => {
             <option value="US">United States (+1)</option>
           </select>
         </label>
+        <button id="add" onclick="document.querySelector('#line')?.removeAttribute('hidden')">Add to Cart</button>
+        <div id="line" data-testid="line-item" hidden>
+          <a href="/products/popup" data-product-identity="popup-product">Popup product</a>
+          <span>Quantity 1</span><span data-options-hash="popup-options"></span>
+        </div>
         <div style="height:4000px"></div>
         <script>
           document.body.dataset.enters = '0';
@@ -1139,7 +1147,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
           });
           window.addEventListener('scroll', () => document.body.dataset.scrolls = String(+document.body.dataset.scrolls + 1));
         </script>`;
-      await context.route("https://product.test/**", (route) =>
+      await context.route("https://mail.google.com/**", (route) =>
         route.fulfill({
           contentType: "text/html",
           body: `<button id="oauth" onclick='window.open(${JSON.stringify(
@@ -1159,13 +1167,13 @@ describe("BrowserController OAuth popup lifecycle", () => {
           body: `<main>Projects</main><button>New project</button>${controls}`,
         }),
       );
-      await product.goto("https://product.test/login");
+      await product.goto(productUrl);
       const controller = BrowserController.fromHarnessPage(product);
       let sessionId: string | undefined;
       try {
         const started = await startHarnessProvisionSession({
           browser: controller,
-          serviceUrl: "https://product.test/login",
+          serviceUrl: productUrl,
         });
         sessionId = started.session_id;
         const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
@@ -1207,11 +1215,18 @@ describe("BrowserController OAuth popup lifecycle", () => {
         expect(countrySet.url).toBe(expectedReturnUrl);
         expect(await source.locator("#phone-country").inputValue()).toBe("US");
         expect(await product.locator("#phone-country").inputValue()).toBe("CA");
+        const cart = await cartAdd(sessionId, "popup-product", "popup-options", "popup-cart");
+        expect(cart).toMatchObject({ status: "added", cart_delta: "+1", postcondition: { quantity: 1 } });
+        expect(await source.locator("#line").isVisible()).toBe(true);
+        expect(await product.locator("#line").isHidden()).toBe(true);
+        expect(sessionForCall(sessionId)?.actionTrace.some((entry) => entry.action.kind === "type")).toBe(
+          true,
+        );
         const destination = "https://console.product.test/settings";
         const navigated = await act(sessionId, { kind: "goto", url: destination });
         expect(navigated.url).toBe(destination);
         expect(source.url()).toBe(destination);
-        expect(product.url()).toBe("https://product.test/login");
+        expect(product.url()).toBe(productUrl);
       } finally {
         if (sessionId) await finishProvisionSession(sessionId);
         await context.close();

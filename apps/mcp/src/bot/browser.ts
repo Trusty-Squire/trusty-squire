@@ -7644,9 +7644,11 @@ export class BrowserController {
     });
   }
 
-  async readCheckoutSummary(fallbackCurrency?: string): Promise<CheckoutSummary> {
-    if (!this.page) throw new Error("Browser not started");
-    const page = this.page;
+  async readCheckoutSummary(
+    fallbackCurrency?: string,
+    page: Page | null = this.page,
+  ): Promise<CheckoutSummary> {
+    if (!page) throw new Error("Browser not started");
     const identity = await page.evaluate(() => ({
       title: document.title,
       siteName:
@@ -7654,7 +7656,7 @@ export class BrowserController {
         document.querySelector<HTMLElement>('[itemprop="merchant"]')?.textContent ??
         "",
     }));
-    const frames = await this.visibleTrustedCheckoutFrames();
+    const frames = await this.visibleTrustedCheckoutFrames(page);
     const parsedFrames = await Promise.all(
       frames.map(async (frame) => {
         const [text, structuredExtract] = await Promise.all([
@@ -7751,9 +7753,8 @@ export class BrowserController {
     };
   }
 
-  private async visibleTrustedCheckoutFrames(): Promise<Frame[]> {
-    if (!this.page) return [];
-    const page = this.page;
+  private async visibleTrustedCheckoutFrames(page: Page | null = this.page): Promise<Frame[]> {
+    if (!page) return [];
     const pageUrl = page.url();
     const mainFrame = page.mainFrame();
     const visible: Frame[] = [mainFrame];
@@ -7858,8 +7859,10 @@ export class BrowserController {
     };
   }
 
-  async readCheckoutReviewLineItems(): Promise<Array<{ title: string; quantity: number }>>;
-  async readCheckoutReviewLineItems(includeDetails: true): Promise<
+  async readCheckoutReviewLineItems(
+    page?: Page | null,
+  ): Promise<Array<{ title: string; quantity: number }>>;
+  async readCheckoutReviewLineItems(includeDetails: true, page?: Page | null): Promise<
     Array<{
       title: string;
       quantity: number;
@@ -7868,7 +7871,7 @@ export class BrowserController {
       option_signatures: string[];
     }>
   >;
-  async readCheckoutReviewLineItems(includeDetails = false): Promise<
+  async readCheckoutReviewLineItems(includeDetails = false, page: Page | null = this.page): Promise<
     Array<{
       title: string;
       quantity: number;
@@ -7877,8 +7880,8 @@ export class BrowserController {
       option_signatures?: string[];
     }>
   > {
-    if (!this.page) throw new Error("Browser not started");
-    const items = await this.page.evaluate(() => {
+    if (!page) throw new Error("Browser not started");
+    const items = await page.evaluate(() => {
       const normalize = (value: string): string => value.replace(/\s+/g, " ").trim();
       const visible = (element: Element): boolean => {
         if (!(element instanceof HTMLElement) || element.getClientRects().length === 0)

@@ -1307,6 +1307,13 @@ function oauthCompletionSourcePage(session: object): OAuthCompletionEvidence["pa
   return oauthCompletionSourcePages.get(session);
 }
 
+function operationPageForSession(session: Session): Page | undefined {
+  const sourcePage =
+    oauthCompletionSourcePage(session) ??
+    (session.compactV2Active ? compactV2SourcePage(session) : undefined);
+  return session.browser.resolveOperationPage?.(sourcePage) ?? sourcePage;
+}
+
 function rememberOAuthCompletionSourcePage(
   session: object,
   page: OAuthCompletionEvidence["page"] | undefined,
@@ -2711,8 +2718,9 @@ async function cartLineQuantity(
   session: Session,
   productIdentity: string,
   optionsHash: string,
+  page?: Page,
 ): Promise<number | null> {
-  const lines = await session.browser.readCheckoutReviewLineItems(true);
+  const lines = await session.browser.readCheckoutReviewLineItems(true, page);
   const matching = lines.filter((line) => cartLineMatches(line, productIdentity, optionsHash));
   if (matching.length !== 1) return null;
   return matching[0]!.quantity;
@@ -2727,18 +2735,22 @@ function alreadyInCartResult(result: CartAddResult): CartAddResult {
   };
 }
 
-async function capturePrivateCheckoutState(session: Session): Promise<CheckoutState | undefined> {
-  const elements = await session.browser.extractInteractiveElements();
+async function capturePrivateCheckoutState(
+  session: Session,
+  page?: Page,
+): Promise<CheckoutState | undefined> {
+  const elements = await session.browser.extractInteractiveElements(page);
   retainSessionElements(session, elements);
-  const url = session.browser.currentUrl();
-  const text = await session.browser.extractVisibleText();
-  const liveCheckout = await captureCartCheckoutForFillCardFallback(session, url);
+  const url = page?.url() ?? session.browser.currentUrl();
+  const text = await session.browser.extractVisibleText(page);
+  const liveCheckout = await captureCartCheckoutForFillCardFallback(session, url, page);
   return checkoutStateForObservation(session, url, text.slice(0, 12_000), elements, liveCheckout);
 }
 
 async function reconcileReservedCartAdd(
   session: Session,
   record: CartAddRecord,
+  page?: Page,
 ): Promise<CartAddResult> {
   if (record.result !== null) return alreadyInCartResult(record.result);
   if (record.promise !== null) {
@@ -2752,15 +2764,15 @@ async function reconcileReservedCartAdd(
           record.optionsHash,
           record.idempotencyKey,
         );
-      const quantity = await cartLineQuantity(session, record.productIdentity, record.optionsHash);
+      const quantity = await cartLineQuantity(session, record.productIdentity, record.optionsHash, page);
       if (quantity === null) throw error;
       session.lastCartMutation = {
         productIdentity: record.productIdentity,
         optionsHash: record.optionsHash,
         cartDelta: "0",
-        origin: originForUrl(session.browser.currentUrl()) ?? "",
+        origin: originForUrl(page?.url() ?? session.browser.currentUrl()) ?? "",
       };
-      const checkoutState = await capturePrivateCheckoutState(session);
+      const checkoutState = await capturePrivateCheckoutState(session, page);
       if (checkoutState === undefined) throw error;
       const result: CartAddResult = {
         status: "already_in_cart",
@@ -2781,20 +2793,25 @@ async function reconcileReservedCartAdd(
   throw new Error("cart add reservation has no operation");
 }
 
-async function performCartAdd(session: Session, record: CartAddRecord): Promise<CartAddResult> {
+async function performCartAdd(
+  session: Session,
+  record: CartAddRecord,
+  page?: Page,
+): Promise<CartAddResult> {
   const beforeQuantity = await cartLineQuantity(
     session,
     record.productIdentity,
     record.optionsHash,
+    page,
   );
   if (beforeQuantity !== null && beforeQuantity > 0) {
     session.lastCartMutation = {
       productIdentity: record.productIdentity,
       optionsHash: record.optionsHash,
       cartDelta: "0",
-      origin: originForUrl(session.browser.currentUrl()) ?? "",
+      origin: originForUrl(page?.url() ?? session.browser.currentUrl()) ?? "",
     };
-    const checkoutState = await capturePrivateCheckoutState(session);
+    const checkoutState = await capturePrivateCheckoutState(session, page);
     if (checkoutState === undefined) throw new Error("cart state was not observable");
     return {
       status: "already_in_cart",
@@ -2842,7 +2859,12 @@ async function performCartAdd(session: Session, record: CartAddRecord): Promise<
     }
   }
   if (addError !== undefined || actionResult === null) throw addError;
-  const afterQuantity = await cartLineQuantity(session, record.productIdentity, record.optionsHash);
+  const afterQuantity = await cartLineQuantity(
+    session,
+    record.productIdentity,
+    record.optionsHash,
+    page,
+  );
   if (afterQuantity === null || afterQuantity <= 0) {
     throw new Error("requested product/variant line was not observable after add");
   }
@@ -2860,7 +2882,7 @@ async function performCartAdd(session: Session, record: CartAddRecord): Promise<
     productIdentity: record.productIdentity,
     optionsHash: record.optionsHash,
     cartDelta,
-    origin: originForUrl(session.browser.currentUrl()) ?? "",
+    origin: originForUrl(page?.url() ?? session.browser.currentUrl()) ?? "",
   };
   return {
     status: "added",
@@ -2911,6 +2933,7 @@ export async function cartAdd(
 ): Promise<CartAddResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const operationPage = operationPageForSession(session);
   const lineKey = `${productIdentity}\u0000${optionsHash}`;
   const byIdempotencyKey = session.cartAddsByIdempotencyKey.get(idempotencyKey);
   if (
@@ -2923,7 +2946,7 @@ export async function cartAdd(
   const existing = byIdempotencyKey ?? session.cartAdds.get(lineKey);
   if (existing !== undefined) {
     session.cartAddsByIdempotencyKey.set(idempotencyKey, existing);
-    return await reconcileReservedCartAdd(session, existing);
+    return await reconcileReservedCartAdd(session, existing, operationPage);
   }
 
   const record: CartAddRecord = {
@@ -2936,7 +2959,7 @@ export async function cartAdd(
   };
   session.cartAdds.set(lineKey, record);
   session.cartAddsByIdempotencyKey.set(idempotencyKey, record);
-  record.promise = performCartAdd(session, record)
+  record.promise = performCartAdd(session, record, operationPage)
     .then((result) => {
       record.phase = "complete";
       record.result = result;
@@ -3550,6 +3573,7 @@ export function buildCompactObservation(args: {
 async function captureCartCheckoutForFillCardFallback(
   session: Session,
   url: string,
+  page?: Page,
 ): Promise<CheckoutSummary | null> {
   let origin: string;
   try {
@@ -3558,7 +3582,7 @@ async function captureCartCheckoutForFillCardFallback(
     return null;
   }
   try {
-    const checkout = await session.browser.readCheckoutSummary();
+    const checkout = await session.browser.readCheckoutSummary(undefined, page);
     if (checkout.checkout_origin === origin) {
       session.lastCartCheckout = { checkout, url, observedAt: Date.now() };
       return checkout;
@@ -4999,13 +5023,7 @@ async function executeAct(
     if (cardBlock !== null) throw new ManualCardEntryBlockedError(cardBlock);
   }
   let browser = session.browser;
-  const oauthCompletionSource = oauthCompletionSourcePage(session);
-  const sourcePage =
-    oauthCompletionSource ?? (session.compactV2Active ? compactV2SourcePage(session) : undefined);
-  // Resolve once, including the active-page fallback. Ref resolution, non-ref
-  // operations and their observation must all retain this same page.
-  // Optional invocation preserves the legacy browser test doubles.
-  const compactV2ActionPage = browser.resolveOperationPage?.(sourcePage) ?? sourcePage;
+  const compactV2ActionPage = operationPageForSession(session);
   let completedAction: ProvisionAction = action;
   let sensitiveSource: RecordedValueSource | undefined;
   let cartAffecting = false;
@@ -5725,7 +5743,8 @@ async function executeAct(
   // Don't fold inbox-provider steps into the replayable recipe (see
   // INBOX_READ_HOSTS): replay re-reads the code via awaitVerification, and a
   // recorded inbox click would bake the email's subject into a shared recipe.
-  if (!isInboxReadHost(browser.currentUrl())) {
+  const urlAfterAction = compactV2ActionPage?.url() ?? browser.currentUrl();
+  if (!isInboxReadHost(urlAfterAction)) {
     const replayElement = replaySafeElementForSession(session, resolvedEl);
     recordTrace(session, completedAction, replayElement, sensitiveSource);
     recordCaptureRound(session, completedAction, replayElement, urlBeforeAction);
@@ -5735,14 +5754,16 @@ async function executeAct(
       productIdentity: cartIdentity!.productIdentity,
       optionsHash: cartIdentity!.optionsHash,
       cartDelta: "unknown",
-      origin: originForUrl(browser.currentUrl()) ?? "",
+      origin: originForUrl(urlAfterAction) ?? "",
     };
   }
   // `detail:"none"` returns a minimal ack (the action ran; no perception emitted)
   // so multi-field fills don't each echo the page. The host must call
   // operate_observe before its next ref-targeted act (refs aren't refreshed here).
   const checkoutState =
-    internalAccess && collectCheckoutState ? await capturePrivateCheckoutState(session) : undefined;
+    internalAccess && collectCheckoutState
+      ? await capturePrivateCheckoutState(session, compactV2ActionPage)
+      : undefined;
   const terminalOAuthCompletionUrl = browser.takeOAuthTerminalCompletionUrl();
   const actionObservationPage =
     action.kind === "oauth_login" || action.kind === "oauth_click"
