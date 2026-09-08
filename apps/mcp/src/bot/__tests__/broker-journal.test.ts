@@ -157,6 +157,15 @@ describe("broker dispatch custody", () => {
       await expect(
         journal.recordDetachedPaymentUncertainty("stuck-session", owner.forwarderId),
       ).resolves.toBe(true);
+      await journal.record("stuck-session", "dispatched-payment", "outcome", {
+        forwarderId: owner.forwarderId,
+        operation: "operate_pay",
+        inputHash: "dispatched-input",
+        outcome: { status: "done" },
+      });
+      await expect(
+        journal.hasOnlyDetachedPaymentUncertainty("stuck-session", owner.forwarderId),
+      ).resolves.toBe(true);
 
       const restarted = new OperatorBroker(config, "cell", new DispatchJournal(path));
       Object.defineProperty(restarted, "tools", {

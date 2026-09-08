@@ -7,6 +7,7 @@ import { ApiClient, type ApiClientConfig } from "../../api-client.js";
 import { buildToolRegistry, findTool } from "../../tools/index.js";
 import {
   finishProvisionSession,
+  forceFinishProvisionSession,
   sessionForCall,
   withProvisionSessionCall,
 } from "../session/lifecycle.js";
@@ -302,9 +303,13 @@ export class OperatorBroker implements BrokerTransportPort {
               return remapSession(result, internalId, id);
             },
             close: async (reason) => {
+              const forwarderId = journalForwarderId(principal);
+              const detachedPaymentUncertainty =
+                reason === "expiry" &&
+                (await this.journal?.hasOnlyDetachedPaymentUncertainty(id, forwarderId));
               if (
-                (await this.journal?.hasOutstanding(id)) ||
-                (await this.journal?.hasPendingStartDelivery(journalForwarderId(principal), id))
+                ((await this.journal?.hasOutstanding(id)) && !detachedPaymentUncertainty) ||
+                (await this.journal?.hasPendingStartDelivery(forwarderId, id))
               )
                 return false;
               const pending = session.pendingThreeDs;
@@ -316,6 +321,7 @@ export class OperatorBroker implements BrokerTransportPort {
                 await brokerBrowserCustody()?.release(session.browser);
                 return true;
               }
+              if (reason === "expiry") return await forceFinishProvisionSession(internalId);
               const result = await finishProvisionSession(internalId);
               if (result.closed)
                 await this.journal?.record(id, "payment-custody", "settled", {

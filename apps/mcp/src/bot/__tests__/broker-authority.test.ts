@@ -129,7 +129,42 @@ describe("broker authority", () => {
     expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
   });
 
-  it("quarantines an expired stuck actor without retaining admission or site custody", async () => {
+  it("releases a detached stuck actor only after expiry teardown closes it", async () => {
+    const broker = new BrokerAuthority("account", "cell", 1, 1);
+    const owner = principal("stuck");
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const closeReasons: Array<"finish" | "disconnect" | "expiry" | undefined> = [];
+    const capability = await broker.open(owner, ["site:a"], async () => ({
+      ...port("stuck"),
+      invoke: async () => {
+        entered.resolve();
+        await release.promise;
+      },
+      close: async (reason) => {
+        closeReasons.push(reason);
+        return true;
+      },
+    }));
+    const running = broker.invoke(owner, capability, "stuck", "operate_pay", {});
+    await entered.promise;
+    const now = Date.now();
+    broker.detach(owner, now, 0);
+    await broker.expireDetached(now);
+
+    expect(closeReasons).toEqual(["expiry"]);
+    expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
+    const replacement = await broker.open(principal("replacement"), ["site:a"], async () =>
+      port("replacement"),
+    );
+    await broker.close(principal("replacement"), replacement);
+
+    release.resolve();
+    await running;
+    expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
+  });
+
+  it("retains the session cap when expiry cannot close the physical session", async () => {
     const broker = new BrokerAuthority("account", "cell", 1, 1);
     const owner = principal("stuck");
     const entered = deferred<void>();
@@ -140,26 +175,22 @@ describe("broker authority", () => {
         entered.resolve();
         await release.promise;
       },
+      close: async () => false,
     }));
     const running = broker.invoke(owner, capability, "stuck", "operate_pay", {});
     await entered.promise;
+
     const now = Date.now();
     broker.detach(owner, now, 0);
     await broker.expireDetached(now);
 
     expect(broker.inventory()).toEqual({ active: 0, quarantined: 1, admitting: 0 });
-    const replacement = await broker.open(principal("replacement"), ["site:a"], async () =>
-      port("replacement"),
-    );
-    await broker.close(principal("replacement"), replacement);
+    await expect(
+      broker.open(principal("replacement"), ["site:a"], async () => port("replacement")),
+    ).rejects.toThrow("capacity");
 
     release.resolve();
     await running;
-    await expect.poll(() => broker.inventory()).toEqual({
-      active: 0,
-      quarantined: 0,
-      admitting: 0,
-    });
   });
 
   it("requires possession of a stable lineage credential to reclaim", async () => {

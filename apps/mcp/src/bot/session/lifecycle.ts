@@ -1536,6 +1536,15 @@ export async function finishProvisionSession(sessionId: string): Promise<FinishR
   return (await finishProvisionSessionWithPreparation(sessionId, async () => undefined)).finish;
 }
 
+export async function forceFinishProvisionSession(sessionId: string): Promise<boolean> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) return true;
+  const terminalError = await forceTerminateProvisionSession(session, "broker_detached_expiry", {
+    reason: "stuck_dispatched_operation",
+  });
+  return terminalError === undefined && sessionForCall(sessionId) === undefined;
+}
+
 // Test/teardown helper — close every live session (used by the dev shim on exit).
 export async function closeAllProvisionSessions(): Promise<void> {
   shutdownGeneration += 1;

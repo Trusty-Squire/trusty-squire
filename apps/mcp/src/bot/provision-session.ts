@@ -511,6 +511,7 @@ import {
   activeSessionCount,
   audit,
   closeAllProvisionSessions,
+  forceFinishProvisionSession,
   finishProvisionSession,
   finishProvisionSessionWithPreparation,
   googleSessionGate,
@@ -530,6 +531,7 @@ import {
 export {
   activeSessionCount,
   closeAllProvisionSessions,
+  forceFinishProvisionSession,
   finishProvisionSession,
   finishProvisionSessionWithPreparation,
   googleSessionGate,

@@ -87,6 +87,12 @@ export class DispatchJournal {
           throw new Error("Malformed journal");
         if (record.phase === "recovered") continue;
         const key = JSON.stringify([record.sessionId, record.requestId]);
+        const prior = states.get(key);
+        if (
+          record.phase === "outcome" &&
+          prior?.outcome?.status === "payment_outcome_unknown"
+        )
+          continue;
         states.set(key, record);
       }
     } catch {
@@ -136,6 +142,24 @@ export class DispatchJournal {
       outstanding.length > 0 &&
       outstanding.every(
         (record) => record.requestId === "payment-custody" && record.phase === "entered",
+      )
+    );
+  }
+
+  async hasOnlyDetachedPaymentUncertainty(sessionId: string, forwarderId: string): Promise<boolean> {
+    const outstanding = [...(await this.states()).values()].filter(
+      (record) =>
+        record.sessionId === sessionId &&
+        record.forwarderId === forwarderId &&
+        (record.phase === "entered" || record.phase === "outcome"),
+    );
+    return (
+      outstanding.length > 0 &&
+      outstanding.every(
+        (record) =>
+          record.operation === "operate_pay" &&
+          record.phase === "outcome" &&
+          record.outcome?.status === "payment_outcome_unknown",
       )
     );
   }

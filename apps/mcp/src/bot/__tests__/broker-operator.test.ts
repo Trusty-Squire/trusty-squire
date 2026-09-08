@@ -18,11 +18,13 @@ const state = vi.hoisted(() => ({
     }
   >(),
   finish: vi.fn(),
+  forceFinish: vi.fn(),
 }));
 
 vi.mock("../session/lifecycle.js", () => ({
   sessionForCall: (sessionId: string) => state.sessions.get(sessionId),
   finishProvisionSession: state.finish,
+  forceFinishProvisionSession: state.forceFinish,
   withProvisionSessionCall: async (_sessionId: string, operation: () => Promise<unknown>) =>
     await operation(),
 }));
@@ -39,6 +41,7 @@ import type { TabCapability } from "../broker/authority.js";
 beforeEach(() => {
   state.sessions.clear();
   state.finish.mockReset();
+  state.forceFinish.mockReset();
 });
 
 afterEach(() => {

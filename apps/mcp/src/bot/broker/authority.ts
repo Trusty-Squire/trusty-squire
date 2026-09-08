@@ -25,7 +25,7 @@ export interface BrokerSessionPort {
     requestId: string,
   ): Promise<unknown>;
   /** True only after owned tabs and pending outcome custody are resolved. */
-  close(reason?: "finish" | "disconnect"): Promise<boolean>;
+  close(reason?: "finish" | "disconnect" | "expiry"): Promise<boolean>;
 }
 export const FORWARDER_HANDOFF_TIMEOUT_MS = 120_000;
 export const DETACHED_EXPIRY_CLOSE_TIMEOUT_MS = 10_000;
@@ -48,7 +48,6 @@ interface Actor {
   closePromise?: Promise<boolean>;
   closeReason?: "finish" | "disconnect";
   reconnectDeadline?: number;
-  admissionReleased?: boolean;
   expiryQuarantined?: boolean;
 }
 
@@ -181,8 +180,7 @@ export class BrokerAuthority {
   ): Promise<TabCapability> {
     this.assertPrincipal(principal);
     if (
-      [...this.actors.values()].filter((actor) => actor.admissionReleased !== true).length +
-        this.admissions.size >=
+      this.actors.size + this.admissions.size >=
       this.maxSessions
     ) {
       throw new BrokerRefusal("capacity", "Identity cell is at capacity");
@@ -438,11 +436,14 @@ export class BrokerAuthority {
       delete actor.reconnectDeadline;
       return;
     }
+    if (await actor.port.close("expiry").catch(() => false)) {
+      this.actors.delete(actor.capability.sessionId);
+      this.scheduler.release(actor.capability.sessionId);
+      return;
+    }
     actor.state = "quarantined";
     actor.expiryQuarantined = true;
-    actor.admissionReleased = true;
     delete actor.reconnectDeadline;
-    this.scheduler.release(actor.capability.sessionId);
     const closeWhenDrained = () => {
       if (!actor.expiryQuarantined || actor.state !== "quarantined") return;
       actor.expiryQuarantined = false;
