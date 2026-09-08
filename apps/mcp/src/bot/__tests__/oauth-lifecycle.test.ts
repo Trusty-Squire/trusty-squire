@@ -210,13 +210,54 @@ describe("BrowserController OAuth popup lifecycle", () => {
     try {
       await controller.startOAuth("#oauth");
       const popup = (controller as unknown as { page: Page }).page;
-      const settling = controller.settleAfterOAuth();
+      const settling = controller.settleAfterOAuth(popup);
       await popup.close();
       await settling;
 
       expect(product.isClosed()).toBe(false);
       expect((controller as unknown as { page: Page }).page).toBe(product);
     } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("refuses a legacy settle after a foreign tab is adopted", async () => {
+    const { controller, product } = await controllerForProduct();
+    const context = product.context();
+    const foreignUrl = "https://foreign.test/adopted";
+    let sessionId: string | undefined;
+    try {
+      await context.route("https://foreign.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: '<main id="foreign-state">Foreign tab</main>',
+        }),
+      );
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: PRODUCT_URL,
+      });
+      sessionId = started.session_id;
+      await controller.startOAuth("#oauth");
+      const source = (controller as unknown as { page: Page }).page;
+      await source.setContent(
+        `<button id="open-foreign" onclick="window.open('${foreignUrl}')">Open foreign tab</button>`,
+      );
+
+      const opened = await act(sessionId, { kind: "click", target: "Open foreign tab" });
+      const foreign = context.pages().find((page) => page.url() === foreignUrl);
+      expect(opened.url).toBe(foreignUrl);
+      expect(foreign).toBeDefined();
+
+      await expect(act(sessionId, { kind: "oauth_settle" })).rejects.toThrow(
+        "OAuth lifecycle no longer matches the resolved operation page",
+      );
+      expect(product.isClosed()).toBe(false);
+      expect(source.isClosed()).toBe(false);
+      await expect(foreign!.locator("#foreign-state").textContent()).resolves.toBe("Foreign tab");
+      expect((controller as unknown as { page: Page }).page).toBe(foreign);
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
       await context.close().catch(() => undefined);
     }
   });
@@ -808,10 +849,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
         releaseClick();
         if (outcome === "completed") {
           await vi.waitFor(() => expect(controller.completedOAuthPage()?.url()).toBe(returnUrl));
-          // A plain observe intentionally retires the completion source and
-          // reads the retained opener; it must not resurrect awaiting_human.
           const next = await observe(sessionId);
-          expect(next.url).toBe(product.url());
+          expect(next.url).toBe(returnUrl);
           expect(next.oauth?.state).not.toBe("awaiting_human");
         }
       } finally {
@@ -1548,6 +1587,104 @@ describe("BrowserController OAuth popup lifecycle", () => {
       if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
       else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
       if (sessionId) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
+
+  it("keeps concurrent source-page clicks paired with their own tabs", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://product.test/login";
+    const returnUrl = "https://console.product.test/return";
+    const firstUrl = "https://console.product.test/first";
+    const secondUrl = "https://console.product.test/second";
+    let sessionId: string | undefined;
+    try {
+      await context.route("https://product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<button id="oauth" onclick='window.open(${JSON.stringify(
+            `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(returnUrl)}`,
+          )})'>Continue</button>`,
+        }),
+      );
+      await context.route("https://accounts.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<script>location.replace(${JSON.stringify(returnUrl)})</script>`,
+        }),
+      );
+      await context.route("https://console.product.test/**", (route) => {
+        const url = route.request().url();
+        const body =
+          url === firstUrl
+            ? "<main>First tab</main>"
+            : url === secondUrl
+              ? "<main>Second tab</main>"
+              : `<button id="first" onclick="window.open('${firstUrl}')">Open first tab</button><button id="second" onclick="window.open('${secondUrl}')">Open second tab</button>`;
+        return route.fulfill({ contentType: "text/html", body });
+      });
+      await product.goto(productUrl);
+      const controller = BrowserController.fromHarnessPage(product);
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+      });
+      sessionId = started.session_id;
+      const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+      expect(oauthRef).toBeDefined();
+      const returned = await act(sessionId, {
+        kind: "oauth_login",
+        target: oauthRef!,
+        provider: "google",
+      });
+      const firstRef = parseElementsTable(returned.el_table ?? "").find(
+        (element) => element.label === "Open first tab",
+      )?.ref;
+      const secondRef = parseElementsTable(returned.el_table ?? "").find(
+        (element) => element.label === "Open second tab",
+      )?.ref;
+      expect(firstRef).toBeDefined();
+      expect(secondRef).toBeDefined();
+
+      let firstAdoptionEntered!: () => void;
+      let resumeFirstAdoption!: () => void;
+      const firstAdoption = new Promise<void>((resolve) => {
+        firstAdoptionEntered = resolve;
+      });
+      const firstAdoptionResume = new Promise<void>((resolve) => {
+        resumeFirstAdoption = resolve;
+      });
+      const originalAdopt = controller.adoptOpenedTab.bind(controller);
+      let firstCall = true;
+      const adoptionSpy = vi
+        .spyOn(controller, "adoptOpenedTab")
+        .mockImplementation(async (graceMs?: number): Promise<string | null> => {
+          if (firstCall) {
+            firstCall = false;
+            firstAdoptionEntered();
+            await firstAdoptionResume;
+          }
+          return await originalAdopt(graceMs);
+        });
+
+      const first = act(sessionId, { kind: "click", target: firstRef! });
+      await firstAdoption;
+      const second = act(sessionId, { kind: "click", target: secondRef! });
+      resumeFirstAdoption();
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      adoptionSpy.mockRestore();
+
+      expect(firstResult.url).toBe(firstUrl);
+      expect(secondResult.url).toBe(secondUrl);
+      await expect(
+        context.pages().find((page) => page.url() === firstUrl)!.locator("main").textContent(),
+      ).resolves.toBe("First tab");
+      await expect(
+        context.pages().find((page) => page.url() === secondUrl)!.locator("main").textContent(),
+      ).resolves.toBe("Second tab");
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
       await context.close();
     }
   });

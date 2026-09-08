@@ -4940,18 +4940,23 @@ async function actInternally(
   const oauthProvider =
     action.kind === "oauth_login" || action.kind === "oauth_click" ? action.provider : undefined;
   try {
-    const execute = async (deadline?: OAuthActionDeadline): Promise<InternalActResult> =>
-      await executeAct(
-        sessionId,
-        action,
-        detail,
-        cartIdentity,
-        true,
-        collectCheckoutState,
-        compactV2Authorization,
-        deadline,
-        capturedOperationPage,
-      );
+    const execute = async (deadline?: OAuthActionDeadline): Promise<InternalActResult> => {
+      const run = async (): Promise<InternalActResult> =>
+        await executeAct(
+          sessionId,
+          action,
+          detail,
+          cartIdentity,
+          true,
+          collectCheckoutState,
+          compactV2Authorization,
+          deadline,
+          capturedOperationPage,
+        );
+      return (action.kind === "click" || action.kind === "js_click") && session !== undefined
+        ? await withOpenedTabAdoptionLease(session.browser, run)
+        : await run();
+    };
     return session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")
       ? await withOAuthActionBoundary(session, oauthProvider, execute)
       : await execute(undefined);
@@ -4983,18 +4988,23 @@ export async function act(
   const oauthProvider =
     action.kind === "oauth_login" || action.kind === "oauth_click" ? action.provider : undefined;
   try {
-    const execute = async (deadline?: OAuthActionDeadline): Promise<InternalActResult> =>
-      await executeAct(
-        sessionId,
-        action,
-        detail,
-        cartIdentity,
-        false,
-        false,
-        undefined,
-        deadline,
-        capturedOperationPage,
-      );
+    const execute = async (deadline?: OAuthActionDeadline): Promise<InternalActResult> => {
+      const run = async (): Promise<InternalActResult> =>
+        await executeAct(
+          sessionId,
+          action,
+          detail,
+          cartIdentity,
+          false,
+          false,
+          undefined,
+          deadline,
+          capturedOperationPage,
+        );
+      return (action.kind === "click" || action.kind === "js_click") && session !== undefined
+        ? await withOpenedTabAdoptionLease(session.browser, run)
+        : await run();
+    };
     const result =
       session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")
         ? await withOAuthActionBoundary(session, oauthProvider, execute)
@@ -5180,7 +5190,7 @@ async function executeAct(
         break;
       }
       case "oauth_settle": {
-        await browser.settleAfterOAuth();
+        await browser.settleAfterOAuth(compactV2ActionPage);
         break;
       }
       case "scroll": {
@@ -6686,6 +6696,32 @@ export function emitProvisionMeasurement(
 // short because a click that opens NO tab pays it in full, and a tab that
 // arrives later than this is still caught by that drain.
 const OPENED_TAB_GRACE_MS = 300;
+
+const openedTabAdoptionTails = new WeakMap<BrowserController, Promise<void>>();
+
+async function withOpenedTabAdoptionLease<T>(
+  browser: BrowserController,
+  run: () => Promise<T>,
+): Promise<T> {
+  const previous = openedTabAdoptionTails.get(browser) ?? Promise.resolve();
+  let release!: () => void;
+  const turn = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  openedTabAdoptionTails.set(
+    browser,
+    previous.then(
+      () => turn,
+      () => turn,
+    ),
+  );
+  await previous.catch(() => undefined);
+  try {
+    return await run();
+  } finally {
+    release();
+  }
+}
 
 // Payment is deliberately out of scope. A sealed card fill and a live
 // place-order/3DS approval both own their page identity, so leave the operator

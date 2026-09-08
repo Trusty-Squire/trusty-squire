@@ -14731,11 +14731,22 @@ export class BrowserController {
   // no-op for the same-tab redirect flow (the active page already IS
   // the product page); for the popup flow, waits briefly for the popup
   // to close, then switches `this.page` back to the product tab.
-  async settleAfterOAuth(): Promise<void> {
+  async settleAfterOAuth(operationPage?: Page): Promise<void> {
     const product = this.oauthProductPage;
+    const active = this.page;
+    const provider = this.oauthProviderPage;
+    const isLifecyclePage = (page: Page | null | undefined): boolean =>
+      page !== null && page !== undefined && (page === product || page === provider);
+    if (
+      product === null ||
+      active === null ||
+      !isLifecyclePage(active) ||
+      (operationPage !== undefined && (!isLifecyclePage(operationPage) || operationPage !== active))
+    ) {
+      throw new Error("OAuth lifecycle no longer matches the resolved operation page");
+    }
     try {
-      if (product === null || product === this.page) return;
-      const provider = this.oauthProviderPage ?? this.page;
+      if (product === active) return;
       for (let i = 0; i < 12 && provider !== null && !provider.isClosed(); i++) {
         await this.sleep(1000);
       }
