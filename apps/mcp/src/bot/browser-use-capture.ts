@@ -680,23 +680,36 @@ export async function captureBrowserUseDOM(
       if (n.contentDocument) collectForms(n.contentDocument);
     };
     collectForms(root);
-    const nodeByDomId = new Map<string, BrowserUseNode>();
-    const labelsFor = new Map<string, BrowserUseNode[]>();
+    type LabelScope = {
+      nodeByDomId: Map<string, BrowserUseNode>;
+      labelsFor: Map<string, BrowserUseNode[]>;
+    };
+    const labelScopeFor = new Map<BrowserUseNode, LabelScope>();
     const parentByNode = new Map<BrowserUseNode, BrowserUseNode>();
-    const indexLabels = (n: BrowserUseNode, parent?: BrowserUseNode): void => {
+    const rootScope: LabelScope = { nodeByDomId: new Map(), labelsFor: new Map() };
+    const indexLabels = (
+      n: BrowserUseNode,
+      parent: BrowserUseNode | undefined,
+      scope: LabelScope,
+    ): void => {
       if (parent) parentByNode.set(n, parent);
+      const ownScope =
+        n !== root && (n.nodeType === 9 || n.shadowType !== null)
+          ? { nodeByDomId: new Map(), labelsFor: new Map() }
+          : scope;
+      labelScopeFor.set(n, ownScope);
       const domId = n.attributes.id;
-      if (domId && !nodeByDomId.has(domId)) nodeByDomId.set(domId, n);
+      if (domId && !ownScope.nodeByDomId.has(domId)) ownScope.nodeByDomId.set(domId, n);
       const controlId = n.attributes.for;
       if (n.nodeName === "LABEL" && controlId) {
-        const labels = labelsFor.get(controlId) ?? [];
+        const labels = ownScope.labelsFor.get(controlId) ?? [];
         labels.push(n);
-        labelsFor.set(controlId, labels);
+        ownScope.labelsFor.set(controlId, labels);
       }
-      n.children.forEach((child) => indexLabels(child, n));
-      if (n.contentDocument) indexLabels(n.contentDocument, n);
+      n.children.forEach((child) => indexLabels(child, n, ownScope));
+      if (n.contentDocument) indexLabels(n.contentDocument, n, ownScope);
     };
-    indexLabels(root);
+    indexLabels(root, undefined, rootScope);
     const labelText = (n: BrowserUseNode): string | null => {
       const text = (node: BrowserUseNode): string =>
         node.nodeType === 3 ? node.value : node.children.map(text).join(" ");
@@ -710,20 +723,41 @@ export async function captureBrowserUseDOM(
         .join(" ");
     };
     const labelledByText = (n: BrowserUseNode): string | null => {
+      const scope = labelScopeFor.get(n);
+      if (!scope) return null;
       const ids = n.attributes["aria-labelledby"]?.trim().split(/\s+/) ?? [];
       const parts = ids
-        .map((id) => nodeByDomId.get(id))
+        .map((id) => scope.nodeByDomId.get(id))
         .map((node) => (node ? labelText(node) : null))
         .filter((value): value is string => value !== null);
       return parts.length === 0 ? null : parts.join(" ").slice(0, 120);
     };
     const associatedLabelText = (n: BrowserUseNode): string | null => {
-      const labels = n.attributes.id ? labelsFor.get(n.attributes.id) : undefined;
+      const scope = labelScopeFor.get(n);
+      if (!scope) return null;
+      const labels = n.attributes.id ? scope.labelsFor.get(n.attributes.id) : undefined;
       const explicit = labels?.map(labelText).find((value) => value !== null);
       if (explicit) return explicit;
       let parent = parentByNode.get(n);
-      while (parent) {
+      while (parent && labelScopeFor.get(parent) === scope) {
         if (parent.nodeName === "LABEL") return labelText(parent);
+        parent = parentByNode.get(parent);
+      }
+      return null;
+    };
+    const syntheticContainer = (n: BrowserUseNode): string | null => {
+      const scope = labelScopeFor.get(n);
+      let parent = parentByNode.get(n);
+      while (parent && labelScopeFor.get(parent) === scope) {
+        const tag = parent.nodeName.toLowerCase();
+        if (["section", "nav", "form", "fieldset", "main", "aside", "article", "dialog"].includes(tag)) {
+          const heading = parent.children
+            .filter((child) => /^H[1-6]$/.test(child.nodeName))
+            .map(labelText)
+            .find((value) => value !== null);
+          const label = parent.attributes["aria-label"]?.trim() || labelledByText(parent) || heading;
+          return `${tag}:${label ?? tag}`;
+        }
         parent = parentByNode.get(parent);
       }
       return null;
@@ -821,8 +855,7 @@ export async function captureBrowserUseDOM(
             t = n.nodeName.toLowerCase(),
             selector = selectorsById.get(n.id)!;
           const path = frame === page.mainFrame() ? null : framePath(frame);
-          const text = (x: BrowserUseNode): string =>
-            x.nodeType === 3 ? x.value : x.children.map(text).join(" ");
+          const explicitAriaLabel = a["aria-label"]?.trim();
           el = {
             index: nextSyntheticIndex++,
             tag: t,
@@ -830,7 +863,7 @@ export async function captureBrowserUseDOM(
             id: a.id ?? null,
             name: a.name ?? null,
             placeholder: a.placeholder ?? null,
-            ariaLabel: a["aria-label"] ?? labelledByText(n),
+            ariaLabel: explicitAriaLabel || labelledByText(n),
             role:
               a.role ??
               (["a", "button", "input", "select", "textarea"].includes(t) ? null : "button"),
@@ -847,6 +880,7 @@ export async function captureBrowserUseDOM(
             frameOrigin: frame === page.mainFrame() ? null : new URL(frame.url()).origin,
             frameUrl: frame === page.mainFrame() ? null : frame.url(),
             framePath: path,
+            container: syntheticContainer(n),
           };
         }
       }

@@ -354,7 +354,8 @@ export function controlLabelV2(description: string | undefined): string | undefi
     if (lastBoundary > 0) slug = slug.slice(0, lastBoundary);
   }
   slug = slug.replace(/-+$/g, "");
-  return slug.length === 0 ? undefined : `@${slug}`;
+  if (slug.length === 0) return /[\p{L}\p{N}]/u.test(titled) ? `@${titled}` : undefined;
+  return `@${slug}`;
 }
 
 type WireControlV2 = [string, string, string?];
@@ -982,7 +983,7 @@ function controlDescription(el: InteractiveElement, role: SafeRoleV2): string {
       ? el.container.slice(el.container.indexOf(":") + 1)
       : el.container;
     const context = safeDescriptionV2(rawContext?.replace(/[-_]+/g, " "));
-    return context === undefined ? role : `${context} ${role}`;
+    return context === undefined ? `${role} ${el.index + 1}` : `${context} ${role}`;
   }
   // Add the page's region context to otherwise opaque labels (such as @as15169).
   const context = regionContextV2(el.container, chosen);
@@ -1352,7 +1353,8 @@ export function buildSafeControlsV2(args: {
     // already CDP-derived interactive inventory supplies each visible control's
     // descendant/accessibility name. This pass binds that name to its own live
     // element, so no cross-serializer tag/role fallback can swap labels.
-    const label = controlLabelV2(controlDescription(el, role));
+    const label =
+      controlLabelV2(controlDescription(el, role)) ?? controlLabelV2(`${role} ${el.index + 1}`);
     const row: Omit<SafeControlV2, "ref"> = {
       role,
       visibility: el.inViewport ? "viewport" : "near",

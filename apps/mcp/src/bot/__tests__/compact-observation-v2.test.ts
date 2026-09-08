@@ -642,6 +642,14 @@ describe("compact observation v2", () => {
       expect(labelsFor(navMenu)).toEqual(["@shop-men"]);
     });
 
+    it("preserves a non-ASCII accessible name when ASCII slugging is empty", () => {
+      expect(labelsFor(element({ ariaLabel: "設定" }))).toEqual(["@設定"]);
+    });
+
+    it("falls back to the emitted role when punctuation cannot form a label", () => {
+      expect(labelsFor(element({ ariaLabel: "!!!" }))).toEqual(["@button-1"]);
+    });
+
     it("uses an associated label before a form control's visible subtree", () => {
       const input = element({
         tag: "input",
@@ -706,15 +714,15 @@ describe("compact observation v2", () => {
 
       const labels = labelsFor(button, ...anonymousControls);
       expect(labels).toContain("@account-menu-button");
-      expect(labels).toContain("@button");
-      expect(labels).toContain("@link");
-      expect(labels).toContain("@textbox");
-      expect(labels).toContain("@select");
-      expect(labels).toContain("@checkbox");
-      expect(labels).toContain("@radio");
-      expect(labels).toContain("@tab");
-      expect(labels).toContain("@menuitem");
-      expect(labels).toContain("@file");
+      expect(labels).toContain("@button-2");
+      expect(labels).toContain("@link-3");
+      expect(labels).toContain("@textbox-4");
+      expect(labels).toContain("@select-5");
+      expect(labels).toContain("@checkbox-6");
+      expect(labels).toContain("@radio-7");
+      expect(labels).toContain("@tab-8");
+      expect(labels).toContain("@menuitem-9");
+      expect(labels).toContain("@file-10");
       expect(labels.every((label) => label !== undefined && label.length > 1)).toBe(true);
     });
 
@@ -727,7 +735,7 @@ describe("compact observation v2", () => {
         canonical: true,
       });
 
-      expect(safe.rows).toEqual([expect.objectContaining({ role: "button", label: "@button" })]);
+      expect(safe.rows).toEqual([expect.objectContaining({ role: "button", label: "@button-1" })]);
     });
   });
 

@@ -34,8 +34,18 @@ describe("interleaved observation DOM", () => {
         <label for="work-email">Work email</label><input id="work-email">
         <span id="account-name">Account email</span><input id="account-email" aria-labelledby="account-name">
         <button id="checkout"><img alt="Acme"><span>Checkout</span></button>
-        <div id="volume" role="slider" tabindex="0" style="display:block;width:20px;height:20px"></div>
+        <button id="preferences" aria-label="設定"></button>
+        <span id="empty-name">Master volume</span><div id="empty-volume" role="slider" aria-label="" aria-labelledby="empty-name" tabindex="0" style="display:block;width:20px;height:20px"></div>
+        <section><h2>Volume controls</h2><div id="volume" role="slider" tabindex="0" style="display:block;width:20px;height:20px"></div></section>
       `);
+      await page.locator("body").evaluate((body) => {
+        const host = document.createElement("div");
+        host.id = "shadow-host";
+        host.attachShadow({ mode: "open" }).innerHTML =
+          '<span id="shared-name">Shadow volume</span><div id="shadow-volume" role="slider" aria-labelledby="shared-name" tabindex="0" style="display:block;width:20px;height:20px"></div>';
+        body.insertAdjacentHTML("afterbegin", '<span id="shared-name">Outer volume</span>');
+        body.append(host);
+      });
       const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
       const handles = new Map(capture.elements.map((element) => [element, `@e:${element.index}`]));
       const rows = buildSafeControlsV2({
@@ -53,7 +63,10 @@ describe("interleaved observation DOM", () => {
       expect(labelFor("work-email")).toBe("@work-email");
       expect(labelFor("account-email")).toBe("@account-email");
       expect(labelFor("checkout")).toBe("@checkout");
-      expect(labelFor("volume")).toBe("@button");
+      expect(labelFor("preferences")).toBe("@設定");
+      expect(labelFor("empty-volume")).toBe("@master-volume");
+      expect(labelFor("volume")).toBe("@volume-controls-button");
+      expect(labelFor("shadow-volume")).toBe("@shadow-volume");
     } finally {
       await page.close();
     }
