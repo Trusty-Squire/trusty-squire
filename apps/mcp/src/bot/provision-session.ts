@@ -5667,10 +5667,7 @@ async function executeAct(
         // Atomic OAuth deliberately accepts only the observed stable ref. A raw
         // locator would lose the same stale-reference guarantees as every other
         // action before the provider transition begins.
-        const fresh =
-          session.compactV2Mode === "on"
-            ? (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements
-            : await browser.extractInteractiveElements(compactV2ActionPage);
+        const fresh = await browser.extractInteractiveElements(compactV2ActionPage);
         retainSessionElements(session, fresh);
         const el =
           compactV2Authorization === undefined
