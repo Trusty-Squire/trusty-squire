@@ -552,7 +552,10 @@ describe("interleaved observation DOM", () => {
         <quick-add-component id="late-role" role="button" aria-label="Add to cart late role"></quick-add-component>
         <quick-add-component id="late-listener" aria-label="Add to cart late listener"></quick-add-component>`);
       await page.locator("#decorations").evaluate((decorations) => {
-        decorations.innerHTML = Array.from({ length: 120 }, () => "<decorative-control></decorative-control>").join("");
+        decorations.innerHTML = Array.from(
+          { length: 120 },
+          () => "<decorative-control></decorative-control>",
+        ).join("");
       });
       await page.evaluate(() => {
         customElements.define(
@@ -566,9 +569,11 @@ describe("interleaved observation DOM", () => {
           },
         );
       });
-      await page.locator("#late-listener").evaluate((el) =>
-        el.addEventListener("click", () => el.setAttribute("data-clicked", "yes")),
-      );
+      await page
+        .locator("#late-listener")
+        .evaluate((el) =>
+          el.addEventListener("click", () => el.setAttribute("data-clicked", "yes")),
+        );
       const capture = await captureThroughController(page);
       const buy = capture.elements.filter((el) => controlMatchesPrivateQueryV2(el, "add to cart"));
       expect(buy.map((el) => el.id).sort()).toEqual(["late-form", "late-listener", "late-role"]);

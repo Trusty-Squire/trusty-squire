@@ -123,8 +123,9 @@ describe("observation byte efficiency", () => {
 
   it("groups inert repeated siblings only when their UTF-8 wire form shrinks", () => {
     const siblings = (value: string) =>
-      serializeBrowserUseDOM(node("BODY", { children: Array.from({ length: 3 }, () => text(value)) }))
-        .dom;
+      serializeBrowserUseDOM(
+        node("BODY", { children: Array.from({ length: 3 }, () => text(value)) }),
+      ).dom;
     expect(siblings("OK")).toBe("OK\nOK\nOK");
     expect(siblings("猫猫猫")).toBe("猫猫猫 [repeated ×3]");
     expect(Buffer.byteLength("猫猫猫 [repeated ×3]", "utf8")).toBeLessThan(

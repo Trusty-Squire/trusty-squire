@@ -330,44 +330,44 @@ export async function captureBrowserUseDOM(
         }
         if (containsCustomElements)
           try {
-          const listenerTargets = await client.send("Runtime.evaluate", {
-            expression: `(() => { const roots=[document], priority=[], fallback=[], limit=100; for(let i=0;i<roots.length;i++) for(const el of roots[i].querySelectorAll('*')) { if(el.shadowRoot) roots.push(el.shadowRoot); if(!el.localName.includes('-')) continue; const r=el.getBoundingClientRect(), s=getComputedStyle(el), visible=r.width>1&&r.height>1&&r.bottom>0&&r.right>0&&r.top<innerHeight&&r.left<innerWidth&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)>0; const role=el.getAttribute('role')||''; const likely=visible&&(/(?:quick-add|add-to-cart|product-form|buy|cart)/.test(el.localName)||el.closest("form,[class*='product'],[id*='product'],[class*='price'],[id*='price']")!==null||['button','link','checkbox','radio','combobox','textbox','menuitem','option','tab'].includes(role)||el.hasAttribute('command')||el.hasAttribute('commandfor')||el.hasAttribute('popovertarget')); const targets=likely?priority:fallback; if(targets.length<limit) targets.push(el); } return [...priority,...fallback].slice(0,limit); })()`,
-            contextId: context.executionContextId,
-            objectGroup: "ts-observation",
-          });
-          if (listenerTargets.result.objectId) {
-            const props = await client.send("Runtime.getProperties", {
-              objectId: listenerTargets.result.objectId,
-              ownProperties: true,
+            const listenerTargets = await client.send("Runtime.evaluate", {
+              expression: `(() => { const roots=[document], priority=[], fallback=[], limit=100; for(let i=0;i<roots.length;i++) for(const el of roots[i].querySelectorAll('*')) { if(el.shadowRoot) roots.push(el.shadowRoot); if(!el.localName.includes('-')) continue; const r=el.getBoundingClientRect(), s=getComputedStyle(el), visible=r.width>1&&r.height>1&&r.bottom>0&&r.right>0&&r.top<innerHeight&&r.left<innerWidth&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)>0; const role=el.getAttribute('role')||''; const likely=visible&&(/(?:quick-add|add-to-cart|product-form|buy|cart)/.test(el.localName)||el.closest("form,[class*='product'],[id*='product'],[class*='price'],[id*='price']")!==null||['button','link','checkbox','radio','combobox','textbox','menuitem','option','tab'].includes(role)||el.hasAttribute('command')||el.hasAttribute('commandfor')||el.hasAttribute('popovertarget')); const targets=likely?priority:fallback; if(targets.length<limit) targets.push(el); } return [...priority,...fallback].slice(0,limit); })()`,
+              contextId: context.executionContextId,
+              objectGroup: "ts-observation",
             });
-            const indexed = props.result.filter((p) => /^\d+$/.test(p.name) && p.value?.objectId);
-            for (let i = 0; i < indexed.length; i += 8) {
-              const batches = await Promise.all(
-                indexed.slice(i, i + 8).map((p) =>
-                  client.send("DOMDebugger.getEventListeners", {
-                    objectId: p.value!.objectId!,
-                    depth: 0,
-                    pierce: true,
-                  }),
-                ),
-              );
-              for (const events of batches)
-                for (const listener of events.listeners)
-                  if (
-                    listener.backendNodeId !== undefined &&
-                    [
-                      "click",
-                      "mousedown",
-                      "mouseup",
-                      "pointerdown",
-                      "pointerup",
-                      "keydown",
-                      "keyup",
-                    ].includes(listener.type)
-                  )
-                    frameListeners.add(listener.backendNodeId);
+            if (listenerTargets.result.objectId) {
+              const props = await client.send("Runtime.getProperties", {
+                objectId: listenerTargets.result.objectId,
+                ownProperties: true,
+              });
+              const indexed = props.result.filter((p) => /^\d+$/.test(p.name) && p.value?.objectId);
+              for (let i = 0; i < indexed.length; i += 8) {
+                const batches = await Promise.all(
+                  indexed.slice(i, i + 8).map((p) =>
+                    client.send("DOMDebugger.getEventListeners", {
+                      objectId: p.value!.objectId!,
+                      depth: 0,
+                      pierce: true,
+                    }),
+                  ),
+                );
+                for (const events of batches)
+                  for (const listener of events.listeners)
+                    if (
+                      listener.backendNodeId !== undefined &&
+                      [
+                        "click",
+                        "mousedown",
+                        "mouseup",
+                        "pointerdown",
+                        "pointerup",
+                        "keydown",
+                        "keyup",
+                      ].includes(listener.type)
+                    )
+                      frameListeners.add(listener.backendNodeId);
+              }
             }
-          }
           } catch {}
         for (const [backendNodeId, element] of frameBindings) bindings.set(backendNodeId, element);
         for (const backendNodeId of frameListeners) listeners.add(backendNodeId);
