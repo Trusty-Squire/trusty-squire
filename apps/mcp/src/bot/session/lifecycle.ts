@@ -1,3 +1,5 @@
+import { reserveBrokerAdmission } from "../broker/admission-context.js";
+import { brokerBrowserCustody } from "../broker/custody.js";
 // Phase 2 of the operator session-management restructure: the session
 // lifecycle, moved out of provision-session.ts as ONE transaction.
 //
@@ -316,6 +318,21 @@ async function tryAcquireSatelliteBrowser(
 
 async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promise<AcquiredBrowser> {
   const generation = provisionStartGeneration();
+  const custody = brokerBrowserCustody();
+  if (custody !== undefined) {
+    const acquired = await custody.acquire(opts);
+    try {
+      assertProvisionStartAdmitted(generation);
+    } catch (error) {
+      await custody.release(acquired.browser);
+      throw error;
+    }
+    return {
+      controller: acquired.browser,
+      profileDir: acquired.profileDir,
+      shutdownGeneration: generation,
+    };
+  }
   if ((process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0) {
     throw new Error("operate_start does not support remote CDP with the local Chrome profile");
   }
@@ -426,6 +443,11 @@ async function releaseWarmBrowserPage(
   _persistState: boolean,
   owner?: SessionTerminalTeardownOwner,
 ): Promise<void> {
+  const custody = brokerBrowserCustody();
+  if (custody !== undefined) {
+    await custody.release(browser);
+    return;
+  }
   const leased = leasedBrowsers.get(browser);
   const group = leased?.identityGroup;
   // A forced teardown of a GROUPED session belongs wholly to
@@ -474,6 +496,11 @@ async function forceReleaseWarmBrowserPage(
   browser: BrowserController,
   owner?: SessionTerminalTeardownOwner,
 ): Promise<void> {
+  const custody = brokerBrowserCustody();
+  if (custody !== undefined) {
+    await custody.release(browser);
+    return;
+  }
   const leased = leasedBrowsers.get(browser);
   const group = leased?.identityGroup;
   // The group's one decrement for a forced session happens here, never in a
@@ -839,7 +866,10 @@ function startSessionWatchdog(session: Session): void {
     startedAt: session.startedAt,
     lastActivityAt: () => session.lastActivityAt,
     hasActiveCall: () =>
-      session.initializing || session.callCount > 0 || session.paymentCallCount > 0,
+      brokerBrowserCustody() !== undefined ||
+      session.initializing ||
+      session.callCount > 0 ||
+      session.paymentCallCount > 0,
     processMarker: () => session.browser.operatorBrowserMarker?.() ?? null,
     onTerminate: async (reason) => await terminateExpiredProvisionSession(session, reason),
   });
@@ -1074,7 +1104,8 @@ export async function startProvisionSession(
   opts: StartOptions,
   ports: SessionStartPorts,
 ): Promise<Observation> {
-  const id = randomUUID();
+  const id =
+    reserveBrokerAdmission([opts.serviceUrl, ...(opts.extraAllowedHosts ?? [])]) ?? randomUUID();
   const compactV2Mode = configuredCompactV2Mode();
   let browser: BrowserController;
   let liveProviders: OAuthProviderId[];
@@ -1082,7 +1113,19 @@ export async function startProvisionSession(
   const acquired = await acquireWarmBrowser(opts, id);
   browser = acquired.controller;
   try {
-    liveProviders = await ensureProvisionPrimaryProviderSession(browser);
+    const probe = async () => {
+      const providers = await ensureProvisionPrimaryProviderSession(browser);
+      workerEmail =
+        typeof browser.detectGoogleAccountEmail === "function"
+          ? await browser.detectGoogleAccountEmail().catch(() => null)
+          : null;
+      return providers;
+    };
+    const custody = brokerBrowserCustody();
+    liveProviders =
+      custody === undefined
+        ? await ensureProvisionPrimaryProviderSession(browser)
+        : await custody.identity(probe);
     assertProvisionStartAdmitted(acquired.shutdownGeneration);
     const gate = googleSessionGate(liveProviders);
     if (!gate.ok) {
@@ -1099,10 +1142,11 @@ export async function startProvisionSession(
           }
         : { session_id: id, url: "", text: "", elements: [], needs_user: gate.needs_user };
     }
-    workerEmail =
-      typeof browser.detectGoogleAccountEmail === "function"
-        ? await browser.detectGoogleAccountEmail().catch(() => null)
-        : null;
+    if (custody === undefined)
+      workerEmail =
+        typeof browser.detectGoogleAccountEmail === "function"
+          ? await browser.detectGoogleAccountEmail().catch(() => null)
+          : null;
   } catch (error) {
     await releaseWarmBrowserPage(browser, false);
     throw error;

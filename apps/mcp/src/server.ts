@@ -1,3 +1,4 @@
+import { OperatorForwarder } from "./bot/broker/forwarder.js";
 // MCP server: reads its account's session from the session file, sets up an ApiClient
 // against the configured API base URL, and exposes the registered tools
 // over stdio.
@@ -117,6 +118,11 @@ export interface ServerCallAdmission extends ServerCallLifecycle {
   inFlightCount(): number;
 }
 
+function brokerRecoveryRequested(meta: unknown): boolean {
+  if (meta === null || typeof meta !== "object") return false;
+  return (meta as Record<string, unknown>)["trusty-squire/recover"] === true;
+}
+
 // `connect` may complete while the host's stdio server is already running.
 // Keep the post-install read behind an injected loader so the call boundary can
 // pick up the account-bound session that Finish just published without making
@@ -158,6 +164,7 @@ export async function buildServer(
   callLifecycle?: ServerCallLifecycle,
   loadPublishedAccountSession?: AccountSessionLoader,
   sessionGuard?: SessionGuard,
+  operatorForwarder?: OperatorForwarder,
 ): Promise<Server> {
   let activeApi = api;
   const tools = buildToolRegistry();
@@ -176,7 +183,7 @@ export async function buildServer(
     })),
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     const tool = findTool(req.params.name, tools);
     if (tool === null) {
       return errorContent("unknown_tool", `unknown tool '${req.params.name}'`);
@@ -227,6 +234,13 @@ export async function buildServer(
     }
     try {
       activeApi.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
+      if (operatorForwarder !== undefined && tool.name.startsWith("operate_")) {
+        return toolResultContent(
+          await operatorForwarder.invoke(tool.name, parsed.data, String(extra.requestId), {
+            recover: brokerRecoveryRequested((req.params as { _meta?: unknown })._meta),
+          }),
+        );
+      }
       const invoke = async () =>
         await tool.handler(parsed.data, activeApi, {
           notifyUser: async (message, data) => {
@@ -412,7 +426,16 @@ export async function runServer(): Promise<void> {
   const api = await loadPublishedAccountSession();
 
   const callAdmission = createServerCallAdmission();
-  const server = await buildServer(api, callAdmission, loadPublishedAccountSession, sessionGuard);
+  const brokerPath = process.env.TRUSTY_SQUIRE_BROKER_SOCKET;
+  const forwarder =
+    brokerPath === undefined ? undefined : new OperatorForwarder(brokerPath, sessionGuard);
+  const server = await buildServer(
+    api,
+    callAdmission,
+    loadPublishedAccountSession,
+    sessionGuard,
+    forwarder,
+  );
   const transport = new StdioServerTransport();
   // Publishes what a later launch of this identity needs to tell "still
   // serving a client" from "wedged": last inbound message, open sessions,
@@ -449,6 +472,7 @@ export async function runServer(): Promise<void> {
         // exit owner.
         await admittedCallsDrained;
         await cancelActiveLoginBrowsers();
+        await forwarder?.close();
         await closeAllProvisionSessions();
         await server.close();
       } catch (err) {
@@ -488,6 +512,7 @@ export async function runServer(): Promise<void> {
 
   idleTimer = setInterval(() => {
     if (shutdown !== undefined) return;
+    if (forwarder?.connected()) return;
     const sessionCount = activeSessionCount();
     if (
       !shouldIdleExit(
@@ -512,8 +537,8 @@ export async function runServer(): Promise<void> {
     heartbeatTimer = setInterval(() => {
       if (shutdown !== undefined) return;
       instance.heartbeat({
-        lastActivityAt,
-        activeSessions: activeSessionCount(),
+        lastActivityAt: forwarder?.connected() ? Date.now() : lastActivityAt,
+        activeSessions: forwarder?.sessionCount() ?? activeSessionCount(),
         inFlightCalls: callAdmission.inFlightCount(),
       });
     }, heartbeatIntervalMs());

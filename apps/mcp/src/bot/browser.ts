@@ -2793,6 +2793,79 @@ export class BrowserController {
   private readonly operationScopedAllowedHosts = new Map<string, number>();
   private hostScopeGuardInstallation: Promise<void> | null = null;
   private hostScopeGuardHandler: ((route: Route) => Promise<void>) | null = null;
+  private brokerRouteRegistration: (() => void) | null = null;
+  private static readonly brokerRoutes = new WeakMap<BrowserContext, Set<BrowserController>>();
+  private static readonly brokerIdentityPages = new WeakMap<BrowserContext, Set<Page>>();
+
+  /** One routing authority for the broker context. Clients never install routes. */
+  async enableBrokerRouting(): Promise<void> {
+    const context = this.context;
+    if (context === null) throw new Error("Browser not started");
+    if (BrowserController.brokerRoutes.has(context)) return;
+    const controllers = new Set<BrowserController>();
+    BrowserController.brokerRoutes.set(context, controllers);
+    BrowserController.brokerIdentityPages.set(context, new Set());
+    await context.route("**/*", async (route) => {
+      try {
+        const request = route.request();
+        if (!["xhr", "fetch"].includes(request.resourceType())) {
+          await route.fallback();
+          return;
+        }
+        // Service-worker traffic cannot be attributed to a tab family. Shared
+        // admission does not qualify it by guessing a URL-based owner.
+        const page = request.frame().page();
+        if (BrowserController.brokerIdentityPages.get(context)?.has(page)) {
+          if (
+            isFailFastScopeAbort(request.url(), request.resourceType(), [
+              "google.com",
+              "googleapis.com",
+              "gstatic.com",
+            ])
+          )
+            await route.abort("failed");
+          else await route.fallback();
+          return;
+        }
+        let owner = [...controllers].find((candidate) => candidate.ownedPages.has(page));
+        if (owner === undefined) {
+          const opener = await page.opener();
+          if (opener !== null)
+            owner = [...controllers].find((candidate) => candidate.ownedPages.has(opener));
+        }
+        if (owner === undefined) {
+          await route.abort("failed");
+          return;
+        }
+        const scope = owner.hostScopeAllowedHostsProvider?.();
+        if (
+          scope === undefined ||
+          isFailFastScopeAbort(
+            request.url(),
+            request.resourceType(),
+            scope.allowedHosts,
+            scope.siblingDomainHosts,
+          )
+        ) {
+          await route.abort("failed");
+          return;
+        }
+        await route.fallback();
+      } catch {
+        await route.abort("failed").catch(() => undefined);
+      }
+    });
+  }
+
+  async brokerTargetId(): Promise<string> {
+    if (this.context === null || this.page === null) throw new Error("Browser not started");
+    const cdp = await this.context.newCDPSession(this.page);
+    try {
+      return (await cdp.send("Target.getTargetInfo")).targetInfo.targetId;
+    } finally {
+      await cdp.detach();
+    }
+  }
 
   // Feed the current session's allowed hosts to the request-scope guard. Read
   // lazily per request, so allow_host / auto-widen updates take effect without
@@ -2860,6 +2933,12 @@ export class BrowserController {
   private async installHostScopeGuard(): Promise<void> {
     const ctx = this.context;
     if (ctx === null) throw new Error("Browser not started");
+    const brokerControllers = BrowserController.brokerRoutes.get(ctx);
+    if (brokerControllers !== undefined) {
+      brokerControllers.add(this);
+      this.brokerRouteRegistration = () => brokerControllers.delete(this);
+      return;
+    }
     const pageAware = experimentalMultiSessionEnabled();
     const handler = async (route: Route): Promise<void> => {
       try {
@@ -2892,6 +2971,8 @@ export class BrowserController {
     }
   }
   private async uninstallHostScopeGuard(): Promise<void> {
+    this.brokerRouteRegistration?.();
+    this.brokerRouteRegistration = null;
     const handler = this.hostScopeGuardHandler;
     const ctx = this.context;
     this.hostScopeGuardHandler = null;
@@ -2935,9 +3016,17 @@ export class BrowserController {
     primary: BrowserController,
     opts: BrowserControllerOptions = {},
   ): Promise<BrowserController> {
-    const satellite = new BrowserController(opts, primary);
-    await satellite.attachOwnPage();
-    return satellite;
+    return await BrowserController.attachSessionPage(primary, opts);
+  }
+
+  /** Broker page port: shares only the process owner, with fresh page state. */
+  static async attachSessionPage(
+    owner: BrowserController,
+    opts: BrowserControllerOptions = {},
+  ): Promise<BrowserController> {
+    const session = new BrowserController(opts, owner);
+    await session.attachOwnPage();
+    return session;
   }
 
   // Opens and registers this controller's OWN page in the shared context.
@@ -2980,6 +3069,12 @@ export class BrowserController {
     ]) {
       if (page !== null && !page.isClosed()) family.add(page);
     }
+    await Promise.all(
+      [...family].map(async (page) => {
+        await page.close().catch(() => undefined);
+      }),
+    );
+    if ([...family].some((page) => !page.isClosed())) return "unknown";
     await this.uninstallHostScopeGuard();
     this.pageDriver.disposeRegistrations();
     this.pageDriver.page = null;
@@ -2987,7 +3082,6 @@ export class BrowserController {
     this.pageDriver.oauthProductPage = null;
     this.pageDriver.oauthProviderPage = null;
     this.pageDriver.oauthProviderPageClosed = false;
-    for (const page of family) await page.close().catch(() => undefined);
     return "closed";
   }
 
@@ -11956,15 +12050,21 @@ export class BrowserController {
 
   // Drop Cloudflare's anti-bot cookies (cf_clearance + __cf_bm) so the next
   // request triggers a FRESH managed challenge, then reload and wait for it
-  // to clear. Scoped to cookie NAME — only CF's own cookies are removed, so
-  // an OAuth provider's session on accounts.google.com / github.com is
-  // untouched. A fresh challenge on a residential IP clears in ~12-15s, so
+  // to clear. Scope by name, exact domain and path of cookies applying to
+  // THIS page, so unrelated sites retain their own Cloudflare clearance. A fresh challenge on a residential IP clears in ~12-15s, so
   // we give it a generous window. Returns true if the interstitial is gone.
   private async clearCloudflareCookiesAndRetry(timeoutMs: number): Promise<boolean> {
     if (!this.page || !this.context) return false;
     try {
-      await this.context.clearCookies({ name: "cf_clearance" });
-      await this.context.clearCookies({ name: "__cf_bm" });
+      const cookies = await this.context.cookies(this.page.url());
+      for (const cookie of cookies) {
+        if (cookie.name !== "cf_clearance" && cookie.name !== "__cf_bm") continue;
+        await this.context.clearCookies({
+          name: cookie.name,
+          domain: cookie.domain,
+          path: cookie.path,
+        });
+      }
     } catch {
       // clearCookies filter unsupported / failed — nothing to retry on.
       return false;
@@ -13972,10 +14072,10 @@ export class BrowserController {
     // undefined (no-op) and any failure must degrade to the popup/none path.
     if (cdp !== null) {
       const promptDeadline = Date.now() + Math.min(4_000, timeoutMs);
-      while (Date.now() < promptDeadline && !fedcmResolved && this.context.pages().length <= 1) {
+      while (Date.now() < promptDeadline && !fedcmResolved && this.ownedPages.live().length <= 1) {
         await this.sleep(250);
       }
-      if (!fedcmResolved && this.context.pages().length <= 1) {
+      if (!fedcmResolved && this.ownedPages.live().length <= 1) {
         try {
           await this.page.evaluate(() => {
             const g = (
@@ -14298,6 +14398,7 @@ export class BrowserController {
       // Deliberately unregistered: this identity probe (and its popups) must
       // never become the session's working page.
       identityPage = await this.context.newPage();
+      BrowserController.brokerIdentityPages.get(this.context)?.add(identityPage);
       const identityUrl = new URL("https://myaccount.google.com/");
       const expectedEmail = expectedGoogleAccountEmail?.trim();
       if (expectedEmail !== undefined && expectedEmail.length > 0) {
@@ -14323,6 +14424,10 @@ export class BrowserController {
       return null;
     } finally {
       await identityPage?.close().catch(() => undefined);
+      const probes =
+        this.context === null ? undefined : BrowserController.brokerIdentityPages.get(this.context);
+      if (probes !== undefined && identityPage !== null && identityPage.isClosed())
+        probes.delete(identityPage);
     }
   }
 

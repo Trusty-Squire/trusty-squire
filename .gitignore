@@ -54,3 +54,7 @@ package-lock.json
 .codegraph/
 tools/bin/
 .claude/settings.json
+
+# Isolated browser-broker qualification profiles, sockets and evidence
+.broker-acceptance/
+.t/

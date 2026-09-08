@@ -33,6 +33,7 @@ import {
   currentProfileHolderPid,
   launchWithProfileGate,
   profileProcessIdentity,
+  profileProcessGroupMarkerState,
   profileProcessIdentityState,
   processBirthIdentityState,
   ProfileBusyError,
@@ -660,5 +661,46 @@ describe("reapProfileHolderIfOwned", () => {
     ).toBe(true);
     expect(killed).toEqual([]);
     expect(lockPresent(dir)).toBe(false);
+  });
+});
+
+describe("owner reaper group proof", () => {
+  const identity = {
+    host: hostname(),
+    pid: 100,
+    start_time: "old",
+    user_data_dir: "/fixture/profile",
+    process_group_id: 100,
+    process_marker: "fixture-marker",
+  };
+  it("ignores unreadable markers in proven unrelated process groups", () => {
+    expect(
+      profileProcessGroupMarkerState(identity, {
+        processIds: () => [200],
+        groupId: () => 200,
+        markerState: () => "unknown",
+        uidState: () => "matching",
+      }),
+    ).toBe("stale");
+  });
+  it("retains uncertainty for an unreadable member of the owned group", () => {
+    expect(
+      profileProcessGroupMarkerState(identity, {
+        processIds: () => [101],
+        groupId: () => 100,
+        markerState: () => "unknown",
+        uidState: () => "matching",
+      }),
+    ).toBe("unknown");
+  });
+  it("finds a surviving exact-marker child after the leader exits", () => {
+    expect(
+      profileProcessGroupMarkerState(identity, {
+        processIds: () => [101],
+        groupId: () => 100,
+        markerState: () => "matching",
+        profileState: () => "matching",
+      }),
+    ).toBe("matching");
   });
 });

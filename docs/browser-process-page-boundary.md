@@ -2,12 +2,15 @@
 
 > **CAPTAIN DECISION 2026-09-07 — this in-process concurrency design is a dead end; do not build on it.**
 > A single client cannot usefully drive two operator sessions in parallel, so the in-process `TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION` concurrency below has no practical production use. It remains ONLY as the auth-preservation / bot-detection test scaffold described in the "Experimental concurrent multisession" section. Do not relitigate this and do not build a scheduler or broker on the in-process flag.
-> The only concurrency worth building is CROSS-PROCESS: two separate host processes sharing one authenticated browser via one shared server. That is NOT what this design provides (the satellite-join is gated on in-process signals; a second process hitting the busy profile gets `ProfileBusyError`). If ever built, it EXTENDS this design's satellite / per-page ownership / refcounted-teardown machinery with a cross-process CDP-endpoint handoff, cross-process teardown refcount, and cross-process host-scope guard.
+> Cross-process broker custody is now implemented separately; its authoritative
+> contract is [the browser-broker guide](browser-broker.md). This document keeps
+> the direct, in-process browser foundation and its test-only concurrency scaffold.
 
 `BrowserController` composes one `BrowserProcessOwner` and one `PageDriver` for
-one session. It preserves the operator API. By default there is no broker,
-shared browser, additional admission, or detach operation; the only exception
-is the off-by-default experimental flag described in the last section below.
+one session. It preserves the operator API. When no broker socket is configured,
+there is no shared browser, additional admission, or detach operation; the only
+exception is the off-by-default experimental flag described in the last section
+below.
 
 - `apps/mcp/src/bot/browser-process-owner.ts` owns launch state, the connected
   context/transport, process identity proof, cancellation, display custody, and
@@ -83,49 +86,23 @@ test (`identity-runtime.test.ts` exercises it against a fake handle).
 
 `session/lifecycle.ts` wires one module-level `IdentityRuntime` into
 `acquireWarmBrowser`/`releaseWarmBrowserPage`/`forceReleaseWarmBrowserPage` for
-the operator profile. **Production still calls `forgetAfterShutdown()` after
-closing the browser at every finish of a runtime-acquired session, and on an
-acquire failure after closing whichever `BrowserController` the launch had
-constructed** (so a launch that rejects after Chrome spawned still reaps the
-process instead of leaving it holding the profile lock). Only browsers leased
-from the runtime touch it: a harness session (`startHarnessProvisionSession`,
+the direct operator profile path. **Without a broker socket, production calls
+`forgetAfterShutdown()` after closing the browser at every finish of a
+runtime-acquired session, and on an acquire failure after closing whichever
+`BrowserController` the launch had constructed.** The socket-configured broker
+owns its own Chrome lifetime and multi-session admission; see
+[the browser-broker guide](browser-broker.md). Only browsers leased from the
+runtime touch it: a harness session (`startHarnessProvisionSession`,
 caller-owned browser) finishing never resets the runtime underneath a live
-`operate_start` session — `operate-session-flow.test.ts` pins both. So today
-this is purely single-flight/epoch bookkeeping around the exact same
-construct-then-close lifecycle as before — Chrome is not yet kept warm across
-sessions, and admission is still capped at exactly one session via the
-existing profile lease (`acquireProfileOperationGuard`/`waitForProfileFree`),
-untouched by this change. Turning on sequential reuse (skip
-`forgetAfterShutdown()` at finish so the next session's `acquire()` reuses the
-still-live Chrome) is the follow-up: it additionally requires resetting
-`BrowserController`/`PageDriver` per-session state (page references, host-scope
-guard routes, checkout/payment scratch fields) to a clean baseline before
-reuse, which this PR deliberately does not attempt.
+`operate_start` session — `operate-session-flow.test.ts` pins both.
 
-## Cross-process broker groundwork: first increment
+## Cross-process broker
 
-The first independently shippable increment fixes cookie persistence at ordinary
-browser shutdown. `browser-close-cookie.test.ts` executes real
-`BrowserProcessOwner.start()`/`close()` in both self-launch/CDP and persistent
-context modes against a fresh profile and a localhost login. It immediately
-closes after receiving a persistent HttpOnly cookie, relaunches with the same
-profile, and requires the server to see an authenticated request. No storage
-snapshot is injected. Both cases failed before the ordering fix. Boundary tests
-also cover hung page/context closes, the SIGINT grace period, and forced fallback.
-
-This does **not** retain Chrome across session finish or introduce broker
-admission. `releaseWarmBrowserPage` still closes the browser and releases the
-profile-operation lease; `IdentityRuntime` still forgets it after shutdown.
-Single-active production admission and the experimental scaffold are unchanged.
-
-The next coherent increment is sequential page release plus persistent runtime
-custody: close only the session's tab family, verify its target IDs are gone,
-reset session-local routes/references/state, and hold the profile lease for the
-browser's lifetime. It must pair that reuse with per-operation cancellation
-fences/deadlines, page-first recovery, and bounded admission/session drains with
-shutdown diagnostics. Preserve payment audit before teardown, and do not retarget
-a timed-out operation to the next session. Cross-process attachment remains a
-later increment; none of this builds on the experimental satellite/refcount path.
+The socket-configured cross-process broker supersedes the former proposed
+follow-up described here. Its configuration, custody, recovery, acceptance, and
+real-auth qualification test guidance are owned by
+[the browser-broker guide](browser-broker.md). Cookie persistence during direct
+browser shutdown remains covered by `browser-close-cookie.test.ts`.
 
 ## Experimental concurrent multisession (Step 4/5 — audit slice)
 

@@ -1,0 +1,95 @@
+{
+  "kind": "fixture-only-not-google-auth-qualification",
+  "brokerPid": 2315404,
+  "chromeRoots": [2315453],
+  "ready": [
+    {
+      "event": "ready",
+      "pid": 2315418,
+      "cap": {
+        "cellId": "fixture-cell",
+        "browserEpoch": "120d7c8c-1f49-43cc-bfa3-7c398c52b295",
+        "sessionId": "6e29fb6c-fbcd-4448-912e-95f5b093d00a",
+        "targetId": "9A91B3A60301DB65BDFF03263558BD07",
+        "leaseGeneration": "65a232d5-eec3-46d3-b245-e5c6472c2df4"
+      }
+    },
+    {
+      "event": "ready",
+      "pid": 2315419,
+      "cap": {
+        "cellId": "fixture-cell",
+        "browserEpoch": "120d7c8c-1f49-43cc-bfa3-7c398c52b295",
+        "sessionId": "812c3f6d-add5-46e3-bbc1-d9e3c4ae7df3",
+        "targetId": "D5A3256E12D562C8BFC7EC4C9E9FF5B8",
+        "leaseGeneration": "a6e9833f-8ed9-4c44-a3ad-d10d83800c16"
+      }
+    },
+    {
+      "event": "ready",
+      "pid": 2315420,
+      "cap": {
+        "cellId": "fixture-cell",
+        "browserEpoch": "120d7c8c-1f49-43cc-bfa3-7c398c52b295",
+        "sessionId": "7d9fb6e2-7a6c-4b35-a443-1445305e4c58",
+        "targetId": "C3D4A8B8EB594AE5698651005602396E",
+        "leaseGeneration": "1709adb0-127b-41b8-abe8-856b72a9e00d"
+      }
+    }
+  ],
+  "rows": [
+    {
+      "event": "evidence",
+      "pid": 2315418,
+      "cap": {
+        "cellId": "fixture-cell",
+        "browserEpoch": "120d7c8c-1f49-43cc-bfa3-7c398c52b295",
+        "sessionId": "6e29fb6c-fbcd-4448-912e-95f5b093d00a",
+        "targetId": "9A91B3A60301DB65BDFF03263558BD07",
+        "leaseGeneration": "65a232d5-eec3-46d3-b245-e5c6472c2df4"
+      },
+      "start": 1788827434288,
+      "end": 1788827435841,
+      "text": "authenticated provisioned",
+      "url": "http://127.0.0.1:37163/provision",
+      "sessionId": "3aaa8a36-9428-42df-a191-7b9fc79835de"
+    },
+    {
+      "event": "evidence",
+      "pid": 2315419,
+      "cap": {
+        "cellId": "fixture-cell",
+        "browserEpoch": "120d7c8c-1f49-43cc-bfa3-7c398c52b295",
+        "sessionId": "812c3f6d-add5-46e3-bbc1-d9e3c4ae7df3",
+        "targetId": "D5A3256E12D562C8BFC7EC4C9E9FF5B8",
+        "leaseGeneration": "a6e9833f-8ed9-4c44-a3ad-d10d83800c16"
+      },
+      "start": 1788827434289,
+      "end": 1788827435777,
+      "text": "authenticated provisioned",
+      "url": "http://127.0.0.2:37163/provision",
+      "sessionId": "83e700ab-a74e-4beb-96e1-bcf55f9ea9f8"
+    },
+    {
+      "event": "evidence",
+      "pid": 2315420,
+      "cap": {
+        "cellId": "fixture-cell",
+        "browserEpoch": "120d7c8c-1f49-43cc-bfa3-7c398c52b295",
+        "sessionId": "7d9fb6e2-7a6c-4b35-a443-1445305e4c58",
+        "targetId": "C3D4A8B8EB594AE5698651005602396E",
+        "leaseGeneration": "1709adb0-127b-41b8-abe8-856b72a9e00d"
+      },
+      "start": 1788827434292,
+      "end": 1788827435928,
+      "text": "authenticated provisioned",
+      "url": "http://127.0.0.3:37163/provision",
+      "sessionId": "24288feb-6e27-44cf-8f1b-d30c1fe48ba7"
+    }
+  ],
+  "servicesProvisioned": 3,
+  "firstClientExit": "SIGKILL",
+  "cookiesSurvivedBrokerBrowserReopen": true,
+  "baseline": [],
+  "after": []
+}

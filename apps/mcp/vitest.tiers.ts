@@ -22,6 +22,15 @@ export const SLOW_POST_MERGE_FILES = [
 // names — same contract as REQUIRED_PAYMENT_SAFETY_FILES. The nightly full
 // suite still covers them as a drift backstop.
 export const REQUIRED_BEHAVIOR_FILES = [
+  "src/bot/__tests__/broker-daemon.test.ts",
+  "src/bot/__tests__/broker-runtime.test.ts",
+  "src/bot/__tests__/broker-forwarder.test.ts",
+  "src/bot/__tests__/broker-maintenance.test.ts",
+  "src/bot/__tests__/broker-journal.test.ts",
+  "src/bot/__tests__/broker-qualification.test.ts",
+  "src/bot/__tests__/broker-authority.test.ts",
+  "src/bot/__tests__/broker-transport.test.ts",
+  "src/bot/__tests__/broker-routing.test.ts",
   "src/bot/__tests__/autocomplete-commit-confirm.test.ts",
   "src/bot/__tests__/browser-document-identity.test.ts",
   "src/bot/__tests__/browser-process-page-boundary.test.ts",

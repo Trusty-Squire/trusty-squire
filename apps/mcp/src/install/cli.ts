@@ -1,3 +1,4 @@
+import { withBrokerMaintenance } from "../bot/broker/maintenance.js";
 // Setup CLI — connect / settings / logout subcommands.
 //
 // `connect` is the ONE onboarding AND re-auth pathway. There is no separate
@@ -466,8 +467,11 @@ async function settings(args: Argv): Promise<void> {
 
 async function connect(args: Argv): Promise<void> {
   try {
-    await withConnectProfileGuard(CHROME_PROFILE_DIR, (profileDir) =>
-      connectWithProfileGuard(args, profileDir),
+    await withBrokerMaintenance(
+      async () =>
+        await withConnectProfileGuard(CHROME_PROFILE_DIR, (profileDir) =>
+          connectWithProfileGuard(args, profileDir),
+        ),
     );
   } catch (err) {
     if (err instanceof ProfileBusyError) {
