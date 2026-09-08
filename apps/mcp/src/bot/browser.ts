@@ -3174,17 +3174,6 @@ export class BrowserController {
     return this.pageDriver.mainDocumentIdentity(page);
   }
 
-  async withOperationPage<T>(page: Page | undefined, operation: () => Promise<T>): Promise<T> {
-    if (page === undefined || page === this.page) return await operation();
-    const previousPage = this.page;
-    this.page = page;
-    try {
-      return await operation();
-    } finally {
-      this.page = previousPage;
-    }
-  }
-
   isActivePage(page: Page): boolean {
     return this.page === page;
   }
@@ -6224,8 +6213,12 @@ export class BrowserController {
   // (x, y). Uses 12-25 intermediate steps with small per-step delays.
   // The curve avoids the dead-straight teleport that Playwright's
   // default move() does.
-  private async bezierMouseTo(x: number, y: number): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
+  private async bezierMouseTo(
+    x: number,
+    y: number,
+    page: Page | null = this.page,
+  ): Promise<void> {
+    if (!page) throw new Error("Browser not started");
     const steps = rand(12, 25);
     // Bezier control points: bow the curve slightly perpendicular to
     // the travel direction so it's a recognizable arc, not a straight
@@ -6248,7 +6241,7 @@ export class BrowserController {
       const oneMinusT = 1 - t;
       const px = oneMinusT * oneMinusT * this.mouseX + 2 * oneMinusT * t * cx + t * t * x;
       const py = oneMinusT * oneMinusT * this.mouseY + 2 * oneMinusT * t * cy + t * t * y;
-      await this.page.mouse.move(px, py);
+      await page.mouse.move(px, py);
       // 6-18ms per step → ~150-400ms total travel for a typical click.
       await this.sleep(rand(6, 18));
     }
@@ -6285,12 +6278,15 @@ export class BrowserController {
   //     full challenge image grid, this method won't help — the
   //     iframe will render the grid, our click won't solve it, and
   //     we'll time out with `solved: false`.
-  async solveVisibleCaptcha(timeoutMs = 30000): Promise<CaptchaSolveResult> {
-    if (!this.page) throw new Error("Browser not started");
+  async solveVisibleCaptcha(
+    timeoutMs = 30000,
+    page: Page | null = this.page,
+  ): Promise<CaptchaSolveResult> {
+    if (!page) throw new Error("Browser not started");
 
     // Locate the widget. Turnstile and reCAPTCHA both use distinctive
     // iframe URLs that are easy to discriminate.
-    const widget = await this.findCaptchaWidget();
+    const widget = await this.findCaptchaWidget(page);
     if (widget === null) return { found: false };
 
     // rc.33 — fingerprint probe. When tracing, dump the values
@@ -6302,7 +6298,7 @@ export class BrowserController {
     // handle (e.g. a SwiftShader/llvmpipe renderer).
     if (process.env.UNIVERSAL_BOT_CAPTCHA_TRACE === "1") {
       try {
-        const fp = await this.page.evaluate(() => {
+        const fp = await page.evaluate(() => {
           const out: Record<string, unknown> = {};
           try {
             const c = document.createElement("canvas");
@@ -6390,12 +6386,12 @@ export class BrowserController {
     if (this.humanize) {
       const wanderX = widget.box.x + widget.box.width / 2 + rand(-40, 40);
       const wanderY = widget.box.y - rand(60, 110);
-      await this.bezierMouseTo(wanderX, wanderY);
+      await this.bezierMouseTo(wanderX, wanderY, page);
       await this.sleep(rand(600, 1400));
-      await this.bezierMouseTo(clickX, clickY);
+      await this.bezierMouseTo(clickX, clickY, page);
       await this.sleep(rand(180, 450));
     }
-    await this.page.mouse.click(clickX, clickY);
+    await page.mouse.click(clickX, clickY);
     this.mouseX = clickX;
     this.mouseY = clickY;
 
@@ -6406,7 +6402,7 @@ export class BrowserController {
     const pollIntervalMs = 500;
     while (Date.now() - start < timeoutMs) {
       await this.sleep(pollIntervalMs);
-      const solved = await this.page.evaluate(() => {
+      const solved = await page.evaluate(() => {
         const turnstile = document.querySelector(
           'input[name="cf-turnstile-response"]',
         ) as HTMLInputElement | null;
@@ -6429,7 +6425,7 @@ export class BrowserController {
       });
       if (solved) {
         if (widget.kind === "hcaptcha") {
-          const settled = await this.waitForCaptchaChallengeToSettle(15_000, 10_000);
+          const settled = await this.waitForCaptchaChallengeToSettle(15_000, 10_000, page);
           if (!settled) return { found: true, solved: false, kind: widget.kind };
         }
         return { found: true, solved: true, kind: widget.kind };
@@ -6460,11 +6456,11 @@ export class BrowserController {
   //       its closest visible ancestor as the click target. The
   //       widget's click handler is registered on the host div, so
   //       a click inside the host box still triggers the challenge.
-  private async findCaptchaWidget(): Promise<{
+  private async findCaptchaWidget(page: Page | null = this.page): Promise<{
     kind: CaptchaKind;
     box: { x: number; y: number; width: number; height: number };
   } | null> {
-    if (!this.page) throw new Error("Browser not started");
+    if (!page) throw new Error("Browser not started");
 
     // An INVISIBLE reCAPTCHA (api2/anchor with size=invisible — the
     // bottom-right badge) is score-mode: there is no checkbox to click, and
@@ -6478,7 +6474,7 @@ export class BrowserController {
     // plain form-submit would have passed silently. Detect "invisible-only"
     // (badge present, no visible checkbox anchor, no rendered bframe grid) and
     // skip reCAPTCHA entirely so the signup proceeds to submit.
-    const recaptchaInvisibleOnly = await this.page
+    const recaptchaInvisibleOnly = await page
       .evaluate(() => {
         const q = (s: string): boolean => document.querySelector(s) !== null;
         const visibleAnchor = Array.from(
@@ -6532,7 +6528,7 @@ export class BrowserController {
     const iframeDeadline = Date.now() + 5000;
     while (Date.now() < iframeDeadline) {
       for (const { kind, selector } of iframeCandidates) {
-        const locator = this.page.locator(selector);
+        const locator = page.locator(selector);
         const count = await locator.count();
         if (count === 0) continue;
         for (let i = 0; i < count; i++) {
@@ -6570,7 +6566,7 @@ export class BrowserController {
       // INSIDE the .grecaptcha-badge (~256×60), so the walk-up below would
       // return the badge box and we'd click it — the exact bug. Skip it.
       if (kind === "recaptcha" && recaptchaInvisibleOnly) continue;
-      const locator = this.page.locator(selector);
+      const locator = page.locator(selector);
       const count = await locator.count();
       if (count === 0) continue;
       const box = await locator
@@ -6613,13 +6609,13 @@ export class BrowserController {
   // solves nothing — it cannot regress the Tier 2 solve path.
   // Best-effort: a page-eval failure (e.g. mid-navigation) reports
   // unknown / not-rendered rather than throwing.
-  async detectCaptchaVariant(): Promise<{
+  async detectCaptchaVariant(page: Page | null = this.page): Promise<{
     variant: CaptchaVariant;
     challengeRendered: boolean;
   }> {
-    if (!this.page) throw new Error("Browser not started");
+    if (!page) throw new Error("Browser not started");
     try {
-      const raw = await this.page.evaluate(() => {
+      const raw = await page.evaluate(() => {
         const present = (sel: string): boolean => document.querySelector(sel) !== null;
         const visible = (sel: string): boolean => {
           const el = document.querySelector(sel);
@@ -6688,10 +6684,10 @@ export class BrowserController {
   // keys are UUIDs (`bc609205-…`); Turnstile keys start with `0x`. We
   // both scope the selector away from the other widgets AND gate on
   // the `6L` prefix, so no non-reCAPTCHA key can ever leak through.
-  async extractRecaptchaSitekey(): Promise<string | null> {
-    if (!this.page) throw new Error("Browser not started");
+  async extractRecaptchaSitekey(page: Page | null = this.page): Promise<string | null> {
+    if (!page) throw new Error("Browser not started");
     try {
-      const sitekey = await this.page.evaluate(() => {
+      const sitekey = await page.evaluate(() => {
         const isRecaptchaKey = (k: string | null): k is string =>
           k !== null && /^6L/.test(k) && k.length > 30;
         // 1. data-sitekey, but NOT on an hCaptcha/Turnstile widget (or
@@ -6729,10 +6725,10 @@ export class BrowserController {
   // the DOM input is populated.
   //
   // Returns true on success, false if no recaptcha widget present.
-  async injectRecaptchaToken(token: string): Promise<boolean> {
-    if (!this.page) throw new Error("Browser not started");
+  async injectRecaptchaToken(token: string, page: Page | null = this.page): Promise<boolean> {
+    if (!page) throw new Error("Browser not started");
     try {
-      const injected = await this.page.evaluate((tok: string) => {
+      const injected = await page.evaluate((tok: string) => {
         // 1. Populate every g-recaptcha-response textarea on the page
         //    (some pages render multiple widgets).
         const inputs = Array.from(
@@ -6803,10 +6799,10 @@ export class BrowserController {
   // Cloudflare Turnstile sitekey. On the `.cf-turnstile` widget's
   // data-sitekey, or as the `0x…` path segment in the challenge iframe src
   // (challenges.cloudflare.com/.../0x4AAAAA…/…). Returns null when absent.
-  async extractTurnstileSitekey(): Promise<string | null> {
-    if (!this.page) throw new Error("Browser not started");
+  async extractTurnstileSitekey(page: Page | null = this.page): Promise<string | null> {
+    if (!page) throw new Error("Browser not started");
     try {
-      return await this.page.evaluate(() => {
+      return await page.evaluate(() => {
         // Turnstile sitekeys are `0x` + ~22 base64url chars (e.g.
         // 0x4AAAAAADSpJWQOnICEKAwx). A site-embedded WIDGET exposes it; a
         // Cloudflare-MANAGED interstitial does not (it's injected, not in the
@@ -6853,10 +6849,10 @@ export class BrowserController {
   // (unlike grecaptcha), so DOM injection + events is the reliable path; the
   // server-side validation reads the input value. Returns true if an input
   // was populated.
-  async injectTurnstileToken(token: string): Promise<boolean> {
-    if (!this.page) throw new Error("Browser not started");
+  async injectTurnstileToken(token: string, page: Page | null = this.page): Promise<boolean> {
+    if (!page) throw new Error("Browser not started");
     try {
-      return await this.page.evaluate((tok: string) => {
+      return await page.evaluate((tok: string) => {
         const inputs = Array.from(
           document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
             '[name="cf-turnstile-response"], [name^="cf-turnstile-response"], input[id^="cf-chl-widget"]',
@@ -6886,13 +6882,16 @@ export class BrowserController {
   // namespaces. Returns true once a token is present. Best-effort: a missing
   // grecaptcha or an execute() throw resolves false (the form may still mint
   // it on its own submit handler).
-  async triggerInvisibleRecaptcha(timeoutMs = 9000): Promise<boolean> {
-    if (!this.page) throw new Error("Browser not started");
-    const tokenPresent = (): Promise<boolean> => this.hasCaptchaResponseToken();
+  async triggerInvisibleRecaptcha(
+    timeoutMs = 9000,
+    page: Page | null = this.page,
+  ): Promise<boolean> {
+    if (!page) throw new Error("Browser not started");
+    const tokenPresent = (): Promise<boolean> => this.hasCaptchaResponseToken(page);
 
     if (await tokenPresent()) return true;
 
-    const fired = await this.page
+    const fired = await page
       .evaluate(() => {
         const w = window as unknown as {
           grecaptcha?: {
@@ -6960,9 +6959,9 @@ export class BrowserController {
     return false;
   }
 
-  async hasCaptchaResponseToken(): Promise<boolean> {
-    if (!this.page) throw new Error("Browser not started");
-    return this.page
+  async hasCaptchaResponseToken(page: Page | null = this.page): Promise<boolean> {
+    if (!page) throw new Error("Browser not started");
+    return page
       .evaluate(() => {
         const hasValue = (selector: string): boolean => {
           const el = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector);
@@ -6978,11 +6977,14 @@ export class BrowserController {
       .catch(() => false);
   }
 
-  async waitForCaptchaResponseToken(timeoutMs = 5000): Promise<boolean> {
-    if (!this.page) throw new Error("Browser not started");
+  async waitForCaptchaResponseToken(
+    timeoutMs = 5000,
+    page: Page | null = this.page,
+  ): Promise<boolean> {
+    if (!page) throw new Error("Browser not started");
     const start = Date.now();
     do {
-      if (await this.hasCaptchaResponseToken()) return true;
+      if (await this.hasCaptchaResponseToken(page)) return true;
       await this.sleep(250);
     } while (Date.now() - start < timeoutMs);
     return false;
@@ -6994,10 +6996,10 @@ export class BrowserController {
   // reCAPTCHA `6L` guard in extractRecaptchaSitekey deliberately rejects
   // them, which is why hCaptcha needs its own extractor). Returns null
   // when no hCaptcha widget is present.
-  async extractHcaptchaSitekey(): Promise<string | null> {
-    if (!this.page) throw new Error("Browser not started");
+  async extractHcaptchaSitekey(page: Page | null = this.page): Promise<string | null> {
+    if (!page) throw new Error("Browser not started");
     try {
-      const fromDom = await this.page.evaluate(() => {
+      const fromDom = await page.evaluate(() => {
         const div = document.querySelector<HTMLElement>(
           ".h-captcha[data-sitekey], [data-hcaptcha-sitekey]",
         );
@@ -7024,30 +7026,30 @@ export class BrowserController {
       // `hcaptcha_login_main_site_key`, etc.). Scan the HTML for a UUID-shaped
       // key next to a sitekey/captcha hint, but only when an hCaptcha marker is
       // present so an unrelated config UUID cannot match.
-      const html = await this.page.evaluate(() => document.documentElement.outerHTML);
+      const html = await page.evaluate(() => document.documentElement.outerHTML);
       return extractHcaptchaSitekeyFromHtml(html);
     } catch {
       return null;
     }
   }
 
-  async getBrowserUserAgent(): Promise<string | null> {
-    if (!this.page) throw new Error("Browser not started");
+  async getBrowserUserAgent(page: Page | null = this.page): Promise<string | null> {
+    if (!page) throw new Error("Browser not started");
     try {
-      return await this.page.evaluate(() => navigator.userAgent);
+      return await page.evaluate(() => navigator.userAgent);
     } catch {
       return null;
     }
   }
 
-  async getHcaptchaSolveContext(): Promise<{
+  async getHcaptchaSolveContext(page: Page | null = this.page): Promise<{
     invisible: boolean;
     userAgent: string | null;
     rqdata: string | null;
   }> {
-    if (!this.page) throw new Error("Browser not started");
+    if (!page) throw new Error("Browser not started");
     try {
-      return await this.page.evaluate(() => {
+      return await page.evaluate(() => {
         let invisible = false;
         let rqdata: string | null = null;
         const useRqdata = (value: string | null): void => {
@@ -7096,7 +7098,7 @@ export class BrowserController {
     } catch {
       return {
         invisible: false,
-        userAgent: await this.getBrowserUserAgent().catch(() => null),
+        userAgent: await this.getBrowserUserAgent(page).catch(() => null),
         rqdata: null,
       };
     }
@@ -7107,11 +7109,11 @@ export class BrowserController {
   // accessors, and fire registered callbacks. Mirrors injectRecaptchaToken;
   // hCaptcha also mirrors the response token into a g-recaptcha-response
   // textarea on some compat installs, so populate both names if present.
-  async injectHcaptchaToken(token: string): Promise<boolean> {
-    if (!this.page) throw new Error("Browser not started");
+  async injectHcaptchaToken(token: string, page: Page | null = this.page): Promise<boolean> {
+    if (!page) throw new Error("Browser not started");
     try {
       const responseKey = extractHcaptchaResponseKeyFromToken(token);
-      const diag = await this.page.evaluate(
+      const diag = await page.evaluate(
         ({ tok, key }: { tok: string; key: string | null }) => {
           const widgetIds = new Set<string>();
           const inputs = Array.from(
@@ -7372,10 +7374,14 @@ export class BrowserController {
     return null;
   }
 
-  async waitForCaptchaChallengeToSettle(timeoutMs = 4000, stableClearMs = 2_500): Promise<boolean> {
-    if (!this.page) throw new Error("Browser not started");
+  async waitForCaptchaChallengeToSettle(
+    timeoutMs = 4000,
+    stableClearMs = 2_500,
+    page: Page | null = this.page,
+  ): Promise<boolean> {
+    if (!page) throw new Error("Browser not started");
     const hasVisibleChallenge = async (): Promise<boolean> =>
-      await this.page!.evaluate(() => {
+      await page.evaluate(() => {
         const visible = (el: Element): boolean => {
           const style = window.getComputedStyle(el as HTMLElement);
           if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
@@ -7456,16 +7462,16 @@ export class BrowserController {
   private resolveOperatorScreenshotFrame(opts: {
     frameIndex?: number;
     frameUrlContains?: string;
-  }): Frame | null {
-    if (!this.page) throw new Error("Browser not started");
+  }, page: Page | null = this.page): Frame | null {
+    if (!page) throw new Error("Browser not started");
     if (opts.frameIndex !== undefined) {
-      const frame = this.page.frames()[opts.frameIndex];
+      const frame = page.frames()[opts.frameIndex];
       if (frame === undefined) throw new Error("screenshot_frame_not_found");
       return frame;
     }
     if (opts.frameUrlContains !== undefined) {
       const needle = opts.frameUrlContains.toLowerCase();
-      const frame = this.page.frames().find((f) => f.url().toLowerCase().includes(needle));
+      const frame = page.frames().find((f) => f.url().toLowerCase().includes(needle));
       if (frame === undefined) throw new Error("screenshot_frame_not_found");
       return frame;
     }
@@ -7481,12 +7487,12 @@ export class BrowserController {
       frameUrlContains?: string;
       fullPage?: boolean;
     } = {},
-  ): Promise<{
+  }, page: Page | null = this.page): Promise<{
     base64: string;
     frameUrl: string | null;
     frameCount: number;
   }> {
-    return await this.screenshotForOperator(opts);
+    return await this.screenshotForOperator(opts, page);
   }
 
   async screenshotForOperator(
@@ -7495,14 +7501,13 @@ export class BrowserController {
       frameUrlContains?: string;
       fullPage?: boolean;
     } = {},
-  ): Promise<{
+  }, page: Page | null = this.page): Promise<{
     base64: string;
     frameUrl: string | null;
     frameCount: number;
   }> {
-    if (!this.page) throw new Error("Browser not started");
-    const page = this.page;
-    const targetFrame = this.resolveOperatorScreenshotFrame(opts);
+    if (!page) throw new Error("Browser not started");
+    const targetFrame = this.resolveOperatorScreenshotFrame(opts, page);
     const cdp = await page.context().newCDPSession(page);
     try {
       // caret:"initial" is not needed here — the CDP capture never runs
@@ -7562,8 +7567,8 @@ export class BrowserController {
     }
   }
 
-  async getState(): Promise<BrowserState> {
-    if (!this.page) throw new Error("Browser not started");
+  async getState(page: Page | null = this.page): Promise<BrowserState> {
+    if (!page) throw new Error("Browser not started");
     // page.content() / page.title() / screenshot() all throw
     // "Execution context was destroyed" when the page is mid-
     // navigation — common after an OAuth-button click that kicks off
@@ -7571,20 +7576,23 @@ export class BrowserController {
     // consent → callback → onboarding). Retry once after a short
     // settle: most navigations finish in <500ms even on slow links.
     try {
-      return await this.snapshotState();
+      return await this.snapshotState(page);
     } catch {
       await this.wait(0.8);
-      return await this.snapshotState();
+      return await this.snapshotState(page);
     }
   }
 
-  private async snapshotState(): Promise<BrowserState> {
-    if (!this.page) throw new Error("Browser not started");
+  private async snapshotState(page: Page | null = this.page): Promise<BrowserState> {
+    if (!page) throw new Error("Browser not started");
     return {
-      url: this.page.url(),
-      title: await this.page.title(),
-      html: await this.page.content(),
-      screenshot: await this.screenshot().catch(() => ""),
+      url: page.url(),
+      title: await page.title(),
+      html: await page.content(),
+      screenshot: await page
+        .screenshot({ fullPage: false, type: "jpeg", quality: 70, timeout: 8_000 })
+        .then((shot) => shot.toString("base64"))
+        .catch(() => ""),
     };
   }
 
@@ -11088,9 +11096,9 @@ export class BrowserController {
   // API-key modals stash the full key in a hidden input the masked
   // display reads from — and that needs to be reachable when the
   // visible extraction comes back truncated.
-  async extractAllInputValues(): Promise<string[]> {
-    if (!this.page) throw new Error("Browser not started");
-    return await this.page.evaluate(() => {
+  async extractAllInputValues(page: Page | null = this.page): Promise<string[]> {
+    if (!page) throw new Error("Browser not started");
+    return await page.evaluate(() => {
       const out: string[] = [];
       document.querySelectorAll("input, textarea").forEach((el) => {
         if (!(el instanceof HTMLInputElement) && !(el instanceof HTMLTextAreaElement)) return;
@@ -11109,9 +11117,9 @@ export class BrowserController {
   // it, we'd false-positive on session IDs in URLs, cache-buster
   // query params, etc. Returns every match it finds; the caller picks
   // the first that survives extractApiKeyFromText.
-  async extractCredentialsNearCopyButtons(): Promise<string[]> {
-    if (!this.page) throw new Error("Browser not started");
-    return await this.page.evaluate(() => {
+  async extractCredentialsNearCopyButtons(page: Page | null = this.page): Promise<string[]> {
+    if (!page) throw new Error("Browser not started");
+    return await page.evaluate(() => {
       const out: string[] = [];
       const isVisible = (el: Element): boolean => {
         const r = el.getBoundingClientRect();
@@ -11192,7 +11200,7 @@ export class BrowserController {
   // The caller maps label
   // text to canonical credential keys using the same vocabulary the
   // Phase E parser uses.
-  async extractLabeledCredentialCandidates(): Promise<
+  async extractLabeledCredentialCandidates(page: Page | null = this.page): Promise<
     Array<{
       value: string;
       label: string | null;
@@ -11200,8 +11208,8 @@ export class BrowserController {
       hasRevealButton: boolean;
     }>
   > {
-    if (!this.page) throw new Error("Browser not started");
-    return await this.page.evaluate(() => {
+    if (!page) throw new Error("Browser not started");
+    return await page.evaluate(() => {
       const LABEL_PHRASES = [
         // Generic
         "api key",
@@ -11481,12 +11489,11 @@ export class BrowserController {
   // api_secret behind a click-to-reveal icon. Best-effort: failures
   // don't throw; subsequent extract pass tries whatever surfaced.
   // Returns the number of buttons successfully clicked.
-  async revealMaskedCredentials(): Promise<{
+  async revealMaskedCredentials(page: Page | null = this.page): Promise<{
     clicked: number;
     diagnostic: string[];
   }> {
-    if (this.page === null) throw new Error("Browser not started");
-    const page = this.page;
+    if (page === null) throw new Error("Browser not started");
     const probe = await page.evaluate(() => {
       const isVisible = (el: Element): boolean => {
         const r = el.getBoundingClientRect();
@@ -13298,9 +13305,9 @@ export class BrowserController {
   // depends on. Reads every input/select/textarea's `name` (falling back to
   // `id`) with a single flat query — no visibility/shadow-DOM handling,
   // matching the method proven in the field-name-set discriminator report.
-  async extractCheckoutFieldNames(): Promise<string[]> {
-    if (!this.page) throw new Error("Browser not started");
-    return await this.page.evaluate(() => {
+  async extractCheckoutFieldNames(page: Page | null = this.page): Promise<string[]> {
+    if (!page) throw new Error("Browser not started");
+    return await page.evaluate(() => {
       const names: string[] = [];
       document.querySelectorAll("input,select,textarea").forEach((el) => {
         const name = el.getAttribute("name") ?? el.getAttribute("id") ?? "";
@@ -14062,6 +14069,9 @@ export class BrowserController {
   }
   currentUrl(): string {
     return this.pageDriver.currentUrl();
+  }
+  activePage(): Page | null {
+    return this.page;
   }
   recoverActivePage(): boolean {
     return this.pageDriver.recoverActivePage();

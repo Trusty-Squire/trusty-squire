@@ -1314,10 +1314,6 @@ function operationPageForSession(session: Session): Page | undefined {
   );
 }
 
-async function withOperationPage<T>(session: Session, operation: () => Promise<T>): Promise<T> {
-  return await session.browser.withOperationPage(operationPageForSession(session), operation);
-}
-
 function rememberOAuthCompletionSourcePage(
   session: object,
   page: OAuthCompletionEvidence["page"] | undefined,
@@ -2260,16 +2256,15 @@ export async function captureScreenshot(
 ): Promise<ScreenshotCapture> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  return await withOperationPage(session, async () => {
-    const captured = await session.browser.captureOperatorScreenshot(opts);
-    return {
-      session_id: sessionId,
-      url: session.browser.currentUrl(),
-      frame_url: captured.frameUrl,
-      frame_count: captured.frameCount,
-      image: { mime_type: "image/jpeg", data_base64: captured.base64 },
-    };
-  });
+  const page = operationPageForSession(session);
+  const captured = await session.browser.captureOperatorScreenshot(opts, page);
+  return {
+    session_id: sessionId,
+    url: page?.url() ?? session.browser.currentUrl(),
+    frame_url: captured.frameUrl,
+    frame_count: captured.frameCount,
+    image: { mime_type: "image/jpeg", data_base64: captured.base64 },
+  };
 }
 
 // Hosts to seed credential EGRESS from when storing a key extracted in this
@@ -5406,8 +5401,10 @@ async function executeAct(
             } else if (action.kind === "click" || action.kind === "js_click") {
               const method = action.kind;
               if (compactV2ActionPage !== undefined && !browser.isActivePage(compactV2ActionPage)) {
-                if (method === "click") await browser.clickHandle(resolved.handle);
-                else await browser.jsClickHandle(resolved.handle);
+                await adoptTabOpenedByClick(session, browser, async () => {
+                  if (method === "click") await browser.clickHandle(resolved.handle);
+                  else await browser.jsClickHandle(resolved.handle);
+                });
               } else {
                 await adoptTabOpenedByClick(session, browser, async () => {
                   if (method === "click")
@@ -5490,17 +5487,19 @@ async function executeAct(
               ),
             );
           } else if (!sourcePageIsActive && compactV2ActionPage !== undefined) {
-            if (target !== null) {
-              if (action.kind === "click") {
-                await browser.clickInFrame(target, el.selector, compactV2ActionPage);
+            await adoptTabOpenedByClick(session, browser, async () => {
+              if (target !== null) {
+                if (action.kind === "click") {
+                  await browser.clickInFrame(target, el.selector, compactV2ActionPage);
+                } else {
+                  await browser.clickViaJsInFrame(target, el.selector, 0, compactV2ActionPage);
+                }
+              } else if (action.kind === "click") {
+                await browser.clickOnPage(compactV2ActionPage, el.selector);
               } else {
-                await browser.clickViaJsInFrame(target, el.selector, 0, compactV2ActionPage);
+                await browser.clickViaJsOnPage(compactV2ActionPage, el.selector);
               }
-            } else if (action.kind === "click") {
-              await browser.clickOnPage(compactV2ActionPage, el.selector);
-            } else {
-              await browser.clickViaJsOnPage(compactV2ActionPage, el.selector);
-            }
+            });
           } else if (action.kind === "click") {
             await adoptTabOpenedByClick(session, browser, async () => {
               await browser.clickWithDispatchTracking(
@@ -5760,7 +5759,8 @@ async function executeAct(
   // Don't fold inbox-provider steps into the replayable recipe (see
   // INBOX_READ_HOSTS): replay re-reads the code via awaitVerification, and a
   // recorded inbox click would bake the email's subject into a shared recipe.
-  const urlAfterAction = compactV2ActionPage?.url() ?? browser.currentUrl();
+  const actionPageAfter = operationPageForSession(session) ?? compactV2ActionPage;
+  const urlAfterAction = actionPageAfter?.url() ?? browser.currentUrl();
   if (!isInboxReadHost(urlAfterAction)) {
     const replayElement = replaySafeElementForSession(session, resolvedEl);
     recordTrace(session, completedAction, replayElement, sensitiveSource);
@@ -5779,13 +5779,10 @@ async function executeAct(
   // operate_observe before its next ref-targeted act (refs aren't refreshed here).
   const checkoutState =
     internalAccess && collectCheckoutState
-      ? await capturePrivateCheckoutState(session, compactV2ActionPage)
+      ? await capturePrivateCheckoutState(session, actionPageAfter)
       : undefined;
   const terminalOAuthCompletionUrl = browser.takeOAuthTerminalCompletionUrl();
-  const actionObservationPage =
-    action.kind === "oauth_login" || action.kind === "oauth_click"
-      ? (oauthCompletionSourcePage(session) ?? compactV2ActionPage)
-      : compactV2ActionPage;
+  const actionObservationPage = actionPageAfter;
   const observation =
     terminalOAuthCompletionUrl !== null
       ? terminalOAuthCompletionObservation(session, terminalOAuthCompletionUrl)
@@ -6522,19 +6519,19 @@ function recordCaptureRound(
 // The EXTRACT round is the one round that keeps raw html — the key-extraction
 // step is synthesized from the page where the credential is shown.
 async function recordExtractRound(session: Session): Promise<boolean> {
-  return await withOperationPage(session, async () => {
+  const page = operationPageForSession(session);
     let html = "";
     if (session.compactV2Mode !== "on") {
       try {
-        html = (await session.browser.getState()).html;
+        html = (await session.browser.getState(page)).html;
       } catch {
         /* best-effort — the copy-button/inventory extract path still works */
       }
     }
     const stateUrl =
       session.compactV2Mode === "on"
-        ? compactV2ReplaySafeUrl(session.browser.currentUrl())
-        : session.browser.currentUrl();
+        ? compactV2ReplaySafeUrl(page?.url() ?? session.browser.currentUrl())
+        : (page?.url() ?? session.browser.currentUrl());
     if (stateUrl === null) {
       rejectRecipeRecording(session, "compact_v2_unrepresentable_page_url");
       return false;
@@ -6553,7 +6550,6 @@ async function recordExtractRound(session: Session): Promise<boolean> {
       observed: { kind: "extract", reason: "extract the credential shown on the page" },
     });
     return true;
-  });
 }
 
 // Record the extract round from the live page, then write the accumulated medium
@@ -6690,6 +6686,12 @@ async function adoptOpenedTab(
   if (!newTabAdoptionAllowed(session)) return;
   const url = await browser.adoptOpenedTab(graceMs).catch(() => null);
   if (url === null) return;
+  const page = browser.activePage();
+  if (page !== null && oauthCompletionSourcePage(session) !== undefined) {
+    rememberOAuthCompletionSourcePage(session, page);
+  } else if (page !== null && session.compactV2Active) {
+    rememberCompactV2SourcePage(session, page);
+  }
   audit(session.id, "new_tab_adopted", { host: registrableHost(url) });
 }
 
@@ -7009,9 +7011,7 @@ async function rememberCheckoutLeg(
   const legStart = checkoutLegStartIndex(trace);
   if (legStart === null) return null;
   const legTrace = trace.slice(legStart);
-  const fieldNames = await withOperationPage(session, async () =>
-    await session.browser.extractCheckoutFieldNames(),
-  );
+  const fieldNames = await session.browser.extractCheckoutFieldNames(operationPageForSession(session));
   const signature = checkoutFieldSetSignature(fieldNames);
   if (signature === null) return null;
   const legSlots = new Set(
@@ -7093,25 +7093,23 @@ export async function verifyPostcondition(
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const sourcePage = operationPageForSession(session);
-  return await session.browser.withOperationPage(sourcePage, async () => {
-    if (postcondition.kind === "observe_artifact" && postcondition.probe_url !== undefined) {
+  if (postcondition.kind === "observe_artifact" && postcondition.probe_url !== undefined) {
       const host = registrableHost(postcondition.probe_url);
       if (host !== null && !session.allowedHosts.some((e) => e.host === host)) {
         session.allowedHosts.push({ host, source: "mid_session" });
       }
       invalidateCompactV2Snapshot(session);
-      await session.browser.goto(postcondition.probe_url);
+      await session.browser.goto(postcondition.probe_url, sourcePage);
       await settle(1500);
-    }
-    const snap = await snapshotForPostcondition(session, sourcePage);
-    const result = checkSuccessSignal(postcondition.success_signal, snap);
-    audit(sessionId, "verify_postcondition", {
-      kind: postcondition.kind,
-      confirmed: result.confirmed,
-      reason: result.reason,
-    });
-    return result;
+  }
+  const snap = await snapshotForPostcondition(session, sourcePage);
+  const result = checkSuccessSignal(postcondition.success_signal, snap);
+  audit(sessionId, "verify_postcondition", {
+    kind: postcondition.kind,
+    confirmed: result.confirmed,
+    reason: result.reason,
   });
+  return result;
 }
 
 export async function verifySavedRecipePostcondition(
@@ -7158,9 +7156,7 @@ export async function verifyActiveRecipePostcondition(
 export async function checkoutShapeSignatureForSession(sessionId: string): Promise<string | null> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const fieldNames = await withOperationPage(session, async () =>
-    await session.browser.extractCheckoutFieldNames(),
-  );
+  const fieldNames = await session.browser.extractCheckoutFieldNames(operationPageForSession(session));
   return checkoutFieldSetSignature(fieldNames);
 }
 
@@ -8062,17 +8058,17 @@ export function classifyVouchflowCredentials(text: string): Record<string, strin
 export async function extractCredentials(sessionId: string): Promise<ExtractResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  return await withOperationPage(session, async () => {
-    const { browser } = session;
-    invalidateCompactV2Snapshot(session);
+  const { browser } = session;
+  const page = operationPageForSession(session);
+  invalidateCompactV2Snapshot(session);
 
   // The masked-display trap: click reveal/show toggles before reading.
-  await browser.revealMaskedCredentials();
+  await browser.revealMaskedCredentials(page);
 
-  const labeled = await browser.extractLabeledCredentialCandidates();
-  const inputs = await browser.extractAllInputValues();
-  const nearCopy = await browser.extractCredentialsNearCopyButtons();
-  const text = await browser.extractVisibleText();
+  const labeled = await browser.extractLabeledCredentialCandidates(page);
+  const inputs = await browser.extractAllInputValues(page);
+  const nearCopy = await browser.extractCredentialsNearCopyButtons(page);
+  const text = await browser.extractVisibleText(page);
 
   // Fail CLOSED on a login wall / anti-bot interstitial: scraping it yields only
   // session/CSRF/asset tokens, and handing one back is a false-green. Refuse,
@@ -8082,7 +8078,7 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     audit(sessionId, "extract", { found: false, blocked_reason: blocked });
     return {
       session_id: sessionId,
-      url: browser.currentUrl(),
+      url: page?.url() ?? browser.currentUrl(),
       credentials: {},
       candidate_count: 0,
       blocked_reason: blocked,
@@ -8174,16 +8170,15 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     n += 1;
     credentials[`api_key_${n}`] = tok;
   }
-  const sanitized = sanitizeExtractedCredentials(credentials, browser.currentUrl(), haystack);
+  const sanitized = sanitizeExtractedCredentials(credentials, page?.url() ?? browser.currentUrl(), haystack);
   const found = Object.keys(sanitized).length > 0;
   audit(sessionId, "extract", { found, candidate_count: labeled.length });
     return {
       session_id: sessionId,
-      url: browser.currentUrl(),
+      url: page?.url() ?? browser.currentUrl(),
       credentials: sanitized,
       candidate_count: labeled.length,
     };
-  });
 }
 
 // ── captcha gate (thick tool) ──
@@ -8264,55 +8259,56 @@ async function solveCaptchaWithTokenSolver(
   solver: TwoCaptchaSolver,
   browser: BrowserController,
   variant: string,
+  page?: Page,
 ): Promise<{ solved: boolean; outcome: string }> {
   if (!solver.isAvailable()) return { solved: false, outcome: "no_key" };
 
   if (variant === "recaptcha_v2" || variant === "recaptcha_v3") {
-    const sitekey = await browser.extractRecaptchaSitekey();
+    const sitekey = await browser.extractRecaptchaSitekey(page);
     if (sitekey === null) return { solved: false, outcome: "missing_sitekey" };
     const res = await solver.solveRecaptchaV2({
       sitekey,
-      pageUrl: browser.currentUrl(),
+      pageUrl: page?.url() ?? browser.currentUrl(),
       ...(variant === "recaptcha_v3" ? { invisible: true } : {}),
     });
     if (res.kind !== "ok") return { solved: false, outcome: res.kind };
-    const injected = await browser.injectRecaptchaToken(res.token);
+    const injected = await browser.injectRecaptchaToken(res.token, page);
     if (!injected) return { solved: false, outcome: "inject_failed" };
     return {
-      solved: await browser.waitForCaptchaResponseToken(2_000),
+      solved: await browser.waitForCaptchaResponseToken(2_000, page),
       outcome: "ok",
     };
   }
 
   if (variant === "hcaptcha") {
-    const sitekey = await browser.extractHcaptchaSitekey();
+    const sitekey = await browser.extractHcaptchaSitekey(page);
     if (sitekey === null) return { solved: false, outcome: "missing_sitekey" };
-    const ctx = await browser.getHcaptchaSolveContext();
+    const ctx = await browser.getHcaptchaSolveContext(page);
     const res = await solver.solveHcaptcha({
       sitekey,
-      pageUrl: browser.currentUrl(),
+      pageUrl: page?.url() ?? browser.currentUrl(),
       invisible: ctx.invisible,
       ...(ctx.userAgent !== null ? { userAgent: ctx.userAgent } : {}),
       ...(ctx.rqdata !== null ? { data: ctx.rqdata } : {}),
     });
     if (res.kind !== "ok") return { solved: false, outcome: res.kind };
-    const injected = await browser.injectHcaptchaToken(res.token);
+    const injected = await browser.injectHcaptchaToken(res.token, page);
     if (!injected) return { solved: false, outcome: "inject_failed" };
     return {
-      solved: await browser.waitForCaptchaResponseToken(2_000),
+      solved: await browser.waitForCaptchaResponseToken(2_000, page),
       outcome: "ok",
     };
   }
 
   if (variant === "turnstile") {
-    const sitekey = await browser.extractTurnstileSitekey();
+    const sitekey = await browser.extractTurnstileSitekey(page);
     if (sitekey === null) return { solved: false, outcome: "missing_sitekey" };
-    const res = await solver.solveTurnstile({ sitekey, pageUrl: browser.currentUrl() });
+    const res = await solver.solveTurnstile({ sitekey, pageUrl: page?.url() ?? browser.currentUrl() });
     if (res.kind !== "ok") return { solved: false, outcome: res.kind };
-    const injected = await browser.injectTurnstileToken(res.token);
+    const injected = await browser.injectTurnstileToken(res.token, page);
     if (!injected) return { solved: false, outcome: "inject_failed" };
     return {
-      solved: await browser.waitForCaptchaResponseToken(2_000),
+      solved: await browser.waitForCaptchaResponseToken(2_000, page),
       outcome: "ok",
     };
   }
@@ -8326,16 +8322,16 @@ async function solveCaptchaWithTokenSolver(
 export async function captchaGate(sessionId: string): Promise<CaptchaGateResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  return await withOperationPage(session, async () => {
-    invalidateCompactV2Snapshot(session);
-    const det = await session.browser.detectCaptchaVariant();
+  const page = operationPageForSession(session);
+  invalidateCompactV2Snapshot(session);
+  const det = await session.browser.detectCaptchaVariant(page);
   const found = det.variant !== "unknown" || det.challengeRendered;
   if (!found) {
     audit(sessionId, "captcha_gate", { found: false });
     return { session_id: sessionId, found: false, variant: "none", settled: true };
   }
 
-  let token = await session.browser.waitForCaptchaResponseToken(750);
+  let token = await session.browser.waitForCaptchaResponseToken(750, page);
   let solvedBySubstrate = false;
   let tokenSolverOutcome: string | null = null;
 
@@ -8345,11 +8341,11 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
     // #279). With NO solver configured, solveCaptchaWithTokenSolver returns
     // "no_key" and a v3 failure stays an IP/behavior scoring wall (needs_user →
     // captcha_wall below), NOT a "set up 2Captcha" prompt.
-    solvedBySubstrate = await session.browser.triggerInvisibleRecaptcha(9_000);
-    token = solvedBySubstrate || (await session.browser.waitForCaptchaResponseToken(2_000));
+    solvedBySubstrate = await session.browser.triggerInvisibleRecaptcha(9_000, page);
+    token = solvedBySubstrate || (await session.browser.waitForCaptchaResponseToken(2_000, page));
     if (!token) {
       const solver = await buildTwoCaptchaSolver(session);
-      const tokenSolved = await solveCaptchaWithTokenSolver(solver, session.browser, det.variant);
+      const tokenSolved = await solveCaptchaWithTokenSolver(solver, session.browser, det.variant, page);
       tokenSolverOutcome = tokenSolved.outcome;
       token = tokenSolved.solved;
     }
@@ -8361,17 +8357,17 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
     // captchas; solveCaptchaWithTokenSolver returns outcome "no_key" when none
     // is configured, so we fall through to the visible-captcha click below.
     const solver = await buildTwoCaptchaSolver(session);
-    const tokenSolved = await solveCaptchaWithTokenSolver(solver, session.browser, det.variant);
+    const tokenSolved = await solveCaptchaWithTokenSolver(solver, session.browser, det.variant, page);
     tokenSolverOutcome = tokenSolved.outcome;
     token = tokenSolved.solved;
     if (!token) {
-      const solved = await session.browser.solveVisibleCaptcha(30_000);
+      const solved = await session.browser.solveVisibleCaptcha(30_000, page);
       solvedBySubstrate = solved.found && solved.solved;
-      token = solvedBySubstrate || (await session.browser.waitForCaptchaResponseToken(2_000));
+      token = solvedBySubstrate || (await session.browser.waitForCaptchaResponseToken(2_000, page));
     }
   }
 
-  const clear = await session.browser.waitForCaptchaChallengeToSettle(token ? 5_000 : 15_000);
+  const clear = await session.browser.waitForCaptchaChallengeToSettle(token ? 5_000 : 15_000, 2_500, page);
   const settled =
     det.variant === "unknown" ? clear : token && (clear || tokenSolverOutcome === "ok");
 
@@ -8424,7 +8420,6 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
       settled,
       ...(needs_user !== undefined ? { needs_user } : {}),
     };
-  });
 }
 
 // ── email verification (thick tool — user-inbox-via-browser) ──

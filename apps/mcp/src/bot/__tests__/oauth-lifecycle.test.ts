@@ -1163,6 +1163,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
           <a href="/products/popup" data-product-identity="popup-product">Popup product</a>
           <span>Quantity 1</span><span data-options-hash="popup-options"></span>
         </div>
+        <button id="open-new-tab" onclick="window.open('https://console.product.test/opened')">Open settings</button>
         <div style="height:4000px"></div>
         <script>
           document.body.dataset.enters = '0';
@@ -1200,10 +1201,13 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await context.route("https://console.product.test/**", (route) =>
         route.fulfill({
           contentType: "text/html",
-          body: `<main>Projects</main><button>New project</button>${controls
-            .replaceAll("__CHECKOUT_FIELD__", "source_checkout_marker")
-            .replaceAll("__TOTAL__", "12.34")
-            .replaceAll("__CREDENTIAL__", "sk_source_abcdefgh1234567890")}`,
+          body:
+            route.request().url() === "https://console.product.test/opened"
+              ? '<label>Opened setting<input id="opened-setting"></label>'
+              : `<main>Projects</main><button>New project</button>${controls
+                  .replaceAll("__CHECKOUT_FIELD__", "source_checkout_marker")
+                  .replaceAll("__TOTAL__", "12.34")
+                  .replaceAll("__CREDENTIAL__", "sk_source_abcdefgh1234567890")}`,
         }),
       );
       await product.goto(productUrl);
@@ -1256,6 +1260,21 @@ describe("BrowserController OAuth popup lifecycle", () => {
         expect(Object.values(extracted.credentials)).toContain("sk_source_abcdefgh1234567890");
         expect(await source.locator("#credential").textContent()).toBe("sk_source_abcdefgh1234567890");
         expect(await product.locator("#credential").textContent()).toBe("••••");
+        await source.evaluate(() => {
+          document.body.insertAdjacentHTML(
+            "beforeend",
+            '<div><span>••••</span><button id="concurrent-reveal" onclick="document.body.dataset.concurrentReveal = \'started\'; this.previousElementSibling.textContent = window.credentialValue">Show API key</button></div>',
+          );
+        });
+        const concurrentExtract = extractCredentials(sessionId);
+        await source.waitForFunction(() => document.body.dataset.concurrentReveal === "started");
+        await controller.goto("https://mail.google.com/concurrent-original");
+        expect(source.url()).toBe(expectedReturnUrl);
+        expect(product.url()).toBe("https://mail.google.com/concurrent-original");
+        expect(Object.values((await concurrentExtract).credentials)).toContain(
+          "sk_source_abcdefgh1234567890",
+        );
+        await controller.goto(productUrl);
         const inputRef = parseElementsTable(result.el_table ?? "").find(
           (el) => el.label === "Project name",
         )?.ref;
@@ -1341,10 +1360,28 @@ describe("BrowserController OAuth popup lifecycle", () => {
         expect(sessionForCall(sessionId)?.actionTrace.some((entry) => entry.action.kind === "type")).toBe(
           true,
         );
+        const beforeOpen = await observe(sessionId);
+        const openRef = parseElementsTable(beforeOpen.el_table ?? "").find(
+          (el) => el.label === "Open settings",
+        )?.ref;
+        expect(openRef).toBeDefined();
+        const openedPage = await source.waitForEvent("popup");
+        const opened = await act(sessionId, { kind: "click", target: openRef! });
+        expect(opened.url).toBe("https://console.product.test/opened");
+        expect(openedPage.url()).toBe("https://console.product.test/opened");
+        const openedInputRef = parseElementsTable(opened.el_table ?? "").find(
+          (el) => el.label === "Opened setting",
+        )?.ref;
+        expect(openedInputRef).toBeDefined();
+        await act(sessionId, { kind: "type", target: openedInputRef!, text: "New tab setting" });
+        expect(await openedPage.locator("#opened-setting").inputValue()).toBe("New tab setting");
+        expect(source.url()).toBe(expectedReturnUrl);
+        expect(product.url()).toBe(productUrl);
         const destination = "https://console.product.test/settings";
         const navigated = await act(sessionId, { kind: "goto", url: destination });
         expect(navigated.url).toBe(destination);
-        expect(source.url()).toBe(destination);
+        expect(openedPage.url()).toBe(destination);
+        expect(source.url()).toBe(expectedReturnUrl);
         expect(product.url()).toBe(productUrl);
       } finally {
         if (sessionId) await finishProvisionSession(sessionId);
