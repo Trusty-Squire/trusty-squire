@@ -5087,7 +5087,11 @@ async function executeAct(
     }
   }
 
-  const recordingTransitionFields = await attestRecordedFieldsBeforeTransition(session, action);
+  const recordingTransitionFields = await attestRecordedFieldsBeforeTransition(
+    session,
+    action,
+    compactV2ActionPage,
+  );
 
   // Captured for the operator-recipe trace: the element a target action
   // resolved to, so we record the VISIBLE text it acted on (not the ref).
@@ -5271,17 +5275,15 @@ async function executeAct(
           compactV2CommittedSelectValue(session, committedText),
         );
         completedAction = { ...action, text: committedText };
-        if (compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage)) {
-          await settleAfterStateChange(browser);
-        }
+        await settleAfterStateChange(browser, compactV2ActionPage);
         break;
       }
       case "set_phone_country": {
         // No captured element — the bot finds the phone-local native <select>.
         // resolvedEl stays null; the step records without a captured-element
         // trace (the country is host-replannable, not a replay recipe).
-        await browser.setPhoneCountry(action.country);
-        await settleAfterStateChange(browser);
+        await browser.setPhoneCountry(action.country, compactV2ActionPage);
+        await settleAfterStateChange(browser, compactV2ActionPage);
         break;
       }
       case "click":
@@ -5391,9 +5393,7 @@ async function executeAct(
             host: registrableHost(urlBeforeAction),
           });
           if (action.kind !== "type") {
-            if (compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage)) {
-              await settleAfterStateChange(browser);
-            }
+            await settleAfterStateChange(browser, compactV2ActionPage);
             // A tab opened by JS a tick after the click lands during the
             // settle above, not inside the click's own grace window. Drain it
             // here — the queue is already populated, so this costs nothing.
@@ -5645,11 +5645,8 @@ async function executeAct(
           );
           rememberOAuthCompletionSourcePage(session, browser.completedOAuthPage() ?? undefined);
         }
-        if (
-          action.kind !== "type" &&
-          (compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage))
-        ) {
-          await settleAfterStateChange(browser);
+        if (action.kind !== "type") {
+          await settleAfterStateChange(browser, compactV2ActionPage);
         }
         // Only a plain click follows a tab it opened. oauth_click owns its own
         // provider-page lifecycle and upload never opens one.
@@ -5719,7 +5716,12 @@ async function executeAct(
       if (!stillObservedDocument) invalidateCompactV2Snapshot(session);
     }
   }
-  await verifyRecordedFieldsAfterTransition(session, action, recordingTransitionFields);
+  await verifyRecordedFieldsAfterTransition(
+    session,
+    action,
+    recordingTransitionFields,
+    compactV2ActionPage,
+  );
   // Don't fold inbox-provider steps into the replayable recipe (see
   // INBOX_READ_HOSTS): replay re-reads the code via awaitVerification, and a
   // recorded inbox click would bake the email's subject into a shared recipe.
@@ -6664,12 +6666,15 @@ async function adoptTabOpenedByClick(
   }
 }
 
-async function settleAfterStateChange(browser: BrowserController): Promise<void> {
+async function settleAfterStateChange(
+  browser: BrowserController,
+  page?: Page,
+): Promise<void> {
   // A fixed dwell here used to consume the OAuth action's completion window
   // after the provider had already returned. Wait for the page's actual
   // interactive state instead; it resolves immediately when the redirect has
   // rendered and remains bounded for slow SPAs.
-  await browser.waitForInteractiveDom(1, 2_000).catch(() => undefined);
+  await browser.waitForInteractiveDom(1, 2_000, page).catch(() => undefined);
 }
 
 // ── operator-recipe: remember a successful run, verify a postcondition ──
@@ -7381,15 +7386,16 @@ async function verifyReplayField(
   session: Session,
   expected: ReplayExpectedField,
   allowCommittedSelect = false,
+  page?: Page,
 ): Promise<{ ok: true } | { ok: false; reason: "field_missing" | "field_value_mismatch" }> {
   if (expected.kind === "set_phone_country") {
-    return (await session.browser.verifyPhoneCountry(expected.expected))
+    return (await session.browser.verifyPhoneCountry(expected.expected, page))
       ? { ok: true }
       : { ok: false, reason: "field_value_mismatch" };
   }
   const target = expected.target;
   if (target === null) return { ok: false, reason: "field_missing" };
-  const fresh = await session.browser.extractInteractiveElements();
+  const fresh = await session.browser.extractInteractiveElements(page);
   retainSessionElements(session, fresh);
   return verifyReplayFieldInElements(session, expected, fresh, allowCommittedSelect);
 }
@@ -7399,9 +7405,10 @@ async function verifyReplayFieldWithElements(
   expected: ReplayExpectedField,
   elements: readonly InteractiveElement[],
   allowCommittedSelect = false,
+  page?: Page,
 ): Promise<{ ok: true } | { ok: false; reason: "field_missing" | "field_value_mismatch" }> {
   if (expected.kind === "set_phone_country") {
-    return (await session.browser.verifyPhoneCountry(expected.expected))
+    return (await session.browser.verifyPhoneCountry(expected.expected, page))
       ? { ok: true }
       : { ok: false, reason: "field_value_mismatch" };
   }
@@ -7412,9 +7419,10 @@ async function isReplayFieldMounted(
   session: Session,
   expected: ReplayExpectedField,
   elements: readonly InteractiveElement[],
+  page?: Page,
 ): Promise<boolean> {
   if (expected.kind === "set_phone_country") {
-    return await session.browser.hasPhoneCountryControl();
+    return await session.browser.hasPhoneCountryControl(page);
   }
   return expected.target !== null && hasRecipeTargetCandidate(elements, expected.target);
 }
@@ -7468,14 +7476,15 @@ function recordedMoneyFields(session: Session): ReplayExpectedField[] {
 async function attestRecordedFieldsBeforeTransition(
   session: Session,
   action: ProvisionAction,
+  page?: Page,
 ): Promise<ReplayExpectedField[]> {
   if (session.replayState !== null || !isReplayTransitionAction(action)) return [];
   const fields = recordedMoneyFields(session);
   if (fields.length === 0) return fields;
-  const fresh = await session.browser.extractInteractiveElements();
+  const fresh = await session.browser.extractInteractiveElements(page);
   retainSessionElements(session, fresh);
   for (const expected of fields) {
-    const guard = await verifyReplayFieldWithElements(session, expected, fresh);
+    const guard = await verifyReplayFieldWithElements(session, expected, fresh, false, page);
     if (!guard.ok) {
       rejectRecipeRecording(
         session,
@@ -7491,21 +7500,22 @@ async function verifyRecordedFieldsAfterTransition(
   session: Session,
   action: ProvisionAction,
   fields: readonly ReplayExpectedField[],
+  page?: Page,
 ): Promise<void> {
   if (session.replayState !== null || !isReplayTransitionAction(action) || fields.length === 0) {
     return;
   }
-  const fresh = await session.browser.extractInteractiveElements();
+  const fresh = await session.browser.extractInteractiveElements(page);
   retainSessionElements(session, fresh);
   for (const expected of fields) {
-    if (!(await isReplayFieldMounted(session, expected, fresh))) {
+    if (!(await isReplayFieldMounted(session, expected, fresh, page))) {
       rejectRecipeRecording(
         session,
         `checkout transition could not be attested (${expected.hole}: field_missing)`,
       );
       return;
     }
-    const guard = await verifyReplayFieldWithElements(session, expected, fresh);
+    const guard = await verifyReplayFieldWithElements(session, expected, fresh, false, page);
     if (!guard.ok) {
       rejectRecipeRecording(
         session,

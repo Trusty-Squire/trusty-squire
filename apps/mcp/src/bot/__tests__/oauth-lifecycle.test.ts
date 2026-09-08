@@ -1124,6 +1124,12 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const expectedReturnUrl = "https://console.product.test/projects";
       const controls = `<form onsubmit="event.preventDefault(); document.body.dataset.submits = String(+(document.body.dataset.submits || 0) + 1)">
         <label>Project name<input id="name"></label><button>Create</button></form>
+        <label>Phone country
+          <select id="phone-country" name="phone_country">
+            <option value="CA" selected>Canada (+1)</option>
+            <option value="US">United States (+1)</option>
+          </select>
+        </label>
         <div style="height:4000px"></div>
         <script>
           document.body.dataset.enters = '0';
@@ -1197,6 +1203,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
         expect(+(await source.locator("body").getAttribute("data-scrolls"))!).toBeGreaterThan(0);
         expect(await product.evaluate(() => scrollY)).toBe(0);
         expect(await product.locator("body").getAttribute("data-scrolls")).toBe("0");
+        const countrySet = await act(sessionId, { kind: "set_phone_country", country: "US" });
+        expect(countrySet.url).toBe(expectedReturnUrl);
+        expect(await source.locator("#phone-country").inputValue()).toBe("US");
+        expect(await product.locator("#phone-country").inputValue()).toBe("CA");
         const destination = "https://console.product.test/settings";
         const navigated = await act(sessionId, { kind: "goto", url: destination });
         expect(navigated.url).toBe(destination);

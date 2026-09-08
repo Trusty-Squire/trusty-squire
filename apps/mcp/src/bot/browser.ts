@@ -5461,33 +5461,33 @@ export class BrowserController {
   // select it, so this path uses the native value setter, dispatches change,
   // and verifies the selected value. Custom phone widget families are not
   // supported and fail loudly.
-  async setPhoneCountry(country: string): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
+  async setPhoneCountry(country: string, page: Page | null = this.page): Promise<void> {
+    if (!page) throw new Error("Browser not started");
     const query = classifyPhoneCountryQuery(country);
     if (query.dialCode === undefined && query.iso2 === undefined && query.name === undefined) {
       throw new Error("setPhoneCountry: empty country argument");
     }
-    await this.clearPhoneCountryMarkers();
-    await this.page
+    await this.clearPhoneCountryMarkers(page);
+    await page
       .locator('[data-ts-phone-country-control="1"]')
       .evaluateAll((elements) => {
         elements.forEach((element) => element.removeAttribute("data-ts-phone-country-control"));
       })
       .catch(() => undefined);
-    if (await this.trySetPhoneCountryNativeSelect(query)) return;
+    if (await this.trySetPhoneCountryNativeSelect(query, page)) return;
     throw new Error(
       "set_phone_country: no supported native phone-country <select> found " +
         "(this widget family is not supported yet) — enter a valid contact number instead.",
     );
   }
 
-  async verifyPhoneCountry(country: string): Promise<boolean> {
-    if (!this.page) return false;
+  async verifyPhoneCountry(country: string, page: Page | null = this.page): Promise<boolean> {
+    if (!page) return false;
     const query = classifyPhoneCountryQuery(country);
     if (query.dialCode === undefined && query.iso2 === undefined && query.name === undefined) {
       return false;
     }
-    const selected = await this.page.evaluate(() => {
+    const selected = await page.evaluate(() => {
       const control = document.querySelector('select[data-ts-phone-country-control="1"]');
       if (!(control instanceof HTMLSelectElement)) return null;
       const option = control.selectedOptions[0];
@@ -5507,9 +5507,9 @@ export class BrowserController {
     return phoneCountryOptionMatches(query, option);
   }
 
-  async hasPhoneCountryControl(): Promise<boolean> {
-    if (!this.page) return false;
-    return (await this.page.locator('select[data-ts-phone-country-control="1"]').count()) === 1;
+  async hasPhoneCountryControl(page: Page | null = this.page): Promise<boolean> {
+    if (!page) return false;
+    return (await page.locator('select[data-ts-phone-country-control="1"]').count()) === 1;
   }
 
   // Strategy 1 — a native <select> that governs the phone country (react-
@@ -5522,9 +5522,11 @@ export class BrowserController {
   // immediately adjacent wrapper.
   // Returns false when no such select exists; throws when one is found but the
   // requested country isn't among its options.
-  private async trySetPhoneCountryNativeSelect(query: PhoneCountryQuery): Promise<boolean> {
-    if (!this.page) throw new Error("Browser not started");
-    const candidates = await this.page.evaluate(() => {
+  private async trySetPhoneCountryNativeSelect(
+    query: PhoneCountryQuery,
+    page: Page,
+  ): Promise<boolean> {
+    const candidates = await page.evaluate(() => {
       const out: Array<{
         marker: number;
         options: Array<{ value: string; text: string }>;
@@ -5599,7 +5601,7 @@ export class BrowserController {
     const idx = pickPhoneCountryOption(query, opts);
     const chosenOpt = idx === -1 ? undefined : best.options[idx];
     if (chosenOpt === undefined) {
-      await this.clearPhoneCountryMarkers();
+      await this.clearPhoneCountryMarkers(page);
       const sample = best.options
         .map((o) => o.text)
         .filter((t) => t.length > 0)
@@ -5616,7 +5618,7 @@ export class BrowserController {
     // .value directly is swallowed by React's value tracker, so we go through
     // the prototype setter the tracker also patches, then fire the event React
     // listens on. Works on the opacity:0 select without a visibility check.
-    const assigned = await this.page.evaluate(
+    const assigned = await page.evaluate(
       ({ marker, val }) => {
         const sel = document.querySelector(`select[data-ts-phone-cc="${marker}"]`);
         if (!(sel instanceof HTMLSelectElement)) return false;
@@ -5631,12 +5633,12 @@ export class BrowserController {
       { marker: best.marker, val: value },
     );
     const committedValue = assigned
-      ? await this.page
+      ? await page
           .locator(`select[data-ts-phone-cc="${best.marker}"]`)
           .inputValue()
           .catch(() => "")
       : "";
-    await this.clearPhoneCountryMarkers();
+    await this.clearPhoneCountryMarkers(page);
     if (!assigned || committedValue !== value) {
       throw new Error(
         `setPhoneCountry: native phone <select> did not retain value ${JSON.stringify(value)}`,
@@ -5645,9 +5647,9 @@ export class BrowserController {
     return true;
   }
 
-  private async clearPhoneCountryMarkers(): Promise<void> {
-    if (!this.page) return;
-    await this.page
+  private async clearPhoneCountryMarkers(page: Page | null = this.page): Promise<void> {
+    if (!page) return;
+    await page
       .evaluate(() => {
         document.querySelectorAll("[data-ts-phone-cc]").forEach((el) => {
           el.removeAttribute("data-ts-phone-cc");
@@ -11807,13 +11809,17 @@ export class BrowserController {
   // after navigate() in the post-verify loop so the planner doesn't
   // see a 0-button page that's still rendering. Best-effort —
   // returns whenever the count is reached OR the timeout elapses.
-  async waitForInteractiveDom(minElements = 5, timeoutMs = 20_000): Promise<void> {
-    if (!this.page) return;
+  async waitForInteractiveDom(
+    minElements = 5,
+    timeoutMs = 20_000,
+    page: Page | null = this.page,
+  ): Promise<void> {
+    if (!page) return;
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       try {
         const count = await Promise.race([
-          this.page.evaluate((min: number) => {
+          page.evaluate((min: number) => {
             const sels =
               'input,textarea,select,button,a[href],[role="button"],[role="menuitem"],[role="option"]';
             const nodes = Array.from(document.querySelectorAll(sels));
