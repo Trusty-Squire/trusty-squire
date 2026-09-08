@@ -4,7 +4,7 @@ import type {
   DispatchJournal,
   ReconciledDispatchOutcome,
 } from "./dispatch-journal.js";
-import { timingSafeEqual, createHash } from "node:crypto";
+import { timingSafeEqual, createHash, createHmac } from "node:crypto";
 import { z } from "zod";
 import { ApiClient, type ApiClientConfig } from "../../api-client.js";
 import { buildToolRegistry, findTool } from "../../tools/index.js";
@@ -57,10 +57,6 @@ function canonicalJson(value: unknown): string {
       .join(",")}}`;
   }
   return JSON.stringify(value) ?? "null";
-}
-
-function inputHash(input: unknown): string {
-  return createHash("sha256").update(canonicalJson(input)).digest("hex");
 }
 
 function callerRequestHash(requestId: string): string | undefined {
@@ -122,6 +118,7 @@ export function brokerCommandMutates(name: string, args: Record<string, unknown>
 export class OperatorBroker implements BrokerTransportPort {
   readonly authority: BrokerAuthority;
   private readonly apis = new Map<string, ApiClient>();
+  private readonly inputBindingKeys = new Map<string, Buffer>();
   private readonly tools = buildToolRegistry();
   private token: Buffer;
   constructor(
@@ -149,11 +146,20 @@ export class OperatorBroker implements BrokerTransportPort {
   ): Promise<Omit<BrokerPrincipal, "clientId"> | null> {
     if (!timingSafeEqual(createHash("sha256").update(token).digest(), this.token)) return null;
     if (lineageCredential === undefined) return null;
+    const id = forwarderId(lineageCredential);
+    this.inputBindingKeys.set(id, createHash("sha256").update(lineageCredential).digest());
     return {
       accountId: this.config.accountId,
       agentId: agentId ?? this.config.agentIdentity ?? "local-agent",
-      forwarderId: forwarderId(lineageCredential),
+      forwarderId: id,
     };
+  }
+  private inputHash(principal: BrokerPrincipal, input: unknown): string {
+    const forwarder = principal.forwarderId;
+    const key = forwarder === undefined ? undefined : this.inputBindingKeys.get(forwarder);
+    if (key === undefined)
+      throw new BrokerRefusal("unauthorized", "Forwarder input binding is not authenticated");
+    return createHmac("sha256", key).update(canonicalJson(input)).digest("hex");
   }
   connected(principal: BrokerPrincipal): Promise<void> | void {
     return this.authority.claimForwarder(principal);
@@ -174,7 +180,7 @@ export class OperatorBroker implements BrokerTransportPort {
       principal,
       requestId,
       tool.name,
-      inputHash({ name: tool.name, args, capability: input.capability }),
+      this.inputHash(principal, { name: tool.name, args, capability: input.capability }),
     );
     const completed = await this.journal?.completedOutcome(
       principal.forwarderId ?? principal.agentId,
@@ -256,7 +262,7 @@ export class OperatorBroker implements BrokerTransportPort {
                 principal,
                 commandId,
                 name,
-                inputHash({ name, args: commandArgs, capability }),
+                this.inputHash(principal, { name, args: commandArgs, capability }),
               );
               if (mutating)
                 await this.journal?.record(id, commandId, "entered", commandDispatch);
@@ -391,7 +397,7 @@ export class OperatorBroker implements BrokerTransportPort {
       callerHash,
       {
         operation: tool.name,
-        inputHash: inputHash({ name: tool.name, args, capability: input.capability }),
+        inputHash: this.inputHash(principal, { name: tool.name, args, capability: input.capability }),
       },
     );
     if (completed === undefined) return null;
@@ -456,6 +462,7 @@ export class OperatorBroker implements BrokerTransportPort {
     );
   }
   async disconnect(principal: BrokerPrincipal): Promise<void> {
+    if (principal.forwarderId !== undefined) this.inputBindingKeys.delete(principal.forwarderId);
     this.authority.beginForwarderRelease(principal);
     if (await this.journal?.hasOutstanding(undefined, principal.forwarderId))
       this.authority.detach(principal);

@@ -53,12 +53,9 @@ it("deregisters the lifecycle session when target discovery fails after start", 
     },
     "cell",
   );
-  const principal = {
-    accountId: "account",
-    agentId: "agent",
-    forwarderId: "forwarder",
-    clientId: "client",
-  };
+  const identity = await broker.authenticate("token", "agent", "a".repeat(43));
+  if (identity === null) throw new Error("Test broker authentication failed");
+  const principal = { ...identity, clientId: "client" };
   const internalId = "lifecycle-session";
   const startTool: Tool = {
     name: "operate_start",

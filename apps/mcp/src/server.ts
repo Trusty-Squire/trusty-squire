@@ -20,7 +20,6 @@ import { ApiClient } from "./api-client.js";
 import { setSelfManagedChromeTerminationSignalExitEnabled } from "./bot/browser.js";
 import { cancelActiveLoginBrowsers } from "./bot/google-login.js";
 import { startOwnerProcessReaper } from "./bot/owner-process-reaper.js";
-import { CHROME_PROFILE_DIR } from "./bot/profile.js";
 import {
   activeSessionCount,
   closeAllProvisionSessions,
@@ -429,11 +428,7 @@ export async function runServer(): Promise<void> {
 
   const callAdmission = createServerCallAdmission();
   const brokerPath = process.env.TRUSTY_SQUIRE_BROKER_SOCKET;
-  const brokerEnabled = await brokerForwardingEnabled(
-    brokerPath,
-    CHROME_PROFILE_DIR,
-    sessionGuard.boundAccountId(),
-  );
+  const brokerEnabled = brokerForwardingEnabled(brokerPath);
   const forwarder =
     brokerPath === undefined || !brokerEnabled ? undefined : new OperatorForwarder(brokerPath, sessionGuard);
   const server = await buildServer(

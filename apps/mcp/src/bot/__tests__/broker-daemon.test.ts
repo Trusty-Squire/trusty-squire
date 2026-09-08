@@ -8,7 +8,6 @@ import { expect, it } from "vitest";
 import { SessionStore } from "../../session.js";
 import { BrokerClient } from "../broker/transport.js";
 import { brokerEnvironment } from "../broker/discovery.js";
-import { beginBrokerQualification } from "../broker/qualification.js";
 const require = createRequire(import.meta.url);
 const sleep = async (ms: number) => await new Promise((r) => setTimeout(r, ms));
 const credential = "a".repeat(43);
@@ -37,7 +36,6 @@ it("keeps a live control client, coordinates plain maintenance, refreshes creden
   await mkdir(join(root, "home"));
   const profile = join(root, "profile");
   await mkdir(profile);
-  const qualificationRun = await beginBrokerQualification(profile, account.account_id);
   const child = spawn(
     process.execPath,
     [require.resolve("tsx/cli"), fileURLToPath(new URL("../../bin.ts", import.meta.url)), "broker"],
@@ -52,7 +50,6 @@ it("keeps a live control client, coordinates plain maintenance, refreshes creden
         TRUSTY_SQUIRE_REAPER_DIR: join(root, "reapers"),
         TRUSTY_SQUIRE_BROKER_SOCKET: socket,
         TRUSTY_SQUIRE_FORWARDER_CREDENTIAL: credential,
-        TRUSTY_SQUIRE_BROKER_QUALIFICATION_RUN_ID: qualificationRun,
         BOT_CDP_ENDPOINT: "",
       },
       stdio: ["ignore", "ignore", "pipe"],

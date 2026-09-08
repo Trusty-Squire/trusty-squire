@@ -1,5 +1,5 @@
 import { mkdtemp, rm, appendFile, readFile } from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
@@ -7,6 +7,18 @@ import { z, type Tool } from "../../tools/index.js";
 import { installBrokerBrowserCustody } from "../broker/custody.js";
 import { DispatchJournal } from "../broker/dispatch-journal.js";
 import { OperatorBroker, brokerCommandMutates, reconciliationOutcome } from "../broker/operator.js";
+
+const credential = (character: string) => character.repeat(43);
+
+async function authenticate(
+  broker: OperatorBroker,
+  clientId: string,
+  lineageCredential: string = credential("a"),
+) {
+  const identity = await broker.authenticate("token", "local-agent", lineageCredential);
+  if (identity === null) throw new Error("Test broker authentication failed");
+  return { ...identity, clientId };
+}
 
 describe("broker dispatch custody", () => {
   it("refuses replacement after an uncertain dispatch and admits only a settled journal", async () => {
@@ -68,7 +80,8 @@ describe("broker dispatch custody", () => {
     Object.defineProperty(broker, "tools", {
       value: [failedTool("operate_start"), failedTool("operate_recipe_run")],
     });
-    const principal = { accountId: "account", agentId: "agent", clientId: "client" };
+    const principal = await authenticate(broker, "client");
+    broker.authority.claimForwarder(principal);
     try {
       await expect(
         broker.call(principal, "tool", { name: "operate_start", args: {} }, "start-request"),
@@ -153,27 +166,36 @@ describe("broker dispatch custody", () => {
       "cell",
       journal,
     );
-    const principal = {
-      accountId: "account",
-      agentId: "local-agent",
-      forwarderId: "forwarder-a",
-      clientId: "restarted",
-    };
+    const principal = await authenticate(broker, "restarted");
+    if (principal.forwarderId === undefined) throw new Error("Test broker lineage is missing");
+    const forwarderId = principal.forwarderId;
     const callerRequestHash = "b".repeat(64);
+    const args = { service_url: "https://example.test", otp: "123456" };
     try {
       broker.authority.claimForwarder(principal);
+      Object.defineProperty(broker, "tools", {
+        value: [
+          {
+            name: "operate_start",
+            description: "",
+            inputSchema: z.object({ service_url: z.string(), otp: z.string() }).strict(),
+            jsonInputSchema: {},
+            handler: async () => undefined,
+          } satisfies Tool,
+        ],
+      });
       const capability = await broker.authority.open(principal, ["site:a"], async () => ({
         targetId: "target",
         invoke: async () => undefined,
         close: async () => true,
       }));
       await journal.record(capability.sessionId, "forwarder:old-process:request", "outcome", {
-        forwarderId: principal.forwarderId,
+        forwarderId,
         callerRequestHash,
         operation: "operate_start",
-        inputHash: createHash("sha256")
+        inputHash: createHmac("sha256", createHash("sha256").update(credential("a")).digest())
           .update(
-            '{"args":{"service_url":"https://example.test"},"capability":null,"name":"operate_start"}',
+            '{"args":{"otp":"123456","service_url":"https://example.test"},"capability":null,"name":"operate_start"}',
           )
           .digest("hex"),
         outcome: { status: "completed" },
@@ -182,12 +204,24 @@ describe("broker dispatch custody", () => {
         broker.recover(principal, {
           callerRequestHash,
           name: "operate_start",
-          args: { service_url: "https://example.test" },
+          args,
         }),
       ).resolves.toMatchObject({
         capability,
         result: { session_id: capability.sessionId, broker: { targetId: "target" } },
       });
+      await expect(
+        broker.recover(principal, {
+          callerRequestHash,
+          name: "operate_start",
+          args: { ...args, otp: "654321" },
+        }),
+      ).resolves.toBeNull();
+      const foreign = await authenticate(broker, "foreign", credential("b"));
+      await expect(
+        broker.recover(foreign, { callerRequestHash, name: "operate_start", args }),
+      ).resolves.toBeNull();
+      await expect(readFile(path, "utf8")).resolves.not.toContain("123456");
       expect(broker.authority.inventory()).toEqual({ active: 1, quarantined: 0, admitting: 0 });
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -208,12 +242,7 @@ describe("broker dispatch custody", () => {
       "cell",
       journal,
     );
-    const principal = {
-      accountId: "account",
-      agentId: "local-agent",
-      forwarderId: "forwarder-a",
-      clientId: "restarted",
-    };
+    const principal = await authenticate(broker, "restarted");
     const callerRequestHash = "c".repeat(64);
     const requestId = `forwarder-a:old-process:${callerRequestHash}`;
     const guidance = { needs_user: { wall: "google_session", resume: "connect" } };

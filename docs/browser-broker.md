@@ -8,19 +8,14 @@ and the existing operator handlers and payment state. The old
 
 The migration follows the engineering-reviewed identity-broker design in
 `/home/lunchbox/firstmate/data/ts-browser-architecture-audit/report.md` §§4–6 and
-its greenlight decision. Production remains on the exclusive path until the
-real enrolled-Google qualification matrix passes. Mechanical fixture success is
-not Google-auth qualification. Firstmate explicitly authorized committing this
-mechanical increment while that human-gated qualification remains pending.
+its greenlight decision. Shared broker concurrency is enabled whenever a socket
+is configured. Mechanical fixture success is not Google-auth qualification;
+real enrolled-Google qualification remains a human-gated test run.
 
 ## Configuration and operation
 
 Build with `pnpm --filter @trusty-squire/mcp build`. Setting a broker socket
-leaves the ordinary single-session operator path in place until the captain has
-completed and inspected the real-auth qualification, then separately sets
-`TRUSTY_SQUIRE_BROKER_CONCURRENCY=enabled` for the broker and participating MCP
-processes. Socket configuration and a recorded evidence path never enable
-shared production admission by themselves. Set the same
+enables shared admission for participating MCP processes. Set the same
 `TRUSTY_SQUIRE_BROKER_SOCKET`, `TRUSTY_SQUIRE_PROFILE_DIR`, and pinned
 `TRUSTY_SQUIRE_ACCOUNT_ID` in each participating MCP process. Each MCP client
 lineage must also receive its own stable, random base64url
@@ -37,8 +32,7 @@ handle crosses IPC. `TRUSTY_SQUIRE_AGENT_IDENTITY` supplies a connection's agent
 label. The lineage credential proves reconnect ownership independently of that
 label; a caller with only a session ID, agent label, or credential hash cannot
 reclaim another client's capability. The broker admits at most three concurrent
-sessions only when the captain has explicitly enabled a profile after real-auth
-qualification.
+sessions.
 
 `connect` requests maintenance over the existing socket, prevents new admissions,
 and waits for existing sessions and payment outcomes to drain. It closes Chrome
@@ -153,13 +147,9 @@ its cookies into the harness.
    `runLiveAcceptance('/absolute/path/to/config.json')`. It launches three real
    MCP stdio servers and the production broker, requires actual Google admission,
    checks service postconditions, and measures isolation and teardown. Preserve
-   its evidence file and run the broader reviewed auth matrix before changing
-   the production default or removing the exclusive fallback. A fully successful
+   its evidence file and run the broader reviewed auth matrix. A fully successful
    run writes an inert profile-local evidence record bound to that account and
-   the three tested service hosts. The record does not assert qualification or
-   enable concurrency. After personally inspecting the evidence and completing
-   the reviewed real-auth matrix, the captain may separately set
-   `TRUSTY_SQUIRE_BROKER_CONCURRENCY=enabled` for the broker and participating
-   MCP processes. Socket configuration and the evidence record alone stay on
-   the single-session path. A failed or interrupted run removes its in-progress
-   record; never create or copy this record manually.
+   the three tested service hosts. The record is evidence of that run only; it
+   neither enables concurrency nor substitutes for the reviewed real-auth matrix.
+   A failed or interrupted run removes its in-progress record; never create or
+   copy this record manually.

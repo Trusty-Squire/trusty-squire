@@ -15,8 +15,6 @@ interface QualificationRecord {
   serviceHosts?: string[];
 }
 
-export type BrokerAdmissionMode = "single" | "qualifying" | "enabled";
-
 export function brokerQualificationPath(profileDir: string): string {
   return join(profilePathIdentity(profileDir), FILE);
 }
@@ -42,33 +40,8 @@ async function readQualification(profileDir: string): Promise<QualificationRecor
   }
 }
 
-export async function brokerAdmissionMode(
-  profileDir: string,
-  accountId: string | null | undefined,
-  env: NodeJS.ProcessEnv = process.env,
-): Promise<BrokerAdmissionMode> {
-  if (typeof accountId !== "string" || accountId.length === 0) return "single";
-  const record = await readQualification(profileDir);
-  if (record === null || record.accountId !== accountId) return "single";
-  if (
-    record.state === "qualifying" &&
-    record.runId !== undefined &&
-    record.runId === env.TRUSTY_SQUIRE_BROKER_QUALIFICATION_RUN_ID
-  )
-    return "qualifying";
-  return record.state === "evidence_recorded" &&
-    env.TRUSTY_SQUIRE_BROKER_CONCURRENCY === "enabled"
-    ? "enabled"
-    : "single";
-}
-
-export async function brokerForwardingEnabled(
-  socketPath: string | undefined,
-  profileDir: string,
-  accountId: string | null | undefined,
-  env: NodeJS.ProcessEnv = process.env,
-): Promise<boolean> {
-  return socketPath !== undefined && (await brokerAdmissionMode(profileDir, accountId, env)) !== "single";
+export function brokerForwardingEnabled(socketPath: string | undefined): boolean {
+  return socketPath !== undefined;
 }
 
 export async function beginBrokerQualification(profileDir: string, accountId: string): Promise<string> {
