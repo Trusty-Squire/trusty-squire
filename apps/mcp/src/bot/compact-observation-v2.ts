@@ -994,20 +994,21 @@ function controlDescription(el: InteractiveElement, role: SafeRoleV2): string {
   const chosen = controlLabelNamingTexts(el)
     .map((candidate) => normalizeDescriptionV2(candidate))
     .find((candidate) => candidate !== undefined);
-  if (chosen === undefined) {
-    // Every actionable row still needs a human-usable alias. The nearest
-    // semantic region is the best available immediate context; a genuinely
-    // anonymous control falls back to its role rather than becoming a bare
-    // [ref, role] tuple. This is descriptive only and does not alter identity.
-    const rawContext = el.container?.includes(":")
-      ? el.container.slice(el.container.indexOf(":") + 1)
-      : el.container;
-    const context = safeDescriptionV2(rawContext?.replace(/[-_]+/g, " "));
-    return context === undefined ? `${role} ${el.index + 1}` : `${context} ${role}`;
+  if (chosen !== undefined) {
+    // Add the page's region context to otherwise opaque labels (such as @as15169).
+    const context = regionContextV2(el.container, chosen);
+    const description = context === undefined ? chosen : `${chosen} ${context}`;
+    if (controlLabelV2(description) !== undefined) return description;
   }
-  // Add the page's region context to otherwise opaque labels (such as @as15169).
-  const context = regionContextV2(el.container, chosen);
-  return context === undefined ? chosen : `${chosen} ${context}`;
+  // Every actionable row still needs a human-usable alias. The nearest
+  // semantic region is the best available immediate context; a genuinely
+  // anonymous control falls back to its role rather than becoming a bare
+  // [ref, role] tuple. This is descriptive only and does not alter identity.
+  const rawContext = el.container?.includes(":")
+    ? el.container.slice(el.container.indexOf(":") + 1)
+    : el.container;
+  const context = safeDescriptionV2(rawContext?.replace(/[-_]+/g, " "));
+  return context === undefined ? `${role} ${el.index + 1}` : `${context} ${role}`;
 }
 
 /** A description is "uninformative" when it carries no 3+-letter word run: ids, short codes, hex fragments. */
@@ -1373,8 +1374,7 @@ export function buildSafeControlsV2(args: {
     // already CDP-derived interactive inventory supplies each visible control's
     // descendant/accessibility name. This pass binds that name to its own live
     // element, so no cross-serializer tag/role fallback can swap labels.
-    const label =
-      controlLabelV2(controlDescription(el, role)) ?? controlLabelV2(`${role} ${el.index + 1}`);
+    const label = controlLabelV2(controlDescription(el, role));
     const row: Omit<SafeControlV2, "ref"> = {
       role,
       visibility: el.inViewport ? "viewport" : "near",
