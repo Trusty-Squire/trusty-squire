@@ -145,6 +145,37 @@ describe("interleaved observation DOM", () => {
     }
   });
 
+  it("retires form and link anchors when only the base target changes", async () => {
+    const page = await browser.newPage();
+    const refs = new StableObservationRefs();
+    const read = async () => {
+      const capture = await captureThroughController(page);
+      const handles = refs.actions("doc", capture.elements);
+      return new Map(
+        ["link", "submitter"].map((id) => {
+          const element = capture.elements.find((candidate) => candidate.id === id)!;
+          return [id, { identity: element.observationIdentity, ref: handles.get(element)! }];
+        }),
+      );
+    };
+    try {
+      await page.setContent(`
+        <base id="base" target="safe-window">
+        <a id="link" href="/continue">Continue</a>
+        <form><button id="submitter">Pay</button></form>
+      `);
+      const first = await read();
+      await page.locator("#base").evaluate((base) => base.setAttribute("target", "attacker-window"));
+      const second = await read();
+      for (const id of first.keys()) {
+        expect(second.get(id)!.identity).toBe(first.get(id)!.identity);
+        expect(second.get(id)!.ref).not.toBe(first.get(id)!.ref);
+      }
+    } finally {
+      await page.close();
+    }
+  });
+
   it("retires a held submitter when effective submission semantics change", async () => {
     const page = await browser.newPage();
     const refs = new StableObservationRefs();
@@ -180,6 +211,28 @@ describe("interleaved observation DOM", () => {
       await page.locator("#submitter").evaluate((element) => element.removeAttribute("formnovalidate"));
       const afterValidationRestore = await read();
       expect(afterValidationRestore.ref).not.toBe(held.ref);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("retires a held submitter when its submitted value changes", async () => {
+    const page = await browser.newPage();
+    const refs = new StableObservationRefs();
+    const read = async () => {
+      const capture = await captureThroughController(page);
+      const submitter = capture.elements.find((element) => element.id === "submitter")!;
+      return { element: submitter, ref: refs.actions("doc", capture.elements).get(submitter)! };
+    };
+    try {
+      await page.setContent(
+        '<form><button id="submitter" name="operation" value="safe">Pay</button></form>',
+      );
+      const held = await read();
+      await page.locator("#submitter").evaluate((element) => element.setAttribute("value", "delete"));
+      const changed = await read();
+      expect(changed.element.observationIdentity).toBe(held.element.observationIdentity);
+      expect(changed.ref).not.toBe(held.ref);
     } finally {
       await page.close();
     }

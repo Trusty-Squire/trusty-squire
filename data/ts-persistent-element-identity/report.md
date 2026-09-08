@@ -90,7 +90,10 @@ capability. The shared DOM/action handle computation remains intact.
 Submitter anchors also bind their effective action, method, target, encoding and
 validation semantics. Each value inherits from its owning form unless the submitter
 overrides it, so mutations to either source retire the capability before a stale
-submit can change request behavior.
+submit can change request behavior. The first document base target supplies the
+default browsing context for target-less forms, submitters and links, and the
+submitter's name/value pair is also bound because it becomes submitted form data.
+Ordinary editable-field values remain non-material.
 
 Final focused validation after the srcdoc decision: all 21 real-browser tests
 passed, including physical-node persistence/replacement and both ancestral and
