@@ -7,11 +7,16 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
 import { SessionStore } from "../../session.js";
-import { BrokerClient } from "../broker/transport.js";
-import { brokerIdleTimeoutMs } from "../broker/daemon.js";
+import { BrokerClient, listenBroker } from "../broker/transport.js";
+import {
+  brokerDrainAllowsMethod,
+  brokerIdleTimeoutMs,
+  brokerShutdownCleanupComplete,
+} from "../broker/daemon.js";
 import { brokerEnvironment, brokerIsSupervised } from "../broker/discovery.js";
 import { DispatchJournal } from "../broker/dispatch-journal.js";
 import { forwarderId } from "../broker/lineage.js";
+import { BrokerRefusal } from "../broker/scheduler.js";
 const require = createRequire(import.meta.url);
 const sleep = async (ms: number) => await new Promise((r) => setTimeout(r, ms));
 const credential = "a".repeat(43);
@@ -36,6 +41,62 @@ it("uses a minutes-scale idle policy and disables it for supervised brokers", ()
     }),
   ).toBeUndefined();
   expect(brokerIsSupervised({ TRUSTY_SQUIRE_BROKER_SUPERVISED: "1" })).toBe(true);
+});
+
+it("keeps a draining recovery endpoint reachable while refusing mutations", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ts-broker-draining-"));
+  const socket = join(root, "b.sock");
+  const listener = await listenBroker(socket, {
+    authenticate: async (token, _agentId, lineageCredential) =>
+      token === "token" && lineageCredential === credential
+        ? { accountId: "account", agentId: "agent", forwarderId: forwarderId(credential) }
+        : null,
+    call: async (_principal, method) => {
+      if (!brokerDrainAllowsMethod(method))
+        throw new BrokerRefusal(
+          "broker_draining",
+          "Broker is draining; only durable recovery is available",
+        );
+      if (method === "recover")
+        return {
+          requestId: "payment-request",
+          result: {
+            reconciliation: { operation: "operate_pay", status: "payment_outcome_unknown" },
+          },
+        };
+      return {};
+    },
+    disconnect: async () => undefined,
+  });
+  let client: BrokerClient | undefined;
+  try {
+    let runtimeCloseAttempts = 0;
+    expect(
+      await brokerShutdownCleanupComplete(
+        { active: 0, quarantined: 1, admitting: 0 },
+        async () => {
+          runtimeCloseAttempts += 1;
+          return true;
+        },
+      ),
+    ).toBe(false);
+    expect(runtimeCloseAttempts).toBe(0);
+    client = await BrokerClient.connect(socket, "token", credential);
+    await expect(client.call("recover", { name: "operate_pay", args: {} })).resolves.toEqual({
+      requestId: "payment-request",
+      result: {
+        reconciliation: { operation: "operate_pay", status: "payment_outcome_unknown" },
+      },
+    });
+    await expect(
+      client.call("tool", { name: "operate_pay", args: {} }),
+    ).rejects.toMatchObject({ code: "broker_draining" });
+    await expect(lstat(socket)).resolves.toBeDefined();
+  } finally {
+    await client?.close();
+    await listener.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 it("returns only a durable start outcome after daemon death", async () => {

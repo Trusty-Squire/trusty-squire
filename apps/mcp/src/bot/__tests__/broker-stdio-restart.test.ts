@@ -118,6 +118,17 @@ function waitForExit(child: ChildProcess, diagnostics: () => string): Promise<nu
   });
 }
 
+async function processIsGone(pid: number): Promise<boolean> {
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+    const close = stat.lastIndexOf(")");
+    const state = close < 0 ? undefined : stat.slice(close + 2).split(" ")[0];
+    return state === "Z" || state === "X";
+  } catch {
+    return true;
+  }
+}
+
 async function waitFor<T>(read: () => Promise<T | undefined>, description: string): Promise<T> {
   let failure = "";
   for (let attempt = 0; attempt < 400; attempt++) {
@@ -171,7 +182,7 @@ async function closeServer(server: Server): Promise<void> {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 }
 
-const describeChromium = chromiumAvailable ? describe : describe.skip;
+const describeChromium = chromiumAvailable && process.platform === "linux" ? describe : describe.skip;
 
 describeChromium("broker-backed MCP stdio restart", () => {
   const roots: string[] = [];
@@ -222,6 +233,8 @@ describeChromium("broker-backed MCP stdio restart", () => {
           TRUSTY_SQUIRE_REAPER_DIR: reapers,
           TRUSTY_SQUIRE_BROKER_SOCKET: socket,
           TRUSTY_SQUIRE_BROKER_SUPERVISED: "1",
+          TRUSTY_SQUIRE_REAPER_POLL_MS: "20",
+          TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS: "20",
           TRUSTY_SQUIRE_AGENT_IDENTITY: "stdio-restart",
           UNIVERSAL_BOT_CHANNEL: "chrome",
           UNIVERSAL_BOT_CHROME_BINARY: chromium.executablePath(),
@@ -301,6 +314,10 @@ describeChromium("broker-backed MCP stdio restart", () => {
       const firstExited = waitForExit(first.child, first.diagnostics);
       first.child.stdin?.end();
       expect(await firstExited).toBe(0);
+      await sleep(150);
+      expect(broker.exitCode).toBeNull();
+      expect(await processIsGone(before.pid)).toBe(false);
+      expect(await browserLaunch(reapers, owner.pid, profile)).toEqual(before);
 
       const second = launchServer();
       const secondClient = stdioClient(second.child, second.diagnostics);
@@ -315,10 +332,13 @@ describeChromium("broker-backed MCP stdio restart", () => {
       expect(await endpointOwner(socket)).toEqual(owner);
       expect(broker.exitCode).toBeNull();
 
-      await secondClient.callTool("operate_finish", { session_id: sessionId });
-      const secondExited = waitForExit(second.child, second.diagnostics);
-      second.child.stdin?.end();
-      expect(await secondExited).toBe(0);
+      expect(broker.kill("SIGKILL")).toBe(true);
+      await brokerExited.catch(() => undefined);
+      expect(broker.signalCode).toBe("SIGKILL");
+      await waitFor(
+        async () => ((await processIsGone(before.pid)) ? true : undefined),
+        "owner-reaper browser cleanup after broker death",
+      );
     } finally {
       for (const child of children) if (child.exitCode === null) child.kill("SIGTERM");
       if (broker.exitCode === null) broker.kill("SIGTERM");

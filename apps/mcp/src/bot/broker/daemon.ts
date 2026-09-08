@@ -24,6 +24,23 @@ const MIN_BROKER_IDLE_TIMEOUT_MS = 60_000;
 const DEFAULT_BROKER_IDLE_TIMEOUT_MS = 5 * 60_000;
 const SUPERVISOR_ATTACH_TIMEOUT_MS = 10_000;
 const SUPERVISOR_ATTACH_POLL_MS = 100;
+const DRAIN_RECOVERY_METHODS = new Set(["recover", "reclaim", "acknowledge", "confirm_start"]);
+
+export function brokerDrainAllowsMethod(method: string): boolean {
+  return DRAIN_RECOVERY_METHODS.has(method);
+}
+
+export async function brokerShutdownCleanupComplete(
+  inventory: { active: number; quarantined: number; admitting: number },
+  closeRuntime: () => Promise<boolean>,
+): Promise<boolean> {
+  return (
+    inventory.active === 0 &&
+    inventory.quarantined === 0 &&
+    inventory.admitting === 0 &&
+    (await closeRuntime())
+  );
+}
 
 function brokerUnavailable(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException).code;
@@ -124,6 +141,7 @@ export async function runBrokerDaemon(): Promise<void> {
   );
   const connected = new Set<string>();
   let closing = false;
+  let draining = false;
   let listenerClosed = false;
   let cleanupRunning = false;
   let maintenanceOwner: string | undefined;
@@ -149,9 +167,13 @@ export async function runBrokerDaemon(): Promise<void> {
       if (idleTimer !== undefined) clearTimeout(idleTimer);
     },
     call: async (principal, method, params, id) => {
-      if (closing) throw new Error("Broker is draining");
       connected.add(principal.clientId);
       if (idleTimer !== undefined) clearTimeout(idleTimer);
+      if (closing || (draining && !brokerDrainAllowsMethod(method)))
+        throw new BrokerRefusal(
+          "broker_draining",
+          "Broker is draining; only durable recovery is available",
+        );
       if (principal.supervisor && method !== "supervise")
         throw new BrokerRefusal("unauthorized", "Supervisor connections may only supervise");
       const report = await guard.inspect();
@@ -249,7 +271,7 @@ export async function runBrokerDaemon(): Promise<void> {
   function scheduleShutdownIfIdle(): void {
     if (idleTimer !== undefined) clearTimeout(idleTimer);
     idleTimer = undefined;
-    if (closing || connected.size !== 0 || idleTimeout === undefined) return;
+    if (closing || draining || connected.size !== 0 || idleTimeout === undefined) return;
     idleTimer = setTimeout(() => {
       idleTimer = undefined;
       void shutdown();
@@ -258,28 +280,24 @@ export async function runBrokerDaemon(): Promise<void> {
   }
   const shutdown = async (explicitDrain = false) => {
     if (closing || (!explicitDrain && connected.size !== 0)) return;
-    const inventory = operator.authority.inventory();
-    if (inventory.active > 0 || inventory.quarantined > 0 || inventory.admitting > 0) return;
-    closing = true;
+    draining = true;
     if (idleTimer !== undefined) clearTimeout(idleTimer);
+    if (!(await brokerShutdownCleanupComplete(operator.authority.inventory(), () => runtime.close()))) {
+      process.stderr.write("[browser-broker] cleanup unproven; retaining physical custody\n");
+      return;
+    }
+    closing = true;
     if (!listenerClosed) {
       listenerClosed = true;
       await listener.close();
-    }
-    if (!(await runtime.close())) {
-      process.stderr.write("[browser-broker] cleanup unproven; retaining physical custody\n");
-      closing = false;
-      return;
     }
     await unlink(`${path}.owner.json`).catch(() => undefined);
     profileElection.release();
     process.exit(0);
   };
   const requestDrain = async () => {
-    if (!listenerClosed) {
-      listenerClosed = true;
-      await listener.close();
-    }
+    draining = true;
+    if (idleTimer !== undefined) clearTimeout(idleTimer);
     await operator.reap(Number.POSITIVE_INFINITY);
     await shutdown(true);
   };
@@ -297,7 +315,8 @@ export async function runBrokerDaemon(): Promise<void> {
         ) {
           await restoreMaintenance();
         }
-        if (connected.size === 0 && idleTimeout !== undefined && idleTimer === undefined)
+        if (draining) await shutdown(true);
+        else if (connected.size === 0 && idleTimeout !== undefined && idleTimer === undefined)
           scheduleShutdownIfIdle();
       })
       .catch((error: unknown) => {
