@@ -226,6 +226,7 @@ export async function captureBrowserUseDOM(
     }
     const listeners = new Set<number>();
     const bindings = new Map<number, InteractiveElement>();
+    const baseUris = new Map<Frame, string>();
     for (const frameId of frameIds) {
       const frame = frameById.get(frameId);
       if (!frame) continue;
@@ -243,7 +244,7 @@ export async function captureBrowserUseDOM(
         // backend identities without guessing from tag names or accessible names.
         const selectors = candidates.map((e) => e.selector);
         const objects = await client.send("Runtime.evaluate", {
-          expression: `(() => { const roots=[document]; for(let i=0;i<roots.length;i++) for(const e of roots[i].querySelectorAll('*')) if(e.shadowRoot) roots.push(e.shadowRoot); return ${JSON.stringify(selectors)}.map(s => { const p=s.split(' >> nth='); const found=roots.flatMap(r=>{try{return [...r.querySelectorAll(p[0])]}catch{return []}}); return found[Number(p[1]||0)] || null; }); })()`,
+          expression: `(() => { const roots=[document]; for(let i=0;i<roots.length;i++) for(const e of roots[i].querySelectorAll('*')) if(e.shadowRoot) roots.push(e.shadowRoot); const found=${JSON.stringify(selectors)}.map(s => { const p=s.split(' >> nth='); const matches=roots.flatMap(r=>{try{return [...r.querySelectorAll(p[0])]}catch{return []}}); return matches[Number(p[1]||0)] || null; }); return Object.assign(found,{baseURI:document.baseURI}); })()`,
           contextId: context.executionContextId,
           objectGroup: "ts-observation",
         });
@@ -252,6 +253,8 @@ export async function captureBrowserUseDOM(
             objectId: objects.result.objectId,
             ownProperties: true,
           });
+          const baseUri = props.result.find((p) => p.name === "baseURI")?.value?.value;
+          baseUris.set(frame, typeof baseUri === "string" ? baseUri : frame.url());
           const indexed = props.result.filter((p) => /^\d+$/.test(p.name) && p.value?.objectId);
           for (let i = 0; i < indexed.length; i += 8)
             await Promise.all(
@@ -450,15 +453,35 @@ export async function captureBrowserUseDOM(
     };
     const root = build(dom.root, [], null, "", owningFrame);
     const explicitForms = new Map<Frame, Map<string, string[]>>();
+    const effectiveDestination = (
+      frame: Frame | null | undefined,
+      value: string | undefined,
+      fallback: string | null = null,
+    ): string | null => {
+      if (value === undefined) return fallback;
+      try {
+        return new URL(value, baseUris.get(frame!) ?? frame?.url()).href;
+      } catch {
+        return null;
+      }
+    };
+    const formIntent = (n: BrowserUseNode): string => {
+      const frame = nodeFrame.get(n.id);
+      return JSON.stringify([
+        n.id,
+        n.attributes.action,
+        n.attributes.method,
+        n.attributes.target,
+        effectiveDestination(frame, n.attributes.action, frame?.url() ?? null),
+      ]);
+    };
     const collectForms = (n: BrowserUseNode): void => {
       const frame = nodeFrame.get(n.id);
       if (frame && n.nodeName === "FORM" && n.attributes.id) {
         let forms = explicitForms.get(frame);
         if (!forms) explicitForms.set(frame, (forms = new Map()));
         const intents = forms.get(n.attributes.id) ?? [];
-        intents.push(
-          JSON.stringify([n.id, n.attributes.action, n.attributes.method, n.attributes.target]),
-        );
+        intents.push(formIntent(n));
         forms.set(n.attributes.id, intents);
       }
       n.children.forEach(collectForms);
@@ -466,13 +489,7 @@ export async function captureBrowserUseDOM(
     };
     collectForms(root);
     const visit = (n: BrowserUseNode, inClosedShadow = false, form = ""): void => {
-      if (n.nodeName === "FORM")
-        form = JSON.stringify([
-          n.id,
-          n.attributes.action,
-          n.attributes.method,
-          n.attributes.target,
-        ]);
+      if (n.nodeName === "FORM") form = formIntent(n);
       const raw = rawById.get(n.id)!,
         frame = nodeFrame.get(n.id)!;
       let el = bindings.get(raw.backendNodeId);
@@ -543,8 +560,10 @@ export async function captureBrowserUseDOM(
           n.attributes.title,
           n.attributes.placeholder,
           n.attributes.href,
+          effectiveDestination(frame, n.attributes.href),
           n.attributes.form,
           n.attributes.formaction,
+          effectiveDestination(frame, n.attributes.formaction),
           n.attributes.autocomplete,
           n.attributes["data-field-role"],
           n.attributes.form === undefined ? form : explicitForms.get(frame)?.get(n.attributes.form),

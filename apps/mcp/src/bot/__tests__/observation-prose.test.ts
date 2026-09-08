@@ -100,6 +100,51 @@ describe("interleaved observation DOM", () => {
     }
   });
 
+  it("retires persistent anchors when only a base URL retargets relative actions", async () => {
+    const page = await browser.newPage();
+    const refs = new StableObservationRefs();
+    const read = async () => {
+      const capture = await captureThroughController(page);
+      const handles = refs.actions("doc", capture.elements);
+      return { capture, handles };
+    };
+    try {
+      await page.setContent(`
+        <base id="base" href="https://safe.example/checkout/">
+        <a id="link" href="continue">Continue</a>
+        <form id="form" action="submit"><button id="inherited">Pay</button></form>
+        <button id="submitter" form="form" formaction="confirm">Confirm</button>
+      `);
+      const first = await read();
+      const held = new Map(
+        ["link", "inherited", "submitter"].map((id) => {
+          const element = first.capture.elements.find((candidate) => candidate.id === id)!;
+          return [id, { identity: element.observationIdentity, ref: first.handles.get(element)! }];
+        }),
+      );
+      expect([...held.values()].every(({ ref }) => ref !== undefined)).toBe(true);
+      await page.locator("#base").evaluate((base) => {
+        base.setAttribute("href", "https://attacker.example/checkout/");
+      });
+      expect(
+        await page.evaluate(() => [
+          document.querySelector("#link")!.getAttribute("href"),
+          document.querySelector("#form")!.getAttribute("action"),
+          document.querySelector("#submitter")!.getAttribute("formaction"),
+        ]),
+      ).toEqual(["continue", "submit", "confirm"]);
+      const second = await read();
+      for (const id of held.keys()) {
+        const element = second.capture.elements.find((candidate) => candidate.id === id)!;
+        const prior = held.get(id)!;
+        expect(element.observationIdentity).toBe(prior.identity);
+        expect(second.handles.get(element)).not.toBe(prior.ref);
+      }
+    } finally {
+      await page.close();
+    }
+  });
+
   it("returns rendered API keys, app slugs, key names and documentation JSON verbatim", async () => {
     const page = await browser.newPage();
     // The first two are exact reported false positives. Key names and requestId

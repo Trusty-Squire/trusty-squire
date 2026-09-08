@@ -81,7 +81,10 @@ node-number reuse across frame-document replacements. Material intent uses CDP's
 accessible name and the node's own attributes; the legacy extractor can infer a
 label from a preceding sibling, so that inferred label is deliberately excluded.
 Both ancestral forms and explicit `form=` owners contribute destination and
-ownership evidence. Missing or duplicate physical identities receive no action
+ownership evidence. Effective link, form and submitter destinations are resolved
+against the live per-frame `document.baseURI`, so a base-only retargeting change
+retires the held capability even when the physical nodes and authored relative
+attributes remain unchanged. Missing or duplicate physical identities receive no action
 capability. The shared DOM/action handle computation remains intact.
 
 Final focused validation after the srcdoc decision: all 21 real-browser tests
