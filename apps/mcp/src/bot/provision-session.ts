@@ -543,7 +543,8 @@ export type { FinishResult, PreparedFinishResult } from "./session/lifecycle.js"
 let oauthActionLeaseTail: Promise<void> = Promise.resolve();
 
 const DEFAULT_OAUTH_LOGIN_LEASE_COOLDOWN_MS = 3_000;
-const DEFAULT_OAUTH_ACTION_TIMEOUT_MS = 30_000;
+const DEFAULT_OAUTH_AUTOMATED_ACTION_TIMEOUT_MS = 30_000;
+const DEFAULT_OAUTH_HUMAN_HANDOFF_TIMEOUT_MS = 5 * 60_000;
 
 interface OAuthActionDeadline {
   completionCheck?: () => Promise<OAuthCompletionEvidence | null>;
@@ -552,24 +553,50 @@ interface OAuthActionDeadline {
   provider: OAuthProviderId | undefined;
   timedOut: boolean;
   inFlight: Set<Promise<unknown>>;
+  phaseChanged: Promise<void>;
+  signalPhaseChanged: () => void;
 }
 
-function oauthActionTimeoutMs(): number {
+function configuredOAuthActionTimeoutMs(): number | null {
   const configured = Number(process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS);
-  return Number.isFinite(configured) && configured > 0
-    ? Math.min(configured, DEFAULT_OAUTH_ACTION_TIMEOUT_MS)
-    : DEFAULT_OAUTH_ACTION_TIMEOUT_MS;
+  return Number.isFinite(configured) && configured > 0 ? configured : null;
+}
+
+function oauthAutomatedActionTimeoutMs(): number {
+  const configured = configuredOAuthActionTimeoutMs();
+  return configured === null
+    ? DEFAULT_OAUTH_AUTOMATED_ACTION_TIMEOUT_MS
+    : Math.min(configured, DEFAULT_OAUTH_AUTOMATED_ACTION_TIMEOUT_MS);
+}
+
+function oauthHumanHandoffTimeoutMs(): number {
+  return configuredOAuthActionTimeoutMs() ?? DEFAULT_OAUTH_HUMAN_HANDOFF_TIMEOUT_MS;
 }
 
 function oauthActionDeadline(provider: OAuthProviderId | undefined): OAuthActionDeadline {
-  const timeoutMs = oauthActionTimeoutMs();
+  const timeoutMs = oauthAutomatedActionTimeoutMs();
+  let signalPhaseChanged!: () => void;
   return {
     expiresAt: Date.now() + timeoutMs,
     timeoutMs,
     provider,
     timedOut: false,
     inFlight: new Set(),
+    phaseChanged: new Promise<void>((resolve) => {
+      signalPhaseChanged = resolve;
+    }),
+    signalPhaseChanged,
   };
+}
+
+function resetOAuthActionDeadline(deadline: OAuthActionDeadline, timeoutMs: number): void {
+  deadline.timeoutMs = timeoutMs;
+  deadline.expiresAt = Date.now() + timeoutMs;
+  deadline.timedOut = false;
+  deadline.signalPhaseChanged();
+  deadline.phaseChanged = new Promise<void>((resolve) => {
+    deadline.signalPhaseChanged = resolve;
+  });
 }
 
 function oauthActionRemainingMs(deadline: OAuthActionDeadline): number {
@@ -633,24 +660,33 @@ async function withinOAuthActionDeadline<T>(
   phase: "lease" | "action" = "action",
 ): Promise<T> {
   const tracked = trackOAuthActionPromise(deadline, promise);
-  const remainingMs = oauthActionRemainingMs(deadline);
-  if (remainingMs <= 0 || deadline.timedOut) {
-    expireOAuthAction(deadline);
-    throw oauthActionDeadlineError(deadline, phase);
-  }
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      tracked,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => {
-          expireOAuthAction(deadline);
-          reject(oauthActionDeadlineError(deadline, phase));
-        }, remainingMs);
+  const settled = tracked.then(
+    (value) => ({ kind: "settled" as const, value }),
+    (error: unknown) => ({ kind: "rejected" as const, error }),
+  );
+  for (;;) {
+    const remainingMs = oauthActionRemainingMs(deadline);
+    if (remainingMs <= 0 || deadline.timedOut) {
+      expireOAuthAction(deadline);
+      throw oauthActionDeadlineError(deadline, phase);
+    }
+    const phaseChanged = deadline.phaseChanged;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      settled,
+      phaseChanged.then(() => ({ kind: "phase_changed" as const })),
+      new Promise<{ kind: "timed_out" }>((resolve) => {
+        timer = setTimeout(() => resolve({ kind: "timed_out" }), remainingMs);
       }),
     ]);
-  } finally {
     if (timer !== undefined) clearTimeout(timer);
+    if (outcome.kind === "phase_changed") continue;
+    if (outcome.kind === "timed_out") {
+      expireOAuthAction(deadline);
+      throw oauthActionDeadlineError(deadline, phase);
+    }
+    if (outcome.kind === "rejected") throw outcome.error;
+    return outcome.value;
   }
 }
 
@@ -792,6 +828,7 @@ async function runSerializedOAuthBoundary(
           "OAuth action target changed during the identity handoff; re-observe before retrying",
         );
       }
+      const humanHandoffTimeoutMs = oauthHumanHandoffTimeoutMs();
       await browser.loginWithOAuth(
         resolved.selector,
         oauthActionRemainingMs(deadline),
@@ -800,7 +837,17 @@ async function runSerializedOAuthBoundary(
         (check) => {
           deadline.completionCheck = check;
         },
+        () => {
+          // Browser setup and the authorized click completed inside the short
+          // machine phase. Only the chooser/2FA/consent wait gets the longer
+          // human budget; signalling re-arms every enclosing deadline race.
+          resetOAuthActionDeadline(deadline, humanHandoffTimeoutMs);
+          return deadline.expiresAt;
+        },
       );
+      // Human completion returns custody to bounded machine work. Give DOM
+      // readiness its own short window instead of spending the human budget.
+      resetOAuthActionDeadline(deadline, oauthAutomatedActionTimeoutMs());
       await settleAfterStateChange(browser);
     },
     { deadline },

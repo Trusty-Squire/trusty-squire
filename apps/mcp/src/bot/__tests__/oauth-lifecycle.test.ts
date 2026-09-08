@@ -1222,7 +1222,11 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const expectedReturnUrl = "https://console.product.test/projects";
       const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
       const previousCooldown = process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
-      process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "4000";
+      // The human phase now receives a fresh configured budget once the popup
+      // handoff is established. Leave enough wall-clock room for the compact
+      // observation setup, then prove that this handoff deadline still wins
+      // while consent work remains pending.
+      process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "6000";
       process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
       await context.route("https://product.test/**", (route) =>
         route.fulfill({
@@ -2819,9 +2823,12 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await product.goto("https://product.test/login");
     const controller = BrowserController.fromHarnessPage(product);
     const startedAt = Date.now();
+    const budgetMs = 3_000;
 
     try {
-      const rejected = controller.loginWithOAuth("#oauth", 1_000, "google");
+      // Direct callers do not supply the facade's handoff callback, so their
+      // explicit total budget must remain the whole lifecycle's ceiling.
+      const rejected = controller.loginWithOAuth("#oauth", budgetMs, "google");
       await expect(rejected).rejects.toBeInstanceOf(OAuthAwaitingHumanError);
       await expect(rejected).rejects.toMatchObject({
         message: expect.stringMatching(/has not returned to https:\/\/product\.test/i),
@@ -2832,6 +2839,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await expect(rejected).rejects.toMatchObject({
         message: expect.stringMatching(/operate_observe/),
       });
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(budgetMs - 500);
       expect(Date.now() - startedAt).toBeLessThan(5_000);
       // The pending challenge must stay reachable: the provider popup is still
       // open and is the controller's active page, so operate_observe reads it.
@@ -2846,7 +2854,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     } finally {
       await context.close().catch(() => undefined);
     }
-  });
+  }, 6_000);
 
   it("reports failed when a popup carries the denial to the callback and then closes itself", async () => {
     const context = await browser.newContext();
@@ -2970,6 +2978,78 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await context.close().catch(() => undefined);
     }
   });
+
+  it("does not re-arm the human deadline when the OAuth control never hands off", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/**", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<button id="oauth" onclick="event.preventDefault()">Continue</button>',
+      });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    const handoff = vi.fn(() => {
+      throw new Error("unexpected human handoff");
+    });
+
+    try {
+      await expect(
+        controller.loginWithOAuth("#oauth", 2_500, "google", undefined, undefined, handoff),
+      ).rejects.toBeInstanceOf(OAuthAwaitingHumanError);
+      expect(handoff).not.toHaveBeenCalled();
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("extends a delayed same-tab facade handoff from its navigation", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+    const previousCooldown = process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "3000";
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
+    await context.route("https://product.test/**", async (route) => {
+      const callback = route.request().url().endsWith("/callback");
+      await route.fulfill({
+        contentType: "text/html",
+        body: callback
+          ? "<main>Signed in</main>"
+          : '<button id="oauth" onclick="setTimeout(() => location.href = \'https://provider.test/oauth?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback\', 2300)">Continue</button>',
+      });
+    });
+    await context.route("https://provider.test/oauth**", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<script>setTimeout(() => location.href = "https://product.test/callback", 900)</script>',
+      });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    let sessionId: string | undefined;
+
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: "https://product.test/login",
+      });
+      sessionId = started.session_id;
+      const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+      expect(oauthRef).toBeDefined();
+      await expect(
+        act(sessionId, { kind: "oauth_login", target: oauthRef!, provider: "google" }),
+      ).resolves.toMatchObject({ url: "https://product.test/callback" });
+    } finally {
+      if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
+      if (previousCooldown === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = previousCooldown;
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close().catch(() => undefined);
+    }
+  }, 10_000);
 
   it("ignores an error= parameter the page already carried before this attempt", async () => {
     // A stale denial from an earlier attempt is still in the address bar; this
