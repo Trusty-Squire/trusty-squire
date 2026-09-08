@@ -177,8 +177,8 @@ export async function runBrokerDaemon(): Promise<void> {
       }
       return await operator.call(principal, method, params, id);
     },
-    disconnect: async (principal) => {
-      await operator.disconnect(principal);
+    disconnect: async (principal, explicit) => {
+      await operator.disconnect(principal, explicit);
       connected.delete(principal.clientId);
       if (maintenanceOwner === principal.clientId && !maintenanceReady)
         maintenanceOwner = undefined;
