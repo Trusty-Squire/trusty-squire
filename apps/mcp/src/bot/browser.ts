@@ -13628,6 +13628,15 @@ export class BrowserController {
     let lastTransientUrl = productUrl;
     let observedReturn: { page: Page; url: string } | null = null;
     let onTransientNavigation: ((frame: Frame) => void) | null = null;
+    let humanHandoffStarted = false;
+    const startHumanHandoff = (): void => {
+      if (humanHandoffStarted || onHumanHandoff === undefined) return;
+      humanHandoffStarted = true;
+      // Only the facade supplies a new absolute deadline here. Direct callers
+      // retain the historical single deadline established above, so
+      // loginWithOAuth(..., 3000) remains bounded to 3s total.
+      oauthDeadline = onHumanHandoff();
+    };
     const popupCapture: {
       page: Page | null;
       onNavigation: ((frame: Frame) => void) | null;
@@ -13699,6 +13708,7 @@ export class BrowserController {
       if (!actionStarted || frame !== product.mainFrame()) return;
       recordTopLevelNavigation(product, frame);
       productNavigated = true;
+      startHumanHandoff();
       resolveProductNavigation();
     };
     const completionPage = (): Page | null => {
@@ -13754,6 +13764,7 @@ export class BrowserController {
       });
       const onPopup = (page: Page): void => {
         if (!this.ownedPages.has(page)) return;
+        startHumanHandoff();
         popupCapture.page = page;
         captureFramelessRequestsForPopup(page);
         popupCapture.onNavigation = (frame: Frame): void => recordTopLevelNavigation(page, frame);
@@ -13823,12 +13834,6 @@ export class BrowserController {
       this.oauthProviderPageClosed = transient.isClosed();
       this.restoreProductPageWhenOAuthPageCloses(transient, durableProduct);
       this.page = transient;
-      if (onHumanHandoff !== undefined && (providerPage !== null || productNavigated)) {
-        // Only the facade supplies a new absolute deadline here. Direct callers
-        // retain the historical single deadline established above, so
-        // loginWithOAuth(..., 3000) remains bounded to 3s total.
-        oauthDeadline = onHumanHandoff();
-      }
       const hasTerminalCompletion = (): boolean =>
         observedReturn !== null && observedReturn.page.isClosed();
       let settled: Page | null = null;
@@ -13840,9 +13845,8 @@ export class BrowserController {
           hasTerminalCompletion,
         );
       } else {
-        const deadline = oauthDeadline;
-        while (settled === null && Date.now() < deadline) {
-          const remaining = deadline - Date.now();
+        while (settled === null && Date.now() < oauthDeadline) {
+          const remaining = oauthDeadline - Date.now();
           settled = await this.waitForOAuthLifecycle(
             () => expectedReturnUrl,
             Math.min(1_000, remaining),
@@ -13850,8 +13854,8 @@ export class BrowserController {
             hasTerminalCompletion,
           );
           if (settled !== null || hasTerminalCompletion()) break;
-          if (Date.now() >= deadline) break;
-          const consentBudgetMs = deadline - Date.now();
+          if (Date.now() >= oauthDeadline) break;
+          const consentBudgetMs = oauthDeadline - Date.now();
           const advanced = await this.advanceOAuthConsent(
             consentProvider,
             consentBudgetMs,

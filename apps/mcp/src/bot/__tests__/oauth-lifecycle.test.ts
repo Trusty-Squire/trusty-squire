@@ -3000,6 +3000,54 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it("extends a delayed same-tab facade handoff from its navigation", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+    const previousCooldown = process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "3000";
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
+    await context.route("https://product.test/**", async (route) => {
+      const callback = route.request().url().endsWith("/callback");
+      await route.fulfill({
+        contentType: "text/html",
+        body: callback
+          ? "<main>Signed in</main>"
+          : '<button id="oauth" onclick="setTimeout(() => location.href = \'https://provider.test/oauth?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback\', 2300)">Continue</button>',
+      });
+    });
+    await context.route("https://provider.test/oauth**", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<script>setTimeout(() => location.href = "https://product.test/callback", 900)</script>',
+      });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    let sessionId: string | undefined;
+
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: "https://product.test/login",
+      });
+      sessionId = started.session_id;
+      const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+      expect(oauthRef).toBeDefined();
+      await expect(
+        act(sessionId, { kind: "oauth_login", target: oauthRef!, provider: "google" }),
+      ).resolves.toMatchObject({ url: "https://product.test/callback" });
+    } finally {
+      if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
+      if (previousCooldown === undefined)
+        delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = previousCooldown;
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close().catch(() => undefined);
+    }
+  }, 10_000);
+
   it("ignores an error= parameter the page already carried before this attempt", async () => {
     // A stale denial from an earlier attempt is still in the address bar; this
     // attempt never navigates, so nothing was observed and it must not fail.
