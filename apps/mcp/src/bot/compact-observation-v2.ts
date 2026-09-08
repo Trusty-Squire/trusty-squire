@@ -973,7 +973,6 @@ function controlLabelNamingTexts(el: InteractiveElement): Array<string | null | 
   }
   return [
     el.ariaLabel,
-    (el.type ?? "").toLowerCase() === "image" ? el.alt : undefined,
     el.labelText,
     el.visibleText,
     isButtonInput(el) ? el.value : undefined,
