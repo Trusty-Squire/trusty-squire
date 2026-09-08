@@ -329,6 +329,50 @@ describe("reapStaleServerInstances", () => {
     expect(readdirSync(root)).toEqual(["300-300.json"]);
   });
 
+  it("reaps a same-lineage drainer on the sweep after its deadline crosses", async () => {
+    const killed: number[] = [];
+    let now = NOW - 1;
+    const root = rootWith([
+      record({
+        pid: 200,
+        start_time: "200",
+        state: "draining",
+        shutdown_deadline_at: NOW,
+      }),
+      record({
+        pid: 300,
+        start_time: "300",
+        state: "serving",
+        last_activity_at: NOW - 31 * 60 * 60_000,
+      }),
+    ]);
+    const alive = new Set([200, 300]);
+    const runtime = {
+      rootDir: root,
+      self: SELF,
+      bounds: BOUNDS,
+      now: () => now,
+      readBirthState: (identity: { pid: number }) =>
+        alive.has(identity.pid) ? ("matching" as const) : ("stale" as const),
+      readParentPid: () => 50 as const,
+      readDescendants: () => [],
+      kill: (pid: number) => {
+        killed.push(pid);
+        alive.delete(pid);
+      },
+      wait: async () => undefined,
+      sweep: async () => 0,
+    };
+
+    await expect(reapStaleServerInstances(runtime)).resolves.toMatchObject({ reaped: 0, kept: 2 });
+    expect(killed).toEqual([]);
+
+    now = NOW + 1;
+    await expect(reapStaleServerInstances(runtime)).resolves.toMatchObject({ reaped: 1, kept: 1 });
+    expect(killed).toEqual([200]);
+    expect(readdirSync(root)).toEqual(["300-300.json"]);
+  });
+
   it("garbage-collects a stale serving record without signalling anything", async () => {
     const killed: number[] = [];
     const root = rootWith([record({ last_activity_at: NOW - 5 * 60_000 })]);

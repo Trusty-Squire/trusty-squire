@@ -472,6 +472,23 @@ export async function runServer(): Promise<void> {
   let shutdown: Promise<void> | undefined;
   let idleTimer: NodeJS.Timeout | undefined;
   let heartbeatTimer: NodeJS.Timeout | undefined;
+  let staleInstanceSweepTimer: NodeJS.Timeout | undefined;
+  let staleInstanceSweepRunning = false;
+  const sweepStaleInstances = (): void => {
+    if (shutdown !== undefined || staleInstanceSweepRunning) return;
+    staleInstanceSweepRunning = true;
+    void reapStaleServerInstances({ launcherLineage: instanceLineage })
+      .catch((err) => {
+        process.stderr.write(
+          `[trusty-squire] stale server reap failed: ${
+            err instanceof Error ? err.message : String(err)
+          }\n`,
+        );
+      })
+      .finally(() => {
+        staleInstanceSweepRunning = false;
+      });
+  };
   const requestShutdown = (): void => {
     if (shutdown !== undefined) return;
     const admittedCallsDrained = callAdmission.closeAndDrain();
@@ -492,6 +509,7 @@ export async function runServer(): Promise<void> {
       process.removeListener("SIGINT", requestShutdown);
       if (idleTimer !== undefined) clearInterval(idleTimer);
       if (heartbeatTimer !== undefined) clearInterval(heartbeatTimer);
+      if (staleInstanceSweepTimer !== undefined) clearInterval(staleInstanceSweepTimer);
       try {
         // The OAuth-bootstrap login Chrome (google-login) is tracked apart
         // from provision sessions — drain it too so it cannot outlive the
@@ -585,6 +603,8 @@ export async function runServer(): Promise<void> {
     }, heartbeatIntervalMs());
     heartbeatTimer.unref();
   }
+  staleInstanceSweepTimer = setInterval(sweepStaleInstances, heartbeatIntervalMs());
+  staleInstanceSweepTimer.unref();
 
   await server.connect(transport);
 }
