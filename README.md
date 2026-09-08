@@ -382,12 +382,14 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   It retains the product tab across provider-owned popup
   redirects and closes. When it observes the authorized return destination still
   open, that destination becomes the session's operation page: its post-login
-  observation and subsequent actions, reads, and navigation stay bound to it,
-  leaving the retained product tab untouched. An owned tab opened by a later
-  action becomes the operation page for following calls. It returns the normal
-  post-login observation even if `detail` is `none`; if that observed destination
-  closes before handoff, it returns a terminal `oauth_completed` snapshot with
-  refs unavailable and directs the host to `operate_observe`. Every OAuth login
+  observation and later page-bound operations (actions, reads, screenshots,
+  navigation, verification, and checkout) stay bound to it, leaving the retained
+  product tab untouched. An owned tab opened by a later action becomes the
+  operation page for following calls. It returns the normal post-login
+  observation even if `detail` is `none`; if that observed destination closes
+  before handoff, it returns a terminal `oauth_completed` snapshot with refs
+  unavailable and directs the host to `operate_observe`, which resumes on the
+  retained viable product page. Every OAuth login
   is serialized from action start through completion and a short release cooldown; other
   session work remains parallel. The whole serialized action has a 30-second
   deadline. At that boundary it rechecks captured, attempt-local return evidence:

@@ -7733,10 +7733,8 @@ export class BrowserController {
       fillCheckoutCardFields: async (card, options) =>
         await this.fillCheckoutCardFields(card, options, requireLivePage()),
       submitFilledCheckout: async () => await this.submitFilledCheckout(requireLivePage()),
-      clearSealedPaymentFields: async () =>
-        await this.clearSealedPaymentFields(requireLivePage()),
-      clearCheckoutCardFields: async () =>
-        await this.clearCheckoutCardFields(requireLivePage()),
+      clearSealedPaymentFields: async () => await this.clearSealedPaymentFields(requireLivePage()),
+      clearCheckoutCardFields: async () => await this.clearCheckoutCardFields(requireLivePage()),
       waitForThreeDsResolution: async (timeoutMs) =>
         await this.waitForThreeDsResolution(timeoutMs, requireLivePage()),
       paymentInstrumentMismatch: () => this.paymentInstrumentMismatch(),
@@ -9687,7 +9685,9 @@ export class BrowserController {
   // filled card fields. Fail-closed refusal is the ONLY outcome here — never
   // silently re-fill (the raw card bytes are already gone by this point in
   // the call chain) and never guess between multiple candidates.
-  private async resolveCompetingSavedCardSelection(page: Page | null = this.page): Promise<
+  private async resolveCompetingSavedCardSelection(
+    page: Page | null = this.page,
+  ): Promise<
     | { outcome: "none" | "resolved"; verification: SavedCardSelectionVerification }
     | { outcome: "ambiguous" }
   > {
@@ -9730,7 +9730,8 @@ export class BrowserController {
       sealedValuesByFrame,
       expectedMarkedCount,
     };
-    if (!(await this.savedCardSelectionVerified(verification, page))) return { outcome: "ambiguous" };
+    if (!(await this.savedCardSelectionVerified(verification, page)))
+      return { outcome: "ambiguous" };
     return { outcome: "resolved", verification };
   }
 
@@ -9738,7 +9739,12 @@ export class BrowserController {
   // terminal merchant order route or a 3-D Secure challenge. Callers gate this
   // on a verified visible total.
   async submitFilledCheckout(page: Page | null = this.page): Promise<CheckoutSubmitResult> {
-    return await this.submitFilledCheckoutInScope(this.checkoutCardGroupScope, undefined, undefined, page);
+    return await this.submitFilledCheckoutInScope(
+      this.checkoutCardGroupScope,
+      undefined,
+      undefined,
+      page,
+    );
   }
 
   private async submitFilledCheckoutInScope(
@@ -9919,7 +9925,9 @@ export class BrowserController {
               resolveNavigationOutcome();
               return;
             }
-            const challenge = await this.detectThreeDsChallenge(undefined, page).catch(() => undefined);
+            const challenge = await this.detectThreeDsChallenge(undefined, page).catch(
+              () => undefined,
+            );
             if (challenge?.three_ds_required === true) {
               navigationThreeDsObserved = true;
               resolveNavigationOutcome();
@@ -14817,14 +14825,16 @@ export class BrowserController {
       active === null ||
       !isLifecyclePage(active) ||
       (operationPage !== undefined &&
-        (!isLifecyclePage(operationPage) ||
-          (operationPage !== active && !isCompletedPopupPair)))
+        (!isLifecyclePage(operationPage) || (operationPage !== active && !isCompletedPopupPair)))
     ) {
       throw new Error("OAuth lifecycle no longer matches the resolved operation page");
     }
     let settled = false;
     try {
-      if (product === active && (provider === null || provider === product || provider.isClosed())) {
+      if (
+        product === active &&
+        (provider === null || provider === product || provider.isClosed())
+      ) {
         settled = true;
         return product;
       }
@@ -14850,9 +14860,7 @@ export class BrowserController {
       }
       this.page = product;
       await product.bringToFront().catch(() => undefined);
-      await product
-        .waitForLoadState("domcontentloaded", { timeout: 30000 })
-        .catch(() => undefined);
+      await product.waitForLoadState("domcontentloaded", { timeout: 30000 }).catch(() => undefined);
       settled = true;
       return product;
     } finally {

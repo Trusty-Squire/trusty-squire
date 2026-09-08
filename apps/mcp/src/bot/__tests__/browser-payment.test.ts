@@ -84,7 +84,9 @@ describe("page-bound payment browser", () => {
       await product.goto("https://retained-product.test/checkout");
       await source.goto("https://payment-source.test/checkout");
       const controller = BrowserController.fromHarnessPage(product);
-      await expect(controller.paymentBrowser(source).fillAndSubmitCheckout(APPROVAL_CARD)).resolves.toMatchObject({
+      await expect(
+        controller.paymentBrowser(source).fillAndSubmitCheckout(APPROVAL_CARD),
+      ).resolves.toMatchObject({
         order_confirmed: true,
       });
       expect(source.url()).toContain("/thank-you/source-123");

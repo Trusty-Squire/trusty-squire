@@ -140,11 +140,17 @@ describe("BrowserController OAuth popup lifecycle", () => {
         }),
       );
       await context.route("https://console.product.test/**", (route) =>
-        route.fulfill({ contentType: "text/html", body: checkout("$12.34", "/thank-you/source-123") }),
+        route.fulfill({
+          contentType: "text/html",
+          body: checkout("$12.34", "/thank-you/source-123"),
+        }),
       );
       await product.goto(productUrl);
       const controller = BrowserController.fromHarnessPage(product);
-      const started = await startHarnessProvisionSession({ browser: controller, serviceUrl: productUrl });
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+      });
       sessionId = started.session_id;
       const oauthRef = parseElementsTable(started.el_table ?? "").find(
         (element) => element.label === "Continue with Google",
@@ -364,7 +370,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
         "OAuth lifecycle no longer matches the resolved operation page",
       );
       expect(provider.isClosed()).toBe(false);
-      await expect(unrelated.locator("#unrelated-state").textContent()).resolves.toBe("Unrelated tab");
+      await expect(unrelated.locator("#unrelated-state").textContent()).resolves.toBe(
+        "Unrelated tab",
+      );
       expect((controller as unknown as { page: Page }).page).toBe(provider);
     } finally {
       await context.close().catch(() => undefined);
@@ -386,7 +394,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await product.close();
       await expect(settling).rejects.toThrow("OAuth lifecycle product page became unavailable");
       expect(provider.isClosed()).toBe(false);
-      await expect(unrelated.locator("#unrelated-state").textContent()).resolves.toBe("Unrelated tab");
+      await expect(unrelated.locator("#unrelated-state").textContent()).resolves.toBe(
+        "Unrelated tab",
+      );
       expect((controller as unknown as { page: Page }).page).toBe(provider);
     } finally {
       await context.close().catch(() => undefined);
@@ -475,7 +485,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
       );
       await product.goto(productUrl);
       const controller = BrowserController.fromHarnessPage(product);
-      const started = await startHarnessProvisionSession({ browser: controller, serviceUrl: productUrl });
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+      });
       sessionId = started.session_id;
       const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
       expect(oauthRef).toBeDefined();
@@ -1097,7 +1110,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
         await expect(act(sessionId, { kind: "press", key: "Enter" })).resolves.toMatchObject({
           url: "https://product.test/login",
         });
-        await expect(act(sessionId, { kind: "goto", url: "https://product.test/other" })).resolves.toMatchObject({
+        await expect(
+          act(sessionId, { kind: "goto", url: "https://product.test/other" }),
+        ).resolves.toMatchObject({
           url: "https://product.test/other",
         });
       } finally {
@@ -2011,10 +2026,18 @@ describe("BrowserController OAuth popup lifecycle", () => {
       expect(firstResult.url).toBe(firstUrl);
       expect(secondResult.url).toBe(secondUrl);
       await expect(
-        context.pages().find((page) => page.url() === firstUrl)!.locator("main").textContent(),
+        context
+          .pages()
+          .find((page) => page.url() === firstUrl)!
+          .locator("main")
+          .textContent(),
       ).resolves.toBe("First tab");
       await expect(
-        context.pages().find((page) => page.url() === secondUrl)!.locator("main").textContent(),
+        context
+          .pages()
+          .find((page) => page.url() === secondUrl)!
+          .locator("main")
+          .textContent(),
       ).resolves.toBe("Second tab");
     } finally {
       if (sessionId !== undefined) await finishProvisionSession(sessionId);
@@ -2055,7 +2078,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
       );
       await product.goto(productUrl);
       const controller = BrowserController.fromHarnessPage(product);
-      const started = await startHarnessProvisionSession({ browser: controller, serviceUrl: productUrl });
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+      });
       sessionId = started.session_id;
       const ordinaryRef = parseElementsTable(started.el_table ?? "").find(
         (element) => element.label === "Open ordinary tab",
@@ -2129,7 +2155,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         const url = route.request().url();
         const body =
           url === firstUrl
-            ? '<main>First tab</main><button onclick="document.body.dataset.wrongTabClicked = \'yes\'">Open second tab</button>'
+            ? "<main>First tab</main><button onclick=\"document.body.dataset.wrongTabClicked = 'yes'\">Open second tab</button>"
             : url === secondUrl
               ? "<main>Second tab</main>"
               : `<button id="first" onclick="window.open('${firstUrl}')">Open first tab</button><button id="second" onclick="window.open('${secondUrl}')">Open second tab</button>`;
@@ -2137,7 +2163,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
       });
       await product.goto(productUrl);
       const controller = BrowserController.fromHarnessPage(product);
-      const started = await startHarnessProvisionSession({ browser: controller, serviceUrl: productUrl });
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+      });
       sessionId = started.session_id;
       const firstRef = parseElementsTable(started.el_table ?? "").find(
         (element) => element.label === "Open first tab",
@@ -2179,7 +2208,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const firstPage = context.pages().find((page) => page.url() === firstUrl)!;
       expect(firstResult.url).toBe(firstUrl);
       expect(secondResult.url).toBe(secondUrl);
-      await expect(firstPage.locator("body").getAttribute("data-wrong-tab-clicked")).resolves.toBeNull();
+      await expect(
+        firstPage.locator("body").getAttribute("data-wrong-tab-clicked"),
+      ).resolves.toBeNull();
       await expect(product.locator("#second").count()).resolves.toBe(1);
     } finally {
       if (sessionId !== undefined) await finishProvisionSession(sessionId);
@@ -2283,7 +2314,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
     });
     let sessionId: string | undefined;
     try {
-      const started = await startHarnessProvisionSession({ browser: controller, serviceUrl: productUrl });
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+      });
       sessionId = started.session_id;
       const adding = cartAdd(sessionId, "popup-product", "popup-options", "popup-cart");
       await cartReadPaused;
@@ -2328,7 +2362,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const controller = BrowserController.fromHarnessPage(product);
     let sessionId: string | undefined;
     try {
-      const started = await startHarnessProvisionSession({ browser: controller, serviceUrl: productUrl });
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+      });
       sessionId = started.session_id;
       const recipe: OperatorRecipe = {
         name: "replay-adoption",
@@ -2339,7 +2376,12 @@ describe("BrowserController OAuth popup lifecycle", () => {
         entry_url: productUrl,
         allowed_hosts: ["product.test"],
         trace: [
-          { action: { kind: "click", target: { dom_hint: { id: "open-replay" }, css: "#open-replay" } } },
+          {
+            action: {
+              kind: "click",
+              target: { dom_hint: { id: "open-replay" }, css: "#open-replay" },
+            },
+          },
           {
             action: {
               kind: "type",
@@ -2368,7 +2410,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
         {
           beforeStep: async ({ step_index }) => {
             if (step_index !== 1) return;
-            const distraction = await act(sessionId!, { kind: "click", target: "Open distraction" });
+            const distraction = await act(sessionId!, {
+              kind: "click",
+              target: "Open distraction",
+            });
             expect(distraction.url).toBe(distractionUrl);
           },
         },

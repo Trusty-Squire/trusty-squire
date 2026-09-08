@@ -4978,13 +4978,11 @@ async function actInternally(
           deadline,
           capturedOperationPage,
         );
-      return (
-        (action.kind === "click" ||
-          action.kind === "js_click" ||
-          action.kind === "oauth_login" ||
-          action.kind === "oauth_click") &&
+      return (action.kind === "click" ||
+        action.kind === "js_click" ||
+        action.kind === "oauth_login" ||
+        action.kind === "oauth_click") &&
         session !== undefined
-      )
         ? await withOpenedTabAdoptionLease(session.browser, run)
         : await run();
     };
@@ -5015,7 +5013,8 @@ export async function act(
   cartIdentity?: CartIdentityContext,
 ): Promise<Observation> {
   const session = sessionForCall(sessionId);
-  const capturedOperationPage = session === undefined ? undefined : operationPageForSession(session);
+  const capturedOperationPage =
+    session === undefined ? undefined : operationPageForSession(session);
   const oauthProvider =
     action.kind === "oauth_login" || action.kind === "oauth_click" ? action.provider : undefined;
   try {
@@ -5032,13 +5031,11 @@ export async function act(
           deadline,
           capturedOperationPage,
         );
-      return (
-        (action.kind === "click" ||
-          action.kind === "js_click" ||
-          action.kind === "oauth_login" ||
-          action.kind === "oauth_click") &&
+      return (action.kind === "click" ||
+        action.kind === "js_click" ||
+        action.kind === "oauth_login" ||
+        action.kind === "oauth_click") &&
         session !== undefined
-      )
         ? await withOpenedTabAdoptionLease(session.browser, run)
         : await run();
     };
@@ -5472,19 +5469,19 @@ async function executeAct(
               if (compactV2ActionPage !== undefined && !browser.isActivePage(compactV2ActionPage)) {
                 actionPageAfter =
                   (await adoptTabOpenedByClick(session, browser, async () => {
-                  if (method === "click") await browser.clickHandle(resolved.handle);
-                  else await browser.jsClickHandle(resolved.handle);
+                    if (method === "click") await browser.clickHandle(resolved.handle);
+                    else await browser.jsClickHandle(resolved.handle);
                   })) ?? actionPageAfter;
               } else {
                 actionPageAfter =
                   (await adoptTabOpenedByClick(session, browser, async () => {
-                  if (method === "click")
-                    await browser.clickWithDispatchTracking({
-                      kind: "handle",
-                      handle: resolved.handle,
-                      method,
-                    });
-                  else await browser.jsClickHandle(resolved.handle);
+                    if (method === "click")
+                      await browser.clickWithDispatchTracking({
+                        kind: "handle",
+                        handle: resolved.handle,
+                        method,
+                      });
+                    else await browser.jsClickHandle(resolved.handle);
                   })) ?? actionPageAfter;
               }
             } else await browser.typeHandle(resolved.handle, action.text);
@@ -5560,37 +5557,37 @@ async function executeAct(
           } else if (!sourcePageIsActive && compactV2ActionPage !== undefined) {
             actionPageAfter =
               (await adoptTabOpenedByClick(session, browser, async () => {
-              if (target !== null) {
-                if (action.kind === "click") {
-                  await browser.clickInFrame(target, el.selector, compactV2ActionPage);
+                if (target !== null) {
+                  if (action.kind === "click") {
+                    await browser.clickInFrame(target, el.selector, compactV2ActionPage);
+                  } else {
+                    await browser.clickViaJsInFrame(target, el.selector, 0, compactV2ActionPage);
+                  }
+                } else if (action.kind === "click") {
+                  await browser.clickOnPage(compactV2ActionPage, el.selector);
                 } else {
-                  await browser.clickViaJsInFrame(target, el.selector, 0, compactV2ActionPage);
+                  await browser.clickViaJsOnPage(compactV2ActionPage, el.selector);
                 }
-              } else if (action.kind === "click") {
-                await browser.clickOnPage(compactV2ActionPage, el.selector);
-              } else {
-                await browser.clickViaJsOnPage(compactV2ActionPage, el.selector);
-              }
               })) ?? actionPageAfter;
           } else if (action.kind === "click") {
             actionPageAfter =
               (await adoptTabOpenedByClick(session, browser, async () => {
-              await browser.clickWithDispatchTracking(
-                target !== null
-                  ? { kind: "frame", frame: target, selector: el.selector, method: "click" }
-                  : { kind: "selector", selector: el.selector, method: "click" },
-                undefined,
-                async () => {
-                  if (target !== null) await browser.clickInFrame(target, el.selector);
-                  else await browser.click(el.selector);
-                },
-              );
+                await browser.clickWithDispatchTracking(
+                  target !== null
+                    ? { kind: "frame", frame: target, selector: el.selector, method: "click" }
+                    : { kind: "selector", selector: el.selector, method: "click" },
+                  undefined,
+                  async () => {
+                    if (target !== null) await browser.clickInFrame(target, el.selector);
+                    else await browser.click(el.selector);
+                  },
+                );
               })) ?? actionPageAfter;
           } else {
             actionPageAfter =
               (await adoptTabOpenedByClick(session, browser, async () => {
-              if (target !== null) await browser.clickViaJsInFrame(target, el.selector);
-              else await browser.clickViaJs(el.selector);
+                if (target !== null) await browser.clickViaJsInFrame(target, el.selector);
+                else await browser.clickViaJs(el.selector);
               })) ?? actionPageAfter;
           }
         } else if (action.kind === "type" && frameTargetFor(el) !== null) {
