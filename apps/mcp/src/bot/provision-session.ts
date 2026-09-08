@@ -4096,6 +4096,7 @@ function compactV2LiveControls(
   session: Session,
   elements: readonly InteractiveElement[],
   page: OAuthCompletionEvidence["page"] | undefined = compactV2SourcePage(session),
+  handles: ReadonlyMap<InteractiveElement, string> = compactV2Handles(session, elements, page),
 ): { rows: SafeControlV2[]; byRef: Map<string, string> } {
   let pageOrigin = "";
   try {
@@ -4105,7 +4106,7 @@ function compactV2LiveControls(
   return buildSafeControlsV2({
     elements,
     legacyRefs: provisionElementRefs(elements),
-    handles: compactV2Handles(session, elements, page),
+    handles,
     pageOrigin,
     pageUrl,
     canonical: session.compactV2Mode === "on",
@@ -4233,8 +4234,8 @@ function compactV2Observation(
   const epochDoc = compactV2EpochDoc(session, sourcePage);
   const previous = session.compactV2Previous;
   const sameDocument = previous !== null && previous.epoch.doc === epochDoc;
-  const safe = compactV2LiveControls(session, elements, sourcePage);
   const handles = compactV2Handles(session, elements, sourcePage);
+  const safe = compactV2LiveControls(session, elements, sourcePage, handles);
   const rendered = serializeBrowserUseDOM(capture.root, {
     ref: (node) => {
       const element = capture.nodeElements.get(node.id);
