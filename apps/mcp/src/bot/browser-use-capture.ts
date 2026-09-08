@@ -536,16 +536,19 @@ export async function captureBrowserUseDOM(
         signature: JSON.stringify([n.id, action, method, target, enctype, noValidate]),
       };
     };
+    const isSubmitter = (n: BrowserUseNode): boolean => {
+      const type = n.attributes.type?.toLowerCase();
+      return (
+        (n.nodeName === "BUTTON" && (type === undefined || type === "submit")) ||
+        (n.nodeName === "INPUT" && (type === "submit" || type === "image"))
+      );
+    };
     const submissionIntent = (
       n: BrowserUseNode,
       frame: Frame,
       owners: readonly FormIntent[],
     ): Array<[string | null, string, string, string, boolean, string | undefined, string | undefined]> | null => {
-      const type = n.attributes.type?.toLowerCase();
-      const isSubmitter =
-        (n.nodeName === "BUTTON" && (type === undefined || type === "submit")) ||
-        (n.nodeName === "INPUT" && (type === "submit" || type === "image"));
-      if (!isSubmitter || owners.length === 0) return null;
+      if (!isSubmitter(n) || owners.length === 0) return null;
       return owners.map((owner) => [
         n.attributes.formaction === undefined
           ? owner.action
@@ -570,6 +573,7 @@ export async function captureBrowserUseDOM(
     collectForms(root);
     const visit = (n: BrowserUseNode, inClosedShadow = false, form?: FormIntent): void => {
       if (n.nodeName === "FORM") form = formIntent(n);
+      if (["IFRAME", "FRAME"].includes(n.nodeName)) form = undefined;
       const raw = rawById.get(n.id)!,
         frame = nodeFrame.get(n.id)!;
       let el = bindings.get(raw.backendNodeId);
@@ -625,9 +629,12 @@ export async function captureBrowserUseDOM(
         }
       }
       if (el && frame && documentLoaders.get(frame) && liveBackendNodeIds.has(raw.backendNodeId)) {
-        const explicitOwner = formOwners.get(raw.backendNodeId);
+        const submitter = isSubmitter(n);
+        const explicitOwner = submitter ? formOwners.get(raw.backendNodeId) : undefined;
         const owners =
-          n.attributes.form === undefined
+          !submitter
+            ? []
+            : n.attributes.form === undefined
             ? form === undefined
               ? []
               : [form]
@@ -654,13 +661,13 @@ export async function captureBrowserUseDOM(
             ? effectiveTarget(n.attributes.target, baseTargets.get(frame) ?? "_self")
             : null,
           ["A", "AREA"].includes(n.nodeName) ? n.attributes.download : null,
-          n.attributes.form,
+          submitter ? n.attributes.form : null,
           owners.map((owner) => owner.signature),
           submissionIntent(n, frame, owners),
           n.attributes.autocomplete,
           n.attributes["data-field-role"],
         ]);
-        if (n.attributes.form !== undefined && !formOwners.has(raw.backendNodeId)) {
+        if (submitter && n.attributes.form !== undefined && !formOwners.has(raw.backendNodeId)) {
           delete el.observationIdentity;
           delete el.observationIntent;
         }

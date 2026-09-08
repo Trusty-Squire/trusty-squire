@@ -150,6 +150,43 @@ describe("interleaved observation DOM", () => {
     }
   });
 
+  it("keeps non-submit controls and iframe wrappers stable across parent form changes", async () => {
+    const page = await browser.newPage();
+    const refs = new StableObservationRefs();
+    const read = async () => {
+      const capture = await captureThroughController(page);
+      const handles = refs.actions("doc", capture.elements);
+      return new Map(
+        ["help", "google"].map((id) => {
+          const element = capture.elements.find((candidate) => candidate.id === id)!;
+          return [id, { identity: element.observationIdentity, ref: handles.get(element)! }];
+        }),
+      );
+    };
+    try {
+      await page.setContent(`
+        <form id="form" action="/safe">
+          <button id="help" type="button">Help</button>
+          <iframe
+            id="google"
+            src="https://accounts.google.com/gsi/button"
+            style="width: 200px; height: 48px"
+          ></iframe>
+        </form>
+      `);
+      const held = await read();
+      expect([...held.values()].every(({ ref }) => ref !== undefined)).toBe(true);
+      await page.locator("#form").evaluate((form) => form.setAttribute("action", "/other"));
+      const changed = await read();
+      for (const id of held.keys()) {
+        expect(changed.get(id)!.identity).toBe(held.get(id)!.identity);
+        expect(changed.get(id)!.ref).toBe(held.get(id)!.ref);
+      }
+    } finally {
+      await page.close();
+    }
+  });
+
   it("retires persistent anchors when only a base URL retargets relative actions", async () => {
     const page = await browser.newPage();
     const refs = new StableObservationRefs();

@@ -103,6 +103,8 @@ association, not by matching every duplicate ID. A non-owner form can change
 without retiring the control's capability; an actual owner change still does.
 Inherited form context stops at shadow-root and nested-document boundaries, so
 parent form changes do not stale controls the browser does not associate with it.
+Form destination evidence applies only to the existing submitter classification;
+non-submitting controls and iframe/frame wrappers do not inherit parent form intent.
 
 ## Deferred native activation concerns
 
