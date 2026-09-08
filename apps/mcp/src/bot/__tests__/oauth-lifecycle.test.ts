@@ -307,7 +307,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
-  it("retains the provider when closing it could lose the product lineage", async () => {
+  it("closes a live provider when its product lineage remains proven", async () => {
     const { controller, product } = await controllerForProduct();
     const context = product.context();
     try {
@@ -316,22 +316,126 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const sleepSpy = vi
         .spyOn(controller as unknown as { sleep(ms: number): Promise<void> }, "sleep")
         .mockResolvedValue();
-      const closeSpy = vi.spyOn(provider, "close").mockImplementation(async () => {
-        await product.close();
-      });
       try {
         await controller.settleAfterOAuth(provider);
 
-        expect(closeSpy).not.toHaveBeenCalled();
         expect(product.isClosed()).toBe(false);
-        expect(provider.isClosed()).toBe(false);
+        expect(provider.isClosed()).toBe(true);
         expect((controller as unknown as { page: Page }).page).toBe(product);
       } finally {
         sleepSpy.mockRestore();
-        closeSpy.mockRestore();
       }
     } finally {
       await context.close().catch(() => undefined);
+    }
+  });
+
+  it("retains the provider when the product closes at teardown dispatch", async () => {
+    const { controller, product } = await controllerForProduct();
+    const context = product.context();
+    try {
+      await controller.startOAuth("#oauth");
+      const provider = (controller as unknown as { page: Page }).page;
+      let sleeps = 0;
+      const sleepSpy = vi
+        .spyOn(controller as unknown as { sleep(ms: number): Promise<void> }, "sleep")
+        .mockImplementation(async () => {
+          sleeps += 1;
+          if (sleeps === 12) await product.close();
+        });
+      try {
+        await expect(controller.settleAfterOAuth(provider)).rejects.toThrow(
+          "OAuth lifecycle product page became unavailable",
+        );
+        expect(provider.isClosed()).toBe(false);
+      } finally {
+        sleepSpy.mockRestore();
+      }
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("returns a source-page scroll observation despite concurrent tab adoption", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://product.test/login";
+    const sourceUrl = "https://console.product.test/source";
+    const ordinaryUrl = "https://console.product.test/ordinary";
+    let sessionId: string | undefined;
+    try {
+      await context.route("https://product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<button id="oauth" onclick='window.open(${JSON.stringify(
+            `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(sourceUrl)}`,
+          )})'>Continue</button>`,
+        }),
+      );
+      await context.route("https://accounts.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<script>location.replace(${JSON.stringify(sourceUrl)})</script>`,
+        }),
+      );
+      await context.route("https://console.product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body:
+            route.request().url() === ordinaryUrl
+              ? "<main>Ordinary tab</main>"
+              : `<!doctype html><html><body style="min-height: 5000px"><main>Source tab</main><button id="open" onclick="window.open('${ordinaryUrl}')">Open ordinary tab</button></body></html>`,
+        }),
+      );
+      await product.goto(productUrl);
+      const controller = BrowserController.fromHarnessPage(product);
+      const started = await startHarnessProvisionSession({ browser: controller, serviceUrl: productUrl });
+      sessionId = started.session_id;
+      const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+      expect(oauthRef).toBeDefined();
+      const returned = await act(sessionId, {
+        kind: "oauth_login",
+        target: oauthRef!,
+        provider: "google",
+      });
+      const ordinaryRef = parseElementsTable(returned.el_table ?? "").find(
+        (element) => element.label === "Open ordinary tab",
+      )?.ref;
+      expect(ordinaryRef).toBeDefined();
+      const source = controller.completedOAuthPage()!;
+
+      let scrollEntered!: () => void;
+      let resumeScroll!: () => void;
+      const scrollStarted = new Promise<void>((resolve) => {
+        scrollEntered = resolve;
+      });
+      const scrollResume = new Promise<void>((resolve) => {
+        resumeScroll = resolve;
+      });
+      const originalScroll = controller.scrollViewport.bind(controller);
+      const scrollSpy = vi
+        .spyOn(controller, "scrollViewport")
+        .mockImplementation(async (direction = "down", page = null): Promise<void> => {
+          await originalScroll(direction, page);
+          scrollEntered();
+          await scrollResume;
+        });
+
+      const scrolling = act(sessionId, { kind: "scroll", direction: "bottom" });
+      await scrollStarted;
+      const opened = await act(sessionId, { kind: "click", target: ordinaryRef! });
+      resumeScroll();
+      const scrolled = await scrolling;
+
+      expect(opened.url).toBe(ordinaryUrl);
+      expect(scrolled.url).toBe(sourceUrl);
+      expect(scrolled.text).toContain("Source tab");
+      expect(scrollSpy).toHaveBeenCalledWith("bottom", source);
+      expect((await observe(sessionId)).url).toBe(ordinaryUrl);
+      scrollSpy.mockRestore();
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close();
     }
   });
 

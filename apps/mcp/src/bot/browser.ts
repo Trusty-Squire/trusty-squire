@@ -14731,7 +14731,7 @@ export class BrowserController {
   // no-op for the same-tab redirect flow (the active page already IS
   // the product page); for the popup flow, waits briefly for the popup
   // to close, then switches `this.page` back to the product tab.
-  async settleAfterOAuth(operationPage?: Page): Promise<void> {
+  async settleAfterOAuth(operationPage?: Page): Promise<Page> {
     const product = this.oauthProductPage;
     const active = this.page;
     const provider = this.oauthProviderPage;
@@ -14750,7 +14750,7 @@ export class BrowserController {
     try {
       if (product === active) {
         settled = true;
-        return;
+        return product;
       }
       for (let i = 0; i < 12 && provider !== null && !provider.isClosed(); i++) {
         await this.sleep(1000);
@@ -14758,8 +14758,15 @@ export class BrowserController {
           throw new Error("OAuth lifecycle product page became unavailable");
         }
       }
-      if (product.isClosed()) {
-        throw new Error("OAuth lifecycle product page became unavailable");
+      if (
+        provider !== null &&
+        provider !== product &&
+        !provider.isClosed() &&
+        this.oauthProductPage === product &&
+        this.oauthProviderPage === provider &&
+        !product.isClosed()
+      ) {
+        await provider.close().catch(() => undefined);
       }
       if (product.isClosed()) {
         throw new Error("OAuth lifecycle product page became unavailable");
@@ -14770,6 +14777,7 @@ export class BrowserController {
         .waitForLoadState("domcontentloaded", { timeout: 30000 })
         .catch(() => undefined);
       settled = true;
+      return product;
     } finally {
       if (settled) {
         this.oauthProductPage = null;

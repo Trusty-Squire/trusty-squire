@@ -4545,6 +4545,7 @@ async function observeSession(
   detail: "compact" | "full" = "compact",
   startMetadata?: CompactV2StartMetadata,
   sourcePage?: OAuthCompletionEvidence["page"],
+  preserveSourceBinding = false,
 ): Promise<Observation> {
   if (sourcePage === undefined) {
     const hadOAuthCompletionSource =
@@ -4555,7 +4556,7 @@ async function observeSession(
     rememberCompactV2SourcePage(session, undefined);
     if (hadOAuthCompletionSource) invalidateCompactV2Snapshot(session);
   }
-  rememberOAuthCompletionSourcePage(session, sourcePage);
+  if (!preserveSourceBinding) rememberOAuthCompletionSourcePage(session, sourcePage);
   const oauthInProgress = (): Observation => {
     session.prevObserve = null;
     invalidateCompactV2Snapshot(session);
@@ -5080,6 +5081,7 @@ async function executeAct(
   }
   let browser = session.browser;
   const compactV2ActionPage = operationPage ?? operationPageForSession(session);
+  let actionPageAfter = compactV2ActionPage;
   let completedAction: ProvisionAction = action;
   let sensitiveSource: RecordedValueSource | undefined;
   let cartAffecting = false;
@@ -5204,7 +5206,7 @@ async function executeAct(
         break;
       }
       case "oauth_settle": {
-        await browser.settleAfterOAuth(compactV2ActionPage);
+        actionPageAfter = await browser.settleAfterOAuth(compactV2ActionPage);
         break;
       }
       case "scroll": {
@@ -5445,12 +5447,14 @@ async function executeAct(
             } else if (action.kind === "click" || action.kind === "js_click") {
               const method = action.kind;
               if (compactV2ActionPage !== undefined && !browser.isActivePage(compactV2ActionPage)) {
-                await adoptTabOpenedByClick(session, browser, async () => {
+                actionPageAfter =
+                  (await adoptTabOpenedByClick(session, browser, async () => {
                   if (method === "click") await browser.clickHandle(resolved.handle);
                   else await browser.jsClickHandle(resolved.handle);
-                });
+                  })) ?? actionPageAfter;
               } else {
-                await adoptTabOpenedByClick(session, browser, async () => {
+                actionPageAfter =
+                  (await adoptTabOpenedByClick(session, browser, async () => {
                   if (method === "click")
                     await browser.clickWithDispatchTracking({
                       kind: "handle",
@@ -5458,7 +5462,7 @@ async function executeAct(
                       method,
                     });
                   else await browser.jsClickHandle(resolved.handle);
-                });
+                  })) ?? actionPageAfter;
               }
             } else await browser.typeHandle(resolved.handle, action.text);
           } finally {
@@ -5474,7 +5478,7 @@ async function executeAct(
             // settle above, not inside the click's own grace window. Drain it
             // here — the queue is already populated, so this costs nothing.
             if (compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage)) {
-              await adoptOpenedTab(session, browser, 0);
+              actionPageAfter = (await adoptOpenedTab(session, browser, 0)) ?? actionPageAfter;
             }
           }
           break;
@@ -5531,7 +5535,8 @@ async function executeAct(
               ),
             );
           } else if (!sourcePageIsActive && compactV2ActionPage !== undefined) {
-            await adoptTabOpenedByClick(session, browser, async () => {
+            actionPageAfter =
+              (await adoptTabOpenedByClick(session, browser, async () => {
               if (target !== null) {
                 if (action.kind === "click") {
                   await browser.clickInFrame(target, el.selector, compactV2ActionPage);
@@ -5543,9 +5548,10 @@ async function executeAct(
               } else {
                 await browser.clickViaJsOnPage(compactV2ActionPage, el.selector);
               }
-            });
+              })) ?? actionPageAfter;
           } else if (action.kind === "click") {
-            await adoptTabOpenedByClick(session, browser, async () => {
+            actionPageAfter =
+              (await adoptTabOpenedByClick(session, browser, async () => {
               await browser.clickWithDispatchTracking(
                 target !== null
                   ? { kind: "frame", frame: target, selector: el.selector, method: "click" }
@@ -5556,12 +5562,13 @@ async function executeAct(
                   else await browser.click(el.selector);
                 },
               );
-            });
+              })) ?? actionPageAfter;
           } else {
-            await adoptTabOpenedByClick(session, browser, async () => {
+            actionPageAfter =
+              (await adoptTabOpenedByClick(session, browser, async () => {
               if (target !== null) await browser.clickViaJsInFrame(target, el.selector);
               else await browser.clickViaJs(el.selector);
-            });
+              })) ?? actionPageAfter;
           }
         } else if (action.kind === "type" && frameTargetFor(el) !== null) {
           // Frame targets skip the autocomplete-popup-commit machinery below —
@@ -5721,7 +5728,9 @@ async function executeAct(
             action.provider,
             oauthDeadline,
           );
-          rememberOAuthCompletionSourcePage(session, browser.completedOAuthPage() ?? undefined);
+          const completedPage = browser.completedOAuthPage() ?? undefined;
+          rememberOAuthCompletionSourcePage(session, completedPage);
+          actionPageAfter = completedPage ?? actionPageAfter;
         }
         if (action.kind !== "type") {
           await settleAfterStateChange(browser, compactV2ActionPage);
@@ -5732,7 +5741,7 @@ async function executeAct(
           (action.kind === "click" || action.kind === "js_click") &&
           (compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage))
         ) {
-          await adoptOpenedTab(session, browser, 0);
+          actionPageAfter = (await adoptOpenedTab(session, browser, 0)) ?? actionPageAfter;
         }
         break;
       }
@@ -5776,7 +5785,9 @@ async function executeAct(
           action.provider,
           oauthDeadline,
         );
-        rememberOAuthCompletionSourcePage(session, browser.completedOAuthPage() ?? undefined);
+        const completedPage = browser.completedOAuthPage() ?? undefined;
+        rememberOAuthCompletionSourcePage(session, completedPage);
+        actionPageAfter = completedPage ?? actionPageAfter;
         break;
       }
     }
@@ -5803,7 +5814,6 @@ async function executeAct(
   // Don't fold inbox-provider steps into the replayable recipe (see
   // INBOX_READ_HOSTS): replay re-reads the code via awaitVerification, and a
   // recorded inbox click would bake the email's subject into a shared recipe.
-  const actionPageAfter = operationPageForSession(session) ?? compactV2ActionPage;
   const urlAfterAction = actionPageAfter?.url() ?? browser.currentUrl();
   if (!isInboxReadHost(urlAfterAction)) {
     const replayElement = replaySafeElementForSession(session, resolvedEl);
@@ -5854,6 +5864,7 @@ async function executeAct(
             detail === "none" ? "compact" : detail,
             undefined,
             actionObservationPage,
+            true,
           );
   return {
     observation:
@@ -6752,10 +6763,10 @@ async function adoptOpenedTab(
   session: Session,
   browser: BrowserController,
   graceMs: number,
-): Promise<void> {
-  if (!newTabAdoptionAllowed(session)) return;
+): Promise<Page | undefined> {
+  if (!newTabAdoptionAllowed(session)) return undefined;
   const url = await browser.adoptOpenedTab(graceMs).catch(() => null);
-  if (url === null) return;
+  if (url === null) return undefined;
   const page = browser.activePage();
   if (page !== null && oauthCompletionSourcePage(session) !== undefined) {
     rememberOAuthCompletionSourcePage(session, page);
@@ -6763,23 +6774,26 @@ async function adoptOpenedTab(
     rememberCompactV2SourcePage(session, page);
   }
   audit(session.id, "new_tab_adopted", { host: registrableHost(url) });
+  return page ?? undefined;
 }
 
 async function adoptTabOpenedByClick(
   session: Session,
   browser: BrowserController,
   click: () => Promise<void>,
-): Promise<void> {
+): Promise<Page | undefined> {
   if (!newTabAdoptionAllowed(session)) {
     await click();
-    return;
+    return undefined;
   }
   browser.armOpenedTabAdoption();
+  let adopted: Page | undefined;
   try {
     await click();
   } finally {
-    await adoptOpenedTab(session, browser, OPENED_TAB_GRACE_MS);
+    adopted = await adoptOpenedTab(session, browser, OPENED_TAB_GRACE_MS);
   }
+  return adopted;
 }
 
 async function settleAfterStateChange(browser: BrowserController, page?: Page): Promise<void> {
