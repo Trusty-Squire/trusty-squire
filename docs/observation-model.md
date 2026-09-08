@@ -61,7 +61,7 @@ The full DOM is already loaded in the operator's browser. The observation is a *
 
 **Compactness invariant (hard requirement, captain-mandated).** The *default* `operate_observe` payload — the vanilla form the driving agent sees every turn — MUST stay compact and bounded, regardless of page size. A huge page yields a bounded skeleton, not a huge payload. `expand`/`read`/`screenshot` exist precisely so richness is **pull-only** and never inflates the default. This is the whole point: the agent reasons over a small skeleton and drills in only where it needs to.
 
-Concretely, the default skeleton is: visible/actionable controls plus a few salient read-only nodes (headings, error banners), and **each row carries only the minimum identity to target and reason** — the ref/label, role, and a compact state flag (e.g. `required`/`invalid`/`disabled`/`checked`). Heavier detail — full attributes, placeholder text, long/validation-message text, node subtrees, images — is **not** in the default; it comes only via `expand`/`read`/`screenshot`. The implementation must hold a per-observation size budget and prove the default stays within it on a large real page (a product grid, a long checkout).
+Concretely, `operate_start` and `operate_observe` default to `format:"compact"`: the existing paged `browser-use-control-query` map of all actionable controls, with each `[ref, role, facts?]` row carrying only the identity and state needed to act. `overflow.next_cursor` continues the map under the existing observation-v2 wire budget. Non-control nodes are absent by construction; this is a size/shape choice, never screening or redaction. `format:"full"` explicitly selects the unchanged, verbatim `browser-use-dom` tree when arbitrary page text, raw attributes, or layout context is needed.
 
 Because the source of truth (loaded DOM) never leaves the browser, every detail request is a cheap in-memory read — no navigation, no re-render, no round-trip, no blowup — and, critically, no cost to the default payload.
 
@@ -96,6 +96,10 @@ The history of this section is a one-way ratchet toward visibility:
 **What that means concretely.** `operate_observe`, `operate_screenshot`, and
 `operate_extract` return what the page
 actually renders:
+
+- Compact versus full observation is only a size/shape choice. Compact serializes
+  controls; full serializes the verbatim DOM. Neither path masks, screens,
+  substitutes, or redacts content that its format emits.
 
 - `operate_screenshot` returns the page's real pixels. There is no mask
   compositing pass, no capture-scoped node scan, no stability re-check, and no

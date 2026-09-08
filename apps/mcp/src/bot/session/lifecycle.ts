@@ -69,7 +69,7 @@ import type { CompactV2StartMetadata, Observation } from "../provision-session.j
 export interface SessionStartPorts {
   observeSession: (
     session: Session,
-    detail: "compact" | "full",
+    format: "compact" | "full",
     startMetadata?: CompactV2StartMetadata,
   ) => Promise<Observation>;
   compactV2StartMetadata: (
@@ -1015,6 +1015,8 @@ function configuredCompactV2Mode(): "off" | "shadow" | "on" {
 
 export interface StartOptions {
   serviceUrl: string;
+  /** Observation shape returned by this start. Compact is the public default. */
+  format?: "compact" | "full";
   // The user's real Chrome profile. Operate opens this directory directly.
   profileDir?: string;
   proxyUrl?: string;
@@ -1107,6 +1109,7 @@ export async function startProvisionSession(
   const id =
     reserveBrokerAdmission([opts.serviceUrl, ...(opts.extraAllowedHosts ?? [])]) ?? randomUUID();
   const compactV2Mode = configuredCompactV2Mode();
+  const requestedFormat = opts.format ?? (compactV2Mode === "on" ? "full" : "compact");
   let browser: BrowserController;
   let liveProviders: OAuthProviderId[];
   let workerEmail: string | null = null;
@@ -1133,13 +1136,22 @@ export async function startProvisionSession(
       await releaseWarmBrowserPage(browser, false);
       refusedStartSessionIds.add(id);
       return compactV2Mode === "on"
-        ? {
-            session_id: id,
-            format: "browser-use-dom",
-            stage: "auth",
-            url: "",
-            needs_user: gate.needs_user,
-          }
+        ? requestedFormat === "full"
+          ? {
+              session_id: id,
+              format: "browser-use-dom",
+              stage: "auth",
+              url: "",
+              needs_user: gate.needs_user,
+            }
+          : {
+              session_id: id,
+              format: "browser-use-control-query",
+              stage: "auth",
+              url: "",
+              safe_table: [],
+              needs_user: gate.needs_user,
+            }
         : { session_id: id, url: "", text: "", elements: [], needs_user: gate.needs_user };
     }
     if (custody === undefined)
@@ -1211,12 +1223,16 @@ export async function startProvisionSession(
     const hintParts = [loginHint, ...(opts.hint !== undefined ? [opts.hint] : [])];
     const observation = await ports.observeSession(
       session,
-      "compact",
+      requestedFormat,
       ports.compactV2StartMetadata(opts.hint, loginHint, session.userEmail),
     );
     session.initializing = false;
     session.lastActivityAt = Date.now();
-    if (observation.format === "browser-use-dom") return observation;
+    if (
+      observation.format === "browser-use-dom" ||
+      observation.format === "browser-use-control-query"
+    )
+      return observation;
     return {
       ...observation,
       hint: hintParts.join("\n"),
@@ -1236,6 +1252,8 @@ export async function startHarnessProvisionSession(
   ports: SessionStartPorts,
 ): Promise<Observation> {
   const id = randomUUID();
+  const requestedFormat =
+    opts.format ?? (opts.observationFormat === "browser-use-dom" ? "full" : "compact");
   const targetHost = registrableHost(opts.serviceUrl);
   const allowedHosts: AllowedHostEntry[] = [
     ...(targetHost === null ? [] : [targetHost]),
@@ -1267,12 +1285,16 @@ export async function startHarnessProvisionSession(
     await opts.browser.goto(opts.serviceUrl);
     const observation = await ports.observeSession(
       session,
-      "compact",
+      requestedFormat,
       ports.compactV2StartMetadata(opts.hint, "", null),
     );
     session.initializing = false;
     session.lastActivityAt = Date.now();
-    if (observation.format === "browser-use-dom") return observation;
+    if (
+      observation.format === "browser-use-dom" ||
+      observation.format === "browser-use-control-query"
+    )
+      return observation;
     return { ...observation, hint: opts.hint ?? "" };
   } catch (error) {
     deregisterProvisionSession(session);

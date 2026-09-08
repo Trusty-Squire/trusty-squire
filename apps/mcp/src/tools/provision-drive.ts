@@ -315,6 +315,7 @@ const proxySchema = z
 
 const startSchema = z.object({
   service_url: z.string().url(),
+  format: z.enum(["compact", "full"]).optional(),
   // Sensitive: may include proxy credentials. It is launch-only and is never
   // retained in the session state, action trail, status, or recipe.
   proxy: proxySchema.optional(),
@@ -329,7 +330,7 @@ const startSchema = z.object({
 });
 
 const DOM_OBSERVATION_CONTRACT =
-  "Default format is `browser-use-dom`: `session_id` continues the session, `url` is the live page URL, " +
+  'With `format:"full"`, the response format is `browser-use-dom`: `session_id` continues the session, `url` is the live page URL, ' +
   "and `stage` identifies the page stage. `dom` is a tab-indented tree with interleaved visible text: " +
   "`[@e:...]<tag attributes />` identifies a control; attributes may include field values and state. " +
   "`|SHADOW(open)|` / `|SHADOW(closed)|` mark shadow hosts, with Open/Closed Shadow and Shadow End boundaries. " +
@@ -341,7 +342,9 @@ const DOM_OBSERVATION_CONTRACT =
   "call operate_observe and choose a current ref. ";
 
 const CONTROL_QUERY_CONTRACT =
-  "With query, role, or cursor, format is `browser-use-control-query`, not `browser-use-dom`. " +
+  'The default `format:"compact"` response is `browser-use-control-query`. It contains every actionable control ' +
+  "(button, link, textbox, select, checkbox, radio, tab, menuitem, and file), including off-viewport controls; " +
+  "non-control markup and arbitrary page text are absent by construction, not redacted. Query or role filters this same map. " +
   "Its `safe_table` is a paged control map: each row is `[ref,role,facts?]`; role is " +
   "b=button, l=link, t=textbox, s=select, c=checkbox, r=radio, tb=tab, m=menuitem, or f=file. " +
   "facts is a `|`-joined `@label` alias followed by present s=state (c=checked, u=unchecked, d=disabled, r=required), " +
@@ -353,6 +356,8 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   description:
     "Begin an interactive website task: opens a scoped browser on the " +
     "user's machine at service_url and returns the initial page observation. " +
+    CONTROL_QUERY_CONTRACT +
+    'Use `format:"full"` only when the verbatim page DOM and text are needed. Nothing is redacted in either format. ' +
     DOM_OBSERVATION_CONTRACT +
     "YOU are the planner — read the observation, then drive the signup, setup, or " +
     "checkout with operate_click, operate_type, operate_select, operate_navigate, operate_scroll, and operate_login (operate_pay for a purchase), re-read with " +
@@ -368,6 +373,7 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
     required: ["service_url"],
     properties: {
       service_url: { type: "string" },
+      format: { type: "string", enum: ["compact", "full"] },
       proxy: {
         type: "string",
         description:
@@ -383,6 +389,7 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
     const consentInboxRead = await readInboxConsent();
     return await startProvisionSession({
       serviceUrl: args.service_url,
+      format: args.format ?? "compact",
       consentInboxRead,
       ...(args.proxy !== undefined ? { proxyUrl: args.proxy } : {}),
       ...(extra.length > 0 ? { extraAllowedHosts: extra } : {}),
@@ -400,19 +407,17 @@ const observeSchema = z.object({
   role: z
     .enum(["button", "link", "textbox", "select", "checkbox", "radio", "tab", "menuitem", "file"])
     .optional(),
-  // Both values return the default DOM tree; legacy full requests expanded fields.
-  detail: z.enum(["compact", "full"]).optional(),
+  format: z.enum(["compact", "full"]).optional(),
 });
 
 export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
   name: "operate_observe",
   description:
     "Re-read the current page of an operate session. " +
-    DOM_OBSERVATION_CONTRACT +
-    "Omit query/cursor/role for the tree. Supplying query or role searches the full document's " +
-    "control inventory, including off-viewport controls. " +
     CONTROL_QUERY_CONTRACT +
-    "detail does not expand the default tree format. " +
+    'Use `format:"full"` only when the verbatim page DOM and text are needed. Nothing is redacted in either format. ' +
+    DOM_OBSERVATION_CONTRACT +
+    "Supplying query, role, or cursor always selects the compact control-map path, regardless of format. " +
     "Explicit legacy sessions (TRUSTY_SQUIRE_OBSERVE_V2=off or shadow) return legacy observations.",
   inputSchema: observeSchema,
   jsonInputSchema: {
@@ -436,14 +441,14 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
           "file",
         ],
       },
-      detail: { type: "string", enum: ["compact", "full"] },
+      format: { type: "string", enum: ["compact", "full"] },
     },
   },
   async handler(args) {
     if (args.query !== undefined || args.cursor !== undefined || args.role !== undefined) {
       return await observeQuery(args.session_id, args.query ?? "", args.role, args.cursor);
     }
-    return await observe(args.session_id, args.detail ?? "compact");
+    return await observe(args.session_id, args.format ?? "compact");
   },
 };
 

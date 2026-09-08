@@ -1935,7 +1935,10 @@ describe("TOOLS registry", () => {
       expect(description).toContain("Refs stay usable on the same document");
     }
     const start = TOOLS.find((tool) => tool.name === "operate_start")?.description ?? "";
-    expect(start).not.toMatch(/safe_table|observe_query|\b[qfaxsbltcrm]=/);
+    expect(start).toContain("browser-use-control-query");
+    expect(start).toContain("safe_table");
+    expect(start).toContain("[ref,role,facts?]");
+    expect(start).not.toContain("observe_query");
     const observe = TOOLS.find((tool) => tool.name === "operate_observe")?.description ?? "";
     expect(observe).toContain("browser-use-control-query");
     expect(observe).toContain("safe_table");

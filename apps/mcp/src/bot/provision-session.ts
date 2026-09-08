@@ -2217,8 +2217,8 @@ function widenAllowedHostsFromUrl(session: Session, url: string): void {
 // the facade: they bind the perception collaborators the start paths need, so
 // the lifecycle module keeps a one-way dependency on this file (types only).
 const sessionStartPorts: SessionStartPorts = {
-  observeSession: async (session, detail, startMetadata) =>
-    await observeSession(session, detail, startMetadata),
+  observeSession: async (session, format, startMetadata) =>
+    await observeSession(session, format, startMetadata, undefined, false, format),
   compactV2StartMetadata: (registryHint, loginHint, userEmail) =>
     compactV2StartMetadata(registryHint, loginHint, userEmail),
 };
@@ -2236,10 +2236,11 @@ export async function startHarnessProvisionSession(
 
 export async function observe(
   sessionId: string,
-  detail: "compact" | "full" = "compact",
+  format?: "compact" | "full",
 ): Promise<Observation> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const requestedFormat = format ?? (session.compactV2Mode === "on" ? "full" : "compact");
   const completionSource = oauthCompletionSourcePage(session);
   if (completionSource?.isClosed() === true) {
     session.browser.completeOAuthTransitionRecovery();
@@ -2253,9 +2254,11 @@ export async function observe(
       : operationPageForSession(session);
   return await observeSession(
     session,
-    detail,
+    requestedFormat,
     undefined,
     sourcePage?.isClosed() === true ? undefined : sourcePage,
+    false,
+    requestedFormat,
   );
 }
 
@@ -4255,14 +4258,19 @@ function compactV2PublicObservation(
     terminal?: Observation["terminal"];
     url?: string;
   },
+  outputFormat: "compact" | "full" = "full",
 ): Observation {
   if (session.compactV2Mode !== "on") return legacy();
   session.compactV2Active = true;
   const payload = {
-    format: "browser-use-dom" as const,
+    format:
+      outputFormat === "compact"
+        ? ("browser-use-control-query" as const)
+        : ("browser-use-dom" as const),
     session_id: session.id,
     url: fields.url ?? session.browser.currentUrl(),
     stage: fields.stage,
+    ...(outputFormat === "compact" ? { safe_table: [] } : {}),
     ...(fields.guidance === undefined ? {} : { guidance: fields.guidance }),
     ...(fields.oauth === undefined ? {} : { oauth: fields.oauth }),
     ...(fields.observed === undefined ? {} : { observed: fields.observed }),
@@ -4282,6 +4290,7 @@ function compactV2Observation(
   semanticSource: ObservationSemanticSourceV2,
   startMetadata?: CompactV2StartMetadata,
   sourcePage?: OAuthCompletionEvidence["page"],
+  outputFormat: "compact" | "full" = "full",
 ): Observation {
   rememberCompactV2SourcePage(session, sourcePage);
   const elements = capture.elements;
@@ -4293,6 +4302,7 @@ function compactV2Observation(
   const epochDoc = compactV2EpochDoc(session, sourcePage);
   const previous = session.compactV2Previous;
   const sameDocument = previous !== null && previous.epoch.doc === epochDoc;
+  const sameFullDocument = sameDocument && previous.dom !== undefined;
   const handles = compactV2Handles(session, elements, sourcePage);
   const safe = compactV2LiveControls(session, elements, sourcePage, handles);
   const rendered = serializeBrowserUseDOM(capture.root, {
@@ -4306,12 +4316,12 @@ function compactV2Observation(
         targetable: false,
       };
     },
-    ...(sameDocument ? { previous: new Set(previous.renderedRefs ?? []) } : {}),
+    ...(sameFullDocument ? { previous: new Set(previous.renderedRefs ?? []) } : {}),
   });
   // Emit canonical names and text verbatim, preserving whitespace, line order
   // and indentation; no prose extraction or byte-budget pruning.
   const dom = rendered.dom;
-  const changed = !sameDocument || previous.dom !== dom;
+  const changed = !sameFullDocument || previous.dom !== dom;
   const epoch = { doc: epochDoc, rev: changed ? generation : previous.epoch.rev };
   session.compactV2Active = true;
   session.compactV2Index = {
@@ -4328,10 +4338,51 @@ function compactV2Observation(
     stage,
     semantics,
     byRef: new Map(safe.rows.map((row) => [row.ref, row])),
-    dom,
-    renderedRefs: rendered.refs,
+    ...(outputFormat === "full"
+      ? { dom, renderedRefs: rendered.refs }
+      : {
+          ...(previous?.dom === undefined ? {} : { dom: previous.dom }),
+          ...(previous?.renderedRefs === undefined ? {} : { renderedRefs: previous.renderedRefs }),
+        }),
   };
   session.prevObserve = null;
+  if (outputFormat === "compact") {
+    const page = encodeV2QueryPage({
+      sessionId: session.id,
+      stage,
+      pageUrl,
+      semantics,
+      rows: safe.rows,
+      cursorFor: (next) =>
+        compactV2Cursor(session, epoch.rev, next, compactV2ControlCursorScope(session)),
+      ...(startMetadata === undefined
+        ? {}
+        : {
+            startMetadata: {
+              ...(startMetadata.hintPages?.[0] === undefined
+                ? {}
+                : { hint: startMetadata.hintPages[0] }),
+              ...(startMetadata.userEmail === undefined
+                ? {}
+                : { userEmail: startMetadata.userEmail }),
+              ...(session.compactV2HintPages.length <= 1
+                ? {}
+                : {
+                    hintOverflow: {
+                      remaining: session.compactV2HintPages.length - 1,
+                      next_cursor: compactV2Cursor(
+                        session,
+                        epoch.rev,
+                        1,
+                        compactV2HintCursorScope(session),
+                      ),
+                    },
+                  }),
+            },
+          }),
+    });
+    return page.payload as unknown as Observation;
+  }
   const removed = sameDocument
     ? (previous.renderedRefs ?? []).filter((ref) => !rendered.refs.includes(ref))
     : [];
@@ -4340,7 +4391,7 @@ function compactV2Observation(
     session_id: session.id,
     url: pageUrl,
     stage,
-    ...(sameDocument ? { delta: true } : {}),
+    ...(sameFullDocument ? { delta: true } : {}),
     ...(changed ? { dom } : { dom_unchanged: true as const }),
     ...(removed.length ? { removed } : {}),
     more_above: capture.moreAbove,
@@ -4567,6 +4618,7 @@ async function observeSession(
   startMetadata?: CompactV2StartMetadata,
   sourcePage?: OAuthCompletionEvidence["page"],
   preserveSourceBinding = false,
+  outputFormat: "compact" | "full" = "full",
 ): Promise<Observation> {
   if (sourcePage === undefined) {
     const hadOAuthCompletionSource =
@@ -4602,6 +4654,7 @@ async function observeSession(
         oauth: state,
       }),
       { stage: "auth", guidance, oauth: state },
+      outputFormat,
     );
   };
   try {
@@ -4645,6 +4698,7 @@ async function observeSession(
         semanticSource,
         startMetadata,
         sourcePage,
+        outputFormat,
       );
     }
     if (v2Mode === "shadow")
