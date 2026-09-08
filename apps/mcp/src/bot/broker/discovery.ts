@@ -1,13 +1,16 @@
 import { spawn } from "node:child_process";
-import { lstat, readFile, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   acquireProfileOperationGuard,
+  ProfileBusyError,
   processBirthIdentity,
   processBirthIdentityState,
   profilePathIdentity,
   CHROME_PROFILE_DIR,
   waitForProfileFree,
+  type ProfileOperationLease,
 } from "../profile.js";
 import { BrokerClient } from "./transport.js";
 import { BrokerRefusal } from "./scheduler.js";
@@ -18,6 +21,59 @@ interface EndpointOwner {
   profileDir: string;
   inode: number;
   device: number;
+}
+
+const BROKER_CONNECT_TIMEOUT_MS = 10_000;
+const BROKER_CONNECT_POLL_MS = 100;
+
+export function brokerElectionRoot(profileDir = CHROME_PROFILE_DIR): string {
+  return join(dirname(profilePathIdentity(profileDir)), ".trusty-squire-broker-leases");
+}
+
+async function prepareBrokerElectionRoot(profileDir: string): Promise<string> {
+  const root = brokerElectionRoot(profileDir);
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  return root;
+}
+
+async function brokerElectionIsHeld(profileDir: string): Promise<boolean> {
+  const root = await prepareBrokerElectionRoot(profileDir);
+  try {
+    const lease = acquireProfileOperationGuard(profileDir, root);
+    lease.release();
+    return false;
+  } catch (error) {
+    if (error instanceof ProfileBusyError) return true;
+    throw error;
+  }
+}
+
+function isUnavailable(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "ECONNREFUSED";
+}
+
+async function waitForBroker(
+  path: string,
+  token: string,
+  lineageCredential: string | undefined,
+  failure?: () => Error | undefined,
+): Promise<BrokerClient> {
+  const deadline = Date.now() + BROKER_CONNECT_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const launchFailure = failure?.();
+    if (launchFailure !== undefined) throw launchFailure;
+    try {
+      return await BrokerClient.connect(path, token, lineageCredential);
+    } catch (error) {
+      if (!isUnavailable(error)) throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, BROKER_CONNECT_POLL_MS));
+  }
+  throw new BrokerRefusal(
+    "broker_unavailable",
+    "Broker did not become available within 10 seconds; no operator command was dispatched",
+  );
 }
 
 export function brokerEnvironment(env: NodeJS.ProcessEnv, path: string): NodeJS.ProcessEnv {
@@ -68,7 +124,10 @@ export async function reclaimDeadBrokerEndpoint(path: string): Promise<void> {
   ) {
     throw new BrokerRefusal("broker_unavailable", "Endpoint belongs to a live or unproven broker");
   }
-  const lease = acquireProfileOperationGuard(profileDir);
+  const lease = acquireProfileOperationGuard(
+    profileDir,
+    await prepareBrokerElectionRoot(profileDir),
+  );
   try {
     if (!(await waitForProfileFree(profileDir, { deadlineMs: 0 })))
       throw new BrokerRefusal("profile_busy", "Old browser is still being reaped");
@@ -94,7 +153,7 @@ export async function connectOrLaunchBroker(
     return await BrokerClient.connect(path, token, lineageCredential);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT" && code !== "ECONNREFUSED") throw error;
+    if (!isUnavailable(error)) throw error;
     if (brokerIsSupervised())
       throw new BrokerRefusal(
         "broker_unavailable",
@@ -111,33 +170,42 @@ export async function connectOrLaunchBroker(
     )
       await reclaimDeadBrokerEndpoint(path);
   }
-  const child = spawn(
-    process.execPath,
-    [fileURLToPath(new URL("../../bin.js", import.meta.url)), "broker"],
-    {
-      detached: true,
-      stdio: "ignore",
-      env: brokerEnvironment(process.env, path),
-    },
-  );
-  let failure: Error | undefined;
-  child.once("error", (error) => {
-    failure = error;
-  });
-  child.unref();
-  const deadline = Date.now() + 10000;
-  while (Date.now() < deadline) {
-    if (failure !== undefined) throw failure;
+  const profileDir = profilePathIdentity(CHROME_PROFILE_DIR);
+  if (await brokerElectionIsHeld(profileDir))
+    return await waitForBroker(path, token, lineageCredential);
+  let launchLease: ProfileOperationLease;
+  try {
+    const launchRoot = join(await prepareBrokerElectionRoot(profileDir), "launch");
+    await mkdir(launchRoot, { recursive: true, mode: 0o700 });
+    launchLease = acquireProfileOperationGuard(profileDir, launchRoot);
+  } catch (error) {
+    if (error instanceof ProfileBusyError) return await waitForBroker(path, token, lineageCredential);
+    throw error;
+  }
+  try {
     try {
       return await BrokerClient.connect(path, token, lineageCredential);
     } catch (error) {
-      if (!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? ""))
-        throw error;
+      if (!isUnavailable(error)) throw error;
     }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    if (await brokerElectionIsHeld(profileDir))
+      return await waitForBroker(path, token, lineageCredential);
+    const child = spawn(
+      process.execPath,
+      [fileURLToPath(new URL("../../bin.js", import.meta.url)), "broker"],
+      {
+        detached: true,
+        stdio: "ignore",
+        env: brokerEnvironment(process.env, path),
+      },
+    );
+    let failure: Error | undefined;
+    child.once("error", (error) => {
+      failure = error;
+    });
+    child.unref();
+    return await waitForBroker(path, token, lineageCredential, () => failure);
+  } finally {
+    launchLease.release();
   }
-  throw new BrokerRefusal(
-    "broker_unavailable",
-    "Broker did not become available within 10 seconds; no operator command was dispatched",
-  );
 }

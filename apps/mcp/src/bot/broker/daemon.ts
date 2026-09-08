@@ -1,4 +1,4 @@
-import { publishEndpointOwner } from "./discovery.js";
+import { brokerElectionRoot, publishEndpointOwner } from "./discovery.js";
 import { DispatchJournal } from "./dispatch-journal.js";
 import { lstat, unlink, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -53,10 +53,7 @@ export async function runBrokerDaemon(): Promise<void> {
   startOwnerProcessReaper();
   // Broker election is anchored beside the canonical profile, independent of
   // each client's socket path or TMPDIR. Retain it through plain-login maintenance.
-  const electionRoot = join(
-    dirname(profilePathIdentity(CHROME_PROFILE_DIR)),
-    ".trusty-squire-broker-leases",
-  );
+  const electionRoot = brokerElectionRoot(CHROME_PROFILE_DIR);
   await mkdir(electionRoot, { recursive: true, mode: 0o700 });
   const election = acquireProfileOperationGuard(CHROME_PROFILE_DIR, electionRoot);
   runtime.claimProfile();
