@@ -1,4 +1,4 @@
-import { brokerElectionRoot, publishEndpointOwner } from "./discovery.js";
+import { brokerElectionRoot, brokerIsSupervised, publishEndpointOwner } from "./discovery.js";
 import { DispatchJournal } from "./dispatch-journal.js";
 import { lstat, unlink, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -8,18 +8,57 @@ import { setSelfManagedChromeTerminationSignalExitEnabled } from "../browser.js"
 import { startOwnerProcessReaper } from "../owner-process-reaper.js";
 import {
   acquireProfileOperationGuard,
+  ProfileBusyError,
   profilePathIdentity,
   CHROME_PROFILE_DIR,
+  type ProfileOperationLease,
   waitForProfileFree,
 } from "../profile.js";
 import { installBrokerBrowserCustody } from "./custody.js";
 import { BrokerRuntime } from "./runtime.js";
 import { OperatorBroker } from "./operator.js";
 import { BrokerRefusal } from "./scheduler.js";
-import { listenBroker } from "./transport.js";
+import { BrokerClient, listenBroker } from "./transport.js";
 
 const MIN_BROKER_IDLE_TIMEOUT_MS = 60_000;
 const DEFAULT_BROKER_IDLE_TIMEOUT_MS = 5 * 60_000;
+const SUPERVISOR_ATTACH_TIMEOUT_MS = 10_000;
+const SUPERVISOR_ATTACH_POLL_MS = 100;
+
+function brokerUnavailable(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return (
+    code === "ENOENT" ||
+    code === "ECONNREFUSED" ||
+    (error as BrokerRefusal).code === "broker_lost"
+  );
+}
+
+async function attachSupervisor(path: string, token: string): Promise<boolean> {
+  let client: BrokerClient | undefined;
+  try {
+    client = await BrokerClient.connectSupervisor(path, token);
+    await client.call("supervise", {});
+    return true;
+  } catch (error) {
+    if (brokerUnavailable(error)) return false;
+    throw error;
+  } finally {
+    await client?.close().catch(() => undefined);
+  }
+}
+
+async function waitForSupervisorAttachment(path: string, token: string): Promise<void> {
+  const deadline = Date.now() + SUPERVISOR_ATTACH_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (await attachSupervisor(path, token)) return;
+    await new Promise((resolve) => setTimeout(resolve, SUPERVISOR_ATTACH_POLL_MS));
+  }
+  throw new BrokerRefusal(
+    "broker_unavailable",
+    "Supervised broker did not become available within 10 seconds",
+  );
+}
 
 export function brokerIdleTimeoutMs(env: NodeJS.ProcessEnv = process.env): number | undefined {
   if (["1", "true"].includes((env.TRUSTY_SQUIRE_BROKER_SUPERVISED ?? "").toLowerCase()))
@@ -47,15 +86,26 @@ export async function runBrokerDaemon(): Promise<void> {
   const cellId = createHash("sha256")
     .update(JSON.stringify([session.account_id, profilePathIdentity(CHROME_PROFILE_DIR)]))
     .digest("hex");
+  const supervised = brokerIsSupervised();
+  const electionRoot = brokerElectionRoot(CHROME_PROFILE_DIR);
+  await mkdir(electionRoot, { recursive: true, mode: 0o700 });
+  let election: ProfileOperationLease | undefined;
+  if (supervised) {
+    try {
+      election = acquireProfileOperationGuard(CHROME_PROFILE_DIR, electionRoot);
+    } catch (error) {
+      if (!(error instanceof ProfileBusyError)) throw error;
+      await waitForSupervisorAttachment(path, session.agent_session_token);
+      return;
+    }
+  }
   const runtime = new BrokerRuntime(session.account_id);
   installBrokerBrowserCustody(runtime);
   setSelfManagedChromeTerminationSignalExitEnabled(false);
   startOwnerProcessReaper();
   // Broker election is anchored beside the canonical profile, independent of
   // each client's socket path or TMPDIR. Retain it through plain-login maintenance.
-  const electionRoot = brokerElectionRoot(CHROME_PROFILE_DIR);
-  await mkdir(electionRoot, { recursive: true, mode: 0o700 });
-  const election = acquireProfileOperationGuard(CHROME_PROFILE_DIR, electionRoot);
+  const profileElection = election ?? acquireProfileOperationGuard(CHROME_PROFILE_DIR, electionRoot);
   runtime.claimProfile();
   const journal = new DispatchJournal(
     join(profilePathIdentity(CHROME_PROFILE_DIR), "trusty-squire-broker-dispatch.jsonl"),
@@ -79,7 +129,7 @@ export async function runBrokerDaemon(): Promise<void> {
   let maintenanceOwner: string | undefined;
   let maintenanceReady = false;
   let idleTimer: NodeJS.Timeout | undefined;
-  const idleTimeout = brokerIdleTimeoutMs();
+  let idleTimeout = brokerIdleTimeoutMs();
   const restoreMaintenance = async () => {
     const refreshed = await guard.bind();
     if (refreshed === null) throw new Error("Enrolled account session is missing");
@@ -91,8 +141,8 @@ export async function runBrokerDaemon(): Promise<void> {
     maintenanceReady = false;
   };
   const listener = await listenBroker(path, {
-    authenticate: async (token, agentId, lineageCredential) =>
-      await operator.authenticate(token, agentId, lineageCredential),
+    authenticate: async (token, agentId, lineageCredential, supervisor) =>
+      await operator.authenticate(token, agentId, lineageCredential, supervisor),
     connected: async (principal) => {
       await operator.connected(principal);
       connected.add(principal.clientId);
@@ -102,6 +152,8 @@ export async function runBrokerDaemon(): Promise<void> {
       if (closing) throw new Error("Broker is draining");
       connected.add(principal.clientId);
       if (idleTimer !== undefined) clearTimeout(idleTimer);
+      if (principal.supervisor && method !== "supervise")
+        throw new BrokerRefusal("unauthorized", "Supervisor connections may only supervise");
       const report = await guard.inspect();
       if (report.problem !== null) throw new Error(report.problem.message);
       if (runtime.browserLost() && (method === "recover" || method === "reclaim"))
@@ -109,6 +161,12 @@ export async function runBrokerDaemon(): Promise<void> {
           "browser_lost",
           "Browser transport is lost; the pending start cannot be recovered",
         );
+      if (method === "supervise") {
+        if (!principal.supervisor)
+          throw new BrokerRefusal("unauthorized", "Supervisor identity is required");
+        idleTimeout = undefined;
+        return { state: "supervised" };
+      }
       if (method === "recover") return await operator.recover(principal, params);
       if (method === "reclaim") return await operator.reclaim(principal);
       if (method === "acknowledge") {
@@ -214,7 +272,7 @@ export async function runBrokerDaemon(): Promise<void> {
       return;
     }
     await unlink(`${path}.owner.json`).catch(() => undefined);
-    election.release();
+    profileElection.release();
     process.exit(0);
   };
   const requestDrain = async () => {

@@ -140,6 +140,28 @@ export class DispatchJournal {
     );
   }
 
+  async recordDetachedPaymentUncertainty(sessionId: string, forwarderId: string): Promise<boolean> {
+    const payments = [...(await this.states()).values()].filter(
+      (record) =>
+        record.sessionId === sessionId &&
+        record.forwarderId === forwarderId &&
+        record.operation === "operate_pay" &&
+        record.phase === "entered",
+    );
+    await Promise.all(
+      payments.map(
+        async (record) =>
+          await this.record(record.sessionId, record.requestId, "outcome", {
+            forwarderId,
+            operation: record.operation,
+            ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
+            outcome: { status: "payment_outcome_unknown" },
+          }),
+      ),
+    );
+    return payments.length > 0;
+  }
+
   async hasCompleted(forwarderId: string, requestId: string): Promise<boolean> {
     return (await this.completedOutcome(forwarderId, requestId)) !== undefined;
   }
@@ -171,7 +193,8 @@ export class DispatchJournal {
 
   async recoveryOutcome(
     forwarderId: string,
-    expected: Pick<DispatchRecord, "operation" | "inputHash">,
+    expected: Pick<DispatchRecord, "operation"> &
+      Partial<Pick<DispatchRecord, "inputHash" | "sessionId">>,
   ): Promise<CompletedDispatchOutcome | undefined> {
     const record = [...(await this.states()).values()]
       .reverse()
@@ -179,7 +202,8 @@ export class DispatchJournal {
         (record) =>
           record.forwarderId === forwarderId &&
           record.operation === expected.operation &&
-          record.inputHash === expected.inputHash &&
+          (expected.inputHash === undefined || record.inputHash === expected.inputHash) &&
+          (expected.sessionId === undefined || record.sessionId === expected.sessionId) &&
           record.outcome !== undefined &&
           (record.phase === "outcome" || record.phase === "acknowledged"),
       );

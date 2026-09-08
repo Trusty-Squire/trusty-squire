@@ -30,6 +30,10 @@ export function brokerElectionRoot(profileDir = CHROME_PROFILE_DIR): string {
   return join(dirname(profilePathIdentity(profileDir)), ".trusty-squire-broker-leases");
 }
 
+export function brokerLaunchRoot(profileDir = CHROME_PROFILE_DIR): string {
+  return join(brokerElectionRoot(profileDir), "launch");
+}
+
 async function prepareBrokerElectionRoot(profileDir: string): Promise<string> {
   const root = brokerElectionRoot(profileDir);
   await mkdir(root, { recursive: true, mode: 0o700 });
@@ -175,7 +179,7 @@ export async function connectOrLaunchBroker(
     return await waitForBroker(path, token, lineageCredential);
   let launchLease: ProfileOperationLease;
   try {
-    const launchRoot = join(await prepareBrokerElectionRoot(profileDir), "launch");
+    const launchRoot = brokerLaunchRoot(profileDir);
     await mkdir(launchRoot, { recursive: true, mode: 0o700 });
     launchLease = acquireProfileOperationGuard(profileDir, launchRoot);
   } catch (error) {

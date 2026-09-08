@@ -7,6 +7,7 @@ export interface BrokerPrincipal {
   agentId: string;
   forwarderId?: string;
   clientId: string;
+  supervisor?: true;
 }
 export interface TabCapability {
   cellId: string;
@@ -72,6 +73,9 @@ export class BrokerAuthority {
   private readonly fencedClients = new Set<string>();
   private readonly scheduler = new ScopeScheduler();
   private readonly lanes = new ScopeScheduler();
+  private detachedExpiryHandler:
+    | ((capability: TabCapability, principal: BrokerPrincipal) => Promise<void> | void)
+    | undefined;
 
   constructor(
     readonly accountId: string,
@@ -79,6 +83,12 @@ export class BrokerAuthority {
     private readonly maxSessions = 3,
     private readonly detachedExpiryCloseTimeoutMs = DETACHED_EXPIRY_CLOSE_TIMEOUT_MS,
   ) {}
+
+  setDetachedExpiryHandler(
+    handler: (capability: TabCapability, principal: BrokerPrincipal) => Promise<void> | void,
+  ): void {
+    this.detachedExpiryHandler = handler;
+  }
 
   private assertPrincipal(principal: BrokerPrincipal): void {
     if (
@@ -419,7 +429,15 @@ export class BrokerAuthority {
     return actor.closePromise;
   }
 
-  private quarantineExpiredActor(actor: Actor): void {
+  private async quarantineExpiredActor(actor: Actor): Promise<void> {
+    try {
+      await this.detachedExpiryHandler?.(actor.capability, actor.principal);
+    } catch {
+      actor.state = "quarantined";
+      actor.expiryQuarantined = true;
+      delete actor.reconnectDeadline;
+      return;
+    }
     actor.state = "quarantined";
     actor.expiryQuarantined = true;
     actor.admissionReleased = true;
@@ -488,7 +506,7 @@ export class BrokerAuthority {
             }),
           ]);
           if (!drained) {
-            this.quarantineExpiredActor(actor);
+            await this.quarantineExpiredActor(actor);
             return;
           }
         } finally {

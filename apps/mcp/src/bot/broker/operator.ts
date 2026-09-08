@@ -122,6 +122,13 @@ export class OperatorBroker implements BrokerTransportPort {
     private readonly journal?: DispatchJournal,
   ) {
     this.authority = new BrokerAuthority(config.accountId, cellId);
+    this.authority.setDetachedExpiryHandler(async (capability, principal) => {
+      if (principal.forwarderId !== undefined)
+        await this.journal?.recordDetachedPaymentUncertainty(
+          capability.sessionId,
+          principal.forwarderId,
+        );
+    });
     this.token = createHash("sha256").update(config.agentSessionToken).digest();
   }
   refreshCredentials(session: { account_id?: string; agent_session_token?: string }): void {
@@ -138,8 +145,15 @@ export class OperatorBroker implements BrokerTransportPort {
     token: string,
     agentId?: string,
     lineageCredential?: string,
+    supervisor = false,
   ): Promise<Omit<BrokerPrincipal, "clientId"> | null> {
     if (!timingSafeEqual(createHash("sha256").update(token).digest(), this.token)) return null;
+    if (supervisor)
+      return {
+        accountId: this.config.accountId,
+        agentId: "broker-supervisor",
+        supervisor: true,
+      };
     if (lineageCredential === undefined) return null;
     const id = forwarderId(lineageCredential);
     this.inputBindingKeys.set(id, createHash("sha256").update(lineageCredential).digest());
@@ -157,6 +171,7 @@ export class OperatorBroker implements BrokerTransportPort {
     return createHmac("sha256", key).update(canonicalJson(input)).digest("hex");
   }
   connected(principal: BrokerPrincipal): Promise<void> | void {
+    if (principal.supervisor) return;
     return this.authority.claimForwarder(principal);
   }
   async call(
@@ -389,10 +404,15 @@ export class OperatorBroker implements BrokerTransportPort {
     if (tool === null || !tool.name.startsWith("operate_"))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
-    const completed = await this.journal?.recoveryOutcome(journalForwarderId(principal), {
-      operation: tool.name,
-      inputHash: this.inputHash(principal, { name: tool.name, args, capability: input.capability }),
-    });
+    const completed = await this.journal?.recoveryOutcome(
+      journalForwarderId(principal),
+      input.capability === undefined && typeof args.session_id === "string"
+        ? { operation: tool.name, sessionId: args.session_id }
+        : {
+            operation: tool.name,
+            inputHash: this.inputHash(principal, { name: tool.name, args, capability: input.capability }),
+          },
+    );
     if (completed === undefined) return null;
     await this.journal?.recordRecovery(journalForwarderId(principal), completed);
     if (completed.start === true) {
