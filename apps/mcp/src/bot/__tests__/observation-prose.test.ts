@@ -35,6 +35,7 @@ describe("interleaved observation DOM", () => {
         <span id="account-name">Account email</span><input id="account-email" aria-labelledby="account-name">
         <label for="query-email">Work email</label><span id="query-name">Billing contact</span><input id="query-email" aria-labelledby="query-name">
         <button id="checkout"><img alt="Acme"><span>Checkout</span></button>
+        <span id="proceed">Proceed</span><button id="ax-precedence" aria-label="Cancel" aria-labelledby="proceed"></button>
         <button id="preferences" aria-label="設定"></button>
         <span id="empty-name">Master volume</span><div id="empty-volume" role="slider" aria-label="" aria-labelledby="empty-name" tabindex="0" style="display:block;width:20px;height:20px"></div>
         <section><h2>Volume controls</h2><label for="volume">Master volume</label><div id="volume" role="slider" tabindex="0" style="display:block;width:20px;height:20px"></div></section>
@@ -73,6 +74,7 @@ describe("interleaved observation DOM", () => {
       expect(labelFor("account-email")).toBe("@account-email");
       expect(labelFor("query-email")).toMatch(/^@billing-contact(?:-\d+)?$/);
       expect(labelFor("checkout")).toBe("@checkout");
+      expect(labelFor("ax-precedence")).toBe("@proceed");
       expect(labelFor("preferences")).toBe("@設定");
       expect(labelFor("empty-volume")).toBe("@master-volume");
       expect(labelFor("volume")).toMatch(/^@master-volume(?:-\d+)?$/);

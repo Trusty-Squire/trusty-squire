@@ -958,9 +958,9 @@ function controlLabelNamingTexts(el: InteractiveElement): Array<string | null | 
       iconLabel !== undefined &&
       accessibleName === `${iconLabel} ${visibleText}`;
     return [
+      aggregateIconName ? undefined : names.accessibleName,
       names.ariaLabel,
       names.labelledByText,
-      aggregateIconName ? undefined : names.accessibleName,
       names.labelText,
       (el.type ?? "").toLowerCase() === "image" ? names.alt : undefined,
       names.visibleText,
