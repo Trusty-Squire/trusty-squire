@@ -3,6 +3,7 @@ import { createSessionGuard } from "../../session-guard.js";
 import { BrokerClient } from "./transport.js";
 import { BrokerRefusal } from "./scheduler.js";
 import { requireLineageCredential } from "./lineage.js";
+import { reclaimDeadBrokerEndpoint } from "./discovery.js";
 
 /** Connect retains the maintenance connection throughout the existing plain,
  * no-CDP login lifecycle. It never opens a second automated browser. */
@@ -19,11 +20,19 @@ export async function withBrokerMaintenance<T>(operation: () => Promise<T>): Pro
   const session = await createSessionGuard().bind();
   if (session?.agent_session_token === undefined)
     throw new BrokerRefusal("unauthorized", "Broker maintenance requires the enrolled account");
-  const client = await BrokerClient.connect(
-    path,
-    session.agent_session_token,
-    requireLineageCredential(),
-  );
+  let client: BrokerClient;
+  try {
+    client = await BrokerClient.connect(
+      path,
+      session.agent_session_token,
+      requireLineageCredential(),
+    );
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ECONNREFUSED") throw error;
+    await reclaimDeadBrokerEndpoint(path);
+    return await operation();
+  }
   let ready = false;
   try {
     const deadline = Date.now() + 120000;

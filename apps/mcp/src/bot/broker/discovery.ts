@@ -43,7 +43,7 @@ export async function publishEndpointOwner(path: string): Promise<void> {
   );
 }
 
-async function reclaimDeadEndpoint(path: string): Promise<void> {
+export async function reclaimDeadBrokerEndpoint(path: string): Promise<void> {
   let owner: EndpointOwner;
   try {
     owner = JSON.parse(await readFile(`${path}.owner.json`, "utf8")) as EndpointOwner;
@@ -90,7 +90,7 @@ export async function connectOrLaunchBroker(
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== "ENOENT" && code !== "ECONNREFUSED") throw error;
-    if (code === "ECONNREFUSED") await reclaimDeadEndpoint(path);
+    if (code === "ECONNREFUSED") await reclaimDeadBrokerEndpoint(path);
     // A cleanly stopped broker removes its socket but may have left its owner
     // record if interrupted during final unlink. Reclaim only with birth proof.
     else if (
@@ -99,7 +99,7 @@ export async function connectOrLaunchBroker(
         () => false,
       )
     )
-      await reclaimDeadEndpoint(path);
+      await reclaimDeadBrokerEndpoint(path);
   }
   const child = spawn(
     process.execPath,

@@ -302,8 +302,9 @@ export class OperatorBroker implements BrokerTransportPort {
           };
         },
         async (id) => {
-          const session = sessionForCall(id);
-          if (session !== undefined && !(await finishProvisionSession(id)).closed) return false;
+          const sessionId = internalId === "" ? id : internalId;
+          const session = sessionForCall(sessionId);
+          if (session !== undefined && !(await finishProvisionSession(sessionId)).closed) return false;
           return (await brokerBrowserCustody()?.cleanupAdmission(id)) ?? false;
         },
       );
