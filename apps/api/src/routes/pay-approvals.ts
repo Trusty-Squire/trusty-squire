@@ -97,11 +97,19 @@ type ApprovalRecord = NonNullable<
   Awaited<ReturnType<ApiDeps["pendingPaymentApprovalStore"]["getById"]>>
 >;
 
+function accountBinding(accountId: string): string {
+  return createHash("sha256")
+    .update("trusty-squire/payment/account/v1\n")
+    .update(accountId)
+    .digest("base64url");
+}
+
 function approvalPayloadHash(record: ApprovalRecord): Buffer | null {
   if (record.cardRef === null) return null;
   const recipientHash = recipientPubkeyHash(record.operatorPubkey);
   if (recipientHash === null) return null;
   return hashVouchPayload({
+    account_binding: accountBinding(record.accountId),
     agent: record.agent,
     amount_cents: record.amountCents,
     approval_id: record.id,
@@ -454,48 +462,55 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     });
   });
 
-  fastify.get<{ Params: { id: string } }>("/v1/pay/approvals/:id/ceremony", async (req, reply) => {
-    const record = await opts.deps.pendingPaymentApprovalStore.getById(req.params.id);
-    if (record === null) {
-      reply.code(404).send({ error: "payment_approval_not_found" });
-      return;
-    }
-    const now = opts.deps.now?.() ?? new Date();
-    const status =
-      record.status === "pending" && record.expiresAt <= now ? "expired" : record.status;
-    const card =
-      record.cardRef === null || status !== "pending"
-        ? null
-        : await opts.deps.e2eCredentialStore.getByIdForAccount(record.cardRef, record.accountId);
-    if (status === "pending" && record.cardRef !== null && card === null) {
-      reply.code(409).send({ error: "payment_card_unavailable" });
-      return;
-    }
-    const payloadHash = approvalPayloadHash(record);
-    if (status === "pending" && payloadHash === null) {
-      reply.code(409).send({ error: "payment_approval_binding_invalid" });
-      return;
-    }
-    return reply.code(200).send({
-      id: record.id,
-      status,
-      // Capability-link disclosure: these are the exact server-stored values
-      // the later, single payment mandate must bind. No plaintext card secrets are included.
-      merchant: record.merchant,
-      checkout_origin: record.checkoutOrigin,
-      amount_cents: record.amountCents,
-      currency: record.currency,
-      nonce: record.nonce,
-      card_ref: record.cardRef,
-      operator_pubkey: record.operatorPubkey,
-      item: record.item,
-      reason: record.reason,
-      agent: record.agent,
-      expires_at: record.expiresAt.toISOString(),
-      approval_payload_sha256: payloadHash?.toString("base64url") ?? null,
-      card: card === null ? null : { blob: card.blob, label: card.label, last4: card.last4 },
-    });
-  });
+  fastify.get<{ Params: { id: string } }>(
+    "/v1/pay/approvals/:id/ceremony",
+    { preHandler: opts.requireWeb },
+    async (req, reply) => {
+      const record = await opts.deps.pendingPaymentApprovalStore.getByIdForAccount(
+        req.params.id,
+        req.auth!.account_id,
+      );
+      if (record === null) {
+        reply.code(404).send({ error: "payment_approval_not_found" });
+        return;
+      }
+      const now = opts.deps.now?.() ?? new Date();
+      const status =
+        record.status === "pending" && record.expiresAt <= now ? "expired" : record.status;
+      const card =
+        record.cardRef === null || status !== "pending"
+          ? null
+          : await opts.deps.e2eCredentialStore.getByIdForAccount(record.cardRef, record.accountId);
+      if (status === "pending" && record.cardRef !== null && card === null) {
+        reply.code(409).send({ error: "payment_card_unavailable" });
+        return;
+      }
+      const payloadHash = approvalPayloadHash(record);
+      if (status === "pending" && payloadHash === null) {
+        reply.code(409).send({ error: "payment_approval_binding_invalid" });
+        return;
+      }
+      return reply.code(200).send({
+        id: record.id,
+        status,
+        // These are the exact server-stored values the payment mandate binds.
+        // No plaintext card secrets are included.
+        merchant: record.merchant,
+        checkout_origin: record.checkoutOrigin,
+        amount_cents: record.amountCents,
+        currency: record.currency,
+        nonce: record.nonce,
+        card_ref: record.cardRef,
+        operator_pubkey: record.operatorPubkey,
+        item: record.item,
+        reason: record.reason,
+        agent: record.agent,
+        expires_at: record.expiresAt.toISOString(),
+        approval_payload_sha256: payloadHash?.toString("base64url") ?? null,
+        card: card === null ? null : { blob: card.blob, label: card.label, last4: card.last4 },
+      });
+    },
+  );
 
   // Binds a stored card to a card-less pending approval (the JIT add-card
   // ceremony). Web-authed, pending-only, write-once, and the bound card must
@@ -552,93 +567,102 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     },
   );
 
-  fastify.post<{ Params: { id: string } }>("/v1/pay/approvals/:id/approve", async (req, reply) => {
-    const parsed = approveBody.safeParse(req.body);
-    if (!parsed.success) {
-      reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
-      return;
-    }
-    const record = await opts.deps.pendingPaymentApprovalStore.getById(req.params.id);
-    if (record === null) {
-      reply.code(404).send({ error: "payment_approval_not_found" });
-      return;
-    }
-    // A card-less mandate cannot be approved — the card must be bound first
-    // (seal→bind→approve). Server-enforced, not client convention.
-    if (record.cardRef === null) {
-      reply.code(409).send({ error: "card_required" });
-      return;
-    }
-    const now = opts.deps.now?.() ?? new Date();
-    if (record.status !== "pending") {
-      reply.code(409).send({ error: "payment_approval_already_approved" });
-      return;
-    }
-    if (record.expiresAt <= now) {
-      reply.code(409).send({ error: "payment_approval_expired" });
-      return;
-    }
-    const binding = submissionBinding(parsed.data, record);
-    candidateLifecycle(record, binding, "submission_received");
-    if (binding === "invalid" || binding === "none") {
-      candidateLifecycle(record, binding, "binding_rejected");
-      reply.code(403).send({ error: "payment_approval_binding_mismatch" });
-      return;
-    }
-    if (binding === "review") {
+  fastify.post<{ Params: { id: string } }>(
+    "/v1/pay/approvals/:id/approve",
+    { preHandler: opts.requireWeb },
+    async (req, reply) => {
+      const parsed = approveBody.safeParse(req.body);
+      if (!parsed.success) {
+        reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
+        return;
+      }
+      const record = await opts.deps.pendingPaymentApprovalStore.getByIdForAccount(
+        req.params.id,
+        req.auth!.account_id,
+      );
+      if (record === null) {
+        reply.code(404).send({ error: "payment_approval_not_found" });
+        return;
+      }
+      // A card-less mandate cannot be approved — the card must be bound first
+      // (seal→bind→approve). Server-enforced, not client convention.
+      if (record.cardRef === null) {
+        reply.code(409).send({ error: "card_required" });
+        return;
+      }
+      const now = opts.deps.now?.() ?? new Date();
+      if (record.status !== "pending") {
+        reply.code(409).send({ error: "payment_approval_already_approved" });
+        return;
+      }
+      if (record.expiresAt <= now) {
+        reply.code(409).send({ error: "payment_approval_expired" });
+        return;
+      }
+      const binding = submissionBinding(parsed.data, record);
+      candidateLifecycle(record, binding, "submission_received");
+      if (binding === "invalid" || binding === "none") {
+        candidateLifecycle(record, binding, "binding_rejected");
+        reply.code(403).send({ error: "payment_approval_binding_mismatch" });
+        return;
+      }
+      if (binding === "review") {
+        const fingerprint = submissionFingerprint(parsed.data);
+        event("review_submitted", record, fingerprint, "stale_payment_client");
+        candidateLifecycle(record, "review", "stale_client_rejected");
+        return reply.code(409).send({
+          error: "stale_payment_client",
+          message:
+            "This payment approval page uses a retired review protocol. Refresh the page and " +
+            "submit the final approval again.",
+        });
+      }
+      const payloadHash = approvalPayloadHash(record);
+      if (payloadHash === null) {
+        reply.code(409).send({ error: "payment_approval_binding_invalid" });
+        return;
+      }
+      try {
+        await verifyVouch({
+          jws: parsed.data.jws,
+          expectedPayloadHash: payloadHash,
+          expectedContext: PAYMENT_VOUCH_CONTEXT,
+          expectedAudience: vouchflowAudience,
+        });
+      } catch (error) {
+        const code =
+          error instanceof VouchMandateVerificationError
+            ? error.code
+            : "mandate_verification_failed";
+        candidateLifecycle(record, "approval", "signature_rejected");
+        reply.code(code === "vouchflow_expected_audience_unset" ? 503 : 403).send({
+          error: code,
+        });
+        return;
+      }
+      const submittedAt = opts.deps.now?.() ?? new Date();
       const fingerprint = submissionFingerprint(parsed.data);
-      event("review_submitted", record, fingerprint, "stale_payment_client");
-      candidateLifecycle(record, "review", "stale_client_rejected");
-      return reply.code(409).send({
-        error: "stale_payment_client",
-        message:
-          "This payment approval page uses a retired review protocol. Refresh the page and " +
-          "submit the final approval again.",
-      });
-    }
-    const payloadHash = approvalPayloadHash(record);
-    if (payloadHash === null) {
-      reply.code(409).send({ error: "payment_approval_binding_invalid" });
-      return;
-    }
-    try {
-      await verifyVouch({
-        jws: parsed.data.jws,
-        expectedPayloadHash: payloadHash,
-        expectedContext: PAYMENT_VOUCH_CONTEXT,
-        expectedAudience: vouchflowAudience,
-      });
-    } catch (error) {
-      const code =
-        error instanceof VouchMandateVerificationError ? error.code : "mandate_verification_failed";
-      candidateLifecycle(record, "approval", "signature_rejected");
-      reply.code(code === "vouchflow_expected_audience_unset" ? 503 : 403).send({
-        error: code,
-      });
-      return;
-    }
-    const submittedAt = opts.deps.now?.() ?? new Date();
-    const fingerprint = submissionFingerprint(parsed.data);
-    const submitted = await opts.deps.pendingPaymentApprovalStore.submitCandidate(
-      record.id,
-      record.accountId,
-      { jws: parsed.data.jws, sealedCard: parsed.data.sealed_card, fingerprint },
-      record.expiresAt,
-      submittedAt,
-    );
-    if (submitted === "in_progress") {
-      candidateLifecycle(record, "approval", "submission_in_progress");
-      reply.code(409).send({ error: "payment_approval_in_progress" });
-      return;
-    }
-    if (submitted !== "submitted") {
-      candidateLifecycle(record, "approval", "submission_not_pending");
-      reply.code(409).send({ error: "payment_approval_not_pending" });
-      return;
-    }
-    candidateLifecycle(record, "approval", "submission_relayed");
-    return reply.code(202).send({ status: "pending" });
-  });
+      const submitted = await opts.deps.pendingPaymentApprovalStore.submitCandidate(
+        record.id,
+        record.accountId,
+        { jws: parsed.data.jws, sealedCard: parsed.data.sealed_card, fingerprint },
+        record.expiresAt,
+        submittedAt,
+      );
+      if (submitted === "in_progress") {
+        candidateLifecycle(record, "approval", "submission_in_progress");
+        reply.code(409).send({ error: "payment_approval_in_progress" });
+        return;
+      }
+      if (submitted !== "submitted") {
+        candidateLifecycle(record, "approval", "submission_not_pending");
+        reply.code(409).send({ error: "payment_approval_not_pending" });
+        return;
+      }
+      candidateLifecycle(record, "approval", "submission_relayed");
+      return reply.code(202).send({ status: "pending" });
+    },
+  );
 
   fastify.post<{ Params: { id: string } }>("/v1/pay/approvals/:id/deny", async (req, reply) => {
     const record = await opts.deps.pendingPaymentApprovalStore.getById(req.params.id);

@@ -43,6 +43,7 @@ describe("payment approval relay", () => {
   let webCookie: string;
   let otherAgentToken: string;
   let otherWebCookie: string;
+  let accountId: string;
 
   beforeEach(async () => {
     nowMs = Date.parse("2026-07-23T12:00:00.000Z");
@@ -53,6 +54,7 @@ describe("payment approval relay", () => {
     server = await buildServer({ deps, vouchVerifier: async () => ({}) });
     const account = await deps.accountStore.createAccount("payer@example.test", "Payer");
     const other = await deps.accountStore.createAccount("other@example.test", "Other");
+    accountId = account.id;
     agentToken = await makeAgentToken(deps, account.id, new Date(nowMs));
     webCookie = await makeWebSession(deps, account.id, new Date(nowMs));
     otherAgentToken = await makeAgentToken(deps, other.id, new Date(nowMs));
@@ -153,6 +155,10 @@ describe("payment approval relay", () => {
   }): { jws: string; sealed_card: string } {
     const operatorPubkey = input.operator_pubkey ?? "c3ludGhldGljLW9wZXJhdG9yLWtleQ";
     const payload = {
+      account_binding: createHash("sha256")
+        .update("trusty-squire/payment/account/v1\n")
+        .update(accountId)
+        .digest("base64url"),
       approval_id: input.id,
       merchant: input.merchant ?? "Synthetic Books",
       checkout_origin: input.checkout_origin ?? "https://checkout.synthetic.test",
@@ -223,6 +229,7 @@ describe("payment approval relay", () => {
     const approval = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${id}/approve`,
+      headers: { cookie: webCookie },
       payload: submission,
     });
     const relayed = await operatorWait;
@@ -266,6 +273,7 @@ describe("payment approval relay", () => {
     const response = await server.inject({
       method: "GET",
       url: `/v1/pay/approvals/${created.id}/ceremony`,
+      headers: { cookie: webCookie },
     });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
@@ -291,12 +299,70 @@ describe("payment approval relay", () => {
     expect(response.json().card).not.toHaveProperty("cvv");
   });
 
+  it("binds ceremony and settlement to the owner web account", async () => {
+    const cardId = await createOwnedCard(webCookie);
+    const created = await createApproval(cardId);
+    const ownerCeremony = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}/ceremony`,
+      headers: { cookie: webCookie },
+    });
+    expect(ownerCeremony.statusCode).toBe(200);
+    const submission = makeSubmission({ ...created, card_ref: cardId });
+    const claims = JSON.parse(
+      Buffer.from(submission.jws.split(".")[1]!, "base64url").toString(),
+    ) as {
+      payload_sha256: string;
+    };
+    expect(ownerCeremony.json()).toMatchObject({
+      approval_payload_sha256: claims.payload_sha256,
+    });
+
+    const foreignCeremony = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}/ceremony`,
+      headers: { cookie: otherWebCookie },
+    });
+    expect(foreignCeremony.statusCode).toBe(404);
+    expect(foreignCeremony.json()).toEqual({ error: "payment_approval_not_found" });
+    const foreignApprove = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/approve`,
+      headers: { cookie: otherWebCookie },
+      payload: submission,
+    });
+    expect(foreignApprove.statusCode).toBe(404);
+    expect(foreignApprove.json()).toEqual({ error: "payment_approval_not_found" });
+
+    for (const headers of [{}, { authorization: `Bearer ${agentToken}` }]) {
+      const ceremony = await server.inject({
+        method: "GET",
+        url: `/v1/pay/approvals/${created.id}/ceremony`,
+        headers,
+      });
+      expect(ceremony.statusCode).toBe(401);
+      const approve = await server.inject({
+        method: "POST",
+        url: `/v1/pay/approvals/${created.id}/approve`,
+        headers,
+        payload: submission,
+      });
+      expect(approve.statusCode).toBe(401);
+    }
+
+    expect(await deps.pendingPaymentApprovalStore.getById(created.id)).toMatchObject({
+      status: "pending",
+      submissionPhase: null,
+    });
+  });
+
   it("rejects legacy review-bound submissions as a stale payment client", async () => {
     const cardId = await createOwnedCard(webCookie);
     const created = await createApproval(cardId);
     const ceremonyResponse = await server.inject({
       method: "GET",
       url: `/v1/pay/approvals/${created.id}/ceremony`,
+      headers: { cookie: webCookie },
     });
     const ceremony = ceremonyResponse.json() as {
       id: string;
@@ -308,6 +374,7 @@ describe("payment approval relay", () => {
     const response = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/approve`,
+      headers: { cookie: webCookie },
       payload: review,
     });
     expect(response.statusCode).toBe(409);
@@ -426,6 +493,7 @@ describe("payment approval relay", () => {
     const noOperator = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/approve`,
+      headers: { cookie: webCookie },
       payload: forged,
     });
     expect(noOperator.statusCode).toBe(202);
@@ -469,6 +537,7 @@ describe("payment approval relay", () => {
     const replacementAttempt = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/approve`,
+      headers: { cookie: webCookie },
       payload: replacement,
     });
     expect(replacementAttempt.statusCode).toBe(409);
@@ -659,6 +728,10 @@ describe("payment approval relay", () => {
                 .update(
                   JSON.stringify({
                     agent: "synthetic-payment-test-agent",
+                    account_binding: createHash("sha256")
+                      .update("trusty-squire/payment/account/v1\n")
+                      .update(accountId)
+                      .digest("base64url"),
                     amount_cents: 2599,
                     approval_id: created.id,
                     card_ref: "card_synthetic_1",
@@ -737,6 +810,7 @@ describe("payment approval relay", () => {
     const approved = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/approve`,
+      headers: { cookie: webCookie },
       payload: submission,
     });
     expect(approved.statusCode).toBe(202);
@@ -831,6 +905,7 @@ describe("payment approval relay", () => {
     const approve = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/approve`,
+      headers: { cookie: webCookie },
       payload: makeSubmission(created),
     });
     expect(approve.statusCode).toBe(409);
@@ -1157,6 +1232,7 @@ describe("payment approval relay", () => {
     const approve = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/approve`,
+      headers: { cookie: webCookie },
       payload: { jws: "synthetic.header.sig", sealed_card: "sealed" },
     });
     expect(approve.statusCode).toBe(409);
@@ -1361,6 +1437,7 @@ describe("payment approval relay", () => {
     const approve = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/approve`,
+      headers: { cookie: webCookie },
       payload: makeSubmission({
         ...otherCreated,
         merchant: "Other Merchant",
@@ -1384,6 +1461,7 @@ describe("payment approval relay", () => {
     const approvalReplay = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${second.id}/approve`,
+      headers: { cookie: webCookie },
       payload: makeSubmission({ ...first, card_ref: cardId }),
     });
     expect(approvalReplay.statusCode).toBe(403);
@@ -1392,10 +1470,12 @@ describe("payment approval relay", () => {
     const firstCeremony = await server.inject({
       method: "GET",
       url: `/v1/pay/approvals/${first.id}/ceremony`,
+      headers: { cookie: webCookie },
     });
     const reviewReplay = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${second.id}/approve`,
+      headers: { cookie: webCookie },
       payload: makeReviewSubmission(firstCeremony.json()),
     });
     expect(reviewReplay.statusCode).toBe(403);

@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ApiDeps } from "../services/deps.js";
@@ -89,8 +89,16 @@ const approveBody = z.object({ jws: z.string().min(1).max(8192) }).strict();
 const TELEGRAM_TEXT_LIMIT = 4096;
 const TELEGRAM_METADATA_LIST_LIMIT = 600;
 
+function accountBinding(accountId: string): string {
+  return createHash("sha256")
+    .update("trusty-squire/credential-mutation/account/v1\n")
+    .update(accountId)
+    .digest("base64url");
+}
+
 export function credentialMutationPayload(record: CredentialMutationApprovalRecord): unknown {
   return {
+    account_binding: accountBinding(record.accountId),
     agent: record.agent,
     requester_kind: record.requesterKind,
     approval_id: record.id,
@@ -193,6 +201,7 @@ async function sendMutationTelegram(deps: ApiDeps, record: CredentialMutationApp
 export const registerCredentialMutationRoutes: FastifyPluginAsync<{
   deps: ApiDeps;
   requireAny: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
+  requireWeb: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
   vouchVerifier?: VouchMandateVerifier;
 }> = async (fastify, opts) => {
   const verifyVouch = opts.vouchVerifier ?? createVouchMandateVerifier();
@@ -300,8 +309,12 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
 
   fastify.get<{ Params: { id: string } }>(
     "/v1/vault/mutation-approvals/:id/ceremony",
+    { preHandler: opts.requireWeb },
     async (req, reply) => {
-      const record = await opts.deps.credentialMutationApprovalStore.getById(req.params.id);
+      const record = await opts.deps.credentialMutationApprovalStore.getByIdForAccount(
+        req.params.id,
+        req.auth!.account_id,
+      );
       if (record === null) {
         reply.code(404).send({ error: "credential_mutation_approval_not_found" });
         return;
@@ -317,13 +330,17 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
 
   fastify.post<{ Params: { id: string } }>(
     "/v1/vault/mutation-approvals/:id/approve",
+    { preHandler: opts.requireWeb },
     async (req, reply) => {
       const parsed = approveBody.safeParse(req.body);
       if (!parsed.success) {
         reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
         return;
       }
-      const record = await opts.deps.credentialMutationApprovalStore.getById(req.params.id);
+      const record = await opts.deps.credentialMutationApprovalStore.getByIdForAccount(
+        req.params.id,
+        req.auth!.account_id,
+      );
       if (record === null) {
         reply.code(404).send({ error: "credential_mutation_approval_not_found" });
         return;

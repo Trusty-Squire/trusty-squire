@@ -294,6 +294,7 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   await fastify.register(registerCredentialMutationRoutes, {
     deps,
     requireAny: auth.requireAny,
+    requireWeb: auth.requireWeb,
     ...(opts.vouchVerifier !== undefined ? { vouchVerifier: opts.vouchVerifier } : {}),
   });
   // fetch_credential — the one approval-gated path that returns a raw
