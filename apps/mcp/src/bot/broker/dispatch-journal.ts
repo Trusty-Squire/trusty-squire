@@ -12,12 +12,44 @@ interface DispatchRecord {
   agentId?: string;
   operation?: string;
   inputHash?: string;
+  outcome?: ReconciledDispatchOutcome;
+}
+
+export interface ReconciledDispatchOutcome {
+  status: "completed" | "payment_3ds_required" | "payment_outcome_unknown";
+  next?: { tool: "operate_payment_status"; wait_seconds: number };
 }
 
 export interface PendingDispatchOutcome {
   sessionId: string;
   requestId: string;
   operation: string;
+}
+
+export interface CompletedDispatchOutcome extends PendingDispatchOutcome {
+  outcome: ReconciledDispatchOutcome;
+}
+
+function validOutcome(value: unknown): value is ReconciledDispatchOutcome {
+  if (value === null || typeof value !== "object") return false;
+  const outcome = value as Record<string, unknown>;
+  if (
+    !["completed", "payment_3ds_required", "payment_outcome_unknown"].includes(
+      String(outcome.status),
+    ) ||
+    !Object.keys(outcome).every((key) => key === "status" || key === "next")
+  )
+    return false;
+  if (outcome.next === undefined) return true;
+  if (outcome.next === null || typeof outcome.next !== "object") return false;
+  const next = outcome.next as Record<string, unknown>;
+  return (
+    next.tool === "operate_payment_status" &&
+    typeof next.wait_seconds === "number" &&
+    Number.isSafeInteger(next.wait_seconds) &&
+    next.wait_seconds >= 0 &&
+    Object.keys(next).every((key) => key === "tool" || key === "wait_seconds")
+  );
 }
 
 /** Minimal write-ahead custody, never arguments, credentials or card values.
@@ -45,7 +77,8 @@ export class DispatchJournal {
           !["entered", "outcome", "acknowledged", "settled"].includes(record.phase) ||
           (record.agentId !== undefined && typeof record.agentId !== "string") ||
           (record.operation !== undefined && typeof record.operation !== "string") ||
-          (record.inputHash !== undefined && typeof record.inputHash !== "string")
+          (record.inputHash !== undefined && typeof record.inputHash !== "string") ||
+          (record.outcome !== undefined && !validOutcome(record.outcome))
         )
           throw new Error("Malformed journal");
         const key = JSON.stringify([record.sessionId, record.requestId]);
@@ -94,13 +127,14 @@ export class DispatchJournal {
     agentId: string,
     requestId: string,
     expected?: Pick<DispatchRecord, "operation" | "inputHash">,
-  ): Promise<PendingDispatchOutcome | undefined> {
+  ): Promise<CompletedDispatchOutcome | undefined> {
     const record = [...(await this.states()).values()].find(
       (record) =>
         record.agentId === agentId &&
         record.requestId === requestId &&
         (expected === undefined ||
           (record.operation === expected.operation && record.inputHash === expected.inputHash)) &&
+        record.outcome !== undefined &&
         (record.phase === "outcome" || record.phase === "acknowledged"),
     );
     return record === undefined
@@ -109,6 +143,7 @@ export class DispatchJournal {
           sessionId: record.sessionId,
           requestId: record.requestId,
           operation: record.operation ?? "operate mutation",
+          outcome: record.outcome!,
         };
   }
 
@@ -125,6 +160,7 @@ export class DispatchJournal {
           agentId,
           operation: record.operation,
           inputHash: record.inputHash,
+          outcome: record.outcome,
         }),
       ),
     );
@@ -135,7 +171,7 @@ export class DispatchJournal {
     sessionId: string,
     requestId: string,
     phase: DispatchPhase,
-    detail?: Pick<DispatchRecord, "agentId" | "operation" | "inputHash">,
+    detail?: Pick<DispatchRecord, "agentId" | "operation" | "inputHash" | "outcome">,
   ): Promise<void> {
     const operation = this.tail.then(async () => {
       await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });

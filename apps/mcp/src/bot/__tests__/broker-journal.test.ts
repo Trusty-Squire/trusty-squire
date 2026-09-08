@@ -1,11 +1,11 @@
-import { mkdtemp, rm, appendFile } from "node:fs/promises";
+import { mkdtemp, rm, appendFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { z, type Tool } from "../../tools/index.js";
 import { installBrokerBrowserCustody } from "../broker/custody.js";
 import { DispatchJournal } from "../broker/dispatch-journal.js";
-import { OperatorBroker } from "../broker/operator.js";
+import { OperatorBroker, reconciliationOutcome } from "../broker/operator.js";
 
 describe("broker dispatch custody", () => {
   it("refuses replacement after an uncertain dispatch and admits only a settled journal", async () => {
@@ -99,6 +99,7 @@ describe("broker dispatch custody", () => {
       await journal.record("session", "request", "outcome", {
         agentId: "agent",
         operation: "operate_pay",
+        outcome: { status: "completed" },
       });
       await expect(new DispatchJournal(path).assertReconciled()).resolves.toBeUndefined();
       await expect(new DispatchJournal(path).pendingOutcomes("agent")).resolves.toEqual([
@@ -108,6 +109,76 @@ describe("broker dispatch custody", () => {
       await expect(journal.acknowledge("agent", "request")).resolves.toBe(true);
       expect(await journal.hasOutstanding("session")).toBe(false);
       expect(await journal.hasCompleted("agent", "request")).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves scrubbed pending payment outcomes across journal restart", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-journal-payment-outcomes-"));
+    const path = join(root, "dispatch.jsonl");
+    const outcomes = [
+      {
+        requestId: "three-ds",
+        result: {
+          status: "payment_3ds_required",
+          approval_url: "https://approval.test/private",
+          needs_user: { message: "private challenge", wall: "3ds" },
+          next: { tool: "operate_payment_status", wait_seconds: 15, hint: "private" },
+        },
+        expected: {
+          status: "payment_3ds_required" as const,
+          next: { tool: "operate_payment_status" as const, wait_seconds: 15 },
+        },
+      },
+      {
+        requestId: "unknown",
+        result: {
+          status: "payment_outcome_unknown",
+          approval_url: "https://approval.test/private",
+          merchant: "Private Merchant",
+          next: { tool: "operate_payment_status", wait_seconds: 15, hint: "private" },
+        },
+        expected: {
+          status: "payment_outcome_unknown" as const,
+          next: { tool: "operate_payment_status" as const, wait_seconds: 15 },
+        },
+      },
+    ];
+    const journal = new DispatchJournal(path);
+    try {
+      for (const { requestId, result, expected } of outcomes) {
+        const outcome = reconciliationOutcome("operate_pay", result);
+        expect(outcome).toEqual(expected);
+        await journal.record("session", requestId, "entered", {
+          agentId: "agent",
+          operation: "operate_pay",
+          inputHash: `${requestId}-hash`,
+        });
+        await journal.record("session", requestId, "outcome", {
+          agentId: "agent",
+          operation: "operate_pay",
+          inputHash: `${requestId}-hash`,
+          outcome,
+        });
+      }
+      const restarted = new DispatchJournal(path);
+      for (const { requestId, expected } of outcomes) {
+        await expect(
+          restarted.completedOutcome("agent", requestId, {
+            operation: "operate_pay",
+            inputHash: `${requestId}-hash`,
+          }),
+        ).resolves.toMatchObject({ requestId, operation: "operate_pay", outcome: expected });
+      }
+      expect(await restarted.hasOutstanding("session")).toBe(true);
+      const records = (await readFile(path, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { phase: string; outcome?: unknown });
+      expect(records.filter((record) => record.phase === "outcome").map((record) => record.outcome)).toEqual(
+        outcomes.map((entry) => entry.expected),
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }

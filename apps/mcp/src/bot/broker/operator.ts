@@ -1,6 +1,10 @@
 import { withBrokerAdmission } from "./admission-context.js";
 import { brokerBrowserCustody } from "./custody.js";
-import type { DispatchJournal, PendingDispatchOutcome } from "./dispatch-journal.js";
+import type {
+  DispatchJournal,
+  PendingDispatchOutcome,
+  ReconciledDispatchOutcome,
+} from "./dispatch-journal.js";
 import { timingSafeEqual, createHash } from "node:crypto";
 import { z } from "zod";
 import { ApiClient, type ApiClientConfig } from "../../api-client.js";
@@ -55,8 +59,34 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value) ?? "null";
 }
 
-function inputHash(input: z.infer<typeof callSchema>): string {
+function inputHash(input: unknown): string {
   return createHash("sha256").update(canonicalJson(input)).digest("hex");
+}
+
+export function reconciliationOutcome(
+  operation: string,
+  result: unknown,
+): ReconciledDispatchOutcome {
+  if (operation !== "operate_pay" || result === null || typeof result !== "object")
+    return { status: "completed" };
+  const payment = result as Record<string, unknown>;
+  if (
+    payment.status !== "payment_3ds_required" &&
+    payment.status !== "payment_outcome_unknown"
+  )
+    return { status: "completed" };
+  const outcome: ReconciledDispatchOutcome = { status: payment.status };
+  if (payment.next !== null && typeof payment.next === "object") {
+    const next = payment.next as Record<string, unknown>;
+    if (
+      next.tool === "operate_payment_status" &&
+      typeof next.wait_seconds === "number" &&
+      Number.isSafeInteger(next.wait_seconds) &&
+      next.wait_seconds >= 0
+    )
+      outcome.next = { tool: "operate_payment_status", wait_seconds: next.wait_seconds };
+  }
+  return outcome;
 }
 
 /** Existing handlers and per-session payment state run unchanged INSIDE the
@@ -109,7 +139,7 @@ export class OperatorBroker implements BrokerTransportPort {
     const dispatch = {
       agentId: principal.agentId,
       operation: tool.name,
-      inputHash: inputHash(input),
+      inputHash: inputHash({ name: tool.name, args, capability: input.capability }),
     };
     const completed = await this.journal?.completedOutcome(
       principal.agentId,
@@ -122,7 +152,7 @@ export class OperatorBroker implements BrokerTransportPort {
           reconciliation: {
             request_id: completed.requestId,
             operation: completed.operation,
-            outcome: "completed",
+            ...completed.outcome,
           },
         },
       };
@@ -156,7 +186,11 @@ export class OperatorBroker implements BrokerTransportPort {
             { sessionId: id, reserve },
             async () => await tool.handler(args, pinnedApi),
           );
-          if (mutationCapableStart) await this.journal?.record(id, requestId, "outcome", dispatch);
+          if (mutationCapableStart)
+            await this.journal?.record(id, requestId, "outcome", {
+              ...dispatch,
+              outcome: reconciliationOutcome(tool.name, observation),
+            });
           internalId = String((observation as { session_id: string }).session_id);
           const session = sessionForCall(internalId);
           if (session === undefined) {
@@ -187,7 +221,13 @@ export class OperatorBroker implements BrokerTransportPort {
                 "operate_screenshot",
                 "operate_payment_status",
               ].includes(name);
-              if (mutating) await this.journal?.record(id, commandId, "entered", dispatch);
+              const commandDispatch = {
+                agentId: principal.agentId,
+                operation: name,
+                inputHash: inputHash({ name, args: commandArgs, capability }),
+              };
+              if (mutating)
+                await this.journal?.record(id, commandId, "entered", commandDispatch);
               const result =
                 name === "operate_finish"
                   ? await execute()
@@ -197,7 +237,11 @@ export class OperatorBroker implements BrokerTransportPort {
                 "payment-custody",
                 session.pendingThreeDs === null ? "settled" : "entered",
               );
-              if (mutating) await this.journal?.record(id, commandId, "outcome", dispatch);
+              if (mutating)
+                await this.journal?.record(id, commandId, "outcome", {
+                  ...commandDispatch,
+                  outcome: reconciliationOutcome(name, result),
+                });
               return remapSession(result, internalId, id);
             },
             close: async (reason) => {
@@ -277,11 +321,11 @@ export class OperatorBroker implements BrokerTransportPort {
     const input = callSchema.parse(params);
     const tool = findTool(input.name, this.tools);
     if (tool === null || !tool.name.startsWith("operate_")) return false;
-    tool.inputSchema.parse(input.args);
+    const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
     return (
       (await this.journal?.completedOutcome(principal.agentId, requestId, {
         operation: tool.name,
-        inputHash: inputHash(input),
+        inputHash: inputHash({ name: tool.name, args, capability: input.capability }),
       })) !== undefined
     );
   }
