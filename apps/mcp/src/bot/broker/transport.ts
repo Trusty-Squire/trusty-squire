@@ -68,7 +68,7 @@ export interface BrokerTransportPort {
     params: Record<string, unknown>,
     requestId: string,
   ): Promise<unknown>;
-  disconnect(principal: BrokerPrincipal): Promise<void>;
+  disconnect(principal: BrokerPrincipal, explicit?: boolean): Promise<void>;
 }
 
 /** Endpoint election is bind-exclusive. Never unlink an existing socket to win
@@ -88,8 +88,9 @@ export async function listenBroker(
     let authenticating = false;
     let closed = false;
     const replies = new Map<string, { input: string; result: Promise<unknown> }>();
+    let explicitClose = false;
     const disconnect = (owner: BrokerPrincipal) => {
-      const task = port.disconnect(owner).catch(() => undefined);
+      const task = port.disconnect(owner, explicitClose).catch(() => undefined);
       cleanup.add(task);
       void task.finally(() => cleanup.delete(task));
     };
@@ -129,6 +130,10 @@ export async function listenBroker(
       }
       if (request.method === "hello")
         throw new BrokerRefusal("unauthorized", "Connection already bound");
+      if (request.method === "client_close") {
+        explicitClose = true;
+        return {};
+      }
       return await port.call(principal, request.method, request.params, request.id);
     };
     frames(socket, (value) => {
@@ -292,5 +297,11 @@ export class BrokerClient {
       this.socket.once("close", resolve);
       this.socket.destroy();
     });
+  }
+
+  async release(): Promise<void> {
+    if (this.ended) return;
+    await this.call("client_close", {});
+    await this.close();
   }
 }

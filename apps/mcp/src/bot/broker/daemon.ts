@@ -18,6 +18,17 @@ import { OperatorBroker } from "./operator.js";
 import { BrokerRefusal } from "./scheduler.js";
 import { listenBroker } from "./transport.js";
 
+const MIN_BROKER_IDLE_TIMEOUT_MS = 60_000;
+const DEFAULT_BROKER_IDLE_TIMEOUT_MS = 5 * 60_000;
+
+export function brokerIdleTimeoutMs(env: NodeJS.ProcessEnv = process.env): number | undefined {
+  if (["1", "true"].includes((env.TRUSTY_SQUIRE_BROKER_SUPERVISED ?? "").toLowerCase()))
+    return undefined;
+  const configured = Number(env.TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS);
+  if (!Number.isFinite(configured) || configured <= 0) return DEFAULT_BROKER_IDLE_TIMEOUT_MS;
+  return Math.max(MIN_BROKER_IDLE_TIMEOUT_MS, configured);
+}
+
 /** Explicit foreground service entrypoint. A supervisor may retain the broker;
  * ordinary clients cannot stop it while another connection owns sessions. */
 export async function runBrokerDaemon(): Promise<void> {
@@ -71,6 +82,7 @@ export async function runBrokerDaemon(): Promise<void> {
   let maintenanceOwner: string | undefined;
   let maintenanceReady = false;
   let idleTimer: NodeJS.Timeout | undefined;
+  const idleTimeout = brokerIdleTimeoutMs();
   const restoreMaintenance = async () => {
     const refreshed = await guard.bind();
     if (refreshed === null) throw new Error("Enrolled account session is missing");
@@ -175,13 +187,20 @@ export async function runBrokerDaemon(): Promise<void> {
         (await waitForProfileFree(CHROME_PROFILE_DIR, { deadlineMs: 0 }))
       )
         await restoreMaintenance();
-      if (connected.size === 0)
-        idleTimer = setTimeout(() => {
-          void shutdown();
-        }, 1000);
+      scheduleShutdownIfIdle();
     },
   });
   await publishEndpointOwner(path);
+  function scheduleShutdownIfIdle(): void {
+    if (idleTimer !== undefined) clearTimeout(idleTimer);
+    idleTimer = undefined;
+    if (closing || connected.size !== 0 || idleTimeout === undefined) return;
+    idleTimer = setTimeout(() => {
+      idleTimer = undefined;
+      void shutdown();
+    }, idleTimeout);
+    idleTimer.unref();
+  }
   const shutdown = async (explicitDrain = false) => {
     if (closing || (!explicitDrain && connected.size !== 0)) return;
     const inventory = operator.authority.inventory();
@@ -206,6 +225,7 @@ export async function runBrokerDaemon(): Promise<void> {
       listenerClosed = true;
       await listener.close();
     }
+    await operator.reap(Number.POSITIVE_INFINITY);
     await shutdown(true);
   };
   const reap = setInterval(() => {
@@ -222,7 +242,8 @@ export async function runBrokerDaemon(): Promise<void> {
         ) {
           await restoreMaintenance();
         }
-        if (connected.size === 0) await shutdown();
+        if (connected.size === 0 && idleTimeout !== undefined && idleTimer === undefined)
+          scheduleShutdownIfIdle();
       })
       .catch((error: unknown) => {
         process.stderr.write(

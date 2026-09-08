@@ -32,13 +32,20 @@ const BOUNDS: ServerReapBounds = {
   graceMs: 5,
 };
 
-const SELF = { agent_identity: "claude-code", pid: 900, start_time: "900" };
+const SELF = {
+  agent_identity: "claude-code",
+  launcher_lineage: "lane-a",
+  pid: 900,
+  start_time: "900",
+};
 const NOW = 10_000_000;
 
 function record(overrides: Partial<ServerInstanceRecord> = {}): ServerInstanceRecord {
   return {
     version: 1,
     agent_identity: "claude-code",
+    launcher_lineage: "lane-a",
+    state: "serving",
     pid: 100,
     start_time: "100",
     parent_pid: 50,
@@ -66,7 +73,12 @@ describe("serverInstanceReapDecision", () => {
   });
 
   it("never targets an identity-less launch, so an unset identity matches nothing", () => {
-    const anonymous = { agent_identity: "", pid: 900, start_time: "900" };
+    const anonymous = {
+      agent_identity: "",
+      launcher_lineage: "lane-a",
+      pid: 900,
+      start_time: "900",
+    };
     expect(decide(record({ agent_identity: "" }), 1, anonymous)).toBe("keep");
   });
 
@@ -80,6 +92,25 @@ describe("serverInstanceReapDecision", () => {
 
   it("keeps a same-identity instance with recent client activity", () => {
     expect(decide(record({ last_activity_at: NOW - 1_000 }), 50)).toBe("keep");
+  });
+
+  it("never targets another launcher lane with the same coarse agent identity", () => {
+    expect(
+      decide(record({ launcher_lineage: "lane-b", last_activity_at: NOW - 31 * 60 * 60_000 }), 1),
+    ).toBe("keep");
+  });
+
+  it("reaps only a same-lineage draining predecessor after its shutdown deadline", () => {
+    const draining = record({
+      state: "draining",
+      shutdown_deadline_at: NOW - 1,
+      last_activity_at: NOW,
+      active_sessions: 1,
+      in_flight_calls: 1,
+    });
+    expect(decide(draining, 50)).toBe("reap");
+    expect(decide({ ...draining, launcher_lineage: "lane-b" }, 50)).toBe("keep");
+    expect(decide({ ...draining, shutdown_deadline_at: NOW + 1 }, 50)).toBe("keep");
   });
 
   it("keeps a quiet same-identity instance that is still doing work", () => {
@@ -251,6 +282,46 @@ describe("reapStaleServerInstances", () => {
     expect(readdirSync(root)).toHaveLength(2);
   });
 
+  it("reaps an overdue draining predecessor only in the replacement's launcher lane", async () => {
+    const killed: number[] = [];
+    const root = rootWith([
+      record({
+        pid: 200,
+        start_time: "200",
+        state: "draining",
+        shutdown_deadline_at: NOW - 1,
+      }),
+      record({
+        pid: 300,
+        start_time: "300",
+        launcher_lineage: "lane-b",
+        state: "draining",
+        shutdown_deadline_at: NOW - 1,
+      }),
+    ]);
+    const alive = new Set([200, 300]);
+
+    const summary = await reapStaleServerInstances({
+      rootDir: root,
+      self: SELF,
+      bounds: BOUNDS,
+      now: () => NOW,
+      readBirthState: (identity) => (alive.has(identity.pid) ? "matching" : "stale"),
+      readParentPid: () => 50,
+      readDescendants: () => [],
+      kill: (pid) => {
+        killed.push(pid);
+        alive.delete(pid);
+      },
+      wait: async () => undefined,
+      sweep: async () => 0,
+    });
+
+    expect(summary).toMatchObject({ reaped: 1, kept: 1 });
+    expect(killed).toEqual([200]);
+    expect(readdirSync(root)).toEqual(["300-300.json"]);
+  });
+
   it("drops the record of a dead prior instance without signalling anything", async () => {
     const killed: number[] = [];
     const root = rootWith([record({ last_activity_at: NOW - 5 * 60_000 })]);
@@ -321,6 +392,17 @@ describe("registerServerInstance", () => {
         last_activity_at: 4_242,
         active_sessions: 2,
         in_flight_calls: 1,
+      });
+
+      handle!.markDraining(9_999, {
+        lastActivityAt: 4_243,
+        activeSessions: 2,
+        inFlightCalls: 1,
+      });
+      expect(readServerInstanceRecord(handle!.path)).toMatchObject({
+        state: "draining",
+        shutdown_deadline_at: 9_999,
+        last_activity_at: 4_243,
       });
 
       handle!.release();

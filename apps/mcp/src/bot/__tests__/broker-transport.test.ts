@@ -10,6 +10,30 @@ import { BrokerAuthority } from "../broker/authority.js";
 const require = createRequire(import.meta.url);
 
 describe("authenticated broker IPC", () => {
+  it("distinguishes explicit client release from a transient socket loss", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-ipc-release-"));
+    const path = join(root, "broker.sock");
+    const releases: boolean[] = [];
+    const broker = await listenBroker(path, {
+      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
+      call: async () => ({}),
+      disconnect: async (_principal, explicit) => {
+        releases.push(explicit === true);
+      },
+    });
+    try {
+      const dropped = await BrokerClient.connect(path, "token");
+      await dropped.close();
+      await expect.poll(() => releases).toEqual([false]);
+      const released = await BrokerClient.connect(path, "token");
+      await released.release();
+      await expect.poll(() => releases).toEqual([false, true]);
+    } finally {
+      await broker.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("claims a lineage at hello and hands it off only after disconnect completes", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-ipc-lineage-"));
     const path = join(root, "b.sock");

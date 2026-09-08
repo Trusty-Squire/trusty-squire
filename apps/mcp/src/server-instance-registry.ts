@@ -32,7 +32,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { sweepOrphanedOwnerProcesses } from "./bot/owner-process-reaper.js";
 import {
   processBirthIdentity,
@@ -55,6 +55,7 @@ const DEFAULT_IDLE_CHECK_INTERVAL_MS = 5 * 60 * 1_000; // 5m — must stay well 
 const DEFAULT_ORPHAN_GRACE_MS = 60 * 1_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30 * 1_000;
 const DEFAULT_REAP_GRACE_MS = 2_000;
+const DEFAULT_SHUTDOWN_DEADLINE_MS = 30_000;
 
 function envMs(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -82,6 +83,10 @@ export function heartbeatIntervalMs(): number {
   return envMs("TRUSTY_SQUIRE_SERVER_HEARTBEAT_INTERVAL_MS", DEFAULT_HEARTBEAT_INTERVAL_MS);
 }
 
+export function shutdownDeadlineMs(): number {
+  return envMs("TRUSTY_SQUIRE_SERVER_SHUTDOWN_DEADLINE_MS", DEFAULT_SHUTDOWN_DEADLINE_MS);
+}
+
 export interface ServerBirthIdentity {
   pid: number;
   start_time: string;
@@ -97,6 +102,10 @@ export interface ServerInstanceActivity {
 export interface ServerInstanceRecord extends ServerBirthIdentity {
   version: 1;
   agent_identity: string;
+  /** Hash of a stable per-launcher/lane secret. Never a human-readable label. */
+  launcher_lineage?: string;
+  state?: "serving" | "draining";
+  shutdown_deadline_at?: number;
   /** PPid at registration, so a host that IS init isn't read as an orphan. */
   parent_pid: number;
   started_at: number;
@@ -137,6 +146,15 @@ function serverInstanceRootDir(): string {
 
 function agentIdentity(): string {
   return (process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "").trim();
+}
+
+function launcherLineage(env: NodeJS.ProcessEnv = process.env): string {
+  const value = (
+    env.TRUSTY_SQUIRE_SERVER_LINEAGE ??
+    env.TRUSTY_SQUIRE_FORWARDER_CREDENTIAL ??
+    ""
+  ).trim();
+  return value.length === 0 ? "" : createHash("sha256").update(value).digest("hex");
 }
 
 function ensurePrivateDir(path: string): void {
@@ -264,7 +282,7 @@ export type ServerInstanceReapDecision = "keep" | "reap" | "forget";
  */
 export function serverInstanceReapDecision(
   record: ServerInstanceRecord,
-  self: { agent_identity: string; pid: number; start_time: string },
+  self: { agent_identity: string; launcher_lineage?: string; pid: number; start_time: string },
   liveness: ProcessIdentityState,
   parentPid: ParentPidRead,
   now: number,
@@ -279,8 +297,23 @@ export function serverInstanceReapDecision(
   // matches nothing, so a host that never set one is never a target.
   if (self.agent_identity.length === 0) return "keep";
   if (record.agent_identity !== self.agent_identity) return "keep";
+  // Agent labels are shared by legitimate concurrent projects. Only the stable,
+  // secret-derived launcher lineage is authority to signal a live predecessor.
+  if (
+    !record.launcher_lineage ||
+    !self.launcher_lineage ||
+    record.launcher_lineage !== self.launcher_lineage
+  )
+    return "keep";
   // A pid we cannot read is a pid we do not kill.
   if (liveness === "unknown" || parentPid === "unknown") return "keep";
+
+  if (
+    record.state === "draining" &&
+    typeof record.shutdown_deadline_at === "number" &&
+    now >= record.shutdown_deadline_at
+  )
+    return "reap";
 
   const quietMs = now - record.last_activity_at;
   // Its spawning host is gone, so no client can still be attached over the
@@ -302,6 +335,7 @@ export function serverInstanceReapDecision(
 export interface ServerInstanceHandle {
   readonly path: string;
   heartbeat(activity: ServerInstanceActivity): void;
+  markDraining(deadlineAt: number, activity: ServerInstanceActivity): void;
   release(): void;
 }
 
@@ -325,6 +359,8 @@ export function registerServerInstance(
   let record: ServerInstanceRecord = {
     version: 1,
     agent_identity: identity,
+    launcher_lineage: launcherLineage(),
+    state: "serving",
     pid: birth.pid,
     start_time: birth.start_time,
     parent_pid: typeof parent === "number" ? parent : 0,
@@ -361,6 +397,23 @@ export function registerServerInstance(
         // protection from a later launch; it must never break serving.
       }
     },
+    markDraining: (deadlineAt, activity) => {
+      if (released) return;
+      record = {
+        ...record,
+        state: "draining",
+        shutdown_deadline_at: deadlineAt,
+        heartbeat_at: now(),
+        last_activity_at: activity.lastActivityAt,
+        active_sessions: activity.activeSessions,
+        in_flight_calls: activity.inFlightCalls,
+      };
+      try {
+        writeServerInstanceRecord(path, record);
+      } catch {
+        // Shutdown continues to its hard deadline even if observability fails.
+      }
+    },
     release: () => {
       released = true;
       rmSync(path, { force: true });
@@ -377,7 +430,7 @@ export interface ServerInstanceReapSummary {
 
 export interface ServerInstanceReapRuntime {
   rootDir?: string;
-  self?: { agent_identity: string; pid: number; start_time: string };
+  self?: { agent_identity: string; launcher_lineage?: string; pid: number; start_time: string };
   bounds?: ServerReapBounds;
   now?: () => number;
   readBirthState?: (identity: ServerBirthIdentity) => ProcessIdentityState;
@@ -441,6 +494,7 @@ export async function reapStaleServerInstances(
   const birth = processBirthIdentity(process.pid);
   const self = runtime.self ?? {
     agent_identity: agentIdentity(),
+    launcher_lineage: launcherLineage(),
     pid: process.pid,
     start_time: birth?.start_time ?? "unknown",
   };

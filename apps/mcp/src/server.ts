@@ -31,6 +31,7 @@ import {
   idleTimeoutWithSessionMs,
   reapStaleServerInstances,
   registerServerInstance,
+  shutdownDeadlineMs,
 } from "./server-instance-registry.js";
 import { buildToolRegistry, findTool } from "./tools/index.js";
 import { createSessionGuard, setServingAccountId, type SessionGuard } from "./session-guard.js";
@@ -157,6 +158,29 @@ export function createServerCallAdmission(): ServerCallAdmission {
     },
     inFlightCount: () => inFlight,
   };
+}
+
+export async function runBoundedServerCleanup(
+  admittedCallsDrained: Promise<void>,
+  cleanup: () => Promise<void>,
+  deadlineMs: number,
+): Promise<"complete" | "deadline"> {
+  let expired = false;
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(() => {
+      expired = true;
+      resolve();
+    }, deadlineMs);
+  });
+  try {
+    await Promise.race([admittedCallsDrained.catch(() => undefined), deadline]);
+    const terminalCleanup = cleanup();
+    await Promise.race([terminalCleanup, deadline]);
+    return expired ? "deadline" : "complete";
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 export async function buildServer(
@@ -454,6 +478,14 @@ export async function runServer(): Promise<void> {
     if (shutdown !== undefined) return;
     const admittedCallsDrained = callAdmission.closeAndDrain();
 
+    const deadlineMs = shutdownDeadlineMs();
+    const shutdownDeadlineAt = Date.now() + deadlineMs;
+    instance?.markDraining(shutdownDeadlineAt, {
+      lastActivityAt,
+      activeSessions: forwarder?.sessionCount() ?? activeSessionCount(),
+      inFlightCalls: callAdmission.inFlightCount(),
+    });
+
     shutdown = (async () => {
       process.stdin.removeListener("end", requestShutdown);
       process.stdin.removeListener("close", requestShutdown);
@@ -462,19 +494,26 @@ export async function runServer(): Promise<void> {
       process.removeListener("SIGINT", requestShutdown);
       if (idleTimer !== undefined) clearInterval(idleTimer);
       if (heartbeatTimer !== undefined) clearInterval(heartbeatTimer);
-      instance?.release();
-
       try {
         // The OAuth-bootstrap login Chrome (google-login) is tracked apart
         // from provision sessions — drain it too so it cannot outlive the
         // server. Its own signal handlers stand down in server mode (see
         // registerHeadlessRigCleanup), leaving this coordinator as the one
         // exit owner.
-        await admittedCallsDrained;
-        await cancelActiveLoginBrowsers();
-        await forwarder?.close();
-        await closeAllProvisionSessions();
-        await server.close();
+        const outcome = await runBoundedServerCleanup(
+          admittedCallsDrained,
+          async () => {
+            await cancelActiveLoginBrowsers();
+            await forwarder?.close();
+            await closeAllProvisionSessions();
+            await server.close();
+          },
+          deadlineMs,
+        );
+        if (outcome === "deadline")
+          process.stderr.write(
+            `[trusty-squire] server shutdown deadline reached after ${deadlineMs}ms; forcing exit\n`,
+          );
       } catch (err) {
         // Teardown is best-effort: the host is gone, so leave a breadcrumb but
         // never let a failed browser close turn into an orphaned MCP process.
@@ -488,6 +527,10 @@ export async function runServer(): Promise<void> {
       // Browser/Chrome child processes can keep the event loop alive briefly
       // even after their teardown. This mirrors bin.ts's forced CLI exit and
       // makes disconnect a reliable process-lifecycle boundary.
+      // Keep the draining record discoverable for the entire terminal cleanup.
+      // The owner reaper remains armed until process.exit; only now is the
+      // instance record no longer needed by a same-lineage replacement.
+      instance?.release();
       process.exit(0);
     })();
   };

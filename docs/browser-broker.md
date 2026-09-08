@@ -22,6 +22,11 @@ lineage must also receive its own stable, random base64url
 `TRUSTY_SQUIRE_FORWARDER_CREDENTIAL` (at least 32 random bytes), retained only
 for that client's restart recovery and never shared with sibling clients. The
 socket parent must already exist, belong to the current user, and have mode 0700.
+Set `TRUSTY_SQUIRE_BROKER_SUPERVISED=1` for the durable service owner. In that
+mode a missing broker is an error instead of permission for an MCP front end to
+spawn a competitor, and zero clients never releases the profile lease. Without
+supervision, `TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS` defaults to five minutes and
+is clamped to a minimum of one minute.
 The account must already be enrolled through `connect`; authentication reads its
 existing agent session token from session storage, never command-line token
 arguments. `connect` maintenance does not require an MCP lineage credential:
@@ -29,8 +34,9 @@ after validating that enrolled token, it creates a one-use local identity solely
 to drain and resume maintenance. That identity cannot recover or reclaim MCP
 sessions.
 
-The first client starts `node apps/mcp/dist/bin.js broker` if necessary. It can
-also run as a foreground service. Socket mode is 0600. No CDP endpoint or browser
+An unsupervised first client may start `node apps/mcp/dist/bin.js broker` if
+necessary. A supervised broker must already be running as a foreground service.
+Socket mode is 0600. No CDP endpoint or browser
 handle crosses IPC. `TRUSTY_SQUIRE_AGENT_IDENTITY` supplies a connection's agent
 label. The lineage credential proves reconnect ownership independently of that
 label; a caller with only a session ID, agent label, or credential hash cannot
@@ -60,10 +66,13 @@ binding. Browser epoch changes invalidate earlier capabilities.
   extract, credential fill, and payment commands use an interactive lane.
   Per-session approval, charge dispatch fences, and post-submit outcome custody
   continue in the existing handlers. Rendered observations are not masked.
-- Live sockets are liveness leases, with no idle expiration of a thinking client.
-  Disconnect fences queued commands, drains entered commands, and closes only
-  that client's sessions. Uncertain tab cleanup or pending payment outcomes stay
-  quarantined. The existing process marker watchdog and owner-death reaper remain.
+- Live sockets are mutation leases, not browser-custody leases. Disconnect
+  immediately fences queued commands and aborts the old connection lease, but
+  retains that lineage's actors for a five-minute authenticated reconnect grace.
+  Explicit client release or grace expiry closes only that client's sessions.
+  Uncertain tab cleanup or pending payment outcomes stay quarantined and remain
+  no-replay journal fences. The existing process marker watchdog and
+  owner-death reaper remain unchanged.
 - A bounded physical launch uses the existing cancellation/ownership machinery.
   A failed admission has retryable cleanup; it releases site reservations only
   after cleanup proves completion. Duplicate release calls share one operation.
@@ -88,9 +97,17 @@ binding. Browser epoch changes invalidate earlier capabilities.
   invents a capability, restarts work, or replays an uncertain payment. The
   record gives the caller a reconciliation next step and remains a no-replay
   fence until that retention window expires.
-- Idle shutdown requires zero connected clients and zero active, admitting, or
-  quarantined sessions. Graceful Chrome closure precedes lease release. Socket
-  recovery requires process birth, endpoint inode, and old-profile-free evidence.
+- Unsupervised idle shutdown requires zero connected clients and zero active,
+  admitting, or quarantined sessions for the configured minutes-scale bound.
+  Supervised brokers stop only on their supervisor signal or an explicit drain.
+  Graceful Chrome closure precedes lease release. Socket recovery requires
+  process birth, endpoint inode, and old-profile-free evidence.
+
+MCP server-instance records use the hash of
+`TRUSTY_SQUIRE_SERVER_LINEAGE` (or the forwarder credential when present) to
+scope predecessor cleanup to one launcher lane. During terminal shutdown the
+record remains `draining` until cleanup completes or the configured
+`TRUSTY_SQUIRE_SERVER_SHUTDOWN_DEADLINE_MS` expires (30 seconds by default).
 
 Implementation entry points: `src/bot/broker/daemon.ts`, `authority.ts`,
 `runtime.ts`, `operator.ts`, and `transport.ts` under `apps/mcp`.
@@ -149,9 +166,24 @@ its cookies into the harness.
   "configHome": "/absolute/worktree/test-identity/config",
   "accountId": "enrolled-test-account-id",
   "services": [
-    { "url": "https://service-one.example", "driver": "one.mjs", "authPattern": "expected account", "provisionPattern": "created project" },
-    { "url": "https://service-two.example", "driver": "two.mjs", "authPattern": "expected account", "provisionPattern": "created project" },
-    { "url": "https://service-three.example", "driver": "three.mjs", "authPattern": "expected account", "provisionPattern": "created project" }
+    {
+      "url": "https://service-one.example",
+      "driver": "one.mjs",
+      "authPattern": "expected account",
+      "provisionPattern": "created project"
+    },
+    {
+      "url": "https://service-two.example",
+      "driver": "two.mjs",
+      "authPattern": "expected account",
+      "provisionPattern": "created project"
+    },
+    {
+      "url": "https://service-three.example",
+      "driver": "three.mjs",
+      "authPattern": "expected account",
+      "provisionPattern": "created project"
+    }
   ]
 }
 ```

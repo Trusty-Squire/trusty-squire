@@ -16,9 +16,28 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "../api-client.js";
-import { buildServer, createServerCallAdmission, shouldIdleExit } from "../server.js";
+import {
+  buildServer,
+  createServerCallAdmission,
+  runBoundedServerCleanup,
+  shouldIdleExit,
+} from "../server.js";
 
 describe("server shutdown call admission", () => {
+  it("runs terminal cleanup and returns at the deadline when an admitted call is stuck", async () => {
+    vi.useFakeTimers();
+    try {
+      const stuck = new Promise<void>(() => undefined);
+      const cleanup = vi.fn(async () => undefined);
+      const result = runBoundedServerCleanup(stuck, cleanup, 50);
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(result).resolves.toBe("deadline");
+      expect(cleanup).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("closes admission before draining calls that already entered", async () => {
     const admission = createServerCallAdmission();
     expect(admission.started()).toBe(true);

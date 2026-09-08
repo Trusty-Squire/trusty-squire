@@ -452,6 +452,7 @@ export class OperatorBroker implements BrokerTransportPort {
   }
   async reap(now = Date.now()): Promise<void> {
     await this.journal?.expirePendingStartDeliveries(now);
+    await this.authority.expireDetached(now);
     await this.authority.retryQuarantined(
       async (capability, principal) =>
         !(
@@ -489,16 +490,17 @@ export class OperatorBroker implements BrokerTransportPort {
       journalForwarderId(principal),
     );
   }
-  async disconnect(principal: BrokerPrincipal): Promise<void> {
+  async disconnect(principal: BrokerPrincipal, explicit = false): Promise<void> {
     if (principal.forwarderId !== undefined) this.inputBindingKeys.delete(principal.forwarderId);
     this.authority.beginForwarderRelease(principal);
     const forwarder = principal.forwarderId;
-    if (
+    if (!explicit) this.authority.detach(principal);
+    else if (
       forwarder !== undefined &&
       ((await this.journal?.hasOutstanding(undefined, forwarder)) ||
         (await this.journal?.hasPendingStartDelivery(forwarder)))
     )
-      this.authority.detach(principal);
+      this.authority.detach(principal, Date.now(), 0);
     else await this.authority.disconnect(principal);
     this.authority.releaseForwarder(principal);
     this.apis.delete(principal.clientId);

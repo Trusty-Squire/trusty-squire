@@ -26,6 +26,10 @@ export function brokerEnvironment(env: NodeJS.ProcessEnv, path: string): NodeJS.
   return { ...brokerEnv, TRUSTY_SQUIRE_BROKER_SOCKET: path };
 }
 
+export function brokerIsSupervised(env: NodeJS.ProcessEnv = process.env): boolean {
+  return ["1", "true"].includes((env.TRUSTY_SQUIRE_BROKER_SUPERVISED ?? "").toLowerCase());
+}
+
 export async function publishEndpointOwner(path: string): Promise<void> {
   const identity = processBirthIdentity(process.pid);
   if (identity === null)
@@ -91,6 +95,11 @@ export async function connectOrLaunchBroker(
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== "ENOENT" && code !== "ECONNREFUSED") throw error;
+    if (brokerIsSupervised())
+      throw new BrokerRefusal(
+        "broker_unavailable",
+        "Supervised broker is unavailable; refusing to create a competing browser owner",
+      );
     if (code === "ECONNREFUSED") await reclaimDeadBrokerEndpoint(path);
     // A cleanly stopped broker removes its socket but may have left its owner
     // record if interrupted during final unlink. Reclaim only with birth proof.

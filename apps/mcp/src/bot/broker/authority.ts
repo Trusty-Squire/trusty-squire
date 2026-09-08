@@ -27,6 +27,9 @@ export interface BrokerSessionPort {
   close(reason?: "finish" | "disconnect"): Promise<boolean>;
 }
 export const FORWARDER_HANDOFF_TIMEOUT_MS = 120_000;
+// Match the durable start-delivery retention window: a socket restart must not
+// destroy the live capability while its acknowledged start is still recoverable.
+export const FORWARDER_RECONNECT_GRACE_MS = 5 * 60_000;
 interface ForwarderConnection {
   clientId: string;
   detach?: { promise: Promise<void>; resolve: () => void };
@@ -36,12 +39,13 @@ interface Actor {
   capability: TabCapability;
   port: BrokerSessionPort;
   abort: AbortController;
-  state: "active" | "closing" | "quarantined";
+  state: "active" | "detached" | "closing" | "quarantined";
   tail: Promise<void>;
   replies: Map<string, { input: string; result: Promise<unknown> }>;
   pending: number;
   closePromise?: Promise<boolean>;
   closeReason?: "finish" | "disconnect";
+  reconnectDeadline?: number;
 }
 
 /** This object lives only in the broker. No Page, Browser or CDP handle crosses
@@ -265,10 +269,22 @@ export class BrokerAuthority {
       )
     )
       throw new BrokerRefusal("forwarder_in_use", "Forwarder identity is already active");
-    return owned.map((actor) => {
+    const now = Date.now();
+    return owned.flatMap((actor) => {
+      if (actor.state === "detached" && (actor.reconnectDeadline ?? 0) <= now) return [];
       actor.principal = { ...principal };
-      if (actor.state === "quarantined") actor.state = "active";
-      return { ...actor.capability };
+      if (actor.state === "detached") {
+        actor.abort = new AbortController();
+        actor.state = "active";
+        delete actor.reconnectDeadline;
+      } else if (actor.state === "quarantined") {
+        // A failed disconnect cleanup can mean an uncertain payment remains in
+        // journal custody. Same-lineage status/reconciliation must stay usable,
+        // while the journal continues to block every fresh mutation.
+        if (actor.closeReason === "disconnect") actor.abort = new AbortController();
+        actor.state = "active";
+      }
+      return [{ ...actor.capability }];
     });
   }
 
@@ -314,6 +330,10 @@ export class BrokerAuthority {
     const actor = this.resolve(principal, capability);
     if (actor.state !== "active") throw new BrokerRefusal("session_closing", "Session is fenced");
     const input = JSON.stringify([name, args, resources, lane]);
+    // Capture this connection lease. A reconnect installs a fresh controller;
+    // queued work from the lost socket must stay aborted rather than becoming
+    // executable merely because the actor is active again.
+    const invocationLease = actor.abort;
     const previous = actor.replies.get(requestId);
     if (previous !== undefined) {
       if (previous.input !== input)
@@ -326,19 +346,19 @@ export class BrokerAuthority {
     }
     actor.pending += 1;
     const result = actor.tail.then(async () => {
-      if (actor.state !== "active" || actor.abort.signal.aborted) {
+      if (actor.state !== "active" || invocationLease.signal.aborted) {
         throw new BrokerRefusal("session_closing", "Command fenced before dispatch");
       }
       this.scheduler.expand(actor.capability.sessionId, resources);
       const laneOwner = randomUUID();
-      if (lane !== undefined) await this.lanes.reserve(laneOwner, [lane], actor.abort.signal);
+      if (lane !== undefined) await this.lanes.reserve(laneOwner, [lane], invocationLease.signal);
       try {
-        if (actor.abort.signal.aborted)
+        if (invocationLease.signal.aborted)
           throw new BrokerRefusal("cancelled", "Command fenced before dispatch");
         const execute = async () =>
-          await actor.port.invoke(name, args, actor.abort.signal, requestId);
+          await actor.port.invoke(name, args, invocationLease.signal, requestId);
         return lane === "oauth"
-          ? await withBrokerIdentityLane(execute, actor.abort.signal)
+          ? await withBrokerIdentityLane(execute, invocationLease.signal)
           : await execute();
       } finally {
         if (lane !== undefined) this.lanes.release(laneOwner);
@@ -403,11 +423,35 @@ export class BrokerAuthority {
     );
   }
 
-  detach(principal: BrokerPrincipal): void {
+  detach(
+    principal: BrokerPrincipal,
+    now = Date.now(),
+    graceMs = FORWARDER_RECONNECT_GRACE_MS,
+  ): void {
     this.assertPrincipal(principal);
-    for (const actor of this.actors.values()) {
-      if (actor.principal.clientId === principal.clientId) actor.state = "quarantined";
+    this.fencedClients.add(principal.clientId);
+    for (const admission of this.admissions.values()) {
+      if (admission.principal.clientId === principal.clientId) admission.abort.abort();
     }
+    for (const actor of this.actors.values()) {
+      if (actor.principal.clientId !== principal.clientId || actor.state !== "active") continue;
+      actor.state = "detached";
+      actor.closeReason = "disconnect";
+      actor.reconnectDeadline = now + graceMs;
+      actor.abort.abort();
+    }
+  }
+
+  async expireDetached(now = Date.now()): Promise<void> {
+    await Promise.all(
+      [...this.actors.values()]
+        .filter(
+          (actor) =>
+            actor.state === "detached" &&
+            (actor.reconnectDeadline ?? Number.POSITIVE_INFINITY) <= now,
+        )
+        .map(async (actor) => await this.closeActor(actor)),
+    );
   }
 
   fenceRuntime(): void {
@@ -434,8 +478,9 @@ export class BrokerAuthority {
   inventory(): { active: number; quarantined: number; admitting: number } {
     return {
       active: [...this.actors.values()].filter((actor) => actor.state === "active").length,
-      quarantined: [...this.actors.values()].filter((actor) => actor.state === "quarantined")
-        .length,
+      quarantined: [...this.actors.values()].filter(
+        (actor) => actor.state === "quarantined" || actor.state === "detached",
+      ).length,
       admitting: this.admissions.size,
     };
   }

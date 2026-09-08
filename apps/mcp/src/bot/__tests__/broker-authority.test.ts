@@ -84,6 +84,51 @@ describe("broker authority", () => {
     await expect(broker.invoke(second, capability, "resumed", "read", {})).resolves.toBe("a");
   });
 
+  it("fences lost-client mutations, reclaims within grace, and expires custody afterward", async () => {
+    const broker = new BrokerAuthority("account", "cell");
+    const first: BrokerPrincipal = {
+      accountId: "account",
+      agentId: "local-agent",
+      forwarderId: "lineage-a",
+      clientId: "first",
+    };
+    const second = { ...first, clientId: "second" };
+    void broker.claimForwarder(first);
+    let dispatches = 0;
+    let releaseFirst!: () => void;
+    const firstEntered = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const capability = await broker.open(first, ["site:a"], async () => ({
+      ...port("a"),
+      invoke: async (name) => {
+        dispatches++;
+        if (name === "holding") await firstEntered;
+        return dispatches;
+      },
+    }));
+    const holding = broker.invoke(first, capability, "holding", "holding", {});
+    await Promise.resolve();
+    const queued = broker.invoke(first, capability, "queued", "charge", {});
+    const now = Date.now();
+    broker.detach(first, now, 100);
+    broker.releaseForwarder(first);
+    expect(() => broker.invoke(first, capability, "lost", "charge", {})).toThrow("not admitted");
+
+    void broker.claimForwarder(second);
+    expect(broker.reclaim(second)).toEqual([capability]);
+    releaseFirst();
+    await holding;
+    await expect(queued).rejects.toThrow("fenced before dispatch");
+    await expect(broker.invoke(second, capability, "fresh", "read", {})).resolves.toBe(2);
+    expect(dispatches).toBe(2);
+
+    broker.detach(second, now + 1_000, 100);
+    broker.releaseForwarder(second);
+    await broker.expireDetached(now + 1_100);
+    expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
+  });
+
   it("requires possession of a stable lineage credential to reclaim", async () => {
     const broker = new BrokerAuthority("account", "cell");
     const credential = "a".repeat(43);

@@ -107,7 +107,6 @@ export class OperatorForwarder {
       if (existing === undefined || !existing.isConnected()) {
         this.connection = undefined;
         this.client = undefined;
-        if (starting) this.sessions.clear();
       }
     }
     const client = await this.connect();

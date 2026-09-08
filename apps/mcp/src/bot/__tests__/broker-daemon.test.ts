@@ -8,7 +8,8 @@ import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
 import { SessionStore } from "../../session.js";
 import { BrokerClient } from "../broker/transport.js";
-import { brokerEnvironment } from "../broker/discovery.js";
+import { brokerIdleTimeoutMs } from "../broker/daemon.js";
+import { brokerEnvironment, brokerIsSupervised } from "../broker/discovery.js";
 import { DispatchJournal } from "../broker/dispatch-journal.js";
 import { forwarderId } from "../broker/lineage.js";
 const require = createRequire(import.meta.url);
@@ -22,6 +23,13 @@ it("keeps a forwarder's lineage credential out of the detached broker environmen
       "/tmp/broker.sock",
     ),
   ).toEqual({ PATH: "/bin", TRUSTY_SQUIRE_BROKER_SOCKET: "/tmp/broker.sock" });
+});
+
+it("uses a minutes-scale idle policy and disables it for supervised brokers", () => {
+  expect(brokerIdleTimeoutMs({})).toBe(5 * 60_000);
+  expect(brokerIdleTimeoutMs({ TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS: "1000" })).toBe(60_000);
+  expect(brokerIdleTimeoutMs({ TRUSTY_SQUIRE_BROKER_SUPERVISED: "true" })).toBeUndefined();
+  expect(brokerIsSupervised({ TRUSTY_SQUIRE_BROKER_SUPERVISED: "1" })).toBe(true);
 });
 
 it("returns only a durable start outcome after daemon death", async () => {
@@ -159,6 +167,7 @@ it("keeps a live control client, coordinates plain maintenance, refreshes creden
         TRUSTY_SQUIRE_REAPER_DIR: join(root, "reapers"),
         TRUSTY_SQUIRE_BROKER_SOCKET: socket,
         TRUSTY_SQUIRE_FORWARDER_CREDENTIAL: credential,
+        TRUSTY_SQUIRE_BROKER_SUPERVISED: "1",
         BOT_CDP_ENDPOINT: "",
       },
       stdio: ["ignore", "ignore", "pipe"],
@@ -223,6 +232,9 @@ it("keeps a live control client, coordinates plain maintenance, refreshes creden
     expect(await replacement.call("maintenance", {})).toMatchObject({ state: "ready" });
     await replacement.call("resume", {});
     await replacement.close();
+    await sleep(1200);
+    expect(child.exitCode).toBeNull();
+    child.kill("SIGTERM");
     const result = await Promise.race([exited, sleep(10000).then(() => "timeout")]);
     expect(result, diagnostic).toBe(0);
     expect(
