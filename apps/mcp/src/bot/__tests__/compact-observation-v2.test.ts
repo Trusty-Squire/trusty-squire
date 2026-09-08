@@ -1,3 +1,4 @@
+import { StableObservationRefs } from "../compact-observation-v2.js";
 import { Buffer } from "node:buffer";
 import { describe, expect, it } from "vitest";
 import {
@@ -475,9 +476,11 @@ describe("compact observation v2", () => {
   });
 
   it("accepts only well-formed handles that are current snapshot members", () => {
-    const current = new Map([["@e:hhhhhhhhhhh", "@e:legacy_current"]]);
-    expect(compactV2LegacyRefForHandle(current, "@e:hhhhhhhhhhh")).toBe("@e:legacy_current");
-    expect(compactV2LegacyRefForHandle(current, "@e:iiiiiiiiiii")).toBeNull(); // not a member
+    const current = new Map([["@e:hhhhhhhhhhhhhhhhhhhhhh", "@e:legacy_current"]]);
+    expect(compactV2LegacyRefForHandle(current, "@e:hhhhhhhhhhhhhhhhhhhhhh")).toBe(
+      "@e:legacy_current",
+    );
+    expect(compactV2LegacyRefForHandle(current, "@e:iiiiiiiiiiiiiiiiiiiiii")).toBeNull(); // not a member
     expect(compactV2LegacyRefForHandle(current, "@e:hhhhhhhhhh")).toBeNull(); // malformed
     expect(compactV2LegacyRefForHandle(current, "@e:short")).toBeNull(); // not a member
     expect(compactV2LegacyRefForHandle(current, "@e:1.1")).toBeNull(); // legacy index form
@@ -489,8 +492,8 @@ describe("compact observation v2", () => {
     expect(controlLabelV2(undefined)).toBeUndefined();
     expect(controlLabelV2("!!!")).toBeUndefined();
     expect(isCompactV2Label("@continue-with-google")).toBe(true);
-    expect(isCompactV2Label("@e:hhhhhhhhhhh")).toBe(false);
-    expect(isCompactV2Handle("@e:hhhhhhhhhhh")).toBe(true);
+    expect(isCompactV2Label("@e:hhhhhhhhhhhhhhhhhhhhhh")).toBe(false);
+    expect(isCompactV2Handle("@e:hhhhhhhhhhhhhhhhhhhhhh")).toBe(true);
     expect(isCompactV2Handle("@e:hhhhhhhhhh")).toBe(false);
   });
 
@@ -1022,5 +1025,44 @@ describe("compact-v2 query pages and region context", () => {
     expect(safe.rows[0]!.label).toBe("@continue-checkout");
     // Region headings are page content, including vendor-key-shaped text.
     expect(safe.rows[1]!.label).toBe("@1w-sk-proj-abcdefghij");
+  });
+});
+
+describe("persistent action anchor allocator", () => {
+  const node = (identity: string, intent = "continue") =>
+    ({
+      observationIdentity: identity,
+      observationIntent: intent,
+    }) as InteractiveElement;
+  it("uses session-separated 132-bit capabilities and refuses unbound or duplicate identity", () => {
+    const first = new StableObservationRefs();
+    const second = new StableObservationRefs();
+    const elements = Array.from({ length: 1000 }, (_, i) => node(String(i)));
+    const refs = first.actions("document", elements);
+    expect(new Set(refs.values()).size).toBe(elements.length);
+    const other = second.actions("document", elements);
+    for (const el of elements) {
+      expect(refs.get(el)).toMatch(/^@e:[A-Za-z0-9_-]{22}$/);
+      expect(refs.get(el)).not.toBe(other.get(el));
+    }
+    expect(first.actions("document", [node("same"), node("same")]).size).toBe(0);
+    expect(first.actions("document", [{} as InteractiveElement]).size).toBe(0);
+  });
+  it("retires missing and changed anchors without reviving refs or aliases", () => {
+    const refs = new StableObservationRefs();
+    const held = node("physical");
+    const original = refs.actions("doc", [held]).get(held)!;
+    expect(refs.label(original, "@continue")).toBe("@continue");
+    const changed = node("physical", "delete");
+    const changedRef = refs.actions("doc", [changed]).get(changed)!;
+    expect(changedRef).not.toBe(original);
+    const restored = refs.actions("doc", [held]).get(held)!;
+    expect(restored).not.toBe(original);
+    expect(refs.label(restored, "@continue")).toBe("@continue-2");
+    refs.actions("doc", []);
+    const returned = refs.actions("doc", [held]).get(held)!;
+    expect(returned).not.toBe(restored);
+    expect(refs.label(returned, "@continue")).toBe("@continue-3");
+    expect(refs.actions("next-doc", [held]).get(held)).not.toBe(returned);
   });
 });

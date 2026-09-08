@@ -14959,6 +14959,10 @@ export function isSafeSignupChoiceText(text: string): boolean {
 // strings (the bug behind the 0/14 sweep). `index` is assigned after
 // ranking, so it is a stable handle for the planner to reference.
 export interface InteractiveElement {
+  /** Private CDP node identity; never a page-authored attribute or wire ref. */
+  observationIdentity?: string;
+  /** Full material intent captured with that node, excluding transient state. */
+  observationIntent?: string;
   index: number;
   tag: string;
   type: string | null;

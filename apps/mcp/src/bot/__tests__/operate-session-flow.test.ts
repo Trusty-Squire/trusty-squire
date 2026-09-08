@@ -4487,6 +4487,79 @@ describe("Compact V2 action-map boundary", () => {
     expect(JSON.stringify(result)).not.toContain("Model");
   });
 
+  it("keeps one anchor through duplicate sibling churn and never transfers its alias", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const held = elem({
+      observationIdentity: "physical-held",
+      tag: "button",
+      role: "button",
+      visibleText: "Continue",
+      selector: "#held",
+    });
+    h.elements = [held];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    const ref = domRefs(started)[0]!;
+    h.elements = [
+      elem({
+        observationIdentity: "new-sibling",
+        tag: "button",
+        role: "button",
+        visibleText: "Continue",
+        selector: "#sibling",
+        index: 1,
+      }),
+      held,
+    ];
+    const next = await observe(started.session_id);
+    expect(domRefs(next)).toContain(ref);
+    await act(started.session_id, { kind: "click", target: ref });
+    expect(h.clickCalls).toBe(1);
+    h.elements = [
+      elem({
+        observationIdentity: "replacement",
+        tag: "button",
+        role: "button",
+        visibleText: "Continue",
+        selector: "#held",
+      }),
+    ];
+    await observe(started.session_id);
+    const clicks = h.clickCalls;
+    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+      "stale_ref",
+    );
+    await expect(act(started.session_id, { kind: "click", target: "@continue" })).rejects.toThrow(
+      "stale_ref",
+    );
+    expect(h.clickCalls).toBe(clicks);
+  });
+
+  it("retires a physical node capability on material change even after re-observation", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const held = elem({
+      observationIdentity: "physical-held",
+      tag: "a",
+      role: "link",
+      visibleText: "Continue",
+      href: "/safe",
+      selector: "#held",
+    });
+    h.elements = [held];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    const ref = domRefs(started)[0]!;
+    h.elements = [{ ...(held as InteractiveElement), href: "/delete" }];
+    await observe(started.session_id);
+    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+      "stale_ref",
+    );
+    h.elements = [held];
+    await observe(started.session_id);
+    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+      "stale_ref",
+    );
+    expect(h.clickCalls).toBe(0);
+  });
+
   it("keeps a ref valid when other controls appear in the live action map", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const email = elem({
@@ -5056,7 +5129,7 @@ describe("Compact V2 action-map boundary", () => {
       children: [shadowControl],
     });
     capture.nodeElements.delete(shadowControl.id);
-    capture.elements = elements.filter((element) => element.index !== 1);
+    capture.elements = capture.elements.filter((element) => element.index !== 1);
     h.elements = capture.elements;
     h.captureOverride = capture;
     const started = await startHarnessProvisionSession({
@@ -5107,7 +5180,7 @@ describe("Compact V2 action-map boundary", () => {
       serviceUrl: "https://app.example.com/dashboard",
     });
     const original = domRefs(started)[0]!;
-    expect(original).toMatch(/^@e:[A-Za-z0-9_-]{11}$/);
+    expect(original).toMatch(/^@e:[A-Za-z0-9_-]{22}$/);
     h.elements.unshift(
       elem({ index: 1, id: "inserted", visibleText: "Inserted control", selector: "#inserted" }),
     );

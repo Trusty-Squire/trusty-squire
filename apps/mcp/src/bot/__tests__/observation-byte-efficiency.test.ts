@@ -479,7 +479,7 @@ describe("observation byte efficiency", () => {
     const refs = new StableObservationRefs();
     const first = refs.get("doc1", "action:first");
     const second = refs.get("doc1", "action:second");
-    expect(first).toMatch(/^@e:[A-Za-z0-9_-]{11}$/);
+    expect(first).toMatch(/^@e:[A-Za-z0-9_-]{22}$/);
     expect(second).not.toBe(first);
     for (let i = 0; i < 100; i++) refs.get("doc1", `new:${i}`);
     expect(refs.get("doc1", "action:second")).toBe(second);

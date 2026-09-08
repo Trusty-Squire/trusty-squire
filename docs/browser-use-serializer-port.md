@@ -13,16 +13,24 @@ meet one. The exact output contract is the mechanically generated corpus in
 
 ## Identity, deltas and query
 
-`[@e:<11 base64url characters>]` uses session-secret HMAC identities instead of
-canonical browser-use's per-observation indices. `StableObservationRefs` maps the
-existing fingerprint to a 66-bit opaque capability for the lifetime of its document;
-the document identity and collision retry are part of its HMAC input. Display-only
-refs use a separate identity namespace in that same allocator. Action authorization
-requires the observed map and live fingerprint match in addition to possession of
-the capability. Those refs remain actionable after another observation of the same
-document while their fingerprint is unchanged. If a structural change changes a
-control's fingerprint, its earlier capability invalidates fail closed and requires
-re-observation. A changed view sends its complete `dom` tree;
+`[@e:<22 base64url characters>]` is a 132-bit session-secret HMAC capability.
+`StableObservationRefs` owns one anchor per physical CDP node, scoped by a private
+random frame namespace, Chrome document loader, and the existing document epoch.
+Unrelated text, sibling insertion/order, values, selection and scrolling preserve
+that anchor. A missing node or changed material intent retires it; restoring the
+old appearance cannot revive a retired capability. Identical replacement markup
+is a different node and cannot inherit a ref. Unbound/duplicate identities fail
+closed. Full CDP accessible names and authored role, destination and form binding
+supply intent checks; inventory-relative inferred labels do not supply identity.
+
+Query labels are compatibility aliases bound once to that same capability. An
+alias is reserved through document reset and never transferred to a replacement
+node. They are not a second semantic re-resolution path. The opaque suffix grew
+from 11 to 22 characters; the prefix and observation/query field shapes remain.
+The full design and regression map are in
+[data/ts-persistent-element-identity/report.md](../data/ts-persistent-element-identity/report.md).
+
+A changed view sends its complete `dom` tree;
 `delta: true` identifies an existing document, and `removed` names refs that left
 the rendered view. An unchanged view emits `dom_unchanged: true` and omits `dom`, retaining the
 consumer's prior view. A newly blank view still emits `dom: ""` with no unchanged

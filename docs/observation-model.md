@@ -41,11 +41,19 @@ The through-line: the layer is tuned for **payload size** and **secret-safety**,
 
 **Correction from review:** an accessible name is *presentation, not identity*. Name-based re-resolution can silently hit the wrong element (duplicate names, swapped list items, localized/changed copy, recycled nodes). So the system does NOT key on the descriptive name. Instead:
 
-- **Identity = a durable fingerprint** the system keys on, bound to an observed document epoch. The DOM `id` is the primary fingerprint input **when it is present, unique on the page, and stable across re-renders**; otherwise the fingerprint falls back to a structural signal (accessibility-tree path + role + name). Framework-random ids (React `useId` → `:r3:`, regenerated-per-render) are detected and excluded from the fingerprint — unique-per-render but unstable is worse than useless.
-- **Label = a legible alias** the agent reads and uses (`@continue-with-google`, `@email-input`, `@sign-out-btn`). The agent talks in labels; the system resolves them to the fingerprint.
-- **Every act carries the observed epoch + fingerprint.** Re-resolution is allowed only within a verified same-document/same-form scope. On any mismatch the operation **fails closed** (`stale_ref`) — it never optimistically re-targets. Duplicate labels (two "Add to cart" in a grid) resolve to distinct fingerprints; a label that maps to more than one live fingerprint returns an explicit ambiguity error, not a guess.
+- **Identity = physical CDP node identity**, scoped by a private frame namespace,
+  Chrome document loader and session document epoch. No DOM id, semantic slug,
+  sibling ordinal or selector supplies compact-v2 identity.
+- **Ref = 132-bit opaque capability**, generated under a session secret for that
+  node and its material intent. Removal or changed intent retires it; identical
+  replacement markup never inherits it.
+- **Label = compatibility spelling of the same anchor**, allocated once per ref
+  and reserved until document reset. It never re-resolves by semantic similarity.
+- **Every act checks the observed map and live anchor.** Document/frame guards,
+  intent checks, payment gates and the state-evidence gate remain fail closed.
 
-Consequence: the agent gets a readable, mostly-stable handle (the DOM id does most of the work where it exists), while the identity/authorization boundary survives — a page changing underneath produces an honest `stale_ref`, never a silent wrong click.
+Current implementation and wire contract:
+[Canonical DOM serialization](browser-use-serializer-port.md#identity-deltas-and-query).
 
 ### 4.2 Resident DOM, projected skeleton (makes expansion free)
 
@@ -229,52 +237,17 @@ and where it is deliberately narrower or more conservative than §4.1 above.
 
 | Concern | File |
 | --- | --- |
-| Fingerprint (DOM id / structural fallback, framework-random id rejection) | `element-fingerprint.ts` |
+| Physical node, document loader and material intent | `browser-use-capture.ts` |
 | Handle minting, epoch, target authorization, live re-resolution | `provision-session.ts` |
 | Browser-use DOM serialization and its contract | `browser-use-serializer.ts`; `browser-use-serializer-port.md` |
 | Control-query rows and `@label` aliases | `compact-observation-v2.ts` |
 
 ### Identity
 
-- **Ref** — the current wire shape, 66-bit capability construction, document lifetime,
-  and additional authorization checks are owned by
-  [`browser-use-serializer-port.md`](browser-use-serializer-port.md). This model retains
-  only the durable-fingerprint rationale below.
-- **Fingerprint** — four tiers, each consulted only when the one above it does
-  not identify the element uniquely within the inventory: (1) the DOM `id` when
-  present, unique on the page, and not framework-random; (2)
-  `(frame, role/tag/type, accessible name, authored form-control name)`; (3)
-  the containing region, disambiguating same-named controls in different parts
-  of the page; (4) the ordinal among elements the first three leave genuinely
-  indistinguishable. The accessibility path (`screenPath`) is deliberately not
-  an input: its fallback slug embeds the element's index in the inventory, so
-  an autocomplete re-render that merely reorders an address block used to
-  change every fingerprint in it. Every tier is frame-scoped so a control in an
-  embedded frame can never hash onto a main-page ref.
-- **Label** — `@continue-with-google`, slugified from the page
-  control description. It is an addressable alias: the flat acting verbs accept it and
-  resolves it to a ref. Over-length names stay legible: when the accessible
-  name is a heading glued to a longer description, the leading title is kept
-  and the description dropped (the seam is detected in the original name, without
-  screening the original name); any remaining
-  over-length slug is cut on a word boundary, never mid-word. Duplicate labels
-  are disambiguated deterministically at
-  map-build time (`disambiguateDuplicateLabelsV2`): the first occurrence keeps
-  the base slug, later ones gain `-2`/`-3` ordinals in the map's own row order,
-  so two controls sharing an accessible name are individually addressable
-  instead of permanently ambiguous. `resolveCompactV2Label` still refuses with
-  `ambiguous_target` if a label ever names more than one observed row — a
-  fail-closed backstop, not the expected path; it never guesses.
-- **Epoch** — `{ doc, rev }`. `doc` is an HMAC of the browser's stable
-  main-document identity; `rev` is a monotonic counter that advances only when
-  the serialized skeleton actually changed. `doc` is the authorization boundary
-  (a real navigation kills every ref minted under it); `rev` binds only the
-  positional overflow cursors, so a re-render invalidates a page offset without
-  touching a single ref. "Main-document identity" means a REPLACED document:
-  `trackMainDocument` counts `domcontentloaded` (one per real main-frame
-  document), not `framenavigated` — Playwright emits the latter for History API
-  navigations too, so a checkout SPA's own `replaceState` used to retire every
-  ref between two fields of one address form.
+The original phase-1 tiered fingerprint and per-snapshot label ordinals have
+been superseded for compact-v2 by physical node anchors. See
+[the current contract](browser-use-serializer-port.md#identity-deltas-and-query).
+The legacy non-compact interface retains its structural fingerprints.
 
 ### Deviations from §4.1, and why
 
@@ -299,23 +272,11 @@ and where it is deliberately narrower or more conservative than §4.1 above.
   the PR #624 re-render-tolerant cursor protocol is intact, now keyed on
   `epoch.rev`.
 
-### Known residual
+### Physical continuity
 
-The tier-4 sibling ordinal is positional. Removing one of two *truly
-indistinguishable* siblings (identical frame, role, accessible name, control
-name, and region) shifts the survivor onto the departed element's fingerprint.
-Real per-row controls carry a distinguishing signal — an authored `id`, a
-`name`, differing row text — which puts them on an earlier tier. This is the
-same information-theoretic residual documented at `volatilePositionalGroups` in
-`provision-session.ts`.
-
-Tiering is inventory-relative: a control whose accessible name is unique at
-observation time and shares it with a newcomer at act time drops from tier 2 to
-tier 3, changing its fingerprint and failing closed. That is the conservative
-direction, and it replaces a strictly worse failure — under the old scheme the
-region slug (derived from the region's own text) and the path ordinal were both
-in the identity unconditionally, so ordinary form churn moved fingerprints that
-now hold.
+A framework replacing a node with identical markup must obtain a new ref.
+This is deliberate fail-closed behavior; node replacement is not continuity.
+Unrelated siblings do not change the surviving node's identity.
 
 ### Phase 2 — redaction shipped, then removed entirely (2026-09-05)
 

@@ -23,6 +23,83 @@ afterAll(async () => {
   await browser?.close();
 });
 describe("interleaved observation DOM", () => {
+  it("binds persistent capabilities to physical nodes across fresh CDP captures", async () => {
+    const page = await browser.newPage();
+    const refs = new StableObservationRefs();
+    const read = async () => {
+      const capture = await captureThroughController(page);
+      const handles = refs.actions("doc", capture.elements);
+      return { capture, handles };
+    };
+    try {
+      await page.setContent('<main><button id="held">Continue</button><p>Before</p></main>');
+      const first = await read();
+      const held = first.capture.elements.find((el) => el.id === "held")!;
+      const ref = first.handles.get(held)!;
+      expect(ref).toMatch(/^@e:[A-Za-z0-9_-]{22}$/);
+      await page.locator("main").evaluate((main) => {
+        main.querySelector("p")!.textContent = "Unrelated content changed";
+        const sibling = document.createElement("button");
+        sibling.textContent = "Continue";
+        main.prepend(sibling);
+      });
+      const second = await read();
+      const same = second.capture.elements.find((el) => el.id === "held")!;
+      expect(same.observationIdentity).toBe(held.observationIdentity);
+      expect(same.observationIntent).toBe(held.observationIntent);
+      expect(second.handles.get(same)).toBe(ref);
+      await page.locator("#held").evaluate((el) => el.replaceWith(el.cloneNode(true)));
+      const third = await read();
+      const replacement = third.capture.elements.find((el) => el.id === "held")!;
+      expect(replacement.observationIdentity).not.toBe(held.observationIdentity);
+      expect([...third.handles.values()]).not.toContain(ref);
+      const replacementRef = third.handles.get(replacement)!;
+      await page.locator("#held").evaluate((el) => {
+        el.textContent = "Delete account";
+      });
+      const fourth = await read();
+      expect([...fourth.handles.values()]).not.toContain(replacementRef);
+      await page.locator("#held").evaluate((el) => {
+        el.textContent = "Continue";
+      });
+      expect([...(await read()).handles.values()]).not.toContain(replacementRef);
+      await page.locator("#held").evaluate((el) => el.remove());
+      expect((await read()).capture.elements.some((el) => el.id === "held")).toBe(false);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("retires a held anchor when its form changes destination", async () => {
+    const page = await browser.newPage();
+    const refs = new StableObservationRefs();
+    const read = async () => {
+      const capture = await captureThroughController(page);
+      const handles = refs.actions("doc", capture.elements);
+      return handles.get(capture.elements.find((el) => el.id === "submit")!);
+    };
+    try {
+      await page.setContent(
+        '<form id="form" action="/safe"><button id="submit">Continue</button></form>',
+      );
+      const submit = await read();
+      expect(submit).toBeDefined();
+      await page.locator("form").evaluate((form) => form.setAttribute("action", "/delete"));
+      expect(await read()).not.toBe(submit);
+      // Explicit ownership outside the form is subject to the same check.
+      await page.locator("#submit").evaluate((button) => {
+        document.body.append(button);
+        button.setAttribute("form", "form");
+      });
+      const explicit = await read();
+      expect(explicit).toBeDefined();
+      await page.locator("form").evaluate((form) => form.setAttribute("action", "/other"));
+      expect(await read()).not.toBe(explicit);
+    } finally {
+      await page.close();
+    }
+  });
+
   it("returns rendered API keys, app slugs, key names and documentation JSON verbatim", async () => {
     const page = await browser.newPage();
     // The first two are exact reported false positives. Key names and requestId

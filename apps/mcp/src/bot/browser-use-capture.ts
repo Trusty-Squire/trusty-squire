@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import type { CDPSession, Frame, Page } from "playwright";
 interface RawNode {
   nodeId: number;
@@ -14,7 +15,7 @@ interface RawNode {
   isScrollable?: boolean;
 }
 interface FrameTree {
-  frame: { id: string; url: string };
+  frame: { id: string; url: string; loaderId: string };
   childFrames?: FrameTree[];
 }
 import type { InteractiveElement } from "./browser.js";
@@ -26,6 +27,18 @@ import {
   type BrowserUseNode,
   type DOMBounds,
 } from "./browser-use-serializer.js";
+
+// Frame object identity prevents backend IDs from crossing renderer/frame scopes.
+// Kept outside the page; authored DOM attributes cannot forge this namespace.
+const frameIdentities = new WeakMap<Frame, string>();
+function frameIdentity(frame: Frame): string {
+  let identity = frameIdentities.get(frame);
+  if (identity === undefined) {
+    identity = randomBytes(32).toString("base64url");
+    frameIdentities.set(frame, identity);
+  }
+  return identity;
+}
 
 const STYLES = [
   "display",
@@ -168,7 +181,9 @@ export async function captureBrowserUseDOM(
       for (const [index, child] of (tree.childFrames ?? []).entries())
         markUnboundFrameTree(child, frame?.childFrames()[index]);
     };
+    const documentLoaders = new Map<Frame, string>();
     const bindFrames = (tree: FrameTree, frame: Frame): void => {
+      documentLoaders.set(frame, tree.frame.loaderId);
       frameIds.push(tree.frame.id);
       frameById.set(tree.frame.id, frame);
       framePathById.set(tree.frame.id, frame === page.mainFrame() ? null : framePath(frame));
@@ -434,7 +449,30 @@ export async function captureBrowserUseDOM(
       return n;
     };
     const root = build(dom.root, [], null, "", owningFrame);
-    const visit = (n: BrowserUseNode, inClosedShadow = false): void => {
+    const explicitForms = new Map<Frame, Map<string, string[]>>();
+    const collectForms = (n: BrowserUseNode): void => {
+      const frame = nodeFrame.get(n.id);
+      if (frame && n.nodeName === "FORM" && n.attributes.id) {
+        let forms = explicitForms.get(frame);
+        if (!forms) explicitForms.set(frame, (forms = new Map()));
+        const intents = forms.get(n.attributes.id) ?? [];
+        intents.push(
+          JSON.stringify([n.id, n.attributes.action, n.attributes.method, n.attributes.target]),
+        );
+        forms.set(n.attributes.id, intents);
+      }
+      n.children.forEach(collectForms);
+      if (n.contentDocument) collectForms(n.contentDocument);
+    };
+    collectForms(root);
+    const visit = (n: BrowserUseNode, inClosedShadow = false, form = ""): void => {
+      if (n.nodeName === "FORM")
+        form = JSON.stringify([
+          n.id,
+          n.attributes.action,
+          n.attributes.method,
+          n.attributes.target,
+        ]);
       const raw = rawById.get(n.id)!,
         frame = nodeFrame.get(n.id)!;
       let el = bindings.get(raw.backendNodeId);
@@ -489,12 +527,33 @@ export async function captureBrowserUseDOM(
           };
         }
       }
-      if (el) {
+      if (el && frame && documentLoaders.get(frame) && liveBackendNodeIds.has(raw.backendNodeId)) {
+        el.observationIdentity = `${frameIdentity(frame)}:${documentLoaders.get(frame)}:${raw.backendNodeId}`;
+        // Include destinations and form ownership even when the visible name
+        // stays the same. State/value and surrounding text are not identity.
+        el.observationIntent = JSON.stringify([
+          n.nodeName,
+          n.axRole,
+          viewMetadata.get(n.id)?.name,
+          n.attributes.type,
+          n.attributes.role,
+          n.attributes.name,
+          n.attributes["aria-label"],
+          n.attributes["aria-labelledby"],
+          n.attributes.title,
+          n.attributes.placeholder,
+          n.attributes.href,
+          n.attributes.form,
+          n.attributes.formaction,
+          n.attributes.autocomplete,
+          n.attributes["data-field-role"],
+          n.attributes.form === undefined ? form : explicitForms.get(frame)?.get(n.attributes.form),
+        ]);
         if (!elements.includes(el)) elements.push(el);
         nodeElements.set(n.id, el);
       }
       const closed = inClosedShadow || n.shadowType?.toLowerCase() === "closed";
-      n.children.forEach((child) => visit(child, closed));
+      n.children.forEach((child) => visit(child, closed, form));
       if (n.contentDocument) visit(n.contentDocument);
     };
     visit(root);
