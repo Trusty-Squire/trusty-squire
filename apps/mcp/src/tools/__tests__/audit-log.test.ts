@@ -257,6 +257,34 @@ describe("audit_log ledger view", () => {
     expect(rollups[0]?.grants).toEqual([{ grant_id: "g1" }]);
   });
 
+  it("uses the lifetime fallback for caller-missing proxy history", () => {
+    const grants = [
+      {
+        grant_id: "g1",
+        credential_ref: REF,
+        rate_limit_per_hour: null,
+        spend_cap_usd: null,
+        created_at: at(-1_000_000),
+        revoked_at: null,
+      },
+    ];
+    const [legacy] = egressBurst(1, { bytes: 300 });
+    Object.assign(legacy!, {
+      attribution: {
+        task_id: null,
+        agent_identity: null,
+        invocation_id: null,
+        purpose: "egress_proxy",
+        caller_missing: true,
+      },
+    });
+
+    const totals = buildGrantTotals([legacy!], grants);
+    expect(totals[0]).toMatchObject({ grant_id: "g1", calls: 1, total_bytes: 300 });
+    const rollups = buildEgressRollups([legacy!], { windowMinutes: 60, grants });
+    expect(rollups[0]?.grants).toEqual([{ grant_id: "g1" }]);
+  });
+
   it("survives an egress-grant lookup failure", async () => {
     const listEgressGrants = vi.fn().mockRejectedValue(new Error("grants down"));
     const { api } = pagedApi(egressBurst(5), { listEgressGrants });

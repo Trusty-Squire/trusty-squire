@@ -79,7 +79,11 @@ function str(value: unknown): string | null {
 
 function hasStructuredAttribution(event: AuditEvent): boolean {
   const value = event.attribution;
-  return value !== null && typeof value === "object";
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    (value as Record<string, unknown>).caller_missing !== true
+  );
 }
 
 /** Why this row is actionable, or null when it is routine. */
