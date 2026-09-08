@@ -211,7 +211,10 @@ async function runSeam(cfg: {
           nonce,
           agent,
           account_binding: accountBinding,
-          expires_at: new Date(8.64e15).toISOString(),
+          // The controlled clock starts at Unix epoch; this must remain within
+          // Node's AbortSignal.timeout range when the operator derives its
+          // request deadline from the server response.
+          expires_at: new Date(60_000).toISOString(),
         },
         { status: 201 },
       );
@@ -271,7 +274,7 @@ async function runSeam(cfg: {
         operator_pubkey: operatorPubkey,
         account_binding: accountBinding,
         ...candidate,
-        expires_at: new Date(8.64e15).toISOString(),
+        expires_at: new Date(60_000).toISOString(),
       });
     }
     if (url.endsWith("/v1/pay/approvals/appr_seam/confirm") && init?.method === "POST") {

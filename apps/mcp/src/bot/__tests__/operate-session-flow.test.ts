@@ -8943,7 +8943,13 @@ describe("operate_pay tool completion — system-owned approval wait [P0]", () =
       if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
         approvalBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
         return Response.json(
-          { id: "appr_kobee", nonce, agent, account_binding: accountBinding, expires_at: expiresAt },
+          {
+            id: "appr_kobee",
+            nonce,
+            agent,
+            account_binding: accountBinding,
+            expires_at: expiresAt,
+          },
           { status: 201 },
         );
       }

@@ -307,7 +307,9 @@ describe("pay page — JIT add-card ceremony", () => {
 
     await userEvent.setup().click(await screen.findByRole("button", { name: /Approve payment/ }));
 
-    await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/login?next=/vault/pay/appr_1"));
+    await waitFor(() =>
+      expect(router.replace).toHaveBeenCalledWith("/login?next=/vault/pay/appr_1"),
+    );
   });
 
   it("sends an expired approval session to login before denial", async () => {
@@ -317,7 +319,9 @@ describe("pay page — JIT add-card ceremony", () => {
 
     await userEvent.setup().click(await screen.findByRole("button", { name: "Deny payment" }));
 
-    await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/login?next=/vault/pay/appr_1"));
+    await waitFor(() =>
+      expect(router.replace).toHaveBeenCalledWith("/login?next=/vault/pay/appr_1"),
+    );
   });
 
   it("shows normal payment copy for a genuine zero-dollar approval", async () => {
@@ -390,7 +394,9 @@ describe("pay page — JIT add-card ceremony", () => {
 
     await userEvent.setup().click(screen.getByTestId("card-entry"));
 
-    await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/login?next=/vault/pay/appr_1"));
+    await waitFor(() =>
+      expect(router.replace).toHaveBeenCalledWith("/login?next=/vault/pay/appr_1"),
+    );
     expect(api.apiPost).toHaveBeenCalledWith("/v1/pay/approvals/appr_1/bind-card", {
       card_ref: "card_new",
     });

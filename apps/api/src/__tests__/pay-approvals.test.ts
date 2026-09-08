@@ -43,7 +43,6 @@ describe("payment approval relay", () => {
   let webCookie: string;
   let otherAgentToken: string;
   let otherWebCookie: string;
-  let accountId: string;
 
   beforeEach(async () => {
     nowMs = Date.parse("2026-07-23T12:00:00.000Z");
@@ -54,7 +53,6 @@ describe("payment approval relay", () => {
     server = await buildServer({ deps, vouchVerifier: async () => ({}) });
     const account = await deps.accountStore.createAccount("payer@example.test", "Payer");
     const other = await deps.accountStore.createAccount("other@example.test", "Other");
-    accountId = account.id;
     agentToken = await makeAgentToken(deps, account.id, new Date(nowMs));
     webCookie = await makeWebSession(deps, account.id, new Date(nowMs));
     otherAgentToken = await makeAgentToken(deps, other.id, new Date(nowMs));
