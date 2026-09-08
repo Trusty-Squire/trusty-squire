@@ -161,6 +161,12 @@ export async function captureBrowserUseDOM(
     const axs = new Map(
       ax.nodes.filter((n) => n.backendDOMNodeId !== undefined).map((n) => [n.backendDOMNodeId!, n]),
     );
+    const hasCustomElements = (node: RawNode): boolean =>
+      (node.nodeType === 1 && node.nodeName.includes("-")) ||
+      (node.children ?? []).some(hasCustomElements) ||
+      (node.shadowRoots ?? []).some(hasCustomElements) ||
+      (node.contentDocument !== undefined && hasCustomElements(node.contentDocument));
+    const containsCustomElements = hasCustomElements(dom.root);
     const frameIds: string[] = [];
     const frameById = new Map<string, Frame>();
     const framePathById = new Map<string, string | null>();
@@ -239,29 +245,30 @@ export async function captureBrowserUseDOM(
       const frameBindings = new Map<number, InteractiveElement>();
       const frameListeners = new Set<number>();
       let formAssociated = new Set<string>();
-      try {
-        formAssociated = new Set(
-          await frame.evaluate(() => {
-            const names = new Set<string>();
-            const roots: Array<Document | ShadowRoot> = [document];
-            for (let i = 0; i < roots.length; i++)
-              for (const el of Array.from(roots[i]!.querySelectorAll("*"))) {
-                const name = el.localName;
-                if (
-                  name.includes("-") &&
-                  (
-                    customElements.get(name) as
-                      | (CustomElementConstructor & { formAssociated?: boolean })
-                      | undefined
-                  )?.formAssociated === true
-                )
-                  names.add(name);
-                if (el.shadowRoot) roots.push(el.shadowRoot);
-              }
-            return [...names];
-          }),
-        );
-      } catch {}
+      if (containsCustomElements)
+        try {
+          formAssociated = new Set(
+            await frame.evaluate(() => {
+              const names = new Set<string>();
+              const roots: Array<Document | ShadowRoot> = [document];
+              for (let i = 0; i < roots.length; i++)
+                for (const el of Array.from(roots[i]!.querySelectorAll("*"))) {
+                  const name = el.localName;
+                  if (
+                    name.includes("-") &&
+                    (
+                      customElements.get(name) as
+                        | (CustomElementConstructor & { formAssociated?: boolean })
+                        | undefined
+                    )?.formAssociated === true
+                  )
+                    names.add(name);
+                  if (el.shadowRoot) roots.push(el.shadowRoot);
+                }
+              return [...names];
+            }),
+          );
+        } catch {}
       formAssociatedTags.set(frame, formAssociated);
       try {
         const context = await client.send("Page.createIsolatedWorld", {
@@ -321,7 +328,8 @@ export async function captureBrowserUseDOM(
               }),
             );
         }
-        try {
+        if (containsCustomElements)
+          try {
           const listenerTargets = await client.send("Runtime.evaluate", {
             expression: `(() => { const roots=[document], priority=[], fallback=[], limit=100; for(let i=0;i<roots.length;i++) for(const el of roots[i].querySelectorAll('*')) { if(el.shadowRoot) roots.push(el.shadowRoot); if(!el.localName.includes('-')) continue; const r=el.getBoundingClientRect(), s=getComputedStyle(el), visible=r.width>1&&r.height>1&&r.bottom>0&&r.right>0&&r.top<innerHeight&&r.left<innerWidth&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)>0; const role=el.getAttribute('role')||''; const likely=visible&&(/(?:quick-add|add-to-cart|product-form|buy|cart)/.test(el.localName)||el.closest("form,[class*='product'],[id*='product'],[class*='price'],[id*='price']")!==null||['button','link','checkbox','radio','combobox','textbox','menuitem','option','tab'].includes(role)||el.hasAttribute('command')||el.hasAttribute('commandfor')||el.hasAttribute('popovertarget')); const targets=likely?priority:fallback; if(targets.length<limit) targets.push(el); } return [...priority,...fallback].slice(0,limit); })()`,
             contextId: context.executionContextId,
@@ -360,7 +368,7 @@ export async function captureBrowserUseDOM(
                     frameListeners.add(listener.backendNodeId);
             }
           }
-        } catch {}
+          } catch {}
         for (const [backendNodeId, element] of frameBindings) bindings.set(backendNodeId, element);
         for (const backendNodeId of frameListeners) listeners.add(backendNodeId);
       } catch {
