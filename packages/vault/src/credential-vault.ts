@@ -598,7 +598,7 @@ export class CredentialVault implements VaultClient {
       requester: "agent",
       signingDeviceId: null,
       assertion: null,
-      attribution,
+      ...(attribution !== undefined ? { attribution } : {}),
     });
   }
 
