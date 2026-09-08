@@ -13730,9 +13730,20 @@ export class BrowserController {
       } else {
         const retained = product.isClosed() ? recovery : product;
         this.page = retained?.isClosed() === false ? retained : this.primaryPage;
-        this.oauthProductPage = null;
-        this.oauthProviderPage = null;
-        this.oauthProviderPageClosed = false;
+        if (
+          this.page === product &&
+          !product.isClosed() &&
+          this.oauthCompletionPage !== null &&
+          !this.oauthCompletionPage.isClosed()
+        ) {
+          this.oauthProductPage = product;
+          this.oauthProviderPage = this.oauthCompletionPage;
+          this.oauthProviderPageClosed = false;
+        } else {
+          this.oauthProductPage = null;
+          this.oauthProviderPage = null;
+          this.oauthProviderPageClosed = false;
+        }
         if (
           providerPage !== null &&
           providerPage !== this.oauthCompletionPage &&
@@ -14737,18 +14748,21 @@ export class BrowserController {
     const provider = this.oauthProviderPage;
     const isLifecyclePage = (page: Page | null | undefined): boolean =>
       page !== null && page !== undefined && (page === product || page === provider);
+    const isCompletedPopupPair = active === product && operationPage === provider;
     if (
       product === null ||
       product.isClosed() ||
       active === null ||
       !isLifecyclePage(active) ||
-      (operationPage !== undefined && (!isLifecyclePage(operationPage) || operationPage !== active))
+      (operationPage !== undefined &&
+        (!isLifecyclePage(operationPage) ||
+          (operationPage !== active && !isCompletedPopupPair)))
     ) {
       throw new Error("OAuth lifecycle no longer matches the resolved operation page");
     }
     let settled = false;
     try {
-      if (product === active) {
+      if (product === active && (provider === null || provider === product || provider.isClosed())) {
         settled = true;
         return product;
       }
@@ -14766,6 +14780,7 @@ export class BrowserController {
         this.oauthProviderPage === provider &&
         !product.isClosed()
       ) {
+        if (this.oauthCompletionPage === provider) this.oauthCompletionPage = null;
         await provider.close().catch(() => undefined);
       }
       if (product.isClosed()) {

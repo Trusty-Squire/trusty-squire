@@ -2239,7 +2239,17 @@ export async function observe(
 ): Promise<Observation> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  return await observeSession(session, detail, undefined, operationPageForSession(session));
+  const completionSource = oauthCompletionSourcePage(session);
+  if (completionSource?.isClosed() === true) {
+    session.browser.completeOAuthTransitionRecovery();
+  }
+  const sourcePage = operationPageForSession(session);
+  return await observeSession(
+    session,
+    detail,
+    undefined,
+    sourcePage?.isClosed() === true ? undefined : sourcePage,
+  );
 }
 
 export interface ScreenshotCapture {

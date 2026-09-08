@@ -954,6 +954,60 @@ describe("BrowserController OAuth popup lifecycle", () => {
     },
   );
 
+  it("settles an atomic popup return on its retained product page", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects";
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<button id="oauth" onclick='window.open(${JSON.stringify(
+          `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+        )})'>Continue</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<script>location.replace(${JSON.stringify(expectedReturnUrl)})</script>`,
+      }),
+    );
+    await context.route("https://console.product.test/**", (route) =>
+      route.fulfill({ contentType: "text/html", body: "<main>Projects</main>" }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    let sessionId: string | undefined;
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: "https://product.test/login",
+      });
+      sessionId = started.session_id;
+      const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+      expect(oauthRef).toBeDefined();
+      await act(sessionId, { kind: "oauth_login", target: oauthRef!, provider: "google" });
+      const provider = controller.completedOAuthPage();
+      expect(provider).not.toBeNull();
+      const sleepSpy = vi
+        .spyOn(controller as unknown as { sleep(ms: number): Promise<void> }, "sleep")
+        .mockResolvedValue();
+      try {
+        const settled = await act(sessionId, { kind: "oauth_settle" });
+        expect(settled.url).toBe("https://product.test/login");
+        expect(settled.el_table).toContain("Continue");
+        expect(provider?.isClosed()).toBe(true);
+        expect(product.isClosed()).toBe(false);
+        expect((controller as unknown as { page: Page }).page).toBe(product);
+      } finally {
+        sleepSpy.mockRestore();
+      }
+    } finally {
+      if (sessionId) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
+
   it.each(["completed", "awaiting_human"] as const)(
     "reports a reused-session popup as %s while the initiating click is still pending",
     async (outcome) => {
@@ -2145,6 +2199,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await expect(
         act(sessionId, { kind: "goto", url: "https://product.test/other" }),
       ).rejects.toThrow("action source page is closed");
+      const recovered = await observe(sessionId);
+      expect(recovered.url).toBe("https://product.test/login");
+      expect(recovered.el_table).toContain("Continue");
       expect(product.url()).toBe("https://product.test/login");
       expect(await product.locator("body").getAttribute("data-product-clicked")).toBeNull();
     } finally {
