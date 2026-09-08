@@ -33,22 +33,13 @@ export class OperatorForwarder {
         const session = await this.guard.bind();
         if (session?.agent_session_token === undefined)
           throw new BrokerRefusal("unauthorized", "Connect before using the broker");
-        const deadline = Date.now() + 2_000;
-        for (;;) {
-          try {
-            const client = await connectOrLaunchBroker(
-              this.path,
-              session.agent_session_token,
-              this.lineageCredential,
-            );
-            this.client = client;
-            return client;
-          } catch (error) {
-            if (!(error instanceof BrokerRefusal) || error.code !== "forwarder_in_use" || Date.now() >= deadline)
-              throw error;
-            await new Promise((resolve) => setTimeout(resolve, 25));
-          }
-        }
+        const client = await connectOrLaunchBroker(
+          this.path,
+          session.agent_session_token,
+          this.lineageCredential,
+        );
+        this.client = client;
+        return client;
       })().finally(() => {
         this.connecting = false;
       });

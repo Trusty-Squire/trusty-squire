@@ -26,6 +26,11 @@ export interface BrokerSessionPort {
   /** True only after owned tabs and pending outcome custody are resolved. */
   close(reason?: "finish" | "disconnect"): Promise<boolean>;
 }
+export const FORWARDER_HANDOFF_TIMEOUT_MS = 120_000;
+interface ForwarderConnection {
+  clientId: string;
+  detach?: { promise: Promise<void>; resolve: () => void };
+}
 interface Actor {
   principal: BrokerPrincipal;
   capability: TabCapability;
@@ -56,7 +61,7 @@ export class BrokerAuthority {
     string,
     { principal: BrokerPrincipal; abort: AbortController }
   >();
-  private readonly forwarderConnections = new Map<string, string>();
+  private readonly forwarderConnections = new Map<string, ForwarderConnection>();
   private readonly fencedClients = new Set<string>();
   private readonly scheduler = new ScopeScheduler();
   private readonly lanes = new ScopeScheduler();
@@ -72,27 +77,64 @@ export class BrokerAuthority {
       principal.accountId !== this.accountId ||
       this.fencedClients.has(principal.clientId) ||
       (principal.forwarderId !== undefined &&
-        this.forwarderConnections.get(principal.forwarderId) !== principal.clientId)
+        this.forwarderConnections.get(principal.forwarderId)?.clientId !== principal.clientId)
     ) {
       throw new BrokerRefusal("unauthorized", "Client is not admitted to this identity cell");
     }
   }
 
-  claimForwarder(principal: BrokerPrincipal): void {
+  claimForwarder(principal: BrokerPrincipal): Promise<void> | void {
     if (principal.accountId !== this.accountId)
       throw new BrokerRefusal("unauthorized", "Client is not admitted to this identity cell");
     const forwarderId = principal.forwarderId;
     if (forwarderId === undefined)
       throw new BrokerRefusal("unauthorized", "Client has no forwarder lineage");
     const holder = this.forwarderConnections.get(forwarderId);
-    if (holder !== undefined && holder !== principal.clientId)
+    if (holder === undefined) {
+      this.forwarderConnections.set(forwarderId, { clientId: principal.clientId });
+      return;
+    }
+    if (holder.clientId === principal.clientId) return;
+    if (holder.detach === undefined)
       throw new BrokerRefusal("forwarder_in_use", "Forwarder identity is already active");
-    this.forwarderConnections.set(forwarderId, principal.clientId);
+    return this.waitForDetach(holder.detach).then(() => this.claimForwarder(principal));
+  }
+
+  beginForwarderRelease(principal: BrokerPrincipal): void {
+    const holder = this.forwarderConnections.get(principal.forwarderId);
+    if (holder === undefined || holder.clientId !== principal.clientId || holder.detach !== undefined)
+      return;
+    let resolve!: () => void;
+    const promise = new Promise<void>((settled) => {
+      resolve = settled;
+    });
+    holder.detach = { promise, resolve };
+  }
+
+  private async waitForDetach(detach: ForwarderConnection["detach"]): Promise<void> {
+    if (detach === undefined) return;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        detach.promise,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new BrokerRefusal("forwarder_handoff_timeout", "Forwarder cleanup did not complete")),
+            FORWARDER_HANDOFF_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
   }
 
   releaseForwarder(principal: BrokerPrincipal): void {
-    if (this.forwarderConnections.get(principal.forwarderId) === principal.clientId)
+    const holder = this.forwarderConnections.get(principal.forwarderId);
+    if (holder?.clientId === principal.clientId) {
       this.forwarderConnections.delete(principal.forwarderId!);
+      holder.detach?.resolve();
+    }
   }
 
   async open(
@@ -302,7 +344,7 @@ export class BrokerAuthority {
     actor.closeReason = reason;
     actor.abort.abort();
     actor.closePromise = (async () => {
-      await actor.tail;
+      await actor.tail.catch(() => undefined);
       const proven = await actor.port.close(reason).catch(() => false);
       if (!proven) {
         actor.state = "quarantined";

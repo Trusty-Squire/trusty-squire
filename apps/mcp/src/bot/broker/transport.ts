@@ -3,7 +3,7 @@ import { chmod, lstat, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { BrokerRefusal } from "./scheduler.js";
-import type { BrokerPrincipal } from "./authority.js";
+import { FORWARDER_HANDOFF_TIMEOUT_MS, type BrokerPrincipal } from "./authority.js";
 
 const MAX_FRAME = 8 * 1024 * 1024;
 const requestSchema = z
@@ -236,7 +236,7 @@ export class BrokerClient {
     const client = new BrokerClient(socket);
     const deadline = setTimeout(
       () => socket.destroy(new Error("Broker authentication timed out")),
-      5000,
+      lineageCredential === undefined ? 5_000 : FORWARDER_HANDOFF_TIMEOUT_MS + 5_000,
     );
     try {
       await new Promise<void>((resolve, reject) => {

@@ -35,6 +35,7 @@ describe("authenticated broker IPC", () => {
       connected: (principal) => authority.claimForwarder(principal),
       call: async () => ({}),
       disconnect: async (principal) => {
+        authority.beginForwarderRelease(principal);
         disconnected();
         await disconnectGate;
         authority.releaseForwarder(principal);
@@ -55,10 +56,21 @@ describe("authenticated broker IPC", () => {
       )?.value;
       await first?.close();
       await disconnectStarted;
-      await expect(BrokerClient.connect(path, "test")).rejects.toThrow("already active");
+      const handoff = BrokerClient.connect(path, "test");
+      let handoffSettled = false;
+      void handoff.then(
+        () => {
+          handoffSettled = true;
+        },
+        () => {
+          handoffSettled = true;
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 2_100));
+      expect(handoffSettled).toBe(false);
       releaseDisconnect();
       await disconnectFinished;
-      restarted = await BrokerClient.connect(path, "test");
+      restarted = await handoff;
     } finally {
       releaseDisconnect();
       await first?.close();
@@ -66,7 +78,7 @@ describe("authenticated broker IPC", () => {
       await broker.close();
       await rm(root, { recursive: true, force: true });
     }
-  });
+  }, 10_000);
 
   it("serves three separate OS processes with overlapping calls and closes only disconnected clients", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-ipc-"));
