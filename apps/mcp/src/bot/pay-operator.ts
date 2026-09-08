@@ -117,7 +117,7 @@ export interface PendingApprovalWait {
   approval_url: string;
   nonce: string;
   agent: string;
-  account_binding?: string;
+  account_binding: string;
   checkout: CheckoutSummary;
   jit: boolean;
   boundCardRef: string | null;
@@ -240,7 +240,7 @@ function decodePayloadHash(claim: unknown): Uint8Array {
 
 interface PaymentCandidateBindingTerms {
   approvalId: string;
-  accountBinding?: string;
+  accountBinding: string;
   checkout: CheckoutSummary;
   nonce: string;
   cardRef: string;
@@ -267,7 +267,7 @@ function paymentCandidateBindingContext(
       .update(fromBase64Url(terms.operatorPublicKey))
       .digest();
     const canonical = canonicalize({
-      ...(terms.accountBinding === undefined ? {} : { account_binding: terms.accountBinding }),
+      account_binding: terms.accountBinding,
       approval_id: terms.approvalId,
       merchant: terms.checkout.merchant,
       checkout_origin: terms.checkout.checkout_origin,
@@ -856,7 +856,7 @@ export async function executeOperatePay(
     let approvalId: string;
     let nonce: string;
     let agent: string;
-    let accountBinding: string | undefined;
+    let accountBinding: string;
     let approvalUrl: string;
     let deadline: number;
     let boundCardRef: string | null;
@@ -915,6 +915,9 @@ export async function executeOperatePay(
         item,
         reason,
       });
+      if (typeof created.account_binding !== "string") {
+        throw new Error("payment_approval_account_binding_missing");
+      }
       approvalId = created.id;
       nonce = created.nonce;
       agent = created.agent;
@@ -931,7 +934,7 @@ export async function executeOperatePay(
       approval_url: approvalUrl,
       nonce,
       agent,
-      ...(accountBinding !== undefined ? { account_binding: accountBinding } : {}),
+      account_binding: accountBinding,
       checkout,
       jit,
       boundCardRef,

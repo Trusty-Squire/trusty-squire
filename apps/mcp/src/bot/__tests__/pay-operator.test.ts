@@ -105,6 +105,7 @@ async function harness(
   let activePendingThreeDs: PendingThreeDsWait | null = null;
   const nonce = "synthetic-nonce";
   const agent = "synthetic-payment-test-agent";
+  const accountBinding = "synthetic-account-binding";
   let approvalPolls = 0;
   let confirmedCandidate: Record<string, unknown> | undefined;
   const approvalExpiresAt = (): string =>
@@ -127,6 +128,7 @@ async function harness(
           id: "approval_test",
           nonce,
           agent,
+          account_binding: accountBinding,
           expires_at: approvalExpiresAt(),
         },
         { status: 201 },
@@ -148,6 +150,7 @@ async function harness(
           nonce,
           card_ref: "card_test",
           operator_pubkey: operatorPublicKey,
+          account_binding: accountBinding,
           jws: confirmedCandidate.jws,
           sealed_card: confirmedCandidate.sealed_card,
           expires_at: approvalExpiresAt(),
@@ -157,6 +160,7 @@ async function harness(
         .update(Buffer.from(operatorPublicKey, "base64url"))
         .digest("base64url");
       const payload = {
+        account_binding: accountBinding,
         approval_id: "approval_test",
         merchant: checkout.merchant,
         checkout_origin:
@@ -231,6 +235,7 @@ async function harness(
         nonce,
         card_ref: "card_test",
         operator_pubkey: operatorPublicKey,
+        account_binding: accountBinding,
         jws: assertion,
         sealed_card: mode === "junk_then_happy" && approvalPolls === 1 ? "junk" : sealedCard,
         expires_at: approvalExpiresAt(),
