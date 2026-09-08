@@ -240,6 +240,10 @@ export class OperatorBroker implements BrokerTransportPort {
                 id,
                 "payment-custody",
                 session.pendingThreeDs === null ? "settled" : "entered",
+                {
+                  agentId: principal.agentId,
+                  forwarderId: principal.forwarderId ?? principal.agentId,
+                },
               );
               if (mutating)
                 await this.journal?.record(id, commandId, "outcome", {
@@ -260,7 +264,11 @@ export class OperatorBroker implements BrokerTransportPort {
                 return true;
               }
               const result = await finishProvisionSession(internalId);
-              if (result.closed) await this.journal?.record(id, "payment-custody", "settled");
+              if (result.closed)
+                await this.journal?.record(id, "payment-custody", "settled", {
+                  agentId: principal.agentId,
+                  forwarderId: principal.forwarderId ?? principal.agentId,
+                });
               return result.closed;
             },
           };

@@ -1,6 +1,6 @@
 import { connectOrLaunchBroker } from "./discovery.js";
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { fstatSync, readFileSync, writeFileSync } from "node:fs";
 import type { SessionGuard } from "../../session-guard.js";
 import type { BrokerClient } from "./transport.js";
 import type { TabCapability } from "./authority.js";
@@ -24,8 +24,19 @@ export class OperatorForwarder {
   private loadIdentity(): string {
     if (process.env.TRUSTY_SQUIRE_FORWARDER_IDENTITY !== undefined)
       return process.env.TRUSTY_SQUIRE_FORWARDER_IDENTITY;
+    let stdin: { dev: number; ino: number };
+    try {
+      stdin = fstatSync(0);
+    } catch {
+      throw new BrokerRefusal(
+        "forwarder_identity_required",
+        "Set a stable forwarder identity when stdin lineage cannot be established",
+      );
+    }
     const scope = createHash("sha256")
-      .update(`${process.ppid}:${process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "local-agent"}`)
+      .update(
+        `${process.ppid}:${stdin.dev}:${stdin.ino}:${process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "local-agent"}`,
+      )
       .digest("hex");
     const statePath = `${this.path}.forwarder-${scope}.id`;
     try {

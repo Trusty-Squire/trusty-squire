@@ -169,18 +169,24 @@ export class BrokerAuthority {
     ) {
       throw new BrokerRefusal("stale_lease", "Capability does not name an owned live session");
     }
+    if (actor.state === "active" && actor.principal.clientId !== principal.clientId)
+      throw new BrokerRefusal("forwarder_in_use", "Forwarder identity is already active");
     actor.principal = { ...principal };
     return actor;
   }
 
   reclaim(principal: BrokerPrincipal): TabCapability[] {
     this.assertPrincipal(principal);
-    return [...this.actors.values()]
-      .filter((actor) => actor.principal.forwarderId === principal.forwarderId)
-      .map((actor) => {
-        actor.principal = { ...principal };
-        return { ...actor.capability };
-      });
+    const owned = [...this.actors.values()].filter(
+      (actor) => actor.principal.forwarderId === principal.forwarderId,
+    );
+    if (owned.some((actor) => actor.state === "active" && actor.principal.clientId !== principal.clientId))
+      throw new BrokerRefusal("forwarder_in_use", "Forwarder identity is already active");
+    return owned.map((actor) => {
+      actor.principal = { ...principal };
+      if (actor.state === "quarantined") actor.state = "active";
+      return { ...actor.capability };
+    });
   }
 
   invoke(
@@ -286,6 +292,9 @@ export class BrokerAuthority {
 
   detach(principal: BrokerPrincipal): void {
     this.assertPrincipal(principal);
+    for (const actor of this.actors.values()) {
+      if (actor.principal.clientId === principal.clientId) actor.state = "quarantined";
+    }
   }
 
   fenceRuntime(): void {

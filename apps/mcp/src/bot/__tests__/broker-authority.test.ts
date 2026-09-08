@@ -61,6 +61,27 @@ describe("broker authority", () => {
     expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
   });
 
+  it("rejects concurrent forwarder reuse but restores a detached lineage", async () => {
+    const broker = new BrokerAuthority("account", "cell");
+    const first: BrokerPrincipal = {
+      accountId: "account",
+      agentId: "local-agent",
+      forwarderId: "lineage-a",
+      clientId: "first",
+    };
+    const second = { ...first, clientId: "second" };
+    const capability = await broker.open(first, ["site:a"], async () => port("a"));
+
+    expect(() => broker.reclaim(second)).toThrow("Forwarder identity is already active");
+    expect(() => broker.invoke(second, capability, "foreign", "read", {})).toThrow(
+      "Forwarder identity is already active",
+    );
+
+    broker.detach(first);
+    expect(broker.reclaim(second)).toEqual([capability]);
+    await expect(broker.invoke(second, capability, "resumed", "read", {})).resolves.toBe("a");
+  });
+
   it("retries failed admission cleanup without releasing site custody early", async () => {
     const broker = new BrokerAuthority("account", "cell");
     const owner = principal("failed");
