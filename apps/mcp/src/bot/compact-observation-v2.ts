@@ -223,7 +223,7 @@ export class StableObservationRefs {
     if (existing !== undefined || preferred === undefined) return existing;
     let candidate = preferred;
     for (let suffix = 2; this.aliasOwners.has(candidate); suffix++)
-      candidate = `${preferred}-${suffix}`;
+      candidate = labelWithOrdinalV2(preferred, suffix);
     this.aliases.set(ref, candidate);
     this.aliasOwners.set(candidate, ref);
     return candidate;
@@ -257,7 +257,8 @@ export class StableObservationRefs {
     return ref;
   }
 }
-const COMPACT_V2_LABEL_RE = /^@[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const LABEL_MAX_CHARS = 32;
+const COMPACT_V2_LABEL_RE = /^@[\p{L}\p{M}\p{N}]+(?:-[\p{L}\p{M}\p{N}]+)*(?:…)?$/u;
 
 export function isCompactV2Handle(target: string): boolean {
   return COMPACT_V2_HANDLE_RE.test(target);
@@ -265,7 +266,11 @@ export function isCompactV2Handle(target: string): boolean {
 
 /** The `@label` alias form, distinguishable from a handle by its `@e:` prefix. */
 export function isCompactV2Label(target: string): boolean {
-  return COMPACT_V2_LABEL_RE.test(target);
+  return (
+    COMPACT_V2_LABEL_RE.test(target) &&
+    /[\p{L}\p{N}]/u.test(target) &&
+    Array.from(target.slice(1)).length <= LABEL_MAX_CHARS
+  );
 }
 
 /**
@@ -282,8 +287,6 @@ export function compactV2LegacyRefForHandle(
   if (!isCompactV2Handle(target)) return null;
   return handles.get(target) ?? null;
 }
-
-const LABEL_MAX_CHARS = 32;
 
 /**
  * Split a glued "Title + description" accessible name into its leading title,
@@ -342,19 +345,34 @@ export function controlLabelV2(description: string | undefined): string | undefi
   if (description === undefined) return undefined;
   const titled = leadingTitleFromAccessibleName(description);
   let slug = titled
+    .normalize("NFKC")
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  if (slug.length > LABEL_MAX_CHARS) {
-    slug = slug.slice(0, LABEL_MAX_CHARS);
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, "-")
+    .replace(/^-+|-+$/gu, "");
+  let characters = Array.from(slug);
+  const truncated = characters.length > LABEL_MAX_CHARS;
+  const usesUnicode = characters.some((character) => character.charCodeAt(0) > 0x7f);
+  if (truncated) {
+    characters = characters.slice(0, LABEL_MAX_CHARS - Number(usesUnicode));
     // Never cut mid-word: drop the trailing partial segment at the last word
     // boundary. A single unbroken run longer than the budget keeps its
     // mid-run cut — there is no boundary to cut on.
-    const lastBoundary = slug.lastIndexOf("-");
-    if (lastBoundary > 0) slug = slug.slice(0, lastBoundary);
+    const lastBoundary = characters.lastIndexOf("-");
+    if (lastBoundary > 0) characters = characters.slice(0, lastBoundary);
   }
-  slug = slug.replace(/-+$/g, "");
-  return slug.length === 0 ? undefined : `@${slug}`;
+  slug = characters.join("").replace(/-+$/g, "");
+  if (slug.length === 0 || !/[\p{L}\p{N}]/u.test(slug)) return undefined;
+  return `@${slug}${truncated && usesUnicode ? "…" : ""}`;
+}
+
+function labelWithOrdinalV2(label: string, suffix: number): string {
+  const tail = `-${suffix}`;
+  const characters = Array.from(label.slice(1));
+  const truncated =
+    characters.length > LABEL_MAX_CHARS - Array.from(tail).length || characters.at(-1) === "…";
+  const body = truncated ? characters.slice(0, -1) : characters;
+  const limit = LABEL_MAX_CHARS - Array.from(tail).length - Number(truncated);
+  return `@${body.slice(0, limit).join("")}${tail}${truncated ? "…" : ""}`;
 }
 
 type WireControlV2 = [string, string, string?];
@@ -366,7 +384,7 @@ type WireControlV2 = [string, string, string?];
 // is deliberately one sparse string rather than nullable columns:
 // checked/unchecked, disabled, action, field, card choice, and frame context
 // remain distinguishable without paying for empty slots on every row. The
-// label's slug charset excludes `|` and `=`, so no escaping is needed.
+// label grammar excludes `|` and `=`, so no escaping is needed.
 function wireControl(row: SafeControlV2): WireControlV2 {
   const role: Record<SafeRoleV2, string> = {
     button: "b",
@@ -928,6 +946,43 @@ function controlNamingTexts(el: InteractiveElement): Array<string | null | undef
   ];
 }
 
+function controlLabelNamingTexts(el: InteractiveElement): Array<string | null | undefined> {
+  const role = roleOf(el);
+  const names = el.compactNames;
+  if (names) {
+    const accessibleName = normalizeDescriptionV2(names.accessibleName);
+    const visibleText = normalizeDescriptionV2(names.visibleText);
+    const iconLabel = normalizeDescriptionV2(names.iconLabel);
+    const aggregateIconName =
+      visibleText !== undefined &&
+      iconLabel !== undefined &&
+      accessibleName === `${iconLabel} ${visibleText}`;
+    return [
+      aggregateIconName ? undefined : names.accessibleName,
+      names.ariaLabel,
+      names.labelledByText,
+      names.labelText,
+      (el.type ?? "").toLowerCase() === "image" ? names.alt : undefined,
+      names.visibleText,
+      isButtonInput(el) ? names.value : undefined,
+      names.iconLabel,
+      names.title,
+      role === "textbox" ? names.placeholder : undefined,
+      role === "textbox" ? names.name : undefined,
+    ];
+  }
+  return [
+    el.ariaLabel,
+    el.labelText,
+    el.visibleText,
+    isButtonInput(el) ? el.value : undefined,
+    el.iconLabel,
+    el.title,
+    role === "textbox" ? el.placeholder : undefined,
+    role === "textbox" ? el.name : undefined,
+  ];
+}
+
 function candidateTexts(el: InteractiveElement): string[] {
   return [
     el.visibleText,
@@ -949,33 +1004,60 @@ function candidateText(el: InteractiveElement): string {
   return candidateTexts(el).join(" ");
 }
 
-function controlDescription(el: InteractiveElement): string | undefined {
-  // Labels are chosen from visible/accessibility naming sources only. Native
-  // button values are names; field values, `name`, and `id` stay excluded.
-  // The name is not length-budgeted here; its slug has a separate budget.
-  const chosen = controlNamingTexts(el)
+function controlDescription(el: InteractiveElement, role: SafeRoleV2): string {
+  // Prefer authored accessibility names over descendant text. Navigation
+  // toggles and data-row controls often contain an entire menu/card subtree;
+  // choosing textContent first turned their concise aria/label name into a
+  // mashed-together alias. Native button values are names, while field values
+  // and ids remain excluded. Textbox placeholder/name are useful only after
+  // the genuine accessibility and visible-name sources have been exhausted.
+  const chosen = controlLabelNamingTexts(el)
     .map((candidate) => normalizeDescriptionV2(candidate))
     .find((candidate) => candidate !== undefined);
-  if (chosen === undefined) return undefined;
-  // Add the page's region context to otherwise opaque labels (such as @as15169).
-  const context = regionContextV2(el.container, chosen);
-  return context === undefined ? chosen : `${chosen} ${context}`;
+  if (chosen !== undefined) {
+    // Add the page's region context to otherwise opaque labels (such as @as15169).
+    const context = regionContextV2(
+      el.compactNames ? el.compactNames.container : el.container,
+      chosen,
+    );
+    const description = context === undefined ? chosen : `${chosen} ${context}`;
+    if (controlLabelV2(description) !== undefined) return description;
+  }
+  // Every actionable row still needs a human-usable alias. The nearest
+  // semantic region is the best available immediate context; a genuinely
+  // anonymous control falls back to its role rather than becoming a bare
+  // [ref, role] tuple. This is descriptive only and does not alter identity.
+  const context = namedContainerContextV2(
+    el.compactNames ? el.compactNames.container : el.container,
+  );
+  return context === undefined ? `${role} ${el.index + 1}` : `${context} ${role}`;
 }
 
 /** A description is "uninformative" when it carries no 3+-letter word run: ids, short codes, hex fragments. */
 function isUninformativeDescriptionV2(description: string): boolean {
-  return !/[a-zA-Z]{3,}/.test(description);
+  return (
+    !/[a-zA-Z]{3,}/.test(description) &&
+    !Array.from(description).some(
+      (character) => character.charCodeAt(0) > 0x7f && /\p{L}/u.test(character),
+    )
+  );
 }
 
 function regionContextV2(container: string | null | undefined, chosen: string): string | undefined {
   if (container === null || container === undefined) return undefined;
   if (!isUninformativeDescriptionV2(chosen)) return undefined;
-  // `container` is "kind:slug" (e.g. "section:api-tokens"); the kind adds no
-  // information for the agent and only spends label bytes.
-  const rawSlug = container.includes(":") ? container.slice(container.indexOf(":") + 1) : container;
-  const context = safeDescriptionV2(rawSlug);
+  const context = namedContainerContextV2(container);
   if (context === undefined) return undefined;
   return context.slice(0, 24).replace(/-+$/, "") || undefined;
+}
+
+function namedContainerContextV2(container: string | null | undefined): string | undefined {
+  if (container === null || container === undefined) return undefined;
+  const separator = container.indexOf(":");
+  const kind = separator < 0 ? undefined : container.slice(0, separator).toLowerCase();
+  const raw = separator < 0 ? container : container.slice(separator + 1);
+  const context = safeDescriptionV2(raw.replace(/[-_]+/g, " "));
+  return context === undefined || context.toLowerCase() === kind ? undefined : context;
 }
 
 function privateQueryTokenV2(value: string): string | null {
@@ -1282,10 +1364,10 @@ export function disambiguateDuplicateLabelsV2(
     seen.set(label, occurrence);
     if (occurrence === 1) return label;
     let suffix = occurrence;
-    let candidate = `${label}-${suffix}`;
+    let candidate = labelWithOrdinalV2(label, suffix);
     while (assigned.has(candidate)) {
       suffix += 1;
-      candidate = `${label}-${suffix}`;
+      candidate = labelWithOrdinalV2(label, suffix);
     }
     assigned.add(candidate);
     return candidate;
@@ -1325,7 +1407,7 @@ export function buildSafeControlsV2(args: {
     // already CDP-derived interactive inventory supplies each visible control's
     // descendant/accessibility name. This pass binds that name to its own live
     // element, so no cross-serializer tag/role fallback can swap labels.
-    const label = controlLabelV2(controlDescription(el));
+    const label = controlLabelV2(controlDescription(el, role));
     const row: Omit<SafeControlV2, "ref"> = {
       role,
       visibility: el.inViewport ? "viewport" : "near",

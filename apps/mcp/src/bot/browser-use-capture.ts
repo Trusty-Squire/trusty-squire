@@ -680,6 +680,134 @@ export async function captureBrowserUseDOM(
       if (n.contentDocument) collectForms(n.contentDocument);
     };
     collectForms(root);
+    type LabelScope = {
+      nodeByDomId: Map<string, BrowserUseNode>;
+      labelsFor: Map<string, BrowserUseNode[]>;
+    };
+    const labelScopeFor = new Map<BrowserUseNode, LabelScope>();
+    const parentByNode = new Map<BrowserUseNode, BrowserUseNode>();
+    const rootScope: LabelScope = { nodeByDomId: new Map(), labelsFor: new Map() };
+    const indexLabels = (
+      n: BrowserUseNode,
+      parent: BrowserUseNode | undefined,
+      scope: LabelScope,
+    ): void => {
+      if (parent) parentByNode.set(n, parent);
+      const ownScope =
+        n !== root && (n.nodeType === 9 || n.shadowType !== null)
+          ? { nodeByDomId: new Map(), labelsFor: new Map() }
+          : scope;
+      labelScopeFor.set(n, ownScope);
+      const domId = n.attributes.id;
+      if (domId && !ownScope.nodeByDomId.has(domId)) ownScope.nodeByDomId.set(domId, n);
+      const controlId = n.attributes.for;
+      if (n.nodeName === "LABEL" && controlId) {
+        const labels = ownScope.labelsFor.get(controlId) ?? [];
+        labels.push(n);
+        ownScope.labelsFor.set(controlId, labels);
+      }
+      n.children.forEach((child) => indexLabels(child, n, ownScope));
+      if (n.contentDocument) indexLabels(n.contentDocument, n, ownScope);
+    };
+    indexLabels(root, undefined, rootScope);
+    const labelText = (n: BrowserUseNode): string | null => {
+      const text = (node: BrowserUseNode): string =>
+        node.nodeType === 3 ? node.value : node.children.map(text).join(" ");
+      const value = text(n).replace(/\s+/g, " ").trim();
+      return value.length === 0 ? null : value.slice(0, 120);
+    };
+    const rawText = (n: BrowserUseNode): string =>
+      n.nodeType === 3 ? n.value : n.children.map(rawText).join(" ");
+    const visibleText = (n: BrowserUseNode, inUserAgentShadow = false): string => {
+      if (n.nodeType === 3) return inUserAgentShadow ? "" : n.value;
+      return n.children
+        .map((child) => visibleText(child, inUserAgentShadow || n.shadowType === "user-agent"))
+        .join(" ");
+    };
+    const labelledByText = (n: BrowserUseNode): string | null => {
+      const scope = labelScopeFor.get(n);
+      if (!scope) return null;
+      const ids = n.attributes["aria-labelledby"]?.trim().split(/\s+/) ?? [];
+      const parts = ids
+        .map((id) => scope.nodeByDomId.get(id))
+        .map((node) => (node ? labelText(node) : null))
+        .filter((value): value is string => value !== null);
+      return parts.length === 0 ? null : parts.join(" ").slice(0, 120);
+    };
+    const associatedLabelText = (n: BrowserUseNode): string | null => {
+      const scope = labelScopeFor.get(n);
+      if (!scope) return null;
+      const labels = n.attributes.id ? scope.labelsFor.get(n.attributes.id) : undefined;
+      const explicit = labels?.map(labelText).find((value) => value !== null);
+      if (explicit) return explicit;
+      let parent = parentByNode.get(n);
+      while (parent && labelScopeFor.get(parent) === scope) {
+        if (parent.nodeName === "LABEL") return labelText(parent);
+        parent = parentByNode.get(parent);
+      }
+      return null;
+    };
+    const nativeContainerKinds = new Map([
+      ["section", "section"],
+      ["nav", "navigation"],
+      ["form", "form"],
+      ["fieldset", "fieldset"],
+      ["main", "main"],
+      ["aside", "aside"],
+      ["article", "article"],
+      ["dialog", "dialog"],
+    ]);
+    const ariaContainerKinds = new Map([
+      ["banner", "banner"],
+      ["complementary", "aside"],
+      ["contentinfo", "contentinfo"],
+      ["form", "form"],
+      ["main", "main"],
+      ["navigation", "navigation"],
+      ["region", "section"],
+      ["search", "search"],
+      ["dialog", "dialog"],
+      ["alertdialog", "dialog"],
+    ]);
+    const syntheticContainer = (n: BrowserUseNode): string | null => {
+      let scope = labelScopeFor.get(n);
+      let child = n;
+      let parent = parentByNode.get(child);
+      while (parent) {
+        if (labelScopeFor.get(parent) !== scope) {
+          if (child.shadowType?.toLowerCase() !== "open") return null;
+          scope = labelScopeFor.get(parent);
+        }
+        const tag = parent.nodeName.toLowerCase();
+        const kind =
+          nativeContainerKinds.get(tag) ??
+          ariaContainerKinds.get(parent.attributes.role?.toLowerCase() ?? "");
+        if (kind) {
+          const heading = parent.children
+            .filter((child) => /^H[1-6]$/.test(child.nodeName))
+            .map(labelText)
+            .find((value) => value !== null);
+          const label =
+            parent.attributes["aria-label"]?.trim() || labelledByText(parent) || heading;
+          return label ? `${kind}:${label}` : null;
+        }
+        child = parent;
+        parent = parentByNode.get(child);
+      }
+      return null;
+    };
+    const iconLabel = (n: BrowserUseNode): string | null => {
+      const find = (node: BrowserUseNode): string | null => {
+        const value = node.attributes.alt ?? node.attributes.title ?? node.attributes["aria-label"];
+        if (value?.trim()) return value.trim().slice(0, 120);
+        for (const child of node.children) {
+          const descendant = find(child);
+          if (descendant) return descendant;
+        }
+        return null;
+      };
+      return n.children.map(find).find((value) => value !== null) ?? null;
+    };
     const ownedLabels = new Map<string, string>();
     const ownedControl = (n: BrowserUseNode): { count: number; sole?: BrowserUseNode } => {
       if (
@@ -761,8 +889,6 @@ export async function captureBrowserUseDOM(
             t = n.nodeName.toLowerCase(),
             selector = selectorsById.get(n.id)!;
           const path = frame === page.mainFrame() ? null : framePath(frame);
-          const text = (x: BrowserUseNode): string =>
-            x.nodeType === 3 ? x.value : x.children.map(text).join(" ");
           el = {
             index: nextSyntheticIndex++,
             tag: t,
@@ -775,7 +901,7 @@ export async function captureBrowserUseDOM(
               a.role ??
               (["a", "button", "input", "select", "textarea"].includes(t) ? null : "button"),
             labelText: null,
-            visibleText: text(n).trim() || null,
+            visibleText: rawText(n).trim() || null,
             selector,
             visible: true,
             inViewport: n.visible,
@@ -840,6 +966,20 @@ export async function captureBrowserUseDOM(
           el.ariaLabel = ownedLabel;
           n.attributes.ax_name ??= ownedLabel;
         }
+        el.compactNames = {
+          ariaLabel: n.attributes["aria-label"]?.trim() || ownedLabel || null,
+          labelledByText: labelledByText(n),
+          accessibleName: viewMetadata.get(n.id)?.name.trim() || null,
+          labelText: associatedLabelText(n),
+          visibleText: visibleText(n).trim() || null,
+          alt: n.attributes.alt ?? null,
+          iconLabel: iconLabel(n),
+          title: n.attributes.title ?? null,
+          placeholder: n.attributes.placeholder ?? null,
+          name: n.attributes.name ?? null,
+          value: n.attributes.value ?? null,
+          container: syntheticContainer(n),
+        };
         if (!elements.includes(el)) elements.push(el);
         nodeElements.set(n.id, el);
       }

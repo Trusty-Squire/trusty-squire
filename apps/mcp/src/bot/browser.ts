@@ -15247,6 +15247,21 @@ export function isSafeSignupChoiceText(text: string): boolean {
 // the planner PICKS from these rather than inventing selector
 // strings (the bug behind the 0/14 sweep). `index` is assigned after
 // ranking, so it is a stable handle for the planner to reference.
+export interface CompactControlNames {
+  ariaLabel: string | null;
+  labelledByText: string | null;
+  accessibleName: string | null;
+  labelText: string | null;
+  visibleText: string | null;
+  alt: string | null;
+  iconLabel: string | null;
+  title: string | null;
+  placeholder: string | null;
+  name: string | null;
+  value: string | null;
+  container: string | null;
+}
+
 export interface InteractiveElement {
   /** Private CDP node identity; never a page-authored attribute or wire ref. */
   observationIdentity?: string;
@@ -15259,6 +15274,7 @@ export interface InteractiveElement {
   name: string | null;
   placeholder: string | null;
   ariaLabel: string | null;
+  compactNames?: CompactControlNames;
   role: string | null;
   labelText: string | null;
   visibleText: string | null;

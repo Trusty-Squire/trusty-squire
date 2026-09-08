@@ -48,6 +48,7 @@ function safeControls(args: {
   legacyRefs: ReadonlyMap<InteractiveElement, string>;
   pageOrigin: string;
   pageUrl?: string;
+  canonical?: boolean;
 }): ReturnType<typeof buildSafeControlsV2> {
   return buildSafeControlsV2({
     ...args,
@@ -623,6 +624,174 @@ describe("compact observation v2", () => {
     ]);
   });
 
+  describe("control-label source priority and fallbacks", () => {
+    const labelsFor = (...elements: InteractiveElement[]): Array<string | undefined> =>
+      safeControls({
+        elements,
+        legacyRefs: new Map(elements.map((el, index) => [el, `@e:label_${index}`])),
+        pageOrigin: "https://merchant.invalid",
+      }).rows.map((row) => row.label);
+
+    it("prefers a concise aria-label over mashed descendant navigation text", () => {
+      const navMenu = element({
+        role: "menuitem",
+        ariaLabel: "Shop men",
+        visibleText: "Shop Men Shoes Apparel Accessories New Arrivals",
+      });
+
+      expect(labelsFor(navMenu)).toEqual(["@shop-men"]);
+    });
+
+    it("preserves a non-ASCII accessible name when ASCII slugging is empty", () => {
+      expect(labelsFor(element({ ariaLabel: "設定" }))).toEqual(["@設定"]);
+    });
+
+    it("keeps Unicode aliases bounded and wire-safe", () => {
+      const piped = labelsFor(element({ ariaLabel: "設定|詳細" }))[0]!;
+      const long = labelsFor(element({ ariaLabel: "設定".repeat(40) }))[0]!;
+      const { payload } = encodeV2QueryPage({
+        sessionId: "session",
+        stage: "browse",
+        rows: [
+          {
+            ref: "@e:unicode",
+            role: "button",
+            visibility: "viewport",
+            frame: "main",
+            label: piped,
+          },
+          { ref: "@e:long", role: "button", visibility: "viewport", frame: "main", label: long },
+        ],
+        cursorFor: () => "cursor",
+      });
+
+      expect(piped).toBe("@設定-詳細");
+      expect(long.endsWith("…")).toBe(true);
+      expect(Array.from(long.slice(1))).toHaveLength(32);
+      expect(isCompactV2Label(piped)).toBe(true);
+      expect(isCompactV2Label(long)).toBe(true);
+      const stable = new StableObservationRefs();
+      stable.label("@e:first", long);
+      const duplicate = stable.label("@e:second", long)!;
+      expect(isCompactV2Label(duplicate)).toBe(true);
+      expect(Array.from(duplicate.slice(1))).toHaveLength(32);
+      expect(payload.safe_table).toEqual([
+        ["@e:unicode", "b", "@設定-詳細"],
+        ["@e:long", "b", long],
+      ]);
+    });
+
+    it("preserves mixed Unicode accessible names", () => {
+      const label = controlLabelV2("設定 Account");
+
+      expect(label).toBe("@設定-account");
+      expect(isCompactV2Label(label!)).toBe(true);
+    });
+
+    it("falls back to the emitted role when punctuation cannot form a label", () => {
+      expect(labelsFor(element({ ariaLabel: "!!!" }))).toEqual(["@button-1"]);
+    });
+
+    it("falls back to the emitted role for combining marks alone", () => {
+      expect(controlLabelV2("\u0301")).toBeUndefined();
+      expect(labelsFor(element({ ariaLabel: "\u0301" }))).toEqual(["@button-1"]);
+    });
+
+    it("uses an associated label before a form control's visible subtree", () => {
+      const input = element({
+        tag: "input",
+        type: "text",
+        role: "textbox",
+        labelText: "Work email",
+        visibleText: "Account Settings Profile Notifications",
+      });
+
+      expect(labelsFor(input)).toEqual(["@work-email"]);
+    });
+
+    it("uses visible text before a descendant icon label", () => {
+      expect(labelsFor(element({ visibleText: "Checkout", iconLabel: "Acme" }))).toEqual([
+        "@checkout",
+      ]);
+    });
+
+    it("uses a descendant icon label before a control title", () => {
+      expect(labelsFor(element({ iconLabel: "Profile", title: "Open settings" }))).toEqual([
+        "@profile",
+      ]);
+    });
+
+    it("uses a text-content button's own visible name", () => {
+      expect(labelsFor(element({ visibleText: "Create account" }))).toEqual(["@create-account"]);
+    });
+
+    it("uses textbox placeholder then name when no accessible or visible name exists", () => {
+      const placeholder = element({
+        tag: "input",
+        type: "search",
+        role: "searchbox",
+        placeholder: "Search emails",
+      });
+      const name = element({
+        index: 1,
+        tag: "input",
+        type: "email",
+        role: "textbox",
+        name: "email_address",
+      });
+
+      expect(labelsFor(placeholder, name)).toEqual(["@search-emails", "@email-address"]);
+    });
+
+    it("uses a control title when higher-priority naming signals are absent", () => {
+      expect(labelsFor(element({ title: "Open command palette" }))).toEqual([
+        "@open-command-palette",
+      ]);
+    });
+
+    it("labels an otherwise anonymous control with its role and immediate context", () => {
+      const button = element({ container: "navigation:account-menu" });
+      const anonymousControls = [
+        element({ index: 1 }),
+        element({ index: 2, tag: "a", role: "link" }),
+        element({ index: 3, tag: "input", type: "text", role: "textbox" }),
+        element({ index: 4, tag: "select", role: "combobox" }),
+        element({ index: 5, tag: "input", type: "checkbox", role: "checkbox" }),
+        element({ index: 6, tag: "input", type: "radio", role: "radio" }),
+        element({ index: 7, tag: "div", role: "tab" }),
+        element({ index: 8, tag: "div", role: "menuitem" }),
+        element({ index: 9, tag: "input", type: "file", role: null }),
+        element({ index: 10, container: "section:section" }),
+      ];
+
+      const labels = labelsFor(button, ...anonymousControls);
+      expect(labels).toContain("@account-menu-button");
+      expect(labels).toContain("@button-2");
+      expect(labels).toContain("@link-3");
+      expect(labels).toContain("@textbox-4");
+      expect(labels).toContain("@select-5");
+      expect(labels).toContain("@checkbox-6");
+      expect(labels).toContain("@radio-7");
+      expect(labels).toContain("@tab-8");
+      expect(labels).toContain("@menuitem-9");
+      expect(labels).toContain("@file-10");
+      expect(labels).toContain("@button-11");
+      expect(labels.every((label) => label !== undefined && label.length > 1)).toBe(true);
+    });
+
+    it("uses the canonical emitted role for an otherwise unsupported control", () => {
+      const slider = element({ tag: "div", role: "slider" });
+      const safe = safeControls({
+        elements: [slider],
+        legacyRefs: new Map([[slider, "@e:slider"]]),
+        pageOrigin: "https://merchant.invalid",
+        canonical: true,
+      });
+
+      expect(safe.rows).toEqual([expect.objectContaining({ role: "button", label: "@button-1" })]);
+    });
+  });
+
   it.each(["usernametaken29", "trusty-squire-dogfood-20260625", "f9a062f02fadf5"])(
     "emits semantic titles and headings verbatim: %s",
     (value) => {
@@ -689,7 +858,7 @@ describe("compact observation v2", () => {
     expect(JSON.stringify(page)).toContain(title);
   });
 
-  it("preserves a prefixless high-entropy token rendered as the accessible name", () => {
+  it("uses the explicit accessible name independently of descendant token shape", () => {
     const button = element({
       visibleText: "abcdefghijklmnopqrstuvwxyz123456",
       ariaLabel: "Copy API key",
@@ -699,9 +868,7 @@ describe("compact observation v2", () => {
       legacyRefs: new Map([[button, "@e:copy"]]),
       pageOrigin: "https://merchant.invalid",
     });
-    expect(safe.rows).toEqual([
-      expect.objectContaining({ label: "@abcdefghijklmnopqrstuvwxyz123456" }),
-    ]);
+    expect(safe.rows).toEqual([expect.objectContaining({ label: "@copy-api-key" })]);
   });
 
   it("keeps word-like pure-alpha and low-entropy digit labels unscreened", () => {
@@ -743,7 +910,7 @@ describe("compact observation v2", () => {
     });
   });
 
-  it("uses the visible text even when it is card material — no accessibility fallback", () => {
+  it("uses the explicit accessible name independently of descendant card shape", () => {
     const button = element({
       visibleText: "4111 1111 1111 1111",
       ariaLabel: "Copy API key",
@@ -753,7 +920,7 @@ describe("compact observation v2", () => {
       legacyRefs: new Map([[button, "@e:copy"]]),
       pageOrigin: "https://merchant.invalid",
     });
-    expect(safe.rows).toEqual([expect.objectContaining({ label: "@4111-1111-1111-1111" })]);
+    expect(safe.rows).toEqual([expect.objectContaining({ label: "@copy-api-key" })]);
   });
 
   it("matches every private query term against one control naming source", () => {

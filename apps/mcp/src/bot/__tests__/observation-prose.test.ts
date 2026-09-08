@@ -27,6 +27,81 @@ afterAll(async () => {
   await browser?.close();
 });
 describe("interleaved observation DOM", () => {
+  it("derives compact control labels from browser-use DOM associations", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`
+        <label for="work-email">Work email</label><input id="work-email">
+        <span id="account-name">Account email</span><input id="account-email" aria-labelledby="account-name">
+        <label for="query-email">Work email</label><span id="query-name">Billing contact</span><input id="query-email" aria-labelledby="query-name">
+        <button id="checkout"><img alt="Acme"><span>Checkout</span></button>
+        <span id="proceed">Proceed</span><button id="ax-precedence" aria-label="Cancel" aria-labelledby="proceed"></button>
+        <button id="preferences" aria-label="設定"></button>
+        <span id="empty-name">Master volume</span><div id="empty-volume" role="slider" aria-label="" aria-labelledby="empty-name" tabindex="0" style="display:block;width:20px;height:20px"></div>
+        <section><h2>Volume controls</h2><label for="volume">Master volume</label><div id="volume" role="slider" tabindex="0" style="display:block;width:20px;height:20px"></div></section>
+        <section><div id="structural-floor" role="slider" tabindex="0" style="display:block;width:20px;height:20px"></div></section>
+        <div role="dialog" aria-label="Add payment method"><button id="dialog-floor"></button></div>
+        <input id="native-submit" type="submit">
+        <span id="image-name">Find product</span><input id="named-image" type="image" alt="Search" aria-labelledby="image-name">
+        <section id="shadow-section"><h2>Shadow volume controls</h2><x-slider id="shadow-host"></x-slider></section>
+      `);
+      await page.locator("body").evaluate((body) => {
+        const host = body.querySelector("#shadow-host")!;
+        host.attachShadow({ mode: "open" }).innerHTML =
+          '<span id="shared-name">Shadow volume</span><div id="shadow-volume" role="slider" aria-labelledby="shared-name" tabindex="0" style="display:block;width:20px;height:20px"></div><div id="shadow-floor" role="slider" tabindex="0" style="display:block;width:20px;height:20px"></div><span id="shadow-email-name">Shadow work email</span><input id="shadow-email" aria-labelledby="shadow-email-name"><input id="image-search" type="image" alt="Search" style="display:block;width:20px;height:20px">';
+        body.insertAdjacentHTML(
+          "afterbegin",
+          '<span id="shared-name">Outer volume</span><label for="shadow-associated">Outer email</label>',
+        );
+        host.shadowRoot!.innerHTML +=
+          '<label for="shadow-associated">Shadow email</label><input id="shadow-associated">';
+      });
+      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const handles = new Map(capture.elements.map((element) => [element, `@e:${element.index}`]));
+      const rows = buildSafeControlsV2({
+        elements: capture.elements,
+        legacyRefs: handles,
+        handles,
+        pageOrigin: "https://merchant.invalid",
+        canonical: true,
+      }).rows;
+      const labelFor = (id: string): string | undefined => {
+        const element = capture.elements.find((candidate) => candidate.id === id)!;
+        return rows.find((row) => row.ref === handles.get(element))?.label;
+      };
+
+      expect(labelFor("work-email")).toBe("@work-email");
+      expect(labelFor("account-email")).toBe("@account-email");
+      expect(labelFor("query-email")).toMatch(/^@billing-contact(?:-\d+)?$/);
+      expect(labelFor("checkout")).toBe("@checkout");
+      expect(labelFor("ax-precedence")).toBe("@proceed");
+      expect(labelFor("preferences")).toBe("@設定");
+      expect(labelFor("empty-volume")).toBe("@master-volume");
+      expect(labelFor("volume")).toMatch(/^@master-volume(?:-\d+)?$/);
+      expect(labelFor("structural-floor")).toMatch(/^@button-\d+$/);
+      expect(labelFor("dialog-floor")).toBe("@add-payment-method-button");
+      expect(labelFor("shadow-volume")).toBe("@shadow-volume");
+      expect(labelFor("shadow-floor")).toBe("@shadow-volume-controls-button");
+      expect(labelFor("shadow-email")).toBe("@shadow-work-email");
+      expect(labelFor("shadow-associated")).toBe("@shadow-email");
+      expect(labelFor("image-search")).toBe("@search");
+      expect(labelFor("native-submit")).toBe("@submit");
+      expect(labelFor("named-image")).toBe("@find-product");
+      const queryCapture = await captureThroughController(page);
+      const queryEmail = queryCapture.elements.find((candidate) => candidate.id === "query-email")!;
+      expect(controlMatchesPrivateQueryV2(queryEmail, "work email")).toBe(true);
+      expect(controlMatchesPrivateQueryV2(queryEmail, "billing contact")).toBe(false);
+      const volume = capture.elements.find((candidate) => candidate.id === "volume")!;
+      expect(controlMatchesPrivateQueryV2(volume, "master volume")).toBe(false);
+      const shadowAssociated = queryCapture.elements.find(
+        (candidate) => candidate.id === "shadow-associated",
+      )!;
+      expect(controlMatchesPrivateQueryV2(shadowAssociated, "outer email")).toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
+
   it("keeps a standard direct-listener control actionable", async () => {
     const page = await browser.newPage();
     try {
