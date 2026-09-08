@@ -236,6 +236,15 @@ export async function captureBrowserUseDOM(
     const baseUris = new Map<Frame, string>();
     const baseTargets = new Map<Frame, string>();
     const formOwners = new Map<number, number | null>();
+    const mainWorldContexts = new Map<string, number>();
+    client.on(
+      "Runtime.executionContextCreated",
+      (event: { context: { id: number; auxData?: { frameId?: string; isDefault?: boolean } } }) => {
+        const { frameId, isDefault } = event.context.auxData ?? {};
+        if (frameId && isDefault) mainWorldContexts.set(frameId, event.context.id);
+      },
+    );
+    await client.send("Runtime.enable");
     for (const frameId of frameIds) {
       const frame = frameById.get(frameId);
       if (!frame) continue;
@@ -374,48 +383,31 @@ export async function captureBrowserUseDOM(
           }
         } catch {}
         try {
-          const listenerTargets = await client.send("Runtime.evaluate", {
-            expression: `(() => { const roots=[document],found=[]; let count=0; for(let i=0;i<roots.length;i++) for(const el of roots[i].querySelectorAll('*')) { if(el.shadowRoot)roots.push(el.shadowRoot); if(++count>10000)return null; if(!el.localName.includes('-'))found.push(el); } return found;})()`,
-            contextId: context.executionContextId,
-            objectGroup: "ts-observation",
-          });
-          if (listenerTargets.result.objectId) {
-            const props = await client.send("Runtime.getProperties", {
-              objectId: listenerTargets.result.objectId,
-              ownProperties: true,
+          const mainWorldContextId = mainWorldContexts.get(frameId);
+          if (mainWorldContextId !== undefined) {
+            const clickObjects = await client.send("Runtime.evaluate", {
+              expression: `(() => { if(typeof getEventListeners!=='function')return null; const roots=[document],found=[]; let count=0; for(let i=0;i<roots.length;i++) for(const el of roots[i].querySelectorAll('*')) { if(el.shadowRoot)roots.push(el.shadowRoot); if(++count>10000)return null; if(el.localName.includes('-'))continue; const l=getEventListeners(el); if(l.click||l.mousedown||l.mouseup||l.pointerdown||l.pointerup){found.push(el);if(found.length>100)return null;} } return found;})()`,
+              contextId: mainWorldContextId,
+              includeCommandLineAPI: true,
+              objectGroup: "ts-observation",
             });
-            const indexed = props.result.filter((p) => /^\d+$/.test(p.name) && p.value?.objectId);
-            let found = 0;
-            for (let i = 0; i < indexed.length && found < 100; i += 8) {
-              const batch = indexed.slice(i, i + 8);
-              const events = await Promise.all(
-                batch.map((p) =>
-                  client.send("DOMDebugger.getEventListeners", {
-                    objectId: p.value!.objectId!,
-                    depth: 0,
-                    pierce: true,
+            if (clickObjects.result.objectId) {
+              const props = await client.send("Runtime.getProperties", {
+                objectId: clickObjects.result.objectId,
+                ownProperties: true,
+              });
+              const indexed = props.result.filter((p) => /^\d+$/.test(p.name) && p.value?.objectId);
+              for (let i = 0; i < indexed.length; i += 8)
+                await Promise.all(
+                  indexed.slice(i, i + 8).map(async (p) => {
+                    const d = await client.send("DOM.describeNode", {
+                      objectId: p.value!.objectId!,
+                    });
+                    frameListeners.add(d.node.backendNodeId);
                   }),
-                ),
-              );
-              for (const [index, result] of events.entries()) {
-                if (
-                  !result.listeners.some((listener) =>
-                    ["click", "mousedown", "mouseup", "pointerdown", "pointerup"].includes(
-                      listener.type,
-                    ),
-                  )
-                )
-                  continue;
-                const target = batch[index]!;
-                const d = await client.send("DOM.describeNode", {
-                  objectId: target.value!.objectId!,
-                });
-                frameListeners.add(d.node.backendNodeId);
-                found += 1;
-                if (found === 100) break;
+                );
               }
             }
-          }
         } catch {}
         for (const [backendNodeId, element] of frameBindings) bindings.set(backendNodeId, element);
         for (const backendNodeId of frameListeners) listeners.add(backendNodeId);

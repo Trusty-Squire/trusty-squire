@@ -48,7 +48,7 @@ describe("interleaved observation DOM", () => {
     const page = await browser.newPage();
     try {
       await page.setContent(
-        `${Array.from({ length: 120 }, (_, index) => `<span id="ordinary-${index}">Item</span>`).join("")}<span id="late-listener">Continue</span>`,
+        `${Array.from({ length: 1_000 }, (_, index) => `<span id="ordinary-${index}">Item</span>`).join("")}<span id="late-listener">Continue</span>`,
       );
       await page.locator("#late-listener").evaluate((element) =>
         element.addEventListener("click", () => element.setAttribute("data-clicked", "yes")),
