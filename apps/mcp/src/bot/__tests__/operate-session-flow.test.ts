@@ -8783,6 +8783,7 @@ describe("awaiting-approval payment lease [P0]", () => {
     approval_url: "https://web.test/vault/pay/appr_wait",
     nonce: "n",
     agent: "a",
+    account_binding: "account-binding-wait",
     checkout: {
       merchant: "Shop",
       checkout_origin: "https://shop.example.com",
