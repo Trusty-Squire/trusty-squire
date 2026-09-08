@@ -253,6 +253,90 @@ describe("broker dispatch custody", () => {
     }
   });
 
+  it("returns only the durable start record after a daemon restart", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-journal-daemon-recovery-"));
+    const path = join(root, "dispatch.jsonl");
+    const journal = new DispatchJournal(path);
+    const config = {
+      accountId: "account",
+      agentSessionToken: "token",
+      apiBaseUrl: "http://unused.test",
+      registryBaseUrl: "http://unused.test",
+    };
+    const args = { service_url: "https://example.test", otp: "123456" };
+    const inputHash = createHmac("sha256", createHash("sha256").update(credential("a")).digest())
+      .update(
+        '{"args":{"otp":"123456","service_url":"https://example.test"},"capability":null,"name":"operate_start"}',
+      )
+      .digest("hex");
+    let starts = 0;
+    try {
+      const original = new OperatorBroker(config, "cell", journal);
+      const originalPrincipal = await authenticate(original, "original");
+      if (originalPrincipal.forwarderId === undefined) throw new Error("Test broker lineage is missing");
+      await journal.record("lost-session", "old-process-request", "outcome", {
+        forwarderId: originalPrincipal.forwarderId,
+        start: true,
+        operation: "operate_start",
+        inputHash,
+        outcome: { status: "completed" },
+      });
+      await journal.acknowledge(originalPrincipal.forwarderId, "old-process-request");
+
+      const restarted = new OperatorBroker(config, "cell", new DispatchJournal(path));
+      Object.defineProperty(restarted, "tools", {
+        value: [
+          {
+            name: "operate_start",
+            description: "",
+            inputSchema: z.object({ service_url: z.string(), otp: z.string() }).strict(),
+            jsonInputSchema: {},
+            handler: async () => {
+              starts += 1;
+            },
+          } satisfies Tool,
+        ],
+      });
+      const sameLineage = await authenticate(restarted, "restarted");
+      const foreign = await authenticate(restarted, "foreign", credential("b"));
+      restarted.authority.claimForwarder(sameLineage);
+
+      await expect(restarted.recover(sameLineage, { name: "operate_start", args })).resolves.toEqual({
+        requestId: "old-process-request",
+        result: {
+          reconciliation: {
+            request_id: "old-process-request",
+            operation: "operate_start",
+            status: "completed",
+          },
+          recovery: {
+            status: "session_unavailable",
+            next_step:
+              "Broker restart ended the session; reconcile this recorded outcome before any new work.",
+          },
+        },
+      });
+      await expect(restarted.recover(foreign, { name: "operate_start", args })).resolves.toBeNull();
+      await expect(
+        restarted.call(
+          sameLineage,
+          "tool",
+          { name: "operate_start", args },
+          "fresh-process-request",
+        ),
+      ).rejects.toThrow("Prior start result awaits caller delivery");
+      expect(starts).toBe(0);
+      const records = (await readFile(path, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { phase: string; inputHash?: string; outcome?: unknown });
+      expect(records.some((record) => record.phase === "recovered")).toBe(true);
+      expect(records.every((record) => record.inputHash !== "123456")).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("allows only an acknowledged payment's scoped status custody", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-journal-payment-custody-"));
     const path = join(root, "dispatch.jsonl");

@@ -2,7 +2,7 @@ import { open, readFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { BrokerRefusal } from "./scheduler.js";
 
-type DispatchPhase = "entered" | "outcome" | "acknowledged" | "settled";
+type DispatchPhase = "entered" | "outcome" | "acknowledged" | "settled" | "recovered";
 export const START_DELIVERY_RETENTION_MS = 5 * 60_000;
 
 interface DispatchRecord {
@@ -77,7 +77,7 @@ export class DispatchJournal {
         if (
           typeof record.sessionId !== "string" ||
           typeof record.requestId !== "string" ||
-          !["entered", "outcome", "acknowledged", "settled"].includes(record.phase) ||
+          !["entered", "outcome", "acknowledged", "settled", "recovered"].includes(record.phase) ||
           (record.forwarderId !== undefined && typeof record.forwarderId !== "string") ||
           (record.start !== undefined && record.start !== true) ||
           (record.operation !== undefined && typeof record.operation !== "string") ||
@@ -85,6 +85,7 @@ export class DispatchJournal {
           (record.outcome !== undefined && !validOutcome(record.outcome))
         )
           throw new Error("Malformed journal");
+        if (record.phase === "recovered") continue;
         const key = JSON.stringify([record.sessionId, record.requestId]);
         states.set(key, record);
       }
@@ -254,6 +255,15 @@ export class DispatchJournal {
       ),
     );
     return starts.length;
+  }
+
+  async recordRecovery(forwarderId: string, completed: CompletedDispatchOutcome): Promise<void> {
+    await this.record(completed.sessionId, completed.requestId, "recovered", {
+      forwarderId,
+      ...(completed.start === true ? { start: true } : {}),
+      operation: completed.operation,
+      outcome: completed.outcome,
+    });
   }
 
   record(

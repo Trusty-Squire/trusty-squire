@@ -404,9 +404,25 @@ export class OperatorBroker implements BrokerTransportPort {
       },
     );
     if (completed === undefined) return null;
+    await this.journal?.recordRecovery(journalForwarderId(principal), completed);
     if (completed.start === true) {
       const capability = this.authority.recoverCapability(principal, completed.sessionId);
-      if (capability === undefined) return null;
+      if (capability === undefined)
+        return {
+          requestId: completed.requestId,
+          result: {
+            reconciliation: {
+              request_id: completed.requestId,
+              operation: completed.operation,
+              ...completed.outcome,
+            },
+            recovery: {
+              status: "session_unavailable",
+              next_step:
+                "Broker restart ended the session; reconcile this recorded outcome before any new work.",
+            },
+          },
+        };
       return {
         requestId: completed.requestId,
         capability,
