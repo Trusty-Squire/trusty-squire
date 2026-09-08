@@ -2,7 +2,7 @@
 
 Run `bash scripts/capture-browser-use.sh` from this checkout. The script creates
 an isolated Python environment under `.local/browser-use`, installs exactly
-`browser-use==0.13.10`, and captures the fixed six-URL corpus with Chrome at
+`browser-use==0.13.10`, and captures the fixed six-URL corpus plus the local Shopify-style fixture with Chrome at
 1280 × 800, viewport threshold 0 and cross-origin iframe support enabled. It does not use an LLM.
 
 Each `.txt` is `SerializedDOMState.llm_representation()` written verbatim, with
@@ -46,3 +46,20 @@ content, not a screened rendering. The volatile HN capture does not pin
 `usernametaken29`; its regression injects that value into visible fixture text
 before serialization and asserts its verbatim output while preserving line
 counts, indentation, attributes, and refs exactly.
+
+## Custom-element shop regression
+
+`pages/shopify.html` is the deterministic Shopify-style product grid used by both
+real-CDP regression tests and the pinned oracle. It contains four distinct
+products, repeated slideshow slides, nested quick-add/product-form wrappers,
+an icon-only submit button named by its owning wrapper, and custom controls.
+Run `bash scripts/capture-browser-use.sh --slug shopify` to regenerate its
+`.json`/`.txt` pair; add `--check` for drift verification. The generator serves
+only this fixture directory on an ephemeral loopback port. The recorded URL is
+`local:shopify.html`, independent of that port.
+
+The upstream `.txt` is still canonical output, not an expectation of local
+compression or control enrichment. `observation-byte-efficiency.test.ts` checks
+production grouping against the same recorded input; `observation-prose.test.ts`
+checks live capture, query matching, exact click targets, form association and
+main-world/shadow-root event listeners.

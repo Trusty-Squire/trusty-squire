@@ -225,6 +225,7 @@ export async function captureBrowserUseDOM(
       }
     }
     const listeners = new Set<number>();
+    const formAssociatedTags = new Map<Frame, Set<string>>();
     const bindings = new Map<number, InteractiveElement>();
     const baseUris = new Map<Frame, string>();
     const baseTargets = new Map<Frame, string>();
@@ -238,6 +239,32 @@ export async function captureBrowserUseDOM(
       const frameBindings = new Map<number, InteractiveElement>();
       const frameListeners = new Set<number>();
       try {
+        // Read the registry in the page's own realm: isolated-world constructors
+        // do not expose the site's form-associated custom-element definitions.
+        formAssociatedTags.set(
+          frame,
+          new Set(
+            await frame.evaluate(() => {
+              const names = new Set<string>();
+              const roots: Array<Document | ShadowRoot> = [document];
+              for (let i = 0; i < roots.length; i++)
+                for (const el of Array.from(roots[i]!.querySelectorAll("*"))) {
+                  const name = el.localName;
+                  if (
+                    name.includes("-") &&
+                    (
+                      customElements.get(name) as
+                        | (CustomElementConstructor & { formAssociated?: boolean })
+                        | undefined
+                    )?.formAssociated === true
+                  )
+                    names.add(name);
+                  if (el.shadowRoot) roots.push(el.shadowRoot);
+                }
+              return [...names];
+            }),
+          ),
+        );
         const context = await client.send("Page.createIsolatedWorld", {
           frameId,
           worldName: "trusty-squire-observation",
@@ -295,25 +322,36 @@ export async function captureBrowserUseDOM(
               }),
             );
         }
-        const clickObjects = await client.send("Runtime.evaluate", {
-          expression: `(() => { if(typeof getEventListeners!=='function')return null; const all=document.querySelectorAll('*'); if(all.length>10000)return null; const found=[]; for(const el of all){const l=getEventListeners(el);if(l.click||l.mousedown||l.mouseup||l.pointerdown||l.pointerup){found.push(el);if(found.length>100)return null;}} return found;})()`,
+        // The console helper in an isolated world only sees that world's
+        // listeners. DOMDebugger with pierce reports the page's real handlers,
+        // including those on custom elements inside shadow roots.
+        const documentObject = await client.send("Runtime.evaluate", {
+          expression: "document",
           contextId: context.executionContextId,
-          includeCommandLineAPI: true,
           objectGroup: "ts-observation",
         });
-        if (clickObjects.result.objectId) {
-          const props = await client.send("Runtime.getProperties", {
-            objectId: clickObjects.result.objectId,
-            ownProperties: true,
+        if (documentObject.result.objectId) {
+          const events = await client.send("DOMDebugger.getEventListeners", {
+            objectId: documentObject.result.objectId,
+            depth: -1,
+            pierce: true,
           });
-          const indexed = props.result.filter((p) => /^\d+$/.test(p.name) && p.value?.objectId);
-          for (let i = 0; i < indexed.length; i += 8)
-            await Promise.all(
-              indexed.slice(i, i + 8).map(async (p) => {
-                const d = await client.send("DOM.describeNode", { objectId: p.value!.objectId! });
-                frameListeners.add(d.node.backendNodeId);
-              }),
-            );
+          for (const listener of events.listeners) {
+            if (
+              listener.backendNodeId !== undefined &&
+              [
+                "click",
+                "mousedown",
+                "mouseup",
+                "pointerdown",
+                "pointerup",
+                "keydown",
+                "keyup",
+              ].includes(listener.type)
+            ) {
+              frameListeners.add(listener.backendNodeId);
+            }
+          }
         }
         for (const [backendNodeId, element] of frameBindings) bindings.set(backendNodeId, element);
         for (const backendNodeId of frameListeners) listeners.add(backendNodeId);
@@ -431,6 +469,7 @@ export async function captureBrowserUseDOM(
         showScroll,
         scrollText: t === "iframe" ? "scroll" : scrollParts.join(" "),
         clickListener: listeners.has(raw.backendNodeId),
+        formAssociated: frame !== null && formAssociatedTags.get(frame)?.has(t) === true,
         axRole: axNode?.role?.value ?? null,
         axProperties: (axNode?.properties ?? []).map((p) => ({
           name: p.name,
@@ -583,6 +622,44 @@ export async function captureBrowserUseDOM(
     const visit = (n: BrowserUseNode, inClosedShadow = false, form?: FormIntent): void => {
       if (n.nodeName === "FORM") form = formIntent(n);
       if (["IFRAME", "FRAME"].includes(n.nodeName)) form = undefined;
+    // A labelled custom wrapper can own a native control without being a click
+    // target itself. Bind its label only to a sole descendant, never to a grid
+    // of competing buttons or to the wrapper's bounding box.
+    const ownedLabels = new Map<string, string>();
+    const ownedControl = (n: BrowserUseNode): { count: number; sole?: BrowserUseNode } => {
+      if (
+        n.computedStyles?.display === "none" ||
+        n.computedStyles?.visibility === "hidden" ||
+        Number(n.computedStyles?.opacity ?? "1") <= 0 ||
+        "inert" in n.attributes
+      )
+        return { count: 0 };
+      if (n.contentDocument) ownedControl(n.contentDocument);
+      const descendants = n.children.map(ownedControl);
+      const count = descendants.reduce((sum, child) => sum + child.count, 0);
+      const sole = count === 1 ? descendants.find((child) => child.count === 1)?.sole : undefined;
+      const custom = n.nodeName.includes("-");
+      const label = n.attributes["aria-label"]?.trim() || n.attributes.title?.trim();
+      if (custom && label && sole && !ownedLabels.has(sole.id)) ownedLabels.set(sole.id, label);
+      const native = ["BUTTON", "INPUT", "SELECT", "TEXTAREA", "A"].includes(n.nodeName);
+      const explicit =
+        n.clickListener ||
+        [
+          "button",
+          "link",
+          "checkbox",
+          "radio",
+          "combobox",
+          "textbox",
+          "menuitem",
+          "option",
+          "tab",
+        ].includes(n.attributes.role ?? n.axRole ?? "");
+      if (native || ((explicit || (custom && browserUseInteractive(n))) && count === 0))
+        return { count: 1, sole: n };
+      return { count, ...(sole ? { sole } : {}) };
+    };
+    ownedControl(root);
       const raw = rawById.get(n.id)!,
         frame = nodeFrame.get(n.id)!;
       let el = bindings.get(raw.backendNodeId);
@@ -680,6 +757,13 @@ export async function captureBrowserUseDOM(
         if (submitter && n.attributes.form !== undefined && !formOwners.has(raw.backendNodeId)) {
           delete el.observationIdentity;
           delete el.observationIntent;
+        }
+      }
+      if (el) {
+        const ownedLabel = ownedLabels.get(n.id);
+        if (ownedLabel && !el.ariaLabel && !n.attributes["aria-labelledby"]) {
+          el.ariaLabel = ownedLabel;
+          n.attributes.ax_name ??= ownedLabel;
         }
         if (!elements.includes(el)) elements.push(el);
         nodeElements.set(n.id, el);

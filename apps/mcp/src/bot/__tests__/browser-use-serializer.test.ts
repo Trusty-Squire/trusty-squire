@@ -13,7 +13,7 @@ const fixtures = fileURLToPath(new URL("../../../../../fixtures/browser-use/", i
 const identity = (s: string): string =>
   s.replace(/(\[)(?:\d+|@e:[A-Za-z0-9_-]+)(\]<)/g, "$1IDENTITY$2");
 describe("canonical browser-use 0.13.10 fixture oracle", () => {
-  for (const slug of ["ipinfo", "mdn", "hacker-news", "wikipedia", "github", "gov-uk"])
+  for (const slug of ["ipinfo", "mdn", "hacker-news", "wikipedia", "github", "gov-uk", "shopify"])
     it(slug, () => {
       const fixture = JSON.parse(readFileSync(`${fixtures}${slug}.json`, "utf8")) as {
         browserUse: string;

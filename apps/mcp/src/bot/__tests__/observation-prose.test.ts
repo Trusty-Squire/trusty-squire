@@ -8,7 +8,11 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { BrowserController, type InteractiveElement } from "../browser.js";
 import { captureBrowserUseDOM } from "../browser-use-capture.js";
 import { serializeBrowserUseDOM, type BrowserUseNode } from "../browser-use-serializer.js";
-import { buildSafeControlsV2, StableObservationRefs } from "../compact-observation-v2.js";
+import {
+  buildSafeControlsV2,
+  controlMatchesPrivateQueryV2,
+  StableObservationRefs,
+} from "../compact-observation-v2.js";
 let browser: Browser;
 const transparentFrameSecurity = async (): Promise<{ opaque: boolean }> => ({ opaque: false });
 const captureThroughController = async (page: Page) => {
@@ -95,6 +99,52 @@ describe("interleaved observation DOM", () => {
       expect(explicit).toBeDefined();
       await page.locator("form").evaluate((form) => form.setAttribute("action", "/other"));
       expect(await read()).not.toBe(explicit);
+  it("finds Shopify owned buy controls and folds repeated custom-element content", async () => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    try {
+      await page.setContent(
+        readFileSync(
+          new URL("../../../../../fixtures/browser-use/pages/shopify.html", import.meta.url),
+          "utf8",
+        ),
+      );
+      const capture = await captureThroughController(page);
+      const buy = capture.elements.filter(
+        (el) => el.tag === "button" && controlMatchesPrivateQueryV2(el, "add to cart"),
+      );
+      expect(buy).toHaveLength(4);
+      const refs = new StableObservationRefs();
+      const handles = new Map(capture.elements.map((el) => [el, refs.get("shop", el.selector)]));
+      const rows = buildSafeControlsV2({
+        elements: capture.elements,
+        handles,
+        legacyRefs: handles,
+        pageOrigin: "https://shop.example",
+        canonical: true,
+      }).rows;
+      for (const el of buy) {
+        expect(rows.find((row) => row.ref === handles.get(el))?.role).toBe("button");
+        expect(handles.get(el)).toMatch(/^@e:[A-Za-z0-9_-]{11}$/);
+      }
+      for (const el of buy) await page.locator(el.selector).click();
+      expect(await page.evaluate(() => (window as unknown as { cart: string[] }).cart)).toEqual([
+        "Jade ring",
+        "Jade pendant",
+        "Jade earrings",
+        "Jade bracelet",
+      ]);
+      expect(capture.elements.some((el) => el.tag === "form-buy-component")).toBe(true);
+      expect(capture.elements.some((el) => el.tag === "search-decoration")).toBe(false);
+      const dom = serializeBrowserUseDOM(capture.root).dom;
+      expect(dom).toContain("[repeated ×3]");
+      expect(dom).toContain("product-card-component repeated ×4");
+      expect(dom.match(/Natural jade, polished by hand/g)).toHaveLength(1);
+      expect(dom.match(/\[same subtree /g)).toHaveLength(3);
+      for (const [id, el] of capture.nodeElements) {
+        if (buy.includes(el)) expect(dom).toContain(`[${id}]<button`);
+      }
+      for (const name of ["Jade ring", "Jade pendant", "Jade earrings", "Jade bracelet"])
+        expect(dom).toContain(name);
     } finally {
       await page.close();
     }
@@ -233,6 +283,32 @@ describe("interleaved observation DOM", () => {
         expect(element.observationIdentity).toBe(prior.identity);
         expect(second.handles.get(element)).not.toBe(prior.ref);
       }
+  it("does not borrow custom wrapper labels across competing controls or hidden subtrees", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<style>multi-control, one-control { display:block }</style>
+        <multi-control aria-label="Add to cart"><button>Favorite</button><button>Compare</button></multi-control>
+        <one-control aria-label="Purchase item"><button aria-label="Explicit choice">Choose</button></one-control>
+        <one-control aria-label="Hidden choice" style="display:none"><button>Hidden</button></one-control>
+        <div id="host"></div>`);
+      await page.locator("#host").evaluate((host) => {
+        const root = host.attachShadow({ mode: "open" });
+        root.innerHTML =
+          '<click-component style="display:block">Add to cart in shadow</click-component>';
+        root
+          .querySelector("click-component")!
+          .addEventListener("click", () => host.setAttribute("data-clicked", "yes"));
+      });
+      const capture = await captureThroughController(page);
+      expect(
+        capture.elements.filter((el) => controlMatchesPrivateQueryV2(el, "add to cart")),
+      ).toHaveLength(1);
+      expect(capture.elements.some((el) => el.ariaLabel === "Explicit choice")).toBe(true);
+      expect(capture.elements.some((el) => el.ariaLabel === "Hidden choice")).toBe(false);
+      const shadow = capture.elements.find((el) => el.tag === "click-component")!;
+      expect(shadow).toBeDefined();
+      await page.locator(shadow.selector).click();
+      expect(await page.locator("#host").getAttribute("data-clicked")).toBe("yes");
     } finally {
       await page.close();
     }

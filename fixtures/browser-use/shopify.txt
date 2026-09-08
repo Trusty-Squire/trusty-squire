@@ -1,0 +1,29 @@
+Jade collection
+Jade ring
+$20
+Natural jade, polished by hand
+Natural jade, polished by hand
+Natural jade, polished by hand
+[41]<button type=submit name=add />
+Jade pendant
+$21
+Natural jade, polished by hand
+Natural jade, polished by hand
+Natural jade, polished by hand
+[63]<button type=submit name=add />
+Jade earrings
+$22
+Natural jade, polished by hand
+Natural jade, polished by hand
+Natural jade, polished by hand
+[85]<button type=submit name=add />
+Jade bracelet
+$23
+Natural jade, polished by hand
+Natural jade, polished by hand
+Natural jade, polished by hand
+[107]<button type=submit name=add />
+[8]<buy-now-component role=button />
+	Buy now
+Add to cart with custom form
+[117]<search-decoration aria-label=Decorative search artwork />
