@@ -322,8 +322,8 @@ vi.mock("../browser.js", async (importOriginal) => ({
     currentUrl(): string {
       return this.detached ? this.detachedUrl : h.currentUrl;
     }
-    activePage(): null {
-      return null;
+    activePage(): { isClosed: () => boolean; url: () => string } {
+      return { isClosed: () => false, url: () => this.currentUrl() };
     }
     mainDocumentIdentity(): string {
       return String(h.mainDocumentEpoch);
@@ -391,6 +391,9 @@ vi.mock("../browser.js", async (importOriginal) => ({
       h.readCheckoutSummaryCalls += 1;
       if (h.checkoutSummary === null) throw new Error("payment_checkout_total_not_found");
       return h.checkoutSummary;
+    }
+    paymentBrowser(): this {
+      return this;
     }
     async readCheckoutReviewLineItems(): Promise<
       Array<{

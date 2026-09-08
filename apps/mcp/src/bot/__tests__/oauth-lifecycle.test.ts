@@ -17,6 +17,7 @@ import {
 } from "../browser.js";
 import {
   act,
+  activeProvisionBrowserForPayment,
   awaitVerification,
   cartAdd,
   cartClear,
@@ -43,6 +44,20 @@ const PRODUCT_URL = `data:text/html,${encodeURIComponent(`
 `)}`;
 
 let browser: Browser;
+
+const PAYMENT_FIXTURE_CARD = {
+  pan: "4242424242424242",
+  exp_month: "12",
+  exp_year: "30",
+  cvv: "123",
+  name: "Synthetic Cardholder",
+  billing: {
+    line1: "123 Synthetic Street",
+    city: "Testville",
+    postal_code: "10001",
+    country: "US",
+  },
+};
 
 async function controllerForProduct(): Promise<{ controller: BrowserController; product: Page }> {
   const context = await browser.newContext();
@@ -89,6 +104,69 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await context.close().catch(() => undefined);
     }
   });
+
+  it("binds payment checkout work to an OAuth completion page", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://product.test/checkout";
+    const returnUrl = "https://console.product.test/return";
+    const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "5000";
+    let sessionId: string | undefined;
+    const checkout = (total: string, submit: string) => `
+      <main>Order total ${total}</main>
+      <form>
+        <input id="pan" autocomplete="cc-number">
+        <input id="expiry" autocomplete="cc-exp">
+        <input id="cvv" autocomplete="cc-csc">
+        <input id="name" autocomplete="cc-name">
+        <button type="button" onclick="fetch('/payments', { method: 'POST' }); history.pushState({}, '', '${submit}'); document.querySelector('main').textContent = 'Your order is confirmed Confirmation # source-123'">Pay now</button>
+      </form>`;
+    try {
+      await context.route("https://product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `${checkout("$98.76", "/thank-you/product-987")}<button id="oauth" onclick='window.open(${JSON.stringify(
+            `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(returnUrl)}`,
+          )})'>Continue with Google</button>`,
+        }),
+      );
+      await context.route("https://accounts.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<script>location.replace(${JSON.stringify(returnUrl)})</script>`,
+        }),
+      );
+      await context.route("https://console.product.test/**", (route) =>
+        route.fulfill({ contentType: "text/html", body: checkout("$12.34", "/thank-you/source-123") }),
+      );
+      await product.goto(productUrl);
+      const controller = BrowserController.fromHarnessPage(product);
+      const started = await startHarnessProvisionSession({ browser: controller, serviceUrl: productUrl });
+      sessionId = started.session_id;
+      const oauthRef = parseElementsTable(started.el_table ?? "").find(
+        (element) => element.label === "Continue with Google",
+      )?.ref;
+      expect(oauthRef).toBeDefined();
+      await act(sessionId, { kind: "oauth_login", target: oauthRef!, provider: "google" });
+
+      const payment = await activeProvisionBrowserForPayment(sessionForCall(sessionId)!);
+      await expect(payment.fillAndSubmitCheckout(PAYMENT_FIXTURE_CARD)).resolves.toMatchObject({
+        order_confirmed: true,
+      });
+      const source = controller.completedOAuthPage()!;
+      expect(source.url()).toContain("/thank-you/source-123");
+      expect(product.url()).toBe(productUrl);
+      expect(await product.locator("#pan").inputValue()).toBe("");
+      expect(await product.locator("#expiry").inputValue()).toBe("");
+      expect(await product.locator("#cvv").inputValue()).toBe("");
+    } finally {
+      if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  }, 20_000);
 
   it("reattaches the active controller page when a provider closes its OAuth-return popup", async () => {
     const { controller, product } = await controllerForProduct();
@@ -1825,7 +1903,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
 
       expect(result).toMatchObject({ found: true, code: "481920" });
       await expect(queuedOauth).rejects.toThrow("stale_ref");
-      expect(product.url()).toContain("mail.google.com/mail/u/0/#search/");
+      expect(source.url()).toContain("mail.google.com/mail/u/0/#search/");
+      expect(product.url()).toBe(productUrl);
       expect(openedPage.url()).toBe(openedUrl);
       expect(await openedPage.locator("main").innerText()).toBe("Opened operator tab");
       expect(await openedPage.locator("body").getAttribute("data-oauth-clicked")).toBeNull();
@@ -1835,7 +1914,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       if (sessionId) await finishProvisionSession(sessionId);
       await context.close();
     }
-  });
+  }, 20_000);
 
   it("keeps concurrent source-page clicks paired with their own tabs", async () => {
     const context = await browser.newContext();

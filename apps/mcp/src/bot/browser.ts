@@ -58,6 +58,7 @@ import { experimentalMultiSessionEnabled } from "./session/multisession-flag.js"
 import { BrowserProcessOwner } from "./browser-process-owner.js";
 import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
+import type { PaymentBrowser } from "./pay-operator.js";
 import { bindOwnerBrowserLaunch, untrackOwnerBrowserLaunch } from "./owner-process-reaper.js";
 import { PageDriver } from "./page-driver.js";
 import {
@@ -7716,6 +7717,33 @@ export class BrowserController {
     };
   }
 
+  paymentBrowser(page: Page): PaymentBrowser {
+    const requireLivePage = (): Page => {
+      if (page.isClosed()) throw new Error("payment page is unavailable");
+      return page;
+    };
+    return {
+      isPayPalHostedCheckout: async () => await this.isPayPalHostedCheckout(requireLivePage()),
+      readCheckoutSummary: async (fallbackCurrency) =>
+        await this.readCheckoutSummary(fallbackCurrency, requireLivePage()),
+      readCheckoutConfirmSummary: async (approvedCurrency) =>
+        await this.readCheckoutConfirmSummary(approvedCurrency, requireLivePage()),
+      fillAndSubmitCheckout: async (card, options) =>
+        await this.fillAndSubmitCheckout(card, options, requireLivePage()),
+      fillCheckoutCardFields: async (card, options) =>
+        await this.fillCheckoutCardFields(card, options, requireLivePage()),
+      submitFilledCheckout: async () => await this.submitFilledCheckout(requireLivePage()),
+      clearSealedPaymentFields: async () =>
+        await this.clearSealedPaymentFields(requireLivePage()),
+      clearCheckoutCardFields: async () =>
+        await this.clearCheckoutCardFields(requireLivePage()),
+      waitForThreeDsResolution: async (timeoutMs) =>
+        await this.waitForThreeDsResolution(timeoutMs, requireLivePage()),
+      paymentInstrumentMismatch: () => this.paymentInstrumentMismatch(),
+      currentUrl: () => requireLivePage().url(),
+    };
+  }
+
   // approvedCurrency is the currency already approved for this purchase
   // (captured at the fill_card phase's readCheckoutSummary call). It lets a
   // page notation that can't be pinned to one ISO currency on its own — a
@@ -7725,9 +7753,11 @@ export class BrowserController {
   // live amount/currency this returns is still checked against the approved
   // mandate by the caller (executeOperatePayConfirm) before anything is
   // charged, so a mis-resolution here cannot itself authorize a bad charge.
-  async readCheckoutConfirmSummary(approvedCurrency?: string): Promise<CheckoutSummary> {
-    if (!this.page) throw new Error("Browser not started");
-    const page = this.page;
+  async readCheckoutConfirmSummary(
+    approvedCurrency?: string,
+    page: Page | null = this.page,
+  ): Promise<CheckoutSummary> {
+    if (!page) throw new Error("Browser not started");
     const identity = await page.evaluate(() => ({
       title: document.title,
       siteName:
@@ -7735,7 +7765,7 @@ export class BrowserController {
         document.querySelector<HTMLElement>('[itemprop="merchant"]')?.textContent ??
         "",
     }));
-    const frames = await this.visibleTrustedCheckoutFrames();
+    const frames = await this.visibleTrustedCheckoutFrames(page);
     const parsedFrames = await Promise.all(
       frames.map(async (frame) =>
         parseCheckoutConfirmAmountResult(
@@ -8099,14 +8129,14 @@ export class BrowserController {
     return undefined;
   }
 
-  async isPayPalHostedCheckout(): Promise<boolean> {
-    if (!this.page) throw new Error("Browser not started");
+  async isPayPalHostedCheckout(page: Page | null = this.page): Promise<boolean> {
+    if (!page) throw new Error("Browser not started");
     // Key the refusal off the ACTUAL card (PAN) input's frame, not off "any
     // PayPal iframe on the page." Shopify checkout frames card entry in a
     // recognized PayPal-independent surface (checkout.pci.shopifyinc.com); a
     // PayPal EXPRESS button (an unfillable-wallet iframe, not card fields)
     // must not cause a false-positive refusal of a fillable checkout.
-    const panFrame = await this.panFieldFrame();
+    const panFrame = await this.panFieldFrame(undefined, page);
     if (panFrame === null) return false;
     try {
       return isPayPalBraintreeHostedFieldsHost(new URL(panFrame.url()).hostname);
@@ -8116,9 +8146,12 @@ export class BrowserController {
   }
 
   // The first frame that actually renders a visible card (PAN) input, or null.
-  private async panFieldFrame(frames?: readonly Frame[]): Promise<Frame | null> {
-    if (!this.page) return null;
-    for (const frame of frames ?? this.page.frames()) {
+  private async panFieldFrame(
+    frames?: readonly Frame[],
+    page: Page | null = this.page,
+  ): Promise<Frame | null> {
+    if (!page) return null;
+    for (const frame of frames ?? page.frames()) {
       const locator = frame.locator(CHECKOUT_PAN_FIELD_SELECTORS);
       const count = await locator.count().catch(() => 0);
       for (let i = 0; i < count; i += 1) {
@@ -8145,8 +8178,9 @@ export class BrowserController {
   private async waitForPanField(
     timeoutMs: number,
     frameAllowed: (frame: Frame) => boolean = () => true,
+    page: Page | null = this.page,
   ): Promise<void> {
-    if (!this.page) return;
+    if (!page) return;
     const deadline = Date.now() + timeoutMs;
     while (true) {
       // A JP form whose PAN carries no name/id hint (see
@@ -8154,11 +8188,11 @@ export class BrowserController {
       // CHECKOUT_PAN_FIELD_SELECTORS once stamped — without this,
       // panFieldFrame() below can never match and every call here burns its
       // full timeoutMs even though the field was on the page from the start.
-      const frames = this.page.frames().filter(frameAllowed);
+      const frames = page.frames().filter(frameAllowed);
       await this.stampJapaneseCardLabelFields(frames);
-      if ((await this.panFieldFrame(frames)) !== null) return;
+      if ((await this.panFieldFrame(frames, page)) !== null) return;
       if (Date.now() >= deadline) return;
-      await this.page.waitForTimeout(200).catch(() => undefined);
+      await page.waitForTimeout(200).catch(() => undefined);
     }
   }
 
@@ -8167,9 +8201,12 @@ export class BrowserController {
   // both lifecycle events and then wait inside that exact frame for the PAN.
   // A settled page with a PAN only in excluded frames returns immediately so
   // the caller can produce its existing fail-closed frame-origin refusal.
-  private async waitForRecognizedPanField(pageUrl: string, deadline?: number): Promise<void> {
-    if (!this.page) return;
-    const page = this.page;
+  private async waitForRecognizedPanField(
+    pageUrl: string,
+    deadline?: number,
+    page: Page | null = this.page,
+  ): Promise<void> {
+    if (!page) return;
     const frameAllowed = (frame: Frame): boolean =>
       frame === page.mainFrame() || recognizedPaymentProviderFrame(frame.url(), pageUrl);
     const remaining = (): number =>
@@ -8192,7 +8229,7 @@ export class BrowserController {
         // This preserves the existing conservative label-to-control contract
         // while never evaluating or mutating an excluded payment frame.
         await this.stampJapaneseCardLabelFields([frame]);
-        if ((await this.panFieldFrame([frame])) !== null) {
+        if ((await this.panFieldFrame([frame], page)) !== null) {
           complete();
           return;
         }
@@ -8213,7 +8250,7 @@ export class BrowserController {
           const frames = page.frames();
           const trustedFrames = frames.filter(frameAllowed);
           await this.stampJapaneseCardLabelFields(trustedFrames);
-          if ((await this.panFieldFrame(trustedFrames)) !== null) {
+          if ((await this.panFieldFrame(trustedFrames, page)) !== null) {
             complete();
             return;
           }
@@ -9399,8 +9436,9 @@ export class BrowserController {
   async fillAndSubmitCheckout(
     card: CheckoutCard,
     options: { onSubmitDispatched?: () => void; beforeSubmitDispatch?: () => void | number } = {},
+    page: Page | null = this.page,
   ): Promise<CheckoutSubmitResult> {
-    if (!this.page) throw new Error("Browser not started");
+    if (!page) throw new Error("Browser not started");
     this.checkoutCardGroupScope = undefined;
     this.paymentInstrumentExpectation = undefined;
     this.observedPaymentInstrumentMismatch = undefined;
@@ -9423,9 +9461,9 @@ export class BrowserController {
       documentElement: ElementHandle<HTMLElement> | null;
     }[] = [];
     try {
-      await this.waitForPanField(10_000);
+      await this.waitForPanField(10_000, undefined, page);
       fillFrameSnapshot = await Promise.all(
-        this.page.frames().map(async (frame) => ({
+        page.frames().map(async (frame) => ({
           frame,
           url: frame.url(),
           documentElement: await frame.$("html").catch(() => null),
@@ -9444,6 +9482,7 @@ export class BrowserController {
           cardGroup,
           options.onSubmitDispatched,
           options.beforeSubmitDispatch,
+          page,
         ),
       };
     } catch (error) {
@@ -9456,9 +9495,10 @@ export class BrowserController {
           fillFrameSnapshot.flatMap(({ documentElement }, frameIndex) =>
             documentElement === null ? [] : [{ documentElement, frameIndex }],
           ),
+          page,
         );
       } else {
-        await this.clearCheckoutCardFieldsInFrames(this.page.frames());
+        await this.clearCheckoutCardFieldsInFrames(page.frames(), page);
       }
     } catch (error) {
       console.error(
@@ -9487,15 +9527,15 @@ export class BrowserController {
   async fillCheckoutCardFields(
     card: CheckoutCard,
     options: { deadline?: number } = {},
+    page: Page | null = this.page,
   ): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
+    if (!page) throw new Error("Browser not started");
     this.checkoutCardGroupScope = undefined;
-    const page = this.page;
     const pageUrl = page.url();
     if (!recognizedPaymentProviderFrame(pageUrl, pageUrl)) {
       throw new Error("payment_checkout_https_required");
     }
-    await this.waitForRecognizedPanField(pageUrl, options.deadline);
+    await this.waitForRecognizedPanField(pageUrl, options.deadline, page);
     if (options.deadline !== undefined && Date.now() >= options.deadline) {
       throw new Error("payment_approval_expired");
     }
@@ -9538,11 +9578,11 @@ export class BrowserController {
     } catch (error) {
       let fillError = error;
       if (error instanceof Error && error.message === "payment_field_not_found:pan") {
-        const excluded = await this.excludedPanFrameOrigin(new Set(allowed));
+        const excluded = await this.excludedPanFrameOrigin(new Set(allowed), page);
         if (excluded !== null) fillError = new UnrecognizedPaymentFrameError(excluded);
       }
       try {
-        await this.clearCheckoutCardFieldsInFrames(allowed);
+        await this.clearCheckoutCardFieldsInFrames(allowed, page);
       } catch {
         throw new PaymentCardFillCleanupError(fillError);
       }
@@ -9552,10 +9592,13 @@ export class BrowserController {
 
   // No PAN field among the allowed frames — name the excluded frame that does
   // carry one (if any) so the refusal is diagnosable without filling it.
-  private async excludedPanFrameOrigin(allowed: ReadonlySet<Frame>): Promise<string | null> {
-    if (!this.page) return null;
-    await this.stampJapaneseCardLabelFields(this.page.frames());
-    for (const frame of this.page.frames()) {
+  private async excludedPanFrameOrigin(
+    allowed: ReadonlySet<Frame>,
+    page: Page | null = this.page,
+  ): Promise<string | null> {
+    if (!page) return null;
+    await this.stampJapaneseCardLabelFields(page.frames());
+    for (const frame of page.frames()) {
       if (allowed.has(frame)) continue;
       const count = await frame
         .locator(CHECKOUT_PAN_FIELD_SELECTORS)
@@ -9572,10 +9615,12 @@ export class BrowserController {
     return null;
   }
 
-  private async scanSavedCardSelectionAcrossFrames(): Promise<Map<Frame, SavedCardSelectionScan>> {
-    if (!this.page) throw new Error("Browser not started");
+  private async scanSavedCardSelectionAcrossFrames(
+    page: Page | null = this.page,
+  ): Promise<Map<Frame, SavedCardSelectionScan>> {
+    if (!page) throw new Error("Browser not started");
     const entries = await Promise.all(
-      this.page.frames().map(async (frame) => {
+      page.frames().map(async (frame) => {
         try {
           return [frame, await frame.evaluate(scanSavedCardSelectionInPage)] as const;
         } catch {
@@ -9594,8 +9639,9 @@ export class BrowserController {
   // snapshotted non-empty value.
   private async savedCardSelectionVerified(
     verification: SavedCardSelectionVerification,
+    page: Page | null = this.page,
   ): Promise<boolean> {
-    const scans = await this.scanSavedCardSelectionAcrossFrames();
+    const scans = await this.scanSavedCardSelectionAcrossFrames(page);
     let markedCount = 0;
     for (const scan of scans.values()) {
       if (scan.competingRadioCount > 0 || scan.competingSelectOption) return false;
@@ -9641,19 +9687,19 @@ export class BrowserController {
   // filled card fields. Fail-closed refusal is the ONLY outcome here — never
   // silently re-fill (the raw card bytes are already gone by this point in
   // the call chain) and never guess between multiple candidates.
-  private async resolveCompetingSavedCardSelection(): Promise<
+  private async resolveCompetingSavedCardSelection(page: Page | null = this.page): Promise<
     | { outcome: "none" | "resolved"; verification: SavedCardSelectionVerification }
     | { outcome: "ambiguous" }
   > {
-    if (!this.page) throw new Error("Browser not started");
-    for (const frame of this.page.frames()) {
+    if (!page) throw new Error("Browser not started");
+    for (const frame of page.frames()) {
       try {
         await frame.evaluate(clearSavedCardSelectionMarkersInPage);
       } catch {
         throw new Error("payment_card_selection_ambiguous");
       }
     }
-    const initial = await this.scanSavedCardSelectionAcrossFrames();
+    const initial = await this.scanSavedCardSelectionAcrossFrames(page);
     const sealedValuesByFrame = new Map(
       [...initial.entries()].map(([frame, scan]) => [frame, scan.sealedFieldValues] as const),
     );
@@ -9684,24 +9730,25 @@ export class BrowserController {
       sealedValuesByFrame,
       expectedMarkedCount,
     };
-    if (!(await this.savedCardSelectionVerified(verification))) return { outcome: "ambiguous" };
+    if (!(await this.savedCardSelectionVerified(verification, page))) return { outcome: "ambiguous" };
     return { outcome: "resolved", verification };
   }
 
   // The charge: find and click the pay/place-order control, then poll for a
   // terminal merchant order route or a 3-D Secure challenge. Callers gate this
   // on a verified visible total.
-  async submitFilledCheckout(): Promise<CheckoutSubmitResult> {
-    return await this.submitFilledCheckoutInScope(this.checkoutCardGroupScope);
+  async submitFilledCheckout(page: Page | null = this.page): Promise<CheckoutSubmitResult> {
+    return await this.submitFilledCheckoutInScope(this.checkoutCardGroupScope, undefined, undefined, page);
   }
 
   private async submitFilledCheckoutInScope(
     cardGroup?: CheckoutCardGroupScope,
     onSubmitDispatched?: () => void,
     beforeSubmitDispatch?: () => void | number,
+    page: Page | null = this.page,
   ): Promise<CheckoutSubmitResult> {
-    if (!this.page) throw new Error("Browser not started");
-    const savedCardSelection = await this.resolveCompetingSavedCardSelection();
+    if (!page) throw new Error("Browser not started");
+    const savedCardSelection = await this.resolveCompetingSavedCardSelection(page);
     if (savedCardSelection.outcome === "ambiguous") {
       throw new Error("payment_card_selection_ambiguous");
     }
@@ -9709,7 +9756,7 @@ export class BrowserController {
     this.checkoutOutcomeBaseline = undefined;
     let submitted = false;
     let clearSubmittedDispatchTracking: (() => Promise<void>) | null = null;
-    for (const frame of this.page.frames()) {
+    for (const frame of page.frames()) {
       const matches = frame.locator('button,input[type="submit"],[role="button"]');
       const count = Math.min(await matches.count().catch(() => 0), 100);
       for (let i = 0; i < count; i += 1) {
@@ -9760,9 +9807,9 @@ export class BrowserController {
         const label = checkoutSubmitLabel(labelSignals ?? {});
         if (!CHECKOUT_SUBMIT_LABEL_RE.test(label)) continue;
         const dispatchToken = `ts-payment-submit-${this.checkoutSubmitSequence++}`;
-        const preDispatchFrameUrls = this.page.frames().map((pageFrame) => pageFrame.url());
+        const preDispatchFrameUrls = page.frames().map((pageFrame) => pageFrame.url());
         const clickOnlyOutcomeBaseline = checkoutOutcomeBaselineFromDispatchSnapshot({
-          url: this.page.url(),
+          url: page.url(),
           urls: preDispatchFrameUrls,
         });
         let submitDispatchedReported = false;
@@ -9851,37 +9898,36 @@ export class BrowserController {
           resolveNavigationOutcome = resolve;
         });
         const paymentRequestListener = (request: Request): void => {
-          const activePage = this.page;
-          if (!paymentRequestTrackingArmed || activePage === null) return;
+          if (!paymentRequestTrackingArmed) return;
           let sourceFrame: Frame;
           try {
             sourceFrame = request.frame();
           } catch {
             return;
           }
-          if (sourceFrame !== frame && sourceFrame !== activePage.mainFrame()) return;
+          if (sourceFrame !== frame && sourceFrame !== page.mainFrame()) return;
           if (!isCheckoutPaymentRequest(request)) return;
           concretePaymentRequestObserved = true;
           resolveConcretePaymentRequest();
         };
         const navigationListener = (): void => {
-          if (!paymentRequestTrackingArmed || this.page === null) return;
+          if (!paymentRequestTrackingArmed) return;
           navigationObserved = true;
           void (async () => {
-            if (await this.hasConfirmedCheckoutOutcome(clickOnlyOutcomeBaseline)) {
+            if (await this.hasConfirmedCheckoutOutcome(clickOnlyOutcomeBaseline, page)) {
               navigationTerminalObserved = true;
               resolveNavigationOutcome();
               return;
             }
-            const challenge = await this.detectThreeDsChallenge().catch(() => undefined);
+            const challenge = await this.detectThreeDsChallenge(undefined, page).catch(() => undefined);
             if (challenge?.three_ds_required === true) {
               navigationThreeDsObserved = true;
               resolveNavigationOutcome();
             }
           })();
         };
-        this.page.on("request", paymentRequestListener);
-        this.page.on("framenavigated", navigationListener);
+        page.on("request", paymentRequestListener);
+        page.on("framenavigated", navigationListener);
         const waitForDispatchEvidence = async (): Promise<void> => {
           let timer: ReturnType<typeof setTimeout> | undefined;
           await Promise.race([
@@ -9912,8 +9958,8 @@ export class BrowserController {
             .catch(() => null);
         const clearDispatchTracking = async (): Promise<void> => {
           paymentRequestTrackingArmed = false;
-          this.page?.off("request", paymentRequestListener);
-          this.page?.off("framenavigated", navigationListener);
+          page.off("request", paymentRequestListener);
+          page.off("framenavigated", navigationListener);
           await candidate
             .evaluate(
               (element) => {
@@ -9965,9 +10011,9 @@ export class BrowserController {
         // dispatched — never proceed on a stale check.
         let capturedBaseline: CheckoutOutcomeBaseline | null = null;
         try {
-          await this.page.bringToFront().catch(() => undefined);
+          await page.bringToFront().catch(() => undefined);
           await candidate.click({ trial: true });
-          if (!(await this.savedCardSelectionVerified(savedCardSelection.verification))) {
+          if (!(await this.savedCardSelectionVerified(savedCardSelection.verification, page))) {
             throw new Error("payment_card_selection_ambiguous");
           }
           capturedBaseline = await runCaptureConfirmedPaymentSubmit({
@@ -9992,11 +10038,11 @@ export class BrowserController {
               const dispatchState = await readDispatchState();
               const clickOnlyOutcomeConfirmed =
                 navigationTerminalObserved ||
-                (await this.hasConfirmedCheckoutOutcome(clickOnlyOutcomeBaseline));
+                (await this.hasConfirmedCheckoutOutcome(clickOnlyOutcomeBaseline, page));
               const clickOnlyThreeDsObserved =
                 navigationObserved &&
                 (navigationThreeDsObserved ||
-                  (await this.detectThreeDsChallenge().catch(() => undefined))
+                  (await this.detectThreeDsChallenge(undefined, page).catch(() => undefined))
                     ?.three_ds_required === true);
               const clickOnlyDispatchObserved =
                 (concretePaymentRequestObserved && dispatchState?.validationBlocked !== true) ||
@@ -10016,7 +10062,7 @@ export class BrowserController {
           throw error;
         }
         try {
-          outcomeBaseline = capturedBaseline ?? (await this.captureCheckoutOutcomeBaseline());
+          outcomeBaseline = capturedBaseline ?? (await this.captureCheckoutOutcomeBaseline(page));
         } catch (error) {
           await clearSubmittedDispatchTracking?.();
           clearSubmittedDispatchTracking = null;
@@ -10035,14 +10081,14 @@ export class BrowserController {
     try {
       const challengeDeadline = Date.now() + 15_000;
       while (Date.now() < challengeDeadline) {
-        if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) {
+        if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline, page)) {
           return { three_ds_required: false, order_confirmed: true };
         }
-        const challenge = await this.detectThreeDsChallenge();
+        const challenge = await this.detectThreeDsChallenge(undefined, page);
         if (challenge.three_ds_required) {
           return challenge;
         }
-        await this.page.waitForTimeout(250).catch(() => undefined);
+        await page.waitForTimeout(250).catch(() => undefined);
       }
       return { three_ds_required: false, order_confirmed: false };
     } catch (error) {
@@ -10058,10 +10104,10 @@ export class BrowserController {
     }
   }
 
-  async clearSealedPaymentFields(): Promise<void> {
+  async clearSealedPaymentFields(page: Page | null = this.page): Promise<void> {
     this.checkoutCardGroupScope = undefined;
-    if (!this.page) return;
-    await this.clearSealedPaymentFieldsInFrames(this.page.frames());
+    if (!page) return;
+    await this.clearSealedPaymentFieldsInFrames(page.frames());
   }
 
   private async clearSealedPaymentFieldsInFrames(frames: readonly Frame[]): Promise<void> {
@@ -10084,10 +10130,10 @@ export class BrowserController {
     }
   }
 
-  async clearCheckoutCardFields(): Promise<void> {
+  async clearCheckoutCardFields(page: Page | null = this.page): Promise<void> {
     this.checkoutCardGroupScope = undefined;
-    if (!this.page) return;
-    await this.clearCheckoutCardFieldsInFrames(this.page.frames());
+    if (!page) return;
+    await this.clearCheckoutCardFieldsInFrames(page.frames(), page);
   }
 
   private async clearCheckoutCardFieldsInDocuments(
@@ -10095,8 +10141,9 @@ export class BrowserController {
       documentElement: ElementHandle<HTMLElement>;
       frameIndex: number;
     }[],
+    page: Page | null = this.page,
   ): Promise<void> {
-    if (!this.page) return;
+    if (!page) return;
     await Promise.all(
       documents.map(({ documentElement, frameIndex }) =>
         this.stampJapaneseCardLabelFieldsInDocument(documentElement, frameIndex),
@@ -10136,7 +10183,7 @@ export class BrowserController {
         });
       }, CHECKOUT_CARD_VALUE_FIELD_SELECTORS);
     }
-    await this.page.waitForTimeout(0).catch(() => undefined);
+    await page.waitForTimeout(0).catch(() => undefined);
     await Promise.all(
       documents.map(({ documentElement, frameIndex }) =>
         this.stampJapaneseCardLabelFieldsInDocument(documentElement, frameIndex),
@@ -10186,7 +10233,7 @@ export class BrowserController {
     if (visibleTexts.some((text) => containsVisiblePaymentMaterial(text))) {
       throw new Error("payment_fields_not_cleared");
     }
-    const interactiveElements = await this.extractInteractiveElements().catch(() => undefined);
+    const interactiveElements = await this.extractInteractiveElements(page).catch(() => undefined);
     if (interactiveElements === undefined) throw new Error("payment_fields_not_cleared");
     const interactiveText = interactiveElements
       .flatMap((element) => [
@@ -10210,8 +10257,11 @@ export class BrowserController {
     }
   }
 
-  private async clearCheckoutCardFieldsInFrames(frames: readonly Frame[]): Promise<void> {
-    if (!this.page) return;
+  private async clearCheckoutCardFieldsInFrames(
+    frames: readonly Frame[],
+    page: Page | null = this.page,
+  ): Promise<void> {
+    if (!page) return;
     await this.stampJapaneseCardLabelFields(frames);
     for (const frame of frames) {
       const fields = frame.locator(CHECKOUT_CARD_VALUE_FIELD_SELECTORS);
@@ -10243,7 +10293,7 @@ export class BrowserController {
         .catch(() => undefined);
     }
     await this.clearSealedPaymentFieldsInFrames(frames);
-    await this.page.waitForTimeout(0).catch(() => undefined);
+    await page.waitForTimeout(0).catch(() => undefined);
     await this.stampJapaneseCardLabelFields(frames);
     for (const frame of frames) {
       const uncleared = await frame
@@ -10271,7 +10321,7 @@ export class BrowserController {
     ) {
       throw new Error("payment_fields_not_cleared");
     }
-    const interactiveElements = await this.extractInteractiveElements().catch(() => undefined);
+    const interactiveElements = await this.extractInteractiveElements(page).catch(() => undefined);
     if (interactiveElements === undefined) throw new Error("payment_fields_not_cleared");
     const interactiveText = interactiveElements
       .flatMap((element) => [
@@ -10295,9 +10345,9 @@ export class BrowserController {
     }
   }
 
-  private async isFrameVisible(frame: Frame): Promise<boolean> {
-    if (!this.page) return false;
-    const mainFrame = this.page.mainFrame();
+  private async isFrameVisible(frame: Frame, page: Page | null = this.page): Promise<boolean> {
+    if (!page) return false;
+    const mainFrame = page.mainFrame();
     let current: Frame | null = frame;
     while (current !== mainFrame) {
       if (current === null) return false;
@@ -10332,10 +10382,13 @@ export class BrowserController {
     }
   }
 
-  private async frameWithinThreeDsStructuralFrame(frame: Frame): Promise<boolean> {
-    if (!this.page) return false;
+  private async frameWithinThreeDsStructuralFrame(
+    frame: Frame,
+    page: Page | null = this.page,
+  ): Promise<boolean> {
+    if (!page) return false;
     let current: Frame | null = frame;
-    while (current !== this.page.mainFrame()) {
+    while (current !== page.mainFrame()) {
       if (current === null) return false;
       const frameElement = await current.frameElement().catch(() => null);
       if (frameElement === null) return false;
@@ -10489,8 +10542,9 @@ export class BrowserController {
 
   private async detectThreeDsChallenge(
     expectedCard?: Pick<CheckoutCard, "pan" | "issuer" | "issuer_source" | "network" | "label">,
+    page: Page | null = this.page,
   ): Promise<CheckoutSubmitResult> {
-    if (!this.page) throw new Error("Browser not started");
+    if (!page) throw new Error("Browser not started");
     if (expectedCard !== undefined) {
       this.rememberPaymentInstrumentExpectation(expectedCard);
     }
@@ -10500,13 +10554,13 @@ export class BrowserController {
     const urlPattern =
       /(?:https?:\/\/(?:[^/]+\.)*cardinalcommerce\.com\/(?:v\d+\/)?cruise\/stepup(?:[/?#]|$)|https?:\/\/hooks\.stripe\.com\/3d_secure|3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/3ds(?:2)?\/|\/acs\/)/i;
     let challengeFallback: CheckoutSubmitResult | undefined;
-    for (const frame of this.page.frames()) {
+    for (const frame of page.frames()) {
       // A captcha frame (fraud-check, not authentication) must never be
       // misread as a 3DS challenge — e.g. Stripe's invisible hCaptcha frame
       // at hcaptcha.html#frame=challenge previously tripped the bare
       // "challenge" match this pattern used to include.
       if (this.frameWithinCaptcha(frame)) continue;
-      if (!(await this.isFrameVisible(frame))) continue;
+      if (!(await this.isFrameVisible(frame, page))) continue;
       // Text signals intentionally use rendered innerText without effective-rect gating;
       // overflow-clipped 3DS phrasing is an accepted contrived residual.
       const [text, structural] = await Promise.all([
@@ -10516,7 +10570,7 @@ export class BrowserController {
       const detected =
         urlPattern.test(frame.url()) ||
         structural ||
-        (await this.frameWithinThreeDsStructuralFrame(frame)) ||
+        (await this.frameWithinThreeDsStructuralFrame(frame, page)) ||
         /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i.test(
           text,
         );
@@ -10528,7 +10582,7 @@ export class BrowserController {
       const result: CheckoutSubmitResult = {
         three_ds_required: true,
         order_confirmed: false,
-        challenge_url: frame.url() || this.page.url(),
+        challenge_url: frame.url() || page.url(),
         ...(mismatch !== undefined ? { payment_instrument_mismatch: mismatch } : {}),
       };
       if (mismatch !== undefined) {
@@ -10544,18 +10598,23 @@ export class BrowserController {
     return this.observedPaymentInstrumentMismatch;
   }
 
-  private async captureCheckoutOutcomeBaseline(): Promise<CheckoutOutcomeBaseline> {
-    if (!this.page) return { url: "", orderUrlIdentities: [], terminalUrlIdentity: null };
-    const url = this.page.url();
+  private async captureCheckoutOutcomeBaseline(
+    page: Page | null = this.page,
+  ): Promise<CheckoutOutcomeBaseline> {
+    if (!page) return { url: "", orderUrlIdentities: [], terminalUrlIdentity: null };
+    const url = page.url();
     return checkoutOutcomeBaselineFromDispatchSnapshot({
       url,
-      urls: this.page.frames().map((frame) => frame.url()),
+      urls: page.frames().map((frame) => frame.url()),
     });
   }
 
-  private async hasConfirmedCheckoutOutcome(baseline: CheckoutOutcomeBaseline): Promise<boolean> {
-    if (!this.page) return false;
-    const current = await this.captureCheckoutOutcomeBaseline();
+  private async hasConfirmedCheckoutOutcome(
+    baseline: CheckoutOutcomeBaseline,
+    page: Page | null = this.page,
+  ): Promise<boolean> {
+    if (!page) return false;
+    const current = await this.captureCheckoutOutcomeBaseline(page);
     let sameCheckoutOrigin = false;
     try {
       const currentUrl = new URL(current.url);
@@ -10575,7 +10634,7 @@ export class BrowserController {
     ) {
       return false;
     }
-    return await this.page.mainFrame().evaluate(() => {
+    return await page.mainFrame().evaluate(() => {
       const visibleText = document.body?.innerText ?? "";
       const confirmationNumber = /\bconfirmation\s*#\s*[a-z0-9][a-z0-9-]{3,}\b/i.test(visibleText);
       const confirmedOrder = /\byour order is confirmed\b/i.test(visibleText);
@@ -10590,25 +10649,28 @@ export class BrowserController {
   // bank-app 3DS): just poll for the same terminal-order signal a plain
   // non-3DS checkout uses, plus a passive plain-text decline check. It never
   // manipulates, intercepts, or gates completion on the challenge frame.
-  async waitForThreeDsResolution(timeoutMs: number): Promise<ThreeDsResolution> {
-    if (!this.page) throw new Error("Browser not started");
+  async waitForThreeDsResolution(
+    timeoutMs: number,
+    page: Page | null = this.page,
+  ): Promise<ThreeDsResolution> {
+    if (!page) throw new Error("Browser not started");
     const outcomeBaseline =
-      this.checkoutOutcomeBaseline ?? (await this.captureCheckoutOutcomeBaseline());
+      this.checkoutOutcomeBaseline ?? (await this.captureCheckoutOutcomeBaseline(page));
     const failureText =
       /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
     const deadline = Date.now() + Math.max(timeoutMs, 0);
     const mismatchAtEntry = this.observedPaymentInstrumentMismatch;
     let challengeObserved = false;
     while (true) {
-      await this.page.bringToFront().catch(() => undefined);
-      const challenge = await this.detectThreeDsChallenge().catch(() => undefined);
+      await page.bringToFront().catch(() => undefined);
+      const challenge = await this.detectThreeDsChallenge(undefined, page).catch(() => undefined);
       if (challenge?.three_ds_required === true) challengeObserved = true;
       if (mismatchAtEntry === undefined && this.observedPaymentInstrumentMismatch !== undefined) {
         return challengeObserved ? "challenge_pending" : "timeout";
       }
-      if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) return "succeeded";
+      if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline, page)) return "succeeded";
       const texts = await Promise.all(
-        this.page
+        page
           .frames()
           .filter((frame) => !this.frameWithinCaptcha(frame))
           .map(
@@ -10619,7 +10681,7 @@ export class BrowserController {
       if (texts.some((text) => failureText.test(text))) return "failed";
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) return challengeObserved ? "challenge_pending" : "timeout";
-      await this.page.waitForTimeout(Math.min(1_000, remainingMs)).catch(() => undefined);
+      await page.waitForTimeout(Math.min(1_000, remainingMs)).catch(() => undefined);
     }
   }
 

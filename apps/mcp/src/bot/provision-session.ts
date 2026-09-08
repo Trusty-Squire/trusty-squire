@@ -43,6 +43,7 @@ import type {
   PendingApprovalWait,
   PendingCardFill,
   PendingThreeDsWait,
+  PaymentBrowser,
   TerminalPaymentApprovalStatus,
 } from "./pay-operator.js";
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
@@ -2356,10 +2357,14 @@ export function activeProvisionBrowser(): BrowserController {
 
 export async function activeProvisionBrowserForPayment(
   selectedSession?: Session,
-): Promise<BrowserController> {
+): Promise<PaymentBrowser> {
   const session = selectedSession ?? activeProvisionSession();
+  const page = operationPageForSession(session);
+  if (page === undefined || page.isClosed()) {
+    throw new Error("payment page is unavailable");
+  }
   invalidateCompactV2Snapshot(session);
-  return session.browser;
+  return session.browser.paymentBrowser(page);
 }
 
 function placeOrderApprovalFromPendingFill(
@@ -5879,7 +5884,7 @@ async function executeAct(
             true,
           );
   return {
-    operationPage: actionPageAfter,
+    ...(actionPageAfter === undefined ? {} : { operationPage: actionPageAfter }),
     observation:
       completedAction.kind === "select" && observation.format !== "browser-use-dom"
         ? { ...observation, selected_option: completedAction.text }
@@ -8791,8 +8796,8 @@ export async function awaitVerification(
   }
 
   invalidateCompactV2Snapshot(session);
-  const inboxPage = session.browser.activePage();
-  if (inboxPage === null || inboxPage.isClosed()) {
+  const inboxPage = operationPageForSession(session);
+  if (inboxPage === undefined || inboxPage.isClosed()) {
     throw new Error("inbox page is unavailable");
   }
 
