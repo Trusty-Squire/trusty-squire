@@ -41,44 +41,43 @@ Inside `elements`:
    `accessibility` flat-tree are not needed to choose an action.
    `occluded_by`/`topmost`/`href` ARE load-bearing — keep them (per-element).
 
-## Observation mode and detail
+## Observation mode and format
 
 The session observation format is selected once at start by
 `TRUSTY_SQUIRE_OBSERVE_V2=on|shadow|off` and defaults to `on`:
 
-- `on` emits the browser-use DOM format. Every detail level stays in that format;
-  `detail:"full"` does not expose the V1 inventory.
+- `on` defaults to `format:"compact"`, a paged browser-use control map.
+  `format:"full"` explicitly emits the browser-use DOM format and does not
+  expose the V1 inventory.
 - `shadow` runs the native browser-use DOM serializer without retaining or emitting
   its result, while callers continue to receive and target V1 observations.
 - `off` keeps the V1 observation and action contract.
 
-Within V1, `detail` is the ordered per-call payload control:
+Within V1, the public `format` parameter selects the ordered per-call payload:
 
 ```
-detail:  none  <  compact  <  full
-         ack       default     rich V1 (compact + screen + accessibility + raw fields)
+format: compact  <  full
+        default     rich V1 (compact + screen + accessibility + raw fields)
 ```
 
-`operate_observe({ detail })` accepts `compact|full`. Flat action verbs return
-their normal action result; there is no public action-detail union. In V1, a
-genuinely ambiguous step can escalate to `detail:"full"` for that one call. In
-V2, ambiguity is resolved through its paging/query protocol instead of
-restoring legacy fields.
+`operate_observe({ format })` accepts `compact|full`. Flat action verbs return
+their normal action result; there is no public observation-detail union. In V1,
+a genuinely ambiguous step can escalate to `format:"full"` for that one call.
+In V2, `compact` is the default paged control map and `full` is the verbatim DOM
+escape hatch.
 
-## Superseded Compact V2 wire contract
+## Current Compact V2 wire-contract ownership
 
-The tuple table, separate page-text channel, fixed wire budget, and overflow
-cursor contract this section once described are replaced by the canonical
-browser-use DOM port. The current `browser-use-dom` contract is owned by
-[`browser-use-serializer-port.md`](browser-use-serializer-port.md), including
-the interleaved tree, stable refs, whole-document query, viewport signals,
-and fixture oracle. This document retains the original
-design rationale and the V1 history below; it is not a second current wire
-reference.
+The default `format:"compact"` control map, byte budget, and cursor contract
+are owned by [`observation-model.md`](observation-model.md). The explicit
+`format:"full"` browser-use DOM contract is owned by
+[`browser-use-serializer-port.md`](browser-use-serializer-port.md). This
+document retains the original design rationale and V1 history below; it is not
+a second current wire reference.
 
 ## Legacy V1 — Phase 1 compact encoder ✅ shipped
 
-When V1 is selected and `detail` is `compact` (the V1 default), `observeSession`:
+When V1 is selected and `format` is `compact` (the V1 default), `observeSession`:
 
 - **Omit `screen` + `accessibility`** (the two re-encodings). Also skip computing
   them (CPU win).
@@ -92,7 +91,7 @@ When V1 is selected and `detail` is `compact` (the V1 default), `observeSession`
   re-expansion and targeted searches.
 - **`value` → `value_len`** (a number) — a payload size budget, not a seal, and
   it reports the field's REAL length for every field including password inputs.
-  `detail:"full"` carries the raw `value`.
+  `format:"full"` carries the raw `value`.
 - **Metadata** so omission is explicit, never silent:
   `elements_total` (the complete current count, including delta/collapsed
   omissions), `text_truncated` (the 4000-char text cap tripped), and
@@ -111,9 +110,9 @@ token-weighted aggregate over the real corpus is approximately 66%. Across
 approximately 58,000 same-selector re-observe pairs, mutable path-region data
 re-minted 0.00% of refs.
 
-## Legacy V1 — Phase 2 `detail` ladder ✅ shipped
+## Legacy V1 — Phase 2 `format` ladder ✅ shipped
 
-- In V1, `operate_observe({ detail: "compact" | "full" })` — `full` restores the
+- In V1, `operate_observe({ format: "compact" | "full" })` — `full` restores the
   legacy screen+accessibility+raw-field payload for an ambiguous step.
 - In V1, actions return their normal result. Call `operate_observe` before the
   next ref-targeted action when the state changed.
@@ -196,7 +195,7 @@ V1 compact observations minimize repeated context without making the stream loss
   preferences actions are never collapsed. `chrome_links_collapsed` reports the
   omitted count; the file still contains them.
 
-In V1, `detail:"full"` bypasses all delta and collapse behavior and preserves
+In V1, `format:"full"` bypasses all delta and collapse behavior and preserves
 the rich payload shape byte-for-byte. As an unsurfaced side effect it replaces the
 persisted snapshot, invalidates the compact baseline so the next compact observe
 is a full resync, and removes the stale snapshot if persistence fails.
@@ -204,7 +203,7 @@ is a full resync, and removes the stale snapshot if persistence fails.
 ## Legacy V1 — Phase 4 columnar element encoding + type-elision ✅ shipped
 
 Two per-element encoding transforms applied on TOP of the Phase-3 delta. Both
-change only the COMPACT wire; the persisted snapshot file and `detail:"full"`
+change only the COMPACT wire; the persisted snapshot file and `format:"full"`
 keep full fidelity.
 
 - **Columnar `el_table`.** A compact `elements` JSON array repeated every field
@@ -225,7 +224,7 @@ keep full fidelity.
   all-unchanged delta). It composes with the delta exactly as `elements` did:
   on `delta:true` it lists only the changed rows (upsert by ref); on a full
   resync it is the resync set minus collapsed chrome links; `removed`/`unchanged`/
-  `text_unchanged` are unchanged. `detail:"full"` keeps the `elements` JSON array
+  `text_unchanged` are unchanged. `format:"full"` keeps the `elements` JSON array
   (the escape hatch stays byte-equivalent to the legacy shape).
 - **Type-elision.** On the wire form only, drop a `type` value the planner
   already infers from tag/role — `button`/`submit` (implied by the tag/role) and

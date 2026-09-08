@@ -1,16 +1,17 @@
 # Design: Trusty Squire operator observation model — skeleton + resident DOM + descriptive refs
 
-**Status:** Current authority for the observation no-seal policy. The browser-use DOM
-wire, identity, query, and fixture contract is owned by
+**Status:** Current authority for the observation-format and no-seal policy. The
+full browser-use DOM wire, identity, and fixture contract is owned by
 [`browser-use-serializer-port.md`](browser-use-serializer-port.md); the remaining
 roadmap material is historical.
 **Scope:** `@trusty-squire/mcp` operator observation/serialization layer (`operate_observe`, `operate_screenshot`, `operate_extract`, the flat acting verbs, and the browser-use DOM serializer)
 **Author:** firstmate, from hands-on operator driving (ipinfo signup + whitejade.xyz checkout, rc.19)
-**Related:** PR #624 (interim gap-2 patch: tolerate live re-renders in compact-v2 overflow paging). This doc is the model that makes that patch unnecessary long-term.
+**Related:** The compact-v2 cursor-map regression coverage in
+`apps/mcp/src/bot/__tests__/operate-session-flow.test.ts`.
 
 ---
 
-## 1. Problem (observed, not theoretical)
+## 1. Historical problem statement (before the current compact-query contract)
 
 Driving real signups and a real Shopify checkout on rc.19, the agent was effectively blind and could not reliably fill dynamic forms. Concrete failures:
 
@@ -59,22 +60,28 @@ Current implementation and wire contract:
 
 The full DOM is already loaded in the operator's browser. The observation is a **projection** of it, not a fetch.
 
-**Compactness invariant (hard requirement, captain-mandated).** The *default* `operate_observe` payload — the vanilla form the driving agent sees every turn — MUST stay compact and bounded, regardless of page size. A huge page yields a bounded skeleton, not a huge payload. `expand`/`read`/`screenshot` exist precisely so richness is **pull-only** and never inflates the default. This is the whole point: the agent reasons over a small skeleton and drills in only where it needs to.
+**Compactness invariant (hard requirement, captain-mandated).** The default
+`operate_start` and `operate_observe` payloads MUST stay compact and bounded,
+regardless of page size. A huge page yields a bounded control-map page, not a
+huge payload. `format:"full"` is an explicit escape hatch when the agent needs
+the verbatim DOM.
 
-Concretely, the default skeleton is: visible/actionable controls plus a few salient read-only nodes (headings, error banners), and **each row carries only the minimum identity to target and reason** — the ref/label, role, and a compact state flag (e.g. `required`/`invalid`/`disabled`/`checked`). Heavier detail — full attributes, placeholder text, long/validation-message text, node subtrees, images — is **not** in the default; it comes only via `expand`/`read`/`screenshot`. The implementation must hold a per-observation size budget and prove the default stays within it on a large real page (a product grid, a long checkout).
+Concretely, `operate_start` and `operate_observe` default to `format:"compact"`: the existing paged `browser-use-control-query` map of all actionable controls, with each `[ref, role, facts?]` row carrying only the identity and state needed to act. `overflow.next_cursor` continues the map under the existing observation-v2 wire budget. Non-control nodes are absent by construction; this is a size/shape choice, never screening or redaction. `format:"full"` explicitly selects the unchanged, verbatim `browser-use-dom` tree when arbitrary page text, raw attributes, or layout context is needed.
 
-Because the source of truth (loaded DOM) never leaves the browser, every detail request is a cheap in-memory read — no navigation, no re-render, no round-trip, no blowup — and, critically, no cost to the default payload.
+Because the source of truth (loaded DOM) never leaves the browser, rendering
+either shape is an in-memory read; the compact map remains bounded and the full
+DOM remains an explicit choice.
 
-### 4.3 On-demand scoped expansion, addressed by ref (replaces overflow paging)
+### 4.3 Superseded proposal: on-demand scoped expansion
 
 Instead of paginating a serialized whole page, the agent pulls detail on a specific ref:
 
 - `expand @ref` → that node's neighborhood (parents / siblings / children) to disambiguate ("which of these five buttons").
 - `read @ref` → the element's text subtree, verbatim.
 
-Requests are scoped to a stable ref and return a bounded local view, so navigation is deterministic and cannot explode — the agent only pulls the neighborhood it is inspecting. This replaces `overflow` + cursor paging entirely.
+Requests are scoped to a stable ref and return a bounded local view, so navigation is deterministic and cannot explode — the agent only pulls the neighborhood it is inspecting. This proposal was not adopted: compact observations retain their paged `overflow.next_cursor` contract.
 
-### 4.4 Vision via set-of-marks, not per-element crops
+### 4.4 Superseded proposal: vision via set-of-marks
 
 Per-element cropped screenshots are O(N) calls — a flower grid would be death by a thousand `show`. Default visual primitive:
 
@@ -96,6 +103,10 @@ The history of this section is a one-way ratchet toward visibility:
 **What that means concretely.** `operate_observe`, `operate_screenshot`, and
 `operate_extract` return what the page
 actually renders:
+
+- Compact versus full observation is only a size/shape choice. Compact serializes
+  controls; full serializes the verbatim DOM. Neither path masks, screens,
+  substitutes, or redacts content that its format emits.
 
 - `operate_screenshot` returns the page's real pixels. There is no mask
   compositing pass, no capture-scoped node scan, no stability re-check, and no
@@ -148,14 +159,14 @@ reach the agent's context, including a card number the operator itself filled.
 The owner made this call explicitly and repeatedly, having been offered and twice
 declined a card-number carve-out.
 
-### 4.6 The descriptive ref is the join key
+### 4.6 Superseded proposal: descriptive-ref join key
 
 One handle names a skeleton row, addresses an `expand`/`read`, and labels a set-of-marks box. The agent never translates between "what I see" and "what I act on."
 
-## 5. Migration / compatibility
+## 5. Historical migration / compatibility notes
 
-- PR #624 is an interim patch on the current compact-v2 paging; it unblocks now. This model supersedes `overflow` + cursor paging.
-- The flat acting verbs accept a ref; descriptive refs are a drop-in change to how refs are minted, plus `expand`/`read` as new read verbs and `screenshot` gaining the set-of-marks overlay.
+- Compact observations retain session-owned cursor pages; see §4.2 for the current format contract.
+- The `expand`/`read` and set-of-marks ideas below are historical proposals, not public tools.
 - Recipe replay (`operate_recipe_save/run`) binds to targets; descriptive refs are more stable for replay than positional indices, but the migration must confirm recorded recipes still resolve.
 
 ## 6. Risks / open questions (for the review)

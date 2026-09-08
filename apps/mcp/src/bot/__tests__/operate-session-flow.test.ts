@@ -3811,9 +3811,7 @@ describe("Compact V2 action-map boundary", () => {
     expect(provisionObserveTool.description).toContain(
       "`[@e:...]<tag attributes />` identifies a control",
     );
-    expect(provisionObserveTool.description).toContain(
-      "control inventory, including off-viewport controls",
-    );
+    expect(provisionObserveTool.description).toContain("including off-viewport controls");
   });
 
   it("retains only sealed inventory after a V2 observation", async () => {
@@ -4199,14 +4197,26 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/products",
     });
-    const pageCursor = (
-      (await observeQuery(started.session_id, "")).overflow as { next_cursor: string }
-    ).next_cursor;
+    const defaultPage = (await provisionObserveTool.handler(
+      { session_id: started.session_id },
+      null,
+    )) as { format: string; safe_table: unknown[]; overflow: { next_cursor: string } };
+    expect(defaultPage.format).toBe("browser-use-control-query");
+    expect(defaultPage.safe_table.length).toBeGreaterThan(0);
+    expect(Buffer.byteLength(JSON.stringify(defaultPage), "utf8")).toBeLessThanOrEqual(
+      OBSERVE_V2_MAX_WIRE_BYTES,
+    );
+    const pageCursor = defaultPage.overflow.next_cursor;
     // A filter riding on the MAP cursor means "search the whole map for this":
     // it resolves the filtered lookup instead of rejecting with invalid_cursor
     // (the live Xata failure).
     const byQuery = (await provisionObserveTool.handler(
-      { session_id: started.session_id, query: "Item 149", cursor: pageCursor },
+      {
+        session_id: started.session_id,
+        query: "Item 149",
+        cursor: pageCursor,
+        format: "full",
+      },
       null,
     )) as {
       format: string;
@@ -5007,12 +5017,13 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
       hint: routeHint,
+      format: "compact",
     });
     expect(Buffer.byteLength(JSON.stringify(started), "utf8")).toBeLessThanOrEqual(
       OBSERVE_V2_MAX_WIRE_BYTES,
     );
     expect(started).toMatchObject({
-      format: "browser-use-dom",
+      format: "browser-use-control-query",
       user_email: "operator@example.test",
     });
     // The first page holds the composed hint's head (the login guidance line
@@ -10339,9 +10350,9 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
       string,
       unknown
     >;
-    expect(observation.format).toBe("browser-use-dom");
+    expect(observation.format).toBe("browser-use-control-query");
     const wire = JSON.stringify(observation);
-    expect(wire).toContain("Fresh CTA");
+    expect(wire).toContain("fresh-cta");
     expect(firstRef === undefined || typeof firstRef === "string").toBe(true);
   });
 });
@@ -10491,8 +10502,12 @@ describe("flat operator verbs", () => {
   });
 });
 
-function domRefs(observation: { dom?: string }): string[] {
-  return [...(observation.dom ?? "").matchAll(/\[(@e:[A-Za-z0-9_-]+)\]</g)].map(
-    (match) => match[1]!,
-  );
+function domRefs(observation: { dom?: string; safe_table?: unknown[] }): string[] {
+  if (observation.dom !== undefined) {
+    return [...observation.dom.matchAll(/\[(@e:[A-Za-z0-9_-]+)\]</g)].map((match) => match[1]!);
+  }
+  return (observation.safe_table ?? []).flatMap((row) => {
+    if (!Array.isArray(row) || typeof row[0] !== "string" || !row[0].startsWith("@e:")) return [];
+    return [row[0]];
+  });
 }

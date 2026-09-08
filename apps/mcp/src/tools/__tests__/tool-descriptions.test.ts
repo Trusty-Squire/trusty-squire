@@ -147,7 +147,7 @@ describe("descriptions do not promise guards that #663 removed", () => {
 
 // Registered descriptions are the protocol documentation delivered to callers.
 describe("current observation protocol documentation", () => {
-  it("operate_start documents the DOM tree without retired table instructions", () => {
+  it("operate_start documents compact default and verbatim full opt-in", () => {
     const description = OPERATE_TOOLS.find((tool) => tool.name === "operate_start")!.description;
     for (const token of [
       "browser-use-dom",
@@ -160,11 +160,16 @@ describe("current observation protocol documentation", () => {
       "*",
       "removed",
       "delta:true",
+      "browser-use-control-query",
+      "safe_table",
+      "[ref,role,facts?]",
+      'format:"compact"',
+      'format:"full"',
+      "Nothing is redacted",
     ]) {
       expect(description).toContain(token);
     }
-    expect(description).not.toMatch(/safe_table|observe_query|\[ref,role,facts/);
-    expect(description).not.toMatch(/\b[qfaxsbltcrm]=/);
+    expect(description).not.toMatch(/observe_query/);
     expect(description).not.toMatch(/state bitset|detail:full|card\/secret-shaped|never emitted/);
   });
 
@@ -182,12 +187,15 @@ describe("current observation protocol documentation", () => {
       "*",
       "removed",
       "delta:true",
+      'format:"compact"',
+      'format:"full"',
+      "Nothing is redacted",
     ]) {
       expect(description).toContain(token);
     }
     expect(description).toContain("safe_table");
     expect(description).toContain("[ref,role,facts?]");
     expect(description).not.toMatch(/observe_query/);
-    expect(description).not.toMatch(/detail:full|card\/secret-shaped|never emitted/);
+    expect(description).not.toMatch(/\bdetail\b|card\/secret-shaped|never emitted/);
   });
 });

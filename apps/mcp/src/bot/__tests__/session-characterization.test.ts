@@ -163,6 +163,7 @@ import {
   activeSessionCount,
   setActivePendingThreeDs,
   type Session,
+  type Observation,
 } from "../provision-session.js";
 import * as provisionSession from "../provision-session.js";
 import * as sessionLifecycle from "../session/lifecycle.js";
@@ -242,7 +243,7 @@ describe("characterization: registered operator tool surface", () => {
       required: ["session_id"],
       properties: {
         session_id: { type: "string" },
-        detail: { type: "string", enum: ["compact", "full"] },
+        format: { type: "string", enum: ["compact", "full"] },
         query: { type: "string" },
         cursor: { type: "string" },
         role: {
@@ -262,6 +263,14 @@ describe("characterization: registered operator tool surface", () => {
       },
     });
     expect(provisionStartTool.name).toBe("operate_start");
+    const startProperties = provisionStartTool.jsonInputSchema.properties as Record<
+      string,
+      unknown
+    >;
+    expect(startProperties.format).toEqual({
+      type: "string",
+      enum: ["compact", "full"],
+    });
   });
 });
 
@@ -503,8 +512,8 @@ describe("characterization: session lifecycle ordering", () => {
 // The COMPLETE agent-visible key set of each observation payload. Asserted as
 // a whole set (not "contains") so a silently added or dropped field fails.
 // The separate text channel is absent from both full and delta payloads.
-const FIRST_V2_KEYS = ["dom", "format", "more_above", "more_below", "session_id", "stage", "url"];
-const REOBSERVE_V2_KEYS = [
+const FULL_V2_KEYS = ["dom", "format", "more_above", "more_below", "session_id", "stage", "url"];
+const FULL_V2_DELTA_KEYS = [
   "delta",
   "dom_unchanged",
   "format",
@@ -514,6 +523,7 @@ const REOBSERVE_V2_KEYS = [
   "stage",
   "url",
 ];
+const START_COMPACT_V2_KEYS = ["format", "safe_table", "session_id", "stage", "url"];
 const V1_COMPACT_KEYS = [
   "delta",
   "elements_total",
@@ -654,22 +664,88 @@ describe("characterization: agent-facing observation payload shapes", () => {
     h.visibleText = "Create your account. Email. Sign up.";
   });
 
-  it("compact-v2 operate_observe returns exactly these payload keys, first read and re-read", async () => {
+  it("public start and observe default to compact while full returns the verbatim DOM", async () => {
+    const secret = "verification-code-481920";
+    h.elements = [
+      el({
+        tag: "input",
+        type: "text",
+        value: secret,
+        visibleText: secret,
+        selector: "#verification-code",
+      }),
+    ];
+    const start = (await provisionStartTool.handler(
+      { service_url: "https://app.example.com/signup" },
+      null,
+    )) as Observation;
+    expect(start).toMatchObject({
+      format: "browser-use-control-query",
+      safe_table: expect.any(Array),
+    });
+    expect(start).not.toHaveProperty("dom");
+
+    const compact = (await provisionObserveTool.handler(
+      { session_id: start.session_id },
+      null,
+    )) as Observation;
+    expect(compact).toMatchObject({
+      format: "browser-use-control-query",
+      safe_table: expect.any(Array),
+    });
+    expect(compact).not.toHaveProperty("dom");
+
+    const full = (await provisionObserveTool.handler(
+      { session_id: start.session_id, format: "full" },
+      null,
+    )) as Observation;
+    expect(full).toMatchObject({ format: "browser-use-dom" });
+    expect(full.dom).toContain(secret);
+  });
+
+  it("compact-v2 starts and re-observes with the compact control map by default", async () => {
     const start = await startHarnessProvisionSession({
       serviceUrl: "https://app.example.com/signup",
       browser: new BrowserController({}),
       observationFormat: "browser-use-dom",
+      format: "compact",
     });
-    expect(start.format).toBe("browser-use-dom");
-    expect(Object.keys(start).sort()).toEqual(FIRST_V2_KEYS);
+    expect(start.format).toBe("browser-use-control-query");
+    expect(Object.keys(start).sort()).toEqual(START_COMPACT_V2_KEYS);
     // V1-only fields must be ABSENT from a compact-v2 payload, never null.
     for (const legacy of ["elements", "el_table", "snapshot_file", "screen", "accessibility"]) {
       expect(Object.keys(start)).not.toContain(legacy);
     }
 
-    const again = await observe(start.session_id);
+    const again = await observe(start.session_id, "compact");
+    expect(again.format).toBe("browser-use-control-query");
+    expect(Object.keys(again).sort()).toEqual(QUERY_KEYS);
+  });
+
+  it("compact-v2 full is an explicit verbatim DOM opt-in with unchanged delta behavior", async () => {
+    const secret = "verification-code-481920";
+    h.elements = [
+      el({
+        tag: "input",
+        type: "text",
+        value: secret,
+        visibleText: secret,
+        selector: "#verification-code",
+      }),
+    ];
+    const start = await startHarnessProvisionSession({
+      serviceUrl: "https://app.example.com/signup",
+      browser: new BrowserController({}),
+      observationFormat: "browser-use-dom",
+      format: "full",
+    });
+    expect(start.format).toBe("browser-use-dom");
+    expect(Object.keys(start).sort()).toEqual(FULL_V2_KEYS);
+    expect(start.dom).toContain(secret);
+
+    const again = await observe(start.session_id, "full");
     expect(again.format).toBe("browser-use-dom");
-    expect(Object.keys(again).sort()).toEqual(REOBSERVE_V2_KEYS);
+    expect(Object.keys(again).sort()).toEqual(FULL_V2_DELTA_KEYS);
     expect(again.dom_unchanged).toBe(true);
   });
 

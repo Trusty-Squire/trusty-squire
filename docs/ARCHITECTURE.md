@@ -60,12 +60,14 @@ A live browser session held by the MCP server. The host agent observes pages and
 chooses actions, while the MCP process owns the browser, sealed secret slots,
 captcha handling, and extraction.
 
-The default observation boundary is `browser-use-dom`. The MCP captures the DOM,
-layout, and accessibility trees, then emits a viewport-scoped, interleaved DOM
-representation with document-scoped stable refs. Its live query inventory can
-find controls outside the viewport; a visible but unbindable node stays in the
-tree with an explicit non-targetable marker. The detailed wire, identity,
-query, and fixture contract is owned by
+The default observation boundary is `format:"compact"`: a bounded, paged
+`browser-use-control-query` map of actionable controls, including controls
+outside the viewport. `format:"full"` explicitly returns the verbatim,
+interleaved `browser-use-dom` tree with document-scoped stable refs; a visible
+but unbindable node stays there with an explicit non-targetable marker. The
+detailed observation contract is owned by
+[`observation-model.md`](observation-model.md); the full-DOM serializer,
+identity, and fixture contract is in
 [`browser-use-serializer-port.md`](browser-use-serializer-port.md).
 
 **Payment approval**
