@@ -14,12 +14,7 @@
 // here. A prior instance is a candidate only when all of these hold:
 //   * its recorded agent identity EXACTLY matches ours (and ours is set),
 //   * it is not us, and its birth identity still names a live process,
-//   * and it is either orphaned — its spawning host is gone, i.e. PPid
-//     collapsed to init when the instance did not start that way — past a
-//     short grace, or quiet past the very bound it should have self-exited
-//     on (server.ts's idle backstop, mirrored here).
-// A non-orphan is therefore only reaped after it already failed its own
-// exit policy, and an instance still serving a client is never a candidate.
+//   * and it is draining past its published shutdown deadline.
 
 import {
   chmodSync,
@@ -54,7 +49,6 @@ const DEFAULT_IDLE_TIMEOUT_WITH_SESSION_MS = 12 * 60 * 60 * 1_000; // 12h, sessi
 const DEFAULT_IDLE_CHECK_INTERVAL_MS = 5 * 60 * 1_000; // 5m — must stay well under the 20m bound
 // An orphan's stdio peer is gone, so a well-behaved instance exits within
 // milliseconds. Still alive and quiet this long past that means wedged.
-const DEFAULT_ORPHAN_GRACE_MS = 60 * 1_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30 * 1_000;
 const DEFAULT_REAP_GRACE_MS = 2_000;
 const DEFAULT_SHUTDOWN_DEADLINE_MS = 30_000;
@@ -121,20 +115,11 @@ export interface ServerInstanceRecord extends ServerBirthIdentity {
 }
 
 export interface ServerReapBounds {
-  orphanGraceMs: number;
-  idleMs: number;
-  idleWithSessionMs: number;
-  /** Slack past an idle bound before the instance counts as having missed it. */
-  idleSlackMs: number;
   graceMs: number;
 }
 
 export function serverReapBounds(): ServerReapBounds {
   return {
-    orphanGraceMs: envMs("TRUSTY_SQUIRE_SERVER_REAP_ORPHAN_GRACE_MS", DEFAULT_ORPHAN_GRACE_MS),
-    idleMs: idleTimeoutMs(),
-    idleWithSessionMs: idleTimeoutWithSessionMs(),
-    idleSlackMs: idleCheckIntervalMs(),
     graceMs: envMs("TRUSTY_SQUIRE_SERVER_REAP_GRACE_MS", DEFAULT_REAP_GRACE_MS),
   };
 }
@@ -308,7 +293,7 @@ export function serverInstanceReapDecision(
   liveness: ProcessIdentityState,
   parentPid: ParentPidRead,
   now: number,
-  bounds: ServerReapBounds,
+  _bounds: ServerReapBounds,
 ): ServerInstanceReapDecision {
   if (record.pid === self.pid) return "keep";
   // A record naming a process that is already gone is file GC, not a kill —
@@ -330,28 +315,11 @@ export function serverInstanceReapDecision(
   // A pid we cannot read is a pid we do not kill.
   if (liveness === "unknown" || parentPid === "unknown") return "keep";
 
-  if (
-    record.state === "draining" &&
+  return record.state === "draining" &&
     typeof record.shutdown_deadline_at === "number" &&
     now >= record.shutdown_deadline_at
-  )
-    return "reap";
-
-  const quietMs = now - record.last_activity_at;
-  // Its spawning host is gone, so no client can still be attached over the
-  // stdio pipe it was handed. A host that was ALREADY init at registration
-  // (container PID 1) never reads as orphaned.
-  const orphaned = record.parent_pid !== 1 && parentPid === 1;
-  if (orphaned) return quietMs >= bounds.orphanGraceMs ? "reap" : "keep";
-
-  // Not orphaned: mirror the instance's own idle bound, so we only ever reap
-  // one that already blew past the deadline it should have exited on itself.
-  // The slack is that bound's poll interval — an instance whose own idle timer
-  // is working exits on its next poll, so anything still here past bound +
-  // interval demonstrably failed to.
-  const busy = record.active_sessions > 0 || record.in_flight_calls > 0;
-  const threshold = (busy ? bounds.idleWithSessionMs : bounds.idleMs) + bounds.idleSlackMs;
-  return quietMs >= threshold ? "reap" : "keep";
+    ? "reap"
+    : "keep";
 }
 
 export interface ServerInstanceHandle {

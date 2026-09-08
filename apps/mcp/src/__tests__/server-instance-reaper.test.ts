@@ -26,10 +26,6 @@ import {
 } from "../server-instance-registry.js";
 
 const BOUNDS: ServerReapBounds = {
-  orphanGraceMs: 60_000,
-  idleMs: 20 * 60_000,
-  idleWithSessionMs: 12 * 60 * 60_000,
-  idleSlackMs: 5 * 60_000,
   graceMs: 5,
 };
 
@@ -144,21 +140,9 @@ describe("serverInstanceReapDecision", () => {
     );
   });
 
-  it("reaps a quiet, idle same-identity instance past its own idle bound", () => {
-    // Its own idle timer polls every 5m, so it is only demonstrably failing to
-    // exit once it is past 20m + one poll interval.
-    expect(decide(record({ last_activity_at: NOW - 21 * 60_000 }), 50)).toBe("keep");
-    expect(decide(record({ last_activity_at: NOW - 26 * 60_000 }), 50)).toBe("reap");
-  });
-
-  it("reaps a busy instance only once it blows the (much longer) session bound", () => {
-    const abandoned = record({ last_activity_at: NOW - 13 * 60 * 60_000, active_sessions: 1 });
-    expect(decide(abandoned, 50)).toBe("reap");
-  });
-
-  it("reaps an orphan past the short grace, and keeps one inside it", () => {
-    expect(decide(record({ last_activity_at: NOW - 5 * 60_000 }), 1)).toBe("reap");
-    expect(decide(record({ last_activity_at: NOW - 1_000 }), 1)).toBe("keep");
+  it("never signals a live serving sibling, regardless of idle or orphan state", () => {
+    expect(decide(record({ last_activity_at: NOW - 31 * 60 * 60_000 }), 1)).toBe("keep");
+    expect(decide(record({ last_activity_at: NOW - 31 * 60 * 60_000 }), 50)).toBe("keep");
   });
 
   it("does not read a host that was already init as an orphan", () => {
@@ -277,7 +261,7 @@ describe("reapStaleServerInstances", () => {
   it("leaves a live same-identity server and a live different-identity server alone", async () => {
     const killed: number[] = [];
     const root = rootWith([
-      record({ pid: 200, start_time: "200", last_activity_at: NOW - 1_000 }),
+      record({ pid: 200, start_time: "200", last_activity_at: NOW - 31 * 60 * 60_000 }),
       record({
         pid: 300,
         start_time: "300",
@@ -345,7 +329,7 @@ describe("reapStaleServerInstances", () => {
     expect(readdirSync(root)).toEqual(["300-300.json"]);
   });
 
-  it("drops the record of a dead prior instance without signalling anything", async () => {
+  it("garbage-collects a stale serving record without signalling anything", async () => {
     const killed: number[] = [];
     const root = rootWith([record({ last_activity_at: NOW - 5 * 60_000 })]);
 
