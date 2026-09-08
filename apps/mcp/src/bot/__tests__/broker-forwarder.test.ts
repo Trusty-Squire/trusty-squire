@@ -88,6 +88,7 @@ describe("MCP broker forwarding", () => {
       authenticate: async () => ({ accountId: "account", agentId: "agent" }),
       call: async (_principal, method, params, requestId) => {
         if (method === "reclaim") return { capabilities: [capability] };
+        if (method === "confirm_start") return {};
         if (method === "recover") {
           expect(params).toMatchObject({ name: "operate_pay", args: { session_id: "session" } });
           expect(params).not.toHaveProperty("callerRequestHash");
@@ -198,6 +199,7 @@ describe("MCP broker forwarding", () => {
       authenticate: async () => ({ accountId: "account", agentId: "agent" }),
       call: async (_principal, method, params) => {
         if (method === "reclaim") return { capabilities: [capability] };
+        if (method === "confirm_start") return {};
         if (method === "acknowledge") return {};
         if (method === "recover") {
           recoveries++;
@@ -277,6 +279,7 @@ describe("MCP broker forwarding", () => {
       authenticate: async () => ({ accountId: "account", agentId: "agent" }),
       call: async (_principal, method, params) => {
         if (method === "reclaim") return { capabilities: starts === 0 ? [] : [capability] };
+        if (method === "confirm_start") return {};
         if (method === "acknowledge") {
           acknowledgements.push(String(params.requestId));
           return {};
@@ -398,6 +401,7 @@ describe("MCP broker forwarding", () => {
         token === "test" ? { accountId: "account", agentId: "agent" } : null,
       call: async (principal, method, params) => {
         if (method === "reclaim") return { capabilities: [] };
+        if (method === "confirm_start") return {};
         if (method === "acknowledge") return {};
         calls++;
         clients.add(principal.clientId);

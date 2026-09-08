@@ -78,6 +78,12 @@ export class OperatorForwarder {
         }
       : undefined;
   }
+  private async confirmStartDelivery(
+    client: BrokerClient,
+    capability: TabCapability,
+  ): Promise<void> {
+    await client.confirmStartDelivery(capability);
+  }
   private isCapability(value: unknown): value is TabCapability {
     if (value === null || typeof value !== "object") return false;
     const capability = value as Record<string, unknown>;
@@ -115,6 +121,7 @@ export class OperatorForwarder {
       capability === undefined
     )
       throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
+    if (!starting && capability !== undefined) await this.confirmStartDelivery(client, capability);
     const recovered = recovery.recover
       ? await this.recover(client, name, args, capability)
       : undefined;
@@ -125,6 +132,8 @@ export class OperatorForwarder {
       if (name === "operate_finish" && id !== undefined) this.sessions.delete(id);
       return recovered.result;
     }
+    if (recovery.recover)
+      throw new BrokerRefusal("recovery_not_found", "No matching durable outcome is available");
     const reply = (await client.call(
       "tool",
       {

@@ -3,7 +3,11 @@ import { chmod, lstat, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { BrokerRefusal } from "./scheduler.js";
-import { FORWARDER_HANDOFF_TIMEOUT_MS, type BrokerPrincipal } from "./authority.js";
+import {
+  FORWARDER_HANDOFF_TIMEOUT_MS,
+  type BrokerPrincipal,
+  type TabCapability,
+} from "./authority.js";
 
 const MAX_FRAME = 8 * 1024 * 1024;
 const requestSchema = z
@@ -274,6 +278,9 @@ export class BrokerClient {
   }
   async acknowledge(requestId: string): Promise<void> {
     await this.call("acknowledge", { requestId });
+  }
+  async confirmStartDelivery(capability: TabCapability): Promise<void> {
+    await this.call("confirm_start", { capability });
   }
   isConnected(): boolean {
     return !this.ended && !this.socket.destroyed;

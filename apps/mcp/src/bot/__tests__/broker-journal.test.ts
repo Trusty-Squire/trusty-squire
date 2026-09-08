@@ -218,6 +218,7 @@ describe("broker dispatch custody", () => {
       }));
       await journal.record(capability.sessionId, "forwarder:old-process:request", "outcome", {
         forwarderId,
+        start: true,
         operation: "operate_start",
         inputHash: createHmac("sha256", createHash("sha256").update(credential("a")).digest())
           .update(

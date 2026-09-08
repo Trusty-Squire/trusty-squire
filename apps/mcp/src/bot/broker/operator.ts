@@ -34,6 +34,7 @@ const callSchema = z
     capability: capabilitySchema.optional(),
   })
   .strict();
+const startConfirmationSchema = z.object({ capability: capabilitySchema }).strict();
 
 function remapSession(value: unknown, from: string, to: string): unknown {
   if (Array.isArray(value)) return value.map((item) => remapSession(item, from, to));
@@ -69,9 +70,11 @@ function dispatchDetail(
   principal: BrokerPrincipal,
   operation: string,
   inputHashValue: string,
+  start = false,
 ) {
   return {
     forwarderId: journalForwarderId(principal),
+    ...(start ? { start: true as const } : {}),
     operation,
     inputHash: inputHashValue,
   };
@@ -173,10 +176,14 @@ export class OperatorBroker implements BrokerTransportPort {
     if (tool === null || !tool.name.startsWith("operate_"))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
+    const starting =
+      tool.name === "operate_start" ||
+      (tool.name === "operate_recipe_run" && args.session_id === undefined);
     const dispatch = dispatchDetail(
       principal,
       tool.name,
       this.inputHash(principal, { name: tool.name, args, capability: input.capability }),
+      starting,
     );
     const completed = await this.journal?.completedOutcome(
       journalForwarderId(principal),
@@ -199,10 +206,12 @@ export class OperatorBroker implements BrokerTransportPort {
       this.apis.set(principal.clientId, api);
     }
     const pinnedApi = api;
-    if (
-      tool.name === "operate_start" ||
-      (tool.name === "operate_recipe_run" && args.session_id === undefined)
-    ) {
+    if (starting) {
+      if (await this.journal?.hasPendingStartDelivery(journalForwarderId(principal)))
+        throw new BrokerRefusal(
+          "outcome_unknown",
+          "Prior start result awaits caller delivery; recover it before starting another session",
+        );
       if (input.capability !== undefined)
         throw new BrokerRefusal("invalid_arguments", "Start takes no existing capability");
       const hosts = [
@@ -391,7 +400,7 @@ export class OperatorBroker implements BrokerTransportPort {
       },
     );
     if (completed === undefined) return null;
-    if (completed.operation === "operate_start") {
+    if (completed.start === true) {
       const capability = this.authority.recoverCapability(principal, completed.sessionId);
       if (capability === undefined) return null;
       return {
@@ -421,6 +430,15 @@ export class OperatorBroker implements BrokerTransportPort {
   }
   async reclaim(principal: BrokerPrincipal): Promise<{ capabilities: TabCapability[] }> {
     return { capabilities: this.authority.reclaim(principal) };
+  }
+  async confirmStartDelivery(
+    principal: BrokerPrincipal,
+    params: Record<string, unknown>,
+  ): Promise<void> {
+    const { capability } = startConfirmationSchema.parse(params);
+    if (!this.authority.hasCapability(principal, capability))
+      throw new BrokerRefusal("stale_lease", "Capability does not name an owned live session");
+    await this.journal?.confirmStartDelivery(capability.sessionId, journalForwarderId(principal));
   }
   async acknowledge(principal: BrokerPrincipal, requestId: string): Promise<void> {
     if (await this.journal?.acknowledge(journalForwarderId(principal), requestId))
@@ -454,7 +472,12 @@ export class OperatorBroker implements BrokerTransportPort {
   async disconnect(principal: BrokerPrincipal): Promise<void> {
     if (principal.forwarderId !== undefined) this.inputBindingKeys.delete(principal.forwarderId);
     this.authority.beginForwarderRelease(principal);
-    if (await this.journal?.hasOutstanding(undefined, principal.forwarderId))
+    const forwarder = principal.forwarderId;
+    if (
+      forwarder !== undefined &&
+      ((await this.journal?.hasOutstanding(undefined, forwarder)) ||
+        (await this.journal?.hasPendingStartDelivery(forwarder)))
+    )
       this.authority.detach(principal);
     else await this.authority.disconnect(principal);
     this.authority.releaseForwarder(principal);

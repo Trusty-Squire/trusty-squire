@@ -10,6 +10,7 @@ interface DispatchRecord {
   phase: DispatchPhase;
   at: number;
   forwarderId?: string;
+  start?: true;
   operation?: string;
   inputHash?: string;
   outcome?: ReconciledDispatchOutcome;
@@ -28,6 +29,7 @@ export interface PendingDispatchOutcome {
 
 export interface CompletedDispatchOutcome extends PendingDispatchOutcome {
   outcome: ReconciledDispatchOutcome;
+  start?: true;
 }
 
 function validOutcome(value: unknown): value is ReconciledDispatchOutcome {
@@ -76,6 +78,7 @@ export class DispatchJournal {
           typeof record.requestId !== "string" ||
           !["entered", "outcome", "acknowledged", "settled"].includes(record.phase) ||
           (record.forwarderId !== undefined && typeof record.forwarderId !== "string") ||
+          (record.start !== undefined && record.start !== true) ||
           (record.operation !== undefined && typeof record.operation !== "string") ||
           (record.inputHash !== undefined && typeof record.inputHash !== "string") ||
           (record.outcome !== undefined && !validOutcome(record.outcome))
@@ -107,6 +110,15 @@ export class DispatchJournal {
         (sessionId === undefined || record.sessionId === sessionId) &&
         (forwarderId === undefined || record.forwarderId === forwarderId) &&
         (record.phase === "entered" || record.phase === "outcome"),
+    );
+  }
+
+  async hasPendingStartDelivery(forwarderId: string): Promise<boolean> {
+    return [...(await this.states()).values()].some(
+      (record) =>
+        record.forwarderId === forwarderId &&
+        record.start === true &&
+        record.phase === "acknowledged",
     );
   }
 
@@ -150,6 +162,7 @@ export class DispatchJournal {
           requestId: record.requestId,
           operation: record.operation ?? "operate mutation",
           outcome: record.outcome!,
+          ...(record.start === true ? { start: true } : {}),
         };
   }
 
@@ -172,6 +185,7 @@ export class DispatchJournal {
           requestId: record.requestId,
           operation: record.operation ?? "operate mutation",
           outcome: record.outcome!,
+          ...(record.start === true ? { start: true } : {}),
         };
   }
 
@@ -186,6 +200,7 @@ export class DispatchJournal {
       outcomes.map(async (record) =>
         await this.record(record.sessionId, record.requestId, "acknowledged", {
           forwarderId,
+          ...(record.start === true ? { start: true } : {}),
           ...(record.operation === undefined ? {} : { operation: record.operation }),
           ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
           ...(record.outcome === undefined ? {} : { outcome: record.outcome }),
@@ -195,13 +210,35 @@ export class DispatchJournal {
     return outcomes.length > 0;
   }
 
+  async confirmStartDelivery(sessionId: string, forwarderId: string): Promise<boolean> {
+    const starts = [...(await this.states()).values()].filter(
+      (record) =>
+        record.sessionId === sessionId &&
+        record.forwarderId === forwarderId &&
+        record.start === true &&
+        record.phase === "acknowledged",
+    );
+    await Promise.all(
+      starts.map(async (record) =>
+        await this.record(record.sessionId, record.requestId, "settled", {
+          forwarderId,
+          start: true,
+          ...(record.operation === undefined ? {} : { operation: record.operation }),
+          ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
+          ...(record.outcome === undefined ? {} : { outcome: record.outcome }),
+        }),
+      ),
+    );
+    return starts.length > 0;
+  }
+
   record(
     sessionId: string,
     requestId: string,
     phase: DispatchPhase,
     detail?: Pick<
       DispatchRecord,
-      "forwarderId" | "operation" | "inputHash" | "outcome"
+      "forwarderId" | "start" | "operation" | "inputHash" | "outcome"
     >,
   ): Promise<void> {
     const operation = this.tail.then(async () => {

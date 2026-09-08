@@ -102,6 +102,10 @@ export async function runBrokerDaemon(): Promise<void> {
         await operator.acknowledge(principal, params.requestId);
         return {};
       }
+      if (method === "confirm_start") {
+        await operator.confirmStartDelivery(principal, params);
+        return {};
+      }
       if (
         (await journal.hasOutstanding(undefined, principal.forwarderId)) &&
         !(
