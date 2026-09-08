@@ -263,6 +263,10 @@ export default function PaymentApprovalPage() {
       setSubmitted(true);
       setNeedsPasskeySetup(false);
     } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        redirectToLogin();
+        return;
+      }
       if (isPaymentPasskeyUnavailable(err)) {
         setNeedsPasskeySetup(true);
         return;
@@ -274,7 +278,7 @@ export default function PaymentApprovalPage() {
       card = undefined;
       setBusy(false);
     }
-  }, [ceremony, id]);
+  }, [ceremony, id, redirectToLogin]);
 
   const denyApproval = useCallback(async () => {
     setBusy(true);
@@ -285,11 +289,15 @@ export default function PaymentApprovalPage() {
       setApproval((current) => (current === null ? null : { ...current, status: "denied" }));
       setSubmitted(false);
     } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        redirectToLogin();
+        return;
+      }
       setError(err instanceof Error ? err.message : "Failed to deny payment approval.");
     } finally {
       setBusy(false);
     }
-  }, [id]);
+  }, [id, redirectToLogin]);
 
   const setUpPasskey = useCallback(async () => {
     setBusy(true);

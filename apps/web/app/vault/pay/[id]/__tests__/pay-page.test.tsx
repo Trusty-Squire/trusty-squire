@@ -3,10 +3,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
-const api = vi.hoisted(() => ({
-  apiGet: vi.fn(),
-  apiPost: vi.fn(),
-}));
+const api = vi.hoisted(() => {
+  class ApiError extends Error {
+    constructor(
+      message: string,
+      public readonly status: number,
+    ) {
+      super(message);
+    }
+  }
+
+  return { ApiError, apiGet: vi.fn(), apiPost: vi.fn() };
+});
 const router = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn() }));
 const vouchflow = vi.hoisted(() => ({ signPayload: vi.fn() }));
 const vault = vi.hoisted(() => ({ decryptCard: vi.fn() }));
@@ -23,13 +31,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 vi.mock("../../../../lib/api", () => ({
-  ApiError: class ApiError extends Error {
-    status: number;
-    constructor(message: string, status: number) {
-      super(message);
-      this.status = status;
-    }
-  },
+  ApiError: api.ApiError,
   apiGet: api.apiGet,
   apiPost: api.apiPost,
 }));
@@ -291,6 +293,26 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(screen.getByText("Payment denied — you can return to your session.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Approve payment/ })).toBeNull();
     expect(vouchflow.signPayload).not.toHaveBeenCalled();
+  });
+
+  it("sends an expired approval session to login before payment authorization", async () => {
+    bound = true;
+    api.apiPost.mockRejectedValue(new api.ApiError("web_session_required", 401));
+    render(<PaymentApprovalPage />);
+
+    await userEvent.setup().click(await screen.findByRole("button", { name: /Approve payment/ }));
+
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/login?next=/vault/pay/appr_1"));
+  });
+
+  it("sends an expired approval session to login before denial", async () => {
+    bound = true;
+    api.apiPost.mockRejectedValue(new api.ApiError("web_session_required", 401));
+    render(<PaymentApprovalPage />);
+
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Deny payment" }));
+
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/login?next=/vault/pay/appr_1"));
   });
 
   it("shows normal payment copy for a genuine zero-dollar approval", async () => {

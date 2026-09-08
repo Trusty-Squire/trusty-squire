@@ -129,6 +129,17 @@ describe("credential mutation approval page", () => {
     expect(await screen.findByText(/vault mutation is complete/i)).toBeTruthy();
   });
 
+  it("sends an expired approval session to login", async () => {
+    api.apiPost.mockRejectedValue(new api.ApiError("web_session_required", 401));
+    render(<CredentialMutationApprovalPage />);
+
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Approve edit" }));
+
+    await waitFor(() =>
+      expect(router.replace).toHaveBeenCalledWith("/login?next=/vault/mutate/mutation_1"),
+    );
+  });
+
   it("does not submit when no passkey is enrolled", async () => {
     pairing.getPairingState.mockResolvedValue({ enrolled: false });
     render(<CredentialMutationApprovalPage />);
