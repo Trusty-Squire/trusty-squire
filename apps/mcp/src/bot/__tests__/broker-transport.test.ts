@@ -114,7 +114,7 @@ describe("authenticated broker IPC", () => {
     }
   });
 
-  it("durably acknowledges a delivered tool response", async () => {
+  it("does not acknowledge a tool response before caller delivery", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-ipc-"));
     const path = join(root, "b.sock");
     const acknowledgements: string[] = [];
@@ -133,7 +133,8 @@ describe("authenticated broker IPC", () => {
     try {
       client = await BrokerClient.connect(path, "test");
       expect(await client.call("tool", {}, "operation")).toEqual({ delivered: true });
-      await expect.poll(() => acknowledgements).toEqual(["operation"]);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(acknowledgements).toEqual([]);
     } finally {
       await client?.close();
       await broker.close();

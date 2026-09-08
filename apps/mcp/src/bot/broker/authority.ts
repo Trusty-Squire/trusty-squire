@@ -5,6 +5,7 @@ import { BrokerRefusal, ScopeScheduler } from "./scheduler.js";
 export interface BrokerPrincipal {
   accountId: string;
   agentId: string;
+  forwarderId?: string;
   clientId: string;
 }
 export interface TabCapability {
@@ -159,7 +160,7 @@ export class BrokerAuthority {
     const actor = this.actors.get(capability.sessionId);
     if (
       actor === undefined ||
-      actor.principal.clientId !== principal.clientId ||
+      actor.principal.forwarderId !== principal.forwarderId ||
       actor.principal.agentId !== principal.agentId ||
       capability.cellId !== this.cellId ||
       capability.browserEpoch !== this.epoch ||
@@ -168,7 +169,18 @@ export class BrokerAuthority {
     ) {
       throw new BrokerRefusal("stale_lease", "Capability does not name an owned live session");
     }
+    actor.principal = { ...principal };
     return actor;
+  }
+
+  reclaim(principal: BrokerPrincipal): TabCapability[] {
+    this.assertPrincipal(principal);
+    return [...this.actors.values()]
+      .filter((actor) => actor.principal.forwarderId === principal.forwarderId)
+      .map((actor) => {
+        actor.principal = { ...principal };
+        return { ...actor.capability };
+      });
   }
 
   invoke(
@@ -270,6 +282,10 @@ export class BrokerAuthority {
         .filter((actor) => actor.principal.clientId === principal.clientId)
         .map(async (actor) => await this.closeActor(actor)),
     );
+  }
+
+  detach(principal: BrokerPrincipal): void {
+    this.assertPrincipal(principal);
   }
 
   fenceRuntime(): void {

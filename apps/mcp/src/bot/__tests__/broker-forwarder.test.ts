@@ -148,9 +148,9 @@ describe("MCP broker forwarding", () => {
       boundAccountId: () => "account",
     };
     const forwarders = [
-      new OperatorForwarder(path, guard),
-      new OperatorForwarder(path, guard),
-      new OperatorForwarder(path, guard),
+      new OperatorForwarder(path, guard, "forwarder-a"),
+      new OperatorForwarder(path, guard, "forwarder-b"),
+      new OperatorForwarder(path, guard, "forwarder-c"),
     ];
     try {
       const results = await Promise.all(

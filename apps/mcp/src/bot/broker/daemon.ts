@@ -81,7 +81,8 @@ export async function runBrokerDaemon(): Promise<void> {
     maintenanceReady = false;
   };
   const listener = await listenBroker(path, {
-    authenticate: async (token, agentId) => await operator.authenticate(token, agentId),
+    authenticate: async (token, agentId, forwarderId) =>
+      await operator.authenticate(token, agentId, forwarderId),
     connected: (principal) => {
       connected.add(principal.clientId);
       if (idleTimer !== undefined) clearTimeout(idleTimer);
@@ -93,6 +94,7 @@ export async function runBrokerDaemon(): Promise<void> {
       const report = await guard.inspect();
       if (report.problem !== null) throw new Error(report.problem.message);
       if (method === "reconcile") return await operator.reconcile(principal);
+      if (method === "reclaim") return await operator.reclaim(principal);
       if (method === "acknowledge") {
         if (typeof params.requestId !== "string")
           throw new Error("A broker acknowledgement requires its request ID");

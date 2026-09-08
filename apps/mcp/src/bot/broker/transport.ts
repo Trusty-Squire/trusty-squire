@@ -52,7 +52,11 @@ function send(socket: Socket, value: unknown): void {
 }
 
 export interface BrokerTransportPort {
-  authenticate(token: string, agentId?: string): Promise<Omit<BrokerPrincipal, "clientId"> | null>;
+  authenticate(
+    token: string,
+    agentId?: string,
+    forwarderId?: string,
+  ): Promise<Omit<BrokerPrincipal, "clientId"> | null>;
   connected?(principal: BrokerPrincipal): void;
   call(
     principal: BrokerPrincipal,
@@ -102,9 +106,11 @@ export async function listenBroker(
         authenticating = true;
         const agentId =
           typeof request.params.agentId === "string" ? request.params.agentId : "local-agent";
+        const forwarderId =
+          typeof request.params.forwarderId === "string" ? request.params.forwarderId : undefined;
         if (agentId.length === 0 || agentId.length > 128)
           throw new BrokerRefusal("unauthorized", "Invalid agent identity");
-        const identity = await port.authenticate(request.params.token, agentId);
+        const identity = await port.authenticate(request.params.token, agentId, forwarderId);
         if (identity === null) throw new BrokerRefusal("unauthorized", "Invalid broker credential");
         principal = { ...identity, clientId: randomUUID() };
         port.connected?.(principal);
@@ -218,12 +224,11 @@ export class BrokerClient {
       if (reply.error !== undefined)
         pending.reject(new BrokerRefusal(reply.error.code, reply.error.message));
       else {
-        if (pending.method === "tool") this.acknowledge(reply.id);
         pending.resolve(reply.result);
       }
     });
   }
-  static async connect(path: string, token: string): Promise<BrokerClient> {
+  static async connect(path: string, token: string, forwarderId?: string): Promise<BrokerClient> {
     const socket = createConnection(path);
     const client = new BrokerClient(socket);
     const deadline = setTimeout(
@@ -238,6 +243,7 @@ export class BrokerClient {
       await client.call("hello", {
         token,
         agentId: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "local-agent",
+        ...(forwarderId === undefined ? {} : { forwarderId }),
       });
       return client;
     } catch (error) {

@@ -1,5 +1,6 @@
 import { connectOrLaunchBroker } from "./discovery.js";
 import { createHash, randomUUID } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
 import type { SessionGuard } from "../../session-guard.js";
 import type { BrokerClient } from "./transport.js";
 import type { TabCapability } from "./authority.js";
@@ -12,11 +13,33 @@ export class OperatorForwarder {
   private client: BrokerClient | undefined;
   private connecting = false;
   private readonly sessions = new Map<string, TabCapability>();
-  private readonly idempotencyNamespace = randomUUID();
+  private readonly idempotencyNamespace: string;
   constructor(
     private readonly path: string,
     private readonly guard: SessionGuard,
-  ) {}
+    identity?: string,
+  ) {
+    this.idempotencyNamespace = identity ?? this.loadIdentity();
+  }
+  private loadIdentity(): string {
+    if (process.env.TRUSTY_SQUIRE_FORWARDER_IDENTITY !== undefined)
+      return process.env.TRUSTY_SQUIRE_FORWARDER_IDENTITY;
+    const scope = createHash("sha256")
+      .update(`${process.ppid}:${process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "local-agent"}`)
+      .digest("hex");
+    const statePath = `${this.path}.forwarder-${scope}.id`;
+    try {
+      const identity = readFileSync(statePath, "utf8").trim();
+      if (/^[0-9a-f-]{36}$/i.test(identity)) return identity;
+    } catch {}
+    const identity = randomUUID();
+    try {
+      writeFileSync(statePath, `${identity}\n`, { mode: 0o600, flag: "wx" });
+      return identity;
+    } catch {
+      return readFileSync(statePath, "utf8").trim();
+    }
+  }
   private connect(): Promise<BrokerClient> {
     if (this.connection === undefined) {
       this.connecting = true;
@@ -24,7 +47,11 @@ export class OperatorForwarder {
         const session = await this.guard.bind();
         if (session?.agent_session_token === undefined)
           throw new BrokerRefusal("unauthorized", "Connect before using the broker");
-        const client = await connectOrLaunchBroker(this.path, session.agent_session_token);
+        const client = await connectOrLaunchBroker(
+          this.path,
+          session.agent_session_token,
+          this.idempotencyNamespace,
+        );
         this.client = client;
         return client;
       })().finally(() => {
@@ -44,6 +71,10 @@ export class OperatorForwarder {
       "outcome_unknown",
       `Prior ${outcomes.map((outcome) => outcome.operation).join(", ")} completed without a delivered result; do not replay it`,
     );
+  }
+  private async reclaim(client: BrokerClient): Promise<void> {
+    const reply = (await client.call("reclaim", {})) as { capabilities?: TabCapability[] };
+    for (const capability of reply.capabilities ?? []) this.sessions.set(capability.sessionId, capability);
   }
   private idempotencyKey(requestId: string): string {
     return `${this.idempotencyNamespace}:${createHash("sha256")
@@ -67,6 +98,7 @@ export class OperatorForwarder {
       }
     }
     const client = await this.connect();
+    await this.reclaim(client);
     await this.reconcile(client, idempotencyKey);
     if (!starting && args.session_id === undefined && this.sessions.size === 1)
       args = { ...args, session_id: this.sessions.keys().next().value };

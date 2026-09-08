@@ -117,11 +117,13 @@ export class OperatorBroker implements BrokerTransportPort {
   async authenticate(
     token: string,
     agentId?: string,
+    forwarderId?: string,
   ): Promise<Omit<BrokerPrincipal, "clientId"> | null> {
     if (!timingSafeEqual(createHash("sha256").update(token).digest(), this.token)) return null;
     return {
       accountId: this.config.accountId,
       agentId: agentId ?? this.config.agentIdentity ?? "local-agent",
+      forwarderId: forwarderId ?? agentId ?? this.config.agentIdentity ?? "local-agent",
     };
   }
   async call(
@@ -313,6 +315,9 @@ export class OperatorBroker implements BrokerTransportPort {
   async reconcile(principal: BrokerPrincipal): Promise<{ outcomes: PendingDispatchOutcome[] }> {
     return { outcomes: (await this.journal?.pendingOutcomes(principal.agentId)) ?? [] };
   }
+  async reclaim(principal: BrokerPrincipal): Promise<{ capabilities: TabCapability[] }> {
+    return { capabilities: this.authority.reclaim(principal) };
+  }
   async canReconcile(
     principal: BrokerPrincipal,
     requestId: string,
@@ -334,7 +339,8 @@ export class OperatorBroker implements BrokerTransportPort {
       await this.authority.retryQuarantined();
   }
   async disconnect(principal: BrokerPrincipal): Promise<void> {
-    await this.authority.disconnect(principal);
+    if (await this.journal?.hasOutstanding()) this.authority.detach(principal);
+    else await this.authority.disconnect(principal);
     this.apis.delete(principal.clientId);
   }
 }

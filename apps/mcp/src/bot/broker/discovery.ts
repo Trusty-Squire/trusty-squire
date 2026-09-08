@@ -75,9 +75,13 @@ async function reclaimDeadEndpoint(path: string): Promise<void> {
   }
 }
 
-export async function connectOrLaunchBroker(path: string, token: string): Promise<BrokerClient> {
+export async function connectOrLaunchBroker(
+  path: string,
+  token: string,
+  forwarderId?: string,
+): Promise<BrokerClient> {
   try {
-    return await BrokerClient.connect(path, token);
+    return await BrokerClient.connect(path, token, forwarderId);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== "ENOENT" && code !== "ECONNREFUSED") throw error;
@@ -110,7 +114,7 @@ export async function connectOrLaunchBroker(path: string, token: string): Promis
   while (Date.now() < deadline) {
     if (failure !== undefined) throw failure;
     try {
-      return await BrokerClient.connect(path, token);
+      return await BrokerClient.connect(path, token, forwarderId);
     } catch (error) {
       if (!["ENOENT", "ECONNREFUSED"].includes((error as NodeJS.ErrnoException).code ?? ""))
         throw error;
