@@ -27,6 +27,38 @@ afterAll(async () => {
   await browser?.close();
 });
 describe("interleaved observation DOM", () => {
+  it("derives compact control labels from browser-use DOM associations", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`
+        <label for="work-email">Work email</label><input id="work-email">
+        <span id="account-name">Account email</span><input id="account-email" aria-labelledby="account-name">
+        <button id="checkout"><img alt="Acme"><span>Checkout</span></button>
+        <div id="volume" role="slider" tabindex="0" style="display:block;width:20px;height:20px"></div>
+      `);
+      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const handles = new Map(capture.elements.map((element) => [element, `@e:${element.index}`]));
+      const rows = buildSafeControlsV2({
+        elements: capture.elements,
+        legacyRefs: handles,
+        handles,
+        pageOrigin: "https://merchant.invalid",
+        canonical: true,
+      }).rows;
+      const labelFor = (id: string): string | undefined => {
+        const element = capture.elements.find((candidate) => candidate.id === id)!;
+        return rows.find((row) => row.ref === handles.get(element))?.label;
+      };
+
+      expect(labelFor("work-email")).toBe("@work-email");
+      expect(labelFor("account-email")).toBe("@account-email");
+      expect(labelFor("checkout")).toBe("@checkout");
+      expect(labelFor("volume")).toBe("@button");
+    } finally {
+      await page.close();
+    }
+  });
+
   it("keeps a standard direct-listener control actionable", async () => {
     const page = await browser.newPage();
     try {

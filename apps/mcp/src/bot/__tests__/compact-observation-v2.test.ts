@@ -48,6 +48,7 @@ function safeControls(args: {
   legacyRefs: ReadonlyMap<InteractiveElement, string>;
   pageOrigin: string;
   pageUrl?: string;
+  canonical?: boolean;
 }): ReturnType<typeof buildSafeControlsV2> {
   return buildSafeControlsV2({
     ...args,
@@ -653,6 +654,12 @@ describe("compact observation v2", () => {
       expect(labelsFor(input)).toEqual(["@work-email"]);
     });
 
+    it("uses visible text before a descendant icon label", () => {
+      expect(
+        labelsFor(element({ visibleText: "Checkout", iconLabel: "Acme" })),
+      ).toEqual(["@checkout"]);
+    });
+
     it("uses a text-content button's own visible name", () => {
       expect(labelsFor(element({ visibleText: "Create account" }))).toEqual([
         "@create-account",
@@ -709,6 +716,18 @@ describe("compact observation v2", () => {
       expect(labels).toContain("@menuitem");
       expect(labels).toContain("@file");
       expect(labels.every((label) => label !== undefined && label.length > 1)).toBe(true);
+    });
+
+    it("uses the canonical emitted role for an otherwise unsupported control", () => {
+      const slider = element({ tag: "div", role: "slider" });
+      const safe = safeControls({
+        elements: [slider],
+        legacyRefs: new Map([[slider, "@e:slider"]]),
+        pageOrigin: "https://merchant.invalid",
+        canonical: true,
+      });
+
+      expect(safe.rows).toEqual([expect.objectContaining({ role: "button", label: "@button" })]);
     });
   });
 

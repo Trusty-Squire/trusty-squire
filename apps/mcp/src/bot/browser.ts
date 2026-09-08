@@ -12389,15 +12389,6 @@ export class BrowserController {
       };
 
       const labelFor = (el: Element): string | null => {
-        const id = el.getAttribute("id");
-        if (id !== null && id.length > 0) {
-          try {
-            const l = document.querySelector(`label[for="${CSS.escape(id)}"]`);
-            if (l !== null) return clean(l.textContent);
-          } catch {
-            /* malformed id — fall through */
-          }
-        }
         const labelledBy = el.getAttribute("aria-labelledby");
         if (labelledBy !== null && labelledBy.trim().length > 0) {
           const parts: string[] = [];
@@ -12406,6 +12397,15 @@ export class BrowserController {
             if (t !== null) parts.push(t);
           }
           if (parts.length > 0) return clean(parts.join(" "));
+        }
+        const id = el.getAttribute("id");
+        if (id !== null && id.length > 0) {
+          try {
+            const l = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+            if (l !== null) return clean(l.textContent);
+          } catch {
+            /* malformed id — fall through */
+          }
         }
         const anc = el.closest("label");
         const ancestorLabel = anc !== null ? clean(anc.textContent) : null;

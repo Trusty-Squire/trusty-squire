@@ -933,12 +933,12 @@ function controlLabelNamingTexts(el: InteractiveElement): Array<string | null | 
   return [
     el.ariaLabel,
     el.labelText,
-    el.iconLabel,
     el.visibleText,
     isButtonInput(el) ? el.value : undefined,
     el.title,
     role === "textbox" ? el.placeholder : undefined,
     role === "textbox" ? el.name : undefined,
+    el.iconLabel,
   ];
 }
 
@@ -963,7 +963,7 @@ function candidateText(el: InteractiveElement): string {
   return candidateTexts(el).join(" ");
 }
 
-function controlDescription(el: InteractiveElement): string | undefined {
+function controlDescription(el: InteractiveElement, role: SafeRoleV2): string {
   // Prefer authored accessibility names over descendant text. Navigation
   // toggles and data-row controls often contain an entire menu/card subtree;
   // choosing textContent first turned their concise aria/label name into a
@@ -978,8 +978,6 @@ function controlDescription(el: InteractiveElement): string | undefined {
     // semantic region is the best available immediate context; a genuinely
     // anonymous control falls back to its role rather than becoming a bare
     // [ref, role] tuple. This is descriptive only and does not alter identity.
-    const role = roleOf(el);
-    if (role === null) return undefined;
     const rawContext = el.container?.includes(":")
       ? el.container.slice(el.container.indexOf(":") + 1)
       : el.container;
@@ -1354,7 +1352,7 @@ export function buildSafeControlsV2(args: {
     // already CDP-derived interactive inventory supplies each visible control's
     // descendant/accessibility name. This pass binds that name to its own live
     // element, so no cross-serializer tag/role fallback can swap labels.
-    const label = controlLabelV2(controlDescription(el));
+    const label = controlLabelV2(controlDescription(el, role));
     const row: Omit<SafeControlV2, "ref"> = {
       role,
       visibility: el.inViewport ? "viewport" : "near",

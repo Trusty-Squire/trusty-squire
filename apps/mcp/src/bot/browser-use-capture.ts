@@ -680,6 +680,66 @@ export async function captureBrowserUseDOM(
       if (n.contentDocument) collectForms(n.contentDocument);
     };
     collectForms(root);
+    const nodeByDomId = new Map<string, BrowserUseNode>();
+    const labelsFor = new Map<string, BrowserUseNode[]>();
+    const parentByNode = new Map<BrowserUseNode, BrowserUseNode>();
+    const indexLabels = (n: BrowserUseNode, parent?: BrowserUseNode): void => {
+      if (parent) parentByNode.set(n, parent);
+      const domId = n.attributes.id;
+      if (domId && !nodeByDomId.has(domId)) nodeByDomId.set(domId, n);
+      const controlId = n.attributes.for;
+      if (n.nodeName === "LABEL" && controlId) {
+        const labels = labelsFor.get(controlId) ?? [];
+        labels.push(n);
+        labelsFor.set(controlId, labels);
+      }
+      n.children.forEach((child) => indexLabels(child, n));
+      if (n.contentDocument) indexLabels(n.contentDocument, n);
+    };
+    indexLabels(root);
+    const labelText = (n: BrowserUseNode): string | null => {
+      const text = (node: BrowserUseNode): string =>
+        node.nodeType === 3 ? node.value : node.children.map(text).join(" ");
+      const value = text(n).replace(/\s+/g, " ").trim();
+      return value.length === 0 ? null : value.slice(0, 120);
+    };
+    const visibleText = (n: BrowserUseNode, inUserAgentShadow = false): string => {
+      if (n.nodeType === 3) return inUserAgentShadow ? "" : n.value;
+      return n.children
+        .map((child) => visibleText(child, inUserAgentShadow || n.shadowType === "user-agent"))
+        .join(" ");
+    };
+    const labelledByText = (n: BrowserUseNode): string | null => {
+      const ids = n.attributes["aria-labelledby"]?.trim().split(/\s+/) ?? [];
+      const parts = ids
+        .map((id) => nodeByDomId.get(id))
+        .map((node) => (node ? labelText(node) : null))
+        .filter((value): value is string => value !== null);
+      return parts.length === 0 ? null : parts.join(" ").slice(0, 120);
+    };
+    const associatedLabelText = (n: BrowserUseNode): string | null => {
+      const labels = n.attributes.id ? labelsFor.get(n.attributes.id) : undefined;
+      const explicit = labels?.map(labelText).find((value) => value !== null);
+      if (explicit) return explicit;
+      let parent = parentByNode.get(n);
+      while (parent) {
+        if (parent.nodeName === "LABEL") return labelText(parent);
+        parent = parentByNode.get(parent);
+      }
+      return null;
+    };
+    const iconLabel = (n: BrowserUseNode): string | null => {
+      const find = (node: BrowserUseNode): string | null => {
+        const value = node.attributes.alt ?? node.attributes.title ?? node.attributes["aria-label"];
+        if (value?.trim()) return value.trim().slice(0, 120);
+        for (const child of node.children) {
+          const descendant = find(child);
+          if (descendant) return descendant;
+        }
+        return null;
+      };
+      return n.children.map(find).find((value) => value !== null) ?? null;
+    };
     const ownedLabels = new Map<string, string>();
     const ownedControl = (n: BrowserUseNode): { count: number; sole?: BrowserUseNode } => {
       if (
@@ -770,18 +830,19 @@ export async function captureBrowserUseDOM(
             id: a.id ?? null,
             name: a.name ?? null,
             placeholder: a.placeholder ?? null,
-            ariaLabel: a["aria-label"] ?? null,
+            ariaLabel: a["aria-label"] ?? labelledByText(n),
             role:
               a.role ??
               (["a", "button", "input", "select", "textarea"].includes(t) ? null : "button"),
-            labelText: null,
-            visibleText: text(n).trim() || null,
+            labelText: associatedLabelText(n),
+            visibleText: visibleText(n).trim() || null,
             selector,
             visible: true,
             inViewport: n.visible,
             inConsentWidget: false,
             href: a.href ?? null,
             title: a.title ?? null,
+            iconLabel: iconLabel(n),
             value: a.value ?? null,
             frameOrigin: frame === page.mainFrame() ? null : new URL(frame.url()).origin,
             frameUrl: frame === page.mainFrame() ? null : frame.url(),
