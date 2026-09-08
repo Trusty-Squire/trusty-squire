@@ -111,7 +111,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const productUrl = "https://product.test/checkout";
     const returnUrl = "https://console.product.test/return";
     const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+    const previousCooldown = process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
     process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "5000";
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
     let sessionId: string | undefined;
     const checkout = (total: string, submit: string) => `
       <main>Order total ${total}</main>
@@ -163,6 +165,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
     } finally {
       if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
       else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
+      if (previousCooldown === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = previousCooldown;
       if (sessionId !== undefined) await finishProvisionSession(sessionId);
       await context.close();
     }
@@ -209,7 +213,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const { controller, product } = await controllerForProduct();
     const context = product.context();
     const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+    const previousCooldown = process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
     process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1000";
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
     const providerReturned = product.waitForEvent("popup").then(async (popup) => {
       await popup.goto("data:text/html,provider-token-exchange");
       await product.locator("#state").evaluate((el) => {
@@ -240,6 +246,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
     } finally {
       if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
       else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
+      if (previousCooldown === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = previousCooldown;
       if (sessionId !== null) await finishProvisionSession(sessionId).catch(() => undefined);
       await context.close().catch(() => undefined);
     }
