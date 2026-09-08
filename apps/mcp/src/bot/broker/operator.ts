@@ -226,11 +226,6 @@ export class OperatorBroker implements BrokerTransportPort {
               ...dispatch,
               outcome: reconciliationOutcome(tool.name, observation),
             });
-          else if (tool.name === "operate_start")
-            await this.journal?.record(id, requestId, "outcome", {
-              ...dispatch,
-              outcome: { status: "completed" },
-            });
           internalId = String((observation as { session_id: string }).session_id);
           const session = sessionForCall(internalId);
           if (session === undefined) {
@@ -315,6 +310,17 @@ export class OperatorBroker implements BrokerTransportPort {
       if (capability.targetId === "no-page") {
         await this.authority.close(principal, capability);
         return { result: observation };
+      }
+      if (tool.name === "operate_start") {
+        try {
+          await this.journal?.record(capability.sessionId, requestId, "outcome", {
+            ...dispatch,
+            outcome: { status: "completed" },
+          });
+        } catch (error) {
+          await this.authority.close(principal, capability);
+          throw error;
+        }
       }
       const result = remapSession(observation, internalId, capability.sessionId) as Record<
         string,

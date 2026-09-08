@@ -194,6 +194,64 @@ describe("broker dispatch custody", () => {
     }
   });
 
+  it("does not reconcile an auth-gated start as a created session", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-journal-auth-gated-start-"));
+    const path = join(root, "dispatch.jsonl");
+    const journal = new DispatchJournal(path);
+    const broker = new OperatorBroker(
+      {
+        accountId: "account",
+        agentSessionToken: "token",
+        apiBaseUrl: "http://unused.test",
+        registryBaseUrl: "http://unused.test",
+      },
+      "cell",
+      journal,
+    );
+    const principal = {
+      accountId: "account",
+      agentId: "local-agent",
+      forwarderId: "forwarder-a",
+      clientId: "restarted",
+    };
+    const callerRequestHash = "c".repeat(64);
+    const requestId = `forwarder-a:old-process:${callerRequestHash}`;
+    const guidance = { needs_user: { wall: "google_session", resume: "connect" } };
+    let starts = 0;
+    const startTool: Tool = {
+      name: "operate_start",
+      description: "",
+      inputSchema: z.object({}).strict(),
+      jsonInputSchema: {},
+      handler: async () => {
+        starts += 1;
+        return guidance;
+      },
+    };
+    Object.defineProperty(broker, "tools", { value: [startTool] });
+    try {
+      await broker.authority.claimForwarder(principal);
+      await expect(broker.call(principal, "tool", { name: "operate_start", args: {} }, requestId)).resolves.toEqual({
+        result: guidance,
+      });
+      await expect(
+        broker.recover(principal, {
+          callerRequestHash,
+          name: "operate_start",
+          args: {},
+        }),
+      ).resolves.toBeNull();
+      await expect(broker.call(principal, "tool", { name: "operate_start", args: {} }, requestId)).resolves.toEqual({
+        result: guidance,
+      });
+      expect(starts).toBe(2);
+      expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
+      await expect(journal.assertReconciled()).resolves.toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("allows only an acknowledged payment's scoped status custody", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-journal-payment-custody-"));
     const path = join(root, "dispatch.jsonl");
