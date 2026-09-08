@@ -1310,7 +1310,9 @@ function oauthCompletionSourcePage(session: object): OAuthCompletionEvidence["pa
 function operationPageForSession(session: Session): Page | undefined {
   return (
     oauthCompletionSourcePage(session) ??
-    (session.compactV2Active ? compactV2SourcePage(session) : undefined)
+    (session.compactV2Active ? compactV2SourcePage(session) : undefined) ??
+    session.browser.activePage() ??
+    undefined
   );
 }
 

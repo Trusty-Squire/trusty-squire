@@ -262,6 +262,51 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it("refuses settlement when the product page closed before waiting", async () => {
+    const { controller, product } = await controllerForProduct();
+    const context = product.context();
+    try {
+      await controller.startOAuth("#oauth");
+      const provider = (controller as unknown as { page: Page }).page;
+      const unrelatedPromise = product.waitForEvent("popup");
+      await product.evaluate(() => window.open("about:blank"));
+      const unrelated = await unrelatedPromise;
+      await unrelated.setContent('<main id="unrelated-state">Unrelated tab</main>');
+      await product.close();
+
+      await expect(controller.settleAfterOAuth(provider)).rejects.toThrow(
+        "OAuth lifecycle no longer matches the resolved operation page",
+      );
+      expect(provider.isClosed()).toBe(false);
+      await expect(unrelated.locator("#unrelated-state").textContent()).resolves.toBe("Unrelated tab");
+      expect((controller as unknown as { page: Page }).page).toBe(provider);
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("refuses settlement when the product page closes during its wait", async () => {
+    const { controller, product } = await controllerForProduct();
+    const context = product.context();
+    try {
+      await controller.startOAuth("#oauth");
+      const provider = (controller as unknown as { page: Page }).page;
+      const unrelatedPromise = product.waitForEvent("popup");
+      await product.evaluate(() => window.open("about:blank"));
+      const unrelated = await unrelatedPromise;
+      await unrelated.setContent('<main id="unrelated-state">Unrelated tab</main>');
+
+      const settling = controller.settleAfterOAuth(provider);
+      await product.close();
+      await expect(settling).rejects.toThrow("OAuth lifecycle product page became unavailable");
+      expect(provider.isClosed()).toBe(false);
+      await expect(unrelated.locator("#unrelated-state").textContent()).resolves.toBe("Unrelated tab");
+      expect((controller as unknown as { page: Page }).page).toBe(provider);
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
   it("keeps a provider-less SPA OAuth control pending after its popup closes", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();
@@ -1683,6 +1728,76 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await expect(
         context.pages().find((page) => page.url() === secondUrl)!.locator("main").textContent(),
       ).resolves.toBe("Second tab");
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
+
+  it("keeps queued ordinary clicks on their captured page", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://product.test/editor";
+    const firstUrl = "https://product.test/first";
+    const secondUrl = "https://product.test/second";
+    let sessionId: string | undefined;
+    try {
+      await context.route("https://product.test/**", (route) => {
+        const url = route.request().url();
+        const body =
+          url === firstUrl
+            ? '<main>First tab</main><button onclick="document.body.dataset.wrongTabClicked = \'yes\'">Open second tab</button>'
+            : url === secondUrl
+              ? "<main>Second tab</main>"
+              : `<button id="first" onclick="window.open('${firstUrl}')">Open first tab</button><button id="second" onclick="window.open('${secondUrl}')">Open second tab</button>`;
+        return route.fulfill({ contentType: "text/html", body });
+      });
+      await product.goto(productUrl);
+      const controller = BrowserController.fromHarnessPage(product);
+      const started = await startHarnessProvisionSession({ browser: controller, serviceUrl: productUrl });
+      sessionId = started.session_id;
+      const firstRef = parseElementsTable(started.el_table ?? "").find(
+        (element) => element.label === "Open first tab",
+      )?.ref;
+      const secondRef = parseElementsTable(started.el_table ?? "").find(
+        (element) => element.label === "Open second tab",
+      )?.ref;
+      expect(firstRef).toBeDefined();
+      expect(secondRef).toBeDefined();
+
+      let firstAdoptionEntered!: () => void;
+      let resumeFirstAdoption!: () => void;
+      const firstAdoption = new Promise<void>((resolve) => {
+        firstAdoptionEntered = resolve;
+      });
+      const firstAdoptionResume = new Promise<void>((resolve) => {
+        resumeFirstAdoption = resolve;
+      });
+      const originalAdopt = controller.adoptOpenedTab.bind(controller);
+      let firstCall = true;
+      const adoptionSpy = vi
+        .spyOn(controller, "adoptOpenedTab")
+        .mockImplementation(async (graceMs?: number): Promise<string | null> => {
+          if (firstCall) {
+            firstCall = false;
+            firstAdoptionEntered();
+            await firstAdoptionResume;
+          }
+          return await originalAdopt(graceMs);
+        });
+
+      const first = act(sessionId, { kind: "click", target: firstRef! });
+      await firstAdoption;
+      const second = act(sessionId, { kind: "click", target: secondRef! });
+      resumeFirstAdoption();
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      adoptionSpy.mockRestore();
+
+      const firstPage = context.pages().find((page) => page.url() === firstUrl)!;
+      expect(firstResult.url).toBe(firstUrl);
+      expect(secondResult.url).toBe(secondUrl);
+      await expect(firstPage.locator("body").getAttribute("data-wrong-tab-clicked")).resolves.toBeNull();
+      await expect(product.locator("#second").count()).resolves.toBe(1);
     } finally {
       if (sessionId !== undefined) await finishProvisionSession(sessionId);
       await context.close();

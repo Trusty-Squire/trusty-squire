@@ -14739,33 +14739,46 @@ export class BrowserController {
       page !== null && page !== undefined && (page === product || page === provider);
     if (
       product === null ||
+      product.isClosed() ||
       active === null ||
       !isLifecyclePage(active) ||
       (operationPage !== undefined && (!isLifecyclePage(operationPage) || operationPage !== active))
     ) {
       throw new Error("OAuth lifecycle no longer matches the resolved operation page");
     }
+    let settled = false;
     try {
-      if (product === active) return;
+      if (product === active) {
+        settled = true;
+        return;
+      }
       for (let i = 0; i < 12 && provider !== null && !provider.isClosed(); i++) {
         await this.sleep(1000);
+        if (product.isClosed()) {
+          throw new Error("OAuth lifecycle product page became unavailable");
+        }
+      }
+      if (product.isClosed()) {
+        throw new Error("OAuth lifecycle product page became unavailable");
       }
       if (provider !== null && provider !== product && !provider.isClosed()) {
         await provider.close().catch(() => undefined);
       }
-      if (!product.isClosed()) {
-        this.page = product;
-        await product.bringToFront().catch(() => undefined);
-        await product
-          .waitForLoadState("domcontentloaded", { timeout: 30000 })
-          .catch(() => undefined);
-      } else {
-        this.adoptLivePage();
+      if (product.isClosed()) {
+        throw new Error("OAuth lifecycle product page became unavailable");
       }
+      this.page = product;
+      await product.bringToFront().catch(() => undefined);
+      await product
+        .waitForLoadState("domcontentloaded", { timeout: 30000 })
+        .catch(() => undefined);
+      settled = true;
     } finally {
-      this.oauthProductPage = null;
-      this.oauthProviderPage = null;
-      this.oauthProviderPageClosed = false;
+      if (settled) {
+        this.oauthProductPage = null;
+        this.oauthProviderPage = null;
+        this.oauthProviderPageClosed = false;
+      }
     }
   }
   async close(options: { cancelStart?: boolean } = {}): Promise<ProfileCloseState> {
