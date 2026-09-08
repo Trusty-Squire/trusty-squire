@@ -724,6 +724,98 @@ describe("BrowserController OAuth popup lifecycle", () => {
     },
   );
 
+  it.each(["completed", "awaiting_human"] as const)(
+    "reports a reused-session popup as %s while the initiating click is still pending",
+    async (outcome) => {
+      const context = await browser.newContext();
+      const product = await context.newPage();
+      const returnUrl = "https://console.product.test/projects";
+      const providerUrl = `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(returnUrl)}`;
+      const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+      const previousCooldown = process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+      // Allow the preceding test's default three-second lease cooldown to drain.
+      process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "5000";
+      process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
+      await context.route("https://product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<button id="oauth" onclick='window.open(${JSON.stringify(providerUrl)})'>Continue with Google</button>`,
+        }),
+      );
+      await context.route("https://accounts.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body:
+            outcome === "completed"
+              ? `<script>location.replace(${JSON.stringify(returnUrl)})</script>`
+              : "<main>Sign in to Google</main>",
+        }),
+      );
+      await context.route("https://console.product.test/**", (route) =>
+        route.fulfill({ contentType: "text/html", body: "<button>New project</button>" }),
+      );
+      await product.goto("https://product.test/login");
+      const controller = BrowserController.fromHarnessPage(product);
+      let releaseClick!: () => void;
+      const clickGate = new Promise<void>((resolve) => {
+        releaseClick = resolve;
+      });
+      let popup: Page | undefined;
+      vi.spyOn(controller, "click").mockImplementationOnce(async (selector) => {
+        const opened = product.waitForEvent("popup");
+        await product.locator(selector).click();
+        popup = await opened;
+        await popup.waitForURL(outcome === "completed" ? returnUrl : providerUrl);
+        // The page can finish OAuth before Playwright's initiating action
+        // resolves. Hold that acknowledgement past the outer action window.
+        await clickGate;
+      });
+      let sessionId: string | undefined;
+      try {
+        const started = await startHarnessProvisionSession({
+          browser: controller,
+          serviceUrl: "https://product.test/login",
+          observationFormat: "browser-use-dom",
+        });
+        sessionId = started.session_id;
+        const target = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
+        expect(target).toBeDefined();
+        const result = await act(sessionId, {
+          kind: "oauth_login",
+          target: target!,
+          provider: "google",
+        });
+        expect(popup?.url()).toBe(outcome === "completed" ? returnUrl : providerUrl);
+        if (outcome === "completed") {
+          expect(result.oauth).toBeUndefined();
+          expect(result.url).toBe(returnUrl);
+          expect(result.dom).toContain("New project");
+        } else {
+          expect(result.oauth?.state).toBe("awaiting_human");
+        }
+        releaseClick();
+        if (outcome === "completed") {
+          await vi.waitFor(() => expect(controller.completedOAuthPage()?.url()).toBe(returnUrl));
+          // A plain observe intentionally retires the completion source and
+          // reads the retained opener; it must not resurrect awaiting_human.
+          const next = await observe(sessionId);
+          expect(next.url).toBe(product.url());
+          expect(next.oauth?.state).not.toBe("awaiting_human");
+        }
+      } finally {
+        releaseClick();
+        if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+        else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
+        if (previousCooldown === undefined)
+          delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+        else process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = previousCooldown;
+        if (sessionId) await finishProvisionSession(sessionId);
+        await context.close();
+      }
+    },
+    10_000,
+  );
+
   it.each(["browser-use-dom", "legacy"])(
     "rechecks completion when the outer action deadline wins during consent work (%s)",
     async (format) => {
