@@ -2244,7 +2244,13 @@ export async function observe(
   if (completionSource?.isClosed() === true) {
     session.browser.completeOAuthTransitionRecovery();
   }
-  const sourcePage = operationPageForSession(session);
+  const transition = session.browser.oauthTransitionStatus?.();
+  const sourcePage =
+    transition?.providerPageClosed === true &&
+    transition.productPageViable &&
+    transition.browserConnected
+      ? undefined
+      : operationPageForSession(session);
   return await observeSession(
     session,
     detail,

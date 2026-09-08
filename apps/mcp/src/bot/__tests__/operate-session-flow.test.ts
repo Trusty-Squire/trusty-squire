@@ -495,6 +495,14 @@ vi.mock("../browser.js", async (importOriginal) => ({
           )
         : [];
     }
+    async typeOnPage(
+      _page: unknown,
+      selector: string,
+      text: string,
+      sealed = false,
+    ): Promise<string[]> {
+      return await this.type(selector, text, sealed);
+    }
     async commitRequiredShippingAddressLine1(selector: string): Promise<void> {
       h.requiredShippingAddressCommits.push(selector);
       if (h.shippingMethodsLoadOnAutocompleteCommit) h.shippingMethodsLoaded = true;
@@ -548,6 +556,9 @@ vi.mock("../browser.js", async (importOriginal) => ({
         h.selectMutation = null;
       }
       return committed;
+    }
+    async selectOptionOnPage(_page: unknown, selector: string, matcher?: string): Promise<string> {
+      return await this.selectOption(selector, matcher);
     }
     async setPhoneCountry(country: string): Promise<void> {
       h.phoneCountries.push(country);
@@ -753,6 +764,9 @@ vi.mock("../browser.js", async (importOriginal) => ({
     }
     async uploadFile(selector: string, filePath: string): Promise<void> {
       h.uploads.push({ selector, filePath });
+    }
+    async uploadFileOnPage(_page: unknown, selector: string, filePath: string): Promise<void> {
+      await this.uploadFile(selector, filePath);
     }
     async startOAuth(): Promise<void> {}
     async loginWithOAuth(
