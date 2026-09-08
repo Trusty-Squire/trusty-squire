@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8" /><title>Custom element shop fixture</title>
+  <style>
+    body {
+      font: 16px sans-serif;
+      margin: 12px;
+    }
+    product-grid {
+      display: flex;
+      gap: 12px;
+    }
+    product-card-component {
+      display: block;
+      width: 240px;
+    }
+    slideshow-component,
+    slideshow-slide,
+    quick-add-component,
+    add-to-cart-component,
+    product-form-component {
+      display: block;
+    }
+    slideshow-slide {
+      padding: 2px;
+    }
+    button,
+    buy-now-component,
+    form-buy-component {
+      display: block;
+      padding: 8px;
+    }
+    search-decoration {
+      display: block;
+      width: 24px;
+      height: 24px;
+    }
+  </style>
+  <h1>Jade collection</h1>
+  <product-grid></product-grid>
+  <buy-now-component role="button" tabindex="0">Buy now</buy-now-component>
+  <form><form-buy-component aria-label="Add to cart with custom form"></form-buy-component></form>
+  <search-decoration class="search-icon" aria-label="Decorative search artwork"></search-decoration>
+  <script>
+    window.cart = [];
+    customElements.define(
+      "form-buy-component",
+      class extends HTMLElement {
+        static formAssociated = true;
+        constructor() {
+          super();
+          this.attachInternals();
+        }
+        connectedCallback() {
+          this.textContent = "Add to cart with custom form";
+        }
+      },
+    );
+    for (const [index, name] of [
+      "Jade ring",
+      "Jade pendant",
+      "Jade earrings",
+      "Jade bracelet",
+    ].entries()) {
+      const card = document.createElement("product-card-component");
+      card.innerHTML = `<h2>${name}</h2><p>$${20 + index}</p>
+    <slideshow-component><slideshow-slide>Natural jade, polished by hand</slideshow-slide><slideshow-slide>Natural jade, polished by hand</slideshow-slide><slideshow-slide>Natural jade, polished by hand</slideshow-slide></slideshow-component>
+    <quick-add-component><add-to-cart-component aria-label="Add to cart"><product-form-component><form>
+      <input type="hidden" name="id" value="${1000 + index}">
+      <button type="submit" name="add" data-product="${index}"><span aria-hidden="true">+</span></button>
+    </form></product-form-component></add-to-cart-component></quick-add-component>`;
+      card.querySelector("form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        window.cart.push(name);
+      });
+      document.querySelector("product-grid").append(card);
+    }
+    document
+      .querySelector("buy-now-component")
+      .addEventListener("click", () => window.cart.push("Buy now"));
+  </script>
+</html>

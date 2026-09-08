@@ -161,6 +161,12 @@ export async function captureBrowserUseDOM(
     const axs = new Map(
       ax.nodes.filter((n) => n.backendDOMNodeId !== undefined).map((n) => [n.backendDOMNodeId!, n]),
     );
+    const hasCustomElements = (node: RawNode): boolean =>
+      (node.nodeType === 1 && node.nodeName.includes("-")) ||
+      (node.children ?? []).some(hasCustomElements) ||
+      (node.shadowRoots ?? []).some(hasCustomElements) ||
+      (node.contentDocument !== undefined && hasCustomElements(node.contentDocument));
+    const containsCustomElements = hasCustomElements(dom.root);
     const frameIds: string[] = [];
     const frameById = new Map<string, Frame>();
     const framePathById = new Map<string, string | null>();
@@ -225,10 +231,20 @@ export async function captureBrowserUseDOM(
       }
     }
     const listeners = new Set<number>();
+    const formAssociatedTags = new Map<Frame, Set<string>>();
     const bindings = new Map<number, InteractiveElement>();
     const baseUris = new Map<Frame, string>();
     const baseTargets = new Map<Frame, string>();
     const formOwners = new Map<number, number | null>();
+    const mainWorldContexts = new Map<string, number>();
+    client.on(
+      "Runtime.executionContextCreated",
+      (event: { context: { id: number; auxData?: { frameId?: string; isDefault?: boolean } } }) => {
+        const { frameId, isDefault } = event.context.auxData ?? {};
+        if (frameId && isDefault) mainWorldContexts.set(frameId, event.context.id);
+      },
+    );
+    await client.send("Runtime.enable");
     for (const frameId of frameIds) {
       const frame = frameById.get(frameId);
       if (!frame) continue;
@@ -237,6 +253,42 @@ export async function captureBrowserUseDOM(
       const candidates = inventory.filter((e) => (e.framePath ?? null) === path);
       const frameBindings = new Map<number, InteractiveElement>();
       const frameListeners = new Set<number>();
+      let formAssociated = new Set<string>();
+      if (containsCustomElements)
+        try {
+          formAssociated = new Set(
+            await frame.evaluate(() => {
+              const names = new Set<string>();
+              const roots: Array<Document | ShadowRoot> = [document];
+              const getShadowRoot = Object.getOwnPropertyDescriptor(
+                Element.prototype,
+                "shadowRoot",
+              )?.get;
+              for (let i = 0; i < roots.length; i++)
+                for (const el of Array.from(roots[i]!.querySelectorAll("*"))) {
+                  const name = el.localName;
+                  if (name.includes("-")) {
+                    let constructor = customElements.get(name) as Function | undefined;
+                    while (constructor) {
+                      const descriptor = Object.getOwnPropertyDescriptor(
+                        constructor,
+                        "formAssociated",
+                      );
+                      if (descriptor) {
+                        if ("value" in descriptor && descriptor.value === true) names.add(name);
+                        break;
+                      }
+                      constructor = Object.getPrototypeOf(constructor) as Function | undefined;
+                    }
+                  }
+                  const shadowRoot = getShadowRoot?.call(el);
+                  if (shadowRoot) roots.push(shadowRoot);
+                }
+              return [...names];
+            }),
+          );
+        } catch {}
+      formAssociatedTags.set(frame, formAssociated);
       try {
         const context = await client.send("Page.createIsolatedWorld", {
           frameId,
@@ -246,7 +298,7 @@ export async function captureBrowserUseDOM(
         // backend identities without guessing from tag names or accessible names.
         const selectors = candidates.map((e) => e.selector);
         const objects = await client.send("Runtime.evaluate", {
-          expression: `(() => { const roots=[document]; for(let i=0;i<roots.length;i++) for(const e of roots[i].querySelectorAll('*')) if(e.shadowRoot) roots.push(e.shadowRoot); const found=${JSON.stringify(selectors)}.map(s => { const p=s.split(' >> nth='); const matches=roots.flatMap(r=>{try{return [...r.querySelectorAll(p[0])]}catch{return []}}); return matches[Number(p[1]||0)] || null; }); const formOwners=roots.flatMap(r=>[...r.querySelectorAll('[form]')]).flatMap(e=>[e,e.form||null]); return Object.assign(found,{baseURI:document.baseURI,baseTarget:document.querySelector('base[target]')?.getAttribute('target'),formOwners}); })()`,
+          expression: `(() => { const roots=[document],getShadowRoot=Object.getOwnPropertyDescriptor(Element.prototype,'shadowRoot')?.get; for(let i=0;i<roots.length;i++) for(const e of roots[i].querySelectorAll('*')) { const shadowRoot=getShadowRoot?.call(e); if(shadowRoot) roots.push(shadowRoot); } const found=${JSON.stringify(selectors)}.map(s => { const p=s.split(' >> nth='); const matches=roots.flatMap(r=>{try{return [...r.querySelectorAll(p[0])]}catch{return []}}); return matches[Number(p[1]||0)] || null; }); const formOwners=roots.flatMap(r=>[...r.querySelectorAll('[form]')]).flatMap(e=>[e,e.form||null]); return Object.assign(found,{baseURI:document.baseURI,baseTarget:document.querySelector('base[target]')?.getAttribute('target'),formOwners}); })()`,
           contextId: context.executionContextId,
           objectGroup: "ts-observation",
         });
@@ -295,26 +347,73 @@ export async function captureBrowserUseDOM(
               }),
             );
         }
-        const clickObjects = await client.send("Runtime.evaluate", {
-          expression: `(() => { if(typeof getEventListeners!=='function')return null; const all=document.querySelectorAll('*'); if(all.length>10000)return null; const found=[]; for(const el of all){const l=getEventListeners(el);if(l.click||l.mousedown||l.mouseup||l.pointerdown||l.pointerup){found.push(el);if(found.length>100)return null;}} return found;})()`,
-          contextId: context.executionContextId,
-          includeCommandLineAPI: true,
-          objectGroup: "ts-observation",
-        });
-        if (clickObjects.result.objectId) {
-          const props = await client.send("Runtime.getProperties", {
-            objectId: clickObjects.result.objectId,
-            ownProperties: true,
+        try {
+          const listenerTargets = await client.send("Runtime.evaluate", {
+            expression: `(() => { const roots=[document], priority=[], fallback=[], limit=100,getShadowRoot=Object.getOwnPropertyDescriptor(Element.prototype,'shadowRoot')?.get; for(let i=0;i<roots.length;i++) for(const el of roots[i].querySelectorAll('*')) { const shadowRoot=getShadowRoot?.call(el); if(shadowRoot) roots.push(shadowRoot); if(!el.localName.includes('-')) continue; const r=el.getBoundingClientRect(), s=getComputedStyle(el), visible=r.width>1&&r.height>1&&r.bottom>0&&r.right>0&&r.top<innerHeight&&r.left<innerWidth&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)>0; const role=el.getAttribute('role')||''; const likely=visible&&(/(?:quick-add|add-to-cart|product-form|buy|cart)/.test(el.localName)||el.closest("form,[class*='product'],[id*='product'],[class*='price'],[id*='price']")!==null||['button','link','checkbox','radio','combobox','textbox','menuitem','option','tab'].includes(role)||el.hasAttribute('command')||el.hasAttribute('commandfor')||el.hasAttribute('popovertarget')); const targets=likely?priority:fallback; if(targets.length<limit) targets.push(el); } return [...priority,...fallback].slice(0,limit); })()`,
+            contextId: context.executionContextId,
+            objectGroup: "ts-observation",
           });
-          const indexed = props.result.filter((p) => /^\d+$/.test(p.name) && p.value?.objectId);
-          for (let i = 0; i < indexed.length; i += 8)
-            await Promise.all(
-              indexed.slice(i, i + 8).map(async (p) => {
-                const d = await client.send("DOM.describeNode", { objectId: p.value!.objectId! });
-                frameListeners.add(d.node.backendNodeId);
-              }),
-            );
-        }
+          if (listenerTargets.result.objectId) {
+            const props = await client.send("Runtime.getProperties", {
+              objectId: listenerTargets.result.objectId,
+              ownProperties: true,
+            });
+            const indexed = props.result.filter((p) => /^\d+$/.test(p.name) && p.value?.objectId);
+            for (let i = 0; i < indexed.length; i += 8) {
+              const batches = await Promise.all(
+                indexed.slice(i, i + 8).map((p) =>
+                  client.send("DOMDebugger.getEventListeners", {
+                    objectId: p.value!.objectId!,
+                    depth: 0,
+                    pierce: true,
+                  }),
+                ),
+              );
+              for (const events of batches)
+                for (const listener of events.listeners)
+                  if (
+                    listener.backendNodeId !== undefined &&
+                    [
+                      "click",
+                      "mousedown",
+                      "mouseup",
+                      "pointerdown",
+                      "pointerup",
+                      "keydown",
+                      "keyup",
+                    ].includes(listener.type)
+                  )
+                    frameListeners.add(listener.backendNodeId);
+            }
+          }
+        } catch {}
+        try {
+          const mainWorldContextId = mainWorldContexts.get(frameId);
+          if (mainWorldContextId !== undefined) {
+            const clickObjects = await client.send("Runtime.evaluate", {
+              expression: `(() => { if(typeof getEventListeners!=='function')return null; const roots=[document],found=[],getShadowRoot=Object.getOwnPropertyDescriptor(Element.prototype,'shadowRoot')?.get; let count=0; for(let i=0;i<roots.length;i++) for(const el of roots[i].querySelectorAll('*')) { const shadowRoot=getShadowRoot?.call(el); if(shadowRoot)roots.push(shadowRoot); if(++count>10000)return null; if(el.localName.includes('-'))continue; const l=getEventListeners(el); if(l.click||l.mousedown||l.mouseup||l.pointerdown||l.pointerup){found.push(el);if(found.length>100)return null;} } return found;})()`,
+              contextId: mainWorldContextId,
+              includeCommandLineAPI: true,
+              objectGroup: "ts-observation",
+            });
+            if (clickObjects.result.objectId) {
+              const props = await client.send("Runtime.getProperties", {
+                objectId: clickObjects.result.objectId,
+                ownProperties: true,
+              });
+              const indexed = props.result.filter((p) => /^\d+$/.test(p.name) && p.value?.objectId);
+              for (let i = 0; i < indexed.length; i += 8)
+                await Promise.all(
+                  indexed.slice(i, i + 8).map(async (p) => {
+                    const d = await client.send("DOM.describeNode", {
+                      objectId: p.value!.objectId!,
+                    });
+                    frameListeners.add(d.node.backendNodeId);
+                  }),
+                );
+            }
+          }
+        } catch {}
         for (const [backendNodeId, element] of frameBindings) bindings.set(backendNodeId, element);
         for (const backendNodeId of frameListeners) listeners.add(backendNodeId);
       } catch {
@@ -431,6 +530,7 @@ export async function captureBrowserUseDOM(
         showScroll,
         scrollText: t === "iframe" ? "scroll" : scrollParts.join(" "),
         clickListener: listeners.has(raw.backendNodeId),
+        formAssociated: frame !== null && formAssociatedTags.get(frame)?.has(t) === true,
         axRole: axNode?.role?.value ?? null,
         axProperties: (axNode?.properties ?? []).map((p) => ({
           name: p.name,
@@ -580,6 +680,58 @@ export async function captureBrowserUseDOM(
       if (n.contentDocument) collectForms(n.contentDocument);
     };
     collectForms(root);
+    const ownedLabels = new Map<string, string>();
+    const ownedControl = (n: BrowserUseNode): { count: number; sole?: BrowserUseNode } => {
+      if (
+        n.computedStyles?.display === "none" ||
+        n.computedStyles?.visibility === "hidden" ||
+        Number(n.computedStyles?.opacity ?? "1") <= 0 ||
+        "inert" in n.attributes ||
+        "disabled" in n.attributes ||
+        n.attributes["aria-disabled"] === "true" ||
+        n.axProperties.some((p) => p.name === "disabled" && Boolean(p.value))
+      )
+        return { count: 0 };
+      if (n.contentDocument) ownedControl(n.contentDocument);
+      const descendants = n.children.map(ownedControl);
+      const descendantCount = descendants.reduce((sum, child) => sum + child.count, 0);
+      const descendantSole =
+        descendantCount === 1 ? descendants.find((child) => child.count === 1)?.sole : undefined;
+      const custom = n.nodeName.includes("-");
+      const nativeTag =
+        ["BUTTON", "SELECT", "TEXTAREA"].includes(n.nodeName) ||
+        (n.nodeName === "A" && "href" in n.attributes) ||
+        (n.nodeName === "INPUT" && n.attributes.type?.toLowerCase() !== "hidden");
+      const explicit =
+        n.clickListener ||
+        [
+          "onclick",
+          "onmousedown",
+          "onmouseup",
+          "onpointerdown",
+          "onpointerup",
+          "onkeydown",
+          "onkeyup",
+        ].some((key) => key in n.attributes) ||
+        [
+          "button",
+          "link",
+          "checkbox",
+          "radio",
+          "combobox",
+          "textbox",
+          "menuitem",
+          "option",
+          "tab",
+        ].includes(n.attributes.role ?? n.axRole ?? "");
+      const self = nativeTag || explicit || (custom && browserUseInteractive(n));
+      const count = descendantCount + Number(self);
+      const sole = count === 1 ? (self ? n : descendantSole) : undefined;
+      const label = n.attributes["aria-label"]?.trim() || n.attributes.title?.trim();
+      if (custom && label && sole && !ownedLabels.has(sole.id)) ownedLabels.set(sole.id, label);
+      return { count, ...(sole ? { sole } : {}) };
+    };
+    if (containsCustomElements) ownedControl(root);
     const visit = (n: BrowserUseNode, inClosedShadow = false, form?: FormIntent): void => {
       if (n.nodeName === "FORM") form = formIntent(n);
       if (["IFRAME", "FRAME"].includes(n.nodeName)) form = undefined;
@@ -680,6 +832,13 @@ export async function captureBrowserUseDOM(
         if (submitter && n.attributes.form !== undefined && !formOwners.has(raw.backendNodeId)) {
           delete el.observationIdentity;
           delete el.observationIntent;
+        }
+      }
+      if (el) {
+        const ownedLabel = ownedLabels.get(n.id);
+        if (ownedLabel && !el.ariaLabel && !n.attributes["aria-labelledby"]) {
+          el.ariaLabel = ownedLabel;
+          n.attributes.ax_name ??= ownedLabel;
         }
         if (!elements.includes(el)) elements.push(el);
         nodeElements.set(n.id, el);

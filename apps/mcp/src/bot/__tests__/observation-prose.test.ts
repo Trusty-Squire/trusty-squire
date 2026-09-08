@@ -8,7 +8,11 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { BrowserController, type InteractiveElement } from "../browser.js";
 import { captureBrowserUseDOM } from "../browser-use-capture.js";
 import { serializeBrowserUseDOM, type BrowserUseNode } from "../browser-use-serializer.js";
-import { buildSafeControlsV2, StableObservationRefs } from "../compact-observation-v2.js";
+import {
+  buildSafeControlsV2,
+  controlMatchesPrivateQueryV2,
+  StableObservationRefs,
+} from "../compact-observation-v2.js";
 let browser: Browser;
 const transparentFrameSecurity = async (): Promise<{ opaque: boolean }> => ({ opaque: false });
 const captureThroughController = async (page: Page) => {
@@ -23,6 +27,134 @@ afterAll(async () => {
   await browser?.close();
 });
 describe("interleaved observation DOM", () => {
+  it("keeps a standard direct-listener control actionable", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent('<span id="listener">Continue</span>');
+      await page
+        .locator("#listener")
+        .evaluate((element) =>
+          element.addEventListener("click", () => element.setAttribute("data-clicked", "yes")),
+        );
+      const capture = await captureThroughController(page);
+      const listener = capture.elements.find((element) => element.id === "listener")!;
+      expect(listener).toMatchObject({ tag: "span" });
+      await page.locator(listener.selector).click();
+      expect(await page.locator("#listener").getAttribute("data-clicked")).toBe("yes");
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("finds a standard listener after ordinary visible content", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(
+        `${Array.from({ length: 1_000 }, (_, index) => `<span id="ordinary-${index}">Item</span>`).join("")}<span id="late-listener">Continue</span>`,
+      );
+      await page
+        .locator("#late-listener")
+        .evaluate((element) =>
+          element.addEventListener("click", () => element.setAttribute("data-clicked", "yes")),
+        );
+      const capture = await captureThroughController(page);
+      const listener = capture.elements.find((element) => element.id === "late-listener")!;
+      expect(listener).toMatchObject({ tag: "span" });
+      await page.locator(listener.selector).click();
+      expect(await page.locator("#late-listener").getAttribute("data-clicked")).toBe("yes");
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("does not invoke form-associated accessors during observation", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<style>getter-form-control, data-form-control { display:block; width:20px; height:20px }</style>
+        <form id="form"><getter-form-control id="getter-control"></getter-form-control><data-form-control id="data-control" aria-label="Add to cart">Add</data-form-control></form>`);
+      await page.locator("#form").evaluate((form) =>
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          form.setAttribute("data-submitted", "yes");
+        }),
+      );
+      const getterReads = await page.evaluate(() => {
+        let reads = 0;
+        document.body.setAttribute("data-form-associated-reads", "0");
+        customElements.define(
+          "getter-form-control",
+          class extends HTMLElement {
+            static get formAssociated() {
+              reads += 1;
+              document.body.setAttribute("data-form-associated-reads", String(reads));
+              if (reads > 1) document.querySelector<HTMLFormElement>("#form")?.requestSubmit();
+              return true;
+            }
+          },
+        );
+        customElements.define(
+          "data-form-control",
+          class extends HTMLElement {
+            static formAssociated = true;
+            constructor() {
+              super();
+              this.attachInternals();
+            }
+          },
+        );
+        return reads;
+      });
+      const capture = await captureThroughController(page);
+      expect(await page.locator("#form").getAttribute("data-submitted")).toBeNull();
+      expect(await page.locator("body").getAttribute("data-form-associated-reads")).toBe(
+        String(getterReads),
+      );
+      expect(capture.elements.some((element) => element.id === "getter-control")).toBe(false);
+      expect(capture.elements.find((element) => element.id === "data-control")).toMatchObject({
+        tag: "data-form-control",
+      });
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("does not invoke page-owned shadow-root accessors during observation", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<form id="form">
+        <button id="native-buy" type="submit" name="add">Add to cart</button>
+        <shadow-accessor-control id="guard"></shadow-accessor-control>
+      </form>`);
+      await page.locator("#form").evaluate((form) =>
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          form.setAttribute("data-submitted", "yes");
+        }),
+      );
+      await page.locator("#guard").evaluate((element) => {
+        let reads = 0;
+        document.body.setAttribute("data-shadow-root-reads", "0");
+        Object.defineProperty(element, "shadowRoot", {
+          get() {
+            reads += 1;
+            document.body.setAttribute("data-shadow-root-reads", String(reads));
+            document.querySelector<HTMLFormElement>("#form")?.requestSubmit();
+            return null;
+          },
+        });
+      });
+      const capture = await captureThroughController(page);
+      expect(await page.locator("body").getAttribute("data-shadow-root-reads")).toBe("0");
+      expect(await page.locator("#form").getAttribute("data-submitted")).toBeNull();
+      const buy = capture.elements.find((element) => element.id === "native-buy")!;
+      expect(buy).toMatchObject({ tag: "button", name: "add", type: "submit" });
+      await page.locator(buy.selector).click();
+      expect(await page.locator("#form").getAttribute("data-submitted")).toBe("yes");
+    } finally {
+      await page.close();
+    }
+  });
+
   it("binds persistent capabilities to physical nodes across fresh CDP captures", async () => {
     const page = await browser.newPage();
     const refs = new StableObservationRefs();
@@ -95,6 +227,58 @@ describe("interleaved observation DOM", () => {
       expect(explicit).toBeDefined();
       await page.locator("form").evaluate((form) => form.setAttribute("action", "/other"));
       expect(await read()).not.toBe(explicit);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("finds Shopify owned buy controls and folds repeated custom-element content", async () => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    try {
+      await page.setContent(
+        readFileSync(
+          new URL("../../../../../fixtures/browser-use/pages/shopify.html", import.meta.url),
+          "utf8",
+        ),
+      );
+      const capture = await captureThroughController(page);
+      const buy = capture.elements.filter(
+        (el) => el.tag === "button" && controlMatchesPrivateQueryV2(el, "add to cart"),
+      );
+      expect(buy).toHaveLength(4);
+      expect(buy.every((el) => el.name === "add" && el.type === "submit")).toBe(true);
+      const refs = new StableObservationRefs();
+      const handles = new Map(capture.elements.map((el) => [el, refs.get("shop", el.selector)]));
+      const rows = buildSafeControlsV2({
+        elements: capture.elements,
+        handles,
+        legacyRefs: handles,
+        pageOrigin: "https://shop.example",
+        canonical: true,
+      }).rows;
+      for (const el of buy) {
+        expect(rows.find((row) => row.ref === handles.get(el))?.role).toBe("button");
+        expect(handles.get(el)).toMatch(/^@e:[A-Za-z0-9_-]{22}$/);
+      }
+      for (const el of buy) await page.locator(el.selector).click();
+      expect(await page.evaluate(() => (window as unknown as { cart: string[] }).cart)).toEqual([
+        "Jade ring",
+        "Jade pendant",
+        "Jade earrings",
+        "Jade bracelet",
+      ]);
+      expect(capture.elements.some((el) => el.tag === "form-buy-component")).toBe(true);
+      expect(capture.elements.some((el) => el.tag === "search-decoration")).toBe(false);
+      const dom = serializeBrowserUseDOM(capture.root).dom;
+      expect(dom).toContain("[repeated ×3]");
+      expect(dom).toContain("product-card-component repeated ×4");
+      expect(dom.match(/Natural jade, polished by hand/g)).toHaveLength(1);
+      expect(dom.match(/\[same subtree /g)).toHaveLength(3);
+      for (const [id, el] of capture.nodeElements) {
+        if (buy.includes(el)) expect(dom).toContain(`[${id}]<button`);
+      }
+      for (const name of ["Jade ring", "Jade pendant", "Jade earrings", "Jade bracelet"])
+        expect(dom).toContain(name);
     } finally {
       await page.close();
     }
@@ -238,6 +422,37 @@ describe("interleaved observation DOM", () => {
     }
   });
 
+  it("does not borrow custom wrapper labels across competing controls or hidden subtrees", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<style>multi-control, one-control { display:block }</style>
+        <multi-control aria-label="Add to cart"><button>Favorite</button><button>Compare</button></multi-control>
+        <one-control aria-label="Purchase item"><button aria-label="Explicit choice">Choose</button></one-control>
+        <one-control aria-label="Hidden choice" style="display:none"><button>Hidden</button></one-control>
+        <div id="host"></div>`);
+      await page.locator("#host").evaluate((host) => {
+        const root = host.attachShadow({ mode: "open" });
+        root.innerHTML =
+          '<click-component style="display:block">Add to cart in shadow</click-component>';
+        root
+          .querySelector("click-component")!
+          .addEventListener("click", () => host.setAttribute("data-clicked", "yes"));
+      });
+      const capture = await captureThroughController(page);
+      expect(
+        capture.elements.filter((el) => controlMatchesPrivateQueryV2(el, "add to cart")),
+      ).toHaveLength(1);
+      expect(capture.elements.some((el) => el.ariaLabel === "Explicit choice")).toBe(true);
+      expect(capture.elements.some((el) => el.ariaLabel === "Hidden choice")).toBe(false);
+      const shadow = capture.elements.find((el) => el.tag === "click-component")!;
+      expect(shadow).toBeDefined();
+      await page.locator(shadow.selector).click();
+      expect(await page.locator("#host").getAttribute("data-clicked")).toBe("yes");
+    } finally {
+      await page.close();
+    }
+  });
+
   it("retires form and link anchors when only the base target changes", async () => {
     const page = await browser.newPage();
     const refs = new StableObservationRefs();
@@ -301,6 +516,40 @@ describe("interleaved observation DOM", () => {
         expect(changed.get(id)!.identity).toBe(held.get(id)!.identity);
         expect(changed.get(id)!.ref).toBe(held.get(id)!.ref);
       }
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("gives a labelled custom wrapper's sole enabled buy control its label", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<style>add-to-cart-component, slideshow-slide { display:block }</style>
+        <form id="cart-form"><add-to-cart-component aria-label="Add to cart">
+          <button id="sold-out" disabled>Sold out</button>
+          <a class="icon"></a>
+          <quick-add-component aria-disabled="true" role="button"></quick-add-component>
+          <button id="buy" type="submit" name="add"></button>
+        </add-to-cart-component></form>
+        <slideshow-slide id="focus-only" tabindex="0">Focus-only slide</slideshow-slide>`);
+      await page.locator("#cart-form").evaluate((form) =>
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          form.setAttribute("data-submitted", "yes");
+        }),
+      );
+      const capture = await captureThroughController(page);
+      const buy = capture.elements.filter(
+        (el) => el.tag === "button" && controlMatchesPrivateQueryV2(el, "add to cart"),
+      );
+      expect(buy).toHaveLength(1);
+      expect(buy[0]).toMatchObject({ id: "buy", name: "add", type: "submit" });
+      expect(capture.elements.find((el) => el.id === "sold-out")).toMatchObject({
+        disabled: true,
+      });
+      expect(capture.elements.some((el) => el.id === "focus-only")).toBe(false);
+      await page.locator(buy[0]!.selector).click();
+      expect(await page.locator("#cart-form").getAttribute("data-submitted")).toBe("yes");
     } finally {
       await page.close();
     }
@@ -420,6 +669,65 @@ describe("interleaved observation DOM", () => {
         .evaluate((element) => element.removeAttribute("formnovalidate"));
       const afterValidationRestore = await read();
       expect(afterValidationRestore.ref).not.toBe(held.ref);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("does not transfer wrapper labels across an enabled wrapper control", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`<style>add-to-cart-component { display:block }</style>
+        <form><add-to-cart-component id="owner" aria-label="Add to cart" onclick="this.dataset.clicked='yes'">
+          <button id="nested-buy" type="submit" name="add"></button>
+        </add-to-cart-component></form>`);
+      const capture = await captureThroughController(page);
+      const buy = capture.elements.filter((el) => controlMatchesPrivateQueryV2(el, "add to cart"));
+      expect(buy.map((el) => el.id)).toEqual(["owner"]);
+      await page.locator(buy[0]!.selector).click();
+      expect(await page.locator("#owner").getAttribute("data-clicked")).toBe("yes");
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("prioritizes late custom buy controls over decorative elements", async () => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    try {
+      await page.setContent(`<style>quick-add-component, late-form-buy { display:block; height:24px }</style>
+        <div id="decorations"></div>
+        <late-form-buy id="late-form" aria-label="Add to cart late form"></late-form-buy>
+        <quick-add-component id="late-role" role="button" aria-label="Add to cart late role"></quick-add-component>
+        <quick-add-component id="late-listener" aria-label="Add to cart late listener"></quick-add-component>`);
+      await page.locator("#decorations").evaluate((decorations) => {
+        decorations.innerHTML = Array.from(
+          { length: 120 },
+          () => "<decorative-control></decorative-control>",
+        ).join("");
+      });
+      await page.evaluate(() => {
+        customElements.define(
+          "late-form-buy",
+          class extends HTMLElement {
+            static formAssociated = true;
+            constructor() {
+              super();
+              this.attachInternals();
+            }
+          },
+        );
+      });
+      await page
+        .locator("#late-listener")
+        .evaluate((el) =>
+          el.addEventListener("click", () => el.setAttribute("data-clicked", "yes")),
+        );
+      const capture = await captureThroughController(page);
+      const buy = capture.elements.filter((el) => controlMatchesPrivateQueryV2(el, "add to cart"));
+      expect(buy.map((el) => el.id).sort()).toEqual(["late-form", "late-listener", "late-role"]);
+      const listener = buy.find((el) => el.id === "late-listener")!;
+      await page.locator(listener.selector).click();
+      expect(await page.locator("#late-listener").getAttribute("data-clicked")).toBe("yes");
     } finally {
       await page.close();
     }

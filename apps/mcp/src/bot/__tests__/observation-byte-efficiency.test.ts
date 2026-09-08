@@ -1,5 +1,7 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  browserUseInteractive,
   browserUseBoundedContextText,
   browserUseBoundedRawText,
   serializeBrowserUseDOM,
@@ -38,6 +40,99 @@ const text = (value: string, props: Partial<BrowserUseNode> = {}) =>
 const opaque = { "background-color": "rgb(255, 255, 255)", opacity: "1" };
 const transparent = { "background-color": "rgba(0, 0, 0, 0)", opacity: "1" };
 describe("observation byte efficiency", () => {
+  it("groups the pinned Shopify capture without hiding product differences or action refs", () => {
+    const { root } = JSON.parse(
+      readFileSync(
+        new URL("../../../../../fixtures/browser-use/shopify.json", import.meta.url),
+        "utf8",
+      ),
+    ) as { root: BrowserUseNode };
+    const grouped = serializeBrowserUseDOM(root);
+    const visit = (n: BrowserUseNode): void => {
+      if (n.nodeName === "PRODUCT-CARD-COMPONENT") n.nodeName = "DIV";
+      n.children.forEach(visit);
+    };
+    visit(root);
+    const plain = serializeBrowserUseDOM(root);
+    expect(grouped.dom).toContain("product-card-component repeated ×4");
+    expect(Buffer.byteLength(grouped.dom)).toBeLessThan(Buffer.byteLength(plain.dom));
+    expect(grouped.refs).toEqual(plain.refs);
+    for (const ref of grouped.refs) expect(grouped.dom).toContain(`[${ref}]<`);
+    for (const value of [
+      "Jade ring",
+      "Jade pendant",
+      "Jade earrings",
+      "Jade bracelet",
+      "$20",
+      "$21",
+      "$22",
+      "$23",
+    ])
+      expect(grouped.dom).toContain(value);
+  });
+  it("requires real custom-element interaction evidence instead of tag, class or cursor heuristics", () => {
+    for (const name of ["ADD-TO-CART-COMPONENT", "QUICK-ADD-COMPONENT", "SEARCH-DECORATION"]) {
+      const decorative = node(name, {
+        attributes: { class: "search-icon" },
+        cursor: "pointer",
+        bounds: { x: 0, y: 0, width: 24, height: 24 },
+      });
+      expect(browserUseInteractive(decorative)).toBe(false);
+      for (const role of ["row", "cell", "gridcell", "search"])
+        expect(browserUseInteractive({ ...decorative, attributes: { role } })).toBe(false);
+      for (const props of [
+        { clickListener: true },
+        { formAssociated: true },
+        { attributes: { role: "button" } },
+        { attributes: { onpointerdown: "buy()" } },
+        { axRole: "button" },
+      ])
+        expect(browserUseInteractive({ ...decorative, ...props })).toBe(true);
+      expect(browserUseInteractive({ ...decorative, attributes: { tabindex: "0" } })).toBe(false);
+      expect(
+        browserUseInteractive({
+          ...decorative,
+          axProperties: [{ name: "focusable", value: true }],
+        }),
+      ).toBe(false);
+      expect(
+        browserUseInteractive({ ...decorative, clickListener: true, attributes: { inert: "" } }),
+      ).toBe(false);
+    }
+  });
+  it("does not share different slides, selection evidence or interactive subtrees", () => {
+    const cards = Array.from({ length: 4 }, (_, i) =>
+      node("PRODUCT-CARD-COMPONENT", {
+        children: [
+          node("SLIDESHOW-COMPONENT", { children: [text(`Different product description ${i}`)] }),
+          node("BUTTON", {
+            attributes: { "aria-pressed": i === 2 ? "true" : "false" },
+            children: [text("Add to cart")],
+          }),
+        ],
+      }),
+    );
+    const output = serializeBrowserUseDOM(node("BODY", { children: cards }));
+    expect(output.dom).not.toContain("same subtree");
+    expect(output.dom).not.toContain("repeated ×4");
+    expect(output.refs).toHaveLength(4);
+    for (const ref of output.refs) expect(output.dom).toContain(`[${ref}]<button`);
+    for (let i = 0; i < 4; i++) expect(output.dom).toContain(`Different product description ${i}`);
+    expect(output.dom).toContain("aria-pressed=true");
+  });
+
+  it("groups inert repeated siblings only when their UTF-8 wire form shrinks", () => {
+    const siblings = (value: string) =>
+      serializeBrowserUseDOM(
+        node("BODY", { children: Array.from({ length: 3 }, () => text(value)) }),
+      ).dom;
+    expect(siblings("OK")).toBe("OK\nOK\nOK");
+    expect(siblings("猫猫猫")).toBe("猫猫猫 [repeated ×3]");
+    expect(Buffer.byteLength("猫猫猫 [repeated ×3]", "utf8")).toBeLessThan(
+      Buffer.byteLength("猫猫猫\n猫猫猫\n猫猫猫", "utf8"),
+    );
+  });
+
   it("ports full union coverage, equal-order batching, opacity and document isolation", () => {
     const covered = text("Covered copy", { paintOrder: 1, computedStyles: transparent });
     const left = node("DIV", {

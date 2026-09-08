@@ -85,6 +85,30 @@ same structure and text collapse with `[repeated ×N]`; only whitespace differen
 and presentation attributes (`id`, `class`, `style`) are ignored. Numbers, names,
 prices, statuses, meaningful attributes and all interactive descendants prevent
 collapse. Structural keys are interned bottom-up rather than recursively escaped.
+For three or more structurally matching custom-element siblings containing
+controls, production may emit a `<tag repeated ×N>` group with ordered `[item N]`
+entries. Each control and every differing product name, price or state remains
+explicit. Identical inert custom subtrees are emitted once with `[subtree N]`
+and referenced as `[same subtree N]` within that group. These numbers are display
+annotations, never action capabilities. Grouping is used only when its UTF-8
+output is smaller than the normal rendering. It never shares an interactive
+subtree, crosses frame/shadow boundaries, or coalesces distinct action refs.
+
+Custom elements require real activation evidence: an authored interaction role,
+handler, command/popover trigger, or registered form association. Focusability
+alone, including `tabindex` and AX focusability, is insufficient; nor are a tag,
+search-like class, small dimensions or inherited pointer cursor.
+Capture checks form association, roles and command/popover triggers across all
+open DOM roots. Expensive handler discovery uses `DOMDebugger.getEventListeners`
+with `pierce` on at most 100 likely-actionable custom elements, prioritizing
+visible product, price, form and interaction-role context ahead of decorative
+elements. It traverses open shadow roots; closed roots remain uninspectable. A
+listener-only custom element outside that prioritized budget fails closed rather
+than being inferred interactive. A custom wrapper's explicit label can name its
+sole enabled interactive descendant only after the wrapper and every descendant
+are counted; hidden or disabled inputs do not compete for ownership, while
+multiple genuine controls prevent label inheritance.
+
 
 Unlabelled, non-interactive SVG rows are omitted. Interactive SVG descendants
 remain visible. Unlabelled iframe hints inherit only bounded local container text or
@@ -123,7 +147,7 @@ or quarantined. Unrelated behavior and payment suites remain required.
 
 ## Validation
 
-- `browser-use-serializer.test.ts` compares the six generated captures in canonical
+- `browser-use-serializer.test.ts` compares the seven generated captures in canonical
   mode, allowing only identity substitution. `observation-byte-efficiency.test.ts`
   covers the local differences.
 - `observation-prose.test.ts` now exercises the replacement through real Chrome,
