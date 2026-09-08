@@ -66,6 +66,7 @@
       card.innerHTML = `<h2>${name}</h2><p>$${20 + index}</p>
     <slideshow-component><slideshow-slide>Natural jade, polished by hand</slideshow-slide><slideshow-slide>Natural jade, polished by hand</slideshow-slide><slideshow-slide>Natural jade, polished by hand</slideshow-slide></slideshow-component>
     <quick-add-component><add-to-cart-component aria-label="Add to cart"><product-form-component><form>
+      <input type="hidden" name="id" value="${1000 + index}">
       <button type="submit" name="add" data-product="${index}"><span aria-hidden="true">+</span></button>
     </form></product-form-component></add-to-cart-component></quick-add-component>`;
       card.querySelector("form").addEventListener("submit", (event) => {

@@ -113,6 +113,7 @@ describe("interleaved observation DOM", () => {
         (el) => el.tag === "button" && controlMatchesPrivateQueryV2(el, "add to cart"),
       );
       expect(buy).toHaveLength(4);
+      expect(buy.every((el) => el.name === "add" && el.type === "submit")).toBe(true);
       const refs = new StableObservationRefs();
       const handles = new Map(capture.elements.map((el) => [el, refs.get("shop", el.selector)]));
       const rows = buildSafeControlsV2({
