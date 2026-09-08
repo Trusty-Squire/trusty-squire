@@ -117,6 +117,7 @@ export interface PendingApprovalWait {
   approval_url: string;
   nonce: string;
   agent: string;
+  account_binding: string;
   checkout: CheckoutSummary;
   jit: boolean;
   boundCardRef: string | null;
@@ -239,6 +240,7 @@ function decodePayloadHash(claim: unknown): Uint8Array {
 
 interface PaymentCandidateBindingTerms {
   approvalId: string;
+  accountBinding: string;
   checkout: CheckoutSummary;
   nonce: string;
   cardRef: string;
@@ -265,6 +267,7 @@ function paymentCandidateBindingContext(
       .update(fromBase64Url(terms.operatorPublicKey))
       .digest();
     const canonical = canonicalize({
+      account_binding: terms.accountBinding,
       approval_id: terms.approvalId,
       merchant: terms.checkout.merchant,
       checkout_origin: terms.checkout.checkout_origin,
@@ -320,6 +323,7 @@ export function classifyApprovalCandidate(
     hasBoundCard(cardRef)
       ? {
           approvalId: state.approval_id,
+          accountBinding: state.account_binding,
           checkout: state.checkout,
           nonce: state.nonce,
           cardRef,
@@ -852,6 +856,7 @@ export async function executeOperatePay(
     let approvalId: string;
     let nonce: string;
     let agent: string;
+    let accountBinding: string;
     let approvalUrl: string;
     let deadline: number;
     let boundCardRef: string | null;
@@ -866,6 +871,7 @@ export async function executeOperatePay(
       approvalId = resume.approval_id;
       nonce = resume.nonce;
       agent = resume.agent;
+      accountBinding = resume.account_binding;
       approvalUrl = resume.approval_url;
       deadline = resume.deadline;
       boundCardRef = resume.boundCardRef;
@@ -909,9 +915,13 @@ export async function executeOperatePay(
         item,
         reason,
       });
+      if (typeof created.account_binding !== "string") {
+        throw new Error("payment_approval_account_binding_missing");
+      }
       approvalId = created.id;
       nonce = created.nonce;
       agent = created.agent;
+      accountBinding = created.account_binding;
       approvalUrl = `${deps.webBase.replace(/\/+$/, "")}/vault/pay/${encodeURIComponent(created.id)}`;
       const waitBudgetMs = jit ? deps.jitApprovalTimeoutMs : deps.approvalTimeoutMs;
       const serverDeadline = Date.parse(created.expires_at);
@@ -924,6 +934,7 @@ export async function executeOperatePay(
       approval_url: approvalUrl,
       nonce,
       agent,
+      account_binding: accountBinding,
       checkout,
       jit,
       boundCardRef,
@@ -1053,6 +1064,7 @@ export async function executeOperatePay(
           } else {
             const binding = paymentCandidateBindingContext(candidate, {
               approvalId,
+              accountBinding,
               checkout,
               nonce,
               cardRef,

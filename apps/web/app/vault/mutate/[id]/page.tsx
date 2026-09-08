@@ -80,14 +80,17 @@ export default function CredentialMutationApprovalPage() {
         if (!cancelled) setCeremony(value);
       })
       .catch((caught: unknown) => {
-        if (!cancelled) {
-          setError(caught instanceof Error ? caught.message : "Failed to load approval.");
+        if (cancelled) return;
+        if (caught instanceof ApiError && caught.status === 401) {
+          redirectToLogin();
+          return;
         }
+        setError(caught instanceof Error ? caught.message : "Failed to load approval.");
       });
     return () => {
       cancelled = true;
     };
-  }, [fetchCeremony]);
+  }, [fetchCeremony, redirectToLogin]);
 
   const approve = useCallback(async () => {
     if (ceremony === null || ceremony.status !== "pending") return;
@@ -111,11 +114,15 @@ export default function CredentialMutationApprovalPage() {
       setCeremony(await fetchCeremony());
       setNeedsPasskeySetup(false);
     } catch (caught) {
+      if (caught instanceof ApiError && caught.status === 401) {
+        redirectToLogin();
+        return;
+      }
       setError(caught instanceof Error ? caught.message : "Approval failed.");
     } finally {
       setBusy(false);
     }
-  }, [ceremony, fetchCeremony]);
+  }, [ceremony, fetchCeremony, redirectToLogin]);
 
   const setUpPasskey = useCallback(async () => {
     setBusy(true);

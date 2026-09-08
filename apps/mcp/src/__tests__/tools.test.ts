@@ -42,6 +42,7 @@ let mockTerminalApproval: {
 let mockCartCheckout: CartCheckoutObservation | null = null;
 const PAYMENT_SESSION_A_ID = "00000000-0000-4000-8000-000000000001";
 const PAYMENT_SESSION_B_ID = "00000000-0000-4000-8000-000000000002";
+const PAYMENT_ACCOUNT_BINDING = "synthetic-account-binding";
 
 interface MockPaymentSessionState {
   browser: PaymentBrowser;
@@ -528,6 +529,7 @@ describe("operate_pay card selection", () => {
       id: "appr_1",
       nonce: "n",
       agent: "a",
+      account_binding: PAYMENT_ACCOUNT_BINDING,
       expires_at: new Date(0).toISOString(),
     });
     const getPaymentConfig = vi.fn().mockResolvedValue({ vouchflow_audience: "cust" });
@@ -563,6 +565,7 @@ describe("operate_pay card selection", () => {
       id: "appr_jit",
       nonce: "n",
       agent: "a",
+      account_binding: PAYMENT_ACCOUNT_BINDING,
       expires_at: new Date(0).toISOString(),
     });
     const getPaymentConfig = vi.fn().mockResolvedValue({ vouchflow_audience: "cust" });
@@ -628,6 +631,7 @@ describe("operate_pay server-owned approval wait [P0] — tool wiring", () => {
       id: "appr_checkout_hint",
       nonce: "n",
       agent: "a",
+      account_binding: PAYMENT_ACCOUNT_BINDING,
       expires_at: new Date(Date.now() + 300_000).toISOString(),
     });
     const api = makeMockApi({
@@ -673,12 +677,14 @@ describe("operate_pay server-owned approval wait [P0] — tool wiring", () => {
         id: "appr_expired",
         nonce: "old-nonce",
         agent: "a",
+        account_binding: PAYMENT_ACCOUNT_BINDING,
         expires_at: new Date(Date.now() + 300_000).toISOString(),
       })
       .mockResolvedValueOnce({
         id: "appr_fresh",
         nonce: "new-nonce",
         agent: "a",
+        account_binding: PAYMENT_ACCOUNT_BINDING,
         expires_at: new Date(Date.now() + 300_000).toISOString(),
       });
     let expiredApprovalReads = 0;
@@ -694,6 +700,7 @@ describe("operate_pay server-owned approval wait [P0] — tool wiring", () => {
         nonce: id === "appr_expired" ? "old-nonce" : "new-nonce",
         card_ref: "card_1",
         operator_pubkey: "public",
+        account_binding: PAYMENT_ACCOUNT_BINDING,
         jws: null,
         sealed_card: null,
         expires_at: new Date(Date.now() + 300_000).toISOString(),
@@ -738,12 +745,14 @@ describe("operate_pay server-owned approval wait [P0] — tool wiring", () => {
         id: "appr_deleted",
         nonce: "deleted-nonce",
         agent: "a",
+        account_binding: PAYMENT_ACCOUNT_BINDING,
         expires_at: expiresAt,
       })
       .mockResolvedValueOnce({
         id: "appr_replacement",
         nonce: "replacement-nonce",
         agent: "a",
+        account_binding: PAYMENT_ACCOUNT_BINDING,
         expires_at: expiresAt,
       });
     const pendingApproval = (id: string) => ({
@@ -756,6 +765,7 @@ describe("operate_pay server-owned approval wait [P0] — tool wiring", () => {
       nonce: id === "appr_deleted" ? "deleted-nonce" : "replacement-nonce",
       card_ref: "card_1",
       operator_pubkey: "public",
+      account_binding: PAYMENT_ACCOUNT_BINDING,
       jws: null,
       sealed_card: null,
       expires_at: expiresAt,
@@ -807,6 +817,7 @@ describe("operate_pay server-owned approval wait [P0] — tool wiring", () => {
       id: "appr_restore",
       nonce: "n",
       agent: "a",
+      account_binding: PAYMENT_ACCOUNT_BINDING,
       expires_at: new Date(Date.now() + 600_000).toISOString(),
     });
     const api = makeMockApi({
@@ -843,6 +854,7 @@ describe("operate_pay server-owned approval wait [P0] — tool wiring", () => {
       approval_url: "https://web.test/pay/appr_existing",
       nonce: "nonce_existing",
       agent: "agent_existing",
+      account_binding: PAYMENT_ACCOUNT_BINDING,
       checkout: {
         merchant: "M",
         checkout_origin: "https://m.test",
@@ -876,6 +888,7 @@ describe("operate_pay server-owned approval wait [P0] — tool wiring", () => {
       approval_url: "https://web.test/pay/appr_configuration",
       nonce: "nonce_configuration",
       agent: "agent_configuration",
+      account_binding: PAYMENT_ACCOUNT_BINDING,
       checkout: {
         merchant: "M",
         checkout_origin: "https://m.test",
@@ -914,6 +927,7 @@ describe("operate_pay server-owned approval wait [P0] — tool wiring", () => {
       approval_url: "https://web.test/pay/appr_terminal",
       nonce: "nonce_terminal",
       agent: "agent_terminal",
+      account_binding: PAYMENT_ACCOUNT_BINDING,
       checkout: {
         merchant: "M",
         checkout_origin: "https://m.test",
@@ -935,6 +949,7 @@ describe("operate_pay server-owned approval wait [P0] — tool wiring", () => {
       id: "appr_fresh_after_terminal",
       nonce: "fresh-nonce",
       agent: "fresh-agent",
+      account_binding: PAYMENT_ACCOUNT_BINDING,
       expires_at: new Date(Date.now() + 600_000).toISOString(),
     });
     const api = makeMockApi({
@@ -951,6 +966,7 @@ describe("operate_pay server-owned approval wait [P0] — tool wiring", () => {
         nonce: "fresh-nonce",
         card_ref: "card_1",
         operator_pubkey: "public",
+        account_binding: PAYMENT_ACCOUNT_BINDING,
         jws: null,
         sealed_card: null,
         expires_at: new Date(Date.now() + 600_000).toISOString(),
@@ -987,6 +1003,7 @@ describe("operate_pay server-owned approval wait [P0] — tool wiring", () => {
         approval_url: `https://web.test/pay/appr_${terminalStatus}`,
         nonce: `nonce_${terminalStatus}`,
         agent: `agent_${terminalStatus}`,
+        account_binding: PAYMENT_ACCOUNT_BINDING,
         checkout: {
           merchant: "M",
           checkout_origin: "https://m.test",
@@ -1018,6 +1035,7 @@ describe("operate_pay server-owned approval wait [P0] — tool wiring", () => {
           nonce: resumeApproval.nonce,
           card_ref: "card_1",
           operator_pubkey: "public",
+          account_binding: PAYMENT_ACCOUNT_BINDING,
           jws: null,
           sealed_card: null,
           expires_at: new Date(
@@ -1078,6 +1096,7 @@ describe("operate_payment_status [P0]", () => {
     approval_url: "https://web.test/vault/pay/appr_status",
     nonce: "n",
     agent: "a",
+    account_binding: PAYMENT_ACCOUNT_BINDING,
     checkout: {
       merchant: "M",
       checkout_origin: "https://m.test",
@@ -1099,6 +1118,7 @@ describe("operate_payment_status [P0]", () => {
       .update(Buffer.from(operatorPublicKey, "base64url"))
       .digest("base64url");
     const approvalCanonical = canonicalize({
+      account_binding: baseState.account_binding,
       approval_id: baseState.approval_id,
       merchant: baseState.checkout.merchant,
       checkout_origin: baseState.checkout.checkout_origin,
@@ -1162,6 +1182,7 @@ describe("operate_payment_status [P0]", () => {
       nonce: state.nonce,
       card_ref: state.cardRef,
       operator_pubkey: state.keypair.publicKey,
+      account_binding: state.account_binding,
       jws: null,
       sealed_card: null,
       expires_at: new Date(Date.now() + 60_000).toISOString(),
@@ -1260,6 +1281,7 @@ describe("operate_payment_status [P0]", () => {
       expires_at: new Date(Date.now() + 60_000).toISOString(),
       card_ref: "card_1",
       operator_pubkey: operatorPublicKey,
+      account_binding: PAYMENT_ACCOUNT_BINDING,
       jws: null,
       sealed_card: null,
     });
@@ -1289,6 +1311,7 @@ describe("operate_payment_status [P0]", () => {
       expires_at: new Date(Date.now() + 60_000).toISOString(),
       card_ref: "card_1",
       operator_pubkey: operatorPublicKey,
+      account_binding: PAYMENT_ACCOUNT_BINDING,
       jws: candidateJws("approval"),
       sealed_card: "sealed",
     });
@@ -1322,6 +1345,7 @@ describe("operate_payment_status [P0]", () => {
       expires_at: new Date(Date.now() + 60_000).toISOString(),
       card_ref: "card_1",
       operator_pubkey: operatorPublicKey,
+      account_binding: PAYMENT_ACCOUNT_BINDING,
       jws: candidateJws("review"),
       sealed_card: "sealed",
     });
@@ -1348,6 +1372,7 @@ describe("operate_payment_status [P0]", () => {
       expires_at: new Date(Date.now() + 60_000).toISOString(),
       card_ref: "card_1",
       operator_pubkey: operatorPublicKey,
+      account_binding: PAYMENT_ACCOUNT_BINDING,
       jws: null,
       sealed_card: null,
     });
@@ -1399,6 +1424,7 @@ describe("operate_pay split checkout phases", () => {
       id: "appr_single",
       nonce: "n",
       agent: "a",
+      account_binding: PAYMENT_ACCOUNT_BINDING,
       expires_at: new Date(Date.now() + 300_000).toISOString(),
     });
     const getPaymentConfig = vi.fn().mockResolvedValue({ vouchflow_audience: "cust" });

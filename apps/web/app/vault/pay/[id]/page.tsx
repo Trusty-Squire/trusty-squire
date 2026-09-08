@@ -27,6 +27,7 @@ interface CeremonyApproval extends ApprovalDetails {
   status: string;
   card_ref: string | null;
   operator_pubkey: string;
+  account_binding: string;
   approval_payload_sha256: string | null;
   card: CeremonyCard | null;
 }
@@ -118,9 +119,6 @@ export default function PaymentApprovalPage() {
   const applyCeremony = useCallback((current: CeremonyApproval) => {
     setJitOrigin((origin) => origin ?? current.card_ref === null);
     setCeremony(current);
-    // Details are capability-link disclosure from the server record. Rendering
-    // them never signs anything; the single payment signature happens only in
-    // the explicit Approve payment handler below.
     setApproval({ ...current, card: { brand: null, last4: null } });
     setCardMetadataError(null);
   }, []);
@@ -150,11 +148,15 @@ export default function PaymentApprovalPage() {
     try {
       applyCeremony(await fetchCeremony());
     } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        redirectToLogin();
+        return;
+      }
       setCardMetadataError(
         err instanceof Error ? err.message : "Failed to load the saved card details.",
       );
     }
-  }, [applyCeremony, fetchCeremony]);
+  }, [applyCeremony, fetchCeremony, redirectToLogin]);
 
   const bindCard = useCallback(
     async (cardId: string, cardMeta?: { label: string; last4: string | null }) => {
@@ -231,6 +233,7 @@ export default function PaymentApprovalPage() {
       // The only payment-context ceremony: it follows rendered server details
       // and binds exactly those canonical values.
       const payload = {
+        account_binding: ceremony.account_binding,
         approval_id: ceremony.id,
         merchant: ceremony.merchant,
         checkout_origin: ceremony.checkout_origin,
@@ -264,6 +267,10 @@ export default function PaymentApprovalPage() {
       setSubmitted(true);
       setNeedsPasskeySetup(false);
     } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        redirectToLogin();
+        return;
+      }
       if (isPaymentPasskeyUnavailable(err)) {
         setNeedsPasskeySetup(true);
         return;
@@ -275,7 +282,7 @@ export default function PaymentApprovalPage() {
       card = undefined;
       setBusy(false);
     }
-  }, [ceremony, id]);
+  }, [ceremony, id, redirectToLogin]);
 
   const denyApproval = useCallback(async () => {
     setBusy(true);
@@ -286,11 +293,15 @@ export default function PaymentApprovalPage() {
       setApproval((current) => (current === null ? null : { ...current, status: "denied" }));
       setSubmitted(false);
     } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        redirectToLogin();
+        return;
+      }
       setError(err instanceof Error ? err.message : "Failed to deny payment approval.");
     } finally {
       setBusy(false);
     }
-  }, [id]);
+  }, [id, redirectToLogin]);
 
   const setUpPasskey = useCallback(async () => {
     setBusy(true);

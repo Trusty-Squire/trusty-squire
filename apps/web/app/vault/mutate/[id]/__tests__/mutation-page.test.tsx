@@ -3,7 +3,18 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const api = vi.hoisted(() => ({ apiGet: vi.fn(), apiPost: vi.fn() }));
+const api = vi.hoisted(() => {
+  class ApiError extends Error {
+    constructor(
+      message: string,
+      public readonly status: number,
+    ) {
+      super(message);
+    }
+  }
+
+  return { ApiError, apiGet: vi.fn(), apiPost: vi.fn() };
+});
 const router = vi.hoisted(() => ({ replace: vi.fn() }));
 const vouchflow = vi.hoisted(() => ({ signPayload: vi.fn() }));
 const pairing = vi.hoisted(() => ({ getPairingState: vi.fn(), pairDevice: vi.fn() }));
@@ -14,14 +25,7 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/vault/mutate/mutation_1",
 }));
 vi.mock("../../../../lib/api", () => ({
-  ApiError: class ApiError extends Error {
-    constructor(
-      message: string,
-      public readonly status: number,
-    ) {
-      super(message);
-    }
-  },
+  ApiError: api.ApiError,
   apiGet: api.apiGet,
   apiPost: api.apiPost,
 }));
@@ -82,6 +86,23 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("credential mutation approval page", () => {
+  it("sends a signed-out visitor to login with the approval link", async () => {
+    api.apiGet.mockImplementation((path: string) => {
+      if (path === "/v1/vault/mutation-approvals/mutation_1/ceremony") {
+        return Promise.reject(new api.ApiError("web_session_required", 401));
+      }
+      return Promise.resolve({ billing_enabled: false });
+    });
+
+    render(<CredentialMutationApprovalPage />);
+
+    await waitFor(() =>
+      expect(router.replace).toHaveBeenCalledWith("/login?next=/vault/mutate/mutation_1"),
+    );
+    expect(api.apiPost).not.toHaveBeenCalled();
+    expect(vouchflow.signPayload).not.toHaveBeenCalled();
+  });
+
   it("shows the exact credential and before/after host change", async () => {
     render(<CredentialMutationApprovalPage />);
     expect(await screen.findByText("OpenAI · prod")).toBeTruthy();
@@ -106,6 +127,17 @@ describe("credential mutation approval page", () => {
       jws: "signed-mutation-jws",
     });
     expect(await screen.findByText(/vault mutation is complete/i)).toBeTruthy();
+  });
+
+  it("sends an expired approval session to login", async () => {
+    api.apiPost.mockRejectedValue(new api.ApiError("web_session_required", 401));
+    render(<CredentialMutationApprovalPage />);
+
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Approve edit" }));
+
+    await waitFor(() =>
+      expect(router.replace).toHaveBeenCalledWith("/login?next=/vault/mutate/mutation_1"),
+    );
   });
 
   it("does not submit when no passkey is enrolled", async () => {

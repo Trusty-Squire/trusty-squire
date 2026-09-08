@@ -166,6 +166,7 @@ export interface PaymentApproval {
   // null for a card-less JIT approval until the add-card ceremony binds one.
   card_ref: string | null;
   operator_pubkey: string;
+  account_binding: string;
   jws: string | null;
   sealed_card: string | null;
   expires_at: string;
@@ -211,7 +212,13 @@ export class ApiClient {
     operator_pubkey: string;
     item: string;
     reason: string;
-  }): Promise<{ id: string; nonce: string; agent: string; expires_at: string }> {
+  }): Promise<{
+    id: string;
+    nonce: string;
+    agent: string;
+    account_binding: string;
+    expires_at: string;
+  }> {
     return this.post("/v1/pay/approvals", input);
   }
 

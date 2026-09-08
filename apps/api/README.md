@@ -29,8 +29,8 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `GET` | `/v1/vault/credentials` | web/agent | List vault credentials |
 | `POST` | `/v1/vault/mutation-approvals` | web/agent | Create a vouch-gated credential metadata edit or delete approval |
 | `GET` | `/v1/vault/mutation-approvals/:id` | web/agent | Read the account-owned mutation approval status |
-| `GET` | `/v1/vault/mutation-approvals/:id/ceremony` | none | Show the capability-bound mutation intent for phone approval |
-| `POST` | `/v1/vault/mutation-approvals/:id/approve` | none | Verify the passkey-signed mandate, then atomically commit the mutation, audit, and terminal approval state |
+| `GET` | `/v1/vault/mutation-approvals/:id/ceremony` | web | Show the account-owned mutation intent for phone approval |
+| `POST` | `/v1/vault/mutation-approvals/:id/approve` | web | Verify the passkey-signed mandate, then atomically commit the mutation, audit, and terminal approval state |
 | `GET` | `/v1/vault/audit` | web/agent | List the account's secret-free Activity trail with keyset pagination and optional `type`/`reference` filters |
 | `POST` | `/v1/vault/e2e` | web | Store an opaque, client-encrypted card blob |
 | `GET` | `/v1/vault/e2e` | web/agent | List client-encrypted card metadata without blobs |
@@ -43,10 +43,10 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `POST` | `/v1/pay/approvals` | agent | Create an account-scoped approval: card-less expires in 18 minutes; has-card in 10 minutes |
 | `POST` | `/v1/pay/approvals/:id/notify-3ds` | agent | Send linked Telegram guidance and return `{ sent }`; optional body `mode` is `detected_challenge` (default) or `possible_out_of_band` |
 | `GET` | `/v1/pay/approvals/:id` | web/agent | Read an account-owned approval; agents may read, peek at, or wait up to 15 seconds for its relay candidate with an optional `wait_ms` bound |
-| `GET` | `/v1/pay/approvals/:id/ceremony` | none | Return the canonical purchase display plus opaque PRF/HPKE inputs for a pending approval |
+| `GET` | `/v1/pay/approvals/:id/ceremony` | web | Return the canonical purchase display plus opaque PRF/HPKE inputs for a pending approval |
 | `POST` | `/v1/pay/approvals/:id/bind-card` | web | Bind an account-owned card to a card-less pending approval |
-| `POST` | `/v1/pay/approvals/:id/approve` | none | Stage a fingerprinted opaque final candidate; reject retired review-protocol clients |
-| `POST` | `/v1/pay/approvals/:id/deny` | none | Atomically deny an unexpired pending approval and clear every staged candidate |
+| `POST` | `/v1/pay/approvals/:id/approve` | web | Stage a fingerprinted opaque final candidate; reject retired review-protocol clients |
+| `POST` | `/v1/pay/approvals/:id/deny` | web | Atomically deny an unexpired pending approval and clear every staged candidate |
 | `POST` | `/v1/pay/approvals/:id/confirm` | agent | Confirm the exact operator-verified candidate for the authenticated account |
 | `GET` | `/health` | none | Liveness |
 
@@ -89,18 +89,20 @@ approval follows the server-enforced seal → bind → approve order. Binding is
 pending-only, write-once, rejects an expired approval, and accepts only an
 `E2ECredential` owned by the same account; an unknown or foreign card returns
 `404`. Approving before a card is bound returns
-`409 { "error": "card_required" }`. The unauthenticated ceremony response is a
-capability-link disclosure of the exact server-recorded merchant, checkout origin,
+`409 { "error": "card_required" }`. The owner-authenticated ceremony response is a
+disclosure of the exact server-recorded merchant, checkout origin,
 amount, currency, nonce, item, reason, requesting agent, and expiry. It also
 contains the approval id and status, bound card reference, operator public key,
-opaque approval-payload digest, and encrypted card blob, but no card display
-metadata. The anonymous approval shell renders those canonical values before one
+opaque account binding, approval-payload digest, and encrypted card blob, but no card display
+metadata. The owner web approval page renders those canonical values before one
 payment-context passkey action signs them, derives the card key, and seals the card
 to the operator.
 
-`POST /approve` accepts a final, server-bound JWS and operator-sealed ciphertext
-only while the approval is pending. `POST /deny` uses the same short-lived
-capability ID to atomically move an unexpired pending approval to `denied` and
+The same opaque account binding appears in authenticated agent approval reads and
+is carried verbatim by the owner page and MCP when they construct the signed
+payload. `POST /approve` accepts a final, server-bound JWS and operator-sealed ciphertext
+only while the approval is pending. `POST /deny` requires the owning web session
+to atomically move an unexpired pending approval to `denied` and
 clear every staged JWS and ciphertext. Confirmation rechecks that terminal state,
 so it cannot release a card after denial has committed. `/approve` stores the
 candidate, its SHA-256
@@ -129,10 +131,11 @@ Wrong-account, changed, undelivered, or expired candidates fail closed.
 Credential mutation approvals reuse the same JWKS-backed Vouchflow mandate
 verifier as payment approvals, but use the distinct
 `vault_credential_mutation` context. Their canonical signed payload binds the
-operation (`credential.edit` or `credential.delete`), exact vault reference,
-requesting agent, nonce, and complete editable before/after metadata. Web and
-agent sessions may create and poll their own account's approvals; the public
-ceremony endpoint only displays and verifies the account-bound capability. After
+owner account through an opaque account binding, operation (`credential.edit` or
+`credential.delete`), exact vault reference, requesting agent, nonce, and complete
+editable before/after metadata. Web and agent sessions may create and poll their
+own account's approvals; the owner web ceremony endpoint only displays and verifies
+the account-owned approval. After
 signature verification, one database transaction locks the pending approval,
 rechecks expiry against the database clock, compares live metadata with the
 signed `before` snapshot, applies the mutation, writes its audit event, and marks

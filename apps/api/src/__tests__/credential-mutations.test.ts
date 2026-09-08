@@ -28,6 +28,7 @@ describe("vouch-gated credential mutations", () => {
   let nowMs: number;
   let agentToken: string;
   let accountId: string;
+  let webCookie: string;
   let signingKey: SigningKey;
   let vouchVerifier: VouchMandateVerifier;
 
@@ -57,6 +58,14 @@ describe("vouch-gated credential mutations", () => {
     });
     await deps.agentSessionStore.insert(session.record);
     agentToken = session.raw_token;
+    const webSession = issueSession({
+      account_id: account.id,
+      ip: null,
+      user_agent: null,
+      now: new Date(nowMs),
+    });
+    await deps.sessionStore.insert(webSession.record);
+    webCookie = `${SESSION_COOKIE_NAME}=${signSessionJwt(webSession.jwt, SESSION_SECRET)}`;
   });
 
   afterEach(async () => {
@@ -94,10 +103,11 @@ describe("vouch-gated credential mutations", () => {
     });
   }
 
-  async function mutationCeremony(id: string) {
+  async function mutationCeremony(id: string, cookie = webCookie) {
     const response = await server.inject({
       method: "GET",
       url: `/v1/vault/mutation-approvals/${id}/ceremony`,
+      headers: { cookie },
     });
     expect(response.statusCode).toBe(200);
     return response.json() as {
@@ -133,6 +143,7 @@ describe("vouch-gated credential mutations", () => {
     return await server.inject({
       method: "POST",
       url: `/v1/vault/mutation-approvals/${id}/approve`,
+      headers: { cookie: webCookie },
       payload: { jws },
     });
   }
@@ -151,6 +162,71 @@ describe("vouch-gated credential mutations", () => {
     );
     return messages;
   }
+
+  it("binds ceremony and settlement to the owner web account", async () => {
+    const reference = await storeCredential();
+    const created = await createMutation({ operation: "delete", reference });
+    const id = (created.json() as { approval_id: string }).approval_id;
+    const ownerCeremony = await mutationCeremony(id);
+    expect(ownerCeremony.payload).toMatchObject({
+      account_binding: createHash("sha256")
+        .update("trusty-squire/credential-mutation/account/v1\n")
+        .update(accountId)
+        .digest("base64url"),
+    });
+    const jws = await signHash(
+      ownerCeremony.payload_sha256,
+      CREDENTIAL_MUTATION_VOUCH_CONTEXT,
+      `mandate_${id}`,
+    );
+
+    const intruder = await deps.accountStore.createAccount("intruder@example.test", "Intruder");
+    const intruderSession = issueSession({
+      account_id: intruder.id,
+      ip: null,
+      user_agent: null,
+      now: new Date(nowMs),
+    });
+    await deps.sessionStore.insert(intruderSession.record);
+    const intruderCookie = `${SESSION_COOKIE_NAME}=${signSessionJwt(
+      intruderSession.jwt,
+      SESSION_SECRET,
+    )}`;
+
+    const foreignCeremony = await server.inject({
+      method: "GET",
+      url: `/v1/vault/mutation-approvals/${id}/ceremony`,
+      headers: { cookie: intruderCookie },
+    });
+    expect(foreignCeremony.statusCode).toBe(404);
+    expect(foreignCeremony.json()).toEqual({ error: "credential_mutation_approval_not_found" });
+    const foreignApprove = await server.inject({
+      method: "POST",
+      url: `/v1/vault/mutation-approvals/${id}/approve`,
+      headers: { cookie: intruderCookie },
+      payload: { jws },
+    });
+    expect(foreignApprove.statusCode).toBe(404);
+
+    for (const headers of [{}, { authorization: `Bearer ${agentToken}` }]) {
+      const ceremony = await server.inject({
+        method: "GET",
+        url: `/v1/vault/mutation-approvals/${id}/ceremony`,
+        headers,
+      });
+      expect(ceremony.statusCode, ceremony.body).toBe(401);
+      const approve = await server.inject({
+        method: "POST",
+        url: `/v1/vault/mutation-approvals/${id}/approve`,
+        headers,
+        payload: { jws },
+      });
+      expect(approve.statusCode, approve.body).toBe(401);
+    }
+
+    expect((await deps.credentialMutationApprovalStore.getById(id))?.status).toBe("pending");
+    expect(await deps.credentialStore.findActive(reference)).not.toBeNull();
+  });
 
   it("requires a valid signed vouch and changes only allowed_hosts metadata", async () => {
     const reference = await storeCredential();
@@ -175,12 +251,14 @@ describe("vouch-gated credential mutations", () => {
     const unsigned = await server.inject({
       method: "POST",
       url: `/v1/vault/mutation-approvals/${approval.approval_id}/approve`,
+      headers: { cookie: webCookie },
       payload: {},
     });
     expect(unsigned.statusCode).toBe(400);
     const badSignature = await server.inject({
       method: "POST",
       url: `/v1/vault/mutation-approvals/${approval.approval_id}/approve`,
+      headers: { cookie: webCookie },
       payload: { jws: "not.a.valid-jws" },
     });
     expect(badSignature.statusCode).toBe(403);
@@ -201,6 +279,7 @@ describe("vouch-gated credential mutations", () => {
     const expiredMandate = await server.inject({
       method: "POST",
       url: `/v1/vault/mutation-approvals/${approval.approval_id}/approve`,
+      headers: { cookie: webCookie },
       payload: { jws: expiredJws },
     });
     expect(expiredMandate.statusCode).toBe(403);
@@ -290,6 +369,7 @@ describe("vouch-gated credential mutations", () => {
     const unsigned = await server.inject({
       method: "POST",
       url: `/v1/vault/mutation-approvals/${approval.approval_id}/approve`,
+      headers: { cookie: webCookie },
       payload: {},
     });
     expect(unsigned.statusCode).toBe(400);
@@ -338,6 +418,7 @@ describe("vouch-gated credential mutations", () => {
     const invalidRetry = await server.inject({
       method: "POST",
       url: `/v1/vault/mutation-approvals/${id}/approve`,
+      headers: { cookie: webCookie },
       payload: { jws: "not.a.valid-jws" },
     });
     expect(invalidRetry.statusCode).toBe(403);
@@ -457,6 +538,7 @@ describe("vouch-gated credential mutations", () => {
     const response = await server.inject({
       method: "POST",
       url: `/v1/vault/mutation-approvals/${id}/approve`,
+      headers: { cookie: webCookie },
       payload: { jws: "synthetic-valid-mandate" },
     });
     expect(response.statusCode).toBe(409);
@@ -653,6 +735,7 @@ describe("vouch-gated credential mutations", () => {
     const first = await server.inject({
       method: "POST",
       url: `/v1/vault/mutation-approvals/${id}/approve`,
+      headers: { cookie: webCookie },
       payload: { jws },
     });
     expect(first.statusCode).toBe(500);
@@ -664,6 +747,7 @@ describe("vouch-gated credential mutations", () => {
     const retried = await server.inject({
       method: "POST",
       url: `/v1/vault/mutation-approvals/${id}/approve`,
+      headers: { cookie: webCookie },
       payload: { jws },
     });
     expect(retried.statusCode).toBe(200);
@@ -704,11 +788,13 @@ describe("vouch-gated credential mutations", () => {
       server.inject({
         method: "POST",
         url: `/v1/vault/mutation-approvals/${firstId}/approve`,
+        headers: { cookie: webCookie },
         payload: { jws: firstJws },
       }),
       server.inject({
         method: "POST",
         url: `/v1/vault/mutation-approvals/${secondId}/approve`,
+        headers: { cookie: webCookie },
         payload: { jws: secondJws },
       }),
     ]);
@@ -770,11 +856,17 @@ describe("vouch-gated credential mutations", () => {
       },
     });
     expect(paymentCreated.statusCode).toBe(201);
-    const payment = paymentCreated.json() as { id: string; nonce: string; agent: string };
+    const payment = paymentCreated.json() as {
+      id: string;
+      nonce: string;
+      agent: string;
+      account_binding: string;
+    };
     const recipientHash = createHash("sha256")
       .update(Buffer.from("c3ludGhldGljLW9wZXJhdG9yLWtleQ", "base64url"))
       .digest("base64url");
     const paymentHash = hashVouchPayload({
+      account_binding: payment.account_binding,
       agent: payment.agent,
       amount_cents: 1200,
       approval_id: payment.id,
@@ -799,6 +891,7 @@ describe("vouch-gated credential mutations", () => {
     const badPaymentSignature = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${payment.id}/approve`,
+      headers: { cookie: webCookie },
       payload: { jws: badPaymentJws, sealed_card: "c2VhbGVkLWNhcmQ" },
     });
     expect(badPaymentSignature.statusCode).toBe(403);
@@ -809,6 +902,7 @@ describe("vouch-gated credential mutations", () => {
     const paymentAsMutation = await server.inject({
       method: "POST",
       url: `/v1/vault/mutation-approvals/${mutationId}/approve`,
+      headers: { cookie: webCookie },
       payload: { jws: paymentJws },
     });
     expect(paymentAsMutation.statusCode).toBe(403);
@@ -817,6 +911,7 @@ describe("vouch-gated credential mutations", () => {
     const mutationAsPayment = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${payment.id}/approve`,
+      headers: { cookie: webCookie },
       payload: { jws: mutationJws, sealed_card: "c2VhbGVkLWNhcmQ" },
     });
     expect(mutationAsPayment.statusCode).toBe(403);
@@ -827,6 +922,7 @@ describe("vouch-gated credential mutations", () => {
     const validPayment = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${payment.id}/approve`,
+      headers: { cookie: webCookie },
       payload: { jws: paymentJws, sealed_card: "c2VhbGVkLWNhcmQ" },
     });
     expect(validPayment.statusCode).toBe(202);

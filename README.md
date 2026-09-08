@@ -68,15 +68,15 @@ the currency already selected or approved for the purchase instead of refusing t
 checkout. Any live amount or currency drift still fails closed; the authoritative
 binding contract lives in the [security model](SECURITY.md#client-encrypted-card-data).
 Approval, 3-D Secure, Activity, and notification amounts use the currency's minor-unit
-precision (for example, whole yen for JPY and two decimals for USD). The anonymous
-approval page shows the merchant, checkout origin, amount and currency, item, and
-reason directly from the short-lived server record before one passkey ceremony
-authorizes those canonical payment values. You also see the requesting MCP client
-(for example, Hermes) and the bound card's label plus last four digits (or its label
-alone for a legacy card) before clicking **Approve payment** to relay the
-operator-sealed final authorization. Before submitting that authorization, you
-can instead choose **Deny payment**; a denial closes that approval attempt and
-prevents any later operator confirmation. When the pre-submission
+precision (for example, whole yen for JPY and two decimals for USD). After you
+sign in, the owner-only approval page shows the merchant, checkout origin, amount
+and currency, item, and reason directly from the short-lived server record before
+one passkey ceremony authorizes those canonical payment values. You also see the
+requesting MCP client (for example, Hermes) and the bound card's label plus last
+four digits (or its label alone for a legacy card) before clicking **Approve
+payment** to relay the operator-sealed final authorization. Before submitting that
+authorization, you can instead choose **Deny payment**; a denial closes that
+approval attempt and prevents any later operator confirmation. When the pre-submission
 checkout can be machine-read, the payment is refused if its merchant, origin, amount,
 or currency has changed since approval. If that resume read cannot recover a total,
 Trusty Squire reuses the original mandate-bound checkout values. Card entry requires the PAN,

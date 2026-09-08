@@ -69,6 +69,7 @@ describe("payment approval relay", () => {
     id: string;
     nonce: string;
     agent: string;
+    account_binding: string;
     expires_at: string;
   }> {
     const response = await server.inject({
@@ -94,6 +95,7 @@ describe("payment approval relay", () => {
       id: string;
       nonce: string;
       agent: string;
+      account_binding: string;
       expires_at: string;
     };
   }
@@ -141,6 +143,7 @@ describe("payment approval relay", () => {
   function makeSubmission(input: {
     id: string;
     nonce: string;
+    account_binding: string;
     card_ref?: string;
     merchant?: string;
     checkout_origin?: string;
@@ -153,6 +156,7 @@ describe("payment approval relay", () => {
   }): { jws: string; sealed_card: string } {
     const operatorPubkey = input.operator_pubkey ?? "c3ludGhldGljLW9wZXJhdG9yLWtleQ";
     const payload = {
+      account_binding: input.account_binding,
       approval_id: input.id,
       merchant: input.merchant ?? "Synthetic Books",
       checkout_origin: input.checkout_origin ?? "https://checkout.synthetic.test",
@@ -223,6 +227,7 @@ describe("payment approval relay", () => {
     const approval = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${id}/approve`,
+      headers: { cookie: webCookie },
       payload: submission,
     });
     const relayed = await operatorWait;
@@ -251,6 +256,7 @@ describe("payment approval relay", () => {
       nonce: created.nonce,
       card_ref: "card_synthetic_1",
       operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
+      account_binding: created.account_binding,
       item: "Synthetic Book",
       reason: "Synthetic test purchase",
       agent: "synthetic-payment-test-agent",
@@ -266,6 +272,7 @@ describe("payment approval relay", () => {
     const response = await server.inject({
       method: "GET",
       url: `/v1/pay/approvals/${created.id}/ceremony`,
+      headers: { cookie: webCookie },
     });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
@@ -279,6 +286,7 @@ describe("payment approval relay", () => {
       reason: "Synthetic test purchase",
       card_ref: cardId,
       operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
+      account_binding: created.account_binding,
       approval_payload_sha256: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
     });
     expect(response.json().card).toEqual({
@@ -291,12 +299,88 @@ describe("payment approval relay", () => {
     expect(response.json().card).not.toHaveProperty("cvv");
   });
 
+  it("binds ceremony and settlement to the owner web account", async () => {
+    const cardId = await createOwnedCard(webCookie);
+    const created = await createApproval(cardId);
+    const ownerCeremony = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}/ceremony`,
+      headers: { cookie: webCookie },
+    });
+    expect(ownerCeremony.statusCode).toBe(200);
+    const ownerTerms = ownerCeremony.json() as { account_binding: string };
+    const submission = makeSubmission({
+      ...created,
+      account_binding: ownerTerms.account_binding,
+      card_ref: cardId,
+    });
+    const claims = JSON.parse(
+      Buffer.from(submission.jws.split(".")[1]!, "base64url").toString(),
+    ) as {
+      payload_sha256: string;
+    };
+    expect(ownerCeremony.json()).toMatchObject({
+      approval_payload_sha256: claims.payload_sha256,
+    });
+
+    const foreignCeremony = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}/ceremony`,
+      headers: { cookie: otherWebCookie },
+    });
+    expect(foreignCeremony.statusCode).toBe(404);
+    expect(foreignCeremony.json()).toEqual({ error: "payment_approval_not_found" });
+    const foreignApprove = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/approve`,
+      headers: { cookie: otherWebCookie },
+      payload: submission,
+    });
+    expect(foreignApprove.statusCode).toBe(404);
+    expect(foreignApprove.json()).toEqual({ error: "payment_approval_not_found" });
+    const foreignDeny = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/deny`,
+      headers: { cookie: otherWebCookie },
+    });
+    expect(foreignDeny.statusCode).toBe(404);
+    expect(foreignDeny.json()).toEqual({ error: "payment_approval_not_found" });
+
+    for (const headers of [{}, { authorization: `Bearer ${agentToken}` }]) {
+      const ceremony = await server.inject({
+        method: "GET",
+        url: `/v1/pay/approvals/${created.id}/ceremony`,
+        headers,
+      });
+      expect(ceremony.statusCode).toBe(401);
+      const approve = await server.inject({
+        method: "POST",
+        url: `/v1/pay/approvals/${created.id}/approve`,
+        headers,
+        payload: submission,
+      });
+      expect(approve.statusCode).toBe(401);
+      const deny = await server.inject({
+        method: "POST",
+        url: `/v1/pay/approvals/${created.id}/deny`,
+        headers,
+      });
+      expect(deny.statusCode).toBe(401);
+    }
+
+    expect(await deps.pendingPaymentApprovalStore.getById(created.id)).toMatchObject({
+      status: "pending",
+      submissionPhase: null,
+    });
+  });
+
   it("rejects legacy review-bound submissions as a stale payment client", async () => {
     const cardId = await createOwnedCard(webCookie);
     const created = await createApproval(cardId);
     const ceremonyResponse = await server.inject({
       method: "GET",
       url: `/v1/pay/approvals/${created.id}/ceremony`,
+      headers: { cookie: webCookie },
     });
     const ceremony = ceremonyResponse.json() as {
       id: string;
@@ -308,6 +392,7 @@ describe("payment approval relay", () => {
     const response = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/approve`,
+      headers: { cookie: webCookie },
       payload: review,
     });
     expect(response.statusCode).toBe(409);
@@ -426,6 +511,7 @@ describe("payment approval relay", () => {
     const noOperator = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/approve`,
+      headers: { cookie: webCookie },
       payload: forged,
     });
     expect(noOperator.statusCode).toBe(202);
@@ -469,6 +555,7 @@ describe("payment approval relay", () => {
     const replacementAttempt = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/approve`,
+      headers: { cookie: webCookie },
       payload: replacement,
     });
     expect(replacementAttempt.statusCode).toBe(409);
@@ -659,6 +746,7 @@ describe("payment approval relay", () => {
                 .update(
                   JSON.stringify({
                     agent: "synthetic-payment-test-agent",
+                    account_binding: created.account_binding,
                     amount_cents: 2599,
                     approval_id: created.id,
                     card_ref: "card_synthetic_1",
@@ -737,6 +825,7 @@ describe("payment approval relay", () => {
     const approved = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/approve`,
+      headers: { cookie: webCookie },
       payload: submission,
     });
     expect(approved.statusCode).toBe(202);
@@ -831,6 +920,7 @@ describe("payment approval relay", () => {
     const approve = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/approve`,
+      headers: { cookie: webCookie },
       payload: makeSubmission(created),
     });
     expect(approve.statusCode).toBe(409);
@@ -1137,7 +1227,12 @@ describe("payment approval relay", () => {
     });
     expect(get.json()).toMatchObject({ card_ref: cardId });
 
-    const bound = get.json() as { id: string; nonce: string; card_ref: string };
+    const bound = get.json() as {
+      id: string;
+      nonce: string;
+      account_binding: string;
+      card_ref: string;
+    };
     const submission = makeSubmission(bound);
     const approve = await relaySubmission(created.id, submission);
     expect(approve.approvalStatus).toBe(202);
@@ -1157,6 +1252,7 @@ describe("payment approval relay", () => {
     const approve = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/approve`,
+      headers: { cookie: webCookie },
       payload: { jws: "synthetic.header.sig", sealed_card: "sealed" },
     });
     expect(approve.statusCode).toBe(409);
@@ -1357,10 +1453,15 @@ describe("payment approval relay", () => {
         reason: "Other reason",
       },
     });
-    const otherCreated = otherCreatedResponse.json() as { id: string; nonce: string };
+    const otherCreated = otherCreatedResponse.json() as {
+      id: string;
+      nonce: string;
+      account_binding: string;
+    };
     const approve = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/approve`,
+      headers: { cookie: webCookie },
       payload: makeSubmission({
         ...otherCreated,
         merchant: "Other Merchant",
@@ -1384,6 +1485,7 @@ describe("payment approval relay", () => {
     const approvalReplay = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${second.id}/approve`,
+      headers: { cookie: webCookie },
       payload: makeSubmission({ ...first, card_ref: cardId }),
     });
     expect(approvalReplay.statusCode).toBe(403);
@@ -1392,10 +1494,12 @@ describe("payment approval relay", () => {
     const firstCeremony = await server.inject({
       method: "GET",
       url: `/v1/pay/approvals/${first.id}/ceremony`,
+      headers: { cookie: webCookie },
     });
     const reviewReplay = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${second.id}/approve`,
+      headers: { cookie: webCookie },
       payload: makeReviewSubmission(firstCeremony.json()),
     });
     expect(reviewReplay.statusCode).toBe(403);
