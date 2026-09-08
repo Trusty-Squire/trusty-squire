@@ -8621,6 +8621,7 @@ const GMAIL_TRANSIENT_MAX_RETRIES = 3;
 async function readGmailSearchResultsResilient(
   browser: BrowserController,
   searchUrl: string,
+  page: Page,
   linkCandidatesOf: (
     els: readonly {
       href?: string | null;
@@ -8635,16 +8636,16 @@ async function readGmailSearchResultsResilient(
   for (let retry = 0; retry <= GMAIL_TRANSIENT_MAX_RETRIES; retry++) {
     if (retry > 0) {
       await browser
-        .waitForCaptchaChallengeToSettle(gmailTransientBackoffMs(retry - 1), 0)
+        .waitForCaptchaChallengeToSettle(gmailTransientBackoffMs(retry - 1), 0, page)
         .catch(() => false);
-      await browser.goto(searchUrl);
+      await browser.goto(searchUrl, page);
     }
     for (let i = 0; i < 6; i++) {
-      text = await browser.extractVisibleText();
+      text = await browser.extractVisibleText(page);
       if (text.length > 200) break;
-      await browser.waitForCaptchaChallengeToSettle(1200, 0).catch(() => false);
+      await browser.waitForCaptchaChallengeToSettle(1200, 0, page).catch(() => false);
     }
-    links = linkCandidatesOf(await browser.extractInteractiveElements());
+    links = linkCandidatesOf(await browser.extractInteractiveElements(page));
     const transientOrEmpty =
       isGmailTransientErrorText(text) || (isEmptyGmailResultText(text) && links.length === 0);
     if (!transientOrEmpty || retry === GMAIL_TRANSIENT_MAX_RETRIES) break;
@@ -8675,6 +8676,10 @@ export async function awaitVerification(
   }
 
   invalidateCompactV2Snapshot(session);
+  const inboxPage = session.browser.activePage();
+  if (inboxPage === null || inboxPage.isClosed()) {
+    throw new Error("inbox page is unavailable");
+  }
 
   const verification = await runDetachedGoogleIdentityOperation(session, async (browser) => {
     return await browser.withTemporaryHostScopeAllowedHosts(["mail.google.com"], async () => {
@@ -8699,17 +8704,19 @@ export async function awaitVerification(
       let sourceFrom: string | null = null;
       for (let attempt = 0; attempt < 3 && code === null && link === null; attempt++) {
         sourceFrom = null;
-        if (attempt > 0) await browser.waitForCaptchaChallengeToSettle(4000, 0).catch(() => false);
-        await browser.goto(searchUrl);
+        if (attempt > 0)
+          await browser.waitForCaptchaChallengeToSettle(4000, 0, inboxPage).catch(() => false);
+        await browser.goto(searchUrl, inboxPage);
         const { text: listText, links: listLinks } = await readGmailSearchResultsResilient(
           browser,
           searchUrl,
+          inboxPage,
           linkCandidatesOf,
         );
-        const opened = await browser.openFirstMailResult().catch(() => false);
+        const opened = await browser.openFirstMailResult(inboxPage).catch(() => false);
         if (opened) {
-          const openedText = await browser.extractVisibleText();
-          const openedLinks = linkCandidatesOf(await browser.extractInteractiveElements());
+          const openedText = await browser.extractVisibleText(inboxPage);
+          const openedLinks = linkCandidatesOf(await browser.extractInteractiveElements(inboxPage));
           sourceFrom = extractSenderEmail(openedText);
           const expectedDomains = expectedVerificationDomains(opts.sender, sourceFrom);
           ({ code, link } = parseVerification(

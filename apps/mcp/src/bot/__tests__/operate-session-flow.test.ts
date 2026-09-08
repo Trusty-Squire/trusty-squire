@@ -322,6 +322,9 @@ vi.mock("../browser.js", async (importOriginal) => ({
     currentUrl(): string {
       return this.detached ? this.detachedUrl : h.currentUrl;
     }
+    activePage(): { isClosed(): boolean } {
+      return { isClosed: () => false };
+    }
     mainDocumentIdentity(): string {
       return String(h.mainDocumentEpoch);
     }

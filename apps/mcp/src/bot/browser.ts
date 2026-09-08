@@ -3307,9 +3307,9 @@ export class BrowserController {
   // returns true if a conversation opened (URL hash gained a message id).
   // MEASURED 2026-07-01 (Loops "Login link": list view had no /api/auth/callback
   // href; opening the mail revealed it).
-  async openFirstMailResult(): Promise<boolean> {
-    if (!this.page) return false;
-    const before = this.page.url();
+  async openFirstMailResult(page: Page | null = this.page): Promise<boolean> {
+    if (page === null) return false;
+    const before = page.url();
     // Find the conversation ROW the same way the observation layer does — a
     // role=link element with a substantial subject label (Gmail chrome
     // affordances like "Gmail"/"Compose"/"Inbox" are short or not role=link) —
@@ -3318,18 +3318,18 @@ export class BrowserController {
     // rows are div[role=link] whose delegated jsaction handler a plain click may
     // not fire. MEASURED 2026-07-01 (Loops "Login link": the results list has no
     // /api/auth/callback href; opening the row reveals it).
-    const els = await this.extractInteractiveElements();
+    const els = await this.extractInteractiveElements(page);
     const row = els.find(
       (e) =>
         e.role === "link" && (e.visibleText ?? e.ariaLabel ?? e.labelText ?? "").trim().length > 25,
     );
     if (row === undefined) return false;
-    await this.click(row.selector).catch(() => {});
+    await this.clickOnPage(page, row.selector).catch(() => {});
     for (let i = 0; i < 10; i++) {
-      const now = this.page.url();
+      const now = page.url();
       // An opened conversation appends a message id to the #search/#inbox hash.
       if (now !== before && /\/[A-Za-z0-9_-]{12,}$/.test(now)) return true;
-      await this.page.waitForTimeout(300).catch(() => {});
+      await page.waitForTimeout(300).catch(() => {});
     }
     return false;
   }

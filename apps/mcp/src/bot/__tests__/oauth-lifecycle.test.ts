@@ -17,6 +17,7 @@ import {
 } from "../browser.js";
 import {
   act,
+  awaitVerification,
   cartAdd,
   cartClear,
   captureScreenshot,
@@ -1424,6 +1425,99 @@ describe("BrowserController OAuth popup lifecycle", () => {
       }
     },
   );
+
+  it("keeps concurrent inbox verification on its captured page after source-tab adoption", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://mail.google.com/product";
+    const returnUrl = "https://console.product.test/return";
+    const openedUrl = "https://console.product.test/opened";
+    let sessionId: string | undefined;
+    try {
+      await context.route("https://mail.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<button id="oauth" onclick='window.open(${JSON.stringify(
+            `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(returnUrl)}`,
+          )})'>Continue</button>`,
+        }),
+      );
+      await context.route("https://accounts.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<script>setTimeout(() => location.href=${JSON.stringify(returnUrl)}, 20)</script>`,
+        }),
+      );
+      await context.route("https://console.product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body:
+            route.request().url() === openedUrl
+              ? '<main>Opened operator tab</main>'
+              : `<main>Returned operator tab</main><button id="open" onclick="window.open('${openedUrl}')">Open tab</button>`,
+        }),
+      );
+      await context.route("https://mail.google.com/mail/u/0/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<div role="link" id="mail-row" onclick="location.hash = 'search/verification/abcdefghijkl'">Verification message for the newly created operator account</div><main>Your verification code is 481920. This verification message remains available while the account setup finishes, so return to the operator after entering the code and continue configuring the new workspace.</main>`,
+        }),
+      );
+      await product.goto(productUrl);
+      const controller = BrowserController.fromHarnessPage(product);
+      const started = await startHarnessProvisionSession({ browser: controller, serviceUrl: productUrl });
+      sessionId = started.session_id;
+      const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+      expect(oauthRef).toBeDefined();
+      const returned = await act(sessionId, {
+        kind: "oauth_login",
+        target: oauthRef!,
+        provider: "google",
+      });
+      const source = controller.completedOAuthPage()!;
+      const openRef = parseElementsTable(returned.el_table ?? "").find(
+        (element) => element.label === "Open tab",
+      )?.ref;
+      expect(openRef).toBeDefined();
+
+      let enteredInbox!: () => void;
+      let resumeInbox!: () => void;
+      const inboxEntered = new Promise<void>((resolve) => {
+        enteredInbox = resolve;
+      });
+      const inboxResume = new Promise<void>((resolve) => {
+        resumeInbox = resolve;
+      });
+      const originalTemporaryScope = controller.withTemporaryHostScopeAllowedHosts.bind(controller);
+      const temporaryScopeSpy = vi
+        .spyOn(controller, "withTemporaryHostScopeAllowedHosts")
+        .mockImplementation(async <T>(hosts: readonly string[], operation: () => Promise<T>): Promise<T> => {
+          if (hosts.includes("mail.google.com")) {
+            enteredInbox();
+            await inboxResume;
+          }
+          return await originalTemporaryScope(hosts, operation);
+        });
+
+      const verification = awaitVerification(sessionId);
+      await inboxEntered;
+      const openedPagePromise = source.waitForEvent("popup");
+      const opened = await act(sessionId, { kind: "click", target: openRef! });
+      const openedPage = await openedPagePromise;
+      expect(opened.url).toBe(openedUrl);
+      resumeInbox();
+      const result = await verification;
+      temporaryScopeSpy.mockRestore();
+
+      expect(result).toMatchObject({ found: true, code: "481920" });
+      expect(product.url()).toContain("mail.google.com/mail/u/0/#search/");
+      expect(openedPage.url()).toBe(openedUrl);
+      expect(await openedPage.locator("main").innerText()).toBe("Opened operator tab");
+    } finally {
+      if (sessionId) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
 
   it("adopts an ordinary newly opened tab for the resulting and next action", async () => {
     const context = await browser.newContext();
