@@ -12812,6 +12812,7 @@ export class BrowserController {
         inConsentWidget: boolean;
         href: string | null;
         iconLabel: string | null;
+        alt: string | null;
         testId: string | null;
         title: string | null;
         landmark: string | null;
@@ -12908,6 +12909,7 @@ export class BrowserController {
           inConsentWidget: inConsent(el),
           href: (el.getAttribute("href") ?? "").slice(0, 300) || null,
           iconLabel: iconLabelFor(el),
+          alt: clean(el.getAttribute("alt")),
           // The element's test-id, the GOLD-STANDARD stable anchor: authors set
           // data-testid/data-test/data-cy precisely so it survives refactors +
           // copy changes, which is exactly what text_match does not. Captured so
@@ -15263,6 +15265,7 @@ export interface InteractiveElement {
   // live extractInteractiveElements sets them; test fixtures omit them.
   href?: string | null;
   iconLabel?: string | null;
+  alt?: string | null;
   // rc.19 — the element's own `title` attribute. Tooltip-style labels
   // used by icon-only buttons like Railway's modal "Copy Code" copy
   // button, which has no visible text and no aria-label. Without this

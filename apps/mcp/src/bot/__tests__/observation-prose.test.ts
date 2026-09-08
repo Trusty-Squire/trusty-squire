@@ -42,7 +42,7 @@ describe("interleaved observation DOM", () => {
       await page.locator("body").evaluate((body) => {
         const host = body.querySelector("#shadow-host")!;
         host.attachShadow({ mode: "open" }).innerHTML =
-          '<span id="shared-name">Shadow volume</span><div id="shadow-volume" role="slider" aria-labelledby="shared-name" tabindex="0" style="display:block;width:20px;height:20px"></div><div id="shadow-floor" role="slider" tabindex="0" style="display:block;width:20px;height:20px"></div>';
+          '<span id="shared-name">Shadow volume</span><div id="shadow-volume" role="slider" aria-labelledby="shared-name" tabindex="0" style="display:block;width:20px;height:20px"></div><div id="shadow-floor" role="slider" tabindex="0" style="display:block;width:20px;height:20px"></div><span id="shadow-email-name">Shadow work email</span><input id="shadow-email" aria-labelledby="shadow-email-name"><input id="image-search" type="image" alt="Search" style="display:block;width:20px;height:20px">';
         body.insertAdjacentHTML("afterbegin", '<span id="shared-name">Outer volume</span>');
       });
       const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
@@ -67,6 +67,8 @@ describe("interleaved observation DOM", () => {
       expect(labelFor("volume")).toBe("@volume-controls-button");
       expect(labelFor("shadow-volume")).toBe("@shadow-volume");
       expect(labelFor("shadow-floor")).toBe("@shadow-volume-controls-button");
+      expect(labelFor("shadow-email")).toBe("@shadow-work-email");
+      expect(labelFor("image-search")).toBe("@search");
     } finally {
       await page.close();
     }

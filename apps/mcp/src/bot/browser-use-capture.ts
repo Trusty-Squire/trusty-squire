@@ -882,6 +882,7 @@ export async function captureBrowserUseDOM(
             href: a.href ?? null,
             title: a.title ?? null,
             iconLabel: iconLabel(n),
+            alt: a.alt ?? null,
             value: a.value ?? null,
             frameOrigin: frame === page.mainFrame() ? null : new URL(frame.url()).origin,
             frameUrl: frame === page.mainFrame() ? null : frame.url(),
@@ -936,6 +937,11 @@ export async function captureBrowserUseDOM(
         }
       }
       if (el) {
+        const explicitAriaLabel = el.ariaLabel?.trim();
+        const scopedLabelledBy = labelledByText(n);
+        if (!explicitAriaLabel && scopedLabelledBy) el.ariaLabel = scopedLabelledBy;
+        const scopedAssociation = associatedLabelText(n);
+        if (!el.labelText?.trim() && scopedAssociation) el.labelText = scopedAssociation;
         const ownedLabel = ownedLabels.get(n.id);
         if (ownedLabel && !el.ariaLabel && !n.attributes["aria-labelledby"]) {
           el.ariaLabel = ownedLabel;
