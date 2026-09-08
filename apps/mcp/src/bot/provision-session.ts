@@ -2848,6 +2848,8 @@ async function performCartAdd(
           },
         },
         true,
+        undefined,
+        page,
       );
       addError = undefined;
       break;
@@ -2911,13 +2913,14 @@ export interface CartClearResult {
 export async function cartClear(sessionId: string): Promise<CartClearResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const cleared = await session.browser.clearCart();
+  const operationPage = operationPageForSession(session);
+  const cleared = await session.browser.clearCart(operationPage);
   if (!cleared) throw new Error("cart_clear failed to reach the cart-clear endpoint");
   session.cartAdds.clear();
   session.cartAddsByIdempotencyKey.clear();
   session.lastCartMutation = null;
   session.lastCartCheckout = null;
-  const observed = await observeSession(session);
+  const observed = await observeSession(session, "compact", undefined, operationPage);
   return {
     status: "cleared",
     cart_url: observed.checkout_state?.cart_url ?? null,
@@ -4916,6 +4919,7 @@ async function actInternally(
   cartIdentity?: CartIdentityContext,
   collectCheckoutState = false,
   compactV2Authorization?: CompactV2TargetAuthorization,
+  operationPage?: Page,
 ): Promise<InternalActResult> {
   const session = sessionForCall(sessionId);
   const oauthProvider =
@@ -4931,6 +4935,7 @@ async function actInternally(
         collectCheckoutState,
         compactV2Authorization,
         deadline,
+        operationPage,
       );
     return session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")
       ? await withOAuthActionBoundary(session, oauthProvider, execute)
@@ -5004,6 +5009,7 @@ async function executeAct(
   collectCheckoutState: boolean,
   internalAuthorization?: CompactV2TargetAuthorization,
   oauthDeadline?: OAuthActionDeadline,
+  operationPage?: Page,
 ): Promise<InternalActResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
@@ -5023,7 +5029,7 @@ async function executeAct(
     if (cardBlock !== null) throw new ManualCardEntryBlockedError(cardBlock);
   }
   let browser = session.browser;
-  const compactV2ActionPage = operationPageForSession(session);
+  const compactV2ActionPage = operationPage ?? operationPageForSession(session);
   let completedAction: ProvisionAction = action;
   let sensitiveSource: RecordedValueSource | undefined;
   let cartAffecting = false;
@@ -5825,6 +5831,7 @@ export async function formSelectMany(
   const fields: FormSelectManyFieldResult[] = [];
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const operationPage = operationPageForSession(session);
   const selectionEntries = Object.entries(selections);
 
   for (let index = 0; index < selectionEntries.length; index += 1) {
@@ -5848,7 +5855,9 @@ export async function formSelectMany(
           status: "failed",
           reason: compactV2SelectionFailureReason(error),
         });
-        if (index + 1 < selectionEntries.length) await observe(sessionId, "compact");
+        if (index + 1 < selectionEntries.length) {
+          await observeSession(session, "compact", undefined, operationPage);
+        }
         continue;
       }
     }
@@ -5861,6 +5870,7 @@ export async function formSelectMany(
         undefined,
         false,
         authorization,
+        operationPage,
       );
       const selectedOption = actionResult.outcome.selectedOption;
       if (selectedOption === undefined) {
@@ -5868,7 +5878,7 @@ export async function formSelectMany(
       }
       // `detail:none` is intentionally a minimal ack. The explicit observe here
       // refreshes the DOM generation between every potentially mutating select.
-      await observe(sessionId, "compact");
+      await observeSession(session, "compact", undefined, operationPage);
       const publicSelectedOption = session.compactV2Active
         ? safeDescriptionV2(selectedOption)
         : selectedOption;
@@ -5899,7 +5909,7 @@ export async function formSelectMany(
         });
       }
       if (session.compactV2Active && index + 1 < selectionEntries.length) {
-        await observe(sessionId, "compact");
+        await observeSession(session, "compact", undefined, operationPage);
       }
     }
   }
@@ -5907,7 +5917,7 @@ export async function formSelectMany(
   return {
     session_id: sessionId,
     fields,
-    observation: await observe(sessionId, "compact"),
+    observation: await observeSession(session, "compact", undefined, operationPage),
   };
 }
 
@@ -7564,6 +7574,7 @@ export async function replayOperatorRecipe(
 ): Promise<OperatorReplayResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const operationPage = operationPageForSession(session);
   const recipeHash = replayDigest(recipe);
   const bindingsHash = bindingDigest(bindings);
   const boundPostcondition = bindRecipePostcondition(recipe.postcondition, bindings);
@@ -7600,14 +7611,19 @@ export async function replayOperatorRecipe(
       audit(sessionId, "replay_leg_fallback", { reason, field, from_step_index: fromStepIndex });
       return {
         status: "leg_fallback_required",
-        observation: await observe(sessionId),
+        observation: await observeSession(session, "compact", undefined, operationPage),
         leg: "checkout",
         from_step_index: fromStepIndex,
         reason: `${reason}: ${field}`,
       };
     }
     markReplayFailure(session, reason, field);
-    return { status: "human_required", observation: await observe(sessionId), reason, field };
+    return {
+      status: "human_required",
+      observation: await observeSession(session, "compact", undefined, operationPage),
+      reason,
+      field,
+    };
   };
 
   if (fromIndex === 0) {
@@ -7643,7 +7659,7 @@ export async function replayOperatorRecipe(
     }
     const repairedField = state.expectedFields.get(fromIndex - 1);
     if (repairedField !== undefined && !state.verifiedFields.has(fromIndex - 1)) {
-      const guard = await verifyReplayField(session, repairedField);
+      const guard = await verifyReplayField(session, repairedField, false, operationPage);
       if (!guard.ok) return await humanRequired(guard.reason, repairedField.hole);
       state.verifiedFields.add(fromIndex - 1);
     }
@@ -7660,7 +7676,7 @@ export async function replayOperatorRecipe(
     state.nextIndex = stepIndex + 1;
     return {
       status: "fallback_required",
-      observation: await observe(sessionId),
+      observation: await observeSession(session, "compact", undefined, operationPage),
       step_index: stepIndex,
       next_index: stepIndex + 1,
       step,
@@ -7680,7 +7696,7 @@ export async function replayOperatorRecipe(
       : recipeDomain;
     return {
       status: "domain_lock_violation",
-      observation: await observe(sessionId),
+      observation: await observeSession(session, "compact", undefined, operationPage),
       step_index: stepIndex,
       host: publicHost,
       recipe_domain: publicRecipeDomain,
@@ -7782,7 +7798,7 @@ export async function replayOperatorRecipe(
       }
       // Structural pre-check: resolve against the live inventory before every
       // deterministic act. This is especially load-bearing on money paths.
-      const fresh = await session.browser.extractInteractiveElements();
+      const fresh = await session.browser.extractInteractiveElements(operationPage);
       retainSessionElements(session, fresh);
       const expectedForStep = state.expectedFields.get(i);
       const resolution =
@@ -7843,7 +7859,15 @@ export async function replayOperatorRecipe(
 
     try {
       await options.beforeAction?.({ step_index: i, action });
-      const acted = await actInternally(sessionId, action, "none");
+      const acted = await actInternally(
+        sessionId,
+        action,
+        "none",
+        undefined,
+        false,
+        undefined,
+        operationPage,
+      );
       if (acted.observation.oauth?.state === "awaiting_human") {
         return await fallback(
           step,
@@ -7854,7 +7878,12 @@ export async function replayOperatorRecipe(
       replayed += 1;
       const expected = state.expectedFields.get(i);
       if (expected !== undefined) {
-        const guard = await verifyReplayField(session, expected, expected.kind === "select");
+        const guard = await verifyReplayField(
+          session,
+          expected,
+          expected.kind === "select",
+          operationPage,
+        );
         if (!guard.ok) return await humanRequired(guard.reason, expected.hole);
         state.verifiedFields.add(i);
       }
@@ -7874,7 +7903,7 @@ export async function replayOperatorRecipe(
 
   return {
     status: "complete",
-    observation: await observe(sessionId),
+    observation: await observeSession(session, "compact", undefined, operationPage),
     replayed_steps: replayed,
     field_values_verified: true,
   };

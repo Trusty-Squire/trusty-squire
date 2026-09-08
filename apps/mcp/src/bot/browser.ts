@@ -3176,7 +3176,7 @@ export class BrowserController {
 
   /** Capture once at the action boundary; never switch tabs during an operation. */
   resolveOperationPage(sourcePage?: Page): Page | undefined {
-    return sourcePage ?? this.page ?? undefined;
+    return sourcePage;
   }
 
   isActivePage(page: Page): boolean {
@@ -8015,9 +8015,9 @@ export class BrowserController {
   // operator reaches a KNOWN (empty) cart quantity before a fresh cart_add,
   // rather than accumulating quantity across separate operate_start sessions
   // on the shared persistent profile.
-  async clearCart(): Promise<boolean> {
-    if (!this.page) throw new Error("Browser not started");
-    return await this.page.evaluate(async () => {
+  async clearCart(page: Page | null = this.page): Promise<boolean> {
+    if (!page) throw new Error("Browser not started");
+    return await page.evaluate(async () => {
       try {
         const response = await fetch("/cart/clear.js", {
           method: "POST",

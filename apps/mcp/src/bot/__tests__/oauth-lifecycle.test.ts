@@ -17,11 +17,15 @@ import {
 import {
   act,
   cartAdd,
+  cartClear,
   finishProvisionSession,
+  formSelectMany,
   observe,
   parseElementsTable,
+  replayOperatorRecipe,
   startHarnessProvisionSession,
 } from "../provision-session.js";
+import type { OperatorRecipe } from "../operator-recipe.js";
 import { sessionForCall } from "../session/lifecycle.js";
 
 const PRODUCT_URL = `data:text/html,${encodeURIComponent(`
@@ -1133,6 +1137,19 @@ describe("BrowserController OAuth popup lifecycle", () => {
             <option value="US">United States (+1)</option>
           </select>
         </label>
+        <label>Workspace
+          <select id="workspace" name="workspace">
+            <option value="alpha" selected>Alpha</option>
+            <option value="beta">Beta</option>
+          </select>
+        </label>
+        <label>Region
+          <select id="region" name="region">
+            <option value="us" selected>US</option>
+            <option value="eu">EU</option>
+          </select>
+        </label>
+        <label>Replay name<input id="replay-name" name="full_name" data-testid="replay-name"></label>
         <button id="add" onclick="document.querySelector('#line')?.removeAttribute('hidden')">Add to Cart</button>
         <div id="line" data-testid="line-item" hidden>
           <a href="/products/popup" data-product-identity="popup-product">Popup product</a>
@@ -1146,6 +1163,13 @@ describe("BrowserController OAuth popup lifecycle", () => {
             if (e.key === 'Enter') document.body.dataset.enters = String(+document.body.dataset.enters + 1);
           });
           window.addEventListener('scroll', () => document.body.dataset.scrolls = String(+document.body.dataset.scrolls + 1));
+          const nativeFetch = window.fetch.bind(window);
+          window.fetch = (...args) => {
+            if (new URL(args[0], location.href).pathname === '/cart/clear.js') {
+              document.body.dataset.cartClears = String(+(document.body.dataset.cartClears || 0) + 1);
+            }
+            return nativeFetch(...args);
+          };
         </script>`;
       await context.route("https://mail.google.com/**", (route) =>
         route.fulfill({
@@ -1215,10 +1239,61 @@ describe("BrowserController OAuth popup lifecycle", () => {
         expect(countrySet.url).toBe(expectedReturnUrl);
         expect(await source.locator("#phone-country").inputValue()).toBe("US");
         expect(await product.locator("#phone-country").inputValue()).toBe("CA");
+        const controlRefs = parseElementsTable(countrySet.el_table ?? "");
+        const workspaceRef = controlRefs.find((el) => el.label === "Workspace")?.ref;
+        const regionRef = controlRefs.find((el) => el.label === "Region")?.ref;
+        expect(workspaceRef).toBeDefined();
+        expect(regionRef).toBeDefined();
+        const selected = await formSelectMany(sessionId, {
+          [workspaceRef!]: "beta",
+          [regionRef!]: "eu",
+        });
+        expect(selected.observation.url).toBe(expectedReturnUrl);
+        expect(await source.locator("#workspace").inputValue()).toBe("beta");
+        expect(await source.locator("#region").inputValue()).toBe("eu");
+        expect(await product.locator("#workspace").inputValue()).toBe("alpha");
+        expect(await product.locator("#region").inputValue()).toBe("us");
         const cart = await cartAdd(sessionId, "popup-product", "popup-options", "popup-cart");
         expect(cart).toMatchObject({ status: "added", cart_delta: "+1", postcondition: { quantity: 1 } });
         expect(await source.locator("#line").isVisible()).toBe(true);
         expect(await product.locator("#line").isHidden()).toBe(true);
+        await cartClear(sessionId);
+        expect(await source.locator("body").getAttribute("data-cart-clears")).toBe("1");
+        expect(await product.locator("body").getAttribute("data-cart-clears")).toBeNull();
+        const replayRecipe: OperatorRecipe = {
+          name: "set-popup-contact",
+          schema_version: 1,
+          goal: "Set the contact name",
+          verb: "configure",
+          domain: "product.test",
+          entry_url: expectedReturnUrl,
+          allowed_hosts: ["console.product.test"],
+          trace: [
+            {
+              action: {
+                kind: "type",
+                target: {
+                  dom_hint: { testid: "replay-name", name: "full_name" },
+                  accessible_name: "Replay name",
+                  css: "#replay-name",
+                },
+                value: { hole: "contact.name" },
+              },
+            },
+          ],
+          secrets: [],
+          postcondition: {
+            kind: "execute_capability",
+            describe: "Contact name is set",
+            success_signal: { text_present: "Projects" },
+          },
+        };
+        const replayed = await replayOperatorRecipe(sessionId, replayRecipe, {
+          "contact.name": "Popup replay",
+        });
+        expect(replayed).toMatchObject({ status: "complete", observation: { url: expectedReturnUrl } });
+        expect(await source.locator("#replay-name").inputValue()).toBe("Popup replay");
+        expect(await product.locator("#replay-name").inputValue()).toBe("");
         expect(sessionForCall(sessionId)?.actionTrace.some((entry) => entry.action.kind === "type")).toBe(
           true,
         );
@@ -1233,6 +1308,58 @@ describe("BrowserController OAuth popup lifecycle", () => {
       }
     },
   );
+
+  it("adopts an ordinary newly opened tab for the resulting and next action", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://product.test/editor";
+    const openedUrl = "https://product.test/opened-editor";
+    await context.route("https://product.test/editor", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<button id="open" onclick='window.open(${JSON.stringify(openedUrl)})'>Open editor</button>`,
+      }),
+    );
+    await context.route("https://product.test/opened-editor", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<label>Opened title<input id="opened-title"></label>`,
+      }),
+    );
+    await product.goto(productUrl);
+    const controller = BrowserController.fromHarnessPage(product);
+    let sessionId: string | undefined;
+    try {
+      const started = await startHarnessProvisionSession({ browser: controller, serviceUrl: productUrl });
+      sessionId = started.session_id;
+      const openRef = parseElementsTable(started.el_table ?? "").find(
+        (element) => element.label === "Open editor",
+      )?.ref;
+      expect(openRef).toBeDefined();
+      const popupPromise = product.waitForEvent("popup");
+      const opened = await act(sessionId, { kind: "click", target: openRef! });
+      const popup = await popupPromise;
+      expect(opened.url).toBe(openedUrl);
+      expect(controller.currentUrl()).toBe(openedUrl);
+      const observed = await observe(sessionId);
+      expect(observed.url).toBe(openedUrl);
+      const openedTitleRef = parseElementsTable(observed.el_table ?? "").find(
+        (element) => element.label === "Opened title",
+      )?.ref;
+      expect(openedTitleRef).toBeDefined();
+      const typed = await act(sessionId, {
+        kind: "type",
+        target: openedTitleRef!,
+        text: "New tab title",
+      });
+      expect(typed.url).toBe(openedUrl);
+      expect(await popup.locator("#opened-title").inputValue()).toBe("New tab title");
+      expect(await product.locator("#opened-title").count()).toBe(0);
+    } finally {
+      if (sessionId) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
 
   it("rejects a closed completion source instead of clicking a colliding product control", async () => {
     const context = await browser.newContext();
