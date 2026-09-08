@@ -452,7 +452,15 @@ export async function captureBrowserUseDOM(
       return n;
     };
     const root = build(dom.root, [], null, "", owningFrame);
-    const explicitForms = new Map<Frame, Map<string, string[]>>();
+    type FormIntent = {
+      action: string | null;
+      enctype: string;
+      method: string;
+      noValidate: boolean;
+      signature: string;
+      target: string;
+    };
+    const explicitForms = new Map<Frame, Map<string, FormIntent[]>>();
     const effectiveDestination = (
       frame: Frame | null | undefined,
       value: string | undefined,
@@ -465,14 +473,53 @@ export async function captureBrowserUseDOM(
         return null;
       }
     };
-    const formIntent = (n: BrowserUseNode): string => {
+    const effectiveMethod = (value: string | undefined): string => {
+      const method = value?.trim().toLowerCase();
+      return method === "post" || method === "dialog" ? method : "get";
+    };
+    const effectiveTarget = (value: string | undefined): string => value?.trim() || "_self";
+    const effectiveEnctype = (value: string | undefined): string => {
+      const enctype = value?.trim().toLowerCase();
+      return ["multipart/form-data", "text/plain"].includes(enctype ?? "")
+        ? enctype!
+        : "application/x-www-form-urlencoded";
+    };
+    const formIntent = (n: BrowserUseNode): FormIntent => {
       const frame = nodeFrame.get(n.id);
-      return JSON.stringify([
-        n.id,
-        n.attributes.action,
-        n.attributes.method,
-        n.attributes.target,
-        effectiveDestination(frame, n.attributes.action, frame?.url() ?? null),
+      const action = effectiveDestination(frame, n.attributes.action, frame?.url() ?? null);
+      const method = effectiveMethod(n.attributes.method);
+      const target = effectiveTarget(n.attributes.target);
+      const enctype = effectiveEnctype(n.attributes.enctype);
+      const noValidate = n.attributes.novalidate !== undefined;
+      return {
+        action,
+        method,
+        target,
+        enctype,
+        noValidate,
+        signature: JSON.stringify([n.id, action, method, target, enctype, noValidate]),
+      };
+    };
+    const submissionIntent = (
+      n: BrowserUseNode,
+      frame: Frame,
+      owners: readonly FormIntent[],
+    ): Array<[string | null, string, string, string, boolean]> | null => {
+      const type = n.attributes.type?.toLowerCase();
+      const isSubmitter =
+        (n.nodeName === "BUTTON" && (type === undefined || type === "submit")) ||
+        (n.nodeName === "INPUT" && (type === "submit" || type === "image"));
+      if (!isSubmitter || owners.length === 0) return null;
+      return owners.map((owner) => [
+        n.attributes.formaction === undefined
+          ? owner.action
+          : effectiveDestination(frame, n.attributes.formaction),
+        n.attributes.formmethod === undefined ? owner.method : effectiveMethod(n.attributes.formmethod),
+        n.attributes.formtarget === undefined ? owner.target : effectiveTarget(n.attributes.formtarget),
+        n.attributes.formenctype === undefined
+          ? owner.enctype
+          : effectiveEnctype(n.attributes.formenctype),
+        owner.noValidate || n.attributes.formnovalidate !== undefined,
       ]);
     };
     const collectForms = (n: BrowserUseNode): void => {
@@ -488,7 +535,7 @@ export async function captureBrowserUseDOM(
       if (n.contentDocument) collectForms(n.contentDocument);
     };
     collectForms(root);
-    const visit = (n: BrowserUseNode, inClosedShadow = false, form = ""): void => {
+    const visit = (n: BrowserUseNode, inClosedShadow = false, form?: FormIntent): void => {
       if (n.nodeName === "FORM") form = formIntent(n);
       const raw = rawById.get(n.id)!,
         frame = nodeFrame.get(n.id)!;
@@ -545,6 +592,12 @@ export async function captureBrowserUseDOM(
         }
       }
       if (el && frame && documentLoaders.get(frame) && liveBackendNodeIds.has(raw.backendNodeId)) {
+        const owners =
+          n.attributes.form === undefined
+            ? form === undefined
+              ? []
+              : [form]
+            : (explicitForms.get(frame)?.get(n.attributes.form) ?? []);
         el.observationIdentity = `${frameIdentity(frame)}:${documentLoaders.get(frame)}:${raw.backendNodeId}`;
         // Include destinations and form ownership even when the visible name
         // stays the same. State/value and surrounding text are not identity.
@@ -562,11 +615,10 @@ export async function captureBrowserUseDOM(
           n.attributes.href,
           effectiveDestination(frame, n.attributes.href),
           n.attributes.form,
-          n.attributes.formaction,
-          effectiveDestination(frame, n.attributes.formaction),
+          owners.map((owner) => owner.signature),
+          submissionIntent(n, frame, owners),
           n.attributes.autocomplete,
           n.attributes["data-field-role"],
-          n.attributes.form === undefined ? form : explicitForms.get(frame)?.get(n.attributes.form),
         ]);
         if (!elements.includes(el)) elements.push(el);
         nodeElements.set(n.id, el);

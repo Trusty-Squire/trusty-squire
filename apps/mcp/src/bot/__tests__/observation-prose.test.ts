@@ -145,6 +145,46 @@ describe("interleaved observation DOM", () => {
     }
   });
 
+  it("retires a held submitter when effective submission semantics change", async () => {
+    const page = await browser.newPage();
+    const refs = new StableObservationRefs();
+    const read = async () => {
+      const capture = await captureThroughController(page);
+      const submitter = capture.elements.find((element) => element.id === "submitter")!;
+      return { element: submitter, ref: refs.actions("doc", capture.elements).get(submitter)! };
+    };
+    try {
+      await page.setContent(`
+        <form id="form" method="post" target="receipt" enctype="multipart/form-data">
+          <button id="submitter">Pay</button>
+        </form>
+      `);
+      let held = await read();
+      const mutate = async (selector: string, attribute: string, value = "") => {
+        await page.locator(selector).evaluate(
+          (element, change) => element.setAttribute(change.attribute, change.value),
+          { attribute, value },
+        );
+        const next = await read();
+        expect(next.element.observationIdentity).toBe(held.element.observationIdentity);
+        expect(next.ref).not.toBe(held.ref);
+        held = next;
+      };
+      await mutate("#form", "method", "get");
+      await mutate("#form", "target", "receipt-next");
+      await mutate("#form", "enctype", "text/plain");
+      await mutate("#submitter", "formmethod", "post");
+      await mutate("#submitter", "formtarget", "receipt-final");
+      await mutate("#submitter", "formenctype", "multipart/form-data");
+      await mutate("#submitter", "formnovalidate");
+      await page.locator("#submitter").evaluate((element) => element.removeAttribute("formnovalidate"));
+      const afterValidationRestore = await read();
+      expect(afterValidationRestore.ref).not.toBe(held.ref);
+    } finally {
+      await page.close();
+    }
+  });
+
   it("returns rendered API keys, app slugs, key names and documentation JSON verbatim", async () => {
     const page = await browser.newPage();
     // The first two are exact reported false positives. Key names and requestId
