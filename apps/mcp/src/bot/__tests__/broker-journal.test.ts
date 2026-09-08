@@ -94,21 +94,23 @@ describe("broker dispatch custody", () => {
     try {
       await journal.record("session", "request", "entered", {
         agentId: "agent",
+        forwarderId: "forwarder",
         operation: "operate_pay",
       });
       await journal.record("session", "request", "outcome", {
         agentId: "agent",
+        forwarderId: "forwarder",
         operation: "operate_pay",
         outcome: { status: "completed" },
       });
       await expect(new DispatchJournal(path).assertReconciled()).resolves.toBeUndefined();
-      await expect(new DispatchJournal(path).pendingOutcomes("agent")).resolves.toEqual([
+      await expect(new DispatchJournal(path).pendingOutcomes("forwarder")).resolves.toEqual([
         { sessionId: "session", requestId: "request", operation: "operate_pay" },
       ]);
       expect(await journal.hasOutstanding("session")).toBe(true);
-      await expect(journal.acknowledge("agent", "request")).resolves.toBe(true);
+      await expect(journal.acknowledge("forwarder", "request")).resolves.toBe(true);
       expect(await journal.hasOutstanding("session")).toBe(false);
-      expect(await journal.hasCompleted("agent", "request")).toBe(true);
+      expect(await journal.hasCompleted("forwarder", "request")).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -152,11 +154,13 @@ describe("broker dispatch custody", () => {
         expect(outcome).toEqual(expected);
         await journal.record("session", requestId, "entered", {
           agentId: "agent",
+          forwarderId: "forwarder",
           operation: "operate_pay",
           inputHash: `${requestId}-hash`,
         });
         await journal.record("session", requestId, "outcome", {
           agentId: "agent",
+          forwarderId: "forwarder",
           operation: "operate_pay",
           inputHash: `${requestId}-hash`,
           outcome,
@@ -165,7 +169,7 @@ describe("broker dispatch custody", () => {
       const restarted = new DispatchJournal(path);
       for (const { requestId, expected } of outcomes) {
         await expect(
-          restarted.completedOutcome("agent", requestId, {
+          restarted.completedOutcome("forwarder", requestId, {
             operation: "operate_pay",
             inputHash: `${requestId}-hash`,
           }),

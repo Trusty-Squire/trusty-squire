@@ -121,6 +121,7 @@ export class OperatorForwarder {
     )) as { result: unknown; capability?: TabCapability };
     if (reply.capability !== undefined)
       this.sessions.set(reply.capability.sessionId, reply.capability);
+    client.acknowledge(idempotencyKey);
     if (name === "operate_finish" && id !== undefined) this.sessions.delete(id);
     return reply.result;
   }

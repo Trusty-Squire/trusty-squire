@@ -140,11 +140,12 @@ export class OperatorBroker implements BrokerTransportPort {
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
     const dispatch = {
       agentId: principal.agentId,
+      forwarderId: principal.forwarderId ?? principal.agentId,
       operation: tool.name,
       inputHash: inputHash({ name: tool.name, args, capability: input.capability }),
     };
     const completed = await this.journal?.completedOutcome(
-      principal.agentId,
+      principal.forwarderId ?? principal.agentId,
       requestId,
       dispatch,
     );
@@ -225,6 +226,7 @@ export class OperatorBroker implements BrokerTransportPort {
               ].includes(name);
               const commandDispatch = {
                 agentId: principal.agentId,
+                forwarderId: principal.forwarderId ?? principal.agentId,
                 operation: name,
                 inputHash: inputHash({ name, args: commandArgs, capability }),
               };
@@ -313,7 +315,7 @@ export class OperatorBroker implements BrokerTransportPort {
     return { result };
   }
   async reconcile(principal: BrokerPrincipal): Promise<{ outcomes: PendingDispatchOutcome[] }> {
-    return { outcomes: (await this.journal?.pendingOutcomes(principal.agentId)) ?? [] };
+    return { outcomes: (await this.journal?.pendingOutcomes(principal.forwarderId ?? principal.agentId)) ?? [] };
   }
   async reclaim(principal: BrokerPrincipal): Promise<{ capabilities: TabCapability[] }> {
     return { capabilities: this.authority.reclaim(principal) };
@@ -328,18 +330,19 @@ export class OperatorBroker implements BrokerTransportPort {
     if (tool === null || !tool.name.startsWith("operate_")) return false;
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
     return (
-      (await this.journal?.completedOutcome(principal.agentId, requestId, {
+      (await this.journal?.completedOutcome(principal.forwarderId ?? principal.agentId, requestId, {
         operation: tool.name,
         inputHash: inputHash({ name: tool.name, args, capability: input.capability }),
       })) !== undefined
     );
   }
   async acknowledge(principal: BrokerPrincipal, requestId: string): Promise<void> {
-    if (await this.journal?.acknowledge(principal.agentId, requestId))
+    if (await this.journal?.acknowledge(principal.forwarderId ?? principal.agentId, requestId))
       await this.authority.retryQuarantined();
   }
   async disconnect(principal: BrokerPrincipal): Promise<void> {
-    if (await this.journal?.hasOutstanding()) this.authority.detach(principal);
+    if (await this.journal?.hasOutstanding(undefined, principal.forwarderId))
+      this.authority.detach(principal);
     else await this.authority.disconnect(principal);
     this.apis.delete(principal.clientId);
   }

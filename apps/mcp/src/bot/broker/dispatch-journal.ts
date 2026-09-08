@@ -10,6 +10,7 @@ interface DispatchRecord {
   phase: DispatchPhase;
   at: number;
   agentId?: string;
+  forwarderId?: string;
   operation?: string;
   inputHash?: string;
   outcome?: ReconciledDispatchOutcome;
@@ -76,6 +77,7 @@ export class DispatchJournal {
           typeof record.requestId !== "string" ||
           !["entered", "outcome", "acknowledged", "settled"].includes(record.phase) ||
           (record.agentId !== undefined && typeof record.agentId !== "string") ||
+          (record.forwarderId !== undefined && typeof record.forwarderId !== "string") ||
           (record.operation !== undefined && typeof record.operation !== "string") ||
           (record.inputHash !== undefined && typeof record.inputHash !== "string") ||
           (record.outcome !== undefined && !validOutcome(record.outcome))
@@ -101,17 +103,18 @@ export class DispatchJournal {
       );
   }
 
-  async hasOutstanding(sessionId?: string): Promise<boolean> {
+  async hasOutstanding(sessionId?: string, forwarderId?: string): Promise<boolean> {
     return [...(await this.states()).values()].some(
       (record) =>
         (sessionId === undefined || record.sessionId === sessionId) &&
+        (forwarderId === undefined || record.forwarderId === forwarderId) &&
         (record.phase === "entered" || record.phase === "outcome"),
     );
   }
 
-  async pendingOutcomes(agentId: string): Promise<PendingDispatchOutcome[]> {
+  async pendingOutcomes(forwarderId: string): Promise<PendingDispatchOutcome[]> {
     return [...(await this.states()).values()]
-      .filter((record) => record.phase === "outcome" && record.agentId === agentId)
+      .filter((record) => record.phase === "outcome" && record.forwarderId === forwarderId)
       .map((record) => ({
         sessionId: record.sessionId,
         requestId: record.requestId,
@@ -119,18 +122,18 @@ export class DispatchJournal {
       }));
   }
 
-  async hasCompleted(agentId: string, requestId: string): Promise<boolean> {
-    return (await this.completedOutcome(agentId, requestId)) !== undefined;
+  async hasCompleted(forwarderId: string, requestId: string): Promise<boolean> {
+    return (await this.completedOutcome(forwarderId, requestId)) !== undefined;
   }
 
   async completedOutcome(
-    agentId: string,
+    forwarderId: string,
     requestId: string,
     expected?: Pick<DispatchRecord, "operation" | "inputHash">,
   ): Promise<CompletedDispatchOutcome | undefined> {
     const record = [...(await this.states()).values()].find(
       (record) =>
-        record.agentId === agentId &&
+        record.forwarderId === forwarderId &&
         record.requestId === requestId &&
         (expected === undefined ||
           (record.operation === expected.operation && record.inputHash === expected.inputHash)) &&
@@ -147,17 +150,18 @@ export class DispatchJournal {
         };
   }
 
-  async acknowledge(agentId: string, requestId: string): Promise<boolean> {
+  async acknowledge(forwarderId: string, requestId: string): Promise<boolean> {
     const outcomes = [...(await this.states()).values()].filter(
       (record) =>
-        record.agentId === agentId &&
+        record.forwarderId === forwarderId &&
         record.requestId === requestId &&
         record.phase === "outcome",
     );
     await Promise.all(
       outcomes.map(async (record) =>
         await this.record(record.sessionId, record.requestId, "acknowledged", {
-          agentId,
+          agentId: record.agentId,
+          forwarderId,
           operation: record.operation,
           inputHash: record.inputHash,
           outcome: record.outcome,
@@ -171,7 +175,10 @@ export class DispatchJournal {
     sessionId: string,
     requestId: string,
     phase: DispatchPhase,
-    detail?: Pick<DispatchRecord, "agentId" | "operation" | "inputHash" | "outcome">,
+    detail?: Pick<
+      DispatchRecord,
+      "agentId" | "forwarderId" | "operation" | "inputHash" | "outcome"
+    >,
   ): Promise<void> {
     const operation = this.tail.then(async () => {
       await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });

@@ -102,7 +102,7 @@ export async function runBrokerDaemon(): Promise<void> {
         return {};
       }
       if (
-        (await journal.hasOutstanding()) &&
+        (await journal.hasOutstanding(undefined, principal.forwarderId)) &&
         !(method === "tool" && (await operator.canReconcile(principal, id, params)))
       )
         throw new BrokerRefusal(
