@@ -2975,6 +2975,31 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it("does not re-arm the human deadline when the OAuth control never hands off", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/**", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<button id="oauth" onclick="event.preventDefault()">Continue</button>',
+      });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    const handoff = vi.fn(() => {
+      throw new Error("unexpected human handoff");
+    });
+
+    try {
+      await expect(
+        controller.loginWithOAuth("#oauth", 2_500, "google", undefined, undefined, handoff),
+      ).rejects.toBeInstanceOf(OAuthAwaitingHumanError);
+      expect(handoff).not.toHaveBeenCalled();
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
   it("ignores an error= parameter the page already carried before this attempt", async () => {
     // A stale denial from an earlier attempt is still in the address bar; this
     // attempt never navigates, so nothing was observed and it must not fail.

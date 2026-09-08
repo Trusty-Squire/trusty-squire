@@ -13823,7 +13823,7 @@ export class BrowserController {
       this.oauthProviderPageClosed = transient.isClosed();
       this.restoreProductPageWhenOAuthPageCloses(transient, durableProduct);
       this.page = transient;
-      if (onHumanHandoff !== undefined) {
+      if (onHumanHandoff !== undefined && (providerPage !== null || productNavigated)) {
         // Only the facade supplies a new absolute deadline here. Direct callers
         // retain the historical single deadline established above, so
         // loginWithOAuth(..., 3000) remains bounded to 3s total.
