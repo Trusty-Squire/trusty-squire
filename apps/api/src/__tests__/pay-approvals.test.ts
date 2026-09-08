@@ -258,6 +258,7 @@ describe("payment approval relay", () => {
       nonce: created.nonce,
       card_ref: "card_synthetic_1",
       operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
+      account_binding: created.account_binding,
       item: "Synthetic Book",
       reason: "Synthetic test purchase",
       agent: "synthetic-payment-test-agent",
