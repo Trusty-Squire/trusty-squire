@@ -71,9 +71,11 @@ binding. Browser epoch changes invalidate earlier capabilities.
   erase-and-retry recovery for uncertain payments.
 - After a restarted MCP process loses an operator reply, its retry must set MCP
   request metadata `"trusty-squire/recover": true`. This explicitly asks the
-  broker to reconcile the same JSON-RPC request ID with its durable lineage
-  record; ordinary reset IDs are always fresh calls. A recovered start returns
-  its existing session capability without retaining page observations.
+  broker to reconcile its authenticated lineage's newest matching durable
+  operation, input, and capability outcome; the retry may use a new JSON-RPC
+  request ID. Ordinary reset IDs without that metadata are fresh calls. A
+  recovered start returns its existing session capability without retaining page
+  observations.
 - Idle shutdown requires zero connected clients and zero active, admitting, or
   quarantined sessions. Graceful Chrome closure precedes lease release. Socket
   recovery requires process birth, endpoint inode, and old-profile-free evidence.

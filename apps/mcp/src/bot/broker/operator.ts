@@ -59,11 +59,6 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value) ?? "null";
 }
 
-function callerRequestHash(requestId: string): string | undefined {
-  const value = requestId.split(":").at(-1);
-  return value !== undefined && /^[a-f0-9]{64}$/.test(value) ? value : undefined;
-}
-
 function journalForwarderId(principal: BrokerPrincipal): string {
   if (principal.forwarderId === undefined)
     throw new BrokerRefusal("unauthorized", "Forwarder lineage is required for journal custody");
@@ -72,14 +67,11 @@ function journalForwarderId(principal: BrokerPrincipal): string {
 
 function dispatchDetail(
   principal: BrokerPrincipal,
-  requestId: string,
   operation: string,
   inputHashValue: string,
 ) {
-  const requestHash = callerRequestHash(requestId);
   return {
     forwarderId: journalForwarderId(principal),
-    ...(requestHash === undefined ? {} : { callerRequestHash: requestHash }),
     operation,
     inputHash: inputHashValue,
   };
@@ -183,7 +175,6 @@ export class OperatorBroker implements BrokerTransportPort {
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
     const dispatch = dispatchDetail(
       principal,
-      requestId,
       tool.name,
       this.inputHash(principal, { name: tool.name, args, capability: input.capability }),
     );
@@ -232,14 +223,11 @@ export class OperatorBroker implements BrokerTransportPort {
             { sessionId: id, reserve },
             async () => await tool.handler(args, pinnedApi),
           );
-          if (mutationCapableStart)
-            await this.journal?.record(id, requestId, "outcome", {
-              ...dispatch,
-              outcome: reconciliationOutcome(tool.name, observation),
-            });
           internalId = String((observation as { session_id: string }).session_id);
           const session = sessionForCall(internalId);
           if (session === undefined) {
+            await finishProvisionSession(internalId);
+            if (mutationCapableStart) await this.journal?.record(id, requestId, "settled", dispatch);
             return {
               targetId: "no-page",
               invoke: async () => {
@@ -248,6 +236,11 @@ export class OperatorBroker implements BrokerTransportPort {
               close: async () => true,
             };
           }
+          if (mutationCapableStart)
+            await this.journal?.record(id, requestId, "outcome", {
+              ...dispatch,
+              outcome: reconciliationOutcome(tool.name, observation),
+            });
           const targetId = await session.browser.brokerTargetId();
           return {
             targetId,
@@ -265,7 +258,6 @@ export class OperatorBroker implements BrokerTransportPort {
               const mutating = brokerCommandMutates(name, commandArgs);
               const commandDispatch = dispatchDetail(
                 principal,
-                commandId,
                 name,
                 this.inputHash(principal, { name, args: commandArgs, capability }),
               );
@@ -386,18 +378,13 @@ export class OperatorBroker implements BrokerTransportPort {
       }
     | null
   > {
-    const callerHash = params.callerRequestHash;
-    if (typeof callerHash !== "string" || !/^[a-f0-9]{64}$/.test(callerHash))
-      throw new BrokerRefusal("invalid_arguments", "Recovery requires its original caller request hash");
-    const { callerRequestHash: _callerRequestHash, ...toolParams } = params;
-    const input = callSchema.parse(toolParams);
+    const input = callSchema.parse(params);
     const tool = findTool(input.name, this.tools);
     if (tool === null || !tool.name.startsWith("operate_"))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
     const completed = await this.journal?.recoveryOutcome(
       journalForwarderId(principal),
-      callerHash,
       {
         operation: tool.name,
         inputHash: this.inputHash(principal, { name: tool.name, args, capability: input.capability }),

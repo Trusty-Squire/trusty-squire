@@ -61,13 +61,11 @@ export class OperatorForwarder {
   }
   private async recover(
     client: BrokerClient,
-    callerRequestHash: string,
     name: string,
     args: Record<string, unknown>,
     capability: TabCapability | undefined,
   ): Promise<{ requestId: string; result: unknown; capability?: TabCapability } | undefined> {
     const reply = (await client.call("recover", {
-      callerRequestHash,
       name,
       args,
       ...(capability === undefined ? {} : { capability }),
@@ -118,7 +116,7 @@ export class OperatorForwarder {
     )
       throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
     const recovered = recovery.recover
-      ? await this.recover(client, callerRequestHash, name, args, capability)
+      ? await this.recover(client, name, args, capability)
       : undefined;
     if (recovered !== undefined) {
       await client.acknowledge(recovered.requestId);

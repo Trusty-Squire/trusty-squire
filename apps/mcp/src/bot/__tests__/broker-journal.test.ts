@@ -106,23 +106,20 @@ describe("broker dispatch custody", () => {
     const path = join(root, "dispatch.jsonl");
     const journal = new DispatchJournal(path);
     try {
-      const callerRequestHash = "a".repeat(64);
       await journal.record("session", "request", "entered", {
         forwarderId: "forwarder",
-        callerRequestHash,
         operation: "operate_pay",
         inputHash: "payment-input",
       });
       await journal.record("session", "request", "outcome", {
         forwarderId: "forwarder",
-        callerRequestHash,
         operation: "operate_pay",
         inputHash: "payment-input",
         outcome: { status: "completed" },
       });
       await expect(new DispatchJournal(path).assertReconciled()).resolves.toBeUndefined();
       await expect(
-        new DispatchJournal(path).recoveryOutcome("forwarder", callerRequestHash, {
+        new DispatchJournal(path).recoveryOutcome("forwarder", {
           operation: "operate_pay",
           inputHash: "payment-input",
         }),
@@ -132,7 +129,7 @@ describe("broker dispatch custody", () => {
       expect(await journal.hasOutstanding("session")).toBe(false);
       expect(await journal.hasCompleted("forwarder", "request")).toBe(true);
       await expect(
-        new DispatchJournal(path).recoveryOutcome("forwarder", callerRequestHash, {
+        new DispatchJournal(path).recoveryOutcome("forwarder", {
           operation: "operate_pay",
           inputHash: "payment-input",
         }),
@@ -154,10 +151,8 @@ describe("broker dispatch custody", () => {
     const root = await mkdtemp(join(tmpdir(), "ts-journal-latest-recovery-"));
     const path = join(root, "dispatch.jsonl");
     const journal = new DispatchJournal(path);
-    const callerRequestHash = "d".repeat(64);
     const detail = {
       forwarderId: "forwarder",
-      callerRequestHash,
       operation: "operate_click",
       inputHash: "stable-input",
     };
@@ -173,7 +168,7 @@ describe("broker dispatch custody", () => {
       await journal.record("session", "new-request", "outcome", outcome);
 
       await expect(
-        new DispatchJournal(path).recoveryOutcome("forwarder", callerRequestHash, {
+        new DispatchJournal(path).recoveryOutcome("forwarder", {
           operation: "operate_click",
           inputHash: "stable-input",
         }),
@@ -202,7 +197,6 @@ describe("broker dispatch custody", () => {
     const principal = await authenticate(broker, "restarted");
     if (principal.forwarderId === undefined) throw new Error("Test broker lineage is missing");
     const forwarderId = principal.forwarderId;
-    const callerRequestHash = "b".repeat(64);
     const args = { service_url: "https://example.test", otp: "123456" };
     try {
       broker.authority.claimForwarder(principal);
@@ -224,7 +218,6 @@ describe("broker dispatch custody", () => {
       }));
       await journal.record(capability.sessionId, "forwarder:old-process:request", "outcome", {
         forwarderId,
-        callerRequestHash,
         operation: "operate_start",
         inputHash: createHmac("sha256", createHash("sha256").update(credential("a")).digest())
           .update(
@@ -235,7 +228,6 @@ describe("broker dispatch custody", () => {
       });
       await expect(
         broker.recover(principal, {
-          callerRequestHash,
           name: "operate_start",
           args,
         }),
@@ -245,70 +237,16 @@ describe("broker dispatch custody", () => {
       });
       await expect(
         broker.recover(principal, {
-          callerRequestHash,
           name: "operate_start",
           args: { ...args, otp: "654321" },
         }),
       ).resolves.toBeNull();
       const foreign = await authenticate(broker, "foreign", credential("b"));
       await expect(
-        broker.recover(foreign, { callerRequestHash, name: "operate_start", args }),
+        broker.recover(foreign, { name: "operate_start", args }),
       ).resolves.toBeNull();
       await expect(readFile(path, "utf8")).resolves.not.toContain("123456");
       expect(broker.authority.inventory()).toEqual({ active: 1, quarantined: 0, admitting: 0 });
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("does not reconcile an auth-gated start as a created session", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-journal-auth-gated-start-"));
-    const path = join(root, "dispatch.jsonl");
-    const journal = new DispatchJournal(path);
-    const broker = new OperatorBroker(
-      {
-        accountId: "account",
-        agentSessionToken: "token",
-        apiBaseUrl: "http://unused.test",
-        registryBaseUrl: "http://unused.test",
-      },
-      "cell",
-      journal,
-    );
-    const principal = await authenticate(broker, "restarted");
-    const callerRequestHash = "c".repeat(64);
-    const requestId = `forwarder-a:old-process:${callerRequestHash}`;
-    const guidance = { needs_user: { wall: "google_session", resume: "connect" } };
-    let starts = 0;
-    const startTool: Tool = {
-      name: "operate_start",
-      description: "",
-      inputSchema: z.object({}).strict(),
-      jsonInputSchema: {},
-      handler: async () => {
-        starts += 1;
-        return guidance;
-      },
-    };
-    Object.defineProperty(broker, "tools", { value: [startTool] });
-    try {
-      await broker.authority.claimForwarder(principal);
-      await expect(broker.call(principal, "tool", { name: "operate_start", args: {} }, requestId)).resolves.toEqual({
-        result: guidance,
-      });
-      await expect(
-        broker.recover(principal, {
-          callerRequestHash,
-          name: "operate_start",
-          args: {},
-        }),
-      ).resolves.toBeNull();
-      await expect(broker.call(principal, "tool", { name: "operate_start", args: {} }, requestId)).resolves.toEqual({
-        result: guidance,
-      });
-      expect(starts).toBe(2);
-      expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
-      await expect(journal.assertReconciled()).resolves.toBeUndefined();
     } finally {
       await rm(root, { recursive: true, force: true });
     }

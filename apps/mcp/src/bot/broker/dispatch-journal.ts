@@ -10,7 +10,6 @@ interface DispatchRecord {
   phase: DispatchPhase;
   at: number;
   forwarderId?: string;
-  callerRequestHash?: string;
   operation?: string;
   inputHash?: string;
   outcome?: ReconciledDispatchOutcome;
@@ -77,7 +76,6 @@ export class DispatchJournal {
           typeof record.requestId !== "string" ||
           !["entered", "outcome", "acknowledged", "settled"].includes(record.phase) ||
           (record.forwarderId !== undefined && typeof record.forwarderId !== "string") ||
-          (record.callerRequestHash !== undefined && typeof record.callerRequestHash !== "string") ||
           (record.operation !== undefined && typeof record.operation !== "string") ||
           (record.inputHash !== undefined && typeof record.inputHash !== "string") ||
           (record.outcome !== undefined && !validOutcome(record.outcome))
@@ -157,13 +155,11 @@ export class DispatchJournal {
 
   async recoveryOutcome(
     forwarderId: string,
-    callerRequestHash: string,
     expected: Pick<DispatchRecord, "operation" | "inputHash">,
   ): Promise<CompletedDispatchOutcome | undefined> {
     const record = [...(await this.states()).values()].reverse().find(
       (record) =>
         record.forwarderId === forwarderId &&
-        record.callerRequestHash === callerRequestHash &&
         record.operation === expected.operation &&
         record.inputHash === expected.inputHash &&
         record.outcome !== undefined &&
@@ -190,9 +186,6 @@ export class DispatchJournal {
       outcomes.map(async (record) =>
         await this.record(record.sessionId, record.requestId, "acknowledged", {
           forwarderId,
-          ...(record.callerRequestHash === undefined
-            ? {}
-            : { callerRequestHash: record.callerRequestHash }),
           ...(record.operation === undefined ? {} : { operation: record.operation }),
           ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
           ...(record.outcome === undefined ? {} : { outcome: record.outcome }),
@@ -208,7 +201,7 @@ export class DispatchJournal {
     phase: DispatchPhase,
     detail?: Pick<
       DispatchRecord,
-      "forwarderId" | "callerRequestHash" | "operation" | "inputHash" | "outcome"
+      "forwarderId" | "operation" | "inputHash" | "outcome"
     >,
   ): Promise<void> {
     const operation = this.tail.then(async () => {

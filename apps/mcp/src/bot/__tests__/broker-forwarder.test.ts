@@ -88,7 +88,9 @@ describe("MCP broker forwarding", () => {
       authenticate: async () => ({ accountId: "account", agentId: "agent" }),
       call: async (_principal, method, params, requestId) => {
         if (method === "reclaim") return { capabilities: [capability] };
-        if (method === "recover")
+        if (method === "recover") {
+          expect(params).toMatchObject({ name: "operate_pay", args: { session_id: "session" } });
+          expect(params).not.toHaveProperty("callerRequestHash");
           return outcomeRecorded && params.name === "operate_pay"
             ? {
                 requestId: paymentRequest,
@@ -102,6 +104,7 @@ describe("MCP broker forwarding", () => {
                 },
               }
             : null;
+        }
         if (method === "acknowledge") {
           acknowledgements.push(String(params.requestId));
           return {};
@@ -157,7 +160,7 @@ describe("MCP broker forwarding", () => {
       await recorded;
       await expect(lost).rejects.toThrow("connection lost");
       await expect(
-        restarted.invoke("operate_pay", { session_id: "session" }, "7", { recover: true }),
+        restarted.invoke("operate_pay", { session_id: "session" }, "reset-payment-id", { recover: true }),
       ).resolves.toEqual({
         reconciliation: {
           request_id: paymentRequest,
@@ -198,6 +201,7 @@ describe("MCP broker forwarding", () => {
         if (method === "acknowledge") return {};
         if (method === "recover") {
           recoveries++;
+          expect(params).not.toHaveProperty("callerRequestHash");
           return {
             requestId: "prior-broker-request",
             result: {
@@ -236,7 +240,7 @@ describe("MCP broker forwarding", () => {
         forwarder.invoke(
           "operate_click",
           { session_id: "session", ref: "@continue" },
-          "1",
+          "reset-click-id",
           { recover: true },
         ),
       ).resolves.toMatchObject({ reconciliation: { request_id: "prior-broker-request" } });
@@ -277,12 +281,15 @@ describe("MCP broker forwarding", () => {
           acknowledgements.push(String(params.requestId));
           return {};
         }
-        if (method === "recover")
+        if (method === "recover") {
+          expect(params).toMatchObject({ name: "operate_start", args: {} });
+          expect(params).not.toHaveProperty("callerRequestHash");
           return {
             requestId: "lost-start-request",
             capability,
             result: { session_id: "session", broker: { targetId: "target" } },
           };
+        }
         if (params.name === "operate_start") {
           starts++;
           startEntered();
@@ -312,7 +319,7 @@ describe("MCP broker forwarding", () => {
       await (forwarder as unknown as { client?: BrokerClient }).client?.close();
       releaseStart();
       await expect(lost).rejects.toThrow("connection lost");
-      await expect(restarted.invoke("operate_start", {}, "1", { recover: true })).resolves.toMatchObject({
+      await expect(restarted.invoke("operate_start", {}, "reset-start-id", { recover: true })).resolves.toMatchObject({
         session_id: "session",
       });
       await expect(restarted.invoke("operate_observe", { session_id: "session" }, "2")).resolves.toMatchObject({
