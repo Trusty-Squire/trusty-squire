@@ -5000,8 +5000,12 @@ async function executeAct(
   }
   let browser = session.browser;
   const oauthCompletionSource = oauthCompletionSourcePage(session);
-  const compactV2ActionPage =
+  const sourcePage =
     oauthCompletionSource ?? (session.compactV2Active ? compactV2SourcePage(session) : undefined);
+  // Resolve once, including the active-page fallback. Ref resolution, non-ref
+  // operations and their observation must all retain this same page.
+  // Optional invocation preserves the legacy browser test doubles.
+  const compactV2ActionPage = browser.resolveOperationPage?.(sourcePage) ?? sourcePage;
   let completedAction: ProvisionAction = action;
   let sensitiveSource: RecordedValueSource | undefined;
   let cartAffecting = false;
@@ -5036,7 +5040,8 @@ async function executeAct(
             : action.target;
     }
   }
-  if (oauthCompletionSource?.isClosed() && "target" in action) {
+  if (compactV2ActionPage?.isClosed()) {
+    if (!("target" in action)) throw new Error("action source page is closed");
     if (session.compactV2Active) throwCompactV2StaleRef();
     throw new TargetStaleError({
       status: "target_stale",
@@ -5097,7 +5102,7 @@ async function executeAct(
               `Declare it first with an allow_host action if this task spans it.`,
           );
         }
-        await browser.goto(action.url);
+        await browser.goto(action.url, compactV2ActionPage);
         break;
       }
       case "allow_host": {
@@ -5117,7 +5122,7 @@ async function executeAct(
         break;
       }
       case "press": {
-        await browser.pressKey(action.key);
+        await browser.pressKey(action.key, compactV2ActionPage);
         break;
       }
       case "oauth_settle": {
@@ -5125,7 +5130,7 @@ async function executeAct(
         break;
       }
       case "scroll": {
-        await browser.scrollViewport(action.direction ?? "down");
+        await browser.scrollViewport(action.direction ?? "down", compactV2ActionPage);
         break;
       }
       case "type_secret": {

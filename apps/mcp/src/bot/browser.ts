@@ -3174,6 +3174,11 @@ export class BrowserController {
     return this.pageDriver.mainDocumentIdentity(page);
   }
 
+  /** Capture once at the action boundary; never switch tabs during an operation. */
+  resolveOperationPage(sourcePage?: Page): Page | undefined {
+    return sourcePage ?? this.page ?? undefined;
+  }
+
   isActivePage(page: Page): boolean {
     return this.page === page;
   }
@@ -3333,8 +3338,8 @@ export class BrowserController {
     }
     return false;
   }
-  async goto(url: string): Promise<void> {
-    return await this.pageDriver.goto(url);
+  async goto(url: string, page?: Page): Promise<void> {
+    return await this.pageDriver.goto(url, page);
   }
 
   // Pre-warm a domain by visiting its root. Useful before navigating
@@ -5100,16 +5105,19 @@ export class BrowserController {
   // sit outside the viewport and so never enter the element inventory). Scrolls
   // the page by ~80% of a viewport (or to an extreme); the next observe picks
   // up the newly-visible elements.
-  async scrollViewport(direction: "down" | "up" | "bottom" | "top" = "down"): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    await this.page.evaluate((dir: string) => {
+  async scrollViewport(
+    direction: "down" | "up" | "bottom" | "top" = "down",
+    page: Page | null = this.page,
+  ): Promise<void> {
+    if (!page) throw new Error("Browser not started");
+    await page.evaluate((dir: string) => {
       const step = Math.round(window.innerHeight * 0.8);
       if (dir === "bottom") window.scrollTo(0, document.body.scrollHeight);
       else if (dir === "top") window.scrollTo(0, 0);
       else if (dir === "up") window.scrollBy(0, -step);
       else window.scrollBy(0, step);
     }, direction);
-    await this.page.waitForTimeout(350);
+    await page.waitForTimeout(350);
   }
 
   async scrollToEndOfTOS(selector?: string): Promise<{
@@ -14056,15 +14064,15 @@ export class BrowserController {
   // Press a keyboard key (e.g. "Escape" to dismiss a focus-trapped modal that
   // exposes no in-DOM close control). Best-effort. Used by the nav-search
   // overlay handler's dismiss fallback.
-  async pressKey(key: string): Promise<void> {
-    if (!this.page) return;
-    await this.page.keyboard.press(key).catch(() => {});
+  async pressKey(key: string, page: Page | null = this.page): Promise<void> {
+    if (!page) return;
+    await page.keyboard.press(key).catch(() => {});
   }
 
-  async focusedElementLabels(): Promise<string[]> {
-    if (!this.page) return [];
+  async focusedElementLabels(page: Page | null = this.page): Promise<string[]> {
+    if (!page) return [];
     const labels: string[] = [];
-    for (const frame of this.page.frames()) {
+    for (const frame of page.frames()) {
       const frameLabels = await frame
         .evaluate(() => {
           const element = document.activeElement;

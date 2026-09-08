@@ -1122,12 +1122,23 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const context = await browser.newContext();
       const product = await context.newPage();
       const expectedReturnUrl = "https://console.product.test/projects";
+      const controls = `<form onsubmit="event.preventDefault(); document.body.dataset.submits = String(+(document.body.dataset.submits || 0) + 1)">
+        <label>Project name<input id="name"></label><button>Create</button></form>
+        <div style="height:4000px"></div>
+        <script>
+          document.body.dataset.enters = '0';
+          document.body.dataset.scrolls = '0';
+          document.addEventListener('keydown', e => {
+            if (e.key === 'Enter') document.body.dataset.enters = String(+document.body.dataset.enters + 1);
+          });
+          window.addEventListener('scroll', () => document.body.dataset.scrolls = String(+document.body.dataset.scrolls + 1));
+        </script>`;
       await context.route("https://product.test/**", (route) =>
         route.fulfill({
           contentType: "text/html",
           body: `<button id="oauth" onclick='window.open(${JSON.stringify(
             `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
-          )})'>Continue</button>`,
+          )})'>Continue</button>${controls}`,
         }),
       );
       await context.route("https://accounts.google.com/**", (route) =>
@@ -1139,7 +1150,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await context.route("https://console.product.test/**", (route) =>
         route.fulfill({
           contentType: "text/html",
-          body: "<main>Projects</main><button>New project</button>",
+          body: `<main>Projects</main><button>New project</button>${controls}`,
         }),
       );
       await product.goto("https://product.test/login");
@@ -1161,7 +1172,36 @@ describe("BrowserController OAuth popup lifecycle", () => {
         expect(result.url).toBe(expectedReturnUrl);
         expect(result.text).toContain("Projects");
         expect((controller as unknown as { page: Page }).page).toBe(product);
-        expect(controller.completedOAuthPage()?.url()).toBe(expectedReturnUrl);
+        const source = controller.completedOAuthPage()!;
+        expect(source.url()).toBe(expectedReturnUrl);
+        const inputRef = parseElementsTable(result.el_table ?? "").find(
+          (el) => el.label === "Project name",
+        )?.ref;
+        expect(inputRef).toBeDefined();
+        await act(sessionId, { kind: "type", target: inputRef!, text: "Popup project" });
+        expect(await source.locator("#name").inputValue()).toBe("Popup project");
+        expect(await product.locator("#name").inputValue()).toBe("");
+        expect(
+          await controller.focusedElementLabels(controller.resolveOperationPage(source)),
+        ).toContain("Project name");
+        expect(await controller.focusedElementLabels(product)).not.toContain("Project name");
+        const pressed = await act(sessionId, { kind: "press", key: "Enter" });
+        expect(pressed.url).toBe(expectedReturnUrl);
+        expect(await source.locator("body").getAttribute("data-enters")).toBe("1");
+        expect(await source.locator("body").getAttribute("data-submits")).toBe("1");
+        expect(await product.locator("body").getAttribute("data-enters")).toBe("0");
+        expect(await product.locator("body").getAttribute("data-submits")).toBeNull();
+        const scrolled = await act(sessionId, { kind: "scroll", direction: "bottom" });
+        expect(scrolled.url).toBe(expectedReturnUrl);
+        expect(await source.evaluate(() => scrollY)).toBeGreaterThan(0);
+        expect(+(await source.locator("body").getAttribute("data-scrolls"))!).toBeGreaterThan(0);
+        expect(await product.evaluate(() => scrollY)).toBe(0);
+        expect(await product.locator("body").getAttribute("data-scrolls")).toBe("0");
+        const destination = "https://console.product.test/settings";
+        const navigated = await act(sessionId, { kind: "goto", url: destination });
+        expect(navigated.url).toBe(destination);
+        expect(source.url()).toBe(destination);
+        expect(product.url()).toBe("https://product.test/login");
       } finally {
         if (sessionId) await finishProvisionSession(sessionId);
         await context.close();
@@ -1219,6 +1259,16 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await expect(act(sessionId, { kind: "click", target: sourceRef! })).rejects.toMatchObject({
         code: "target_stale",
       });
+      await expect(act(sessionId, { kind: "press", key: "Enter" })).rejects.toThrow(
+        "action source page is closed",
+      );
+      await expect(act(sessionId, { kind: "scroll", direction: "bottom" })).rejects.toThrow(
+        "action source page is closed",
+      );
+      await expect(
+        act(sessionId, { kind: "goto", url: "https://product.test/other" }),
+      ).rejects.toThrow("action source page is closed");
+      expect(product.url()).toBe("https://product.test/login");
       expect(await product.locator("body").getAttribute("data-product-clicked")).toBeNull();
     } finally {
       if (sessionId) await finishProvisionSession(sessionId);
