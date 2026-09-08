@@ -333,6 +333,13 @@ describe("payment approval relay", () => {
     });
     expect(foreignApprove.statusCode).toBe(404);
     expect(foreignApprove.json()).toEqual({ error: "payment_approval_not_found" });
+    const foreignDeny = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/deny`,
+      headers: { cookie: otherWebCookie },
+    });
+    expect(foreignDeny.statusCode).toBe(404);
+    expect(foreignDeny.json()).toEqual({ error: "payment_approval_not_found" });
 
     for (const headers of [{}, { authorization: `Bearer ${agentToken}` }]) {
       const ceremony = await server.inject({
@@ -348,6 +355,12 @@ describe("payment approval relay", () => {
         payload: submission,
       });
       expect(approve.statusCode).toBe(401);
+      const deny = await server.inject({
+        method: "POST",
+        url: `/v1/pay/approvals/${created.id}/deny`,
+        headers,
+      });
+      expect(deny.statusCode).toBe(401);
     }
 
     expect(await deps.pendingPaymentApprovalStore.getById(created.id)).toMatchObject({

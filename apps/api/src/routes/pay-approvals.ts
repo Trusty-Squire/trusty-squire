@@ -664,23 +664,30 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     },
   );
 
-  fastify.post<{ Params: { id: string } }>("/v1/pay/approvals/:id/deny", async (req, reply) => {
-    const record = await opts.deps.pendingPaymentApprovalStore.getById(req.params.id);
-    if (record === null) {
-      reply.code(404).send({ error: "payment_approval_not_found" });
-      return;
-    }
-    const now = opts.deps.now?.() ?? new Date();
-    const denied = await opts.deps.pendingPaymentApprovalStore.deny(record.id, now);
-    if (denied !== "denied") {
-      reply.code(409).send({
-        error:
-          record.expiresAt <= now ? "payment_approval_expired" : "payment_approval_not_pending",
-      });
-      return;
-    }
-    return reply.code(200).send({ status: "denied" });
-  });
+  fastify.post<{ Params: { id: string } }>(
+    "/v1/pay/approvals/:id/deny",
+    { preHandler: opts.requireWeb },
+    async (req, reply) => {
+      const record = await opts.deps.pendingPaymentApprovalStore.getByIdForAccount(
+        req.params.id,
+        req.auth!.account_id,
+      );
+      if (record === null) {
+        reply.code(404).send({ error: "payment_approval_not_found" });
+        return;
+      }
+      const now = opts.deps.now?.() ?? new Date();
+      const denied = await opts.deps.pendingPaymentApprovalStore.deny(record.id, now);
+      if (denied !== "denied") {
+        reply.code(409).send({
+          error:
+            record.expiresAt <= now ? "payment_approval_expired" : "payment_approval_not_pending",
+        });
+        return;
+      }
+      return reply.code(200).send({ status: "denied" });
+    },
+  );
 
   fastify.post<{ Params: { id: string } }>(
     "/v1/pay/approvals/:id/confirm",
