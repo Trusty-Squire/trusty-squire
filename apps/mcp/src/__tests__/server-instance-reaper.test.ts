@@ -18,6 +18,7 @@ import {
   reapStaleServerInstances,
   registerServerInstance,
   readServerInstanceRecord,
+  serverLauncherLineage,
   serverInstanceReapDecision,
   type ParentPidRead,
   type ServerInstanceRecord,
@@ -67,6 +68,20 @@ const decide = (
 ) => serverInstanceReapDecision(entry, self, liveness, parentPid, NOW, BOUNDS);
 
 describe("serverInstanceReapDecision", () => {
+  it("derives ordinary-launch lineage from profile, account, and agent identity", () => {
+    const options = {
+      profileDir: "/tmp/trusty-squire-profile",
+      accountId: "account-a",
+      identity: "claude-code",
+      env: {},
+    };
+    const lineage = serverLauncherLineage(options);
+    expect(lineage).not.toBe("");
+    expect(serverLauncherLineage(options)).toBe(lineage);
+    expect(serverLauncherLineage({ ...options, accountId: "account-b" })).not.toBe(lineage);
+    expect(serverLauncherLineage({ ...options, identity: "codex" })).not.toBe(lineage);
+  });
+
   it("never touches a different agent identity, however orphaned and stale", () => {
     const other = record({ agent_identity: "codex", last_activity_at: NOW - 31 * 60 * 60_000 });
     expect(decide(other, 1)).toBe("keep");
@@ -101,16 +116,24 @@ describe("serverInstanceReapDecision", () => {
   });
 
   it("reaps only a same-lineage draining predecessor after its shutdown deadline", () => {
+    const lineage = serverLauncherLineage({
+      profileDir: "/tmp/trusty-squire-profile",
+      accountId: "account-a",
+      identity: "claude-code",
+      env: {},
+    });
+    const self = { ...SELF, launcher_lineage: lineage };
     const draining = record({
+      launcher_lineage: lineage,
       state: "draining",
       shutdown_deadline_at: NOW - 1,
       last_activity_at: NOW,
       active_sessions: 1,
       in_flight_calls: 1,
     });
-    expect(decide(draining, 50)).toBe("reap");
-    expect(decide({ ...draining, launcher_lineage: "lane-b" }, 50)).toBe("keep");
-    expect(decide({ ...draining, shutdown_deadline_at: NOW + 1 }, 50)).toBe("keep");
+    expect(decide(draining, 50, self)).toBe("reap");
+    expect(decide({ ...draining, launcher_lineage: "lane-b" }, 50, self)).toBe("keep");
+    expect(decide({ ...draining, shutdown_deadline_at: NOW + 1 }, 50, self)).toBe("keep");
   });
 
   it("keeps a quiet same-identity instance that is still doing work", () => {
@@ -379,10 +402,18 @@ describe("registerServerInstance", () => {
     () => {
       const root = mkdtempSync(join(tmpdir(), "ts-server-instances-"));
       roots.push(root);
-      const handle = registerServerInstance({ rootDir: root, identity: "claude-code" });
+      const handle = registerServerInstance({
+        rootDir: root,
+        identity: "claude-code",
+        accountId: "fixture-account",
+      });
       expect(handle).not.toBeNull();
       expect(readServerInstanceRecord(handle!.path)).toMatchObject({
         agent_identity: "claude-code",
+        launcher_lineage: serverLauncherLineage({
+          accountId: "fixture-account",
+          identity: "claude-code",
+        }),
         pid: process.pid,
         active_sessions: 0,
       });

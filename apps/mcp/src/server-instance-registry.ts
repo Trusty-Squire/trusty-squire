@@ -35,8 +35,10 @@ import { join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { sweepOrphanedOwnerProcesses } from "./bot/owner-process-reaper.js";
 import {
+  CHROME_PROFILE_DIR,
   processBirthIdentity,
   processBirthIdentityState,
+  profilePathIdentity,
   type ProcessIdentityState,
 } from "./bot/profile.js";
 import { VERSION } from "./version.js";
@@ -148,13 +150,33 @@ function agentIdentity(): string {
   return (process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "").trim();
 }
 
-function launcherLineage(env: NodeJS.ProcessEnv = process.env): string {
+export function serverLauncherLineage(
+  options: {
+    accountId?: string;
+    identity?: string;
+    env?: NodeJS.ProcessEnv;
+    profileDir?: string;
+  } = {},
+): string {
+  const env = options.env ?? process.env;
   const value = (
     env.TRUSTY_SQUIRE_SERVER_LINEAGE ??
     env.TRUSTY_SQUIRE_FORWARDER_CREDENTIAL ??
     ""
   ).trim();
-  return value.length === 0 ? "" : createHash("sha256").update(value).digest("hex");
+  if (value.length > 0) return createHash("sha256").update(value).digest("hex");
+  const identity = (options.identity ?? agentIdentity()).trim();
+  const accountId = (options.accountId ?? env.TRUSTY_SQUIRE_ACCOUNT_ID ?? "").trim();
+  if (identity.length === 0 || accountId.length === 0) return "";
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        profilePathIdentity(options.profileDir ?? CHROME_PROFILE_DIR),
+        accountId,
+        identity,
+      ]),
+    )
+    .digest("hex");
 }
 
 function ensurePrivateDir(path: string): void {
@@ -345,7 +367,13 @@ export interface ServerInstanceHandle {
  * nothing to publish (non-Linux, no agent identity, unreadable birth identity).
  */
 export function registerServerInstance(
-  options: { rootDir?: string; identity?: string; now?: () => number } = {},
+  options: {
+    rootDir?: string;
+    identity?: string;
+    accountId?: string;
+    launcherLineage?: string;
+    now?: () => number;
+  } = {},
 ): ServerInstanceHandle | null {
   if (process.platform !== "linux") return null;
   const identity = options.identity ?? agentIdentity();
@@ -359,7 +387,8 @@ export function registerServerInstance(
   let record: ServerInstanceRecord = {
     version: 1,
     agent_identity: identity,
-    launcher_lineage: launcherLineage(),
+    launcher_lineage:
+      options.launcherLineage ?? serverLauncherLineage({ accountId: options.accountId, identity }),
     state: "serving",
     pid: birth.pid,
     start_time: birth.start_time,
@@ -431,6 +460,7 @@ export interface ServerInstanceReapSummary {
 export interface ServerInstanceReapRuntime {
   rootDir?: string;
   self?: { agent_identity: string; launcher_lineage?: string; pid: number; start_time: string };
+  launcherLineage?: string;
   bounds?: ServerReapBounds;
   now?: () => number;
   readBirthState?: (identity: ServerBirthIdentity) => ProcessIdentityState;
@@ -494,7 +524,7 @@ export async function reapStaleServerInstances(
   const birth = processBirthIdentity(process.pid);
   const self = runtime.self ?? {
     agent_identity: agentIdentity(),
-    launcher_lineage: launcherLineage(),
+    launcher_lineage: runtime.launcherLineage ?? serverLauncherLineage(),
     pid: process.pid,
     start_time: birth?.start_time ?? "unknown",
   };

@@ -31,6 +31,7 @@ import {
   idleTimeoutWithSessionMs,
   reapStaleServerInstances,
   registerServerInstance,
+  serverLauncherLineage,
   shutdownDeadlineMs,
 } from "./server-instance-registry.js";
 import { buildToolRegistry, findTool } from "./tools/index.js";
@@ -403,21 +404,6 @@ export async function runServer(): Promise<void> {
   // sweeps strict process-only manifests, then tracks exact local browser and
   // session-helper identities for launches owned by this server.
   startOwnerProcessReaper();
-  // Reconnects leave the superseded instance behind: a live box carried a
-  // superseded server beside its replacement plus two orphaned to init for
-  // ~31 hours, each keeping a browser tree resident. Reap prior instances of
-  // OUR agent identity that are orphaned or past their own idle bound, before
-  // serving — never by process name, never one still serving a client. Purely
-  // housekeeping, so a failure here must not stop the server from starting.
-  try {
-    await reapStaleServerInstances();
-  } catch (err) {
-    process.stderr.write(
-      `[trusty-squire] stale server reap failed: ${
-        err instanceof Error ? err.message : String(err)
-      }\n`,
-    );
-  }
   // Startup breadcrumb on stderr (which lands in the host agent's MCP
   // log). A silent no-op was the worst part of the entrypoint-guard
   // bug — this line makes "did the server actually start?" answerable
@@ -448,6 +434,18 @@ export async function runServer(): Promise<void> {
     }
   };
   const api = await loadPublishedAccountSession();
+  const instanceLineage = serverLauncherLineage({
+    accountId: sessionGuard.boundAccountId() ?? undefined,
+  });
+  try {
+    await reapStaleServerInstances({ launcherLineage: instanceLineage });
+  } catch (err) {
+    process.stderr.write(
+      `[trusty-squire] stale server reap failed: ${
+        err instanceof Error ? err.message : String(err)
+      }\n`,
+    );
+  }
 
   const callAdmission = createServerCallAdmission();
   const brokerPath = process.env.TRUSTY_SQUIRE_BROKER_SOCKET;
@@ -464,7 +462,7 @@ export async function runServer(): Promise<void> {
   // Publishes what a later launch of this identity needs to tell "still
   // serving a client" from "wedged": last inbound message, open sessions,
   // in-flight calls. Without it every prior instance looks equally idle.
-  const instance = registerServerInstance();
+  const instance = registerServerInstance({ launcherLineage: instanceLineage });
 
   // A stdio client can disappear without sending a signal (for example when
   // its parent agent exits). Chrome keeps Node's event loop alive in that
