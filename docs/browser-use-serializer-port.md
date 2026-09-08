@@ -105,8 +105,9 @@ visible product, price, form and interaction-role context ahead of decorative
 elements. It traverses open shadow roots; closed roots remain uninspectable. A
 listener-only custom element outside that prioritized budget fails closed rather
 than being inferred interactive. A custom wrapper's explicit label can name its
-sole enabled control only after the wrapper and every descendant are counted;
-competing controls prevent label inheritance.
+sole enabled interactive descendant only after the wrapper and every descendant
+are counted; hidden or disabled inputs do not compete for ownership, while
+multiple genuine controls prevent label inheritance.
 
 
 Unlabelled, non-interactive SVG rows are omitted. Interactive SVG descendants

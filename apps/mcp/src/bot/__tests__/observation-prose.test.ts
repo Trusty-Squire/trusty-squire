@@ -31,9 +31,11 @@ describe("interleaved observation DOM", () => {
     const page = await browser.newPage();
     try {
       await page.setContent('<span id="listener">Continue</span>');
-      await page.locator("#listener").evaluate((element) =>
-        element.addEventListener("click", () => element.setAttribute("data-clicked", "yes")),
-      );
+      await page
+        .locator("#listener")
+        .evaluate((element) =>
+          element.addEventListener("click", () => element.setAttribute("data-clicked", "yes")),
+        );
       const capture = await captureThroughController(page);
       const listener = capture.elements.find((element) => element.id === "listener")!;
       expect(listener).toMatchObject({ tag: "span" });
@@ -50,9 +52,11 @@ describe("interleaved observation DOM", () => {
       await page.setContent(
         `${Array.from({ length: 1_000 }, (_, index) => `<span id="ordinary-${index}">Item</span>`).join("")}<span id="late-listener">Continue</span>`,
       );
-      await page.locator("#late-listener").evaluate((element) =>
-        element.addEventListener("click", () => element.setAttribute("data-clicked", "yes")),
-      );
+      await page
+        .locator("#late-listener")
+        .evaluate((element) =>
+          element.addEventListener("click", () => element.setAttribute("data-clicked", "yes")),
+        );
       const capture = await captureThroughController(page);
       const listener = capture.elements.find((element) => element.id === "late-listener")!;
       expect(listener).toMatchObject({ tag: "span" });

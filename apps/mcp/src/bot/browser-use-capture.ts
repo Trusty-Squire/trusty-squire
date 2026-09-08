@@ -411,8 +411,8 @@ export async function captureBrowserUseDOM(
                     frameListeners.add(d.node.backendNodeId);
                   }),
                 );
-              }
             }
+          }
         } catch {}
         for (const [backendNodeId, element] of frameBindings) bindings.set(backendNodeId, element);
         for (const backendNodeId of frameListeners) listeners.add(backendNodeId);
