@@ -13,6 +13,7 @@
 // "am I main?" guard — duplicated in cli.ts and server.ts, and wrong in
 // both when launched via a bin symlink — is gone by construction.
 import process from "node:process";
+import { runBrokerDaemon } from "./bot/broker/daemon.js";
 import { MissingSessionError } from "./api-client.js";
 import { runCli } from "./install/cli.js";
 import { runServer } from "./server.js";
@@ -33,12 +34,17 @@ if (isVersionFlag) {
 }
 
 const isServer = argv[0] === "server";
+const isBroker = argv[0] === "broker";
 const isSkill = argv[0] === "skill";
 // NB: the `housekeeper` subcommand moved to its own operator-only package
 // (@trusty-squire/housekeeper, the `ts-housekeeper` bin). `mcp housekeeper`
 // no longer exists here; the systemd timer invokes ts-housekeeper directly.
 
 async function dispatch(): Promise<number> {
+  if (isBroker) {
+    await runBrokerDaemon();
+    return 0;
+  }
   if (isServer) {
     await runServer();
     // runServer force-exits when its client disconnects or it receives a
@@ -65,7 +71,7 @@ dispatch()
     //
     // The `server` branch exits from runServer's disconnect/signal shutdown
     // path; `skill` returns its own code via T30 taxonomy.
-    if (!isServer) process.exit(code);
+    if (!isServer && !isBroker) process.exit(code);
   })
   .catch((err: unknown) => {
     // stderr lands in the host agent's MCP log; keep it useful.

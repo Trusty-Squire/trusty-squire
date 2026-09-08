@@ -794,6 +794,12 @@ in `apps/mcp/src/session.ts`.
 The public operator contract and capability migration are owned by
 [`docs/operator-tool-surface.md`](docs/operator-tool-surface.md).
 
+## Cross-process browser broker
+
+The opt-in broker custody, maintenance, recovery, and qualification contracts live
+in [`docs/browser-broker.md`](docs/browser-broker.md). Mechanical fixture acceptance
+does not qualify real Google auth or authorize changing the production default.
+
 ## Maintaining this file
 
 This file is a living contract, not a historical record. Keep it for durable,

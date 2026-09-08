@@ -265,28 +265,50 @@ function linuxProcessUidState(pid: number): ProcessIdentityState {
   }
 }
 
-function linuxProfileProcessGroupMarkerState(
+export interface ProfileGroupReaders {
+  processIds?: () => number[];
+  groupId?: (pid: number) => LinuxProcessGroupIdRead;
+  markerState?: (pid: number, marker: string) => ProcessIdentityState;
+  uidState?: (pid: number) => ProcessIdentityState;
+  profileState?: (pid: number, profileDir: string) => ProcessIdentityState;
+}
+
+export function profileProcessGroupMarkerState(
   identity: ProfileProcessIdentity,
+  readers: ProfileGroupReaders = {},
 ): ProcessIdentityState {
   if (process.platform !== "linux" || identity.process_marker === undefined) return "stale";
+  if (identity.process_group_id === undefined || identity.process_group_id === "unknown")
+    return "unknown";
   let unknown = false;
   try {
-    for (const entry of readdirSync("/proc")) {
-      if (!/^\d+$/.test(entry)) continue;
-      const pid = Number(entry);
-      const markerState = linuxOperatorMarkerState(pid, identity.process_marker);
+    const pids =
+      readers.processIds?.() ??
+      readdirSync("/proc")
+        .filter((entry) => /^\d+$/.test(entry))
+        .map(Number);
+    for (const pid of pids) {
+      const groupId = (readers.groupId ?? readLinuxProcessGroupId)(pid);
+      // This is a GROUP proof. An unreadable marker on a process in a proven
+      // different group cannot keep this dead owner's reaper alive forever.
+      if (groupId !== "unknown" && groupId !== identity.process_group_id) continue;
+      const markerState = (readers.markerState ?? linuxOperatorMarkerState)(
+        pid,
+        identity.process_marker,
+      );
       if (markerState === "stale") continue;
       if (markerState === "unknown") {
-        if (linuxProcessUidState(pid) !== "stale") unknown = true;
+        if ((readers.uidState ?? linuxProcessUidState)(pid) !== "stale") unknown = true;
         continue;
       }
-      const profileState = processProfileState(pid, identity.user_data_dir);
+      const profileState = (readers.profileState ?? processProfileState)(
+        pid,
+        identity.user_data_dir,
+      );
       if (profileState !== "matching") {
         unknown = true;
         continue;
       }
-      const groupId = readLinuxProcessGroupId(pid);
-      if (identity.process_group_id === "unknown") return "unknown";
       if (groupId === identity.process_group_id) return "matching";
       if (groupId === "unknown") unknown = true;
     }
@@ -311,7 +333,7 @@ export function profileProcessIdentityState(
   if (identity.process_marker === undefined || identity.process_group_id === undefined) {
     return "stale";
   }
-  return readers.readGroupMarkerState?.(identity) ?? linuxProfileProcessGroupMarkerState(identity);
+  return readers.readGroupMarkerState?.(identity) ?? profileProcessGroupMarkerState(identity);
 }
 
 export function profileProcessMatches(
