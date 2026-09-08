@@ -8931,6 +8931,7 @@ describe("operate_pay tool completion — system-owned approval wait [P0]", () =
     const immediateApprovalReads: boolean[] = [];
     const nonce = "kobee-nonce";
     const agent = "kobee-agent";
+    const accountBinding = "account-binding-kobee";
     const expiresAt = new Date(Date.now() + 600_000).toISOString();
 
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -8942,7 +8943,7 @@ describe("operate_pay tool completion — system-owned approval wait [P0]", () =
       if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
         approvalBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
         return Response.json(
-          { id: "appr_kobee", nonce, agent, expires_at: expiresAt },
+          { id: "appr_kobee", nonce, agent, account_binding: accountBinding, expires_at: expiresAt },
           { status: 201 },
         );
       }
@@ -8963,6 +8964,7 @@ describe("operate_pay tool completion — system-owned approval wait [P0]", () =
             status: "pending",
             ...CHECKOUT,
             nonce,
+            account_binding: accountBinding,
             card_ref: "card_kobee",
             operator_pubkey: operatorPublicKey,
             jws: null,
@@ -8974,6 +8976,7 @@ describe("operate_pay tool completion — system-owned approval wait [P0]", () =
           .update(Buffer.from(operatorPublicKey, "base64url"))
           .digest("base64url");
         const canonical = canonicalize({
+          account_binding: accountBinding,
           approval_id: "appr_kobee",
           merchant: CHECKOUT.merchant,
           checkout_origin: CHECKOUT.checkout_origin,
@@ -9007,6 +9010,7 @@ describe("operate_pay tool completion — system-owned approval wait [P0]", () =
           status: "approved",
           ...CHECKOUT,
           nonce,
+          account_binding: accountBinding,
           card_ref: "card_kobee",
           operator_pubkey: operatorPublicKey,
           jws,
