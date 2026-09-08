@@ -492,7 +492,11 @@ export async function captureBrowserUseDOM(
       const custom = n.nodeName.includes("-");
       const label = n.attributes["aria-label"]?.trim() || n.attributes.title?.trim();
       if (custom && label && sole && !ownedLabels.has(sole.id)) ownedLabels.set(sole.id, label);
-      const native = ["BUTTON", "INPUT", "SELECT", "TEXTAREA", "A"].includes(n.nodeName);
+      const native =
+        ["BUTTON", "SELECT", "TEXTAREA", "A"].includes(n.nodeName) ||
+        (n.nodeName === "INPUT" &&
+          n.attributes.type?.toLowerCase() !== "hidden" &&
+          !("disabled" in n.attributes));
       const explicit =
         n.clickListener ||
         [
