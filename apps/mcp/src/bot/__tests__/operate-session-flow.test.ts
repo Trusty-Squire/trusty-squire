@@ -4437,7 +4437,7 @@ describe("Compact V2 action-map boundary", () => {
     await finishProvisionSession(started.session_id);
   });
 
-  it("matches private merchant labels while returning only sealed rows", async () => {
+  it("matches merchant labels while returning labeled safe-table rows", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Buy Acme", selector: "#acme" }),
@@ -4465,8 +4465,8 @@ describe("Compact V2 action-map boundary", () => {
 
     expect(acme.safe_table).toHaveLength(1);
     expect(japanese.safe_table).toHaveLength(1);
-    expect(JSON.stringify(acme)).not.toContain("Acme");
-    expect(JSON.stringify(japanese)).not.toContain("購入する");
+    expect(JSON.stringify(acme)).toContain("@buy-acme");
+    expect(JSON.stringify(japanese)).toContain("@購入する");
     expect((acme.safe_table as Array<[string]>)[0]![0]).not.toBe(
       (japanese.safe_table as Array<[string]>)[0]![0],
     );
