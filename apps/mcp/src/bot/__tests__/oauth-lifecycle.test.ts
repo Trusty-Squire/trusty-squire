@@ -1762,6 +1762,101 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it("does not let an OAuth popup replace a queued ordinary click", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://product.test/login";
+    const ordinaryUrl = "https://console.product.test/ordinary";
+    const oauthReturnUrl = "https://console.product.test/oauth-return";
+    let sessionId: string | undefined;
+    try {
+      await context.route("https://product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<button id="ordinary" onclick="window.open('${ordinaryUrl}')">Open ordinary tab</button><button id="oauth" onclick='window.open(${JSON.stringify(
+            `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(oauthReturnUrl)}`,
+          )})'>Continue with Google</button>`,
+        }),
+      );
+      await context.route("https://accounts.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<script>location.replace(${JSON.stringify(oauthReturnUrl)})</script>`,
+        }),
+      );
+      await context.route("https://console.product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body:
+            route.request().url() === ordinaryUrl
+              ? "<main>Ordinary tab</main>"
+              : "<main>OAuth return tab</main>",
+        }),
+      );
+      await product.goto(productUrl);
+      const controller = BrowserController.fromHarnessPage(product);
+      const started = await startHarnessProvisionSession({ browser: controller, serviceUrl: productUrl });
+      sessionId = started.session_id;
+      const ordinaryRef = parseElementsTable(started.el_table ?? "").find(
+        (element) => element.label === "Open ordinary tab",
+      )?.ref;
+      const oauthRef = parseElementsTable(started.el_table ?? "").find(
+        (element) => element.label === "Continue with Google",
+      )?.ref;
+      expect(ordinaryRef).toBeDefined();
+      expect(oauthRef).toBeDefined();
+
+      let ordinaryAdoptionEntered!: () => void;
+      let resumeOrdinaryAdoption!: () => void;
+      const ordinaryAdoption = new Promise<void>((resolve) => {
+        ordinaryAdoptionEntered = resolve;
+      });
+      const ordinaryAdoptionResume = new Promise<void>((resolve) => {
+        resumeOrdinaryAdoption = resolve;
+      });
+      const originalAdopt = controller.adoptOpenedTab.bind(controller);
+      let firstCall = true;
+      const adoptionSpy = vi
+        .spyOn(controller, "adoptOpenedTab")
+        .mockImplementation(async (graceMs?: number): Promise<string | null> => {
+          if (firstCall) {
+            firstCall = false;
+            ordinaryAdoptionEntered();
+            await ordinaryAdoptionResume;
+          }
+          return await originalAdopt(graceMs);
+        });
+
+      const ordinary = act(sessionId, { kind: "click", target: ordinaryRef! });
+      await ordinaryAdoption;
+      const popupBeforeRelease = product
+        .waitForEvent("popup")
+        .then(() => true)
+        .catch(() => false);
+      const oauth = act(sessionId, {
+        kind: "oauth_login",
+        target: oauthRef!,
+        provider: "google",
+      });
+      await expect(
+        Promise.race([
+          popupBeforeRelease,
+          new Promise<false>((resolve) => setTimeout(() => resolve(false), 100)),
+        ]),
+      ).resolves.toBe(false);
+      resumeOrdinaryAdoption();
+
+      const ordinaryResult = await ordinary;
+      adoptionSpy.mockRestore();
+      expect(ordinaryResult.url).toBe(ordinaryUrl);
+      await expect(oauth).rejects.toThrow("stale_ref");
+      expect(context.pages().some((page) => page.url() === oauthReturnUrl)).toBe(false);
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
+
   it("keeps queued ordinary clicks on their captured page", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();

@@ -4955,7 +4955,13 @@ async function actInternally(
           deadline,
           capturedOperationPage,
         );
-      return (action.kind === "click" || action.kind === "js_click") && session !== undefined
+      return (
+        (action.kind === "click" ||
+          action.kind === "js_click" ||
+          action.kind === "oauth_login" ||
+          action.kind === "oauth_click") &&
+        session !== undefined
+      )
         ? await withOpenedTabAdoptionLease(session.browser, run)
         : await run();
     };
@@ -5003,7 +5009,13 @@ export async function act(
           deadline,
           capturedOperationPage,
         );
-      return (action.kind === "click" || action.kind === "js_click") && session !== undefined
+      return (
+        (action.kind === "click" ||
+          action.kind === "js_click" ||
+          action.kind === "oauth_login" ||
+          action.kind === "oauth_click") &&
+        session !== undefined
+      )
         ? await withOpenedTabAdoptionLease(session.browser, run)
         : await run();
     };
