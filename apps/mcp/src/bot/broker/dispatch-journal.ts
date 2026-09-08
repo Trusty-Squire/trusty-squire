@@ -85,12 +85,26 @@ export class DispatchJournal {
   }
 
   async hasCompleted(agentId: string, requestId: string): Promise<boolean> {
-    return [...(await this.states()).values()].some(
+    return (await this.completedOutcome(agentId, requestId)) !== undefined;
+  }
+
+  async completedOutcome(
+    agentId: string,
+    requestId: string,
+  ): Promise<PendingDispatchOutcome | undefined> {
+    const record = [...(await this.states()).values()].find(
       (record) =>
         record.agentId === agentId &&
         record.requestId === requestId &&
         (record.phase === "outcome" || record.phase === "acknowledged"),
     );
+    return record === undefined
+      ? undefined
+      : {
+          sessionId: record.sessionId,
+          requestId: record.requestId,
+          operation: record.operation ?? "operate mutation",
+        };
   }
 
   async acknowledge(agentId: string, requestId: string): Promise<boolean> {

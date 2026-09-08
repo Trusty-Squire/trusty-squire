@@ -32,19 +32,23 @@ export class OperatorForwarder {
     }
     return this.connection;
   }
-  private async reconcile(client: BrokerClient): Promise<void> {
+  private async reconcile(client: BrokerClient, requestId: string): Promise<void> {
     const result = (await client.call("reconcile", {})) as {
       outcomes?: Array<{ requestId: string; operation: string }>;
     };
     const outcomes = result.outcomes ?? [];
     if (outcomes.length === 0) return;
-    for (const outcome of outcomes) client.acknowledge(outcome.requestId);
+    if (outcomes.some((outcome) => outcome.requestId === requestId)) return;
     throw new BrokerRefusal(
       "outcome_unknown",
       `Prior ${outcomes.map((outcome) => outcome.operation).join(", ")} completed without a delivered result; do not replay it`,
     );
   }
-  async invoke(name: string, args: Record<string, unknown>): Promise<unknown> {
+  async invoke(
+    name: string,
+    args: Record<string, unknown>,
+    requestId: string = randomUUID(),
+  ): Promise<unknown> {
     const starting =
       name === "operate_start" || (name === "operate_recipe_run" && args.session_id === undefined);
     if (starting && this.connection !== undefined) {
@@ -56,7 +60,7 @@ export class OperatorForwarder {
       }
     }
     const client = await this.connect();
-    await this.reconcile(client);
+    await this.reconcile(client, requestId);
     if (!starting && args.session_id === undefined && this.sessions.size === 1)
       args = { ...args, session_id: this.sessions.keys().next().value };
     const id = typeof args.session_id === "string" ? args.session_id : undefined;
@@ -67,11 +71,15 @@ export class OperatorForwarder {
       capability === undefined
     )
       throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
-    const reply = (await client.call("tool", {
-      name,
-      args,
-      ...(capability === undefined ? {} : { capability }),
-    }, randomUUID())) as { result: unknown; capability?: TabCapability };
+    const reply = (await client.call(
+      "tool",
+      {
+        name,
+        args,
+        ...(capability === undefined ? {} : { capability }),
+      },
+      requestId,
+    )) as { result: unknown; capability?: TabCapability };
     if (reply.capability !== undefined)
       this.sessions.set(reply.capability.sessionId, reply.capability);
     if (name === "operate_finish" && id !== undefined) this.sessions.delete(id);

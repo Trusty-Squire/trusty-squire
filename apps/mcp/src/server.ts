@@ -230,7 +230,9 @@ export async function buildServer(
     try {
       activeApi.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
       if (operatorForwarder !== undefined && tool.name.startsWith("operate_")) {
-        return toolResultContent(await operatorForwarder.invoke(tool.name, parsed.data));
+        return toolResultContent(
+          await operatorForwarder.invoke(tool.name, parsed.data, String(req.id)),
+        );
       }
       const invoke = async () =>
         await tool.handler(parsed.data, activeApi, {

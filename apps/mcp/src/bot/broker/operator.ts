@@ -90,11 +90,17 @@ export class OperatorBroker implements BrokerTransportPort {
     if (tool === null || !tool.name.startsWith("operate_"))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
-    if (await this.journal?.hasCompleted(principal.agentId, requestId))
-      throw new BrokerRefusal(
-        "outcome_unknown",
-        "This mutation result was already reconciled; never replay it",
-      );
+    const completed = await this.journal?.completedOutcome(principal.agentId, requestId);
+    if (completed !== undefined)
+      return {
+        result: {
+          reconciliation: {
+            request_id: completed.requestId,
+            operation: completed.operation,
+            outcome: "completed",
+          },
+        },
+      };
     let api = this.apis.get(principal.clientId);
     if (api === undefined) {
       api = new ApiClient({ ...this.config, agentIdentity: principal.agentId });
@@ -239,6 +245,9 @@ export class OperatorBroker implements BrokerTransportPort {
   }
   async reconcile(principal: BrokerPrincipal): Promise<{ outcomes: PendingDispatchOutcome[] }> {
     return { outcomes: (await this.journal?.pendingOutcomes(principal.agentId)) ?? [] };
+  }
+  async canReconcile(principal: BrokerPrincipal, requestId: string): Promise<boolean> {
+    return (await this.journal?.completedOutcome(principal.agentId, requestId)) !== undefined;
   }
   async acknowledge(principal: BrokerPrincipal, requestId: string): Promise<void> {
     if (await this.journal?.acknowledge(principal.agentId, requestId))

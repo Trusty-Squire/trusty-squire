@@ -99,7 +99,10 @@ export async function runBrokerDaemon(): Promise<void> {
         await operator.acknowledge(principal, params.requestId);
         return {};
       }
-      if (await journal.hasOutstanding())
+      if (
+        (await journal.hasOutstanding()) &&
+        !(method === "tool" && (await operator.canReconcile(principal, id)))
+      )
         throw new BrokerRefusal(
           "outcome_unknown",
           "Prior mutation outcome awaits reconciliation; reconnect without replaying it",
