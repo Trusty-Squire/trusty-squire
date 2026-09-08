@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type Page } from "playwright";
+import { checkoutFieldSetSignature } from "@trusty-squire/recipe-schema";
 import {
   BrowserController,
   OAuthAwaitingHumanError,
@@ -18,12 +19,16 @@ import {
   act,
   cartAdd,
   cartClear,
+  captureScreenshot,
+  checkoutShapeSignatureForSession,
+  extractCredentials,
   finishProvisionSession,
   formSelectMany,
   observe,
   parseElementsTable,
   replayOperatorRecipe,
   startHarnessProvisionSession,
+  verifyPostcondition,
 } from "../provision-session.js";
 import type { OperatorRecipe } from "../operator-recipe.js";
 import { sessionForCall } from "../session/lifecycle.js";
@@ -1150,6 +1155,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
           </select>
         </label>
         <label>Replay name<input id="replay-name" name="full_name" data-testid="replay-name"></label>
+        <input type="hidden" name="__CHECKOUT_FIELD__">
+        <div>API Key <span id="credential">••••</span><button id="reveal" onclick="document.querySelector('#credential').textContent = window.credentialValue">Show API key</button></div>
         <button id="add" onclick="document.querySelector('#line')?.removeAttribute('hidden')">Add to Cart</button>
         <div id="line" data-testid="line-item" hidden>
           <a href="/products/popup" data-product-identity="popup-product">Popup product</a>
@@ -1159,6 +1166,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         <script>
           document.body.dataset.enters = '0';
           document.body.dataset.scrolls = '0';
+          window.credentialValue = '__CREDENTIAL__';
           document.addEventListener('keydown', e => {
             if (e.key === 'Enter') document.body.dataset.enters = String(+document.body.dataset.enters + 1);
           });
@@ -1176,7 +1184,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
           contentType: "text/html",
           body: `<button id="oauth" onclick='window.open(${JSON.stringify(
             `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
-          )})'>Continue</button>${controls}`,
+          )})'>Continue</button>${controls
+            .replaceAll("__CHECKOUT_FIELD__", "product_checkout_marker")
+            .replaceAll("__CREDENTIAL__", "sk_product_abcdefgh1234567890")}`,
         }),
       );
       await context.route("https://accounts.google.com/**", (route) =>
@@ -1188,7 +1198,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await context.route("https://console.product.test/**", (route) =>
         route.fulfill({
           contentType: "text/html",
-          body: `<main>Projects</main><button>New project</button>${controls}`,
+          body: `<main>Projects</main><button>New project</button>${controls
+            .replaceAll("__CHECKOUT_FIELD__", "source_checkout_marker")
+            .replaceAll("__CREDENTIAL__", "sk_source_abcdefgh1234567890")}`,
         }),
       );
       await product.goto(productUrl);
@@ -1212,6 +1224,30 @@ describe("BrowserController OAuth popup lifecycle", () => {
         expect((controller as unknown as { page: Page }).page).toBe(product);
         const source = controller.completedOAuthPage()!;
         expect(source.url()).toBe(expectedReturnUrl);
+        const reobserved = await observe(sessionId);
+        expect(reobserved.url).toBe(expectedReturnUrl);
+        const screenshot = await captureScreenshot(sessionId);
+        expect(screenshot.url).toBe(expectedReturnUrl);
+        const postcondition = await verifyPostcondition(sessionId, {
+          kind: "execute_capability",
+          describe: "Projects are visible",
+          success_signal: { text_present: "Projects" },
+        });
+        expect(postcondition).toMatchObject({ confirmed: true });
+        const checkoutSignature = await checkoutShapeSignatureForSession(sessionId);
+        const productSignature = checkoutFieldSetSignature(
+          await product.locator("input,select,textarea").evaluateAll((elements) =>
+            elements
+              .map((element) => element.getAttribute("name") ?? element.getAttribute("id") ?? "")
+              .filter((name) => name.length > 0),
+          ),
+        );
+        expect(checkoutSignature).not.toBe(productSignature);
+        const extracted = await extractCredentials(sessionId);
+        expect(extracted.url).toBe(expectedReturnUrl);
+        expect(Object.values(extracted.credentials)).toContain("sk_source_abcdefgh1234567890");
+        expect(await source.locator("#credential").textContent()).toBe("sk_source_abcdefgh1234567890");
+        expect(await product.locator("#credential").textContent()).toBe("••••");
         const inputRef = parseElementsTable(result.el_table ?? "").find(
           (el) => el.label === "Project name",
         )?.ref;

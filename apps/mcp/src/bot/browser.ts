@@ -3179,6 +3179,17 @@ export class BrowserController {
     return sourcePage;
   }
 
+  async withOperationPage<T>(page: Page | undefined, operation: () => Promise<T>): Promise<T> {
+    if (page === undefined || page === this.page) return await operation();
+    const previousPage = this.page;
+    this.page = page;
+    try {
+      return await operation();
+    } finally {
+      this.page = previousPage;
+    }
+  }
+
   isActivePage(page: Page): boolean {
     return this.page === page;
   }

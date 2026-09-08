@@ -1314,6 +1314,10 @@ function operationPageForSession(session: Session): Page | undefined {
   return session.browser.resolveOperationPage?.(sourcePage) ?? sourcePage;
 }
 
+async function withOperationPage<T>(session: Session, operation: () => Promise<T>): Promise<T> {
+  return await session.browser.withOperationPage(operationPageForSession(session), operation);
+}
+
 function rememberOAuthCompletionSourcePage(
   session: object,
   page: OAuthCompletionEvidence["page"] | undefined,
@@ -2237,7 +2241,7 @@ export async function observe(
 ): Promise<Observation> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  return await observeSession(session, detail);
+  return await observeSession(session, detail, undefined, operationPageForSession(session));
 }
 
 export interface ScreenshotCapture {
@@ -2256,14 +2260,16 @@ export async function captureScreenshot(
 ): Promise<ScreenshotCapture> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const captured = await session.browser.captureOperatorScreenshot(opts);
-  return {
-    session_id: sessionId,
-    url: session.browser.currentUrl(),
-    frame_url: captured.frameUrl,
-    frame_count: captured.frameCount,
-    image: { mime_type: "image/jpeg", data_base64: captured.base64 },
-  };
+  return await withOperationPage(session, async () => {
+    const captured = await session.browser.captureOperatorScreenshot(opts);
+    return {
+      session_id: sessionId,
+      url: session.browser.currentUrl(),
+      frame_url: captured.frameUrl,
+      frame_count: captured.frameCount,
+      image: { mime_type: "image/jpeg", data_base64: captured.base64 },
+    };
+  });
 }
 
 // Hosts to seed credential EGRESS from when storing a key extracted in this
@@ -2272,7 +2278,10 @@ export async function captureScreenshot(
 export function observedHostsForSession(sessionId: string): string[] {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  widenAllowedHostsFromUrl(session, session.browser.currentUrl());
+  widenAllowedHostsFromUrl(
+    session,
+    operationPageForSession(session)?.url() ?? session.browser.currentUrl(),
+  );
   return [...new Set(egressSeedHosts(session))];
 }
 
@@ -2321,7 +2330,7 @@ export function readSecretSlotValue(sessionId: string, slot: string): string {
 export function currentProvisionUrl(sessionId: string): string {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  return session.browser.currentUrl();
+  return operationPageForSession(session)?.url() ?? session.browser.currentUrl();
 }
 
 export function isCompactV2ProvisionSession(sessionId: string): boolean {
@@ -4077,7 +4086,7 @@ function normalizeVolatileCheckoutPath(pathname: string): string {
 // token churn on the same logical page must not invalidate.
 function compactV2EpochDoc(
   session: Session,
-  page: OAuthCompletionEvidence["page"] | undefined = compactV2SourcePage(session),
+  page: OAuthCompletionEvidence["page"] | undefined = operationPageForSession(session),
 ): string {
   let location = page?.url() ?? session.browser.currentUrl();
   try {
@@ -4329,6 +4338,7 @@ async function exerciseCompactV2Shadow(
   generation: number,
   elements: readonly InteractiveElement[],
   semanticSource: ObservationSemanticSourceV2,
+  sourcePage: OAuthCompletionEvidence["page"] | undefined,
 ): Promise<void> {
   const saved = {
     compactV2Active: session.compactV2Active,
@@ -4341,8 +4351,10 @@ async function exerciseCompactV2Shadow(
     compactV2Observation(
       session,
       generation,
-      await session.browser.extractBrowserUseObservation(),
+      await session.browser.extractBrowserUseObservation(sourcePage),
       semanticSource,
+      undefined,
+      sourcePage,
     );
   } catch {
   } finally {
@@ -4362,7 +4374,7 @@ export async function observeQuery(
 ): Promise<Record<string, unknown>> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const sourcePage = compactV2SourcePage(session);
+  const sourcePage = operationPageForSession(session);
   const index = session.compactV2Index;
   if (index === null || index.expiresAt < Date.now()) throw new Error("stale_cursor");
   // Query/paging is part of the same session-bound action-map protocol: never return
@@ -4610,7 +4622,7 @@ async function observeSession(
       );
     }
     if (v2Mode === "shadow")
-      await exerciseCompactV2Shadow(session, generation, elements, semanticSource);
+      await exerciseCompactV2Shadow(session, generation, elements, semanticSource, sourcePage);
     session.compactV2Active = false;
     invalidateCompactV2Snapshot(session);
     const text = await session.browser.extractVisibleText(sourcePage);
@@ -6511,36 +6523,38 @@ function recordCaptureRound(
 // The EXTRACT round is the one round that keeps raw html — the key-extraction
 // step is synthesized from the page where the credential is shown.
 async function recordExtractRound(session: Session): Promise<boolean> {
-  let html = "";
-  if (session.compactV2Mode !== "on") {
-    try {
-      html = (await session.browser.getState()).html;
-    } catch {
-      /* best-effort — the copy-button/inventory extract path still works */
+  return await withOperationPage(session, async () => {
+    let html = "";
+    if (session.compactV2Mode !== "on") {
+      try {
+        html = (await session.browser.getState()).html;
+      } catch {
+        /* best-effort — the copy-button/inventory extract path still works */
+      }
     }
-  }
-  const stateUrl =
-    session.compactV2Mode === "on"
-      ? compactV2ReplaySafeUrl(session.browser.currentUrl())
-      : session.browser.currentUrl();
-  if (stateUrl === null) {
-    rejectRecipeRecording(session, "compact_v2_unrepresentable_page_url");
-    return false;
-  }
-  session.captureRounds.push({
-    service: captureService(session),
-    round: session.captureRounds.length,
-    oauth: false,
-    state: {
-      url: stateUrl,
-      title: "",
-      html,
-      screenshot: "",
-    },
-    inventory: session.lastElements,
-    observed: { kind: "extract", reason: "extract the credential shown on the page" },
+    const stateUrl =
+      session.compactV2Mode === "on"
+        ? compactV2ReplaySafeUrl(session.browser.currentUrl())
+        : session.browser.currentUrl();
+    if (stateUrl === null) {
+      rejectRecipeRecording(session, "compact_v2_unrepresentable_page_url");
+      return false;
+    }
+    session.captureRounds.push({
+      service: captureService(session),
+      round: session.captureRounds.length,
+      oauth: false,
+      state: {
+        url: stateUrl,
+        title: "",
+        html,
+        screenshot: "",
+      },
+      inventory: session.lastElements,
+      observed: { kind: "extract", reason: "extract the credential shown on the page" },
+    });
+    return true;
   });
-  return true;
 }
 
 // Record the extract round from the live page, then write the accumulated medium
@@ -6996,7 +7010,9 @@ async function rememberCheckoutLeg(
   const legStart = checkoutLegStartIndex(trace);
   if (legStart === null) return null;
   const legTrace = trace.slice(legStart);
-  const fieldNames = await session.browser.extractCheckoutFieldNames();
+  const fieldNames = await withOperationPage(session, async () =>
+    await session.browser.extractCheckoutFieldNames(),
+  );
   const signature = checkoutFieldSetSignature(fieldNames);
   if (signature === null) return null;
   const legSlots = new Set(
@@ -7021,10 +7037,13 @@ async function rememberCheckoutLeg(
 
 // Read a single page snapshot for postcondition checking. Field VALUES are
 // reduced to lengths here so a token/secret success-signal can't leak.
-async function snapshotForPostcondition(session: Session): Promise<PostconditionSnapshot> {
+async function snapshotForPostcondition(
+  session: Session,
+  sourcePage: Page | undefined,
+): Promise<PostconditionSnapshot> {
   const privateFields =
     session.compactV2Mode === "on"
-      ? (await session.browser.extractInteractiveElements())
+      ? (await session.browser.extractInteractiveElements(sourcePage))
           .filter((element) => typeof element.value === "string" && element.value.length > 0)
           .map((element) => {
             const sealed = sealRetainedInteractiveElementsV2([element])[0]!;
@@ -7046,7 +7065,7 @@ async function snapshotForPostcondition(session: Session): Promise<Postcondition
           })
           .filter((field) => field.label.length > 0)
       : null;
-  const obs = await observeSession(session);
+  const obs = await observeSession(session, "compact", undefined, sourcePage);
   const fields =
     privateFields ??
     session.lastElements
@@ -7056,10 +7075,10 @@ async function snapshotForPostcondition(session: Session): Promise<Postcondition
         value_len: element.value!.length,
       }));
   return {
-    url: obs.format === "browser-use-dom" ? session.browser.currentUrl() : obs.url,
+    url: obs.format === "browser-use-dom" ? (sourcePage?.url() ?? session.browser.currentUrl()) : obs.url,
     text:
       obs.format === "browser-use-dom"
-        ? await session.browser.extractVisibleText()
+        ? await session.browser.extractVisibleText(sourcePage)
         : (session.prevObserve?.text ?? obs.text ?? ""),
     fields,
   };
@@ -7074,23 +7093,26 @@ export async function verifyPostcondition(
 ): Promise<PostconditionResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  if (postcondition.kind === "observe_artifact" && postcondition.probe_url !== undefined) {
-    const host = registrableHost(postcondition.probe_url);
-    if (host !== null && !session.allowedHosts.some((e) => e.host === host)) {
-      session.allowedHosts.push({ host, source: "mid_session" });
+  const sourcePage = operationPageForSession(session);
+  return await session.browser.withOperationPage(sourcePage, async () => {
+    if (postcondition.kind === "observe_artifact" && postcondition.probe_url !== undefined) {
+      const host = registrableHost(postcondition.probe_url);
+      if (host !== null && !session.allowedHosts.some((e) => e.host === host)) {
+        session.allowedHosts.push({ host, source: "mid_session" });
+      }
+      invalidateCompactV2Snapshot(session);
+      await session.browser.goto(postcondition.probe_url);
+      await settle(1500);
     }
-    invalidateCompactV2Snapshot(session);
-    await session.browser.goto(postcondition.probe_url);
-    await settle(1500);
-  }
-  const snap = await snapshotForPostcondition(session);
-  const result = checkSuccessSignal(postcondition.success_signal, snap);
-  audit(sessionId, "verify_postcondition", {
-    kind: postcondition.kind,
-    confirmed: result.confirmed,
-    reason: result.reason,
+    const snap = await snapshotForPostcondition(session, sourcePage);
+    const result = checkSuccessSignal(postcondition.success_signal, snap);
+    audit(sessionId, "verify_postcondition", {
+      kind: postcondition.kind,
+      confirmed: result.confirmed,
+      reason: result.reason,
+    });
+    return result;
   });
-  return result;
 }
 
 export async function verifySavedRecipePostcondition(
@@ -7137,7 +7159,9 @@ export async function verifyActiveRecipePostcondition(
 export async function checkoutShapeSignatureForSession(sessionId: string): Promise<string | null> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const fieldNames = await session.browser.extractCheckoutFieldNames();
+  const fieldNames = await withOperationPage(session, async () =>
+    await session.browser.extractCheckoutFieldNames(),
+  );
   return checkoutFieldSetSignature(fieldNames);
 }
 
@@ -8039,8 +8063,9 @@ export function classifyVouchflowCredentials(text: string): Record<string, strin
 export async function extractCredentials(sessionId: string): Promise<ExtractResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const { browser } = session;
-  invalidateCompactV2Snapshot(session);
+  return await withOperationPage(session, async () => {
+    const { browser } = session;
+    invalidateCompactV2Snapshot(session);
 
   // The masked-display trap: click reveal/show toggles before reading.
   await browser.revealMaskedCredentials();
@@ -8153,12 +8178,13 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   const sanitized = sanitizeExtractedCredentials(credentials, browser.currentUrl(), haystack);
   const found = Object.keys(sanitized).length > 0;
   audit(sessionId, "extract", { found, candidate_count: labeled.length });
-  return {
-    session_id: sessionId,
-    url: browser.currentUrl(),
-    credentials: sanitized,
-    candidate_count: labeled.length,
-  };
+    return {
+      session_id: sessionId,
+      url: browser.currentUrl(),
+      credentials: sanitized,
+      candidate_count: labeled.length,
+    };
+  });
 }
 
 // ── captcha gate (thick tool) ──
@@ -8301,8 +8327,9 @@ async function solveCaptchaWithTokenSolver(
 export async function captchaGate(sessionId: string): Promise<CaptchaGateResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  invalidateCompactV2Snapshot(session);
-  const det = await session.browser.detectCaptchaVariant();
+  return await withOperationPage(session, async () => {
+    invalidateCompactV2Snapshot(session);
+    const det = await session.browser.detectCaptchaVariant();
   const found = det.variant !== "unknown" || det.challengeRendered;
   if (!found) {
     audit(sessionId, "captcha_gate", { found: false });
@@ -8391,13 +8418,14 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
     ...(tokenSolverOutcome !== null ? { token_solver: tokenSolverOutcome } : {}),
     ...(needs_user !== undefined ? { needs_gate: needs_user.gate } : {}),
   });
-  return {
-    session_id: sessionId,
-    found: true,
-    variant: det.variant,
-    settled,
-    ...(needs_user !== undefined ? { needs_user } : {}),
-  };
+    return {
+      session_id: sessionId,
+      found: true,
+      variant: det.variant,
+      settled,
+      ...(needs_user !== undefined ? { needs_user } : {}),
+    };
+  });
 }
 
 // ── email verification (thick tool — user-inbox-via-browser) ──
