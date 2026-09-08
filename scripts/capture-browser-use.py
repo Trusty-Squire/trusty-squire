@@ -8,6 +8,9 @@ import argparse
 import asyncio
 import hashlib
 import json
+import threading
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
@@ -23,6 +26,7 @@ URLS = {
     "wikipedia": "https://en.wikipedia.org/wiki/Certificate_authority",
     "github": "https://github.com/anthropics",
     "gov-uk": "https://www.gov.uk/browse/benefits",
+    "shopify": "local:shopify.html",
 }
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -73,12 +77,17 @@ async def main():
         args=["--no-sandbox"],
     )
     stale = []
+    local_server = None
+    if not args.slug or args.slug == "shopify":
+        local_server = ThreadingHTTPServer(("127.0.0.1", 0), partial(SimpleHTTPRequestHandler, directory=str(ROOT / "fixtures/browser-use/pages")))
+        threading.Thread(target=local_server.serve_forever, daemon=True).start()
     try:
         await asyncio.wait_for(browser.start(), timeout=45)
         for slug, url in URLS.items():
             if args.slug and slug != args.slug:
                 continue
-            await browser.navigate_to(url)
+            navigation_url = f"http://127.0.0.1:{local_server.server_port}/{url.removeprefix('local:')}" if url.startswith("local:") else url
+            await browser.navigate_to(navigation_url)
             await asyncio.sleep(3)
             # Keep canonical paint-order filtering enabled; record its snapshot inputs.
             service = DomService(browser, viewport_threshold=0, paint_order_filtering=True, cross_origin_iframes=True)
@@ -103,6 +112,9 @@ async def main():
             print(f"CAPTURED {slug}: {len(actual.encode())} bytes", flush=True)
     finally:
         await browser.kill()
+        if local_server:
+            local_server.shutdown()
+            local_server.server_close()
     if stale:
         raise SystemExit("STALE FIXTURES: " + ", ".join(stale))
 

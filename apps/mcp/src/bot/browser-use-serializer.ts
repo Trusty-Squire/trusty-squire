@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { browserUsePaintOrder } from "./browser-use-paint-order.js";
 /**
  * TypeScript port of browser-use 0.13.10's DOMTreeSerializer.
@@ -27,6 +28,7 @@ export interface BrowserUseNode {
   showScroll: boolean;
   scrollText: string;
   clickListener: boolean;
+  formAssociated?: boolean;
   axRole: string | null;
   axProperties: Array<{ name: string; value: unknown }>;
   axChildIds: unknown[] | null;
@@ -160,15 +162,45 @@ const interactiveRoles = new Set([
   "cell",
   "gridcell",
 ]);
+const customInteractiveRoles = new Set(
+  [...interactiveRoles].filter((role) => !["row", "cell", "gridcell", "search"].includes(role)),
+);
 const cap = (s: string, n = 100): string =>
   Array.from(s).length <= n ? s : Array.from(s).slice(0, n).join("") + "...";
 const pyString = (v: unknown): string =>
   v === null ? "None" : typeof v === "boolean" ? (v ? "True" : "False") : String(v);
 
-export function browserUseInteractive(n: BrowserUseNode): boolean {
+export function browserUseInteractive(n: BrowserUseNode, canonical = false): boolean {
   const t = tag(n),
     a = n.attributes;
   if (n.nodeType !== 1 || t === "html" || t === "body") return false;
+  // A custom tag name, inherited pointer cursor, search-like class or small
+  // icon geometry is not an interaction contract. Keep the pinned oracle intact.
+  if (!canonical && t.includes("-")) {
+    if ("inert" in a || "disabled" in a || a["aria-disabled"] === "true") return false;
+    if (n.axProperties.some((p) => ["disabled", "hidden"].includes(p.name) && p.value))
+      return false;
+    return (
+      n.clickListener ||
+      n.formAssociated === true ||
+      [
+        "onclick",
+        "onmousedown",
+        "onmouseup",
+        "onpointerdown",
+        "onpointerup",
+        "onkeydown",
+        "onkeyup",
+      ].some((key) => key in a) ||
+      ("tabindex" in a && Number(a.tabindex) >= 0) ||
+      customInteractiveRoles.has(a.role ?? "") ||
+      customInteractiveRoles.has(n.axRole ?? "") ||
+      n.axRole === "listbox" ||
+      n.axProperties.some(
+        (p) => ["focusable", "editable", "settable"].includes(p.name) && p.value === true,
+      )
+    );
+  }
   if (n.clickListener) return true;
   if (
     (t === "iframe" || t === "frame") &&
@@ -641,14 +673,13 @@ export function serializeBrowserUseDOM(
   } = {},
 ): { dom: string; refs: string[] } {
   const efficient = !options.canonical;
+  const isInteractive = (n: BrowserUseNode): boolean =>
+    browserUseInteractive(n, !!options.canonical);
   const targets = new Map<Simplified, { ref: string; targetable: boolean }>();
   const actionDescendants = new Map<BrowserUseNode, boolean>();
   const containsAction = (node: BrowserUseNode): boolean => {
     if (!actionDescendants.has(node))
-      actionDescendants.set(
-        node,
-        browserUseInteractive(node) || node.children.some(containsAction),
-      );
+      actionDescendants.set(node, isInteractive(node) || node.children.some(containsAction));
     return actionDescendants.get(node)!;
   };
   const simplify = (
@@ -686,7 +717,7 @@ export function serializeBrowserUseDOM(
       n.attributes["data-browser-use-exclude"]?.toLowerCase() === "true"
     )
       return null;
-    const code = efficient && !insideCode && !browserUseInteractive(n) ? codeText(n) : null;
+    const code = efficient && !insideCode && !isInteractive(n) ? codeText(n) : null;
     let children = (
       (t === "iframe" || t === "frame") && n.contentDocument
         ? n.contentDocument.children
@@ -695,8 +726,7 @@ export function serializeBrowserUseDOM(
       .map((child) =>
         simplify(
           child,
-          preserveActionText ||
-            (efficient && (code?.actionable === true || browserUseInteractive(n))),
+          preserveActionText || (efficient && (code?.actionable === true || isInteractive(n))),
           insideCode || code !== null,
         ),
       )
@@ -735,7 +765,10 @@ export function serializeBrowserUseDOM(
   if (!tree)
     return { dom: "Empty DOM tree (you might have to wait for the page to load)", refs: [] };
   const filter = (n: Simplified, active: DOMBounds | null): void => {
-    n.excluded = active !== null && exclude(n.original, active);
+    n.excluded =
+      active !== null &&
+      exclude(n.original, active) &&
+      !(efficient && tag(n.original).includes("-") && isInteractive(n.original));
     const next = propagates(n.original) && n.original.bounds ? n.original.bounds : active;
     n.children.forEach((c) => filter(c, next));
   };
@@ -743,7 +776,7 @@ export function serializeBrowserUseDOM(
   const paintedOver = browserUsePaintOrder(tree);
   const refs: string[] = [];
   const hasInteractive = (n: Simplified): boolean =>
-    n.children.some((c) => browserUseInteractive(c.original) || hasInteractive(c));
+    n.children.some((c) => isInteractive(c.original) || hasInteractive(c));
   const assign = (n: Simplified, inShadow: boolean): void => {
     const o = n.original,
       t = tag(o),
@@ -760,7 +793,7 @@ export function serializeBrowserUseDOM(
           !hasInteractive(n);
       else
         n.interactive =
-          browserUseInteractive(o) &&
+          isInteractive(o) &&
           ((o.snapshot && o.visible) ||
             (t === "input" && a.type === "file") ||
             (!o.snapshot &&
@@ -788,7 +821,7 @@ export function serializeBrowserUseDOM(
       protectedCache.set(
         n,
         n.interactive ||
-          browserUseInteractive(n.original) ||
+          isInteractive(n.original) ||
           n.original.scrollable ||
           n.original.nodeType === 11 ||
           ["iframe", "frame"].includes(tag(n.original)) ||
@@ -809,6 +842,8 @@ export function serializeBrowserUseDOM(
           .filter(([key]) => !["id", "class", "style"].includes(key))
           .sort(([a], [b]) => a.localeCompare(b)),
         n.original.visible,
+        n.original.axRole,
+        n.original.axProperties,
         paintedOver.has(n.original),
         n.children.map(repetitionKey),
       ]);
@@ -870,7 +905,7 @@ export function serializeBrowserUseDOM(
       const icons: string[] = [];
       const collect = (child: BrowserUseNode): void => {
         if (!child.visible || child.contentDocument) return;
-        if (browserUseInteractive(child)) return;
+        if (isInteractive(child)) return;
         const evidence = stateIconEvidence(child);
         if (evidence) {
           icons.push(evidence);
@@ -896,7 +931,45 @@ export function serializeBrowserUseDOM(
       node.attributes[attribute]?.trim(),
     ),
   });
+  // Structural grouping is only a presentation container: differing names,
+  // prices, attributes and every action still render in their original order.
+  // Inside it, identical inert custom subtrees can refer to one local example.
+  const shapeCache = new Map<Simplified, number>();
+  const shapes = new Map<string, number>();
+  const shapeKey = (n: Simplified): number => {
+    if (!shapeCache.has(n)) {
+      const signature = JSON.stringify([
+        n.original.nodeType,
+        n.original.nodeName,
+        n.children.map(shapeKey),
+      ]);
+      const key = shapes.get(signature) ?? shapes.size;
+      shapes.set(signature, key);
+      shapeCache.set(n, key);
+    }
+    return shapeCache.get(n)!;
+  };
+  let sharedSubtrees: Map<number, number> | null = null;
+  let nextSharedSubtree = 1;
+  let groupingEnabled = true;
   const render = (n: Simplified, depth: number): string => {
+    const eligible = sharedSubtrees && tag(n.original).includes("-") && !protectedTree(n);
+    const key = eligible ? repetitionKey(n) : null;
+    const previous = key === null ? undefined : sharedSubtrees!.get(key);
+    if (previous !== undefined) return "\t".repeat(depth) + `[same subtree ${previous}]`;
+    const boundary = n.original.nodeType === 11 || ["iframe", "frame"].includes(tag(n.original));
+    const enclosingShared = sharedSubtrees;
+    if (boundary) sharedSubtrees = null;
+    const value = renderNode(n, depth);
+    if (boundary) sharedSubtrees = enclosingShared;
+    if (key !== null && value.length >= 40) {
+      const id = nextSharedSubtree++;
+      sharedSubtrees!.set(key, id);
+      return value + ` [subtree ${id}]`;
+    }
+    return value;
+  };
+  const renderNode = (n: Simplified, depth: number): string => {
     const o = n.original,
       t = tag(o),
       indent = "\t".repeat(depth);
@@ -1006,6 +1079,44 @@ export function serializeBrowserUseDOM(
       lines.push(indent + (n.verbatim ? o.value : o.value.trim()));
     for (let i = 0; i < n.children.length; i++) {
       const child = n.children[i]!;
+      if (
+        efficient &&
+        groupingEnabled &&
+        sharedSubtrees === null &&
+        tag(child.original).includes("-") &&
+        protectedTree(child)
+      ) {
+        const shape = shapeKey(child);
+        let count = 1;
+        while (i + count < n.children.length && shapeKey(n.children[i + count]!) === shape) count++;
+        if (count >= 3) {
+          const emittedBefore = new Set(emittedTargets);
+          sharedSubtrees = new Map();
+          const grouped = [`${"\t".repeat(next)}<${tag(child.original)} repeated ×${count}>`];
+          for (let offset = 0; offset < count; offset++) {
+            grouped.push(
+              `${"\t".repeat(next)}[item ${offset + 1}]\n${render(n.children[i + offset]!, next)}`,
+            );
+          }
+          sharedSubtrees = null;
+          // Do not make a small listing larger merely to announce repetition.
+          // Rendering only changes the emitted-ref set; restore it before the
+          // comparison so exact-binding dedup behaves identically in both forms.
+          emittedTargets.clear();
+          for (const ref of emittedBefore) emittedTargets.add(ref);
+          groupingEnabled = false;
+          const plain = n.children
+            .slice(i, i + count)
+            .map((item) => render(item, next))
+            .filter(Boolean)
+            .join("\n");
+          groupingEnabled = true;
+          const compact = grouped.join("\n");
+          lines.push(Buffer.byteLength(compact) < Buffer.byteLength(plain) ? compact : plain);
+          i += count - 1;
+          continue;
+        }
+      }
       const line = render(child, next);
       if (!line) continue;
       let count = 1;
