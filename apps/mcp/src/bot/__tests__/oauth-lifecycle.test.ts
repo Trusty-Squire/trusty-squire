@@ -1222,7 +1222,11 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const expectedReturnUrl = "https://console.product.test/projects";
       const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
       const previousCooldown = process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
-      process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "4000";
+      // The human phase now receives a fresh configured budget once the popup
+      // handoff is established. Leave enough wall-clock room for the compact
+      // observation setup, then prove that this handoff deadline still wins
+      // while consent work remains pending.
+      process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "6000";
       process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
       await context.route("https://product.test/**", (route) =>
         route.fulfill({

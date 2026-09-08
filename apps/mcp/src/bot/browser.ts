@@ -13587,6 +13587,7 @@ export class BrowserController {
     consentProvider?: OAuthProviderId,
     expectedGoogleAccountEmail?: string | null,
     registerCompletionCheck?: (check: () => Promise<OAuthCompletionEvidence | null>) => void,
+    onHumanHandoff?: () => number,
   ): Promise<void> {
     const product = this.page;
     const context = this.context;
@@ -13601,7 +13602,7 @@ export class BrowserController {
     this.oauthTerminalCompletionUrl = null;
     const oauthBudgetMs = Math.max(1, settleTimeoutMs);
     const productUrl = product.url();
-    const oauthDeadline = Date.now() + oauthBudgetMs;
+    let oauthDeadline = Date.now() + oauthBudgetMs;
     const remainingBudgetMs = (): number => Math.max(1, oauthDeadline - Date.now());
     const safeOrigin = (url: string): string => {
       try {
@@ -13822,6 +13823,12 @@ export class BrowserController {
       this.oauthProviderPageClosed = transient.isClosed();
       this.restoreProductPageWhenOAuthPageCloses(transient, durableProduct);
       this.page = transient;
+      if (onHumanHandoff !== undefined) {
+        // Only the facade supplies a new absolute deadline here. Direct callers
+        // retain the historical single deadline established above, so
+        // loginWithOAuth(..., 3000) remains bounded to 3s total.
+        oauthDeadline = onHumanHandoff();
+      }
       const hasTerminalCompletion = (): boolean =>
         observedReturn !== null && observedReturn.page.isClosed();
       let settled: Page | null = null;

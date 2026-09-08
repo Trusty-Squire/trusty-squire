@@ -22,6 +22,7 @@ const h = vi.hoisted(() => ({
   oauthStatus: "already_valid" as string,
   oauthLoginCalls: [] as string[],
   oauthLoginTimeouts: [] as number[],
+  oauthHumanHandoffTimeouts: [] as number[],
   oauthLoginError: null as Error | null,
   oauthConsentProviders: [] as Array<string | undefined>,
   oauthExpectedGoogleAccountEmails: [] as Array<string | null | undefined>,
@@ -774,11 +775,17 @@ vi.mock("../browser.js", async (importOriginal) => ({
       settleTimeoutMs?: number,
       provider?: string,
       expectedGoogleAccountEmail?: string | null,
+      _registerCompletionCheck?: unknown,
+      onHumanHandoff?: () => number,
     ): Promise<void> {
       h.oauthLoginCalls.push(selector);
       h.oauthLoginTimeouts.push(settleTimeoutMs ?? 0);
       h.oauthConsentProviders.push(provider);
       h.oauthExpectedGoogleAccountEmails.push(expectedGoogleAccountEmail);
+      const humanDeadline = onHumanHandoff?.();
+      if (humanDeadline !== undefined) {
+        h.oauthHumanHandoffTimeouts.push(humanDeadline - Date.now());
+      }
       const gate = h.oauthLoginGates.get(this.index);
       if (gate !== undefined) await gate;
       h.currentUrl = h.oauthResultUrl;
@@ -1156,6 +1163,7 @@ beforeEach(() => {
   h.oauthStatus = "already_valid";
   h.oauthLoginCalls = [];
   h.oauthLoginTimeouts = [];
+  h.oauthHumanHandoffTimeouts = [];
   h.oauthLoginError = null;
   h.oauthConsentProviders = [];
   h.oauthExpectedGoogleAccountEmails = [];
@@ -3592,6 +3600,38 @@ describe("operate session — OAuth lifecycle", () => {
       act(started.session_id, { kind: "oauth_login", target: "Continue with Google" }),
     ).resolves.toMatchObject({ text: "Signed in" });
     expect(h.waitForInteractiveDomCalls).toContainEqual({ minElements: 1, timeoutMs: 2_000 });
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("allows a configured human OAuth handoff to continue beyond the old 30-second cap", async () => {
+    vi.useFakeTimers();
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "60000";
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    h.oauthLoginGates.set(
+      0,
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, 31_000);
+      }),
+    );
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+
+    const login = operateLoginTool.handler(
+      { session_id: started.session_id, provider: "google", ref: "Continue with Google" },
+      null,
+    );
+    await vi.advanceTimersByTimeAsync(31_000);
+
+    await expect(login).resolves.toMatchObject({ text: "Signed in" });
+    expect(h.oauthLoginTimeouts).toEqual([30_000]);
+    expect(h.oauthHumanHandoffTimeouts).toEqual([60_000]);
     await finishProvisionSession(started.session_id);
   });
 
