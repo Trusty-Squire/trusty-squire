@@ -77,6 +77,15 @@ function dispatchDetail(
   };
 }
 
+async function withBrokerAuditContext<T>(
+  api: ApiClient,
+  taskId: string,
+  invocationId: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return await api.withAuditContext({ taskId, invocationId, purpose: taskId }, operation);
+}
+
 export function reconciliationOutcome(
   operation: string,
   result: unknown,
@@ -225,7 +234,10 @@ export class OperatorBroker implements BrokerTransportPort {
           if (mutationCapableStart) await this.journal?.record(id, requestId, "entered", dispatch);
           observation = await withBrokerAdmission(
             { sessionId: id, reserve },
-            async () => await tool.handler(args, pinnedApi),
+            async () =>
+              await withBrokerAuditContext(pinnedApi, tool.name, requestId, async () =>
+                await tool.handler(args, pinnedApi),
+              ),
           );
           internalId = String((observation as { session_id: string }).session_id);
           const session = sessionForCall(internalId);
@@ -259,7 +271,10 @@ export class OperatorBroker implements BrokerTransportPort {
               if (command === null)
                 throw new BrokerRefusal("unknown_tool", "Unknown operator command");
               const translated = { ...commandArgs, session_id: internalId };
-              const execute = async () => await command.handler(translated, pinnedApi);
+              const execute = async () =>
+                await withBrokerAuditContext(pinnedApi, name, commandId, async () =>
+                  await command.handler(translated, pinnedApi),
+                );
               const mutating = brokerCommandMutates(name, commandArgs);
               const commandDispatch = dispatchDetail(
                 principal,
