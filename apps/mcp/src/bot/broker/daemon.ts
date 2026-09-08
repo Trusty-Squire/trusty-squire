@@ -101,7 +101,7 @@ export async function runBrokerDaemon(): Promise<void> {
       }
       if (
         (await journal.hasOutstanding()) &&
-        !(method === "tool" && (await operator.canReconcile(principal, id)))
+        !(method === "tool" && (await operator.canReconcile(principal, id, params)))
       )
         throw new BrokerRefusal(
           "outcome_unknown",

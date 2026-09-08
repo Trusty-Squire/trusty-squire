@@ -10,7 +10,7 @@ describe("MCP broker forwarding", () => {
   it("returns a lost payment outcome without redispatching its request key", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-forward-reconcile-"));
     const path = join(root, "b.sock");
-    const paymentRequest = "payment-request";
+    let paymentRequest = "";
     let paymentDispatches = 0;
     let outcomeRecorded = false;
     let releasePayment!: () => void;
@@ -50,8 +50,10 @@ describe("MCP broker forwarding", () => {
             },
             result: { session_id: "session" },
           };
-        if (params.name === "operate_pay" && requestId === paymentRequest) {
-          if (outcomeRecorded)
+        if (params.name === "operate_pay") {
+          if (outcomeRecorded) {
+            if (requestId !== paymentRequest)
+              throw new Error("payment replay used a new request key");
             return {
               result: {
                 reconciliation: {
@@ -61,6 +63,8 @@ describe("MCP broker forwarding", () => {
                 },
               },
             };
+          }
+          paymentRequest = requestId;
           paymentDispatches++;
           paymentEntered();
           await paymentGate;
@@ -83,24 +87,18 @@ describe("MCP broker forwarding", () => {
       boundAccountId: () => "account",
     };
     const forwarder = new OperatorForwarder(path, guard);
-    let lostClient: BrokerClient | undefined;
     try {
       await forwarder.invoke("operate_start", {}, "start-request");
-      await expect.poll(() => acknowledgements).toEqual(["start-request"]);
+      await expect.poll(() => acknowledgements).toHaveLength(1);
       acknowledgements.length = 0;
-      lostClient = await BrokerClient.connect(path, "test");
-      const lost = lostClient.call(
-        "tool",
-        { name: "operate_pay", args: { session_id: "session" } },
-        paymentRequest,
-      );
+      const lost = forwarder.invoke("operate_pay", { session_id: "session" }, "7");
       await entered;
-      await lostClient.close();
+      await (forwarder as unknown as { client?: BrokerClient }).client?.close();
       releasePayment();
       await recorded;
       await expect(lost).rejects.toThrow("connection lost");
       await expect(
-        forwarder.invoke("operate_pay", { session_id: "session" }, paymentRequest),
+        forwarder.invoke("operate_pay", { session_id: "session" }, "7"),
       ).resolves.toEqual({
         reconciliation: {
           request_id: paymentRequest,
@@ -111,8 +109,58 @@ describe("MCP broker forwarding", () => {
       expect(paymentDispatches).toBe(1);
       await expect.poll(() => acknowledgements).toEqual([paymentRequest]);
     } finally {
-      await lostClient?.close();
       await forwarder.close();
+      await broker.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("namespaces matching MCP request IDs across independent clients", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-forward-keys-"));
+    const path = join(root, "b.sock");
+    const requests = new Set<string>();
+    let dispatches = 0;
+    const broker = await listenBroker(path, {
+      authenticate: async () => ({ accountId: "account", agentId: "local-agent" }),
+      call: async (_principal, method, _params, requestId) => {
+        if (method === "reconcile") return { outcomes: [] };
+        if (method === "acknowledge") return {};
+        if (requests.has(requestId))
+          return {
+            result: {
+              reconciliation: { request_id: requestId, operation: "operate_recipe_run" },
+            },
+          };
+        requests.add(requestId);
+        dispatches++;
+        return { result: { dispatched: requestId } };
+      },
+      disconnect: async () => undefined,
+    });
+    const guard: SessionGuard = {
+      bind: async () => ({
+        account_id: "account",
+        agent_session_token: "test",
+        api_base_url: "http://unused.test",
+        saved_at: "",
+      }),
+      inspect: async () => ({ problem: null }),
+      boundAccountId: () => "account",
+    };
+    const forwarders = [
+      new OperatorForwarder(path, guard),
+      new OperatorForwarder(path, guard),
+      new OperatorForwarder(path, guard),
+    ];
+    try {
+      const results = await Promise.all(
+        forwarders.map(async (forwarder) => await forwarder.invoke("operate_recipe_run", {}, "7")),
+      );
+      expect(results).toHaveLength(3);
+      expect(dispatches).toBe(3);
+      expect(requests.size).toBe(3);
+    } finally {
+      await Promise.all(forwarders.map(async (forwarder) => await forwarder.close()));
       await broker.close();
       await rm(root, { recursive: true, force: true });
     }

@@ -1,5 +1,5 @@
 import { connectOrLaunchBroker } from "./discovery.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { SessionGuard } from "../../session-guard.js";
 import type { BrokerClient } from "./transport.js";
 import type { TabCapability } from "./authority.js";
@@ -12,6 +12,7 @@ export class OperatorForwarder {
   private client: BrokerClient | undefined;
   private connecting = false;
   private readonly sessions = new Map<string, TabCapability>();
+  private readonly idempotencyNamespace = randomUUID();
   constructor(
     private readonly path: string,
     private readonly guard: SessionGuard,
@@ -44,23 +45,29 @@ export class OperatorForwarder {
       `Prior ${outcomes.map((outcome) => outcome.operation).join(", ")} completed without a delivered result; do not replay it`,
     );
   }
+  private idempotencyKey(requestId: string): string {
+    return `${this.idempotencyNamespace}:${createHash("sha256")
+      .update(requestId)
+      .digest("hex")}`;
+  }
   async invoke(
     name: string,
     args: Record<string, unknown>,
     requestId: string = randomUUID(),
   ): Promise<unknown> {
+    const idempotencyKey = this.idempotencyKey(requestId);
     const starting =
       name === "operate_start" || (name === "operate_recipe_run" && args.session_id === undefined);
-    if (starting && this.connection !== undefined) {
+    if (this.connection !== undefined) {
       const existing = await this.connection.catch(() => undefined);
       if (existing === undefined || !existing.isConnected()) {
         this.connection = undefined;
         this.client = undefined;
-        this.sessions.clear();
+        if (starting) this.sessions.clear();
       }
     }
     const client = await this.connect();
-    await this.reconcile(client, requestId);
+    await this.reconcile(client, idempotencyKey);
     if (!starting && args.session_id === undefined && this.sessions.size === 1)
       args = { ...args, session_id: this.sessions.keys().next().value };
     const id = typeof args.session_id === "string" ? args.session_id : undefined;
@@ -78,7 +85,7 @@ export class OperatorForwarder {
         args,
         ...(capability === undefined ? {} : { capability }),
       },
-      requestId,
+      idempotencyKey,
     )) as { result: unknown; capability?: TabCapability };
     if (reply.capability !== undefined)
       this.sessions.set(reply.capability.sessionId, reply.capability);

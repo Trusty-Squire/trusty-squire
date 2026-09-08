@@ -11,6 +11,7 @@ interface DispatchRecord {
   at: number;
   agentId?: string;
   operation?: string;
+  inputHash?: string;
 }
 
 export interface PendingDispatchOutcome {
@@ -43,7 +44,8 @@ export class DispatchJournal {
           typeof record.requestId !== "string" ||
           !["entered", "outcome", "acknowledged", "settled"].includes(record.phase) ||
           (record.agentId !== undefined && typeof record.agentId !== "string") ||
-          (record.operation !== undefined && typeof record.operation !== "string")
+          (record.operation !== undefined && typeof record.operation !== "string") ||
+          (record.inputHash !== undefined && typeof record.inputHash !== "string")
         )
           throw new Error("Malformed journal");
         const key = JSON.stringify([record.sessionId, record.requestId]);
@@ -91,11 +93,14 @@ export class DispatchJournal {
   async completedOutcome(
     agentId: string,
     requestId: string,
+    expected?: Pick<DispatchRecord, "operation" | "inputHash">,
   ): Promise<PendingDispatchOutcome | undefined> {
     const record = [...(await this.states()).values()].find(
       (record) =>
         record.agentId === agentId &&
         record.requestId === requestId &&
+        (expected === undefined ||
+          (record.operation === expected.operation && record.inputHash === expected.inputHash)) &&
         (record.phase === "outcome" || record.phase === "acknowledged"),
     );
     return record === undefined
@@ -119,6 +124,7 @@ export class DispatchJournal {
         await this.record(record.sessionId, record.requestId, "acknowledged", {
           agentId,
           operation: record.operation,
+          inputHash: record.inputHash,
         }),
       ),
     );
@@ -129,7 +135,7 @@ export class DispatchJournal {
     sessionId: string,
     requestId: string,
     phase: DispatchPhase,
-    detail?: Pick<DispatchRecord, "agentId" | "operation">,
+    detail?: Pick<DispatchRecord, "agentId" | "operation" | "inputHash">,
   ): Promise<void> {
     const operation = this.tail.then(async () => {
       await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });

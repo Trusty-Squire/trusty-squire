@@ -43,6 +43,22 @@ function remapSession(value: unknown, from: string, to: string): unknown {
   return value;
 }
 
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function inputHash(input: z.infer<typeof callSchema>): string {
+  return createHash("sha256").update(canonicalJson(input)).digest("hex");
+}
+
 /** Existing handlers and per-session payment state run unchanged INSIDE the
  * broker. Every MCP connection gets its own pinned API client and capability. */
 export class OperatorBroker implements BrokerTransportPort {
@@ -90,7 +106,16 @@ export class OperatorBroker implements BrokerTransportPort {
     if (tool === null || !tool.name.startsWith("operate_"))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
-    const completed = await this.journal?.completedOutcome(principal.agentId, requestId);
+    const dispatch = {
+      agentId: principal.agentId,
+      operation: tool.name,
+      inputHash: inputHash(input),
+    };
+    const completed = await this.journal?.completedOutcome(
+      principal.agentId,
+      requestId,
+      dispatch,
+    );
     if (completed !== undefined)
       return {
         result: {
@@ -126,7 +151,6 @@ export class OperatorBroker implements BrokerTransportPort {
         async (id, signal, reserve) => {
           if (signal.aborted) throw new BrokerRefusal("cancelled", "Start cancelled");
           const mutationCapableStart = tool.name === "operate_recipe_run";
-          const dispatch = { agentId: principal.agentId, operation: tool.name };
           if (mutationCapableStart) await this.journal?.record(id, requestId, "entered", dispatch);
           observation = await withBrokerAdmission(
             { sessionId: id, reserve },
@@ -163,7 +187,6 @@ export class OperatorBroker implements BrokerTransportPort {
                 "operate_screenshot",
                 "operate_payment_status",
               ].includes(name);
-              const dispatch = { agentId: principal.agentId, operation: name };
               if (mutating) await this.journal?.record(id, commandId, "entered", dispatch);
               const result =
                 name === "operate_finish"
@@ -246,8 +269,21 @@ export class OperatorBroker implements BrokerTransportPort {
   async reconcile(principal: BrokerPrincipal): Promise<{ outcomes: PendingDispatchOutcome[] }> {
     return { outcomes: (await this.journal?.pendingOutcomes(principal.agentId)) ?? [] };
   }
-  async canReconcile(principal: BrokerPrincipal, requestId: string): Promise<boolean> {
-    return (await this.journal?.completedOutcome(principal.agentId, requestId)) !== undefined;
+  async canReconcile(
+    principal: BrokerPrincipal,
+    requestId: string,
+    params: Record<string, unknown>,
+  ): Promise<boolean> {
+    const input = callSchema.parse(params);
+    const tool = findTool(input.name, this.tools);
+    if (tool === null || !tool.name.startsWith("operate_")) return false;
+    tool.inputSchema.parse(input.args);
+    return (
+      (await this.journal?.completedOutcome(principal.agentId, requestId, {
+        operation: tool.name,
+        inputHash: inputHash(input),
+      })) !== undefined
+    );
   }
   async acknowledge(principal: BrokerPrincipal, requestId: string): Promise<void> {
     if (await this.journal?.acknowledge(principal.agentId, requestId))
