@@ -747,6 +747,28 @@ export async function captureBrowserUseDOM(
       }
       return null;
     };
+    const nativeContainerKinds = new Map([
+      ["section", "section"],
+      ["nav", "navigation"],
+      ["form", "form"],
+      ["fieldset", "fieldset"],
+      ["main", "main"],
+      ["aside", "aside"],
+      ["article", "article"],
+      ["dialog", "dialog"],
+    ]);
+    const ariaContainerKinds = new Map([
+      ["banner", "banner"],
+      ["complementary", "aside"],
+      ["contentinfo", "contentinfo"],
+      ["form", "form"],
+      ["main", "main"],
+      ["navigation", "navigation"],
+      ["region", "section"],
+      ["search", "search"],
+      ["dialog", "dialog"],
+      ["alertdialog", "dialog"],
+    ]);
     const syntheticContainer = (n: BrowserUseNode): string | null => {
       let scope = labelScopeFor.get(n);
       let child = n;
@@ -757,13 +779,16 @@ export async function captureBrowserUseDOM(
           scope = labelScopeFor.get(parent);
         }
         const tag = parent.nodeName.toLowerCase();
-        if (["section", "nav", "form", "fieldset", "main", "aside", "article", "dialog"].includes(tag)) {
+        const kind =
+          nativeContainerKinds.get(tag) ??
+          ariaContainerKinds.get(parent.attributes.role?.toLowerCase() ?? "");
+        if (kind) {
           const heading = parent.children
             .filter((child) => /^H[1-6]$/.test(child.nodeName))
             .map(labelText)
             .find((value) => value !== null);
           const label = parent.attributes["aria-label"]?.trim() || labelledByText(parent) || heading;
-          return label ? `${tag}:${label}` : null;
+          return label ? `${kind}:${label}` : null;
         }
         child = parent;
         parent = parentByNode.get(child);

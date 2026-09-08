@@ -39,6 +39,7 @@ describe("interleaved observation DOM", () => {
         <span id="empty-name">Master volume</span><div id="empty-volume" role="slider" aria-label="" aria-labelledby="empty-name" tabindex="0" style="display:block;width:20px;height:20px"></div>
         <section><h2>Volume controls</h2><label for="volume">Master volume</label><div id="volume" role="slider" tabindex="0" style="display:block;width:20px;height:20px"></div></section>
         <section><div id="structural-floor" role="slider" tabindex="0" style="display:block;width:20px;height:20px"></div></section>
+        <div role="dialog" aria-label="Add payment method"><button id="dialog-floor"></button></div>
         <input id="native-submit" type="submit">
         <span id="image-name">Find product</span><input id="named-image" type="image" alt="Search" aria-labelledby="image-name">
         <section id="shadow-section"><h2>Shadow volume controls</h2><x-slider id="shadow-host"></x-slider></section>
@@ -76,6 +77,7 @@ describe("interleaved observation DOM", () => {
       expect(labelFor("empty-volume")).toBe("@master-volume");
       expect(labelFor("volume")).toMatch(/^@master-volume(?:-\d+)?$/);
       expect(labelFor("structural-floor")).toMatch(/^@button-\d+$/);
+      expect(labelFor("dialog-floor")).toBe("@add-payment-method-button");
       expect(labelFor("shadow-volume")).toBe("@shadow-volume");
       expect(labelFor("shadow-floor")).toBe("@shadow-volume-controls-button");
       expect(labelFor("shadow-email")).toBe("@shadow-work-email");
