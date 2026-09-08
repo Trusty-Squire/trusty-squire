@@ -761,7 +761,7 @@ export async function captureBrowserUseDOM(
             .map(labelText)
             .find((value) => value !== null);
           const label = parent.attributes["aria-label"]?.trim() || labelledByText(parent) || heading;
-          return `${tag}:${label ?? tag}`;
+          return label ? `${tag}:${label}` : null;
         }
         child = parent;
         parent = parentByNode.get(child);
@@ -869,7 +869,8 @@ export async function captureBrowserUseDOM(
             id: a.id ?? null,
             name: a.name ?? null,
             placeholder: a.placeholder ?? null,
-            ariaLabel: explicitAriaLabel || labelledByText(n),
+            ariaLabel: explicitAriaLabel || null,
+            labelledByText: labelledByText(n),
             role:
               a.role ??
               (["a", "button", "input", "select", "textarea"].includes(t) ? null : "button"),
@@ -939,9 +940,11 @@ export async function captureBrowserUseDOM(
       if (el) {
         const explicitAriaLabel = el.ariaLabel?.trim();
         const scopedLabelledBy = labelledByText(n);
-        if (!explicitAriaLabel && scopedLabelledBy) el.ariaLabel = scopedLabelledBy;
+        if (!explicitAriaLabel) el.labelledByText = scopedLabelledBy;
         const scopedAssociation = associatedLabelText(n);
-        if (!el.labelText?.trim() && scopedAssociation) el.labelText = scopedAssociation;
+        if (bindings.has(raw.backendNodeId) && labelScopeFor.get(n) !== rootScope)
+          el.labelText = scopedAssociation;
+        else if (!el.labelText?.trim() && scopedAssociation) el.labelText = scopedAssociation;
         const ownedLabel = ownedLabels.get(n.id);
         if (ownedLabel && !el.ariaLabel && !n.attributes["aria-labelledby"]) {
           el.ariaLabel = ownedLabel;

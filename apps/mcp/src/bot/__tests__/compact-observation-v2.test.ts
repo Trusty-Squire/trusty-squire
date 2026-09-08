@@ -675,6 +675,13 @@ describe("compact observation v2", () => {
       ]);
     });
 
+    it("preserves mixed Unicode accessible names", () => {
+      const label = controlLabelV2("設定 Account");
+
+      expect(label).toBe("@設定-account");
+      expect(isCompactV2Label(label!)).toBe(true);
+    });
+
     it("falls back to the emitted role when punctuation cannot form a label", () => {
       expect(labelsFor(element({ ariaLabel: "!!!" }))).toEqual(["@button-1"]);
     });
@@ -739,6 +746,7 @@ describe("compact observation v2", () => {
         element({ index: 7, tag: "div", role: "tab" }),
         element({ index: 8, tag: "div", role: "menuitem" }),
         element({ index: 9, tag: "input", type: "file", role: null }),
+        element({ index: 10, container: "section:section" }),
       ];
 
       const labels = labelsFor(button, ...anonymousControls);
@@ -752,6 +760,7 @@ describe("compact observation v2", () => {
       expect(labels).toContain("@tab-8");
       expect(labels).toContain("@menuitem-9");
       expect(labels).toContain("@file-10");
+      expect(labels).toContain("@button-11");
       expect(labels.every((label) => label !== undefined && label.length > 1)).toBe(true);
     });
 

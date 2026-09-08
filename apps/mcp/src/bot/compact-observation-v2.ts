@@ -341,30 +341,24 @@ export function controlLabelV2(description: string | undefined): string | undefi
   if (description === undefined) return undefined;
   const titled = leadingTitleFromAccessibleName(description);
   let slug = titled
+    .normalize("NFKC")
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  if (slug.length > LABEL_MAX_CHARS) {
-    slug = slug.slice(0, LABEL_MAX_CHARS);
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, "-")
+    .replace(/^-+|-+$/gu, "");
+  let characters = Array.from(slug);
+  const truncated = characters.length > LABEL_MAX_CHARS;
+  const usesUnicode = characters.some((character) => character.charCodeAt(0) > 0x7f);
+  if (truncated) {
+    characters = characters.slice(0, LABEL_MAX_CHARS - Number(usesUnicode));
     // Never cut mid-word: drop the trailing partial segment at the last word
     // boundary. A single unbroken run longer than the budget keeps its
     // mid-run cut — there is no boundary to cut on.
-    const lastBoundary = slug.lastIndexOf("-");
-    if (lastBoundary > 0) slug = slug.slice(0, lastBoundary);
+    const lastBoundary = characters.lastIndexOf("-");
+    if (lastBoundary > 0) characters = characters.slice(0, lastBoundary);
   }
-  slug = slug.replace(/-+$/g, "");
-  if (slug.length === 0) {
-    let unicodeSlug = titled
-      .normalize("NFKC")
-      .replace(/[^\p{L}\p{M}\p{N}]+/gu, "-")
-      .replace(/^-+|-+$/gu, "");
-    if (unicodeSlug.length === 0) return undefined;
-    const characters = Array.from(unicodeSlug);
-    if (characters.length > LABEL_MAX_CHARS)
-      unicodeSlug = `${characters.slice(0, LABEL_MAX_CHARS - 1).join("")}…`;
-    return `@${unicodeSlug}`;
-  }
-  return `@${slug}`;
+  slug = characters.join("").replace(/-+$/g, "");
+  if (slug.length === 0) return undefined;
+  return `@${slug}${truncated && usesUnicode ? "…" : ""}`;
 }
 
 function labelWithOrdinalV2(label: string, suffix: number): string {
@@ -953,6 +947,7 @@ function controlLabelNamingTexts(el: InteractiveElement): Array<string | null | 
   return [
     el.ariaLabel,
     (el.type ?? "").toLowerCase() === "image" ? el.alt : undefined,
+    el.labelledByText,
     el.labelText,
     el.visibleText,
     isButtonInput(el) ? el.value : undefined,
@@ -1004,27 +999,35 @@ function controlDescription(el: InteractiveElement, role: SafeRoleV2): string {
   // semantic region is the best available immediate context; a genuinely
   // anonymous control falls back to its role rather than becoming a bare
   // [ref, role] tuple. This is descriptive only and does not alter identity.
-  const rawContext = el.container?.includes(":")
-    ? el.container.slice(el.container.indexOf(":") + 1)
-    : el.container;
-  const context = safeDescriptionV2(rawContext?.replace(/[-_]+/g, " "));
+  const context = namedContainerContextV2(el.container);
   return context === undefined ? `${role} ${el.index + 1}` : `${context} ${role}`;
 }
 
 /** A description is "uninformative" when it carries no 3+-letter word run: ids, short codes, hex fragments. */
 function isUninformativeDescriptionV2(description: string): boolean {
-  return !/[a-zA-Z]{3,}/.test(description);
+  return (
+    !/[a-zA-Z]{3,}/.test(description) &&
+    !Array.from(description).some((character) =>
+      character.charCodeAt(0) > 0x7f && /\p{L}/u.test(character),
+    )
+  );
 }
 
 function regionContextV2(container: string | null | undefined, chosen: string): string | undefined {
   if (container === null || container === undefined) return undefined;
   if (!isUninformativeDescriptionV2(chosen)) return undefined;
-  // `container` is "kind:slug" (e.g. "section:api-tokens"); the kind adds no
-  // information for the agent and only spends label bytes.
-  const rawSlug = container.includes(":") ? container.slice(container.indexOf(":") + 1) : container;
-  const context = safeDescriptionV2(rawSlug);
+  const context = namedContainerContextV2(container);
   if (context === undefined) return undefined;
   return context.slice(0, 24).replace(/-+$/, "") || undefined;
+}
+
+function namedContainerContextV2(container: string | null | undefined): string | undefined {
+  if (container === null || container === undefined) return undefined;
+  const separator = container.indexOf(":");
+  const kind = separator < 0 ? undefined : container.slice(0, separator).toLowerCase();
+  const raw = separator < 0 ? container : container.slice(separator + 1);
+  const context = safeDescriptionV2(raw.replace(/[-_]+/g, " "));
+  return context === undefined || context.toLowerCase() === kind ? undefined : context;
 }
 
 function privateQueryTokenV2(value: string): string | null {

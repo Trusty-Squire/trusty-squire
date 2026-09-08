@@ -12389,15 +12389,6 @@ export class BrowserController {
       };
 
       const labelFor = (el: Element): string | null => {
-        const labelledBy = el.getAttribute("aria-labelledby");
-        if (labelledBy !== null && labelledBy.trim().length > 0) {
-          const parts: string[] = [];
-          for (const part of labelledBy.split(/\s+/)) {
-            const t = clean(document.getElementById(part)?.textContent);
-            if (t !== null) parts.push(t);
-          }
-          if (parts.length > 0) return clean(parts.join(" "));
-        }
         const id = el.getAttribute("id");
         if (id !== null && id.length > 0) {
           try {
@@ -12406,6 +12397,15 @@ export class BrowserController {
           } catch {
             /* malformed id — fall through */
           }
+        }
+        const labelledBy = el.getAttribute("aria-labelledby");
+        if (labelledBy !== null && labelledBy.trim().length > 0) {
+          const parts: string[] = [];
+          for (const part of labelledBy.split(/\s+/)) {
+            const t = clean(document.getElementById(part)?.textContent);
+            if (t !== null) parts.push(t);
+          }
+          if (parts.length > 0) return clean(parts.join(" "));
         }
         const anc = el.closest("label");
         const ancestorLabel = anc !== null ? clean(anc.textContent) : null;
@@ -15250,6 +15250,7 @@ export interface InteractiveElement {
   name: string | null;
   placeholder: string | null;
   ariaLabel: string | null;
+  labelledByText?: string | null;
   role: string | null;
   labelText: string | null;
   visibleText: string | null;
