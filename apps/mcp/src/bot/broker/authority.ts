@@ -214,6 +214,10 @@ export class BrokerAuthority {
       if (this.admissions.get(id)?.reconnectDeadline === undefined) this.assertPrincipal(principal);
       creating = true;
       port = await create(id, abort.signal, (resources) => this.scheduler.expand(id, resources));
+      if (this.expiredAdmissions.has(id)) {
+        await this.disposeExpiredAdmission(port);
+        throw new BrokerRefusal("cancelled", "Admission reconnect grace expired");
+      }
       const capability: TabCapability = {
         cellId: this.cellId,
         browserEpoch: this.epoch,
@@ -232,13 +236,6 @@ export class BrokerAuthority {
         pending: 0,
       };
       this.actors.set(id, actor);
-      if (this.expiredAdmissions.has(id)) {
-        actor.state = "closing";
-        actor.closeReason = "disconnect";
-        actor.abort.abort();
-        await this.quarantineExpiredActor(actor);
-        throw new BrokerRefusal("cancelled", "Admission reconnect grace expired");
-      }
       const reconnectDeadline = this.admissions.get(id)?.reconnectDeadline;
       if (reconnectDeadline !== undefined) {
         actor.state = "detached";
@@ -250,7 +247,11 @@ export class BrokerAuthority {
       }
       return { ...capability };
     } catch (error) {
-      if (this.expiredAdmissions.has(id)) this.scheduler.release(id);
+      if (this.expiredAdmissions.has(id)) {
+        if (port === undefined && creating)
+          await this.disposeExpiredAdmission(undefined, id, cleanupFailedAdmission);
+        this.scheduler.release(id);
+      }
       else if (port === undefined && !creating) this.scheduler.release(id);
       else if (port === undefined) {
         const reconnectDeadline = this.admissions.get(id)?.reconnectDeadline;
@@ -500,6 +501,17 @@ export class BrokerAuthority {
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
     }
+  }
+
+  private async disposeExpiredAdmission(
+    port: BrokerSessionPort | undefined,
+    id?: string,
+    cleanupFailedAdmission?: (sessionId: string) => Promise<boolean>,
+  ): Promise<void> {
+    await this.completeWithinDetachedExpiryTimeout(async () => {
+      if (port !== undefined) return await port.close("expiry");
+      return (await cleanupFailedAdmission?.(id ?? "")) ?? false;
+    });
   }
 
   private markExpiryQuarantined(actor: Actor): void {

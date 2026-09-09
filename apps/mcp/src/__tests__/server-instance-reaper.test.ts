@@ -222,7 +222,13 @@ describe("reapStaleServerInstances", () => {
       [103, 100],
     ]);
     const killed: Array<[number, NodeJS.Signals]> = [];
-    const root = rootWith([record({ last_activity_at: NOW - 5 * 60_000 })]);
+    const root = rootWith([
+      record({
+        state: "draining",
+        shutdown_deadline_at: NOW - 1,
+        last_activity_at: NOW - 5 * 60_000,
+      }),
+    ]);
     const sweep = vi.fn(async () => 0);
 
     const summary = await reapStaleServerInstances({

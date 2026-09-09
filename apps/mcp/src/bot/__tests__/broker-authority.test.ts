@@ -409,7 +409,7 @@ describe("broker authority", () => {
     expect(broker.inventory()).toEqual({ active: 1, quarantined: 0, admitting: 0 });
   });
 
-  it("quarantines a port returned after detached admission expiry", async () => {
+  it("disposes a port returned after detached admission expiry without consuming capacity", async () => {
     const broker = new BrokerAuthority("account", "cell", 1, 5);
     const owner = principal("late");
     const created = deferred<BrokerSessionPort>();
@@ -437,10 +437,48 @@ describe("broker authority", () => {
       ]),
     ).rejects.toThrow("Admission reconnect grace expired");
     expect(closeReasons).toEqual(["expiry"]);
-    expect(broker.inventory()).toEqual({ active: 0, quarantined: 1, admitting: 0 });
-    await expect(
-      broker.open(principal("replacement"), ["site:a"], async () => port("replacement")),
-    ).rejects.toThrow("capacity");
+    expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
+    const replacementOwner = principal("replacement");
+    const replacement = await broker.open(replacementOwner, ["site:a"], async () =>
+      port("replacement"),
+    );
+    await expect(broker.close(replacementOwner, replacement)).resolves.toBe(true);
+  });
+
+  it("hands expired failed admissions to bounded cleanup without consuming capacity", async () => {
+    const broker = new BrokerAuthority("account", "cell", 1, 5);
+    const owner = principal("late-failure");
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    let cleanupCalls = 0;
+    const opening = broker.open(
+      owner,
+      ["site:a"],
+      async () => {
+        entered.resolve();
+        await release.promise;
+        throw new Error("target discovery failed after browser creation");
+      },
+      async () => {
+        cleanupCalls += 1;
+        return false;
+      },
+    );
+    await entered.promise;
+
+    const now = Date.now();
+    broker.detach(owner, now, 0);
+    await broker.expireDetached(now);
+    release.resolve();
+
+    await expect(opening).rejects.toThrow("target discovery failed after browser creation");
+    expect(cleanupCalls).toBe(1);
+    expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
+    const replacementOwner = principal("replacement");
+    const replacement = await broker.open(replacementOwner, ["site:a"], async () =>
+      port("replacement"),
+    );
+    await expect(broker.close(replacementOwner, replacement)).resolves.toBe(true);
   });
 
   it("retires transferred transport fences without resuming stale commands", async () => {
