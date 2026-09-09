@@ -14,12 +14,7 @@
 // here. A prior instance is a candidate only when all of these hold:
 //   * its recorded agent identity EXACTLY matches ours (and ours is set),
 //   * it is not us, and its birth identity still names a live process,
-//   * and it is either orphaned — its spawning host is gone, i.e. PPid
-//     collapsed to init when the instance did not start that way — past a
-//     short grace, or quiet past the very bound it should have self-exited
-//     on (server.ts's idle backstop, mirrored here).
-// A non-orphan is therefore only reaped after it already failed its own
-// exit policy, and an instance still serving a client is never a candidate.
+//   * and it is draining past its published shutdown deadline.
 
 import {
   chmodSync,
@@ -32,7 +27,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { sweepOrphanedOwnerProcesses } from "./bot/owner-process-reaper.js";
 import {
   processBirthIdentity,
@@ -52,9 +47,9 @@ const DEFAULT_IDLE_TIMEOUT_WITH_SESSION_MS = 12 * 60 * 60 * 1_000; // 12h, sessi
 const DEFAULT_IDLE_CHECK_INTERVAL_MS = 5 * 60 * 1_000; // 5m — must stay well under the 20m bound
 // An orphan's stdio peer is gone, so a well-behaved instance exits within
 // milliseconds. Still alive and quiet this long past that means wedged.
-const DEFAULT_ORPHAN_GRACE_MS = 60 * 1_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30 * 1_000;
 const DEFAULT_REAP_GRACE_MS = 2_000;
+const DEFAULT_SHUTDOWN_DEADLINE_MS = 30_000;
 
 function envMs(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -82,6 +77,10 @@ export function heartbeatIntervalMs(): number {
   return envMs("TRUSTY_SQUIRE_SERVER_HEARTBEAT_INTERVAL_MS", DEFAULT_HEARTBEAT_INTERVAL_MS);
 }
 
+export function shutdownDeadlineMs(): number {
+  return envMs("TRUSTY_SQUIRE_SERVER_SHUTDOWN_DEADLINE_MS", DEFAULT_SHUTDOWN_DEADLINE_MS);
+}
+
 export interface ServerBirthIdentity {
   pid: number;
   start_time: string;
@@ -97,6 +96,10 @@ export interface ServerInstanceActivity {
 export interface ServerInstanceRecord extends ServerBirthIdentity {
   version: 1;
   agent_identity: string;
+  /** Hash of a stable per-launcher/lane secret. Never a human-readable label. */
+  launcher_lineage?: string;
+  state?: "serving" | "draining";
+  shutdown_deadline_at?: number;
   /** PPid at registration, so a host that IS init isn't read as an orphan. */
   parent_pid: number;
   started_at: number;
@@ -110,20 +113,11 @@ export interface ServerInstanceRecord extends ServerBirthIdentity {
 }
 
 export interface ServerReapBounds {
-  orphanGraceMs: number;
-  idleMs: number;
-  idleWithSessionMs: number;
-  /** Slack past an idle bound before the instance counts as having missed it. */
-  idleSlackMs: number;
   graceMs: number;
 }
 
 export function serverReapBounds(): ServerReapBounds {
   return {
-    orphanGraceMs: envMs("TRUSTY_SQUIRE_SERVER_REAP_ORPHAN_GRACE_MS", DEFAULT_ORPHAN_GRACE_MS),
-    idleMs: idleTimeoutMs(),
-    idleWithSessionMs: idleTimeoutWithSessionMs(),
-    idleSlackMs: idleCheckIntervalMs(),
     graceMs: envMs("TRUSTY_SQUIRE_SERVER_REAP_GRACE_MS", DEFAULT_REAP_GRACE_MS),
   };
 }
@@ -137,6 +131,24 @@ function serverInstanceRootDir(): string {
 
 function agentIdentity(): string {
   return (process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "").trim();
+}
+
+export function serverLauncherLineage(
+  options: {
+    accountId?: string;
+    identity?: string;
+    env?: NodeJS.ProcessEnv;
+    profileDir?: string;
+  } = {},
+): string {
+  const env = options.env ?? process.env;
+  const value = (
+    env.TRUSTY_SQUIRE_SERVER_LINEAGE ??
+    env.TRUSTY_SQUIRE_FORWARDER_CREDENTIAL ??
+    ""
+  ).trim();
+  if (value.length > 0) return createHash("sha256").update(value).digest("hex");
+  return "";
 }
 
 function ensurePrivateDir(path: string): void {
@@ -264,11 +276,11 @@ export type ServerInstanceReapDecision = "keep" | "reap" | "forget";
  */
 export function serverInstanceReapDecision(
   record: ServerInstanceRecord,
-  self: { agent_identity: string; pid: number; start_time: string },
+  self: { agent_identity: string; launcher_lineage?: string; pid: number; start_time: string },
   liveness: ProcessIdentityState,
   parentPid: ParentPidRead,
   now: number,
-  bounds: ServerReapBounds,
+  _bounds: ServerReapBounds,
 ): ServerInstanceReapDecision {
   if (record.pid === self.pid) return "keep";
   // A record naming a process that is already gone is file GC, not a kill —
@@ -279,29 +291,28 @@ export function serverInstanceReapDecision(
   // matches nothing, so a host that never set one is never a target.
   if (self.agent_identity.length === 0) return "keep";
   if (record.agent_identity !== self.agent_identity) return "keep";
+  // Agent labels are shared by legitimate concurrent projects. Only the stable,
+  // secret-derived launcher lineage is authority to signal a live predecessor.
+  if (
+    !record.launcher_lineage ||
+    !self.launcher_lineage ||
+    record.launcher_lineage !== self.launcher_lineage
+  )
+    return "keep";
   // A pid we cannot read is a pid we do not kill.
   if (liveness === "unknown" || parentPid === "unknown") return "keep";
 
-  const quietMs = now - record.last_activity_at;
-  // Its spawning host is gone, so no client can still be attached over the
-  // stdio pipe it was handed. A host that was ALREADY init at registration
-  // (container PID 1) never reads as orphaned.
-  const orphaned = record.parent_pid !== 1 && parentPid === 1;
-  if (orphaned) return quietMs >= bounds.orphanGraceMs ? "reap" : "keep";
-
-  // Not orphaned: mirror the instance's own idle bound, so we only ever reap
-  // one that already blew past the deadline it should have exited on itself.
-  // The slack is that bound's poll interval — an instance whose own idle timer
-  // is working exits on its next poll, so anything still here past bound +
-  // interval demonstrably failed to.
-  const busy = record.active_sessions > 0 || record.in_flight_calls > 0;
-  const threshold = (busy ? bounds.idleWithSessionMs : bounds.idleMs) + bounds.idleSlackMs;
-  return quietMs >= threshold ? "reap" : "keep";
+  return record.state === "draining" &&
+    typeof record.shutdown_deadline_at === "number" &&
+    now >= record.shutdown_deadline_at
+    ? "reap"
+    : "keep";
 }
 
 export interface ServerInstanceHandle {
   readonly path: string;
   heartbeat(activity: ServerInstanceActivity): void;
+  markDraining(deadlineAt: number, activity: ServerInstanceActivity): void;
   release(): void;
 }
 
@@ -311,7 +322,13 @@ export interface ServerInstanceHandle {
  * nothing to publish (non-Linux, no agent identity, unreadable birth identity).
  */
 export function registerServerInstance(
-  options: { rootDir?: string; identity?: string; now?: () => number } = {},
+  options: {
+    rootDir?: string;
+    identity?: string;
+    accountId?: string;
+    launcherLineage?: string;
+    now?: () => number;
+  } = {},
 ): ServerInstanceHandle | null {
   if (process.platform !== "linux") return null;
   const identity = options.identity ?? agentIdentity();
@@ -325,6 +342,8 @@ export function registerServerInstance(
   let record: ServerInstanceRecord = {
     version: 1,
     agent_identity: identity,
+    launcher_lineage: options.launcherLineage ?? serverLauncherLineage(),
+    state: "serving",
     pid: birth.pid,
     start_time: birth.start_time,
     parent_pid: typeof parent === "number" ? parent : 0,
@@ -361,6 +380,23 @@ export function registerServerInstance(
         // protection from a later launch; it must never break serving.
       }
     },
+    markDraining: (deadlineAt, activity) => {
+      if (released) return;
+      record = {
+        ...record,
+        state: "draining",
+        shutdown_deadline_at: deadlineAt,
+        heartbeat_at: now(),
+        last_activity_at: activity.lastActivityAt,
+        active_sessions: activity.activeSessions,
+        in_flight_calls: activity.inFlightCalls,
+      };
+      try {
+        writeServerInstanceRecord(path, record);
+      } catch {
+        // Shutdown continues to its hard deadline even if observability fails.
+      }
+    },
     release: () => {
       released = true;
       rmSync(path, { force: true });
@@ -377,7 +413,8 @@ export interface ServerInstanceReapSummary {
 
 export interface ServerInstanceReapRuntime {
   rootDir?: string;
-  self?: { agent_identity: string; pid: number; start_time: string };
+  self?: { agent_identity: string; launcher_lineage?: string; pid: number; start_time: string };
+  launcherLineage?: string;
   bounds?: ServerReapBounds;
   now?: () => number;
   readBirthState?: (identity: ServerBirthIdentity) => ProcessIdentityState;
@@ -441,6 +478,7 @@ export async function reapStaleServerInstances(
   const birth = processBirthIdentity(process.pid);
   const self = runtime.self ?? {
     agent_identity: agentIdentity(),
+    launcher_lineage: runtime.launcherLineage ?? serverLauncherLineage(),
     pid: process.pid,
     start_time: birth?.start_time ?? "unknown",
   };

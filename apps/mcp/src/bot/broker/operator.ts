@@ -7,6 +7,7 @@ import { ApiClient, type ApiClientConfig } from "../../api-client.js";
 import { buildToolRegistry, findTool } from "../../tools/index.js";
 import {
   finishProvisionSession,
+  forceFinishProvisionSession,
   sessionForCall,
   withProvisionSessionCall,
 } from "../session/lifecycle.js";
@@ -131,6 +132,13 @@ export class OperatorBroker implements BrokerTransportPort {
     private readonly journal?: DispatchJournal,
   ) {
     this.authority = new BrokerAuthority(config.accountId, cellId);
+    this.authority.setDetachedExpiryHandler(async (capability, principal) => {
+      if (principal.forwarderId !== undefined)
+        await this.journal?.recordDetachedPaymentUncertainty(
+          capability.sessionId,
+          principal.forwarderId,
+        );
+    });
     this.token = createHash("sha256").update(config.agentSessionToken).digest();
   }
   refreshCredentials(session: { account_id?: string; agent_session_token?: string }): void {
@@ -147,8 +155,15 @@ export class OperatorBroker implements BrokerTransportPort {
     token: string,
     agentId?: string,
     lineageCredential?: string,
+    supervisor = false,
   ): Promise<Omit<BrokerPrincipal, "clientId"> | null> {
     if (!timingSafeEqual(createHash("sha256").update(token).digest(), this.token)) return null;
+    if (supervisor)
+      return {
+        accountId: this.config.accountId,
+        agentId: "broker-supervisor",
+        supervisor: true,
+      };
     if (lineageCredential === undefined) return null;
     const id = forwarderId(lineageCredential);
     this.inputBindingKeys.set(id, createHash("sha256").update(lineageCredential).digest());
@@ -166,6 +181,7 @@ export class OperatorBroker implements BrokerTransportPort {
     return createHmac("sha256", key).update(canonicalJson(input)).digest("hex");
   }
   connected(principal: BrokerPrincipal): Promise<void> | void {
+    if (principal.supervisor) return;
     return this.authority.claimForwarder(principal);
   }
   async call(
@@ -186,7 +202,12 @@ export class OperatorBroker implements BrokerTransportPort {
     const dispatch = dispatchDetail(
       principal,
       tool.name,
-      this.inputHash(principal, { name: tool.name, args, capability: input.capability }),
+      this.inputHash(
+        principal,
+        typeof args.session_id === "string"
+          ? { name: tool.name, args }
+          : { name: tool.name, args, capability: input.capability },
+      ),
       starting,
     );
     const completed = await this.journal?.completedOutcome(
@@ -254,6 +275,7 @@ export class OperatorBroker implements BrokerTransportPort {
                 throw new BrokerRefusal("auth_required", "Connect before starting");
               },
               close: async () => true,
+              orphan: async () => undefined,
             };
           }
           if (mutationCapableStart)
@@ -285,7 +307,7 @@ export class OperatorBroker implements BrokerTransportPort {
               const commandDispatch = dispatchDetail(
                 principal,
                 name,
-                this.inputHash(principal, { name, args: commandArgs, capability }),
+                this.inputHash(principal, { name, args: commandArgs }),
               );
               if (mutating) await this.journal?.record(id, commandId, "entered", commandDispatch);
               const result =
@@ -308,9 +330,13 @@ export class OperatorBroker implements BrokerTransportPort {
               return remapSession(result, internalId, id);
             },
             close: async (reason) => {
+              const forwarderId = journalForwarderId(principal);
+              const detachedPaymentUncertainty =
+                reason === "expiry" &&
+                (await this.journal?.hasOnlyDetachedPaymentUncertainty(id, forwarderId));
               if (
-                (await this.journal?.hasOutstanding(id)) ||
-                (await this.journal?.hasPendingStartDelivery(journalForwarderId(principal), id))
+                ((await this.journal?.hasOutstanding(id)) && !detachedPaymentUncertainty) ||
+                (await this.journal?.hasPendingStartDelivery(forwarderId, id))
               )
                 return false;
               const pending = session.pendingThreeDs;
@@ -322,6 +348,7 @@ export class OperatorBroker implements BrokerTransportPort {
                 await brokerBrowserCustody()?.release(session.browser);
                 return true;
               }
+              if (reason === "expiry") return await forceFinishProvisionSession(internalId);
               const result = await finishProvisionSession(internalId);
               if (result.closed)
                 await this.journal?.record(id, "payment-custody", "settled", {
@@ -329,6 +356,7 @@ export class OperatorBroker implements BrokerTransportPort {
                 });
               return result.closed;
             },
+            orphan: async () => await brokerBrowserCustody()?.orphan(session.browser),
           };
         },
         async (id) => {
@@ -337,6 +365,15 @@ export class OperatorBroker implements BrokerTransportPort {
           if (session !== undefined && !(await finishProvisionSession(sessionId)).closed)
             return false;
           return (await brokerBrowserCustody()?.cleanupAdmission(id)) ?? false;
+        },
+        async (id) => {
+          const sessionId = internalId === "" ? id : internalId;
+          const session = sessionForCall(sessionId);
+          if (session !== undefined) {
+            await brokerBrowserCustody()?.orphan(session.browser);
+            return;
+          }
+          await brokerBrowserCustody()?.orphanAdmission(id);
         },
       );
       if (capability.targetId === "no-page") {
@@ -410,10 +447,23 @@ export class OperatorBroker implements BrokerTransportPort {
     if (tool === null || !tool.name.startsWith("operate_"))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
-    const completed = await this.journal?.recoveryOutcome(journalForwarderId(principal), {
-      operation: tool.name,
-      inputHash: this.inputHash(principal, { name: tool.name, args, capability: input.capability }),
-    });
+    const completed = await this.journal?.recoveryOutcome(
+      journalForwarderId(principal),
+      typeof args.session_id === "string"
+        ? {
+            operation: tool.name,
+            sessionId: args.session_id,
+            inputHash: this.inputHash(principal, { name: tool.name, args }),
+          }
+        : {
+            operation: tool.name,
+            inputHash: this.inputHash(principal, {
+              name: tool.name,
+              args,
+              capability: input.capability,
+            }),
+          },
+    );
     if (completed === undefined) return null;
     await this.journal?.recordRecovery(journalForwarderId(principal), completed);
     if (completed.start === true) {
@@ -473,6 +523,7 @@ export class OperatorBroker implements BrokerTransportPort {
   }
   async reap(now = Date.now()): Promise<void> {
     await this.journal?.expirePendingStartDeliveries(now);
+    await this.authority.expireDetached(now);
     await this.authority.retryQuarantined(
       async (capability, principal) =>
         !(
@@ -510,17 +561,16 @@ export class OperatorBroker implements BrokerTransportPort {
       journalForwarderId(principal),
     );
   }
-  async disconnect(principal: BrokerPrincipal): Promise<void> {
-    if (principal.forwarderId !== undefined) this.inputBindingKeys.delete(principal.forwarderId);
+  async disconnect(principal: BrokerPrincipal, explicit = false): Promise<void> {
     this.authority.beginForwarderRelease(principal);
     const forwarder = principal.forwarderId;
-    if (
-      forwarder !== undefined &&
-      ((await this.journal?.hasOutstanding(undefined, forwarder)) ||
-        (await this.journal?.hasPendingStartDelivery(forwarder)))
-    )
-      this.authority.detach(principal);
-    else await this.authority.disconnect(principal);
+    if (!explicit) this.authority.detach(principal);
+    else if (forwarder !== undefined && (await this.journal?.hasOutstanding(undefined, forwarder)))
+      this.authority.detach(principal, Date.now(), 0);
+    else {
+      if (forwarder !== undefined) await this.journal?.settleExplicitStartDeliveries(forwarder);
+      await this.authority.disconnect(principal);
+    }
     this.authority.releaseForwarder(principal);
     this.apis.delete(principal.clientId);
   }

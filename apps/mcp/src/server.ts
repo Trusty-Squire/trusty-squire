@@ -31,6 +31,8 @@ import {
   idleTimeoutWithSessionMs,
   reapStaleServerInstances,
   registerServerInstance,
+  serverLauncherLineage,
+  shutdownDeadlineMs,
 } from "./server-instance-registry.js";
 import { buildToolRegistry, findTool } from "./tools/index.js";
 import { createSessionGuard, setServingAccountId, type SessionGuard } from "./session-guard.js";
@@ -157,6 +159,29 @@ export function createServerCallAdmission(): ServerCallAdmission {
     },
     inFlightCount: () => inFlight,
   };
+}
+
+export async function runBoundedServerCleanup(
+  admittedCallsDrained: Promise<void>,
+  cleanup: () => Promise<void>,
+  deadlineMs: number,
+): Promise<"complete" | "deadline"> {
+  let expired = false;
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(() => {
+      expired = true;
+      resolve();
+    }, deadlineMs);
+  });
+  try {
+    await Promise.race([admittedCallsDrained.catch(() => undefined), deadline]);
+    const terminalCleanup = cleanup();
+    await Promise.race([terminalCleanup, deadline]);
+    return expired ? "deadline" : "complete";
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 export async function buildServer(
@@ -394,21 +419,6 @@ export async function runServer(): Promise<void> {
   // sweeps strict process-only manifests, then tracks exact local browser and
   // session-helper identities for launches owned by this server.
   startOwnerProcessReaper();
-  // Reconnects leave the superseded instance behind: a live box carried a
-  // superseded server beside its replacement plus two orphaned to init for
-  // ~31 hours, each keeping a browser tree resident. Reap prior instances of
-  // OUR agent identity that are orphaned or past their own idle bound, before
-  // serving — never by process name, never one still serving a client. Purely
-  // housekeeping, so a failure here must not stop the server from starting.
-  try {
-    await reapStaleServerInstances();
-  } catch (err) {
-    process.stderr.write(
-      `[trusty-squire] stale server reap failed: ${
-        err instanceof Error ? err.message : String(err)
-      }\n`,
-    );
-  }
   // Startup breadcrumb on stderr (which lands in the host agent's MCP
   // log). A silent no-op was the worst part of the entrypoint-guard
   // bug — this line makes "did the server actually start?" answerable
@@ -439,6 +449,16 @@ export async function runServer(): Promise<void> {
     }
   };
   const api = await loadPublishedAccountSession();
+  const instanceLineage = serverLauncherLineage();
+  try {
+    await reapStaleServerInstances({ launcherLineage: instanceLineage });
+  } catch (err) {
+    process.stderr.write(
+      `[trusty-squire] stale server reap failed: ${
+        err instanceof Error ? err.message : String(err)
+      }\n`,
+    );
+  }
 
   const callAdmission = createServerCallAdmission();
   const brokerPath = process.env.TRUSTY_SQUIRE_BROKER_SOCKET;
@@ -455,7 +475,7 @@ export async function runServer(): Promise<void> {
   // Publishes what a later launch of this identity needs to tell "still
   // serving a client" from "wedged": last inbound message, open sessions,
   // in-flight calls. Without it every prior instance looks equally idle.
-  const instance = registerServerInstance();
+  const instance = registerServerInstance({ launcherLineage: instanceLineage });
 
   // A stdio client can disappear without sending a signal (for example when
   // its parent agent exits). Chrome keeps Node's event loop alive in that
@@ -465,9 +485,34 @@ export async function runServer(): Promise<void> {
   let shutdown: Promise<void> | undefined;
   let idleTimer: NodeJS.Timeout | undefined;
   let heartbeatTimer: NodeJS.Timeout | undefined;
+  let staleInstanceSweepTimer: NodeJS.Timeout | undefined;
+  let staleInstanceSweepRunning = false;
+  const sweepStaleInstances = (): void => {
+    if (shutdown !== undefined || staleInstanceSweepRunning) return;
+    staleInstanceSweepRunning = true;
+    void reapStaleServerInstances({ launcherLineage: instanceLineage })
+      .catch((err) => {
+        process.stderr.write(
+          `[trusty-squire] stale server reap failed: ${
+            err instanceof Error ? err.message : String(err)
+          }\n`,
+        );
+      })
+      .finally(() => {
+        staleInstanceSweepRunning = false;
+      });
+  };
   const requestShutdown = (): void => {
     if (shutdown !== undefined) return;
     const admittedCallsDrained = callAdmission.closeAndDrain();
+
+    const deadlineMs = shutdownDeadlineMs();
+    const shutdownDeadlineAt = Date.now() + deadlineMs;
+    instance?.markDraining(shutdownDeadlineAt, {
+      lastActivityAt,
+      activeSessions: forwarder?.sessionCount() ?? activeSessionCount(),
+      inFlightCalls: callAdmission.inFlightCount(),
+    });
 
     shutdown = (async () => {
       process.stdin.removeListener("end", requestShutdown);
@@ -477,19 +522,27 @@ export async function runServer(): Promise<void> {
       process.removeListener("SIGINT", requestShutdown);
       if (idleTimer !== undefined) clearInterval(idleTimer);
       if (heartbeatTimer !== undefined) clearInterval(heartbeatTimer);
-      instance?.release();
-
+      if (staleInstanceSweepTimer !== undefined) clearInterval(staleInstanceSweepTimer);
       try {
         // The OAuth-bootstrap login Chrome (google-login) is tracked apart
         // from provision sessions — drain it too so it cannot outlive the
         // server. Its own signal handlers stand down in server mode (see
         // registerHeadlessRigCleanup), leaving this coordinator as the one
         // exit owner.
-        await admittedCallsDrained;
-        await cancelActiveLoginBrowsers();
-        await forwarder?.close();
-        await closeAllProvisionSessions();
-        await server.close();
+        const outcome = await runBoundedServerCleanup(
+          admittedCallsDrained,
+          async () => {
+            await cancelActiveLoginBrowsers();
+            await forwarder?.close();
+            await closeAllProvisionSessions();
+            await server.close();
+          },
+          deadlineMs,
+        );
+        if (outcome === "deadline")
+          process.stderr.write(
+            `[trusty-squire] server shutdown deadline reached after ${deadlineMs}ms; forcing exit\n`,
+          );
       } catch (err) {
         // Teardown is best-effort: the host is gone, so leave a breadcrumb but
         // never let a failed browser close turn into an orphaned MCP process.
@@ -503,6 +556,10 @@ export async function runServer(): Promise<void> {
       // Browser/Chrome child processes can keep the event loop alive briefly
       // even after their teardown. This mirrors bin.ts's forced CLI exit and
       // makes disconnect a reliable process-lifecycle boundary.
+      // Keep the draining record discoverable for the entire terminal cleanup.
+      // The owner reaper remains armed until process.exit; only now is the
+      // instance record no longer needed by a same-lineage replacement.
+      instance?.release();
       process.exit(0);
     })();
   };
@@ -559,6 +616,8 @@ export async function runServer(): Promise<void> {
     }, heartbeatIntervalMs());
     heartbeatTimer.unref();
   }
+  staleInstanceSweepTimer = setInterval(sweepStaleInstances, heartbeatIntervalMs());
+  staleInstanceSweepTimer.unref();
 
   await server.connect(transport);
 }

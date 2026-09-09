@@ -78,6 +78,22 @@ it("keeps an uncertain failed admission until its own tab cleanup succeeds", asy
   expect(await runtime.cleanupAdmission("admission")).toBe(true);
   expect(await runtime.close()).toBe(true);
 });
+it("releases orphan tab bookkeeping without closing the owner browser", async () => {
+  const closePage = vi.fn(async () => "unknown");
+  const browser = { closeOwnPagesOnly: closePage };
+  state.attach.mockResolvedValue(browser);
+  const runtime = new BrokerRuntime("account");
+  const acquired = await withBrokerAdmission(
+    { sessionId: "admission", reserve: () => undefined },
+    async () => await runtime.acquire({ profileDir: root }),
+  );
+
+  await runtime.orphan(acquired.browser);
+
+  expect(closePage).not.toHaveBeenCalled();
+  expect(await runtime.close()).toBe(true);
+  expect(state.close).toHaveBeenCalledOnce();
+});
 it("bounds a hung physical launch and retains an unproven process lease", async () => {
   state.start.mockImplementation(() => new Promise(() => undefined));
   state.close.mockResolvedValue("unknown");

@@ -60,6 +60,7 @@ export interface BrokerTransportPort {
     token: string,
     agentId?: string,
     lineageCredential?: string,
+    supervisor?: boolean,
   ): Promise<Omit<BrokerPrincipal, "clientId"> | null>;
   connected?(principal: BrokerPrincipal): Promise<void> | void;
   call(
@@ -68,7 +69,7 @@ export interface BrokerTransportPort {
     params: Record<string, unknown>,
     requestId: string,
   ): Promise<unknown>;
-  disconnect(principal: BrokerPrincipal): Promise<void>;
+  disconnect(principal: BrokerPrincipal, explicit?: boolean): Promise<void>;
 }
 
 /** Endpoint election is bind-exclusive. Never unlink an existing socket to win
@@ -88,8 +89,9 @@ export async function listenBroker(
     let authenticating = false;
     let closed = false;
     const replies = new Map<string, { input: string; result: Promise<unknown> }>();
+    let explicitClose = false;
     const disconnect = (owner: BrokerPrincipal) => {
-      const task = port.disconnect(owner).catch(() => undefined);
+      const task = port.disconnect(owner, explicitClose).catch(() => undefined);
       cleanup.add(task);
       void task.finally(() => cleanup.delete(task));
     };
@@ -114,9 +116,15 @@ export async function listenBroker(
           typeof request.params.lineageCredential === "string"
             ? request.params.lineageCredential
             : undefined;
+        const supervisor = request.params.supervisor === true;
         if (agentId.length === 0 || agentId.length > 128)
           throw new BrokerRefusal("unauthorized", "Invalid agent identity");
-        const identity = await port.authenticate(request.params.token, agentId, lineageCredential);
+        const identity = await port.authenticate(
+          request.params.token,
+          agentId,
+          lineageCredential,
+          supervisor,
+        );
         if (identity === null) throw new BrokerRefusal("unauthorized", "Invalid broker credential");
         const candidate = { ...identity, clientId: randomUUID() };
         await port.connected?.(candidate);
@@ -129,6 +137,10 @@ export async function listenBroker(
       }
       if (request.method === "hello")
         throw new BrokerRefusal("unauthorized", "Connection already bound");
+      if (request.method === "client_close") {
+        explicitClose = true;
+        return {};
+      }
       return await port.call(principal, request.method, request.params, request.id);
     };
     frames(socket, (value) => {
@@ -235,6 +247,7 @@ export class BrokerClient {
     path: string,
     token: string,
     lineageCredential?: string,
+    supervisor = false,
   ): Promise<BrokerClient> {
     const socket = createConnection(path);
     const client = new BrokerClient(socket);
@@ -251,6 +264,7 @@ export class BrokerClient {
         token,
         agentId: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "local-agent",
         ...(lineageCredential === undefined ? {} : { lineageCredential }),
+        ...(supervisor ? { supervisor: true } : {}),
       });
       return client;
     } catch (error) {
@@ -259,6 +273,9 @@ export class BrokerClient {
     } finally {
       clearTimeout(deadline);
     }
+  }
+  static async connectSupervisor(path: string, token: string): Promise<BrokerClient> {
+    return await BrokerClient.connect(path, token, undefined, true);
   }
   call(
     method: string,
@@ -292,5 +309,11 @@ export class BrokerClient {
       this.socket.once("close", resolve);
       this.socket.destroy();
     });
+  }
+
+  async release(): Promise<void> {
+    if (this.ended) return;
+    await this.call("client_close", {});
+    await this.close();
   }
 }

@@ -19,11 +19,13 @@ const state = vi.hoisted(() => ({
     }
   >(),
   finish: vi.fn(),
+  forceFinish: vi.fn(),
 }));
 
 vi.mock("../session/lifecycle.js", () => ({
   sessionForCall: (sessionId: string) => state.sessions.get(sessionId),
   finishProvisionSession: state.finish,
+  forceFinishProvisionSession: state.forceFinish,
   withProvisionSessionCall: async (_sessionId: string, operation: () => Promise<unknown>) =>
     await operation(),
 }));
@@ -40,10 +42,41 @@ import type { TabCapability } from "../broker/authority.js";
 beforeEach(() => {
   state.sessions.clear();
   state.finish.mockReset();
+  state.forceFinish.mockReset();
 });
 
 afterEach(() => {
   state.sessions.clear();
+});
+
+it("retains a replacement lineage binding through the old socket handoff", async () => {
+  const broker = new OperatorBroker(
+    {
+      accountId: "account",
+      agentSessionToken: "token",
+      apiBaseUrl: "http://unused.test",
+      registryBaseUrl: "http://unused.test",
+    },
+    "cell",
+  );
+  const identity = await broker.authenticate("token", "agent", "a".repeat(43));
+  if (identity === null) throw new Error("Test broker authentication failed");
+  const first = { ...identity, clientId: "first" };
+  await broker.connected(first);
+  const replacementIdentity = await broker.authenticate("token", "agent", "a".repeat(43));
+  if (replacementIdentity === null) throw new Error("Test replacement authentication failed");
+  const replacement = { ...replacementIdentity, clientId: "replacement" };
+  broker.authority.beginForwarderRelease(first);
+  const handoff = Promise.resolve(broker.connected(replacement));
+  await broker.disconnect(first);
+  await handoff;
+
+  await expect(
+    broker.recover(replacement, {
+      name: "operate_start",
+      args: { service_url: "https://example.test" },
+    }),
+  ).resolves.toBeNull();
 });
 
 it("deregisters the lifecycle session when target discovery fails after start", async () => {
@@ -61,6 +94,8 @@ it("deregisters the lifecycle session when target discovery fails after start", 
       events.push(`cleanup:${sessionId}`);
       return true;
     },
+    orphanAdmission: async () => undefined,
+    orphan: async () => undefined,
     release: async () => undefined,
     identity: async (operation) => await operation(),
   });
@@ -268,6 +303,178 @@ it("settles no-page starts without retaining a recoverable mutation", async () =
   }
 });
 
+it("closes an explicitly released client session immediately", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ts-broker-explicit-start-"));
+  const journal = new DispatchJournal(join(root, "dispatch.jsonl"));
+  const broker = new OperatorBroker(
+    {
+      accountId: "account",
+      agentSessionToken: "token",
+      apiBaseUrl: "http://unused.test",
+      registryBaseUrl: "http://unused.test",
+    },
+    "cell",
+    journal,
+  );
+  const identity = await broker.authenticate("token", "agent", "a".repeat(43));
+  if (identity === null) throw new Error("Test broker authentication failed");
+  const principal = { ...identity, clientId: "client" };
+  const internalId = "explicit-close-session";
+  const startTool: Tool = {
+    name: "operate_start",
+    description: "",
+    inputSchema: z.object({}).strict(),
+    jsonInputSchema: {},
+    handler: async () => {
+      state.sessions.set(internalId, {
+        browser: {
+          brokerTargetId: async () => "target",
+          isConnected: () => true,
+          waitForThreeDsResolution: async () => "succeeded",
+        },
+        pendingThreeDs: null,
+      });
+      return { session_id: internalId };
+    },
+  };
+  Object.defineProperty(broker, "tools", { value: [startTool] });
+  state.finish.mockImplementation(async (sessionId: string) => {
+    state.sessions.delete(sessionId);
+    return { session_id: sessionId, url: "", closed: true };
+  });
+
+  try {
+    await broker.connected(principal);
+    const started = (await broker.call(
+      principal,
+      "tool",
+      { name: "operate_start", args: {} },
+      "start-request",
+    )) as { capability: TabCapability };
+    await broker.acknowledge(principal, "start-request");
+    expect(await journal.hasPendingStartDelivery(principal.forwarderId!)).toBe(true);
+
+    await broker.disconnect(principal, true);
+
+    expect(started.capability.sessionId).toBeDefined();
+    expect(state.finish).toHaveBeenCalledWith(internalId);
+    expect(state.sessions.size).toBe(0);
+    expect(await journal.hasPendingStartDelivery(principal.forwarderId!)).toBe(false);
+    expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("quarantines an uncertain payment after explicit close and returns its recovery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ts-broker-explicit-payment-"));
+  const journal = new DispatchJournal(join(root, "dispatch.jsonl"));
+  const broker = new OperatorBroker(
+    {
+      accountId: "account",
+      agentSessionToken: "token",
+      apiBaseUrl: "http://unused.test",
+      registryBaseUrl: "http://unused.test",
+    },
+    "cell",
+    journal,
+  );
+  const identity = await broker.authenticate("token", "agent", "a".repeat(43));
+  if (identity === null) throw new Error("Test broker authentication failed");
+  const principal = { ...identity, clientId: "client" };
+  const resumed = { ...principal, clientId: "resumed" };
+  const internalId = "uncertain-payment-session";
+  let paymentDispatches = 0;
+  const startTool: Tool = {
+    name: "operate_start",
+    description: "",
+    inputSchema: z.object({}).strict(),
+    jsonInputSchema: {},
+    handler: async () => {
+      state.sessions.set(internalId, {
+        browser: {
+          brokerTargetId: async () => "target",
+          isConnected: () => true,
+          waitForThreeDsResolution: async () => "succeeded",
+        },
+        pendingThreeDs: null,
+      });
+      return { session_id: internalId };
+    },
+  };
+  const payTool: Tool = {
+    name: "operate_pay",
+    description: "",
+    inputSchema: z.object({ session_id: z.string() }).strict(),
+    jsonInputSchema: {},
+    handler: async () => {
+      paymentDispatches += 1;
+      return { status: "payment_outcome_unknown" };
+    },
+  };
+  Object.defineProperty(broker, "tools", { value: [startTool, payTool] });
+  state.finish.mockImplementation(async (sessionId: string) => {
+    state.sessions.delete(sessionId);
+    return { session_id: sessionId, url: "", closed: true };
+  });
+  state.forceFinish.mockImplementation(async (sessionId: string) => {
+    state.sessions.delete(sessionId);
+    return true;
+  });
+
+  try {
+    await broker.connected(principal);
+    const started = (await broker.call(
+      principal,
+      "tool",
+      { name: "operate_start", args: {} },
+      "start-request",
+    )) as { capability: TabCapability };
+    await broker.acknowledge(principal, "start-request");
+    await broker.confirmStartDelivery(principal, { capability: started.capability });
+    await broker.call(
+      principal,
+      "tool",
+      {
+        name: "operate_pay",
+        args: { session_id: started.capability.sessionId },
+        capability: started.capability,
+      },
+      "payment-request",
+    );
+
+    await broker.disconnect(principal, true);
+    await broker.reap();
+
+    expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
+    expect(state.sessions.size).toBe(0);
+    expect(await journal.hasOutstanding(started.capability.sessionId, principal.forwarderId)).toBe(
+      true,
+    );
+
+    await broker.connected(resumed);
+    expect(await broker.reclaim(resumed)).toEqual({ capabilities: [] });
+    await expect(
+      broker.recover(resumed, {
+        name: "operate_pay",
+        args: { session_id: started.capability.sessionId },
+      }),
+    ).resolves.toMatchObject({
+      requestId: "payment-request",
+      result: {
+        reconciliation: {
+          request_id: "payment-request",
+          operation: "operate_pay",
+          status: "payment_outcome_unknown",
+        },
+      },
+    });
+    expect(paymentDispatches).toBe(1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 it("retains acknowledged start control until a same-lineage follow-up", async () => {
   const guard: SessionGuard = {
     bind: async () => ({
@@ -326,6 +533,10 @@ it("retains acknowledged start control until a same-lineage follow-up", async ()
       state.sessions.delete(sessionId);
       return { session_id: sessionId, url: "", closed: true };
     });
+    state.forceFinish.mockImplementation(async (sessionId: string) => {
+      state.sessions.delete(sessionId);
+      return true;
+    });
     const listener = await listenBroker(path, {
       authenticate: async (token, agentId, lineageCredential) =>
         await broker.authenticate(token, agentId, lineageCredential),
@@ -343,7 +554,7 @@ it("retains acknowledged start control until a same-lineage follow-up", async ()
         }
         return await broker.call(principal, method, params, requestId);
       },
-      disconnect: async (principal) => await broker.disconnect(principal),
+      disconnect: async (principal, explicit) => await broker.disconnect(principal, explicit),
     });
     const original = new OperatorForwarder(path, guard, "a".repeat(43));
     const foreign = new OperatorForwarder(path, guard, "b".repeat(43));

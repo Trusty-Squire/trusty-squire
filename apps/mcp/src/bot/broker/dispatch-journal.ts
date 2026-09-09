@@ -87,6 +87,9 @@ export class DispatchJournal {
           throw new Error("Malformed journal");
         if (record.phase === "recovered") continue;
         const key = JSON.stringify([record.sessionId, record.requestId]);
+        const prior = states.get(key);
+        if (record.phase === "outcome" && prior?.outcome?.status === "payment_outcome_unknown")
+          continue;
         states.set(key, record);
       }
     } catch {
@@ -140,6 +143,49 @@ export class DispatchJournal {
     );
   }
 
+  async hasOnlyDetachedPaymentUncertainty(
+    sessionId: string,
+    forwarderId: string,
+  ): Promise<boolean> {
+    const outstanding = [...(await this.states()).values()].filter(
+      (record) =>
+        record.sessionId === sessionId &&
+        record.forwarderId === forwarderId &&
+        (record.phase === "entered" || record.phase === "outcome"),
+    );
+    return (
+      outstanding.length > 0 &&
+      outstanding.every(
+        (record) =>
+          record.operation === "operate_pay" &&
+          record.phase === "outcome" &&
+          record.outcome?.status === "payment_outcome_unknown",
+      )
+    );
+  }
+
+  async recordDetachedPaymentUncertainty(sessionId: string, forwarderId: string): Promise<boolean> {
+    const payments = [...(await this.states()).values()].filter(
+      (record) =>
+        record.sessionId === sessionId &&
+        record.forwarderId === forwarderId &&
+        record.operation === "operate_pay" &&
+        record.phase === "entered",
+    );
+    await Promise.all(
+      payments.map(
+        async (record) =>
+          await this.record(record.sessionId, record.requestId, "outcome", {
+            forwarderId,
+            ...(record.operation === undefined ? {} : { operation: record.operation }),
+            ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
+            outcome: { status: "payment_outcome_unknown" },
+          }),
+      ),
+    );
+    return payments.length > 0;
+  }
+
   async hasCompleted(forwarderId: string, requestId: string): Promise<boolean> {
     return (await this.completedOutcome(forwarderId, requestId)) !== undefined;
   }
@@ -171,7 +217,8 @@ export class DispatchJournal {
 
   async recoveryOutcome(
     forwarderId: string,
-    expected: Pick<DispatchRecord, "operation" | "inputHash">,
+    expected: Pick<DispatchRecord, "operation" | "inputHash"> &
+      Partial<Pick<DispatchRecord, "sessionId">>,
   ): Promise<CompletedDispatchOutcome | undefined> {
     const record = [...(await this.states()).values()]
       .reverse()
@@ -180,6 +227,7 @@ export class DispatchJournal {
           record.forwarderId === forwarderId &&
           record.operation === expected.operation &&
           record.inputHash === expected.inputHash &&
+          (expected.sessionId === undefined || record.sessionId === expected.sessionId) &&
           record.outcome !== undefined &&
           (record.phase === "outcome" || record.phase === "acknowledged"),
       );
@@ -222,6 +270,29 @@ export class DispatchJournal {
         record.sessionId === sessionId &&
         record.forwarderId === forwarderId &&
         record.start === true &&
+        record.phase === "acknowledged",
+    );
+    await Promise.all(
+      starts.map(
+        async (record) =>
+          await this.record(record.sessionId, record.requestId, "settled", {
+            forwarderId,
+            start: true,
+            ...(record.operation === undefined ? {} : { operation: record.operation }),
+            ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
+            ...(record.outcome === undefined ? {} : { outcome: record.outcome }),
+          }),
+      ),
+    );
+    return starts.length > 0;
+  }
+
+  async settleExplicitStartDeliveries(forwarderId: string): Promise<boolean> {
+    const starts = [...(await this.states()).values()].filter(
+      (record) =>
+        record.forwarderId === forwarderId &&
+        record.start === true &&
+        record.operation === "operate_start" &&
         record.phase === "acknowledged",
     );
     await Promise.all(

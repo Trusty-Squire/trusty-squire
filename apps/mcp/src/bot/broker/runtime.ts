@@ -157,6 +157,23 @@ export class BrokerRuntime implements BrokerBrowserCustody {
     return !this.closing;
   }
 
+  async orphanAdmission(sessionId: string): Promise<void> {
+    if (this.pendingAdmissions.has(sessionId)) return;
+    await Promise.all(
+      [...this.admissionIds]
+        .filter(([, id]) => id === sessionId)
+        .map(async ([browser]) => await this.orphan(browser)),
+    );
+  }
+
+  async orphan(browser: BrowserController): Promise<void> {
+    const release = this.sessions.get(browser);
+    if (release === undefined) return;
+    this.sessions.delete(browser);
+    this.admissionIds.delete(browser);
+    release();
+  }
+
   async release(browser: BrowserController): Promise<void> {
     const existing = this.releases.get(browser);
     if (existing !== undefined) return await existing;

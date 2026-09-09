@@ -54,6 +54,8 @@ describe("broker dispatch custody", () => {
         throw new Error("not used");
       },
       cleanupAdmission: async () => true,
+      orphanAdmission: async () => undefined,
+      orphan: async () => undefined,
       release: async () => undefined,
       identity: async (operation) => await operation(),
     });
@@ -129,6 +131,96 @@ describe("broker dispatch custody", () => {
           inputHash: "payment-input",
         }),
       ).resolves.toMatchObject({ sessionId: "session", requestId: "request" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("exposes a bounded detached payment quarantine without replaying it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-journal-detached-payment-"));
+    const path = join(root, "dispatch.jsonl");
+    const journal = new DispatchJournal(path);
+    const config = {
+      accountId: "account",
+      agentSessionToken: "token",
+      apiBaseUrl: "http://unused.test",
+      registryBaseUrl: "http://unused.test",
+    };
+    let dispatches = 0;
+    try {
+      const original = new OperatorBroker(config, "cell", journal);
+      const owner = await authenticate(original, "owner");
+      if (owner.forwarderId === undefined) throw new Error("Test broker lineage is missing");
+      const paymentArgs = { session_id: "stuck-session", item: "first" };
+      const paymentInputHash = createHmac(
+        "sha256",
+        createHash("sha256").update(credential("a")).digest(),
+      )
+        .update('{"args":{"item":"first","session_id":"stuck-session"},"name":"operate_pay"}')
+        .digest("hex");
+      await journal.record("stuck-session", "dispatched-payment", "entered", {
+        forwarderId: owner.forwarderId,
+        operation: "operate_pay",
+        inputHash: paymentInputHash,
+      });
+      await expect(
+        journal.recordDetachedPaymentUncertainty("stuck-session", owner.forwarderId),
+      ).resolves.toBe(true);
+      await journal.record("stuck-session", "dispatched-payment", "outcome", {
+        forwarderId: owner.forwarderId,
+        operation: "operate_pay",
+        inputHash: paymentInputHash,
+        outcome: { status: "done" },
+      });
+      await expect(
+        journal.hasOnlyDetachedPaymentUncertainty("stuck-session", owner.forwarderId),
+      ).resolves.toBe(true);
+
+      const restarted = new OperatorBroker(config, "cell", new DispatchJournal(path));
+      Object.defineProperty(restarted, "tools", {
+        value: [
+          {
+            name: "operate_pay",
+            description: "",
+            inputSchema: z.object({ session_id: z.string(), item: z.string() }).strict(),
+            jsonInputSchema: {},
+            handler: async () => {
+              dispatches += 1;
+            },
+          } satisfies Tool,
+        ],
+      });
+      const sameLineage = await authenticate(restarted, "restarted");
+      const foreign = await authenticate(restarted, "foreign", credential("b"));
+
+      await expect(
+        restarted.recover(sameLineage, {
+          name: "operate_pay",
+          args: paymentArgs,
+        }),
+      ).resolves.toEqual({
+        requestId: "dispatched-payment",
+        result: {
+          reconciliation: {
+            request_id: "dispatched-payment",
+            operation: "operate_pay",
+            status: "payment_outcome_unknown",
+          },
+        },
+      });
+      await expect(
+        restarted.recover(sameLineage, {
+          name: "operate_pay",
+          args: { ...paymentArgs, item: "second" },
+        }),
+      ).resolves.toBeNull();
+      await expect(
+        restarted.recover(foreign, {
+          name: "operate_pay",
+          args: paymentArgs,
+        }),
+      ).resolves.toBeNull();
+      expect(dispatches).toBe(0);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -213,6 +305,7 @@ describe("broker dispatch custody", () => {
         targetId: "target",
         invoke: async () => undefined,
         close: async () => true,
+        orphan: async () => undefined,
       }));
       await journal.record(capability.sessionId, "forwarder:old-process:request", "outcome", {
         forwarderId,
@@ -385,6 +478,7 @@ describe("broker dispatch custody", () => {
         targetId: "target",
         invoke: async () => undefined,
         close: async () => true,
+        orphan: async () => undefined,
       }));
       await journal.record(capability.sessionId, "payment-custody", "entered", {
         forwarderId: principal.forwarderId,

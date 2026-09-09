@@ -347,6 +347,65 @@ describe("MCP broker forwarding", () => {
     }
   });
 
+  it("replaces stale local sessions when a new broker reclaims none", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-forward-replacement-"));
+    const path = join(root, "b.sock");
+    let starts = 0;
+    const broker = await listenBroker(path, {
+      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
+      call: async (_principal, method, params) => {
+        if (method === "reclaim") return { capabilities: [] };
+        if (method === "acknowledge") return {};
+        if (method === "confirm_start") return {};
+        if (params.name === "operate_start") {
+          starts += 1;
+          const sessionId = `session-${starts}`;
+          return {
+            capability: {
+              cellId: "cell",
+              browserEpoch: "epoch",
+              sessionId,
+              targetId: sessionId,
+              leaseGeneration: "one",
+            },
+            result: { session_id: sessionId },
+          };
+        }
+        if (params.name === "operate_observe") {
+          expect(params).toMatchObject({ args: { session_id: "session-2" } });
+          return { result: { dom: "second broker" } };
+        }
+        throw new Error(`Unexpected ${method}`);
+      },
+      disconnect: async () => undefined,
+    });
+    const guard: SessionGuard = {
+      bind: async () => ({
+        account_id: "account",
+        agent_session_token: "test",
+        api_base_url: "http://unused.test",
+        saved_at: "",
+      }),
+      inspect: async () => ({ problem: null }),
+      boundAccountId: () => "account",
+    };
+    const forwarder = new OperatorForwarder(path, guard, credential("a"));
+    try {
+      await forwarder.invoke("operate_start", {}, "first-start");
+      await (forwarder as unknown as { client?: BrokerClient }).client?.close();
+      await forwarder.invoke("operate_start", {}, "second-start");
+
+      expect(forwarder.sessionCount()).toBe(1);
+      await expect(forwarder.invoke("operate_observe", {}, "observe")).resolves.toEqual({
+        dom: "second broker",
+      });
+    } finally {
+      await forwarder.close();
+      await broker.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("namespaces matching MCP request IDs across independent clients", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-forward-keys-"));
     const path = join(root, "b.sock");

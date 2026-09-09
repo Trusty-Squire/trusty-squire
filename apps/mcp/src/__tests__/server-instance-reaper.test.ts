@@ -18,6 +18,7 @@ import {
   reapStaleServerInstances,
   registerServerInstance,
   readServerInstanceRecord,
+  serverLauncherLineage,
   serverInstanceReapDecision,
   type ParentPidRead,
   type ServerInstanceRecord,
@@ -25,20 +26,23 @@ import {
 } from "../server-instance-registry.js";
 
 const BOUNDS: ServerReapBounds = {
-  orphanGraceMs: 60_000,
-  idleMs: 20 * 60_000,
-  idleWithSessionMs: 12 * 60 * 60_000,
-  idleSlackMs: 5 * 60_000,
   graceMs: 5,
 };
 
-const SELF = { agent_identity: "claude-code", pid: 900, start_time: "900" };
+const SELF = {
+  agent_identity: "claude-code",
+  launcher_lineage: "lane-a",
+  pid: 900,
+  start_time: "900",
+};
 const NOW = 10_000_000;
 
 function record(overrides: Partial<ServerInstanceRecord> = {}): ServerInstanceRecord {
   return {
     version: 1,
     agent_identity: "claude-code",
+    launcher_lineage: "lane-a",
+    state: "serving",
     pid: 100,
     start_time: "100",
     parent_pid: 50,
@@ -60,13 +64,36 @@ const decide = (
 ) => serverInstanceReapDecision(entry, self, liveness, parentPid, NOW, BOUNDS);
 
 describe("serverInstanceReapDecision", () => {
+  it("fails closed for process signalling without an explicit launcher lineage", () => {
+    const options = {
+      profileDir: "/tmp/trusty-squire-profile",
+      accountId: "account-a",
+      identity: "claude-code",
+      env: {},
+    };
+    expect(serverLauncherLineage(options)).toBe("");
+    const explicit = serverLauncherLineage({
+      ...options,
+      env: { TRUSTY_SQUIRE_SERVER_LINEAGE: "lane-secret" },
+    });
+    expect(explicit).not.toBe("");
+    expect(
+      serverLauncherLineage({ ...options, env: { TRUSTY_SQUIRE_SERVER_LINEAGE: "other-lane" } }),
+    ).not.toBe(explicit);
+  });
+
   it("never touches a different agent identity, however orphaned and stale", () => {
     const other = record({ agent_identity: "codex", last_activity_at: NOW - 31 * 60 * 60_000 });
     expect(decide(other, 1)).toBe("keep");
   });
 
   it("never targets an identity-less launch, so an unset identity matches nothing", () => {
-    const anonymous = { agent_identity: "", pid: 900, start_time: "900" };
+    const anonymous = {
+      agent_identity: "",
+      launcher_lineage: "lane-a",
+      pid: 900,
+      start_time: "900",
+    };
     expect(decide(record({ agent_identity: "" }), 1, anonymous)).toBe("keep");
   });
 
@@ -82,6 +109,33 @@ describe("serverInstanceReapDecision", () => {
     expect(decide(record({ last_activity_at: NOW - 1_000 }), 50)).toBe("keep");
   });
 
+  it("never targets another launcher lane with the same coarse agent identity", () => {
+    expect(
+      decide(record({ launcher_lineage: "lane-b", last_activity_at: NOW - 31 * 60 * 60_000 }), 1),
+    ).toBe("keep");
+  });
+
+  it("reaps only a same-lineage draining predecessor after its shutdown deadline", () => {
+    const lineage = serverLauncherLineage({
+      profileDir: "/tmp/trusty-squire-profile",
+      accountId: "account-a",
+      identity: "claude-code",
+      env: { TRUSTY_SQUIRE_SERVER_LINEAGE: "lane-a" },
+    });
+    const self = { ...SELF, launcher_lineage: lineage };
+    const draining = record({
+      launcher_lineage: lineage,
+      state: "draining",
+      shutdown_deadline_at: NOW - 1,
+      last_activity_at: NOW,
+      active_sessions: 1,
+      in_flight_calls: 1,
+    });
+    expect(decide(draining, 50, self)).toBe("reap");
+    expect(decide({ ...draining, launcher_lineage: "lane-b" }, 50, self)).toBe("keep");
+    expect(decide({ ...draining, shutdown_deadline_at: NOW + 1 }, 50, self)).toBe("keep");
+  });
+
   it("keeps a quiet same-identity instance that is still doing work", () => {
     const busy = record({ last_activity_at: NOW - 60 * 60_000, active_sessions: 1 });
     expect(decide(busy, 50)).toBe("keep");
@@ -90,21 +144,9 @@ describe("serverInstanceReapDecision", () => {
     );
   });
 
-  it("reaps a quiet, idle same-identity instance past its own idle bound", () => {
-    // Its own idle timer polls every 5m, so it is only demonstrably failing to
-    // exit once it is past 20m + one poll interval.
-    expect(decide(record({ last_activity_at: NOW - 21 * 60_000 }), 50)).toBe("keep");
-    expect(decide(record({ last_activity_at: NOW - 26 * 60_000 }), 50)).toBe("reap");
-  });
-
-  it("reaps a busy instance only once it blows the (much longer) session bound", () => {
-    const abandoned = record({ last_activity_at: NOW - 13 * 60 * 60_000, active_sessions: 1 });
-    expect(decide(abandoned, 50)).toBe("reap");
-  });
-
-  it("reaps an orphan past the short grace, and keeps one inside it", () => {
-    expect(decide(record({ last_activity_at: NOW - 5 * 60_000 }), 1)).toBe("reap");
-    expect(decide(record({ last_activity_at: NOW - 1_000 }), 1)).toBe("keep");
+  it("never signals a live serving sibling, regardless of idle or orphan state", () => {
+    expect(decide(record({ last_activity_at: NOW - 31 * 60 * 60_000 }), 1)).toBe("keep");
+    expect(decide(record({ last_activity_at: NOW - 31 * 60 * 60_000 }), 50)).toBe("keep");
   });
 
   it("does not read a host that was already init as an orphan", () => {
@@ -180,7 +222,13 @@ describe("reapStaleServerInstances", () => {
       [103, 100],
     ]);
     const killed: Array<[number, NodeJS.Signals]> = [];
-    const root = rootWith([record({ last_activity_at: NOW - 5 * 60_000 })]);
+    const root = rootWith([
+      record({
+        state: "draining",
+        shutdown_deadline_at: NOW - 1,
+        last_activity_at: NOW - 5 * 60_000,
+      }),
+    ]);
     const sweep = vi.fn(async () => 0);
 
     const summary = await reapStaleServerInstances({
@@ -223,7 +271,7 @@ describe("reapStaleServerInstances", () => {
   it("leaves a live same-identity server and a live different-identity server alone", async () => {
     const killed: number[] = [];
     const root = rootWith([
-      record({ pid: 200, start_time: "200", last_activity_at: NOW - 1_000 }),
+      record({ pid: 200, start_time: "200", last_activity_at: NOW - 31 * 60 * 60_000 }),
       record({
         pid: 300,
         start_time: "300",
@@ -251,7 +299,91 @@ describe("reapStaleServerInstances", () => {
     expect(readdirSync(root)).toHaveLength(2);
   });
 
-  it("drops the record of a dead prior instance without signalling anything", async () => {
+  it("reaps an overdue draining predecessor only in the replacement's launcher lane", async () => {
+    const killed: number[] = [];
+    const root = rootWith([
+      record({
+        pid: 200,
+        start_time: "200",
+        state: "draining",
+        shutdown_deadline_at: NOW - 1,
+      }),
+      record({
+        pid: 300,
+        start_time: "300",
+        launcher_lineage: "lane-b",
+        state: "draining",
+        shutdown_deadline_at: NOW - 1,
+      }),
+    ]);
+    const alive = new Set([200, 300]);
+
+    const summary = await reapStaleServerInstances({
+      rootDir: root,
+      self: SELF,
+      bounds: BOUNDS,
+      now: () => NOW,
+      readBirthState: (identity) => (alive.has(identity.pid) ? "matching" : "stale"),
+      readParentPid: () => 50,
+      readDescendants: () => [],
+      kill: (pid) => {
+        killed.push(pid);
+        alive.delete(pid);
+      },
+      wait: async () => undefined,
+      sweep: async () => 0,
+    });
+
+    expect(summary).toMatchObject({ reaped: 1, kept: 1 });
+    expect(killed).toEqual([200]);
+    expect(readdirSync(root)).toEqual(["300-300.json"]);
+  });
+
+  it("reaps a same-lineage drainer on the sweep after its deadline crosses", async () => {
+    const killed: number[] = [];
+    let now = NOW - 1;
+    const root = rootWith([
+      record({
+        pid: 200,
+        start_time: "200",
+        state: "draining",
+        shutdown_deadline_at: NOW,
+      }),
+      record({
+        pid: 300,
+        start_time: "300",
+        state: "serving",
+        last_activity_at: NOW - 31 * 60 * 60_000,
+      }),
+    ]);
+    const alive = new Set([200, 300]);
+    const runtime = {
+      rootDir: root,
+      self: SELF,
+      bounds: BOUNDS,
+      now: () => now,
+      readBirthState: (identity: { pid: number }) =>
+        alive.has(identity.pid) ? ("matching" as const) : ("stale" as const),
+      readParentPid: () => 50 as const,
+      readDescendants: () => [],
+      kill: (pid: number) => {
+        killed.push(pid);
+        alive.delete(pid);
+      },
+      wait: async () => undefined,
+      sweep: async () => 0,
+    };
+
+    await expect(reapStaleServerInstances(runtime)).resolves.toMatchObject({ reaped: 0, kept: 2 });
+    expect(killed).toEqual([]);
+
+    now = NOW + 1;
+    await expect(reapStaleServerInstances(runtime)).resolves.toMatchObject({ reaped: 1, kept: 1 });
+    expect(killed).toEqual([200]);
+    expect(readdirSync(root)).toEqual(["300-300.json"]);
+  });
+
+  it("garbage-collects a stale serving record without signalling anything", async () => {
     const killed: number[] = [];
     const root = rootWith([record({ last_activity_at: NOW - 5 * 60_000 })]);
 
@@ -308,10 +440,18 @@ describe("registerServerInstance", () => {
     () => {
       const root = mkdtempSync(join(tmpdir(), "ts-server-instances-"));
       roots.push(root);
-      const handle = registerServerInstance({ rootDir: root, identity: "claude-code" });
+      const handle = registerServerInstance({
+        rootDir: root,
+        identity: "claude-code",
+        accountId: "fixture-account",
+      });
       expect(handle).not.toBeNull();
       expect(readServerInstanceRecord(handle!.path)).toMatchObject({
         agent_identity: "claude-code",
+        launcher_lineage: serverLauncherLineage({
+          accountId: "fixture-account",
+          identity: "claude-code",
+        }),
         pid: process.pid,
         active_sessions: 0,
       });
@@ -321,6 +461,17 @@ describe("registerServerInstance", () => {
         last_activity_at: 4_242,
         active_sessions: 2,
         in_flight_calls: 1,
+      });
+
+      handle!.markDraining(9_999, {
+        lastActivityAt: 4_243,
+        activeSessions: 2,
+        inFlightCalls: 1,
+      });
+      expect(readServerInstanceRecord(handle!.path)).toMatchObject({
+        state: "draining",
+        shutdown_deadline_at: 9_999,
+        last_activity_at: 4_243,
       });
 
       handle!.release();

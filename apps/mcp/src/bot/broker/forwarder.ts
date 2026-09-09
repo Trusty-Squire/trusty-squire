@@ -102,27 +102,22 @@ export class OperatorForwarder {
     const idempotencyKey = this.idempotencyKey(callerRequestHash);
     const starting =
       name === "operate_start" || (name === "operate_recipe_run" && args.session_id === undefined);
+    let reconnecting = false;
     if (this.connection !== undefined) {
       const existing = await this.connection.catch(() => undefined);
       if (existing === undefined || !existing.isConnected()) {
         this.connection = undefined;
         this.client = undefined;
-        if (starting) this.sessions.clear();
+        reconnecting = true;
       }
     }
     const client = await this.connect();
+    if (reconnecting) this.sessions.clear();
     await this.reclaim(client);
     if (!starting && args.session_id === undefined && this.sessions.size === 1)
       args = { ...args, session_id: this.sessions.keys().next().value };
     const id = typeof args.session_id === "string" ? args.session_id : undefined;
     const capability = id === undefined ? undefined : this.sessions.get(id);
-    if (
-      name !== "operate_start" &&
-      !(name === "operate_recipe_run" && id === undefined) &&
-      capability === undefined
-    )
-      throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
-    if (!starting && capability !== undefined) await this.confirmStartDelivery(client, capability);
     const recovered = recovery.recover
       ? await this.recover(client, name, args, capability)
       : undefined;
@@ -133,6 +128,13 @@ export class OperatorForwarder {
       if (name === "operate_finish" && id !== undefined) this.sessions.delete(id);
       return recovered.result;
     }
+    if (
+      name !== "operate_start" &&
+      !(name === "operate_recipe_run" && id === undefined) &&
+      capability === undefined
+    )
+      throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
+    if (!starting && capability !== undefined) await this.confirmStartDelivery(client, capability);
     if (recovery.recover)
       throw new BrokerRefusal("recovery_not_found", "No matching durable outcome is available");
     const reply = (await client.call(
