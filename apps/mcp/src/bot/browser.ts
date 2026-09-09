@@ -426,6 +426,15 @@ export function oauthErrorFromReturnUrl(
   return null;
 }
 
+function oauthEndpointFamily(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+  } catch {
+    return null;
+  }
+}
+
 function oauthRedirectChain(url: string): string[] {
   const chain: string[] = [];
   let source: string;
@@ -434,16 +443,23 @@ function oauthRedirectChain(url: string): string[] {
   } catch {
     return chain;
   }
-  const seen = new Set<string>([source]);
+  const sourceFamily = oauthEndpointFamily(source);
+  if (sourceFamily === null) return chain;
+  const seen = new Set<string>([sourceFamily]);
   while (chain.length < 2) {
     try {
       const redirectUri = new URL(source).searchParams.get("redirect_uri");
       if (redirectUri === null) break;
       const target = new URL(redirectUri);
-      if ((target.protocol !== "http:" && target.protocol !== "https:") || seen.has(target.href))
+      const targetFamily = oauthEndpointFamily(target.href);
+      if (
+        (target.protocol !== "http:" && target.protocol !== "https:") ||
+        targetFamily === null ||
+        seen.has(targetFamily)
+      )
         break;
       chain.push(target.href);
-      seen.add(target.href);
+      seen.add(targetFamily);
       source = target.href;
     } catch {
       break;
@@ -13639,7 +13655,7 @@ export class BrowserController {
     let productNavigated = false;
     let transientNavigated = false;
     const expectedReturnUrls: string[] = [];
-    const redirectSources = new Set<string>();
+    const redirectSourceFamilies = new Set<string>();
     let pendingOnProvider = false;
     let lastTransientUrl = productUrl;
     let observedReturn: { page: Page; url: string } | null = null;
@@ -13658,13 +13674,16 @@ export class BrowserController {
       onNavigation: ((frame: Frame) => void) | null;
     } = { page: null, onNavigation: null };
     const captureExpectedReturnUrl = (url: string): void => {
-      try {
-        redirectSources.add(new URL(url).href);
-      } catch {
-        return;
-      }
+      const sourceFamily = oauthEndpointFamily(url);
+      if (sourceFamily === null) return;
+      redirectSourceFamilies.add(sourceFamily);
       for (const target of oauthRedirectChain(url)) {
-        if (!redirectSources.has(target) && !expectedReturnUrls.includes(target))
+        const targetFamily = oauthEndpointFamily(target);
+        if (
+          targetFamily !== null &&
+          !redirectSourceFamilies.has(targetFamily) &&
+          !expectedReturnUrls.includes(target)
+        )
           expectedReturnUrls.push(target);
       }
     };

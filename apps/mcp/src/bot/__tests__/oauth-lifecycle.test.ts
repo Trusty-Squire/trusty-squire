@@ -1582,10 +1582,15 @@ describe("BrowserController OAuth popup lifecycle", () => {
     });
     await product.goto("https://resend.test/signup");
     const controller = BrowserController.fromHarnessPage(product);
+    const completion = { check: undefined as undefined | (() => Promise<unknown>) };
     try {
-      await expect(controller.loginWithOAuth("#oauth", 500)).rejects.toBeInstanceOf(
-        OAuthAwaitingHumanError,
-      );
+      await expect(
+        controller.loginWithOAuth("#oauth", 500, undefined, undefined, (check) => {
+          completion.check = check;
+        }),
+      ).rejects.toBeInstanceOf(OAuthAwaitingHumanError);
+      expect(completion.check).toBeDefined();
+      await expect(completion.check?.()).resolves.toBeNull();
       expect(controller.currentUrl()).toBe("https://resend.test/signup");
     } finally {
       await context.close();

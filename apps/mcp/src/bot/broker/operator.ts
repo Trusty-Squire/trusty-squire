@@ -55,11 +55,14 @@ function authorizedLegacyPreDispatchFailure(
   sessionId: string,
   operation: string,
   requestId: string,
+  args: Record<string, unknown>,
 ): boolean {
   return (
     sessionId === retainedXataPreDispatchFailure.sessionId &&
     operation === retainedXataPreDispatchFailure.operation &&
-    requestId === retainedXataPreDispatchFailure.requestId
+    requestId === retainedXataPreDispatchFailure.requestId &&
+    args.provider === "google" &&
+    args.ref === "reconciliation-only:no-dispatch"
   );
 }
 
@@ -495,10 +498,14 @@ export class OperatorBroker implements BrokerTransportPort {
     const completed =
       explicitFailure !== undefined &&
       sessionId !== undefined &&
-      this.legacyPreDispatchFailureAuthorized(sessionId, tool.name, explicitFailure.requestId)
+      this.legacyPreDispatchFailureAuthorized(
+        sessionId,
+        tool.name,
+        explicitFailure.requestId,
+        args,
+      )
         ? await this.journal?.reconcileExplicitPreDispatchFailure(
             journalForwarderId(principal),
-            inputHash,
             sessionId,
             tool.name,
             explicitFailure,

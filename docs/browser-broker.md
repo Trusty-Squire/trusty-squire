@@ -108,10 +108,12 @@ binding. Browser epoch changes invalidate earlier capabilities.
   object metadata instead of the ordinary boolean:
   `"trusty-squire/recover": {"request_id":"...","error":"stale_ref","dispatch":"not_dispatched"}`.
   The broker accepts only the server-authorized retained Xata session/request
-  tuple, from its original authenticated forwarder lineage, with arguments that
-  reproduce the retained input hash. The caller's error label is not evidence.
-  The broker fsyncs a `settled` lineage-preserving record and returns the same
-  result on an exact repeat without replaying the tool. Other records,
+  tuple and reconciliation-only argument locator, from its original
+  authenticated forwarder lineage. The retained record's original input hash
+  remains part of the durable identity and is copied unchanged into settlement;
+  the caller's replacement arguments and error label are not evidence. The
+  broker fsyncs a `settled` lineage-preserving record and returns the same result
+  on an exact repeat without replaying the tool. Other records,
   exceptions, operations, lineages, arguments, and ambiguous post-dispatch
   failures stay fenced. A broker with retained startup custody serves this
   recovery endpoint without launching a browser; all ordinary work remains

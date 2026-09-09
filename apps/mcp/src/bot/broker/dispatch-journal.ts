@@ -269,7 +269,6 @@ export class DispatchJournal {
    */
   async reconcileExplicitPreDispatchFailure(
     forwarderId: string,
-    inputHash: string,
     sessionId: string,
     operation: string,
     evidence: ExplicitPreDispatchFailureEvidence,
@@ -281,7 +280,7 @@ export class DispatchJournal {
         candidate.requestId === evidence.requestId &&
         candidate.operation === operation &&
         candidate.forwarderId === forwarderId &&
-        candidate.inputHash === inputHash,
+        candidate.inputHash !== undefined,
     );
     if (record === undefined) return undefined;
     const outcome = { status: "not_dispatched" as const, error: evidence.error };
@@ -298,7 +297,7 @@ export class DispatchJournal {
     await this.record(sessionId, record.requestId, "settled", {
       forwarderId,
       operation,
-      inputHash,
+      inputHash: record.inputHash,
       outcome,
     });
     return { sessionId, requestId: record.requestId, operation, outcome };

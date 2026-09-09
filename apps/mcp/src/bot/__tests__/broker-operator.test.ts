@@ -64,8 +64,10 @@ it("recovers an explicitly proven stale-ref pre-dispatch failure without replay"
     },
     "cell",
     journal,
-    (_sessionId, operation, requestId) =>
-      operation === "operate_login" && requestId === retainedRequestId,
+    (_sessionId, operation, requestId, args) =>
+      operation === "operate_login" &&
+      requestId === retainedRequestId &&
+      args.ref === "reconciliation-only:no-dispatch",
   );
   const identity = await broker.authenticate("token", "agent", "a".repeat(43));
   if (identity === null) throw new Error("Test broker authentication failed");
@@ -126,7 +128,7 @@ it("recovers an explicitly proven stale-ref pre-dispatch failure without replay"
     const args = {
       session_id: started.capability.sessionId,
       provider: "google" as const,
-      ref: "@e:stale",
+      ref: "reconciliation-only:no-dispatch",
     };
 
     await expect(
