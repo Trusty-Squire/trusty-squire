@@ -4003,6 +4003,36 @@ export class BrowserController {
     );
   }
 
+  async bindOAuthClickTarget(
+    selector: string,
+    confirmSelector: () => Promise<string>,
+  ): Promise<ElementHandle<Element> | null> {
+    if (!this.page) throw new Error("Browser not started");
+    const expected = await this.page.locator(selector).first().elementHandle().catch(() => null);
+    if (expected === null) return null;
+    let current: ElementHandle<Element> | null = null;
+    try {
+      current = await this.page
+        .locator(await confirmSelector())
+        .first()
+        .elementHandle()
+        .catch(() => null);
+      if (
+        current === null ||
+        !(await current.evaluate((element, target) => element === target, expected))
+      ) {
+        await expected.dispose().catch(() => undefined);
+        return null;
+      }
+      return expected;
+    } catch {
+      await expected.dispose().catch(() => undefined);
+      return null;
+    } finally {
+      await current?.dispose().catch(() => undefined);
+    }
+  }
+
   private async clickInner(selector: string, modalActive: boolean): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     // Radio/checkbox inputs — especially the visually-hidden kind behind a
@@ -13654,7 +13684,9 @@ export class BrowserController {
     expectedGoogleAccountEmail?: string | null,
     registerCompletionCheck?: (check: () => Promise<OAuthCompletionEvidence | null>) => void,
     onHumanHandoff?: () => number,
-    resolveSelectorBeforeClick?: () => Promise<string>,
+    dispatchAuthorizedClick?: (
+      dispatch: (handle: ElementHandle<Element>) => Promise<void>,
+    ) => Promise<void>,
   ): Promise<void> {
     const product = this.page;
     const context = this.context;
@@ -13868,18 +13900,24 @@ export class BrowserController {
             "not_attempted",
           );
         }
-        const dispatchSelector = await resolveSelectorBeforeClick?.() ?? selector;
-        if (Date.now() >= oauthDeadline) {
-          throw new OAuthAwaitingHumanError(
-            `OAuth has not been attempted yet: the ${Math.ceil(oauthBudgetMs / 1000)}-second ` +
-              `budget elapsed before the OAuth control on ${safeOrigin(productUrl)} was clicked. ` +
-              "Retry oauth_login.",
-            "not_attempted",
-          );
-        }
         try {
-          actionStarted = true;
-          await this.click(dispatchSelector);
+          if (dispatchAuthorizedClick === undefined) {
+            actionStarted = true;
+            await this.click(selector);
+          } else {
+            await dispatchAuthorizedClick(async (handle) => {
+              if (Date.now() >= oauthDeadline) {
+                throw new OAuthAwaitingHumanError(
+                  `OAuth has not been attempted yet: the ${Math.ceil(oauthBudgetMs / 1000)}-second ` +
+                    `budget elapsed before the OAuth control on ${safeOrigin(productUrl)} was clicked. ` +
+                    "Retry oauth_login.",
+                  "not_attempted",
+                );
+              }
+              actionStarted = true;
+              await this.clickWithDispatchTracking({ kind: "handle", handle, method: "click" });
+            });
+          }
         } catch (error) {
           if (!product.isClosed()) throw error;
         }

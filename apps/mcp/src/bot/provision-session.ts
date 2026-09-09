@@ -836,26 +836,46 @@ async function runSerializedOAuthBoundary(
           resetOAuthActionDeadline(deadline, humanHandoffTimeoutMs);
           return deadline.expiresAt;
         },
-        async () => {
+        async (dispatch) => {
+          let dispatchAttempted = false;
+          let handle: Awaited<ReturnType<BrowserController["bindOAuthClickTarget"]>> = null;
           try {
-            const fresh =
-              session.compactV2Mode === "on"
-                ? (await browser.extractBrowserUseObservation()).elements
-                : await browser.extractInteractiveElements();
-            retainSessionElements(session, fresh);
-            const resolved =
-              compactAuthorization === undefined
-                ? resolveTarget(fresh, authorizedRef)
-                : resolveAuthorizedCompactV2Target(session, fresh, compactAuthorization);
-            if (resolved !== null) return resolved.selector;
-            throw new Error(
-              "OAuth action target changed during the identity handoff; re-observe before retrying",
-            );
+            const resolveCurrentTarget = async (): Promise<InteractiveElement> => {
+              const fresh =
+                session.compactV2Mode === "on"
+                  ? (await browser.extractBrowserUseObservation()).elements
+                  : await browser.extractInteractiveElements();
+              retainSessionElements(session, fresh);
+              const resolved =
+                compactAuthorization === undefined
+                  ? resolveTarget(fresh, authorizedRef)
+                  : resolveAuthorizedCompactV2Target(session, fresh, compactAuthorization);
+              if (resolved !== null) return resolved;
+              throw new Error(
+                "OAuth action target changed during the identity handoff; re-observe before retrying",
+              );
+            };
+            const resolved = await resolveCurrentTarget();
+            handle = await browser.bindOAuthClickTarget(resolved.selector, async () => {
+              return (await resolveCurrentTarget()).selector;
+            });
+            if (handle === null) {
+              throw new Error(
+                "OAuth action target changed during the identity handoff; re-observe before retrying",
+              );
+            }
+            dispatchAttempted = true;
+            await dispatch(handle);
           } catch (error) {
-            if (compactAuthorization !== undefined) {
+            if (
+              compactAuthorization !== undefined &&
+              (!dispatchAttempted || clickDispatchStatusForError(error) === "not_dispatched")
+            ) {
               throw new ProvenPreDispatchMutationError("stale_ref", { cause: error });
             }
             throw error;
+          } finally {
+            await handle?.dispose().catch(() => undefined);
           }
         },
       );

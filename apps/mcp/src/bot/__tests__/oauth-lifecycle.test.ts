@@ -1641,6 +1641,54 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it("rejects a same-selector OAuth replacement at click dispatch", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://dispatch-gap.test/login";
+    const providerUrl = `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(
+      "https://dispatch-gap.test/dashboard",
+    )}`;
+    let sessionId: string | undefined;
+    await context.route("**/*", (route) => {
+      const url = route.request().url();
+      if (url === productUrl) {
+        return route.fulfill({
+          contentType: "text/html",
+          body: `<button id="oauth" onclick='location.href=${JSON.stringify(providerUrl)}'>Continue with Google</button>`,
+        });
+      }
+      return route.fulfill({ contentType: "text/html", body: "<main>Provider</main>" });
+    });
+    await product.goto(productUrl);
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+        observationFormat: "browser-use-dom",
+      });
+      sessionId = started.session_id;
+      const ref = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
+      expect(ref).toBeDefined();
+      const clickHandle = controller.clickHandle.bind(controller);
+      const dispatch = vi.spyOn(controller, "clickHandle").mockImplementation(async (handle) => {
+        await product.locator("#oauth").evaluate((element) => {
+          element.outerHTML =
+            '<button id="oauth" onclick="document.body.dataset.danger = \'clicked\'">Delete account</button>';
+        });
+        await clickHandle(handle);
+      });
+      await expect(
+        act(sessionId, { kind: "oauth_login", target: ref!, provider: "google" }),
+      ).rejects.toBeInstanceOf(ProvenPreDispatchMutationError);
+      dispatch.mockRestore();
+      expect(await product.locator("body").getAttribute("data-danger")).toBeNull();
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
+
   it("rejects an owned return chain longer than callback then dashboard", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();
