@@ -5122,6 +5122,24 @@ export async function act(
   const oauthProvider =
     action.kind === "oauth_login" || action.kind === "oauth_click" ? action.provider : undefined;
   try {
+    // Bind a public OAuth target to the observation that authorized it before
+    // waiting for the broker-wide OAuth lane. The lane may legitimately be
+    // occupied longer than the observation TTL; that delay alone must not turn
+    // an unchanged target into stale_ref. executeAct still re-resolves this
+    // physical node and its material intent against the live document after
+    // lease acquisition, immediately before any click can dispatch.
+    let queuedOAuthAuthorization: CompactV2TargetAuthorization | undefined;
+    if (
+      session?.compactV2Active === true &&
+      (action.kind === "oauth_login" || action.kind === "oauth_click")
+    ) {
+      try {
+        queuedOAuthAuthorization = compactV2AuthorizationForTarget(session, action.target);
+      } catch (error) {
+        audit(sessionId, "act", { kind: action.kind, target: "<rejected-v2-target>" });
+        throw error;
+      }
+    }
     const execute = async (deadline?: OAuthActionDeadline): Promise<InternalActResult> => {
       const run = async (): Promise<InternalActResult> =>
         await executeAct(
@@ -5131,7 +5149,7 @@ export async function act(
           cartIdentity,
           false,
           false,
-          undefined,
+          queuedOAuthAuthorization,
           deadline,
           capturedOperationPage,
         );
@@ -5229,7 +5247,7 @@ async function executeAct(
   if ("target" in action) {
     if (session.compactV2Active && !internalAccess) {
       try {
-        compactV2Authorization = compactV2AuthorizationForTarget(session, action.target);
+        compactV2Authorization ??= compactV2AuthorizationForTarget(session, action.target);
         resolutionTarget = compactV2Authorization.legacyRef;
         auditTarget = action.target;
       } catch (error) {

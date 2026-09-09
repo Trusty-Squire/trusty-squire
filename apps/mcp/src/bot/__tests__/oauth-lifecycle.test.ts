@@ -1528,6 +1528,81 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it("keeps an unchanged observed OAuth target valid while it waits behind the shared lane", async () => {
+    const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+    const previousCooldown = process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "3000";
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
+    const sessions: Array<{ context: Awaited<ReturnType<typeof browser.newContext>>; id: string }> =
+      [];
+    const startOAuthFixture = async (name: string, providerDelayMs: number) => {
+      const context = await browser.newContext();
+      const product = await context.newPage();
+      const productUrl = `https://${name}.queue.test/login`;
+      const returnUrl = `https://${name}.queue.test/dashboard`;
+      const providerUrl = `https://accounts.google.com/${name}?redirect_uri=${encodeURIComponent(returnUrl)}`;
+      await context.route("**/*", (route) => {
+        const url = route.request().url();
+        return route.fulfill({
+          contentType: "text/html",
+          body:
+            url === productUrl
+              ? `<button id="oauth" onclick='window.open(${JSON.stringify(providerUrl)})'>Continue with Google</button>`
+              : url.startsWith(`https://accounts.google.com/${name}`)
+                ? `<script>setTimeout(() => location.replace(${JSON.stringify(returnUrl)}), ${providerDelayMs})</script>`
+                : "<main>Authenticated dashboard</main>",
+        });
+      });
+      await product.goto(productUrl);
+      const controller = BrowserController.fromHarnessPage(product);
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+        observationFormat: "browser-use-dom",
+      });
+      const ref = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
+      expect(ref).toBeDefined();
+      sessions.push({ context, id: started.session_id });
+      return { product, id: started.session_id, ref: ref!, returnUrl };
+    };
+
+    try {
+      const immediate = await startOAuthFixture("immediate", 0);
+      sessionForCall(immediate.id)!.compactV2Index!.expiresAt = Date.now() + 200;
+      await expect(
+        act(immediate.id, { kind: "oauth_login", target: immediate.ref, provider: "google" }),
+      ).resolves.toMatchObject({ url: immediate.returnUrl });
+
+      const blocker = await startOAuthFixture("blocker", 700);
+      const queued = await startOAuthFixture("queued", 0);
+      const blockerPopup = blocker.product.waitForEvent("popup");
+      const blockingLogin = act(blocker.id, {
+        kind: "oauth_login",
+        target: blocker.ref,
+        provider: "google",
+      });
+      await blockerPopup;
+      sessionForCall(queued.id)!.compactV2Index!.expiresAt = Date.now() + 100;
+      const queuedLogin = act(queued.id, {
+        kind: "oauth_login",
+        target: queued.ref,
+        provider: "google",
+      });
+
+      await expect(blockingLogin).resolves.toMatchObject({ url: blocker.returnUrl });
+      await expect(queuedLogin).resolves.toMatchObject({ url: queued.returnUrl });
+    } finally {
+      if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
+      if (previousCooldown === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = previousCooldown;
+      for (const session of sessions.reverse()) {
+        await finishProvisionSession(session.id);
+        await session.context.close();
+      }
+    }
+  });
+
   it("rejects an owned return chain longer than callback then dashboard", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();
