@@ -261,35 +261,40 @@ export class BrokerAuthority {
       else if (port === undefined && !creating) this.scheduler.release(id);
       else if (port === undefined) {
         const reconnectDeadline = this.admissions.get(id)?.reconnectDeadline;
-        // The factory may have launched a page before throwing. Never infer
-        // successful cleanup from a rejected admission promise.
-        const failed: Actor = {
-          principal: { ...principal },
-          capability: {
-            cellId: this.cellId,
-            browserEpoch: this.epoch,
-            sessionId: id,
-            targetId: "unproven-admission",
-            leaseGeneration: randomUUID(),
-          },
-          port: {
-            targetId: "unproven-admission",
-            invoke: async () => {
-              throw error;
+        if (reconnectDeadline !== undefined) {
+          await this.disposeExpiredAdmission(
+            undefined,
+            id,
+            cleanupFailedAdmission,
+            orphanFailedAdmission,
+          );
+          this.scheduler.release(id);
+        } else {
+          const failed: Actor = {
+            principal: { ...principal },
+            capability: {
+              cellId: this.cellId,
+              browserEpoch: this.epoch,
+              sessionId: id,
+              targetId: "unproven-admission",
+              leaseGeneration: randomUUID(),
             },
-            close: async () => (await cleanupFailedAdmission?.(id)) ?? false,
-            orphan: async () => await orphanFailedAdmission?.(id),
-          },
-          abort,
-          state: reconnectDeadline === undefined ? "quarantined" : "detached",
-          tail: Promise.resolve(),
-          replies: new Map(),
-          pending: 0,
-          ...(reconnectDeadline === undefined
-            ? {}
-            : { closeReason: "disconnect" as const, reconnectDeadline }),
-        };
-        this.actors.set(id, failed);
+            port: {
+              targetId: "unproven-admission",
+              invoke: async () => {
+                throw error;
+              },
+              close: async () => (await cleanupFailedAdmission?.(id)) ?? false,
+              orphan: async () => await orphanFailedAdmission?.(id),
+            },
+            abort,
+            state: "quarantined",
+            tail: Promise.resolve(),
+            replies: new Map(),
+            pending: 0,
+          };
+          this.actors.set(id, failed);
+        }
       }
       const failed = this.actors.get(id);
       if (
