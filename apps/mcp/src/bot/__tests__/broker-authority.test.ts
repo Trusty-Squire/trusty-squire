@@ -409,6 +409,27 @@ describe("broker authority", () => {
     expect(broker.inventory()).toEqual({ active: 1, quarantined: 0, admitting: 0 });
   });
 
+  it("expires a never-settling detached admission without retaining capacity", async () => {
+    const broker = new BrokerAuthority("account", "cell", 1);
+    const owner = principal("admission");
+    const entered = deferred<void>();
+    void broker.open(owner, ["site:a"], async () => {
+      entered.resolve();
+      return await new Promise<BrokerSessionPort>(() => undefined);
+    });
+    await entered.promise;
+    const now = Date.now();
+    broker.detach(owner, now, 0);
+    await broker.expireDetached(now);
+
+    expect(broker.hasReconnectGrace(now)).toBe(false);
+    expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
+    const replacement = await broker.open(principal("replacement"), ["site:a"], async () =>
+      port("replacement"),
+    );
+    await expect(broker.close(principal("replacement"), replacement)).resolves.toBe(true);
+  });
+
   it("serializes the OAuth lane while unrelated operations continue", async () => {
     const broker = new BrokerAuthority("account", "cell");
     const release = deferred<void>();

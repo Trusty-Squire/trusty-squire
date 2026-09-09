@@ -193,7 +193,12 @@ export class OperatorBroker implements BrokerTransportPort {
     const dispatch = dispatchDetail(
       principal,
       tool.name,
-      this.inputHash(principal, { name: tool.name, args, capability: input.capability }),
+      this.inputHash(
+        principal,
+        typeof args.session_id === "string"
+          ? { name: tool.name, args }
+          : { name: tool.name, args, capability: input.capability },
+      ),
       starting,
     );
     const completed = await this.journal?.completedOutcome(
@@ -280,7 +285,7 @@ export class OperatorBroker implements BrokerTransportPort {
               const commandDispatch = dispatchDetail(
                 principal,
                 name,
-                this.inputHash(principal, { name, args: commandArgs, capability }),
+                this.inputHash(principal, { name, args: commandArgs }),
               );
               if (mutating) await this.journal?.record(id, commandId, "entered", commandDispatch);
               const result =
@@ -412,8 +417,12 @@ export class OperatorBroker implements BrokerTransportPort {
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
     const completed = await this.journal?.recoveryOutcome(
       journalForwarderId(principal),
-      input.capability === undefined && typeof args.session_id === "string"
-        ? { operation: tool.name, sessionId: args.session_id }
+      typeof args.session_id === "string"
+        ? {
+            operation: tool.name,
+            sessionId: args.session_id,
+            inputHash: this.inputHash(principal, { name: tool.name, args }),
+          }
         : {
             operation: tool.name,
             inputHash: this.inputHash(principal, { name: tool.name, args, capability: input.capability }),

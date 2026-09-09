@@ -217,8 +217,8 @@ export class DispatchJournal {
 
   async recoveryOutcome(
     forwarderId: string,
-    expected: Pick<DispatchRecord, "operation"> &
-      Partial<Pick<DispatchRecord, "inputHash" | "sessionId">>,
+    expected: Pick<DispatchRecord, "operation" | "inputHash"> &
+      Partial<Pick<DispatchRecord, "sessionId">>,
   ): Promise<CompletedDispatchOutcome | undefined> {
     const record = [...(await this.states()).values()]
       .reverse()
@@ -226,7 +226,7 @@ export class DispatchJournal {
         (record) =>
           record.forwarderId === forwarderId &&
           record.operation === expected.operation &&
-          (expected.inputHash === undefined || record.inputHash === expected.inputHash) &&
+          record.inputHash === expected.inputHash &&
           (expected.sessionId === undefined || record.sessionId === expected.sessionId) &&
           record.outcome !== undefined &&
           (record.phase === "outcome" || record.phase === "acknowledged"),

@@ -70,6 +70,7 @@ export class BrokerAuthority {
   }
   private readonly actors = new Map<string, Actor>();
   private readonly admissions = new Map<string, Admission>();
+  private readonly expiredAdmissions = new Set<string>();
   private readonly forwarderConnections = new Map<string, ForwarderConnection>();
   private readonly fencedClients = new Set<string>();
   private readonly scheduler = new ScopeScheduler();
@@ -194,9 +195,13 @@ export class BrokerAuthority {
     let creating = false;
     try {
       await this.scheduler.reserve(id, resources, abort.signal);
+      if (this.expiredAdmissions.has(id))
+        throw new BrokerRefusal("cancelled", "Admission reconnect grace expired");
       if (this.admissions.get(id)?.reconnectDeadline === undefined) this.assertPrincipal(principal);
       creating = true;
       port = await create(id, abort.signal, (resources) => this.scheduler.expand(id, resources));
+      if (this.expiredAdmissions.has(id))
+        throw new BrokerRefusal("cancelled", "Admission reconnect grace expired");
       const capability: TabCapability = {
         cellId: this.cellId,
         browserEpoch: this.epoch,
@@ -226,7 +231,8 @@ export class BrokerAuthority {
       }
       return { ...capability };
     } catch (error) {
-      if (port === undefined && !creating) this.scheduler.release(id);
+      if (this.expiredAdmissions.has(id)) this.scheduler.release(id);
+      else if (port === undefined && !creating) this.scheduler.release(id);
       else if (port === undefined) {
         const reconnectDeadline = this.admissions.get(id)?.reconnectDeadline;
         // The factory may have launched a page before throwing. Never infer
@@ -268,6 +274,7 @@ export class BrokerAuthority {
       throw error;
     } finally {
       this.admissions.delete(id);
+      this.expiredAdmissions.delete(id);
     }
   }
 
@@ -540,6 +547,13 @@ export class BrokerAuthority {
   }
 
   async expireDetached(now = Date.now()): Promise<void> {
+    for (const [id, admission] of this.admissions) {
+      if ((admission.reconnectDeadline ?? Number.POSITIVE_INFINITY) > now) continue;
+      this.expiredAdmissions.add(id);
+      admission.abort.abort();
+      this.admissions.delete(id);
+      this.scheduler.release(id);
+    }
     const expired = [...this.actors.values()].filter(
       (actor) =>
         actor.state === "detached" &&

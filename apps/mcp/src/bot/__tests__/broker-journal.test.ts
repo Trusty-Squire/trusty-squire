@@ -149,10 +149,17 @@ describe("broker dispatch custody", () => {
       const original = new OperatorBroker(config, "cell", journal);
       const owner = await authenticate(original, "owner");
       if (owner.forwarderId === undefined) throw new Error("Test broker lineage is missing");
+      const paymentArgs = { session_id: "stuck-session", item: "first" };
+      const paymentInputHash = createHmac(
+        "sha256",
+        createHash("sha256").update(credential("a")).digest(),
+      )
+        .update('{"args":{"item":"first","session_id":"stuck-session"},"name":"operate_pay"}')
+        .digest("hex");
       await journal.record("stuck-session", "dispatched-payment", "entered", {
         forwarderId: owner.forwarderId,
         operation: "operate_pay",
-        inputHash: "dispatched-input",
+        inputHash: paymentInputHash,
       });
       await expect(
         journal.recordDetachedPaymentUncertainty("stuck-session", owner.forwarderId),
@@ -160,7 +167,7 @@ describe("broker dispatch custody", () => {
       await journal.record("stuck-session", "dispatched-payment", "outcome", {
         forwarderId: owner.forwarderId,
         operation: "operate_pay",
-        inputHash: "dispatched-input",
+        inputHash: paymentInputHash,
         outcome: { status: "done" },
       });
       await expect(
@@ -173,7 +180,7 @@ describe("broker dispatch custody", () => {
           {
             name: "operate_pay",
             description: "",
-            inputSchema: z.object({ session_id: z.string() }).strict(),
+            inputSchema: z.object({ session_id: z.string(), item: z.string() }).strict(),
             jsonInputSchema: {},
             handler: async () => {
               dispatches += 1;
@@ -187,7 +194,7 @@ describe("broker dispatch custody", () => {
       await expect(
         restarted.recover(sameLineage, {
           name: "operate_pay",
-          args: { session_id: "stuck-session" },
+          args: paymentArgs,
         }),
       ).resolves.toEqual({
         requestId: "dispatched-payment",
@@ -200,9 +207,15 @@ describe("broker dispatch custody", () => {
         },
       });
       await expect(
+        restarted.recover(sameLineage, {
+          name: "operate_pay",
+          args: { ...paymentArgs, item: "second" },
+        }),
+      ).resolves.toBeNull();
+      await expect(
         restarted.recover(foreign, {
           name: "operate_pay",
-          args: { session_id: "stuck-session" },
+          args: paymentArgs,
         }),
       ).resolves.toBeNull();
       expect(dispatches).toBe(0);
