@@ -8,6 +8,11 @@ import { requireLineageCredential } from "./lineage.js";
 
 export interface BrokerRecoveryRequest {
   recover?: boolean;
+  preDispatchFailure?: {
+    requestId: string;
+    error: "stale_ref";
+    dispatch: "not_dispatched";
+  };
 }
 
 /** The MCP process holds only opaque capabilities. Never reconnect/replay a
@@ -65,11 +70,15 @@ export class OperatorForwarder {
     name: string,
     args: Record<string, unknown>,
     capability: TabCapability | undefined,
+    recovery: BrokerRecoveryRequest,
   ): Promise<{ requestId: string; result: unknown; capability?: TabCapability } | undefined> {
     const reply = (await client.call("recover", {
       name,
       args,
       ...(capability === undefined ? {} : { capability }),
+      ...(recovery.preDispatchFailure === undefined
+        ? {}
+        : { preDispatchFailure: recovery.preDispatchFailure }),
     })) as { requestId?: unknown; result?: unknown; capability?: unknown } | null;
     return typeof reply?.requestId === "string"
       ? {
@@ -119,7 +128,7 @@ export class OperatorForwarder {
     const id = typeof args.session_id === "string" ? args.session_id : undefined;
     const capability = id === undefined ? undefined : this.sessions.get(id);
     const recovered = recovery.recover
-      ? await this.recover(client, name, args, capability)
+      ? await this.recover(client, name, args, capability, recovery)
       : undefined;
     if (recovered !== undefined) {
       await client.acknowledge(recovered.requestId);

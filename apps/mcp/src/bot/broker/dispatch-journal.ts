@@ -18,7 +18,13 @@ interface DispatchRecord {
 }
 
 export interface ReconciledDispatchOutcome {
-  status: "completed" | "done" | "payment_3ds_required" | "payment_outcome_unknown";
+  status:
+    | "completed"
+    | "done"
+    | "payment_3ds_required"
+    | "payment_outcome_unknown"
+    | "not_dispatched";
+  error?: "stale_ref";
   next?: { tool: "operate_payment_status"; wait_seconds: number };
 }
 
@@ -33,14 +39,27 @@ export interface CompletedDispatchOutcome extends PendingDispatchOutcome {
   start?: true;
 }
 
+export interface ExplicitPreDispatchFailureEvidence {
+  requestId: string;
+  error: "stale_ref";
+  dispatch: "not_dispatched";
+}
+
 function validOutcome(value: unknown): value is ReconciledDispatchOutcome {
   if (value === null || typeof value !== "object") return false;
   const outcome = value as Record<string, unknown>;
   if (
-    !["completed", "done", "payment_3ds_required", "payment_outcome_unknown"].includes(
-      String(outcome.status),
-    ) ||
-    !Object.keys(outcome).every((key) => key === "status" || key === "next")
+    ![
+      "completed",
+      "done",
+      "payment_3ds_required",
+      "payment_outcome_unknown",
+      "not_dispatched",
+    ].includes(String(outcome.status)) ||
+    !Object.keys(outcome).every((key) => key === "status" || key === "next" || key === "error") ||
+    (outcome.status === "not_dispatched"
+      ? outcome.error !== "stale_ref" || outcome.next !== undefined
+      : outcome.error !== undefined)
   )
     return false;
   if (outcome.next === undefined) return true;
@@ -240,6 +259,48 @@ export class DispatchJournal {
           outcome: record.outcome!,
           ...(record.start === true ? { start: true } : {}),
         };
+  }
+
+  /**
+   * Reconcile a retained pre-fix record from exact, independently preserved
+   * failure metadata. This is intentionally a single supported tuple: an
+   * operate_login stale_ref is raised while resolving the observed ref, before
+   * the OAuth dispatch boundary. No other exception or operation is inferred.
+   */
+  async reconcileExplicitPreDispatchFailure(
+    sessionId: string,
+    operation: string,
+    evidence: ExplicitPreDispatchFailureEvidence,
+  ): Promise<CompletedDispatchOutcome | undefined> {
+    if (operation !== "operate_login") return undefined;
+    const record = [...(await this.states()).values()].find(
+      (candidate) =>
+        candidate.sessionId === sessionId &&
+        candidate.requestId === evidence.requestId &&
+        candidate.operation === operation,
+    );
+    if (record === undefined) return undefined;
+    const outcome = { status: "not_dispatched" as const, error: evidence.error };
+    if (
+      (record.phase === "outcome" ||
+        record.phase === "acknowledged" ||
+        record.phase === "settled") &&
+      record.outcome?.status === outcome.status &&
+      record.outcome.error === outcome.error
+    ) {
+      return { sessionId, requestId: record.requestId, operation, outcome };
+    }
+    if (record.phase !== "entered") return undefined;
+    // The explicit operation is itself the acknowledgement: once the exact
+    // no-dispatch evidence is fsynced, there is no external mutation reply to
+    // retain. A lost repair response can repeat this same operation safely.
+    await this.record(sessionId, record.requestId, "settled", {
+      ...(record.forwarderId === undefined ? {} : { forwarderId: record.forwarderId }),
+      operation,
+      ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
+      outcome,
+    });
+    return { sessionId, requestId: record.requestId, operation, outcome };
   }
 
   async acknowledge(forwarderId: string, requestId: string): Promise<boolean> {

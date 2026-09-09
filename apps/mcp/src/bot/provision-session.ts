@@ -74,6 +74,7 @@ import {
   type SafeStageV2,
 } from "./compact-observation-v2.js";
 import type { ApiClient } from "../api-client.js";
+import { ProvenPreDispatchMutationError } from "./mutation-dispatch-evidence.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
 import { pickVerificationLink, type VerificationLinkCandidate } from "./email-verification.js";
 import {
@@ -5152,6 +5153,13 @@ export async function act(
     // return it as a normal (non-throwing) observation instead of an error.
     if (error instanceof OAuthAwaitingHumanError && session !== undefined) {
       return oauthAwaitingHumanObservation(session, error);
+    }
+    // Every stale-ref branch reachable from oauth_login precedes
+    // runSerializedOAuthBoundary, the sole path that can click/dispatch OAuth.
+    // Carry that code-owned proof to the journal without classifying failures
+    // by their intentionally opaque public message.
+    if (action.kind === "oauth_login" && error instanceof CompactV2StaleRefError) {
+      throw new ProvenPreDispatchMutationError("stale_ref", { cause: error });
     }
     if (session?.compactV2Active === true) {
       // Preserve only the retry evidence consumed by operate_click. Raw browser

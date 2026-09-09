@@ -9,7 +9,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { buildServer } from "../server.js";
+import { brokerRecoveryRequested, buildServer } from "../server.js";
 import type { ApiClient } from "../api-client.js";
 import type { BrowserController } from "../bot/browser.js";
 import {
@@ -31,6 +31,43 @@ function resultText(result: Awaited<ReturnType<Client["callTool"]>>): string {
   const content = result.content as Array<{ type: string; text?: string }>;
   return content.map((c) => c.text ?? "").join(" ");
 }
+
+it("accepts only the exact explicit stale-ref pre-dispatch recovery metadata", () => {
+  expect(
+    brokerRecoveryRequested({
+      "trusty-squire/recover": {
+        request_id: "broker-request",
+        error: "stale_ref",
+        dispatch: "not_dispatched",
+      },
+    }),
+  ).toEqual({
+    recover: true,
+    preDispatchFailure: {
+      requestId: "broker-request",
+      error: "stale_ref",
+      dispatch: "not_dispatched",
+    },
+  });
+  expect(
+    brokerRecoveryRequested({
+      "trusty-squire/recover": {
+        request_id: "broker-request",
+        error: "provider_timeout",
+        dispatch: "not_dispatched",
+      },
+    }),
+  ).toEqual({});
+  expect(
+    brokerRecoveryRequested({
+      "trusty-squire/recover": {
+        request_id: "broker-request",
+        error: "stale_ref",
+        dispatch: "unknown",
+      },
+    }),
+  ).toEqual({});
+});
 
 describe("operate_* bad input is a per-call error, never a server failure", () => {
   it("preserves the same active in-memory session through malformed and unknown calls", async () => {

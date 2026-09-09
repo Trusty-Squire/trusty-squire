@@ -15,6 +15,7 @@ import { BrokerAuthority, type BrokerPrincipal, type TabCapability } from "./aut
 import { BrokerRefusal, siteResources } from "./scheduler.js";
 import type { BrokerTransportPort } from "./transport.js";
 import { forwarderId } from "./lineage.js";
+import { provenPreDispatchMutationFailure } from "../mutation-dispatch-evidence.js";
 
 const capabilitySchema = z
   .object({
@@ -32,6 +33,16 @@ const callSchema = z
     capability: capabilitySchema.optional(),
   })
   .strict();
+const recoverySchema = callSchema.extend({
+  preDispatchFailure: z
+    .object({
+      requestId: z.string().min(1),
+      error: z.literal("stale_ref"),
+      dispatch: z.literal("not_dispatched"),
+    })
+    .strict()
+    .optional(),
+});
 const startConfirmationSchema = z.object({ capability: capabilitySchema }).strict();
 
 function remapSession(value: unknown, from: string, to: string): unknown {
@@ -310,10 +321,22 @@ export class OperatorBroker implements BrokerTransportPort {
                 this.inputHash(principal, { name, args: commandArgs }),
               );
               if (mutating) await this.journal?.record(id, commandId, "entered", commandDispatch);
-              const result =
-                name === "operate_finish"
-                  ? await execute()
-                  : await withProvisionSessionCall(internalId, execute);
+              let result: unknown;
+              try {
+                result =
+                  name === "operate_finish"
+                    ? await execute()
+                    : await withProvisionSessionCall(internalId, execute);
+              } catch (error) {
+                const preDispatch = provenPreDispatchMutationFailure(error);
+                if (mutating && name === "operate_login" && preDispatch !== null) {
+                  await this.journal?.record(id, commandId, "outcome", {
+                    ...commandDispatch,
+                    outcome: { status: "not_dispatched", error: preDispatch.code },
+                  });
+                }
+                throw error;
+              }
               await this.journal?.record(
                 id,
                 "payment-custody",
@@ -442,28 +465,35 @@ export class OperatorBroker implements BrokerTransportPort {
         }
       | Record<string, unknown>;
   } | null> {
-    const input = callSchema.parse(params);
+    const input = recoverySchema.parse(params);
     const tool = findTool(input.name, this.tools);
     if (tool === null || !tool.name.startsWith("operate_"))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
-    const completed = await this.journal?.recoveryOutcome(
-      journalForwarderId(principal),
-      typeof args.session_id === "string"
-        ? {
-            operation: tool.name,
-            sessionId: args.session_id,
-            inputHash: this.inputHash(principal, { name: tool.name, args }),
-          }
-        : {
-            operation: tool.name,
-            inputHash: this.inputHash(principal, {
-              name: tool.name,
-              args,
-              capability: input.capability,
-            }),
-          },
-    );
+    const completed =
+      input.preDispatchFailure !== undefined && typeof args.session_id === "string"
+        ? await this.journal?.reconcileExplicitPreDispatchFailure(
+            args.session_id,
+            tool.name,
+            input.preDispatchFailure,
+          )
+        : await this.journal?.recoveryOutcome(
+            journalForwarderId(principal),
+            typeof args.session_id === "string"
+              ? {
+                  operation: tool.name,
+                  sessionId: args.session_id,
+                  inputHash: this.inputHash(principal, { name: tool.name, args }),
+                }
+              : {
+                  operation: tool.name,
+                  inputHash: this.inputHash(principal, {
+                    name: tool.name,
+                    args,
+                    capability: input.capability,
+                  }),
+                },
+          );
     if (completed === undefined) return null;
     await this.journal?.recordRecovery(journalForwarderId(principal), completed);
     if (completed.start === true) {

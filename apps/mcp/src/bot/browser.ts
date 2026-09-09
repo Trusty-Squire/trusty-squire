@@ -426,15 +426,25 @@ export function oauthErrorFromReturnUrl(
   return null;
 }
 
-function oauthRedirectUri(url: string): string | null {
-  try {
-    const redirectUri = new URL(url).searchParams.get("redirect_uri");
-    if (redirectUri === null) return null;
-    const target = new URL(redirectUri);
-    return target.protocol === "http:" || target.protocol === "https:" ? target.href : null;
-  } catch {
-    return null;
+function oauthRedirectChain(url: string): string[] {
+  const chain: string[] = [];
+  const seen = new Set<string>();
+  let source = url;
+  while (chain.length < 4) {
+    try {
+      const redirectUri = new URL(source).searchParams.get("redirect_uri");
+      if (redirectUri === null) break;
+      const target = new URL(redirectUri);
+      if ((target.protocol !== "http:" && target.protocol !== "https:") || seen.has(target.href))
+        break;
+      chain.push(target.href);
+      seen.add(target.href);
+      source = target.href;
+    } catch {
+      break;
+    }
   }
+  return chain;
 }
 
 function oauthRedirectTargetMatches(candidateUrl: string, expectedReturnUrl: string): boolean {
@@ -13623,7 +13633,7 @@ export class BrowserController {
     let actionStarted = false;
     let productNavigated = false;
     let transientNavigated = false;
-    let expectedReturnUrl: string | null = null;
+    const expectedReturnUrls: string[] = [];
     let pendingOnProvider = false;
     let lastTransientUrl = productUrl;
     let observedReturn: { page: Page; url: string } | null = null;
@@ -13642,8 +13652,12 @@ export class BrowserController {
       onNavigation: ((frame: Frame) => void) | null;
     } = { page: null, onNavigation: null };
     const captureExpectedReturnUrl = (url: string): void => {
-      expectedReturnUrl ??= oauthRedirectUri(url);
+      for (const target of oauthRedirectChain(url)) {
+        if (!expectedReturnUrls.includes(target)) expectedReturnUrls.push(target);
+      }
     };
+    const matchesExpectedReturn = (url: string): boolean =>
+      expectedReturnUrls.some((expected) => this.isOAuthReturnUrl(url, expected));
     const attemptPage = (page: Page): boolean => page === product || page === popupCapture.page;
     // Playwright reports a popup's initial navigation before it can associate
     // the request with a frame. Keep that request inert until the opener's
@@ -13700,9 +13714,7 @@ export class BrowserController {
       const url = frame.url();
       captureExpectedReturnUrl(url);
       observedReturn =
-        this.isOAuthReturnUrl(url, expectedReturnUrl) && oauthErrorFromReturnUrl(url) === null
-          ? { page, url }
-          : null;
+        matchesExpectedReturn(url) && oauthErrorFromReturnUrl(url) === null ? { page, url } : null;
     };
     const onProductNavigation = (frame: Frame): void => {
       if (!actionStarted || frame !== product.mainFrame()) return;
@@ -13720,7 +13732,7 @@ export class BrowserController {
           page === null ||
           page.isClosed() ||
           (page === product ? !productNavigated : !transientNavigated) ||
-          !this.isOAuthReturnUrl(page.url(), expectedReturnUrl) ||
+          !matchesExpectedReturn(page.url()) ||
           oauthErrorFromReturnUrl(page.url()) !== null
         ) {
           continue;
@@ -13734,11 +13746,7 @@ export class BrowserController {
       const returnedPage = completionPage();
       if (returnedPage !== null) {
         const url = returnedPage.url();
-        if (
-          !returnedPage.isClosed() &&
-          returnedPage.url() === url &&
-          this.isOAuthReturnUrl(url, expectedReturnUrl)
-        ) {
+        if (!returnedPage.isClosed() && returnedPage.url() === url && matchesExpectedReturn(url)) {
           return { page: returnedPage };
         }
       }
@@ -13823,7 +13831,7 @@ export class BrowserController {
         }
       };
       transient.on("framenavigated", onTransientNavigation);
-      expectedReturnUrl ??= oauthRedirectUri(transient.url());
+      captureExpectedReturnUrl(transient.url());
       if (transient !== product) {
         transientNavigated = true;
         recordTopLevelNavigation(transient, transient.mainFrame());
@@ -13839,7 +13847,7 @@ export class BrowserController {
       let settled: Page | null = null;
       if (consentProvider === undefined) {
         settled = await this.waitForOAuthLifecycle(
-          () => expectedReturnUrl,
+          () => expectedReturnUrls,
           remainingBudgetMs(),
           completionPage,
           hasTerminalCompletion,
@@ -13848,7 +13856,7 @@ export class BrowserController {
         while (settled === null && Date.now() < oauthDeadline) {
           const remaining = oauthDeadline - Date.now();
           settled = await this.waitForOAuthLifecycle(
-            () => expectedReturnUrl,
+            () => expectedReturnUrls,
             Math.min(1_000, remaining),
             completionPage,
             hasTerminalCompletion,
@@ -13985,7 +13993,7 @@ export class BrowserController {
   }
 
   private async waitForOAuthLifecycle(
-    expectedReturnUrl: () => string | null,
+    expectedReturnUrls: () => readonly string[],
     timeoutMs: number,
     completionPage: () => Page | null,
     terminalCompletion: () => boolean,
@@ -14007,7 +14015,9 @@ export class BrowserController {
         if (
           !ready ||
           returnedPage.isClosed() ||
-          !this.isOAuthReturnUrl(returnedPage.url(), expectedReturnUrl())
+          !expectedReturnUrls().some((expected) =>
+            this.isOAuthReturnUrl(returnedPage.url(), expected),
+          )
         ) {
           return null;
         }
@@ -14016,7 +14026,9 @@ export class BrowserController {
         await this.sleep(Math.min(50, Math.max(1, deadline - Date.now())));
         return !returnedPage.isClosed() &&
           returnedPage.url() === returnedUrl &&
-          this.isOAuthReturnUrl(returnedPage.url(), expectedReturnUrl())
+          expectedReturnUrls().some((expected) =>
+            this.isOAuthReturnUrl(returnedPage.url(), expected),
+          )
           ? returnedPage
           : null;
       }

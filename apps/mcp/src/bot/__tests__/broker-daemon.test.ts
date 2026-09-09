@@ -14,6 +14,7 @@ import { BrokerClient, listenBroker } from "../broker/transport.js";
 import {
   brokerDrainAllowsMethod,
   brokerIdleShutdownEligible,
+  brokerStartupAllowsMethod,
   brokerIdleTimeoutMs,
   brokerShutdownCleanupComplete,
 } from "../broker/daemon.js";
@@ -69,6 +70,13 @@ it("uses a minutes-scale idle policy and disables it for supervised brokers", ()
     }),
   ).toBeUndefined();
   expect(brokerIsSupervised({ TRUSTY_SQUIRE_BROKER_SUPERVISED: "1" })).toBe(true);
+});
+
+it("keeps startup browser work fenced while retained custody exposes only recovery", () => {
+  expect(brokerStartupAllowsMethod(true, "recover")).toBe(true);
+  expect(brokerStartupAllowsMethod(true, "acknowledge")).toBe(true);
+  expect(brokerStartupAllowsMethod(true, "tool")).toBe(false);
+  expect(brokerStartupAllowsMethod(false, "tool")).toBe(true);
 });
 
 it("defers unsupervised idle shutdown until reconnect custody resolves", () => {

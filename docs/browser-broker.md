@@ -101,6 +101,48 @@ binding. Browser epoch changes invalidate earlier capabilities.
   invents a capability, restarts work, or replays an uncertain payment. The
   record gives the caller a reconciliation next step and remains a no-replay
   fence until that retention window expires.
+- A code-proven `operate_login` stale-ref failure is recorded as
+  `status: not_dispatched, error: stale_ref`: stale-ref resolution precedes the
+  sole OAuth dispatch boundary. Older retained `entered` records may be
+  reconciled only from independently preserved exact failure evidence by using
+  object metadata instead of the ordinary boolean:
+  `"trusty-squire/recover": {"request_id":"...","error":"stale_ref","dispatch":"not_dispatched"}`.
+  The broker accepts only that operation/error/dispatch tuple and the exact
+  retained session/request identity, fsyncs a `settled` lineage-preserving
+  record, and returns the same result on an exact repeat. It does not replay the
+  tool. Other exceptions, operations, and ambiguous post-dispatch failures stay
+  fenced. A broker with retained startup custody serves this recovery endpoint
+  without launching a browser; all ordinary work remains fenced until recovery.
+
+  For the retained Xata record from the 2026-09-08 concurrency acceptance, do
+  not edit the canonical journal. After this change is merged and the MCP binary
+  running the broker contains it, with no canonical-profile Chrome/broker alive
+  and the journal still containing the exact `entered` record, issue exactly:
+
+  ```js
+  client.callTool({
+    name: "operate_login",
+    arguments: {
+      session_id: "546b6f5a-930e-4473-8aec-43fc355fd108",
+      provider: "google",
+      ref: "reconciliation-only:no-dispatch",
+    },
+    _meta: {
+      "trusty-squire/recover": {
+        request_id:
+          "4ae34aeb-e1b8-4457-a99b-72ac418600ca:4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce",
+        error: "stale_ref",
+        dispatch: "not_dispatched",
+      },
+    },
+  });
+  ```
+
+  The required response is a reconciliation with `status: not_dispatched` and
+  `error: stale_ref`. Before starting another canonical browser, independently
+  run the journal checker and require `DispatchJournal.assertReconciled()` to
+  return normally. These preconditions rely on the acceptance report's retained
+  tool output as the failure evidence; without it, leave the record fenced.
 - Unsupervised idle shutdown requires zero connected clients and zero active,
   admitting, or quarantined sessions for the configured minutes-scale bound.
   Supervised brokers stop only on their supervisor signal or an explicit drain.

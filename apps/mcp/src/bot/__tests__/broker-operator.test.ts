@@ -49,6 +49,234 @@ afterEach(() => {
   state.sessions.clear();
 });
 
+it("recovers an explicitly proven stale-ref pre-dispatch failure without replay", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ts-broker-pre-dispatch-"));
+  const path = join(root, "dispatch.jsonl");
+  const journal = new DispatchJournal(path);
+  const broker = new OperatorBroker(
+    {
+      accountId: "account",
+      agentSessionToken: "token",
+      apiBaseUrl: "http://unused.test",
+      registryBaseUrl: "http://unused.test",
+    },
+    "cell",
+    journal,
+  );
+  const identity = await broker.authenticate("token", "agent", "a".repeat(43));
+  if (identity === null) throw new Error("Test broker authentication failed");
+  const principal = { ...identity, clientId: "client" };
+  const internalId = "stale-ref-session";
+  let loginAttempts = 0;
+  let observations = 0;
+  const startTool: Tool = {
+    name: "operate_start",
+    description: "",
+    inputSchema: z.object({}).strict(),
+    jsonInputSchema: {},
+    handler: async () => {
+      state.sessions.set(internalId, {
+        browser: {
+          brokerTargetId: async () => "target",
+          isConnected: () => true,
+          waitForThreeDsResolution: async () => "succeeded",
+        },
+        pendingThreeDs: null,
+      });
+      return { session_id: internalId };
+    },
+  };
+  const loginTool: Tool = {
+    name: "operate_login",
+    description: "",
+    inputSchema: z
+      .object({ session_id: z.string(), provider: z.literal("google"), ref: z.string() })
+      .strict(),
+    jsonInputSchema: {},
+    handler: async () => {
+      loginAttempts += 1;
+      // Models the retained pre-fix record: the caller preserved the exact
+      // stale_ref result, but the old broker wrote only `entered`.
+      throw new Error("stale_ref");
+    },
+  };
+  const observeTool: Tool = {
+    name: "operate_observe",
+    description: "",
+    inputSchema: z.object({ session_id: z.string() }).strict(),
+    jsonInputSchema: {},
+    handler: async () => ({ observed: ++observations }),
+  };
+  Object.defineProperty(broker, "tools", { value: [startTool, loginTool, observeTool] });
+
+  try {
+    await broker.connected(principal);
+    const started = (await broker.call(
+      principal,
+      "tool",
+      { name: "operate_start", args: {} },
+      "start-request",
+    )) as { capability: TabCapability };
+    await broker.acknowledge(principal, "start-request");
+    await broker.confirmStartDelivery(principal, { capability: started.capability });
+    const args = {
+      session_id: started.capability.sessionId,
+      provider: "google" as const,
+      ref: "@e:stale",
+    };
+
+    await expect(
+      broker.call(
+        principal,
+        "tool",
+        { name: "operate_login", args, capability: started.capability },
+        "login-request",
+      ),
+    ).rejects.toThrow("stale_ref");
+    expect(loginAttempts).toBe(1);
+    await expect(journal.hasOutstanding(started.capability.sessionId)).resolves.toBe(true);
+    await expect(
+      broker.recover(principal, {
+        name: "operate_login",
+        args: { ...args, ref: "@e:different" },
+      }),
+    ).resolves.toBeNull();
+    await expect(journal.hasOutstanding(started.capability.sessionId)).resolves.toBe(true);
+
+    const recovered = await broker.recover(principal, {
+      name: "operate_login",
+      args,
+      preDispatchFailure: {
+        requestId: "login-request",
+        error: "stale_ref",
+        dispatch: "not_dispatched",
+      },
+    });
+    expect(recovered).toEqual({
+      requestId: "login-request",
+      result: {
+        reconciliation: {
+          request_id: "login-request",
+          operation: "operate_login",
+          status: "not_dispatched",
+          error: "stale_ref",
+        },
+      },
+    });
+    await expect(journal.hasOutstanding(started.capability.sessionId)).resolves.toBe(false);
+    await broker.acknowledge(principal, "login-request");
+    await expect(journal.hasOutstanding(started.capability.sessionId)).resolves.toBe(false);
+    await expect(
+      broker.recover(principal, {
+        name: "operate_login",
+        args,
+        preDispatchFailure: {
+          requestId: "login-request",
+          error: "stale_ref",
+          dispatch: "not_dispatched",
+        },
+      }),
+    ).resolves.toEqual(recovered);
+    expect(loginAttempts).toBe(1);
+
+    await expect(
+      broker.call(
+        principal,
+        "tool",
+        {
+          name: "operate_observe",
+          args: { session_id: started.capability.sessionId },
+          capability: started.capability,
+        },
+        "observe-request",
+      ),
+    ).resolves.toMatchObject({ result: { observed: 1 } });
+    await expect(new DispatchJournal(path).assertReconciled()).resolves.toBeUndefined();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("keeps an ambiguous thrown mutation fenced and unrecoverable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ts-broker-ambiguous-dispatch-"));
+  const path = join(root, "dispatch.jsonl");
+  const journal = new DispatchJournal(path);
+  const broker = new OperatorBroker(
+    {
+      accountId: "account",
+      agentSessionToken: "token",
+      apiBaseUrl: "http://unused.test",
+      registryBaseUrl: "http://unused.test",
+    },
+    "cell",
+    journal,
+  );
+  const identity = await broker.authenticate("token", "agent", "a".repeat(43));
+  if (identity === null) throw new Error("Test broker authentication failed");
+  const principal = { ...identity, clientId: "client" };
+  const internalId = "ambiguous-session";
+  const startTool: Tool = {
+    name: "operate_start",
+    description: "",
+    inputSchema: z.object({}).strict(),
+    jsonInputSchema: {},
+    handler: async () => {
+      state.sessions.set(internalId, {
+        browser: {
+          brokerTargetId: async () => "target",
+          isConnected: () => true,
+          waitForThreeDsResolution: async () => "succeeded",
+        },
+        pendingThreeDs: null,
+      });
+      return { session_id: internalId };
+    },
+  };
+  const loginTool: Tool = {
+    name: "operate_login",
+    description: "",
+    inputSchema: z
+      .object({ session_id: z.string(), provider: z.literal("google"), ref: z.string() })
+      .strict(),
+    jsonInputSchema: {},
+    handler: async () => {
+      throw new Error("provider navigation may already have dispatched");
+    },
+  };
+  Object.defineProperty(broker, "tools", { value: [startTool, loginTool] });
+
+  try {
+    await broker.connected(principal);
+    const started = (await broker.call(
+      principal,
+      "tool",
+      { name: "operate_start", args: {} },
+      "start-request",
+    )) as { capability: TabCapability };
+    await broker.acknowledge(principal, "start-request");
+    await broker.confirmStartDelivery(principal, { capability: started.capability });
+    const args = {
+      session_id: started.capability.sessionId,
+      provider: "google" as const,
+      ref: "@e:possibly-dispatched",
+    };
+    await expect(
+      broker.call(
+        principal,
+        "tool",
+        { name: "operate_login", args, capability: started.capability },
+        "login-request",
+      ),
+    ).rejects.toThrow("may already have dispatched");
+    await expect(broker.recover(principal, { name: "operate_login", args })).resolves.toBeNull();
+    await expect(new DispatchJournal(path).assertReconciled()).rejects.toThrow(
+      "lost mutation custody",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 it("retains a replacement lineage binding through the old socket handoff", async () => {
   const broker = new OperatorBroker(
     {

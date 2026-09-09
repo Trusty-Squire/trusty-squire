@@ -31,6 +31,10 @@ export function brokerDrainAllowsMethod(method: string): boolean {
   return DRAIN_RECOVERY_METHODS.has(method);
 }
 
+export function brokerStartupAllowsMethod(retainedCustody: boolean, method: string): boolean {
+  return !retainedCustody || DRAIN_RECOVERY_METHODS.has(method);
+}
+
 export async function brokerShutdownCleanupComplete(
   inventory: { active: number; quarantined: number; admitting: number },
   closeRuntime: () => Promise<boolean>,
@@ -156,7 +160,10 @@ export async function runBrokerDaemon(): Promise<void> {
     join(profilePathIdentity(CHROME_PROFILE_DIR), "trusty-squire-broker-dispatch.jsonl"),
   );
   await journal.expirePendingStartDeliveries();
-  await journal.assertReconciled();
+  // A retained `entered` record must not launch/adopt a browser, but the
+  // broker endpoint has to exist so an explicit durable recovery can repair
+  // it. Parsing states here still fails startup on a malformed journal.
+  let startupReconciliation = await journal.hasOutstanding();
   const operator = new OperatorBroker(
     {
       accountId: session.account_id,
@@ -226,12 +233,22 @@ export async function runBrokerDaemon(): Promise<void> {
         idleTimeout = undefined;
         return { state: "supervised" };
       }
-      if (method === "recover") return await operator.recover(principal, params);
+      if (method === "recover") {
+        const result = await operator.recover(principal, params);
+        startupReconciliation = await journal.hasOutstanding();
+        return result;
+      }
+      if (!brokerStartupAllowsMethod(startupReconciliation, method))
+        throw new BrokerRefusal(
+          "outcome_unknown",
+          "Prior broker lost mutation custody; only explicit reconciliation is available",
+        );
       if (method === "reclaim") return await operator.reclaim(principal);
       if (method === "acknowledge") {
         if (typeof params.requestId !== "string")
           throw new Error("A broker acknowledgement requires its request ID");
         await operator.acknowledge(principal, params.requestId);
+        startupReconciliation = await journal.hasOutstanding();
         return {};
       }
       if (method === "confirm_start") {

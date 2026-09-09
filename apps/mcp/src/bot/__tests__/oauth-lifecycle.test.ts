@@ -34,6 +34,7 @@ import {
 } from "../provision-session.js";
 import type { OperatorRecipe } from "../operator-recipe.js";
 import { sessionForCall } from "../session/lifecycle.js";
+import { ProvenPreDispatchMutationError } from "../mutation-dispatch-evidence.js";
 
 const PRODUCT_URL = `data:text/html,${encodeURIComponent(`
   <!doctype html>
@@ -1488,6 +1489,69 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it("completes an owned callback-to-dashboard return named by a nested redirect_uri", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const dashboardUrl = "https://resend.test/emails";
+    const callbackUrl = `https://resend.test/auth/callback?redirect_uri=${encodeURIComponent(dashboardUrl)}`;
+    const providerUrl = `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(callbackUrl)}`;
+    await context.route("**/*", (route) => {
+      const url = route.request().url();
+      return route.fulfill({
+        contentType: "text/html",
+        body:
+          url === "https://resend.test/signup"
+            ? `<button id="oauth" onclick='location.href=${JSON.stringify(providerUrl)}'>Continue</button>`
+            : url.startsWith("https://accounts.google.com/")
+              ? `<script>location.href=${JSON.stringify(callbackUrl)}</script>`
+              : url === callbackUrl
+                ? `<script>location.replace(${JSON.stringify(dashboardUrl)})</script>`
+                : "<main>Emails</main>",
+      });
+    });
+    await product.goto("https://resend.test/signup");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 800, "google")).resolves.toBeUndefined();
+      expect(controller.currentUrl()).toBe(dashboardUrl);
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("keeps an unrelated same-origin page pending after an owned OAuth callback", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const dashboardUrl = "https://resend.test/emails";
+    const unrelatedUrl = "https://resend.test/settings";
+    const callbackUrl = `https://resend.test/auth/callback?redirect_uri=${encodeURIComponent(dashboardUrl)}`;
+    const providerUrl = `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(callbackUrl)}`;
+    await context.route("**/*", (route) => {
+      const url = route.request().url();
+      return route.fulfill({
+        contentType: "text/html",
+        body:
+          url === "https://resend.test/signup"
+            ? `<button id="oauth" onclick='location.href=${JSON.stringify(providerUrl)}'>Continue</button>`
+            : url.startsWith("https://accounts.google.com/")
+              ? `<script>location.href=${JSON.stringify(callbackUrl)}</script>`
+              : url === callbackUrl
+                ? `<script>location.replace(${JSON.stringify(unrelatedUrl)})</script>`
+                : "<main>Settings</main>",
+      });
+    });
+    await product.goto("https://resend.test/signup");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 500, "google")).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+      expect(controller.currentUrl()).toBe(unrelatedUrl);
+    } finally {
+      await context.close();
+    }
+  });
+
   it("completes a popup OAuth return to its same-origin callback", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();
@@ -1929,7 +1993,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       temporaryScopeSpy.mockRestore();
 
       expect(result).toMatchObject({ found: true, code: "481920" });
-      await expect(queuedOauth).rejects.toThrow("stale_ref");
+      await expect(queuedOauth).rejects.toBeInstanceOf(ProvenPreDispatchMutationError);
       expect(source.url()).toContain("mail.google.com/mail/u/0/#search/");
       expect(product.url()).toBe(productUrl);
       expect(openedPage.url()).toBe(openedUrl);
