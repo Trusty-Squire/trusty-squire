@@ -1,6 +1,10 @@
 import { withBrokerAdmission } from "./admission-context.js";
 import { brokerBrowserCustody } from "./custody.js";
-import type { DispatchJournal, ReconciledDispatchOutcome } from "./dispatch-journal.js";
+import type {
+  AuthorizedPreDispatchFailure,
+  DispatchJournal,
+  ReconciledDispatchOutcome,
+} from "./dispatch-journal.js";
 import { timingSafeEqual, createHash, createHmac } from "node:crypto";
 import { z } from "zod";
 import { ApiClient, type ApiClientConfig } from "../../api-client.js";
@@ -44,28 +48,6 @@ const recoverySchema = callSchema.extend({
     .optional(),
 });
 const startConfirmationSchema = z.object({ capability: capabilitySchema }).strict();
-const retainedXataPreDispatchFailure = {
-  sessionId: "546b6f5a-930e-4473-8aec-43fc355fd108",
-  requestId:
-    "4ae34aeb-e1b8-4457-a99b-72ac418600ca:4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce",
-  operation: "operate_login",
-} as const;
-
-function authorizedLegacyPreDispatchFailure(
-  sessionId: string,
-  operation: string,
-  requestId: string,
-  args: Record<string, unknown>,
-): boolean {
-  return (
-    sessionId === retainedXataPreDispatchFailure.sessionId &&
-    operation === retainedXataPreDispatchFailure.operation &&
-    requestId === retainedXataPreDispatchFailure.requestId &&
-    args.provider === "google" &&
-    args.ref === "reconciliation-only:no-dispatch"
-  );
-}
-
 function remapSession(value: unknown, from: string, to: string): unknown {
   if (Array.isArray(value)) return value.map((item) => remapSession(item, from, to));
   if (value !== null && typeof value === "object")
@@ -162,7 +144,7 @@ export class OperatorBroker implements BrokerTransportPort {
     private readonly config: ApiClientConfig & { accountId: string },
     cellId: string,
     private readonly journal?: DispatchJournal,
-    private readonly legacyPreDispatchFailureAuthorized = authorizedLegacyPreDispatchFailure,
+    private readonly legacyPreDispatchAuthorization?: AuthorizedPreDispatchFailure,
   ) {
     this.authority = new BrokerAuthority(config.accountId, cellId);
     this.authority.setDetachedExpiryHandler(async (capability, principal) => {
@@ -495,19 +477,18 @@ export class OperatorBroker implements BrokerTransportPort {
     const explicitFailure = input.preDispatchFailure;
     const sessionId = typeof args.session_id === "string" ? args.session_id : undefined;
     const inputHash = this.inputHash(principal, { name: tool.name, args });
+    const authorization = this.legacyPreDispatchAuthorization;
     const completed =
       explicitFailure !== undefined &&
       sessionId !== undefined &&
-      this.legacyPreDispatchFailureAuthorized(
-        sessionId,
-        tool.name,
-        explicitFailure.requestId,
-        args,
-      )
+      authorization !== undefined &&
+      sessionId === authorization.sessionId &&
+      tool.name === authorization.operation &&
+      journalForwarderId(principal) === authorization.forwarderId &&
+      args.provider === "google" &&
+      args.ref === "reconciliation-only:no-dispatch"
         ? await this.journal?.reconcileExplicitPreDispatchFailure(
-            journalForwarderId(principal),
-            sessionId,
-            tool.name,
+            authorization,
             explicitFailure,
           )
         : await this.journal?.recoveryOutcome(

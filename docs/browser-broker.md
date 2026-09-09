@@ -109,11 +109,13 @@ binding. Browser epoch changes invalidate earlier capabilities.
   `"trusty-squire/recover": {"request_id":"...","error":"stale_ref","dispatch":"not_dispatched"}`.
   The broker accepts only the server-authorized retained Xata session/request
   tuple and reconciliation-only argument locator, from its original
-  authenticated forwarder lineage. The retained record's original input hash
-  remains part of the durable identity and is copied unchanged into settlement;
-  the caller's replacement arguments and error label are not evidence. The
-  broker fsyncs a `settled` lineage-preserving record and returns the same result
-  on an exact repeat without replaying the tool. Other records,
+  authenticated forwarder lineage. Before serving recovery, broker startup
+  snapshots the complete matching `entered` record as the one-record
+  authorization, including its stored forwarder and input hash. Settlement
+  requires that same complete record identity and preserves its input hash
+  verbatim; the caller's replacement arguments and error label are not
+  evidence. The broker fsyncs a `settled` lineage-preserving record and returns
+  the same result on an exact repeat without replaying the tool. Other records,
   exceptions, operations, lineages, arguments, and ambiguous post-dispatch
   failures stay fenced. A broker with retained startup custody serves this
   recovery endpoint without launching a browser; all ordinary work remains
@@ -122,7 +124,9 @@ binding. Browser epoch changes invalidate earlier capabilities.
   For the retained Xata record from the 2026-09-08 concurrency acceptance, do
   not edit the canonical journal. After this change is merged and the MCP binary
   running the broker contains it, with no canonical-profile Chrome/broker alive
-  and the journal still containing the exact `entered` record, issue exactly:
+  and the journal still containing exactly that `entered` record with its
+  original forwarder and input hash, start the broker once so it snapshots that
+  identity, then issue exactly from the original forwarder lineage:
 
   ```js
   client.callTool({

@@ -160,6 +160,8 @@ export async function runBrokerDaemon(): Promise<void> {
     join(profilePathIdentity(CHROME_PROFILE_DIR), "trusty-squire-broker-dispatch.jsonl"),
   );
   await journal.expirePendingStartDeliveries();
+  const retainedXataPreDispatchAuthorization =
+    await journal.retainedXataPreDispatchAuthorization();
   // A retained `entered` record must not launch/adopt a browser, but the
   // broker endpoint has to exist so an explicit durable recovery can repair
   // it. Parsing states here still fails startup on a malformed journal.
@@ -173,6 +175,7 @@ export async function runBrokerDaemon(): Promise<void> {
     },
     cellId,
     journal,
+    retainedXataPreDispatchAuthorization,
   );
   const connected = new Set<string>();
   let closing = false;

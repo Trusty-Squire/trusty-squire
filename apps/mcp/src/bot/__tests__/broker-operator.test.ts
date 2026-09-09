@@ -53,8 +53,19 @@ it("recovers an explicitly proven stale-ref pre-dispatch failure without replay"
   const root = await mkdtemp(join(tmpdir(), "ts-broker-pre-dispatch-"));
   const path = join(root, "dispatch.jsonl");
   const journal = new DispatchJournal(path);
+  const retainedSessionId = "546b6f5a-930e-4473-8aec-43fc355fd108";
   const retainedRequestId =
     "4ae34aeb-e1b8-4457-a99b-72ac418600ca:4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce";
+  const lineageCredential = "a".repeat(43);
+  const retainedForwarderId = forwarderId(lineageCredential);
+  const retainedInputHash = "retained-input-hash";
+  await journal.record(retainedSessionId, retainedRequestId, "entered", {
+    forwarderId: retainedForwarderId,
+    operation: "operate_login",
+    inputHash: retainedInputHash,
+  });
+  const authorization = await journal.retainedXataPreDispatchAuthorization();
+  if (authorization === undefined) throw new Error("Retained authorization was not captured");
   const broker = new OperatorBroker(
     {
       accountId: "account",
@@ -64,15 +75,12 @@ it("recovers an explicitly proven stale-ref pre-dispatch failure without replay"
     },
     "cell",
     journal,
-    (_sessionId, operation, requestId, args) =>
-      operation === "operate_login" &&
-      requestId === retainedRequestId &&
-      args.ref === "reconciliation-only:no-dispatch",
+    authorization,
   );
-  const identity = await broker.authenticate("token", "agent", "a".repeat(43));
+  const identity = await broker.authenticate("token", "agent", lineageCredential);
   if (identity === null) throw new Error("Test broker authentication failed");
   const principal = { ...identity, clientId: "client" };
-  const internalId = "546b6f5a-930e-4473-8aec-43fc355fd108";
+  const internalId = "new-session";
   let loginAttempts = 0;
   let observations = 0;
   const startTool: Tool = {
@@ -101,9 +109,7 @@ it("recovers an explicitly proven stale-ref pre-dispatch failure without replay"
     jsonInputSchema: {},
     handler: async () => {
       loginAttempts += 1;
-      // Models the retained pre-fix record: the caller preserved the exact
-      // stale_ref result, but the old broker wrote only `entered`.
-      throw new Error("stale_ref");
+      return { unexpected: true };
     },
   };
   const observeTool: Tool = {
@@ -117,42 +123,37 @@ it("recovers an explicitly proven stale-ref pre-dispatch failure without replay"
 
   try {
     await broker.connected(principal);
-    const started = (await broker.call(
-      principal,
-      "tool",
-      { name: "operate_start", args: {} },
-      "start-request",
-    )) as { capability: TabCapability };
-    await broker.acknowledge(principal, "start-request");
-    await broker.confirmStartDelivery(principal, { capability: started.capability });
     const args = {
-      session_id: started.capability.sessionId,
+      session_id: retainedSessionId,
       provider: "google" as const,
       ref: "reconciliation-only:no-dispatch",
     };
-
-    await expect(
-      broker.call(
-        principal,
-        "tool",
-        { name: "operate_login", args, capability: started.capability },
-        retainedRequestId,
-      ),
-    ).rejects.toThrow("stale_ref");
-    expect(loginAttempts).toBe(1);
-    await expect(journal.hasOutstanding(started.capability.sessionId)).resolves.toBe(true);
-    await expect(
-      broker.recover(principal, {
-        name: "operate_login",
-        args: { ...args, ref: "@e:different" },
-        preDispatchFailure: {
-          requestId: retainedRequestId,
-          error: "stale_ref",
-          dispatch: "not_dispatched",
-        },
-      }),
-    ).resolves.toBeNull();
-    await expect(journal.hasOutstanding(started.capability.sessionId)).resolves.toBe(true);
+    const recoveryRequest = {
+      name: "operate_login",
+      args,
+      preDispatchFailure: {
+        requestId: retainedRequestId,
+        error: "stale_ref" as const,
+        dispatch: "not_dispatched" as const,
+      },
+    };
+    await journal.record(retainedSessionId, retainedRequestId, "entered", {
+      forwarderId: retainedForwarderId,
+      operation: "operate_login",
+    });
+    await expect(broker.recover(principal, recoveryRequest)).resolves.toBeNull();
+    await journal.record(retainedSessionId, retainedRequestId, "entered", {
+      forwarderId: retainedForwarderId,
+      operation: "operate_login",
+      inputHash: "different-input-hash",
+    });
+    await expect(broker.recover(principal, recoveryRequest)).resolves.toBeNull();
+    await journal.record(retainedSessionId, retainedRequestId, "entered", {
+      forwarderId: retainedForwarderId,
+      operation: "operate_login",
+      inputHash: retainedInputHash,
+    });
+    await expect(journal.hasOutstanding(retainedSessionId)).resolves.toBe(true);
 
     const foreignIdentity = await broker.authenticate("token", "other-agent", "b".repeat(43));
     if (foreignIdentity === null) throw new Error("Foreign broker authentication failed");
@@ -170,17 +171,9 @@ it("recovers an explicitly proven stale-ref pre-dispatch failure without replay"
         },
       ),
     ).resolves.toBeNull();
-    await expect(journal.hasOutstanding(started.capability.sessionId)).resolves.toBe(true);
+    await expect(journal.hasOutstanding(retainedSessionId)).resolves.toBe(true);
 
-    const recovered = await broker.recover(principal, {
-      name: "operate_login",
-      args,
-      preDispatchFailure: {
-        requestId: retainedRequestId,
-        error: "stale_ref",
-        dispatch: "not_dispatched",
-      },
-    });
+    const recovered = await broker.recover(principal, recoveryRequest);
     expect(recovered).toEqual({
       requestId: retainedRequestId,
       result: {
@@ -192,21 +185,22 @@ it("recovers an explicitly proven stale-ref pre-dispatch failure without replay"
         },
       },
     });
-    await expect(journal.hasOutstanding(started.capability.sessionId)).resolves.toBe(false);
+    await expect(journal.hasOutstanding(retainedSessionId)).resolves.toBe(false);
     await broker.acknowledge(principal, retainedRequestId);
-    await expect(journal.hasOutstanding(started.capability.sessionId)).resolves.toBe(false);
+    await expect(journal.hasOutstanding(retainedSessionId)).resolves.toBe(false);
     await expect(
-      broker.recover(principal, {
-        name: "operate_login",
-        args,
-        preDispatchFailure: {
-          requestId: retainedRequestId,
-          error: "stale_ref",
-          dispatch: "not_dispatched",
-        },
-      }),
+      broker.recover(principal, recoveryRequest),
     ).resolves.toEqual(recovered);
-    expect(loginAttempts).toBe(1);
+    expect(loginAttempts).toBe(0);
+
+    const started = (await broker.call(
+      principal,
+      "tool",
+      { name: "operate_start", args: {} },
+      "start-request",
+    )) as { capability: TabCapability };
+    await broker.acknowledge(principal, "start-request");
+    await broker.confirmStartDelivery(principal, { capability: started.capability });
 
     await expect(
       broker.call(

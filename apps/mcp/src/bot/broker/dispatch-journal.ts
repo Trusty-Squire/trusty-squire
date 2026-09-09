@@ -45,6 +45,21 @@ export interface ExplicitPreDispatchFailureEvidence {
   dispatch: "not_dispatched";
 }
 
+export interface AuthorizedPreDispatchFailure {
+  sessionId: string;
+  requestId: string;
+  operation: "operate_login";
+  forwarderId: string;
+  inputHash: string;
+}
+
+const retainedXataPreDispatchFailure = {
+  sessionId: "546b6f5a-930e-4473-8aec-43fc355fd108",
+  requestId:
+    "4ae34aeb-e1b8-4457-a99b-72ac418600ca:4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce",
+  operation: "operate_login",
+} as const;
+
 function validOutcome(value: unknown): value is ReconciledDispatchOutcome {
   if (value === null || typeof value !== "object") return false;
   const outcome = value as Record<string, unknown>;
@@ -126,6 +141,22 @@ export class DispatchJournal {
         "outcome_unknown",
         "Prior broker lost mutation custody; reconcile before browser replacement",
       );
+  }
+
+  async retainedXataPreDispatchAuthorization(): Promise<AuthorizedPreDispatchFailure | undefined> {
+    const record = [...(await this.states()).values()].find(
+      (candidate) =>
+        candidate.sessionId === retainedXataPreDispatchFailure.sessionId &&
+        candidate.requestId === retainedXataPreDispatchFailure.requestId &&
+        candidate.operation === retainedXataPreDispatchFailure.operation &&
+        candidate.phase === "entered",
+    );
+    if (record?.forwarderId === undefined || record.inputHash === undefined) return undefined;
+    return {
+      ...retainedXataPreDispatchFailure,
+      forwarderId: record.forwarderId,
+      inputHash: record.inputHash,
+    };
   }
 
   async hasOutstanding(sessionId?: string, forwarderId?: string): Promise<boolean> {
@@ -261,29 +292,22 @@ export class DispatchJournal {
         };
   }
 
-  /**
-   * Reconcile a retained pre-fix record from exact, independently preserved
-   * failure metadata. This is intentionally a single supported tuple: an
-   * operate_login stale_ref is raised while resolving the observed ref, before
-   * the OAuth dispatch boundary. No other exception or operation is inferred.
-   */
   async reconcileExplicitPreDispatchFailure(
-    forwarderId: string,
-    sessionId: string,
-    operation: string,
+    authorization: AuthorizedPreDispatchFailure,
     evidence: ExplicitPreDispatchFailureEvidence,
   ): Promise<CompletedDispatchOutcome | undefined> {
-    if (operation !== "operate_login") return undefined;
+    const { sessionId, requestId, operation, forwarderId, inputHash } = authorization;
+    if (evidence.requestId !== requestId) return undefined;
     const record = [...(await this.states()).values()].find(
       (candidate) =>
         candidate.sessionId === sessionId &&
-        candidate.requestId === evidence.requestId &&
+        candidate.requestId === requestId &&
         candidate.operation === operation &&
         candidate.forwarderId === forwarderId &&
-        candidate.inputHash !== undefined,
+        candidate.inputHash === inputHash,
     );
     if (record === undefined) return undefined;
-    const outcome = { status: "not_dispatched" as const, error: evidence.error };
+    const outcome = { status: "not_dispatched" as const, error: "stale_ref" as const };
     if (
       (record.phase === "outcome" ||
         record.phase === "acknowledged" ||
@@ -297,7 +321,7 @@ export class DispatchJournal {
     await this.record(sessionId, record.requestId, "settled", {
       forwarderId,
       operation,
-      inputHash: record.inputHash,
+      inputHash,
       outcome,
     });
     return { sessionId, requestId: record.requestId, operation, outcome };
