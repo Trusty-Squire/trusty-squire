@@ -1552,6 +1552,46 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it("does not accept a provider reached by a cyclic callback return chain", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const providerBaseUrl = "https://accounts.google.com/provider";
+    const callbackUrl = `https://resend.test/auth/callback?redirect_uri=${encodeURIComponent(providerBaseUrl)}`;
+    const providerStartUrl = `${providerBaseUrl}?redirect_uri=${encodeURIComponent(callbackUrl)}`;
+    let providerVisits = 0;
+    await context.route("**/*", (route) => {
+      const url = route.request().url();
+      if (url === "https://resend.test/signup") {
+        return route.fulfill({
+          contentType: "text/html",
+          body: `<button id="oauth" onclick='window.open(${JSON.stringify(providerStartUrl)})'>Continue</button>`,
+        });
+      }
+      if (url === providerStartUrl) {
+        return route.fulfill({ status: 302, headers: { location: providerBaseUrl } });
+      }
+      return route.fulfill({
+        contentType: "text/html",
+        body:
+          url === providerBaseUrl
+            ? ++providerVisits === 1
+              ? `<script>location.href=${JSON.stringify(callbackUrl)}</script>`
+              : "<main>Provider</main>"
+            : `<script>location.replace(${JSON.stringify(providerBaseUrl)})</script>`,
+      });
+    });
+    await product.goto("https://resend.test/signup");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 500)).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+      expect(controller.currentUrl()).toBe("https://resend.test/signup");
+    } finally {
+      await context.close();
+    }
+  });
+
   it("completes a popup OAuth return to its same-origin callback", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();

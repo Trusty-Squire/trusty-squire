@@ -44,6 +44,24 @@ const recoverySchema = callSchema.extend({
     .optional(),
 });
 const startConfirmationSchema = z.object({ capability: capabilitySchema }).strict();
+const retainedXataPreDispatchFailure = {
+  sessionId: "546b6f5a-930e-4473-8aec-43fc355fd108",
+  requestId:
+    "4ae34aeb-e1b8-4457-a99b-72ac418600ca:4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce",
+  operation: "operate_login",
+} as const;
+
+function authorizedLegacyPreDispatchFailure(
+  sessionId: string,
+  operation: string,
+  requestId: string,
+): boolean {
+  return (
+    sessionId === retainedXataPreDispatchFailure.sessionId &&
+    operation === retainedXataPreDispatchFailure.operation &&
+    requestId === retainedXataPreDispatchFailure.requestId
+  );
+}
 
 function remapSession(value: unknown, from: string, to: string): unknown {
   if (Array.isArray(value)) return value.map((item) => remapSession(item, from, to));
@@ -141,6 +159,7 @@ export class OperatorBroker implements BrokerTransportPort {
     private readonly config: ApiClientConfig & { accountId: string },
     cellId: string,
     private readonly journal?: DispatchJournal,
+    private readonly legacyPreDispatchFailureAuthorized = authorizedLegacyPreDispatchFailure,
   ) {
     this.authority = new BrokerAuthority(config.accountId, cellId);
     this.authority.setDetachedExpiryHandler(async (capability, principal) => {
@@ -470,20 +489,27 @@ export class OperatorBroker implements BrokerTransportPort {
     if (tool === null || !tool.name.startsWith("operate_"))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
+    const explicitFailure = input.preDispatchFailure;
+    const sessionId = typeof args.session_id === "string" ? args.session_id : undefined;
+    const inputHash = this.inputHash(principal, { name: tool.name, args });
     const completed =
-      input.preDispatchFailure !== undefined && typeof args.session_id === "string"
+      explicitFailure !== undefined &&
+      sessionId !== undefined &&
+      this.legacyPreDispatchFailureAuthorized(sessionId, tool.name, explicitFailure.requestId)
         ? await this.journal?.reconcileExplicitPreDispatchFailure(
-            args.session_id,
+            journalForwarderId(principal),
+            inputHash,
+            sessionId,
             tool.name,
-            input.preDispatchFailure,
+            explicitFailure,
           )
         : await this.journal?.recoveryOutcome(
             journalForwarderId(principal),
-            typeof args.session_id === "string"
+            sessionId !== undefined
               ? {
                   operation: tool.name,
-                  sessionId: args.session_id,
-                  inputHash: this.inputHash(principal, { name: tool.name, args }),
+                  sessionId,
+                  inputHash,
                 }
               : {
                   operation: tool.name,

@@ -53,6 +53,8 @@ it("recovers an explicitly proven stale-ref pre-dispatch failure without replay"
   const root = await mkdtemp(join(tmpdir(), "ts-broker-pre-dispatch-"));
   const path = join(root, "dispatch.jsonl");
   const journal = new DispatchJournal(path);
+  const retainedRequestId =
+    "4ae34aeb-e1b8-4457-a99b-72ac418600ca:4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce";
   const broker = new OperatorBroker(
     {
       accountId: "account",
@@ -62,11 +64,13 @@ it("recovers an explicitly proven stale-ref pre-dispatch failure without replay"
     },
     "cell",
     journal,
+    (_sessionId, operation, requestId) =>
+      operation === "operate_login" && requestId === retainedRequestId,
   );
   const identity = await broker.authenticate("token", "agent", "a".repeat(43));
   if (identity === null) throw new Error("Test broker authentication failed");
   const principal = { ...identity, clientId: "client" };
-  const internalId = "stale-ref-session";
+  const internalId = "546b6f5a-930e-4473-8aec-43fc355fd108";
   let loginAttempts = 0;
   let observations = 0;
   const startTool: Tool = {
@@ -130,7 +134,7 @@ it("recovers an explicitly proven stale-ref pre-dispatch failure without replay"
         principal,
         "tool",
         { name: "operate_login", args, capability: started.capability },
-        "login-request",
+        retainedRequestId,
       ),
     ).rejects.toThrow("stale_ref");
     expect(loginAttempts).toBe(1);
@@ -139,7 +143,30 @@ it("recovers an explicitly proven stale-ref pre-dispatch failure without replay"
       broker.recover(principal, {
         name: "operate_login",
         args: { ...args, ref: "@e:different" },
+        preDispatchFailure: {
+          requestId: retainedRequestId,
+          error: "stale_ref",
+          dispatch: "not_dispatched",
+        },
       }),
+    ).resolves.toBeNull();
+    await expect(journal.hasOutstanding(started.capability.sessionId)).resolves.toBe(true);
+
+    const foreignIdentity = await broker.authenticate("token", "other-agent", "b".repeat(43));
+    if (foreignIdentity === null) throw new Error("Foreign broker authentication failed");
+    await expect(
+      broker.recover(
+        { ...foreignIdentity, clientId: "foreign-client" },
+        {
+          name: "operate_login",
+          args,
+          preDispatchFailure: {
+            requestId: retainedRequestId,
+            error: "stale_ref",
+            dispatch: "not_dispatched",
+          },
+        },
+      ),
     ).resolves.toBeNull();
     await expect(journal.hasOutstanding(started.capability.sessionId)).resolves.toBe(true);
 
@@ -147,16 +174,16 @@ it("recovers an explicitly proven stale-ref pre-dispatch failure without replay"
       name: "operate_login",
       args,
       preDispatchFailure: {
-        requestId: "login-request",
+        requestId: retainedRequestId,
         error: "stale_ref",
         dispatch: "not_dispatched",
       },
     });
     expect(recovered).toEqual({
-      requestId: "login-request",
+      requestId: retainedRequestId,
       result: {
         reconciliation: {
-          request_id: "login-request",
+          request_id: retainedRequestId,
           operation: "operate_login",
           status: "not_dispatched",
           error: "stale_ref",
@@ -164,14 +191,14 @@ it("recovers an explicitly proven stale-ref pre-dispatch failure without replay"
       },
     });
     await expect(journal.hasOutstanding(started.capability.sessionId)).resolves.toBe(false);
-    await broker.acknowledge(principal, "login-request");
+    await broker.acknowledge(principal, retainedRequestId);
     await expect(journal.hasOutstanding(started.capability.sessionId)).resolves.toBe(false);
     await expect(
       broker.recover(principal, {
         name: "operate_login",
         args,
         preDispatchFailure: {
-          requestId: "login-request",
+          requestId: retainedRequestId,
           error: "stale_ref",
           dispatch: "not_dispatched",
         },
@@ -269,6 +296,17 @@ it("keeps an ambiguous thrown mutation fenced and unrecoverable", async () => {
       ),
     ).rejects.toThrow("may already have dispatched");
     await expect(broker.recover(principal, { name: "operate_login", args })).resolves.toBeNull();
+    await expect(
+      broker.recover(principal, {
+        name: "operate_login",
+        args,
+        preDispatchFailure: {
+          requestId: "login-request",
+          error: "stale_ref",
+          dispatch: "not_dispatched",
+        },
+      }),
+    ).resolves.toBeNull();
     await expect(new DispatchJournal(path).assertReconciled()).rejects.toThrow(
       "lost mutation custody",
     );

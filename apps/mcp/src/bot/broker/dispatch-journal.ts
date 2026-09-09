@@ -268,6 +268,8 @@ export class DispatchJournal {
    * the OAuth dispatch boundary. No other exception or operation is inferred.
    */
   async reconcileExplicitPreDispatchFailure(
+    forwarderId: string,
+    inputHash: string,
     sessionId: string,
     operation: string,
     evidence: ExplicitPreDispatchFailureEvidence,
@@ -277,7 +279,9 @@ export class DispatchJournal {
       (candidate) =>
         candidate.sessionId === sessionId &&
         candidate.requestId === evidence.requestId &&
-        candidate.operation === operation,
+        candidate.operation === operation &&
+        candidate.forwarderId === forwarderId &&
+        candidate.inputHash === inputHash,
     );
     if (record === undefined) return undefined;
     const outcome = { status: "not_dispatched" as const, error: evidence.error };
@@ -291,13 +295,10 @@ export class DispatchJournal {
       return { sessionId, requestId: record.requestId, operation, outcome };
     }
     if (record.phase !== "entered") return undefined;
-    // The explicit operation is itself the acknowledgement: once the exact
-    // no-dispatch evidence is fsynced, there is no external mutation reply to
-    // retain. A lost repair response can repeat this same operation safely.
     await this.record(sessionId, record.requestId, "settled", {
-      ...(record.forwarderId === undefined ? {} : { forwarderId: record.forwarderId }),
+      forwarderId,
       operation,
-      ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
+      inputHash,
       outcome,
     });
     return { sessionId, requestId: record.requestId, operation, outcome };

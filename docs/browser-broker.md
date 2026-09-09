@@ -107,12 +107,15 @@ binding. Browser epoch changes invalidate earlier capabilities.
   reconciled only from independently preserved exact failure evidence by using
   object metadata instead of the ordinary boolean:
   `"trusty-squire/recover": {"request_id":"...","error":"stale_ref","dispatch":"not_dispatched"}`.
-  The broker accepts only that operation/error/dispatch tuple and the exact
-  retained session/request identity, fsyncs a `settled` lineage-preserving
-  record, and returns the same result on an exact repeat. It does not replay the
-  tool. Other exceptions, operations, and ambiguous post-dispatch failures stay
-  fenced. A broker with retained startup custody serves this recovery endpoint
-  without launching a browser; all ordinary work remains fenced until recovery.
+  The broker accepts only the server-authorized retained Xata session/request
+  tuple, from its original authenticated forwarder lineage, with arguments that
+  reproduce the retained input hash. The caller's error label is not evidence.
+  The broker fsyncs a `settled` lineage-preserving record and returns the same
+  result on an exact repeat without replaying the tool. Other records,
+  exceptions, operations, lineages, arguments, and ambiguous post-dispatch
+  failures stay fenced. A broker with retained startup custody serves this
+  recovery endpoint without launching a browser; all ordinary work remains
+  fenced until recovery.
 
   For the retained Xata record from the 2026-09-08 concurrency acceptance, do
   not edit the canonical journal. After this change is merged and the MCP binary

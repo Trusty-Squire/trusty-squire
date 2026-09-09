@@ -428,9 +428,14 @@ export function oauthErrorFromReturnUrl(
 
 function oauthRedirectChain(url: string): string[] {
   const chain: string[] = [];
-  const seen = new Set<string>();
-  let source = url;
-  while (chain.length < 4) {
+  let source: string;
+  try {
+    source = new URL(url).href;
+  } catch {
+    return chain;
+  }
+  const seen = new Set<string>([source]);
+  while (chain.length < 2) {
     try {
       const redirectUri = new URL(source).searchParams.get("redirect_uri");
       if (redirectUri === null) break;
@@ -13634,6 +13639,7 @@ export class BrowserController {
     let productNavigated = false;
     let transientNavigated = false;
     const expectedReturnUrls: string[] = [];
+    const redirectSources = new Set<string>();
     let pendingOnProvider = false;
     let lastTransientUrl = productUrl;
     let observedReturn: { page: Page; url: string } | null = null;
@@ -13652,8 +13658,14 @@ export class BrowserController {
       onNavigation: ((frame: Frame) => void) | null;
     } = { page: null, onNavigation: null };
     const captureExpectedReturnUrl = (url: string): void => {
+      try {
+        redirectSources.add(new URL(url).href);
+      } catch {
+        return;
+      }
       for (const target of oauthRedirectChain(url)) {
-        if (!expectedReturnUrls.includes(target)) expectedReturnUrls.push(target);
+        if (!redirectSources.has(target) && !expectedReturnUrls.includes(target))
+          expectedReturnUrls.push(target);
       }
     };
     const matchesExpectedReturn = (url: string): boolean =>
