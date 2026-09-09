@@ -54,6 +54,7 @@ interface Actor {
   closePromise?: Promise<boolean>;
   closeReason?: "finish" | "disconnect";
   reconnectDeadline?: number;
+  reclaimable?: boolean;
 }
 
 /** This object lives only in the broker. No Page, Browser or CDP handle crosses
@@ -292,6 +293,7 @@ export class BrokerAuthority {
             tail: Promise.resolve(),
             replies: new Map(),
             pending: 0,
+            reclaimable: false,
           };
           this.actors.set(id, failed);
         }
@@ -334,7 +336,8 @@ export class BrokerAuthority {
   reclaim(principal: BrokerPrincipal): TabCapability[] {
     this.assertPrincipal(principal);
     const owned = [...this.actors.values()].filter(
-      (actor) => actor.principal.forwarderId === principal.forwarderId,
+      (actor) =>
+        actor.reclaimable !== false && actor.principal.forwarderId === principal.forwarderId,
     );
     if (
       owned.some(

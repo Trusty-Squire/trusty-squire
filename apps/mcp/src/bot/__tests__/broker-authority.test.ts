@@ -472,6 +472,45 @@ describe("broker authority", () => {
     await expect(broker.close(replacement, capability)).resolves.toBe(true);
   });
 
+  it("does not reclaim a rejected portless admission after its client disconnects", async () => {
+    const broker = new BrokerAuthority("account", "cell", 1);
+    const owner = { ...principal("a"), forwarderId: "lineage-a" };
+    const replacement = { ...owner, clientId: "replacement" };
+    let cleanupProven = false;
+    let cleanupCalls = 0;
+    await broker.claimForwarder(owner);
+
+    await expect(
+      broker.open(
+        owner,
+        ["site:a"],
+        async () => {
+          throw new Error("start failed before session port");
+        },
+        async () => {
+          cleanupCalls++;
+          return cleanupProven;
+        },
+      ),
+    ).rejects.toThrow("start failed before session port");
+    expect(cleanupCalls).toBe(1);
+    expect(broker.inventory()).toEqual({ active: 0, quarantined: 1, admitting: 0 });
+
+    broker.detach(owner);
+    broker.releaseForwarder(owner);
+    await broker.claimForwarder(replacement);
+    expect(broker.reclaim(replacement)).toEqual([]);
+    expect(broker.inventory()).toEqual({ active: 0, quarantined: 1, admitting: 0 });
+
+    cleanupProven = true;
+    await broker.retryQuarantined();
+    expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
+    const capability = await broker.open(replacement, ["site:a"], async () =>
+      port("replacement"),
+    );
+    await expect(broker.close(replacement, capability)).resolves.toBe(true);
+  });
+
   it("disposes a port returned after detached admission expiry without consuming capacity", async () => {
     const broker = new BrokerAuthority("account", "cell", 1, 5);
     const owner = principal("late");
