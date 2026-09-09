@@ -85,6 +85,26 @@ export function brokerIdleTimeoutMs(env: NodeJS.ProcessEnv = process.env): numbe
   return Math.max(MIN_BROKER_IDLE_TIMEOUT_MS, configured);
 }
 
+export function brokerIdleShutdownEligible(input: {
+  closing: boolean;
+  draining: boolean;
+  connectedClients: number;
+  idleTimeout: number | undefined;
+  inventory: { active: number; quarantined: number; admitting: number };
+  hasReconnectGrace: boolean;
+}): boolean {
+  return (
+    !input.closing &&
+    !input.draining &&
+    input.connectedClients === 0 &&
+    input.idleTimeout !== undefined &&
+    !input.hasReconnectGrace &&
+    input.inventory.active === 0 &&
+    input.inventory.quarantined === 0 &&
+    input.inventory.admitting === 0
+  );
+}
+
 /** Explicit foreground service entrypoint. A supervisor may retain the broker;
  * ordinary clients cannot stop it while another connection owns sessions. */
 export async function runBrokerDaemon(): Promise<void> {
@@ -271,7 +291,17 @@ export async function runBrokerDaemon(): Promise<void> {
   function scheduleShutdownIfIdle(): void {
     if (idleTimer !== undefined) clearTimeout(idleTimer);
     idleTimer = undefined;
-    if (closing || draining || connected.size !== 0 || idleTimeout === undefined) return;
+    if (
+      !brokerIdleShutdownEligible({
+        closing,
+        draining,
+        connectedClients: connected.size,
+        idleTimeout,
+        inventory: operator.authority.inventory(),
+        hasReconnectGrace: operator.authority.hasReconnectGrace(),
+      })
+    )
+      return;
     idleTimer = setTimeout(() => {
       idleTimer = undefined;
       void shutdown();
@@ -279,7 +309,19 @@ export async function runBrokerDaemon(): Promise<void> {
     idleTimer.unref();
   }
   const shutdown = async (explicitDrain = false) => {
-    if (closing || (!explicitDrain && connected.size !== 0)) return;
+    if (
+      closing ||
+      (!explicitDrain &&
+        !brokerIdleShutdownEligible({
+          closing,
+          draining,
+          connectedClients: connected.size,
+          idleTimeout,
+          inventory: operator.authority.inventory(),
+          hasReconnectGrace: operator.authority.hasReconnectGrace(),
+        }))
+    )
+      return;
     draining = true;
     if (idleTimer !== undefined) clearTimeout(idleTimer);
     if (!(await brokerShutdownCleanupComplete(operator.authority.inventory(), () => runtime.close()))) {

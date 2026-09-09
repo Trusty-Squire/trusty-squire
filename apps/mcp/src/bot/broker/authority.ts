@@ -36,6 +36,11 @@ interface ForwarderConnection {
   clientId: string;
   detach?: { promise: Promise<void>; resolve: () => void };
 }
+interface Admission {
+  principal: BrokerPrincipal;
+  abort: AbortController;
+  reconnectDeadline?: number;
+}
 interface Actor {
   principal: BrokerPrincipal;
   capability: TabCapability;
@@ -64,10 +69,7 @@ export class BrokerAuthority {
     this.epochValue = randomUUID();
   }
   private readonly actors = new Map<string, Actor>();
-  private readonly admissions = new Map<
-    string,
-    { principal: BrokerPrincipal; abort: AbortController }
-  >();
+  private readonly admissions = new Map<string, Admission>();
   private readonly forwarderConnections = new Map<string, ForwarderConnection>();
   private readonly fencedClients = new Set<string>();
   private readonly scheduler = new ScopeScheduler();
@@ -192,7 +194,7 @@ export class BrokerAuthority {
     let creating = false;
     try {
       await this.scheduler.reserve(id, resources, abort.signal);
-      this.assertPrincipal(principal);
+      if (this.admissions.get(id)?.reconnectDeadline === undefined) this.assertPrincipal(principal);
       creating = true;
       port = await create(id, abort.signal, (resources) => this.scheduler.expand(id, resources));
       const capability: TabCapability = {
@@ -213,7 +215,12 @@ export class BrokerAuthority {
         pending: 0,
       };
       this.actors.set(id, actor);
-      if (abort.signal.aborted || this.fencedClients.has(principal.clientId)) {
+      const reconnectDeadline = this.admissions.get(id)?.reconnectDeadline;
+      if (reconnectDeadline !== undefined) {
+        actor.state = "detached";
+        actor.closeReason = "disconnect";
+        actor.reconnectDeadline = reconnectDeadline;
+      } else if (abort.signal.aborted || this.fencedClients.has(principal.clientId)) {
         await this.closeActor(actor);
         throw new BrokerRefusal("cancelled", "Client disconnected during admission");
       }
@@ -221,9 +228,10 @@ export class BrokerAuthority {
     } catch (error) {
       if (port === undefined && !creating) this.scheduler.release(id);
       else if (port === undefined) {
+        const reconnectDeadline = this.admissions.get(id)?.reconnectDeadline;
         // The factory may have launched a page before throwing. Never infer
         // successful cleanup from a rejected admission promise.
-        this.actors.set(id, {
+        const failed: Actor = {
           principal: { ...principal },
           capability: {
             cellId: this.cellId,
@@ -240,14 +248,23 @@ export class BrokerAuthority {
             close: async () => (await cleanupFailedAdmission?.(id)) ?? false,
           },
           abort,
-          state: "quarantined",
+          state: reconnectDeadline === undefined ? "quarantined" : "detached",
           tail: Promise.resolve(),
           replies: new Map(),
           pending: 0,
-        });
+          ...(reconnectDeadline === undefined
+            ? {}
+            : { closeReason: "disconnect" as const, reconnectDeadline }),
+        };
+        this.actors.set(id, failed);
       }
       const failed = this.actors.get(id);
-      if (port === undefined && failed !== undefined) await this.closeActor(failed);
+      if (
+        port === undefined &&
+        failed !== undefined &&
+        failed.state !== "detached"
+      )
+        await this.closeActor(failed);
       throw error;
     } finally {
       this.admissions.delete(id);
@@ -509,7 +526,9 @@ export class BrokerAuthority {
     this.assertPrincipal(principal);
     this.fencedClients.add(principal.clientId);
     for (const admission of this.admissions.values()) {
-      if (admission.principal.clientId === principal.clientId) admission.abort.abort();
+      if (admission.principal.clientId !== principal.clientId) continue;
+      admission.reconnectDeadline = now + graceMs;
+      admission.abort.abort();
     }
     for (const actor of this.actors.values()) {
       if (actor.principal.clientId !== principal.clientId || actor.state !== "active") continue;
@@ -551,6 +570,18 @@ export class BrokerAuthority {
         }
         await this.closeSettledExpiredActor(actor);
       }),
+    );
+  }
+
+  hasReconnectGrace(now = Date.now()): boolean {
+    return (
+      [...this.admissions.values()].some(
+        (admission) => (admission.reconnectDeadline ?? 0) > now,
+      ) ||
+      [...this.actors.values()].some(
+        (actor) =>
+          actor.state === "detached" && (actor.reconnectDeadline ?? 0) > now,
+      )
     );
   }
 

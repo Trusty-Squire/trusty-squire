@@ -1,15 +1,19 @@
 import { spawn } from "node:child_process";
+import { createServer, type Server } from "node:http";
 import { createRequire } from "node:module";
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, rm, lstat, readFile } from "node:fs/promises";
 import { createHash, createHmac } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { chromium } from "playwright";
 import { expect, it } from "vitest";
 import { SessionStore } from "../../session.js";
 import { BrokerClient, listenBroker } from "../broker/transport.js";
 import {
   brokerDrainAllowsMethod,
+  brokerIdleShutdownEligible,
   brokerIdleTimeoutMs,
   brokerShutdownCleanupComplete,
 } from "../broker/daemon.js";
@@ -20,6 +24,17 @@ import { BrokerRefusal } from "../broker/scheduler.js";
 const require = createRequire(import.meta.url);
 const sleep = async (ms: number) => await new Promise((r) => setTimeout(r, ms));
 const credential = "a".repeat(43);
+let chromiumAvailable = false;
+try {
+  chromiumAvailable = existsSync(chromium.executablePath());
+} catch {
+  chromiumAvailable = false;
+}
+const itWithChromium = chromiumAvailable && process.platform === "linux" ? it : it.skip;
+
+async function closeServer(server: Server): Promise<void> {
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+}
 
 it("keeps a forwarder's lineage credential out of the detached broker environment", () => {
   expect(
@@ -41,6 +56,31 @@ it("uses a minutes-scale idle policy and disables it for supervised brokers", ()
     }),
   ).toBeUndefined();
   expect(brokerIsSupervised({ TRUSTY_SQUIRE_BROKER_SUPERVISED: "1" })).toBe(true);
+});
+
+it("defers unsupervised idle shutdown until reconnect custody resolves", () => {
+  const idle = {
+    closing: false,
+    draining: false,
+    connectedClients: 0,
+    idleTimeout: 60_000,
+    inventory: { active: 0, quarantined: 0, admitting: 0 },
+  };
+  expect(brokerIdleShutdownEligible({ ...idle, hasReconnectGrace: false })).toBe(true);
+  expect(
+    brokerIdleShutdownEligible({
+      ...idle,
+      hasReconnectGrace: true,
+      inventory: { active: 0, quarantined: 1, admitting: 0 },
+    }),
+  ).toBe(false);
+  expect(
+    brokerIdleShutdownEligible({
+      ...idle,
+      hasReconnectGrace: false,
+      inventory: { active: 0, quarantined: 1, admitting: 0 },
+    }),
+  ).toBe(false);
 });
 
 it("keeps a draining recovery endpoint reachable while refusing mutations", async () => {
@@ -99,7 +139,7 @@ it("keeps a draining recovery endpoint reachable while refusing mutations", asyn
   }
 });
 
-it("keeps the real daemon endpoint recoverable when drain retains quarantined custody", async () => {
+itWithChromium("keeps the real daemon endpoint recoverable when real browser cleanup remains unproven", async () => {
   const root = await mkdtemp(join(tmpdir(), "ts-broker-drain-process-"));
   const socket = join(root, "b.sock");
   const config = join(root, "config");
@@ -110,11 +150,19 @@ it("keeps the real daemon endpoint recoverable when drain retains quarantined cu
     api_base_url: "http://127.0.0.1:1",
     saved_at: new Date().toISOString(),
   };
-  const actorPath = join(root, "actor-id");
+  const closeEnteredPath = join(root, "close-entered");
   const journal = new DispatchJournal(join(profile, "trusty-squire-broker-dispatch.jsonl"));
   await mkdir(profile);
   await mkdir(join(root, "home"));
   await new SessionStore(join(config, "trusty-squire", "session.json")).write(account);
+  const service = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "text/html" });
+    response.end("<!doctype html><title>Drain recovery browser</title>");
+  });
+  await new Promise<void>((resolve) => service.listen(0, "127.0.0.1", resolve));
+  const address = service.address();
+  if (address === null || typeof address === "string") throw new Error("test service did not bind");
+  const serviceUrl = `http://127.0.0.1:${address.port}/`;
   const child = spawn(
     process.execPath,
     [
@@ -132,7 +180,10 @@ it("keeps the real daemon endpoint recoverable when drain retains quarantined cu
         TRUSTY_SQUIRE_REAPER_DIR: join(root, "reapers"),
         TRUSTY_SQUIRE_BROKER_SOCKET: socket,
         TRUSTY_SQUIRE_BROKER_SUPERVISED: "1",
-        TRUSTY_SQUIRE_BROKER_TEST_ACTOR_PATH: actorPath,
+        TRUSTY_SQUIRE_BROKER_TEST_CLOSE_ENTERED_PATH: closeEnteredPath,
+        UNIVERSAL_BOT_CHANNEL: "chrome",
+        UNIVERSAL_BOT_CHROME_BINARY: chromium.executablePath(),
+        BOT_SELF_LAUNCH: "1",
         BOT_CDP_ENDPOINT: "",
       },
       stdio: ["ignore", "ignore", "pipe"],
@@ -161,14 +212,13 @@ it("keeps the real daemon endpoint recoverable when drain retains quarantined cu
       await sleep(25);
     }
     initial = await BrokerClient.connect(socket, account.agent_session_token, credential);
-    let sessionId = "";
-    for (let attempt = 0; attempt < 200; attempt++) {
-      sessionId = await readFile(actorPath, "utf8").catch(() => "");
-      if (sessionId.length > 0) break;
-      if (child.exitCode !== null) throw new Error(diagnostic);
-      await sleep(25);
-    }
-    if (sessionId.length === 0) throw new Error("fixture actor was not created");
+    const started = (await initial.call("tool", {
+      name: "operate_start",
+      args: { service_url: serviceUrl },
+    })) as { capability?: { sessionId?: string; targetId?: string } };
+    const sessionId = started.capability?.sessionId;
+    if (typeof sessionId !== "string" || typeof started.capability?.targetId !== "string")
+      throw new Error(`real browser session was not created: ${JSON.stringify(started)}`);
     const paymentArgs = { session_id: sessionId, item: "fixture purchase", reason: "drain recovery" };
     await journal.record(sessionId, "stuck-payment", "outcome", {
       forwarderId: forwarderId(credential),
@@ -179,7 +229,11 @@ it("keeps the real daemon endpoint recoverable when drain retains quarantined cu
     initial = undefined;
     child.kill("SIGTERM");
     for (let attempt = 0; attempt < 200; attempt++) {
-      if (diagnostic.includes("cleanup unproven")) break;
+      if (
+        diagnostic.includes("cleanup unproven") &&
+        (await readFile(closeEnteredPath, "utf8").catch(() => "")) === "entered"
+      )
+        break;
       if (child.exitCode !== null) throw new Error(diagnostic);
       await sleep(25);
     }
@@ -203,9 +257,10 @@ it("keeps the real daemon endpoint recoverable when drain retains quarantined cu
     await client?.close();
     if (child.exitCode === null) child.kill("SIGKILL");
     await exited;
+    await closeServer(service);
     await rm(root, { recursive: true, force: true });
   }
-}, 30000);
+}, 120000);
 
 it("returns only a durable start outcome after daemon death", async () => {
   const root = await mkdtemp(join(tmpdir(), "ts-broker-daemon-recovery-"));

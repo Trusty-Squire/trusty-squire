@@ -382,29 +382,31 @@ describe("broker authority", () => {
     expect(broker.inventory().quarantined).toBe(1);
   });
 
-  it("closes a late admission after client loss without releasing another site's lease", async () => {
+  it("retains a late detached admission for same-lineage reclaim", async () => {
     const broker = new BrokerAuthority("account", "cell");
     const entered = deferred<void>(),
       release = deferred<void>();
-    let closed = false;
-    const opening = broker.open(principal("a"), ["site:a"], async () => {
+    const owner = { ...principal("a"), forwarderId: "lineage-a" };
+    const replacement = { ...owner, clientId: "replacement" };
+    void broker.claimForwarder(owner);
+    const opening = broker.open(owner, ["site:a"], async () => {
       entered.resolve();
       await release.promise;
       return {
         ...port("a"),
-        close: async () => {
-          closed = true;
-          return true;
-        },
       };
     });
-    const rejected = expect(opening).rejects.toThrow("disconnected during admission");
     await entered.promise;
-    await broker.disconnect(principal("a"));
+    const now = Date.now();
+    broker.detach(owner, now, 100);
+    broker.releaseForwarder(owner);
     release.resolve();
-    await rejected;
-    expect(closed).toBe(true);
-    expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
+    const capability = await opening;
+    expect(broker.hasReconnectGrace(now + 1)).toBe(true);
+    void broker.claimForwarder(replacement);
+    expect(broker.reclaim(replacement)).toEqual([capability]);
+    await expect(broker.invoke(replacement, capability, "reclaimed", "read", {})).resolves.toBe("a");
+    expect(broker.inventory()).toEqual({ active: 1, quarantined: 0, admitting: 0 });
   });
 
   it("serializes the OAuth lane while unrelated operations continue", async () => {
