@@ -13655,7 +13655,7 @@ export class BrowserController {
     let productNavigated = false;
     let transientNavigated = false;
     const expectedReturnUrls: string[] = [];
-    const redirectSourceFamilies = new Set<string>();
+    let returnChainCaptured = false;
     let pendingOnProvider = false;
     let lastTransientUrl = productUrl;
     let observedReturn: { page: Page; url: string } | null = null;
@@ -13674,17 +13674,18 @@ export class BrowserController {
       onNavigation: ((frame: Frame) => void) | null;
     } = { page: null, onNavigation: null };
     const captureExpectedReturnUrl = (url: string): void => {
-      const sourceFamily = oauthEndpointFamily(url);
-      if (sourceFamily === null) return;
-      redirectSourceFamilies.add(sourceFamily);
-      for (const target of oauthRedirectChain(url)) {
-        const targetFamily = oauthEndpointFamily(target);
-        if (
-          targetFamily !== null &&
-          !redirectSourceFamilies.has(targetFamily) &&
-          !expectedReturnUrls.includes(target)
-        )
-          expectedReturnUrls.push(target);
+      if (returnChainCaptured) return;
+      const chain = oauthRedirectChain(url);
+      if (chain.length === 0) return;
+      let providerOrigin: string;
+      try {
+        providerOrigin = new URL(url).origin;
+      } catch {
+        return;
+      }
+      returnChainCaptured = true;
+      for (const target of chain) {
+        if (new URL(target).origin !== providerOrigin) expectedReturnUrls.push(target);
       }
     };
     const matchesExpectedReturn = (url: string): boolean =>
