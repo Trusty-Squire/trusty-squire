@@ -509,7 +509,8 @@ export class OperatorBroker implements BrokerTransportPort {
                 },
           );
     if (completed === undefined) return null;
-    await this.journal?.recordRecovery(journalForwarderId(principal), completed);
+    if (completed.alreadySettled !== true)
+      await this.journal?.recordRecovery(journalForwarderId(principal), completed);
     if (completed.start === true) {
       const capability = this.authority.recoverCapability(principal, completed.sessionId);
       if (capability === undefined)

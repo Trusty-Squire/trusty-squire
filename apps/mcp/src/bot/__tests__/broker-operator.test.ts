@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z, type Tool } from "../../tools/index.js";
@@ -188,9 +188,38 @@ it("recovers an explicitly proven stale-ref pre-dispatch failure without replay"
     await expect(journal.hasOutstanding(retainedSessionId)).resolves.toBe(false);
     await broker.acknowledge(principal, retainedRequestId);
     await expect(journal.hasOutstanding(retainedSessionId)).resolves.toBe(false);
+    const restartedJournal = new DispatchJournal(path);
+    const restartedAuthorization = await restartedJournal.retainedXataPreDispatchAuthorization();
+    if (restartedAuthorization === undefined)
+      throw new Error("Settled authorization was not restored");
+    const restartedBroker = new OperatorBroker(
+      {
+        accountId: "account",
+        agentSessionToken: "token",
+        apiBaseUrl: "http://unused.test",
+        registryBaseUrl: "http://unused.test",
+      },
+      "restarted-cell",
+      restartedJournal,
+      restartedAuthorization,
+    );
+    Object.defineProperty(restartedBroker, "tools", {
+      value: [startTool, loginTool, observeTool],
+    });
+    const restartedIdentity = await restartedBroker.authenticate(
+      "token",
+      "agent",
+      lineageCredential,
+    );
+    if (restartedIdentity === null) throw new Error("Restarted broker authentication failed");
+    const journalBeforeReplay = await readFile(path, "utf8");
     await expect(
-      broker.recover(principal, recoveryRequest),
+      restartedBroker.recover(
+        { ...restartedIdentity, clientId: "restarted-client" },
+        recoveryRequest,
+      ),
     ).resolves.toEqual(recovered);
+    await expect(readFile(path, "utf8")).resolves.toBe(journalBeforeReplay);
     expect(loginAttempts).toBe(0);
 
     const started = (await broker.call(

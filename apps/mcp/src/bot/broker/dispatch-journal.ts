@@ -37,6 +37,7 @@ export interface PendingDispatchOutcome {
 export interface CompletedDispatchOutcome extends PendingDispatchOutcome {
   outcome: ReconciledDispatchOutcome;
   start?: true;
+  alreadySettled?: true;
 }
 
 export interface ExplicitPreDispatchFailureEvidence {
@@ -149,7 +150,11 @@ export class DispatchJournal {
         candidate.sessionId === retainedXataPreDispatchFailure.sessionId &&
         candidate.requestId === retainedXataPreDispatchFailure.requestId &&
         candidate.operation === retainedXataPreDispatchFailure.operation &&
-        candidate.phase === "entered",
+        candidate.start === undefined &&
+        ((candidate.phase === "entered" && candidate.outcome === undefined) ||
+          (candidate.phase === "settled" &&
+            candidate.outcome?.status === "not_dispatched" &&
+            candidate.outcome.error === "stale_ref")),
     );
     if (record?.forwarderId === undefined || record.inputHash === undefined) return undefined;
     return {
@@ -304,19 +309,23 @@ export class DispatchJournal {
         candidate.requestId === requestId &&
         candidate.operation === operation &&
         candidate.forwarderId === forwarderId &&
-        candidate.inputHash === inputHash,
+        candidate.inputHash === inputHash &&
+        candidate.start === undefined,
     );
     if (record === undefined) return undefined;
     const outcome = { status: "not_dispatched" as const, error: "stale_ref" as const };
     if (
-      (record.phase === "outcome" ||
-        record.phase === "acknowledged" ||
-        record.phase === "settled") &&
+      record.phase === "settled" &&
       record.outcome?.status === outcome.status &&
       record.outcome.error === outcome.error
-    ) {
-      return { sessionId, requestId: record.requestId, operation, outcome };
-    }
+    )
+      return {
+        sessionId,
+        requestId: record.requestId,
+        operation,
+        outcome,
+        alreadySettled: true,
+      };
     if (record.phase !== "entered") return undefined;
     await this.record(sessionId, record.requestId, "settled", {
       forwarderId,

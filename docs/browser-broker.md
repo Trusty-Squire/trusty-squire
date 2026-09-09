@@ -119,7 +119,9 @@ binding. Browser epoch changes invalidate earlier capabilities.
   exceptions, operations, lineages, arguments, and ambiguous post-dispatch
   failures stay fenced. A broker with retained startup custody serves this
   recovery endpoint without launching a browser; all ordinary work remains
-  fenced until recovery.
+  fenced until recovery. After settlement, broker restart snapshots that same
+  exact settled identity; repeating the command returns the recorded
+  reconciliation without appending to or changing the journal.
 
   For the retained Xata record from the 2026-09-08 concurrency acceptance, do
   not edit the canonical journal. After this change is merged and the MCP binary
