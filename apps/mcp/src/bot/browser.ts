@@ -468,6 +468,23 @@ function oauthRedirectChain(url: string): string[] {
   return chain;
 }
 
+function oauthProviderOrigin(
+  url: string,
+  provider: OAuthProviderId | undefined,
+  productOrigin: string,
+): string | null {
+  try {
+    const parsed = new URL(url);
+    if (parsed.origin === productOrigin) return null;
+    const host = parsed.hostname.toLowerCase();
+    if (provider === "google" && host !== "accounts.google.com") return null;
+    if (provider === "github" && host !== "github.com") return null;
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
 function oauthRedirectTargetMatches(candidateUrl: string, expectedReturnUrl: string): boolean {
   try {
     const candidate = new URL(candidateUrl);
@@ -13642,6 +13659,7 @@ export class BrowserController {
         return url;
       }
     };
+    const productOrigin = safeOrigin(productUrl);
     // Fix C: a timed-out wait only proves control has not returned to the
     // product origin yet — never assert WHY (expired session, denial, etc.).
     // A consent screen or 2FA challenge is routinely still showing; the
@@ -13677,16 +13695,11 @@ export class BrowserController {
       if (returnChainCaptured) return;
       const chain = oauthRedirectChain(url);
       if (chain.length === 0) return;
-      let providerOrigin: string;
-      try {
-        providerOrigin = new URL(url).origin;
-      } catch {
-        return;
-      }
+      const providerOrigin = oauthProviderOrigin(url, consentProvider, productOrigin);
+      if (providerOrigin === null) return;
       returnChainCaptured = true;
-      for (const target of chain) {
-        if (new URL(target).origin !== providerOrigin) expectedReturnUrls.push(target);
-      }
+      if (chain.some((target) => new URL(target).origin === providerOrigin)) return;
+      expectedReturnUrls.push(...chain);
     };
     const matchesExpectedReturn = (url: string): boolean =>
       expectedReturnUrls.some((expected) => this.isOAuthReturnUrl(url, expected));

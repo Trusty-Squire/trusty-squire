@@ -1552,7 +1552,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
-  it("does not accept a provider reached by a cyclic callback return chain", async () => {
+  it("does not accept a delayed callback in a provider-origin return cycle", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();
     const providerBaseUrl = "https://accounts.google.com/provider";
@@ -1579,7 +1579,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
               ? `<script>location.href=${JSON.stringify(callbackUrl)}</script>`
               : "<main>Provider</main>"
             : url === callbackUrl
-              ? `<script>location.replace(${JSON.stringify(providerReturnUrl)})</script>`
+              ? `<script>setTimeout(() => location.replace(${JSON.stringify(providerReturnUrl)}), 120)</script>`
               : "<main>Provider</main>",
       });
     });
@@ -1595,6 +1595,40 @@ describe("BrowserController OAuth popup lifecycle", () => {
       expect(completion.check).toBeDefined();
       await expect(completion.check?.()).resolves.toBeNull();
       expect(controller.currentUrl()).toBe("https://resend.test/signup");
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("does not attribute a product auth-start redirect as the provider root", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const providerUrl = "https://accounts.google.com/provider";
+    const productStartUrl = `https://resend.test/auth/start?redirect_uri=${encodeURIComponent(providerUrl)}`;
+    await context.route("**/*", (route) => {
+      const url = route.request().url();
+      return route.fulfill({
+        contentType: "text/html",
+        body:
+          url === "https://resend.test/signup"
+            ? `<button id="oauth" onclick='location.href=${JSON.stringify(productStartUrl)}'>Continue</button>`
+            : url === productStartUrl
+              ? `<script>location.href=${JSON.stringify(providerUrl)}</script>`
+              : "<main>Google</main>",
+      });
+    });
+    await product.goto("https://resend.test/signup");
+    const controller = BrowserController.fromHarnessPage(product);
+    const completion = { check: undefined as undefined | (() => Promise<unknown>) };
+    try {
+      await expect(
+        controller.loginWithOAuth("#oauth", 500, "google", undefined, (check) => {
+          completion.check = check;
+        }),
+      ).rejects.toBeInstanceOf(OAuthAwaitingHumanError);
+      expect(completion.check).toBeDefined();
+      await expect(completion.check?.()).resolves.toBeNull();
+      expect(controller.currentUrl()).toBe(providerUrl);
     } finally {
       await context.close();
     }
