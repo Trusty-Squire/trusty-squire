@@ -26,6 +26,7 @@ export interface BrokerSessionPort {
   ): Promise<unknown>;
   /** True only after owned tabs and pending outcome custody are resolved. */
   close(reason?: "finish" | "disconnect" | "expiry"): Promise<boolean>;
+  orphan(): Promise<void>;
 }
 export const FORWARDER_HANDOFF_TIMEOUT_MS = 120_000;
 export const DETACHED_EXPIRY_CLOSE_TIMEOUT_MS = 10_000;
@@ -53,7 +54,6 @@ interface Actor {
   closePromise?: Promise<boolean>;
   closeReason?: "finish" | "disconnect";
   reconnectDeadline?: number;
-  expiryQuarantined?: boolean;
 }
 
 /** This object lives only in the broker. No Page, Browser or CDP handle crosses
@@ -194,6 +194,7 @@ export class BrokerAuthority {
       reserve: (resources: readonly string[]) => void,
     ) => Promise<BrokerSessionPort>,
     cleanupFailedAdmission?: (sessionId: string) => Promise<boolean>,
+    orphanFailedAdmission?: (sessionId: string) => Promise<void>,
   ): Promise<TabCapability> {
     this.assertPrincipal(principal);
     if (
@@ -249,7 +250,12 @@ export class BrokerAuthority {
     } catch (error) {
       if (this.expiredAdmissions.has(id)) {
         if (port === undefined && creating)
-          await this.disposeExpiredAdmission(undefined, id, cleanupFailedAdmission);
+          await this.disposeExpiredAdmission(
+            undefined,
+            id,
+            cleanupFailedAdmission,
+            orphanFailedAdmission,
+          );
         this.scheduler.release(id);
       }
       else if (port === undefined && !creating) this.scheduler.release(id);
@@ -272,6 +278,7 @@ export class BrokerAuthority {
               throw error;
             },
             close: async () => (await cleanupFailedAdmission?.(id)) ?? false,
+            orphan: async () => await orphanFailedAdmission?.(id),
           },
           abort,
           state: reconnectDeadline === undefined ? "quarantined" : "detached",
@@ -334,7 +341,6 @@ export class BrokerAuthority {
     const displacedClients = new Set<string>();
     const capabilities = owned.flatMap((actor) => {
       if (actor.state === "detached" && (actor.reconnectDeadline ?? 0) <= now) return [];
-      if (actor.expiryQuarantined) return [];
       displacedClients.add(actor.principal.clientId);
       actor.principal = { ...principal };
       if (actor.state === "detached") {
@@ -507,25 +513,32 @@ export class BrokerAuthority {
     port: BrokerSessionPort | undefined,
     id?: string,
     cleanupFailedAdmission?: (sessionId: string) => Promise<boolean>,
+    orphanFailedAdmission?: (sessionId: string) => Promise<void>,
   ): Promise<void> {
-    await this.completeWithinDetachedExpiryTimeout(async () => {
+    const closed = await this.completeWithinDetachedExpiryTimeout(async () => {
       if (port !== undefined) return await port.close("expiry");
       return (await cleanupFailedAdmission?.(id ?? "")) ?? false;
     });
+    if (closed.completed && closed.value) return;
+    await this.completeWithinDetachedExpiryTimeout(async () => {
+      if (port !== undefined) return await port.orphan();
+      await orphanFailedAdmission?.(id ?? "");
+    });
   }
 
-  private markExpiryQuarantined(actor: Actor): void {
-    actor.state = "quarantined";
-    actor.expiryQuarantined = true;
-    delete actor.reconnectDeadline;
+  private async orphanExpiredActor(actor: Actor): Promise<void> {
+    await this.completeWithinDetachedExpiryTimeout(async () => await actor.port.orphan());
+    this.actors.delete(actor.capability.sessionId);
+    this.scheduler.release(actor.capability.sessionId);
+    this.retireFencedClient(actor.principal.clientId);
   }
 
-  private async quarantineExpiredActor(actor: Actor): Promise<void> {
+  private async disposeExpiredActor(actor: Actor): Promise<void> {
     const handled = await this.completeWithinDetachedExpiryTimeout(async () => {
       await this.detachedExpiryHandler?.(actor.capability, actor.principal);
     });
     if (!handled.completed) {
-      this.markExpiryQuarantined(actor);
+      await this.orphanExpiredActor(actor);
       return;
     }
     const closed = await this.completeWithinDetachedExpiryTimeout(
@@ -537,20 +550,7 @@ export class BrokerAuthority {
       this.retireFencedClient(actor.principal.clientId);
       return;
     }
-    this.markExpiryQuarantined(actor);
-  }
-
-  private async closeSettledExpiredActor(actor: Actor): Promise<void> {
-    const closed = await this.completeWithinDetachedExpiryTimeout(
-      async () => await actor.port.close("expiry"),
-    );
-    if (closed.completed && closed.value) {
-      this.actors.delete(actor.capability.sessionId);
-      this.scheduler.release(actor.capability.sessionId);
-      this.retireFencedClient(actor.principal.clientId);
-      return;
-    }
-    this.markExpiryQuarantined(actor);
+    await this.orphanExpiredActor(actor);
   }
 
   async disconnect(principal: BrokerPrincipal): Promise<void> {
@@ -609,23 +609,19 @@ export class BrokerAuthority {
         actor.abort.abort();
         let timeout: ReturnType<typeof setTimeout> | undefined;
         try {
-          const drained = await Promise.race([
+          await Promise.race([
             actor.tail.then(
-              () => true,
-              () => true,
+              () => undefined,
+              () => undefined,
             ),
-            new Promise<false>((resolve) => {
-              timeout = setTimeout(() => resolve(false), this.detachedExpiryCloseTimeoutMs);
+            new Promise<void>((resolve) => {
+              timeout = setTimeout(() => resolve(), this.detachedExpiryCloseTimeoutMs);
             }),
           ]);
-          if (!drained) {
-            await this.quarantineExpiredActor(actor);
-            return;
-          }
         } finally {
           if (timeout !== undefined) clearTimeout(timeout);
         }
-        await this.closeSettledExpiredActor(actor);
+        await this.disposeExpiredActor(actor);
       }),
     );
   }
@@ -658,7 +654,6 @@ export class BrokerAuthority {
   ): Promise<void> {
     for (const actor of [...this.actors.values()]) {
       if (actor.state !== "quarantined") continue;
-      if (actor.expiryQuarantined) continue;
       if (!(await shouldClose(actor.capability, actor.principal))) continue;
       await this.closeActor(actor, actor.closeReason ?? "disconnect");
     }

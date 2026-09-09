@@ -8,6 +8,8 @@ export interface BrokerBrowserCustody {
     proxyUrl?: string;
   }): Promise<{ browser: BrowserController; profileDir: string }>;
   cleanupAdmission(sessionId: string): Promise<boolean>;
+  orphanAdmission(sessionId: string): Promise<void>;
+  orphan(browser: BrowserController): Promise<void>;
   release(browser: BrowserController): Promise<void>;
   identity<T>(operation: () => Promise<T>): Promise<T>;
 }

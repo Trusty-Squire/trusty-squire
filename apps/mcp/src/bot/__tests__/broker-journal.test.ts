@@ -54,6 +54,8 @@ describe("broker dispatch custody", () => {
         throw new Error("not used");
       },
       cleanupAdmission: async () => true,
+      orphanAdmission: async () => undefined,
+      orphan: async () => undefined,
       release: async () => undefined,
       identity: async (operation) => await operation(),
     });
@@ -303,6 +305,7 @@ describe("broker dispatch custody", () => {
         targetId: "target",
         invoke: async () => undefined,
         close: async () => true,
+        orphan: async () => undefined,
       }));
       await journal.record(capability.sessionId, "forwarder:old-process:request", "outcome", {
         forwarderId,
@@ -475,6 +478,7 @@ describe("broker dispatch custody", () => {
         targetId: "target",
         invoke: async () => undefined,
         close: async () => true,
+        orphan: async () => undefined,
       }));
       await journal.record(capability.sessionId, "payment-custody", "entered", {
         forwarderId: principal.forwarderId,

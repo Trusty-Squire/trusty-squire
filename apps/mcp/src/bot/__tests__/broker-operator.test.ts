@@ -92,6 +92,8 @@ it("deregisters the lifecycle session when target discovery fails after start", 
       events.push(`cleanup:${sessionId}`);
       return true;
     },
+    orphanAdmission: async () => undefined,
+    orphan: async () => undefined,
     release: async () => undefined,
     identity: async (operation) => await operation(),
   });

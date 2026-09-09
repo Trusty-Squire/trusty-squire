@@ -260,6 +260,7 @@ export class OperatorBroker implements BrokerTransportPort {
                 throw new BrokerRefusal("auth_required", "Connect before starting");
               },
               close: async () => true,
+              orphan: async () => undefined,
             };
           }
           if (mutationCapableStart)
@@ -334,6 +335,7 @@ export class OperatorBroker implements BrokerTransportPort {
                 });
               return result.closed;
             },
+            orphan: async () => await brokerBrowserCustody()?.orphan(session.browser),
           };
         },
         async (id) => {
@@ -342,6 +344,15 @@ export class OperatorBroker implements BrokerTransportPort {
           if (session !== undefined && !(await finishProvisionSession(sessionId)).closed)
             return false;
           return (await brokerBrowserCustody()?.cleanupAdmission(id)) ?? false;
+        },
+        async (id) => {
+          const sessionId = internalId === "" ? id : internalId;
+          const session = sessionForCall(sessionId);
+          if (session !== undefined) {
+            await brokerBrowserCustody()?.orphan(session.browser);
+            return;
+          }
+          await brokerBrowserCustody()?.orphanAdmission(id);
         },
       );
       if (capability.targetId === "no-page") {
