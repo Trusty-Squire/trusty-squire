@@ -1519,6 +1519,41 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it("rejects an owned return chain longer than callback then dashboard", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const dashboardUrl = "https://resend.test/emails";
+    const secondCallbackUrl = `https://resend.test/auth/exchange?redirect_uri=${encodeURIComponent(dashboardUrl)}`;
+    const firstCallbackUrl = `https://resend.test/auth/callback?redirect_uri=${encodeURIComponent(secondCallbackUrl)}`;
+    const providerUrl = `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(firstCallbackUrl)}`;
+    await context.route("**/*", (route) => {
+      const url = route.request().url();
+      return route.fulfill({
+        contentType: "text/html",
+        body:
+          url === "https://resend.test/signup"
+            ? `<button id="oauth" onclick='location.href=${JSON.stringify(providerUrl)}'>Continue</button>`
+            : url === providerUrl
+              ? `<script>location.href=${JSON.stringify(firstCallbackUrl)}</script>`
+              : url === firstCallbackUrl
+                ? `<script>location.href=${JSON.stringify(secondCallbackUrl)}</script>`
+                : url === secondCallbackUrl
+                  ? `<script>setTimeout(() => location.replace(${JSON.stringify(dashboardUrl)}), 120)</script>`
+                  : "<main>Emails</main>",
+      });
+    });
+    await product.goto("https://resend.test/signup");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 500, "google")).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+      expect(controller.currentUrl()).toBe(dashboardUrl);
+    } finally {
+      await context.close();
+    }
+  });
+
   it("does not complete when a stable intermediate callback returns to login", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();

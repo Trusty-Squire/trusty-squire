@@ -435,7 +435,7 @@ function oauthEndpointFamily(url: string): string | null {
   }
 }
 
-function oauthRedirectChain(url: string): string[] {
+function oauthRedirectChain(url: string): string[] | null {
   const chain: string[] = [];
   let source: string;
   try {
@@ -463,6 +463,13 @@ function oauthRedirectChain(url: string): string[] {
       source = target.href;
     } catch {
       break;
+    }
+  }
+  if (chain.length === 2) {
+    try {
+      if (new URL(source).searchParams.has("redirect_uri")) return null;
+    } catch {
+      return null;
     }
   }
   return chain;
@@ -13692,10 +13699,14 @@ export class BrowserController {
     } = { page: null, onNavigation: null };
     const captureExpectedReturnUrl = (url: string): void => {
       if (expectedReturnChain !== null) return;
-      const chain = oauthRedirectChain(url);
-      if (chain.length === 0) return;
       const providerOrigin = oauthProviderOrigin(url, consentProvider, productOrigin);
       if (providerOrigin === null) return;
+      const chain = oauthRedirectChain(url);
+      if (chain === null) {
+        expectedReturnChain = [];
+        return;
+      }
+      if (chain.length === 0) return;
       expectedReturnChain = chain.some((target) => new URL(target).origin === providerOrigin)
         ? []
         : chain;

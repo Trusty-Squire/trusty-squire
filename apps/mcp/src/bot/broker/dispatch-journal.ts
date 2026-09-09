@@ -164,6 +164,32 @@ export class DispatchJournal {
     };
   }
 
+  async hasOnlyAuthorizedPreDispatchFailure(
+    authorization: AuthorizedPreDispatchFailure,
+  ): Promise<boolean> {
+    if (
+      authorization.sessionId !== retainedXataPreDispatchFailure.sessionId ||
+      authorization.requestId !== retainedXataPreDispatchFailure.requestId ||
+      authorization.operation !== retainedXataPreDispatchFailure.operation
+    )
+      return false;
+    const outstanding = [...(await this.states()).values()].filter(
+      (record) => record.phase === "entered" || record.phase === "outcome",
+    );
+    if (outstanding.length !== 1) return false;
+    const [record] = outstanding;
+    return (
+      record?.phase === "entered" &&
+      record.outcome === undefined &&
+      record.start === undefined &&
+      record.sessionId === authorization.sessionId &&
+      record.requestId === authorization.requestId &&
+      record.operation === authorization.operation &&
+      record.forwarderId === authorization.forwarderId &&
+      record.inputHash === authorization.inputHash
+    );
+  }
+
   async hasOutstanding(sessionId?: string, forwarderId?: string): Promise<boolean> {
     return [...(await this.states()).values()].some(
       (record) =>

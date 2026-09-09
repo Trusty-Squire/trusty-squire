@@ -165,7 +165,10 @@ export async function runBrokerDaemon(): Promise<void> {
   // A retained `entered` record must not launch/adopt a browser, but the
   // broker endpoint has to exist so an explicit durable recovery can repair
   // it. Parsing states here still fails startup on a malformed journal.
-  let startupReconciliation = await journal.hasOutstanding();
+  let startupReconciliation =
+    retainedXataPreDispatchAuthorization !== undefined &&
+    (await journal.hasOnlyAuthorizedPreDispatchFailure(retainedXataPreDispatchAuthorization));
+  if (!startupReconciliation) await journal.assertReconciled();
   const operator = new OperatorBroker(
     {
       accountId: session.account_id,
@@ -238,7 +241,10 @@ export async function runBrokerDaemon(): Promise<void> {
       }
       if (method === "recover") {
         const result = await operator.recover(principal, params);
-        startupReconciliation = await journal.hasOutstanding();
+        if (startupReconciliation && retainedXataPreDispatchAuthorization !== undefined)
+          startupReconciliation = await journal.hasOnlyAuthorizedPreDispatchFailure(
+            retainedXataPreDispatchAuthorization,
+          );
         return result;
       }
       if (!brokerStartupAllowsMethod(startupReconciliation, method))
@@ -251,7 +257,6 @@ export async function runBrokerDaemon(): Promise<void> {
         if (typeof params.requestId !== "string")
           throw new Error("A broker acknowledgement requires its request ID");
         await operator.acknowledge(principal, params.requestId);
-        startupReconciliation = await journal.hasOutstanding();
         return {};
       }
       if (method === "confirm_start") {
