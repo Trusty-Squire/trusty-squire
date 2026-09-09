@@ -19,6 +19,7 @@ import { serializeBrowserUseDOM } from "./browser-use-serializer.js";
 //    `finish`/extract path; the vault stays write-only.
 
 import { createHash, createHmac, randomInt } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Buffer } from "node:buffer";
 import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -74,6 +75,7 @@ import {
   type SafeStageV2,
 } from "./compact-observation-v2.js";
 import type { ApiClient } from "../api-client.js";
+import { ProvenPreDispatchMutationError } from "./mutation-dispatch-evidence.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
 import { pickVerificationLink, type VerificationLinkCandidate } from "./email-verification.js";
 import {
@@ -808,6 +810,8 @@ async function runSerializedOAuthBoundary(
   authorizedElements: readonly InteractiveElement[],
   provider: OAuthProviderId | undefined,
   deadline: OAuthActionDeadline,
+  compactAuthorization?: CompactV2TargetAuthorization,
+  bindPreparedTargetAtDispatch = false,
 ): Promise<BrowserController> {
   const authorizedRef = provisionElementRefs(authorizedElements).get(authorizedElement);
   if (authorizedRef === undefined) {
@@ -817,22 +821,9 @@ async function runSerializedOAuthBoundary(
   const completed = await runSerializedGoogleIdentityOperation(
     session,
     async (browser) => {
-      // The action was authorized against the session's isolated browser before
-      // the canonical profile was opened. Re-extract inside the same serialized
-      // operation and require the identical structural element identity before
-      // clicking; this keeps stale-handle protection without letting a prepared
-      // canonical browser escape the boundary on reobserve_required.
-      const fresh = await browser.extractInteractiveElements();
-      retainSessionElements(session, fresh);
-      const resolved = resolveTarget(fresh, authorizedRef);
-      if (resolved === null) {
-        throw new Error(
-          "OAuth action target changed during the identity handoff; re-observe before retrying",
-        );
-      }
       const humanHandoffTimeoutMs = oauthHumanHandoffTimeoutMs();
       await browser.loginWithOAuth(
-        resolved.selector,
+        authorizedElement.selector,
         oauthActionRemainingMs(deadline),
         provider,
         provider === "github" ? undefined : expectedGoogleAccountEmail,
@@ -846,6 +837,46 @@ async function runSerializedOAuthBoundary(
           resetOAuthActionDeadline(deadline, humanHandoffTimeoutMs);
           return deadline.expiresAt;
         },
+        bindPreparedTargetAtDispatch && compactAuthorization !== undefined
+          ? async (dispatch) => {
+              let dispatchAttempted = false;
+              let handle: Awaited<ReturnType<BrowserController["bindOAuthClickTarget"]>> = null;
+              try {
+                const resolveCurrentTarget = async (): Promise<InteractiveElement> => {
+                  const fresh =
+                    session.compactV2Mode === "on"
+                      ? (await browser.extractBrowserUseObservation()).elements
+                      : await browser.extractInteractiveElements();
+                  retainSessionElements(session, fresh);
+                  return resolveAuthorizedCompactV2Target(session, fresh, compactAuthorization);
+                };
+                const resolved = await resolveCurrentTarget();
+                handle = await browser.bindOAuthClickTarget(resolved.selector, async () => {
+                  return (await resolveCurrentTarget()).selector;
+                });
+                if (handle === null) {
+                  throw new Error(
+                    "OAuth action target changed during the identity handoff; re-observe before retrying",
+                  );
+                }
+                dispatchAttempted = true;
+                await dispatch(handle, async () => {
+                  const current = await resolveCurrentTarget();
+                  if (await browser.matchesOAuthClickTarget(handle!, current.selector)) return;
+                  throw new Error(
+                    "OAuth action target changed during the identity handoff; re-observe before retrying",
+                  );
+                });
+              } catch (error) {
+                if (!dispatchAttempted || clickDispatchStatusForError(error) === "not_dispatched") {
+                  throw new ProvenPreDispatchMutationError("stale_ref", { cause: error });
+                }
+                throw error;
+              } finally {
+                await handle?.dispose().catch(() => undefined);
+              }
+            }
+          : undefined,
       );
       // Human completion returns custody to bounded machine work. Give DOM
       // readiness its own short window instead of spending the human budget.
@@ -1389,9 +1420,44 @@ function throwCompactV2StaleRef(): never {
   throw new CompactV2StaleRefError("stale_ref");
 }
 
-interface CompactV2TargetAuthorization {
+export interface CompactV2TargetAuthorization {
   legacyRef: string;
   row: SafeControlV2;
+}
+
+export interface PreparedOAuthLoginTarget {
+  sessionId: string;
+  target: string;
+  authorization: CompactV2TargetAuthorization;
+}
+
+const preparedOAuthLoginTarget = new AsyncLocalStorage<PreparedOAuthLoginTarget>();
+
+export function preparePublicOAuthLoginTarget(
+  sessionId: string,
+  target: string,
+): PreparedOAuthLoginTarget | undefined {
+  const session = sessionForCall(sessionId);
+  if (session?.compactV2Active !== true) return undefined;
+  try {
+    return {
+      sessionId,
+      target,
+      authorization: compactV2AuthorizationForTarget(session, target),
+    };
+  } catch (error) {
+    if (error instanceof CompactV2StaleRefError) {
+      throw new ProvenPreDispatchMutationError("stale_ref", { cause: error });
+    }
+    throw error;
+  }
+}
+
+export function withPreparedOAuthLoginTarget<T>(
+  prepared: PreparedOAuthLoginTarget,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return preparedOAuthLoginTarget.run(prepared, operation);
 }
 
 /**
@@ -5080,6 +5146,7 @@ async function actInternally(
           compactV2Authorization,
           deadline,
           capturedOperationPage,
+          false,
         );
       return (action.kind === "click" ||
         action.kind === "js_click" ||
@@ -5121,6 +5188,24 @@ export async function act(
   const oauthProvider =
     action.kind === "oauth_login" || action.kind === "oauth_click" ? action.provider : undefined;
   try {
+    let queuedOAuthAuthorization: CompactV2TargetAuthorization | undefined;
+    let preparedOAuthDispatch = false;
+    const prepared = preparedOAuthLoginTarget.getStore();
+    if (
+      action.kind === "oauth_login" &&
+      prepared?.sessionId === sessionId &&
+      prepared.target === action.target
+    ) {
+      queuedOAuthAuthorization = prepared.authorization;
+      preparedOAuthDispatch = true;
+    } else if (session?.compactV2Active === true && action.kind === "oauth_login") {
+      try {
+        queuedOAuthAuthorization = compactV2AuthorizationForTarget(session, action.target);
+      } catch (error) {
+        audit(sessionId, "act", { kind: action.kind, target: "<rejected-v2-target>" });
+        throw error;
+      }
+    }
     const execute = async (deadline?: OAuthActionDeadline): Promise<InternalActResult> => {
       const run = async (): Promise<InternalActResult> =>
         await executeAct(
@@ -5130,9 +5215,10 @@ export async function act(
           cartIdentity,
           false,
           false,
-          undefined,
+          queuedOAuthAuthorization,
           deadline,
           capturedOperationPage,
+          preparedOAuthDispatch,
         );
       return (action.kind === "click" ||
         action.kind === "js_click" ||
@@ -5152,6 +5238,12 @@ export async function act(
     // return it as a normal (non-throwing) observation instead of an error.
     if (error instanceof OAuthAwaitingHumanError && session !== undefined) {
       return oauthAwaitingHumanObservation(session, error);
+    }
+    if (action.kind === "oauth_login") {
+      if (error instanceof ProvenPreDispatchMutationError) throw error;
+      if (error instanceof CompactV2StaleRefError) {
+        throw new ProvenPreDispatchMutationError("stale_ref", { cause: error });
+      }
     }
     if (session?.compactV2Active === true) {
       // Preserve only the retry evidence consumed by operate_click. Raw browser
@@ -5183,6 +5275,7 @@ async function executeAct(
   internalAuthorization?: CompactV2TargetAuthorization,
   oauthDeadline?: OAuthActionDeadline,
   operationPage?: Page,
+  preparedOAuthDispatch = false,
 ): Promise<InternalActResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
@@ -5221,7 +5314,7 @@ async function executeAct(
   if ("target" in action) {
     if (session.compactV2Active && !internalAccess) {
       try {
-        compactV2Authorization = compactV2AuthorizationForTarget(session, action.target);
+        compactV2Authorization ??= compactV2AuthorizationForTarget(session, action.target);
         resolutionTarget = compactV2Authorization.legacyRef;
         auditTarget = action.target;
       } catch (error) {
@@ -5850,6 +5943,7 @@ async function executeAct(
             fresh,
             action.provider,
             oauthDeadline,
+            compactV2Authorization,
           );
           const completedPage = browser.completedOAuthPage() ?? undefined;
           rememberOAuthCompletionSourcePage(session, completedPage);
@@ -5907,6 +6001,8 @@ async function executeAct(
           fresh,
           action.provider,
           oauthDeadline,
+          compactV2Authorization,
+          preparedOAuthDispatch,
         );
         const completedPage = browser.completedOAuthPage() ?? undefined;
         rememberOAuthCompletionSourcePage(session, completedPage);

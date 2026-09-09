@@ -1,4 +1,4 @@
-import { OperatorForwarder } from "./bot/broker/forwarder.js";
+import { OperatorForwarder, type BrokerRecoveryRequest } from "./bot/broker/forwarder.js";
 // MCP server: reads its account's session from the session file, sets up an ApiClient
 // against the configured API base URL, and exposes the registered tools
 // over stdio.
@@ -120,9 +120,27 @@ export interface ServerCallAdmission extends ServerCallLifecycle {
   inFlightCount(): number;
 }
 
-function brokerRecoveryRequested(meta: unknown): boolean {
-  if (meta === null || typeof meta !== "object") return false;
-  return (meta as Record<string, unknown>)["trusty-squire/recover"] === true;
+export function brokerRecoveryRequested(meta: unknown): BrokerRecoveryRequest {
+  if (meta === null || typeof meta !== "object") return {};
+  const value = (meta as Record<string, unknown>)["trusty-squire/recover"];
+  if (value === true) return { recover: true };
+  if (value === null || typeof value !== "object") return {};
+  const evidence = value as Record<string, unknown>;
+  if (
+    typeof evidence.request_id !== "string" ||
+    evidence.error !== "stale_ref" ||
+    evidence.dispatch !== "not_dispatched" ||
+    !Object.keys(evidence).every((key) => ["request_id", "error", "dispatch"].includes(key))
+  )
+    return {};
+  return {
+    recover: true,
+    preDispatchFailure: {
+      requestId: evidence.request_id,
+      error: "stale_ref",
+      dispatch: "not_dispatched",
+    },
+  };
 }
 
 // `connect` may complete while the host's stdio server is already running.
@@ -263,7 +281,7 @@ export async function buildServer(
       if (operatorForwarder !== undefined && tool.name.startsWith("operate_")) {
         return toolResultContent(
           await operatorForwarder.invoke(tool.name, parsed.data, String(extra.requestId), {
-            recover: brokerRecoveryRequested((req.params as { _meta?: unknown })._meta),
+            ...brokerRecoveryRequested((req.params as { _meta?: unknown })._meta),
           }),
         );
       }

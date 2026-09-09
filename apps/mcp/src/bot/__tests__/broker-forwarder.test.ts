@@ -6,10 +6,73 @@ import { OperatorForwarder } from "../broker/forwarder.js";
 import { listenBroker } from "../broker/transport.js";
 import type { BrokerClient } from "../broker/transport.js";
 import type { SessionGuard } from "../../session-guard.js";
+import { ProvenPreDispatchMutationError } from "../mutation-dispatch-evidence.js";
 
 const credential = (character: string) => character.repeat(43);
 
 describe("MCP broker forwarding", () => {
+  it("acknowledges a delivered pre-dispatch failure before rejecting it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-forward-pre-dispatch-"));
+    const path = join(root, "b.sock");
+    const acknowledgements: string[] = [];
+    const capability = {
+      cellId: "cell",
+      browserEpoch: "epoch",
+      sessionId: "session",
+      targetId: "target",
+      leaseGeneration: "one",
+    };
+    const broker = await listenBroker(path, {
+      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
+      call: async (_principal, method, params, requestId) => {
+        if (method === "reclaim") return { capabilities: [] };
+        if (method === "confirm_start") return {};
+        if (method === "acknowledge") {
+          acknowledgements.push(String(params.requestId));
+          return {};
+        }
+        if (params.name === "operate_start")
+          return { capability, result: { session_id: capability.sessionId } };
+        if (params.name === "operate_login")
+          return {
+            preDispatchFailure: { error: "stale_ref", dispatch: "not_dispatched" },
+          };
+        if (params.name === "operate_observe") return { result: { dom: "still available" } };
+        throw new Error(`Unexpected ${method}:${requestId}`);
+      },
+      disconnect: async () => undefined,
+    });
+    const guard: SessionGuard = {
+      bind: async () => ({
+        account_id: "account",
+        agent_session_token: "test",
+        api_base_url: "http://unused.test",
+        saved_at: "",
+      }),
+      inspect: async () => ({ problem: null }),
+      boundAccountId: () => "account",
+    };
+    const forwarder = new OperatorForwarder(path, guard, credential("a"));
+    try {
+      await forwarder.invoke("operate_start", {}, "start");
+      await expect(
+        forwarder.invoke(
+          "operate_login",
+          { session_id: "session", provider: "google", ref: "@e:changed" },
+          "login",
+        ),
+      ).rejects.toBeInstanceOf(ProvenPreDispatchMutationError);
+      expect(acknowledgements).toHaveLength(2);
+      await expect(
+        forwarder.invoke("operate_observe", { session_id: "session" }, "observe"),
+      ).resolves.toEqual({ dom: "still available" });
+    } finally {
+      await forwarder.close();
+      await broker.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("waits for broker acknowledgement before resolving a forwarded call", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-forward-ack-"));
     const path = join(root, "b.sock");

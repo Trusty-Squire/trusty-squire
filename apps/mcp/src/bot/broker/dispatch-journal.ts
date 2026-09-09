@@ -18,7 +18,13 @@ interface DispatchRecord {
 }
 
 export interface ReconciledDispatchOutcome {
-  status: "completed" | "done" | "payment_3ds_required" | "payment_outcome_unknown";
+  status:
+    | "completed"
+    | "done"
+    | "payment_3ds_required"
+    | "payment_outcome_unknown"
+    | "not_dispatched";
+  error?: "stale_ref";
   next?: { tool: "operate_payment_status"; wait_seconds: number };
 }
 
@@ -31,16 +37,45 @@ export interface PendingDispatchOutcome {
 export interface CompletedDispatchOutcome extends PendingDispatchOutcome {
   outcome: ReconciledDispatchOutcome;
   start?: true;
+  alreadySettled?: true;
 }
+
+export interface ExplicitPreDispatchFailureEvidence {
+  requestId: string;
+  error: "stale_ref";
+  dispatch: "not_dispatched";
+}
+
+export interface AuthorizedPreDispatchFailure {
+  sessionId: string;
+  requestId: string;
+  operation: "operate_login";
+  forwarderId: string;
+  inputHash: string;
+}
+
+const retainedXataPreDispatchFailure = {
+  sessionId: "546b6f5a-930e-4473-8aec-43fc355fd108",
+  requestId:
+    "4ae34aeb-e1b8-4457-a99b-72ac418600ca:4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce",
+  operation: "operate_login",
+} as const;
 
 function validOutcome(value: unknown): value is ReconciledDispatchOutcome {
   if (value === null || typeof value !== "object") return false;
   const outcome = value as Record<string, unknown>;
   if (
-    !["completed", "done", "payment_3ds_required", "payment_outcome_unknown"].includes(
-      String(outcome.status),
-    ) ||
-    !Object.keys(outcome).every((key) => key === "status" || key === "next")
+    ![
+      "completed",
+      "done",
+      "payment_3ds_required",
+      "payment_outcome_unknown",
+      "not_dispatched",
+    ].includes(String(outcome.status)) ||
+    !Object.keys(outcome).every((key) => key === "status" || key === "next" || key === "error") ||
+    (outcome.status === "not_dispatched"
+      ? outcome.error !== "stale_ref" || outcome.next !== undefined
+      : outcome.error !== undefined)
   )
     return false;
   if (outcome.next === undefined) return true;
@@ -107,6 +142,52 @@ export class DispatchJournal {
         "outcome_unknown",
         "Prior broker lost mutation custody; reconcile before browser replacement",
       );
+  }
+
+  async retainedXataPreDispatchAuthorization(): Promise<AuthorizedPreDispatchFailure | undefined> {
+    const record = [...(await this.states()).values()].find(
+      (candidate) =>
+        candidate.sessionId === retainedXataPreDispatchFailure.sessionId &&
+        candidate.requestId === retainedXataPreDispatchFailure.requestId &&
+        candidate.operation === retainedXataPreDispatchFailure.operation &&
+        candidate.start === undefined &&
+        ((candidate.phase === "entered" && candidate.outcome === undefined) ||
+          (candidate.phase === "settled" &&
+            candidate.outcome?.status === "not_dispatched" &&
+            candidate.outcome.error === "stale_ref")),
+    );
+    if (record?.forwarderId === undefined || record.inputHash === undefined) return undefined;
+    return {
+      ...retainedXataPreDispatchFailure,
+      forwarderId: record.forwarderId,
+      inputHash: record.inputHash,
+    };
+  }
+
+  async hasOnlyAuthorizedPreDispatchFailure(
+    authorization: AuthorizedPreDispatchFailure,
+  ): Promise<boolean> {
+    if (
+      authorization.sessionId !== retainedXataPreDispatchFailure.sessionId ||
+      authorization.requestId !== retainedXataPreDispatchFailure.requestId ||
+      authorization.operation !== retainedXataPreDispatchFailure.operation
+    )
+      return false;
+    const outstanding = [...(await this.states()).values()].filter(
+      (record) => record.phase === "entered" || record.phase === "outcome",
+    );
+    if (outstanding.length !== 1) return false;
+    const [record] = outstanding;
+    return (
+      record?.phase === "entered" &&
+      record.outcome === undefined &&
+      record.start === undefined &&
+      record.sessionId === authorization.sessionId &&
+      record.requestId === authorization.requestId &&
+      record.operation === authorization.operation &&
+      record.forwarderId === authorization.forwarderId &&
+      record.inputHash === authorization.inputHash
+    );
   }
 
   async hasOutstanding(sessionId?: string, forwarderId?: string): Promise<boolean> {
@@ -240,6 +321,45 @@ export class DispatchJournal {
           outcome: record.outcome!,
           ...(record.start === true ? { start: true } : {}),
         };
+  }
+
+  async reconcileExplicitPreDispatchFailure(
+    authorization: AuthorizedPreDispatchFailure,
+    evidence: ExplicitPreDispatchFailureEvidence,
+  ): Promise<CompletedDispatchOutcome | undefined> {
+    const { sessionId, requestId, operation, forwarderId, inputHash } = authorization;
+    if (evidence.requestId !== requestId) return undefined;
+    const record = [...(await this.states()).values()].find(
+      (candidate) =>
+        candidate.sessionId === sessionId &&
+        candidate.requestId === requestId &&
+        candidate.operation === operation &&
+        candidate.forwarderId === forwarderId &&
+        candidate.inputHash === inputHash &&
+        candidate.start === undefined,
+    );
+    if (record === undefined) return undefined;
+    const outcome = { status: "not_dispatched" as const, error: "stale_ref" as const };
+    if (
+      record.phase === "settled" &&
+      record.outcome?.status === outcome.status &&
+      record.outcome.error === outcome.error
+    )
+      return {
+        sessionId,
+        requestId: record.requestId,
+        operation,
+        outcome,
+        alreadySettled: true,
+      };
+    if (record.phase !== "entered") return undefined;
+    await this.record(sessionId, record.requestId, "settled", {
+      forwarderId,
+      operation,
+      inputHash,
+      outcome,
+    });
+    return { sessionId, requestId: record.requestId, operation, outcome };
   }
 
   async acknowledge(forwarderId: string, requestId: string): Promise<boolean> {

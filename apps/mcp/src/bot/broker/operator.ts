@@ -1,6 +1,10 @@
 import { withBrokerAdmission } from "./admission-context.js";
 import { brokerBrowserCustody } from "./custody.js";
-import type { DispatchJournal, ReconciledDispatchOutcome } from "./dispatch-journal.js";
+import type {
+  AuthorizedPreDispatchFailure,
+  DispatchJournal,
+  ReconciledDispatchOutcome,
+} from "./dispatch-journal.js";
 import { timingSafeEqual, createHash, createHmac } from "node:crypto";
 import { z } from "zod";
 import { ApiClient, type ApiClientConfig } from "../../api-client.js";
@@ -11,10 +15,20 @@ import {
   sessionForCall,
   withProvisionSessionCall,
 } from "../session/lifecycle.js";
+import {
+  preparePublicOAuthLoginTarget,
+  withPreparedOAuthLoginTarget,
+  type PreparedOAuthLoginTarget,
+} from "../provision-session.js";
 import { BrokerAuthority, type BrokerPrincipal, type TabCapability } from "./authority.js";
 import { BrokerRefusal, siteResources } from "./scheduler.js";
 import type { BrokerTransportPort } from "./transport.js";
 import { forwarderId } from "./lineage.js";
+import { provenPreDispatchMutationFailure } from "../mutation-dispatch-evidence.js";
+
+class DeliveredPreDispatchFailure {
+  constructor(readonly error: "stale_ref") {}
+}
 
 const capabilitySchema = z
   .object({
@@ -32,8 +46,17 @@ const callSchema = z
     capability: capabilitySchema.optional(),
   })
   .strict();
+const recoverySchema = callSchema.extend({
+  preDispatchFailure: z
+    .object({
+      requestId: z.string().min(1),
+      error: z.literal("stale_ref"),
+      dispatch: z.literal("not_dispatched"),
+    })
+    .strict()
+    .optional(),
+});
 const startConfirmationSchema = z.object({ capability: capabilitySchema }).strict();
-
 function remapSession(value: unknown, from: string, to: string): unknown {
   if (Array.isArray(value)) return value.map((item) => remapSession(item, from, to));
   if (value !== null && typeof value === "object")
@@ -130,6 +153,7 @@ export class OperatorBroker implements BrokerTransportPort {
     private readonly config: ApiClientConfig & { accountId: string },
     cellId: string,
     private readonly journal?: DispatchJournal,
+    private readonly legacyPreDispatchAuthorization?: AuthorizedPreDispatchFailure,
   ) {
     this.authority = new BrokerAuthority(config.accountId, cellId);
     this.authority.setDetachedExpiryHandler(async (capability, principal) => {
@@ -286,7 +310,17 @@ export class OperatorBroker implements BrokerTransportPort {
           const targetId = await session.browser.brokerTargetId();
           return {
             targetId,
-            invoke: async (name, commandArgs, _signal, commandId) => {
+            prepare: async (name, commandArgs) => {
+              const ref = commandArgs.ref;
+              return name === "operate_login" &&
+                typeof commandArgs.provider === "string" &&
+                typeof ref === "string"
+                ? await withProvisionSessionCall(internalId, async () =>
+                    preparePublicOAuthLoginTarget(internalId, ref),
+                  )
+                : undefined;
+            },
+            invoke: async (name, commandArgs, _signal, commandId, prepared) => {
               if (!session.browser.isConnected())
                 throw new BrokerRefusal(
                   "browser_lost",
@@ -296,13 +330,17 @@ export class OperatorBroker implements BrokerTransportPort {
               if (command === null)
                 throw new BrokerRefusal("unknown_tool", "Unknown operator command");
               const translated = { ...commandArgs, session_id: internalId };
-              const execute = async () =>
-                await withBrokerAuditContext(
-                  pinnedApi,
-                  name,
-                  commandId,
-                  async () => await command.handler(translated, pinnedApi),
+              const executeHandler = async () =>
+                await withBrokerAuditContext(pinnedApi, name, commandId, async () =>
+                  command.handler(translated, pinnedApi),
                 );
+              const execute = async () =>
+                prepared === undefined
+                  ? await executeHandler()
+                  : await withPreparedOAuthLoginTarget(
+                      prepared as PreparedOAuthLoginTarget,
+                      executeHandler,
+                    );
               const mutating = brokerCommandMutates(name, commandArgs);
               const commandDispatch = dispatchDetail(
                 principal,
@@ -310,10 +348,23 @@ export class OperatorBroker implements BrokerTransportPort {
                 this.inputHash(principal, { name, args: commandArgs }),
               );
               if (mutating) await this.journal?.record(id, commandId, "entered", commandDispatch);
-              const result =
-                name === "operate_finish"
-                  ? await execute()
-                  : await withProvisionSessionCall(internalId, execute);
+              let result: unknown;
+              try {
+                result =
+                  name === "operate_finish"
+                    ? await execute()
+                    : await withProvisionSessionCall(internalId, execute);
+              } catch (error) {
+                const preDispatch = provenPreDispatchMutationFailure(error);
+                if (mutating && name === "operate_login" && preDispatch !== null) {
+                  await this.journal?.record(id, commandId, "outcome", {
+                    ...commandDispatch,
+                    outcome: { status: "not_dispatched", error: preDispatch.code },
+                  });
+                  return new DeliveredPreDispatchFailure(preDispatch.code);
+                }
+                throw error;
+              }
               await this.journal?.record(
                 id,
                 "payment-custody",
@@ -427,6 +478,13 @@ export class OperatorBroker implements BrokerTransportPort {
       extra,
       lane,
     );
+    if (result instanceof DeliveredPreDispatchFailure)
+      return {
+        preDispatchFailure: {
+          error: result.error,
+          dispatch: "not_dispatched" as const,
+        },
+      };
     if (tool.name === "operate_finish") await this.authority.close(principal, capability);
     return { result };
   }
@@ -442,30 +500,45 @@ export class OperatorBroker implements BrokerTransportPort {
         }
       | Record<string, unknown>;
   } | null> {
-    const input = callSchema.parse(params);
+    const input = recoverySchema.parse(params);
     const tool = findTool(input.name, this.tools);
     if (tool === null || !tool.name.startsWith("operate_"))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
-    const completed = await this.journal?.recoveryOutcome(
-      journalForwarderId(principal),
-      typeof args.session_id === "string"
-        ? {
-            operation: tool.name,
-            sessionId: args.session_id,
-            inputHash: this.inputHash(principal, { name: tool.name, args }),
-          }
-        : {
-            operation: tool.name,
-            inputHash: this.inputHash(principal, {
-              name: tool.name,
-              args,
-              capability: input.capability,
-            }),
-          },
-    );
+    const explicitFailure = input.preDispatchFailure;
+    const sessionId = typeof args.session_id === "string" ? args.session_id : undefined;
+    const inputHash = this.inputHash(principal, { name: tool.name, args });
+    const authorization = this.legacyPreDispatchAuthorization;
+    const completed =
+      explicitFailure !== undefined &&
+      sessionId !== undefined &&
+      authorization !== undefined &&
+      sessionId === authorization.sessionId &&
+      tool.name === authorization.operation &&
+      journalForwarderId(principal) === authorization.forwarderId &&
+      args.provider === "google" &&
+      args.ref === "reconciliation-only:no-dispatch"
+        ? await this.journal?.reconcileExplicitPreDispatchFailure(authorization, explicitFailure)
+        : await this.journal?.recoveryOutcome(
+            journalForwarderId(principal),
+            sessionId !== undefined
+              ? {
+                  operation: tool.name,
+                  sessionId,
+                  inputHash,
+                }
+              : {
+                  operation: tool.name,
+                  inputHash: this.inputHash(principal, {
+                    name: tool.name,
+                    args,
+                    capability: input.capability,
+                  }),
+                },
+          );
     if (completed === undefined) return null;
-    await this.journal?.recordRecovery(journalForwarderId(principal), completed);
+    if (completed.alreadySettled !== true)
+      await this.journal?.recordRecovery(journalForwarderId(principal), completed);
     if (completed.start === true) {
       const capability = this.authority.recoverCapability(principal, completed.sessionId);
       if (capability === undefined)

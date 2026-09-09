@@ -426,12 +426,78 @@ export function oauthErrorFromReturnUrl(
   return null;
 }
 
-function oauthRedirectUri(url: string): string | null {
+function oauthEndpointFamily(url: string): string | null {
   try {
-    const redirectUri = new URL(url).searchParams.get("redirect_uri");
-    if (redirectUri === null) return null;
-    const target = new URL(redirectUri);
-    return target.protocol === "http:" || target.protocol === "https:" ? target.href : null;
+    const parsed = new URL(url);
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+  } catch {
+    return null;
+  }
+}
+
+function oauthRedirectChain(url: string): string[] | null {
+  const chain: string[] = [];
+  let source: string;
+  try {
+    source = new URL(url).href;
+  } catch {
+    return null;
+  }
+  const sourceFamily = oauthEndpointFamily(source);
+  if (sourceFamily === null) return null;
+  const seen = new Set<string>([sourceFamily]);
+  while (chain.length < 2) {
+    try {
+      const redirectUri = new URL(source).searchParams.get("redirect_uri");
+      if (redirectUri === null) break;
+      const target = new URL(redirectUri);
+      const targetFamily = oauthEndpointFamily(target.href);
+      if (
+        (target.protocol !== "http:" && target.protocol !== "https:") ||
+        targetFamily === null ||
+        seen.has(targetFamily)
+      )
+        return null;
+      chain.push(target.href);
+      seen.add(targetFamily);
+      source = target.href;
+    } catch {
+      return null;
+    }
+  }
+  if (chain.length === 2) {
+    try {
+      if (new URL(source).searchParams.has("redirect_uri")) return null;
+    } catch {
+      return null;
+    }
+  }
+  return chain;
+}
+
+function oauthProviderForUrl(url: string): OAuthProviderId | null {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (host === "accounts.google.com") return "google";
+    if (host === "github.com") return "github";
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function oauthProviderOrigin(
+  url: string,
+  provider: OAuthProviderId | undefined,
+  productOrigin: string,
+): string | null {
+  try {
+    const parsed = new URL(url);
+    if (parsed.origin === productOrigin) return null;
+    const recognizedProvider = oauthProviderForUrl(parsed.href);
+    if (recognizedProvider === null || (provider !== undefined && recognizedProvider !== provider))
+      return null;
+    return parsed.origin;
   } catch {
     return null;
   }
@@ -3935,6 +4001,60 @@ export class BrowserController {
     await this.withModalInertNeutralized(selector, (modalActive) =>
       this.clickInner(selector, modalActive),
     );
+  }
+
+  async bindOAuthClickTarget(
+    selector: string,
+    confirmSelector: () => Promise<string>,
+  ): Promise<ElementHandle<Element> | null> {
+    if (!this.page) throw new Error("Browser not started");
+    const expected = await this.page
+      .locator(selector)
+      .first()
+      .elementHandle()
+      .catch(() => null);
+    if (expected === null) return null;
+    let current: ElementHandle<Element> | null = null;
+    try {
+      current = await this.page
+        .locator(await confirmSelector())
+        .first()
+        .elementHandle()
+        .catch(() => null);
+      if (
+        current === null ||
+        !(await current.evaluate((element, target) => element === target, expected))
+      ) {
+        await expected.dispose().catch(() => undefined);
+        return null;
+      }
+      return expected;
+    } catch {
+      await expected.dispose().catch(() => undefined);
+      return null;
+    } finally {
+      await current?.dispose().catch(() => undefined);
+    }
+  }
+
+  async matchesOAuthClickTarget(
+    expected: ElementHandle<Element>,
+    selector: string,
+  ): Promise<boolean> {
+    if (!this.page) return false;
+    const current = await this.page
+      .locator(selector)
+      .first()
+      .elementHandle()
+      .catch(() => null);
+    if (current === null) return false;
+    try {
+      return await current.evaluate((element, target) => element === target, expected);
+    } catch {
+      return false;
+    } finally {
+      await current.dispose().catch(() => undefined);
+    }
   }
 
   private async clickInner(selector: string, modalActive: boolean): Promise<void> {
@@ -13588,6 +13708,12 @@ export class BrowserController {
     expectedGoogleAccountEmail?: string | null,
     registerCompletionCheck?: (check: () => Promise<OAuthCompletionEvidence | null>) => void,
     onHumanHandoff?: () => number,
+    dispatchAuthorizedClick?: (
+      dispatch: (
+        handle: ElementHandle<Element>,
+        confirmTarget: () => Promise<void>,
+      ) => Promise<void>,
+    ) => Promise<void>,
   ): Promise<void> {
     const product = this.page;
     const context = this.context;
@@ -13611,6 +13737,7 @@ export class BrowserController {
         return url;
       }
     };
+    const productOrigin = safeOrigin(productUrl);
     // Fix C: a timed-out wait only proves control has not returned to the
     // product origin yet — never assert WHY (expired session, denial, etc.).
     // A consent screen or 2FA challenge is routinely still showing; the
@@ -13623,7 +13750,7 @@ export class BrowserController {
     let actionStarted = false;
     let productNavigated = false;
     let transientNavigated = false;
-    let expectedReturnUrl: string | null = null;
+    let expectedReturnChain: readonly string[] | null = null;
     let pendingOnProvider = false;
     let lastTransientUrl = productUrl;
     let observedReturn: { page: Page; url: string } | null = null;
@@ -13642,8 +13769,25 @@ export class BrowserController {
       onNavigation: ((frame: Frame) => void) | null;
     } = { page: null, onNavigation: null };
     const captureExpectedReturnUrl = (url: string): void => {
-      expectedReturnUrl ??= oauthRedirectUri(url);
+      if (expectedReturnChain !== null) return;
+      const providerOrigin = oauthProviderOrigin(url, consentProvider, productOrigin);
+      if (providerOrigin === null) return;
+      const chain = oauthRedirectChain(url);
+      if (chain === null) {
+        expectedReturnChain = [];
+        return;
+      }
+      if (chain.length === 0) return;
+      expectedReturnChain = chain.some((target) => oauthProviderForUrl(target) !== null)
+        ? []
+        : chain;
     };
+    const expectedReturnUrls = (): readonly string[] =>
+      expectedReturnChain === null || expectedReturnChain.length === 0
+        ? []
+        : [expectedReturnChain[expectedReturnChain.length - 1]!];
+    const matchesExpectedReturn = (url: string): boolean =>
+      expectedReturnUrls().some((expected) => this.isOAuthReturnUrl(url, expected));
     const attemptPage = (page: Page): boolean => page === product || page === popupCapture.page;
     // Playwright reports a popup's initial navigation before it can associate
     // the request with a frame. Keep that request inert until the opener's
@@ -13700,9 +13844,7 @@ export class BrowserController {
       const url = frame.url();
       captureExpectedReturnUrl(url);
       observedReturn =
-        this.isOAuthReturnUrl(url, expectedReturnUrl) && oauthErrorFromReturnUrl(url) === null
-          ? { page, url }
-          : null;
+        matchesExpectedReturn(url) && oauthErrorFromReturnUrl(url) === null ? { page, url } : null;
     };
     const onProductNavigation = (frame: Frame): void => {
       if (!actionStarted || frame !== product.mainFrame()) return;
@@ -13720,7 +13862,7 @@ export class BrowserController {
           page === null ||
           page.isClosed() ||
           (page === product ? !productNavigated : !transientNavigated) ||
-          !this.isOAuthReturnUrl(page.url(), expectedReturnUrl) ||
+          !matchesExpectedReturn(page.url()) ||
           oauthErrorFromReturnUrl(page.url()) !== null
         ) {
           continue;
@@ -13734,11 +13876,7 @@ export class BrowserController {
       const returnedPage = completionPage();
       if (returnedPage !== null) {
         const url = returnedPage.url();
-        if (
-          !returnedPage.isClosed() &&
-          returnedPage.url() === url &&
-          this.isOAuthReturnUrl(url, expectedReturnUrl)
-        ) {
+        if (!returnedPage.isClosed() && returnedPage.url() === url && matchesExpectedReturn(url)) {
           return { page: returnedPage };
         }
       }
@@ -13790,8 +13928,115 @@ export class BrowserController {
           );
         }
         try {
-          actionStarted = true;
-          await this.click(selector);
+          if (dispatchAuthorizedClick === undefined) {
+            actionStarted = true;
+            await this.click(selector);
+          } else {
+            await dispatchAuthorizedClick(async (handle, confirmTarget) => {
+              await this.withModalInertNeutralized(selector, async () => {
+                const materialSignature = (element: Element): string => {
+                  const control = element as HTMLElement;
+                  return JSON.stringify([
+                    element.tagName.toLowerCase(),
+                    element.getAttribute("role") ?? "",
+                    element.getAttribute("aria-label") ?? "",
+                    element.getAttribute("title") ?? "",
+                    element instanceof HTMLInputElement ? element.value : "",
+                    (control.innerText || element.textContent || "").replace(/\s+/g, " ").trim(),
+                  ]);
+                };
+                let expectedSignature: string;
+                try {
+                  // Complete Playwright's actionability wait before the final
+                  // authorization check. The second click is intentionally
+                  // short: a new wait would reopen the intent-change window.
+                  await handle.click({ trial: true, timeout: 8000 });
+                  expectedSignature = await handle.evaluate(materialSignature);
+                  await confirmTarget();
+                } catch (error) {
+                  throw new BrowserClickDispatchError("not_dispatched", error);
+                }
+                if (Date.now() >= oauthDeadline) {
+                  throw new OAuthAwaitingHumanError(
+                    `OAuth has not been attempted yet: the ${Math.ceil(oauthBudgetMs / 1000)}-second ` +
+                      `budget elapsed before the OAuth control on ${safeOrigin(productUrl)} was clicked. ` +
+                      "Retry oauth_login.",
+                    "not_attempted",
+                  );
+                }
+                const guardKey = `__ts_oauth_click_${Math.random().toString(36).slice(2)}`;
+                await handle.evaluate(
+                  (element, guard) => {
+                    const signature = (candidate: Element): string => {
+                      const control = candidate as HTMLElement;
+                      return JSON.stringify([
+                        candidate.tagName.toLowerCase(),
+                        candidate.getAttribute("role") ?? "",
+                        candidate.getAttribute("aria-label") ?? "",
+                        candidate.getAttribute("title") ?? "",
+                        candidate instanceof HTMLInputElement ? candidate.value : "",
+                        (control.innerText || candidate.textContent || "")
+                          .replace(/\s+/g, " ")
+                          .trim(),
+                      ]);
+                    };
+                    const target = element as HTMLElement & Record<string, unknown>;
+                    const state = {
+                      blocked: false,
+                      listener: (event: Event): void => {
+                        if (signature(element) === guard.expected) return;
+                        state.blocked = true;
+                        event.preventDefault();
+                        event.stopImmediatePropagation();
+                      },
+                    };
+                    target[guard.key] = state;
+                    element.addEventListener("click", state.listener, {
+                      capture: true,
+                      once: true,
+                    });
+                  },
+                  { key: guardKey, expected: expectedSignature },
+                );
+                actionStarted = true;
+                try {
+                  await this.clickWithDispatchTracking(
+                    { kind: "handle", handle, method: "click" },
+                    undefined,
+                    async () => {
+                      await handle.click({ timeout: 1000, noWaitAfter: true });
+                      const blocked = await handle.evaluate((element, key) => {
+                        const target = element as HTMLElement &
+                          Record<string, { blocked?: boolean } | undefined>;
+                        return target[key]?.blocked === true;
+                      }, guardKey);
+                      if (blocked) {
+                        throw new BrowserClickDispatchError(
+                          "not_dispatched",
+                          new Error("OAuth target intent changed at click dispatch"),
+                        );
+                      }
+                    },
+                  );
+                } finally {
+                  await handle
+                    .evaluate((element, key) => {
+                      const target = element as HTMLElement &
+                        Record<
+                          string,
+                          { listener?: EventListenerOrEventListenerObject } | undefined
+                        >;
+                      const state = target[key];
+                      if (state?.listener !== undefined) {
+                        element.removeEventListener("click", state.listener, { capture: true });
+                      }
+                      delete target[key];
+                    }, guardKey)
+                    .catch(() => undefined);
+                }
+              });
+            });
+          }
         } catch (error) {
           if (!product.isClosed()) throw error;
         }
@@ -13823,7 +14068,7 @@ export class BrowserController {
         }
       };
       transient.on("framenavigated", onTransientNavigation);
-      expectedReturnUrl ??= oauthRedirectUri(transient.url());
+      captureExpectedReturnUrl(transient.url());
       if (transient !== product) {
         transientNavigated = true;
         recordTopLevelNavigation(transient, transient.mainFrame());
@@ -13839,7 +14084,7 @@ export class BrowserController {
       let settled: Page | null = null;
       if (consentProvider === undefined) {
         settled = await this.waitForOAuthLifecycle(
-          () => expectedReturnUrl,
+          expectedReturnUrls,
           remainingBudgetMs(),
           completionPage,
           hasTerminalCompletion,
@@ -13848,7 +14093,7 @@ export class BrowserController {
         while (settled === null && Date.now() < oauthDeadline) {
           const remaining = oauthDeadline - Date.now();
           settled = await this.waitForOAuthLifecycle(
-            () => expectedReturnUrl,
+            expectedReturnUrls,
             Math.min(1_000, remaining),
             completionPage,
             hasTerminalCompletion,
@@ -13985,7 +14230,7 @@ export class BrowserController {
   }
 
   private async waitForOAuthLifecycle(
-    expectedReturnUrl: () => string | null,
+    expectedReturnUrls: () => readonly string[],
     timeoutMs: number,
     completionPage: () => Page | null,
     terminalCompletion: () => boolean,
@@ -14007,7 +14252,9 @@ export class BrowserController {
         if (
           !ready ||
           returnedPage.isClosed() ||
-          !this.isOAuthReturnUrl(returnedPage.url(), expectedReturnUrl())
+          !expectedReturnUrls().some((expected) =>
+            this.isOAuthReturnUrl(returnedPage.url(), expected),
+          )
         ) {
           return null;
         }
@@ -14016,7 +14263,9 @@ export class BrowserController {
         await this.sleep(Math.min(50, Math.max(1, deadline - Date.now())));
         return !returnedPage.isClosed() &&
           returnedPage.url() === returnedUrl &&
-          this.isOAuthReturnUrl(returnedPage.url(), expectedReturnUrl())
+          expectedReturnUrls().some((expected) =>
+            this.isOAuthReturnUrl(returnedPage.url(), expected),
+          )
           ? returnedPage
           : null;
       }
