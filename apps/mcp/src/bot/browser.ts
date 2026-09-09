@@ -13672,8 +13672,7 @@ export class BrowserController {
     let actionStarted = false;
     let productNavigated = false;
     let transientNavigated = false;
-    const expectedReturnUrls: string[] = [];
-    let returnChainCaptured = false;
+    let expectedReturnChain: readonly string[] | null = null;
     let pendingOnProvider = false;
     let lastTransientUrl = productUrl;
     let observedReturn: { page: Page; url: string } | null = null;
@@ -13692,17 +13691,21 @@ export class BrowserController {
       onNavigation: ((frame: Frame) => void) | null;
     } = { page: null, onNavigation: null };
     const captureExpectedReturnUrl = (url: string): void => {
-      if (returnChainCaptured) return;
+      if (expectedReturnChain !== null) return;
       const chain = oauthRedirectChain(url);
       if (chain.length === 0) return;
       const providerOrigin = oauthProviderOrigin(url, consentProvider, productOrigin);
       if (providerOrigin === null) return;
-      returnChainCaptured = true;
-      if (chain.some((target) => new URL(target).origin === providerOrigin)) return;
-      expectedReturnUrls.push(...chain);
+      expectedReturnChain = chain.some((target) => new URL(target).origin === providerOrigin)
+        ? []
+        : chain;
     };
+    const expectedReturnUrls = (): readonly string[] =>
+      expectedReturnChain === null || expectedReturnChain.length === 0
+        ? []
+        : [expectedReturnChain[expectedReturnChain.length - 1]!];
     const matchesExpectedReturn = (url: string): boolean =>
-      expectedReturnUrls.some((expected) => this.isOAuthReturnUrl(url, expected));
+      expectedReturnUrls().some((expected) => this.isOAuthReturnUrl(url, expected));
     const attemptPage = (page: Page): boolean => page === product || page === popupCapture.page;
     // Playwright reports a popup's initial navigation before it can associate
     // the request with a frame. Keep that request inert until the opener's
@@ -13892,7 +13895,7 @@ export class BrowserController {
       let settled: Page | null = null;
       if (consentProvider === undefined) {
         settled = await this.waitForOAuthLifecycle(
-          () => expectedReturnUrls,
+          expectedReturnUrls,
           remainingBudgetMs(),
           completionPage,
           hasTerminalCompletion,
@@ -13901,7 +13904,7 @@ export class BrowserController {
         while (settled === null && Date.now() < oauthDeadline) {
           const remaining = oauthDeadline - Date.now();
           settled = await this.waitForOAuthLifecycle(
-            () => expectedReturnUrls,
+            expectedReturnUrls,
             Math.min(1_000, remaining),
             completionPage,
             hasTerminalCompletion,
