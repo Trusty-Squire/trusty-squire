@@ -817,6 +817,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const context = await browser.newContext();
       const product = await context.newPage();
       let expectedReturnUrl = "";
+      const returnTarget = createServer((_request, response) => {
+        response.writeHead(200, { "content-type": "text/html" });
+        response.end("<main>Projects</main>");
+      });
       const provider = createServer((request, response) => {
         if (request.url?.startsWith("/provider")) {
           response.writeHead(302, { location: expectedReturnUrl });
@@ -826,9 +830,11 @@ describe("BrowserController OAuth popup lifecycle", () => {
         response.writeHead(200, { "content-type": "text/html" });
         response.end("<main>Projects</main>");
       });
+      await new Promise<void>((resolve) => returnTarget.listen(0, "127.0.0.1", resolve));
       await new Promise<void>((resolve) => provider.listen(0, "127.0.0.1", resolve));
+      const { port: returnPort } = returnTarget.address() as AddressInfo;
       const { port } = provider.address() as AddressInfo;
-      expectedReturnUrl = `http://127.0.0.1:${port}/projects`;
+      expectedReturnUrl = `http://127.0.0.1:${returnPort}/projects`;
       const providerUrl = `http://127.0.0.1:${port}/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`;
       await context.route("https://product.test/**", (route) =>
         route.fulfill({
@@ -847,6 +853,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
         await context.close();
         await new Promise<void>((resolve, reject) =>
           provider.close((error) => (error === undefined ? resolve() : reject(error))),
+        );
+        await new Promise<void>((resolve, reject) =>
+          returnTarget.close((error) => (error === undefined ? resolve() : reject(error))),
         );
       }
     },
