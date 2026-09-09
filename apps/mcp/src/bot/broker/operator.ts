@@ -310,14 +310,16 @@ export class OperatorBroker implements BrokerTransportPort {
           const targetId = await session.browser.brokerTargetId();
           return {
             targetId,
-            prepare: async (name, commandArgs) =>
-              name === "operate_login" &&
-              typeof commandArgs.provider === "string" &&
-              typeof commandArgs.ref === "string"
+            prepare: async (name, commandArgs) => {
+              const ref = commandArgs.ref;
+              return name === "operate_login" &&
+                typeof commandArgs.provider === "string" &&
+                typeof ref === "string"
                 ? await withProvisionSessionCall(internalId, async () =>
-                    preparePublicOAuthLoginTarget(internalId, commandArgs.ref),
+                    preparePublicOAuthLoginTarget(internalId, ref),
                   )
-                : undefined,
+                : undefined;
+            },
             invoke: async (name, commandArgs, _signal, commandId, prepared) => {
               if (!session.browser.isConnected())
                 throw new BrokerRefusal(
