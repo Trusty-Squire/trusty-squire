@@ -409,6 +409,75 @@ describe("broker authority", () => {
     expect(broker.inventory()).toEqual({ active: 1, quarantined: 0, admitting: 0 });
   });
 
+  it("quarantines a port returned after detached admission expiry", async () => {
+    const broker = new BrokerAuthority("account", "cell", 1, 5);
+    const owner = principal("late");
+    const created = deferred<BrokerSessionPort>();
+    const closeReasons: Array<"finish" | "disconnect" | "expiry" | undefined> = [];
+    const opening = broker.open(owner, ["site:a"], async () => await created.promise);
+    await Promise.resolve();
+
+    const now = Date.now();
+    broker.detach(owner, now, 0);
+    await broker.expireDetached(now);
+    created.resolve({
+      ...port("late"),
+      close: async (reason) => {
+        closeReasons.push(reason);
+        return await new Promise<boolean>(() => undefined);
+      },
+    });
+
+    await expect(
+      Promise.race([
+        opening,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("late admission close was not bounded")), 100),
+        ),
+      ]),
+    ).rejects.toThrow("Admission reconnect grace expired");
+    expect(closeReasons).toEqual(["expiry"]);
+    expect(broker.inventory()).toEqual({ active: 0, quarantined: 1, admitting: 0 });
+    await expect(
+      broker.open(principal("replacement"), ["site:a"], async () => port("replacement")),
+    ).rejects.toThrow("capacity");
+  });
+
+  it("retires transferred transport fences without resuming stale commands", async () => {
+    const broker = new BrokerAuthority("account", "cell");
+    let owner: BrokerPrincipal = {
+      accountId: "account",
+      agentId: "local-agent",
+      forwarderId: "lineage-a",
+      clientId: "client-0",
+    };
+    await broker.claimForwarder(owner);
+    const capability = await broker.open(owner, ["site:a"], async () => port("a"));
+    const fencedClients = () =>
+      (broker as unknown as { fencedClients: Set<string> }).fencedClients;
+
+    for (let index = 1; index <= 3; index++) {
+      const stale = owner;
+      broker.detach(stale);
+      broker.releaseForwarder(stale);
+      expect(() => broker.invoke(stale, capability, `lost-${index}`, "mutate", {})).toThrow(
+        "not admitted",
+      );
+
+      owner = { ...stale, clientId: `client-${index}` };
+      await broker.claimForwarder(owner);
+      expect(broker.reclaim(owner)).toEqual([capability]);
+      expect(() => broker.invoke(stale, capability, `stale-${index}`, "mutate", {})).toThrow(
+        "Forwarder identity is already active",
+      );
+      expect(fencedClients()).not.toContain(stale.clientId);
+      expect(fencedClients().size).toBe(0);
+    }
+
+    await broker.close(owner, capability);
+    expect(fencedClients().size).toBe(0);
+  });
+
   it("expires a never-settling detached admission without retaining capacity", async () => {
     const broker = new BrokerAuthority("account", "cell", 1);
     const owner = principal("admission");

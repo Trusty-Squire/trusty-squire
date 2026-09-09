@@ -70,7 +70,7 @@ export class BrokerAuthority {
   }
   private readonly actors = new Map<string, Actor>();
   private readonly admissions = new Map<string, Admission>();
-  private readonly expiredAdmissions = new Set<string>();
+  private readonly expiredAdmissions = new Map<string, BrokerPrincipal>();
   private readonly forwarderConnections = new Map<string, ForwarderConnection>();
   private readonly fencedClients = new Set<string>();
   private readonly scheduler = new ScopeScheduler();
@@ -101,6 +101,20 @@ export class BrokerAuthority {
     ) {
       throw new BrokerRefusal("unauthorized", "Client is not admitted to this identity cell");
     }
+  }
+
+  private retireFencedClient(clientId: string): void {
+    if (
+      [...this.admissions.values()].some(
+        (admission) => admission.principal.clientId === clientId,
+      ) ||
+      [...this.expiredAdmissions.values()].some(
+        (principal) => principal.clientId === clientId,
+      ) ||
+      [...this.actors.values()].some((actor) => actor.principal.clientId === clientId)
+    )
+      return;
+    this.fencedClients.delete(clientId);
   }
 
   claimForwarder(principal: BrokerPrincipal): Promise<void> | void {
@@ -200,8 +214,6 @@ export class BrokerAuthority {
       if (this.admissions.get(id)?.reconnectDeadline === undefined) this.assertPrincipal(principal);
       creating = true;
       port = await create(id, abort.signal, (resources) => this.scheduler.expand(id, resources));
-      if (this.expiredAdmissions.has(id))
-        throw new BrokerRefusal("cancelled", "Admission reconnect grace expired");
       const capability: TabCapability = {
         cellId: this.cellId,
         browserEpoch: this.epoch,
@@ -220,6 +232,13 @@ export class BrokerAuthority {
         pending: 0,
       };
       this.actors.set(id, actor);
+      if (this.expiredAdmissions.has(id)) {
+        actor.state = "closing";
+        actor.closeReason = "disconnect";
+        actor.abort.abort();
+        await this.quarantineExpiredActor(actor);
+        throw new BrokerRefusal("cancelled", "Admission reconnect grace expired");
+      }
       const reconnectDeadline = this.admissions.get(id)?.reconnectDeadline;
       if (reconnectDeadline !== undefined) {
         actor.state = "detached";
@@ -275,6 +294,7 @@ export class BrokerAuthority {
     } finally {
       this.admissions.delete(id);
       this.expiredAdmissions.delete(id);
+      this.retireFencedClient(principal.clientId);
     }
   }
 
@@ -310,9 +330,11 @@ export class BrokerAuthority {
     )
       throw new BrokerRefusal("forwarder_in_use", "Forwarder identity is already active");
     const now = Date.now();
-    return owned.flatMap((actor) => {
+    const displacedClients = new Set<string>();
+    const capabilities = owned.flatMap((actor) => {
       if (actor.state === "detached" && (actor.reconnectDeadline ?? 0) <= now) return [];
       if (actor.expiryQuarantined) return [];
+      displacedClients.add(actor.principal.clientId);
       actor.principal = { ...principal };
       if (actor.state === "detached") {
         actor.abort = new AbortController();
@@ -327,6 +349,8 @@ export class BrokerAuthority {
       }
       return [{ ...actor.capability }];
     });
+    for (const clientId of displacedClients) this.retireFencedClient(clientId);
+    return capabilities;
   }
 
   recoverCapability(principal: BrokerPrincipal, sessionId: string): TabCapability | undefined {
@@ -339,7 +363,9 @@ export class BrokerAuthority {
       actor.principal.agentId !== principal.agentId
     )
       return undefined;
+    const displacedClientId = actor.principal.clientId;
     actor.principal = { ...principal };
+    this.retireFencedClient(displacedClientId);
     return { ...actor.capability };
   }
 
@@ -446,6 +472,7 @@ export class BrokerAuthority {
       }
       this.actors.delete(actor.capability.sessionId);
       this.scheduler.release(actor.capability.sessionId);
+      this.retireFencedClient(actor.principal.clientId);
       return true;
     })();
     return actor.closePromise;
@@ -495,6 +522,7 @@ export class BrokerAuthority {
     if (closed.completed && closed.value) {
       this.actors.delete(actor.capability.sessionId);
       this.scheduler.release(actor.capability.sessionId);
+      this.retireFencedClient(actor.principal.clientId);
       return;
     }
     this.markExpiryQuarantined(actor);
@@ -507,6 +535,7 @@ export class BrokerAuthority {
     if (closed.completed && closed.value) {
       this.actors.delete(actor.capability.sessionId);
       this.scheduler.release(actor.capability.sessionId);
+      this.retireFencedClient(actor.principal.clientId);
       return;
     }
     this.markExpiryQuarantined(actor);
@@ -523,6 +552,7 @@ export class BrokerAuthority {
         .filter((actor) => actor.principal.clientId === principal.clientId)
         .map(async (actor) => await this.closeActor(actor)),
     );
+    this.retireFencedClient(principal.clientId);
   }
 
   detach(
@@ -544,12 +574,13 @@ export class BrokerAuthority {
       actor.reconnectDeadline = now + graceMs;
       actor.abort.abort();
     }
+    this.retireFencedClient(principal.clientId);
   }
 
   async expireDetached(now = Date.now()): Promise<void> {
     for (const [id, admission] of this.admissions) {
       if ((admission.reconnectDeadline ?? Number.POSITIVE_INFINITY) > now) continue;
-      this.expiredAdmissions.add(id);
+      this.expiredAdmissions.set(id, { ...admission.principal });
       admission.abort.abort();
       this.admissions.delete(id);
       this.scheduler.release(id);
