@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, rm, lstat, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, lstat, readFile, readdir } from "node:fs/promises";
 import { createHash, createHmac } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -163,7 +163,7 @@ itWithChromium("keeps the real daemon endpoint recoverable when real browser cle
     api_base_url: "http://127.0.0.1:1",
     saved_at: new Date().toISOString(),
   };
-  const closeEnteredPath = join(root, "close-entered");
+  const reapers = join(root, "reapers");
   const journal = new DispatchJournal(join(profile, "trusty-squire-broker-dispatch.jsonl"));
   await mkdir(profile);
   await mkdir(join(root, "home"));
@@ -179,7 +179,8 @@ itWithChromium("keeps the real daemon endpoint recoverable when real browser cle
   const child = spawn(
     process.execPath,
     [
-      require.resolve("tsx/cli"),
+      "--import",
+      require.resolve("tsx"),
       fileURLToPath(new URL("./fixtures/broker-draining-daemon.ts", import.meta.url)),
     ],
     {
@@ -190,10 +191,9 @@ itWithChromium("keeps the real daemon endpoint recoverable when real browser cle
         TMPDIR: root,
         TRUSTY_SQUIRE_ACCOUNT_ID: account.account_id,
         TRUSTY_SQUIRE_PROFILE_DIR: profile,
-        TRUSTY_SQUIRE_REAPER_DIR: join(root, "reapers"),
+        TRUSTY_SQUIRE_REAPER_DIR: reapers,
         TRUSTY_SQUIRE_BROKER_SOCKET: socket,
         TRUSTY_SQUIRE_BROKER_SUPERVISED: "1",
-        TRUSTY_SQUIRE_BROKER_TEST_CLOSE_ENTERED_PATH: closeEnteredPath,
         UNIVERSAL_BOT_CHANNEL: "chrome",
         UNIVERSAL_BOT_CHROME_BINARY: chromium.executablePath(),
         BOT_SELF_LAUNCH: "1",
@@ -212,6 +212,7 @@ itWithChromium("keeps the real daemon endpoint recoverable when real browser cle
   });
   let initial: BrokerClient | undefined;
   let client: BrokerClient | undefined;
+  let browserPid: number | undefined;
   try {
     for (let attempt = 0; attempt < 200; attempt++) {
       if (
@@ -232,6 +233,26 @@ itWithChromium("keeps the real daemon endpoint recoverable when real browser cle
     const sessionId = started.capability?.sessionId;
     if (typeof sessionId !== "string" || typeof started.capability?.targetId !== "string")
       throw new Error(`real browser session was not created: ${JSON.stringify(started)}`);
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const launchPid = await readdir(reapers)
+        .then(async (entries) =>
+          await Promise.all(
+            entries.filter((entry) => entry.endsWith(".json")).map(async (entry) => {
+              const manifest = JSON.parse(await readFile(join(reapers, entry), "utf8")) as {
+                resources?: Array<{ pid?: number; user_data_dir?: string }>;
+              };
+              return manifest.resources?.find((resource) => resource.user_data_dir === profile)?.pid;
+            }),
+          ),
+        )
+        .then((pids) => pids.find((pid): pid is number => Number.isSafeInteger(pid)));
+      if (launchPid !== undefined) {
+        browserPid = launchPid;
+        break;
+      }
+      await sleep(25);
+    }
+    if (browserPid === undefined) throw new Error("real broker browser was not registered with its reaper");
     const paymentArgs = { session_id: sessionId, item: "fixture purchase", reason: "drain recovery" };
     await journal.record(sessionId, "stuck-payment", "outcome", {
       forwarderId: forwarderId(credential),
@@ -243,19 +264,18 @@ itWithChromium("keeps the real daemon endpoint recoverable when real browser cle
         .digest("hex"),
       outcome: { status: "payment_outcome_unknown" },
     });
+    process.kill(browserPid, "SIGSTOP");
     await initial.close();
     initial = undefined;
     await sleep(100);
     child.kill("SIGTERM");
     for (let attempt = 0; attempt < 200; attempt++) {
-      if (
-        diagnostic.includes("cleanup unproven") &&
-        (await readFile(closeEnteredPath, "utf8").catch(() => "")) === "entered"
-      )
-        break;
+      if (diagnostic.includes("cleanup unproven")) break;
       if (child.exitCode !== null) throw new Error(diagnostic);
       await sleep(25);
     }
+    if (!diagnostic.includes("cleanup unproven"))
+      throw new Error(`draining broker never reported unproven cleanup: ${diagnostic}`);
     await expect(lstat(socket)).resolves.toBeDefined();
     client = await within(
       BrokerClient.connect(socket, account.agent_session_token, credential),
@@ -288,10 +308,28 @@ itWithChromium("keeps the real daemon endpoint recoverable when real browser cle
     await within(client?.close() ?? Promise.resolve(), 1_000, "recovery broker close").catch(
       () => undefined,
     );
+    if (browserPid !== undefined) {
+      try {
+        process.kill(browserPid, "SIGCONT");
+      } catch {
+        // The owner reaper may already have proved the stopped process dead.
+      }
+    }
     if (child.exitCode === null) child.kill("SIGKILL");
     await within(exited, 1_000, "broker daemon exit").catch(() => undefined);
     await closeServer(service);
-    await rm(root, { recursive: true, force: true });
+    let removed = false;
+    for (let attempt = 0; attempt < 200; attempt++) {
+      try {
+        await rm(root, { recursive: true, force: true });
+        removed = true;
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOTEMPTY") throw error;
+        await sleep(25);
+      }
+    }
+    if (!removed) throw new Error("broker test fixture remained busy during cleanup");
   }
 }, 120000);
 
@@ -327,7 +365,12 @@ it("returns only a durable start outcome after daemon death", async () => {
   await journal.acknowledge(lineage, "old-process-request");
   const child = spawn(
     process.execPath,
-    [require.resolve("tsx/cli"), fileURLToPath(new URL("../../bin.ts", import.meta.url)), "broker"],
+    [
+      "--import",
+      require.resolve("tsx"),
+      fileURLToPath(new URL("../../bin.ts", import.meta.url)),
+      "broker",
+    ],
     {
       env: {
         ...process.env,
@@ -418,7 +461,12 @@ it("keeps a live control client, coordinates plain maintenance, refreshes creden
   await mkdir(profile);
   const child = spawn(
     process.execPath,
-    [require.resolve("tsx/cli"), fileURLToPath(new URL("../../bin.ts", import.meta.url)), "broker"],
+    [
+      "--import",
+      require.resolve("tsx"),
+      fileURLToPath(new URL("../../bin.ts", import.meta.url)),
+      "broker",
+    ],
     {
       env: {
         ...process.env,

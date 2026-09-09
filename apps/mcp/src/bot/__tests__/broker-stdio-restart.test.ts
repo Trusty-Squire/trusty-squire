@@ -221,7 +221,12 @@ describeChromium("broker-backed MCP stdio restart", () => {
     let brokerDiagnostics = "";
     const broker = spawn(
       process.execPath,
-      [require.resolve("tsx/cli"), fileURLToPath(new URL("../../bin.ts", import.meta.url)), "broker"],
+      [
+        "--import",
+        require.resolve("tsx"),
+        fileURLToPath(new URL("../../bin.ts", import.meta.url)),
+        "broker",
+      ],
       {
         env: {
           ...process.env,
@@ -253,7 +258,12 @@ describeChromium("broker-backed MCP stdio restart", () => {
       let diagnostics = "";
       const child = spawn(
         process.execPath,
-        [require.resolve("tsx/cli"), fileURLToPath(new URL("../../bin.ts", import.meta.url)), "server"],
+        [
+          "--import",
+          require.resolve("tsx"),
+          fileURLToPath(new URL("../../bin.ts", import.meta.url)),
+          "server",
+        ],
         {
           env: {
             ...process.env,

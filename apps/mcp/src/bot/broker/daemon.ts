@@ -216,7 +216,7 @@ export async function runBrokerDaemon(): Promise<void> {
         throw new BrokerRefusal("unauthorized", "Supervisor connections may only supervise");
       const report = await guard.inspect();
       if (report.problem !== null) throw new Error(report.problem.message);
-      if (runtime.browserLost() && (method === "recover" || method === "reclaim"))
+      if (runtime.browserLost() && method === "reclaim")
         throw new BrokerRefusal(
           "browser_lost",
           "Browser transport is lost; the pending start cannot be recovered",
