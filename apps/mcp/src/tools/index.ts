@@ -45,6 +45,7 @@ export interface ToolContext {
   // In-process override for hosts/tests with a tighter transport deadline.
   // Omitted by the MCP server, which uses operate_pay's one-minute default.
   paymentApprovalWaitMs?: number;
+  signal?: AbortSignal;
 }
 
 // Re-exported for convenience; defined in its own module to avoid a

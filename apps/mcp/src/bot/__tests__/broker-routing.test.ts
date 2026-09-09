@@ -17,11 +17,13 @@ async function fixture() {
   await root.enableBrokerRouting();
   const a = await BrowserController.attachSessionPage(root, { humanize: false });
   const b = await BrowserController.attachSessionPage(root, { humanize: false });
-  await a.setHostScopeAllowedHosts(() => ["a.test"]);
-  await b.setHostScopeAllowedHosts(() => ["b.test"]);
+  const aHosts = ["a.test"];
+  const bHosts = ["b.test"];
+  await a.setHostScopeAllowedHosts(() => aHosts);
+  await b.setHostScopeAllowedHosts(() => bHosts);
   await Promise.all([a.goto("https://a.test"), b.goto("https://b.test")]);
   const page = (controller: BrowserController) => (controller as unknown as { page: Page }).page;
-  return { context, a, b, page };
+  return { context, root, a, b, aHosts, bHosts, page };
 }
 
 describe("broker context coordination", () => {
@@ -36,11 +38,57 @@ describe("broker context coordination", () => {
           "fetch('https://b.test/api').then(() => 'escaped', () => 'blocked')",
         ),
       ).toBe("blocked");
+      expect(a.takeHostScopeDenials()).toEqual([
+        expect.objectContaining({
+          hostname: "b.test",
+          resource_type: "fetch",
+          reason: "host_not_allowed",
+          count: 1,
+          remedy: { action: "allow_host", host: "b.test" },
+        }),
+      ]);
+      expect(b.takeHostScopeDenials()).toEqual([]);
       await a.closeOwnPagesOnly();
       expect(await page(b).evaluate("fetch('/api').then(r => r.ok)")).toBe(true);
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it("attributes bounded denial metadata to one document and never widens sibling scope", async () => {
+    const { root, a, b, aHosts, page } = await fixture();
+    expect(
+      await page(a).evaluate(
+        "fetch('https://api.external.test/private/path?secret=never-report').then(() => 'escaped', () => 'blocked')",
+      ),
+    ).toBe("blocked");
+    const [diagnostic] = a.takeHostScopeDenials();
+    expect(diagnostic).toMatchObject({
+      hostname: "api.external.test",
+      resource_type: "fetch",
+      reason: "host_not_allowed",
+      remedy: { action: "allow_host", host: "api.external.test" },
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain("private/path");
+    expect(JSON.stringify(diagnostic)).not.toContain("never-report");
+
+    aHosts.push("api.external.test");
+    expect(
+      await page(a).evaluate("fetch('https://api.external.test/region').then(r => r.ok)"),
+    ).toBe(true);
+    expect(
+      await page(b).evaluate(
+        "fetch('https://api.external.test/region').then(() => 'escaped', () => 'blocked')",
+      ),
+    ).toBe("blocked");
+    const unowned = (root as unknown as { page: Page }).page;
+    expect(
+      await unowned.evaluate(
+        "fetch('https://api.external.test/worker').then(() => 'escaped', () => 'blocked')",
+      ),
+    ).toBe("blocked");
+    expect(a.takeHostScopeDenials()).toEqual([]);
+    expect(b.takeHostScopeDenials()).toHaveLength(1);
   });
 
   it("clears Cloudflare cookies only for the recovering site's exact cookie scope", async () => {

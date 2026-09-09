@@ -31,6 +31,7 @@ import {
   parseCheckoutAmount,
   OAuthAwaitingHumanError,
   OAuthFailedError,
+  OAuthOnboardingRequiredError,
   type BrowserController,
   type ClickDispatchStatus,
   type CheckoutSummary,
@@ -263,6 +264,9 @@ export interface Observation {
   // V1 and Compact V2 start with the live page location. Compact V2 can shorten
   // fixed metadata only when necessary to fit its wire budget.
   url: string;
+  // Bounded, document-attributed request-scope denials. Hostnames only: never
+  // paths, query strings, request bodies, headers, or page-provided secrets.
+  scope_denials?: import("./browser.js").HostScopeDenialDiagnostic[];
   // Registry route guidance, present ONLY on the first (start) observation when
   // a skill exists for the service. The host agent reads it before driving.
   hint?: string;
@@ -369,6 +373,11 @@ export interface Observation {
     // flow.
     | {
         state: "awaiting_human";
+        reason: string;
+        next_action: "operate_observe";
+      }
+    | {
+        state: "onboarding_required";
         reason: string;
         next_action: "operate_observe";
       };
@@ -2333,7 +2342,10 @@ function widenAllowedHostsFromUrl(session: Session, url: string): void {
 // the lifecycle module keeps a one-way dependency on this file (types only).
 const sessionStartPorts: SessionStartPorts = {
   observeSession: async (session, format, startMetadata) =>
-    await observeSession(session, format, startMetadata, undefined, false, format),
+    withHostScopeDenials(
+      session,
+      await observeSession(session, format, startMetadata, undefined, false, format),
+    ),
   compactV2StartMetadata: (registryHint, loginHint, userEmail) =>
     compactV2StartMetadata(registryHint, loginHint, userEmail),
 };
@@ -2367,14 +2379,22 @@ export async function observe(
     transition.browserConnected
       ? undefined
       : operationPageForSession(session);
-  return await observeSession(
+  return withHostScopeDenials(
     session,
-    requestedFormat,
-    undefined,
-    sourcePage?.isClosed() === true ? undefined : sourcePage,
-    false,
-    requestedFormat,
+    await observeSession(
+      session,
+      requestedFormat,
+      undefined,
+      sourcePage?.isClosed() === true ? undefined : sourcePage,
+      false,
+      requestedFormat,
+    ),
   );
+}
+
+function withHostScopeDenials<T extends object>(session: Session, result: T): T {
+  const denials = session.browser.takeHostScopeDenials?.() ?? [];
+  return denials.length === 0 ? result : ({ ...result, scope_denials: denials } as T);
 }
 
 export interface ScreenshotCapture {
@@ -4566,11 +4586,38 @@ export async function observeQuery(
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const sourcePage = operationPageForSession(session);
-  const index = session.compactV2Index;
+  let index = session.compactV2Index;
+  const currentDocument = compactV2EpochDoc(session, sourcePage);
+  const invalidSnapshot =
+    index === null || index.expiresAt < Date.now() || index.epoch.doc !== currentDocument;
+  // A query/role without a cursor is a fresh read, not a continuation. Capture
+  // the current document before filtering. Only a caller-supplied continuation
+  // token inherits stale-snapshot preconditions.
+  if (invalidSnapshot && cursor === undefined) {
+    if (index?.epoch.doc !== currentDocument) invalidateCompactV2Snapshot(session);
+    session.generation += 1;
+    const capture = await session.browser.extractBrowserUseObservation(sourcePage);
+    let semanticSource: ObservationSemanticSourceV2 = { title: "", headings: [] };
+    try {
+      semanticSource = await session.browser.extractObservationSemantics(sourcePage);
+    } catch {
+      // Semantics are optional; action membership comes from the canonical capture.
+    }
+    compactV2Observation(
+      session,
+      session.generation,
+      capture,
+      semanticSource,
+      undefined,
+      sourcePage,
+      "compact",
+    );
+    index = session.compactV2Index;
+  }
   if (index === null || index.expiresAt < Date.now()) throw new Error("stale_cursor");
   // Query/paging is part of the same session-bound action-map protocol: never return
   // rows from a page whose private binding no longer matches the live page.
-  if (index.epoch.doc !== compactV2EpochDoc(session)) {
+  if (index.epoch.doc !== compactV2EpochDoc(session, sourcePage)) {
     invalidateCompactV2Snapshot(session);
     throw new Error("stale_cursor");
   }
@@ -4696,7 +4743,7 @@ export async function observeQuery(
     offset,
     cursorFor: (next) => compactV2Cursor(session, pagingRev, next, cursorScope),
   });
-  return page.payload;
+  return withHostScopeDenials(session, page.payload);
 }
 
 function terminalOAuthCompletionObservation(session: Session, url: string): Observation {
@@ -5119,6 +5166,27 @@ function oauthAwaitingHumanObservation(
   );
 }
 
+function oauthOnboardingRequiredObservation(
+  session: Session,
+  error: OAuthOnboardingRequiredError,
+): Observation {
+  session.prevObserve = null;
+  invalidateCompactV2Snapshot(session);
+  const url = session.browser.currentUrl();
+  const guidance =
+    "OAuth provider consent is complete. The relying party requires user-supplied onboarding information; inspect the current form and do not click OAuth consent again.";
+  const oauth: NonNullable<Observation["oauth"]> = {
+    state: "onboarding_required",
+    reason: error.message,
+    next_action: "operate_observe",
+  };
+  return compactV2PublicObservation(
+    session,
+    () => ({ session_id: session.id, url, text: "", guidance, elements: [], oauth }),
+    { stage: "form", guidance, oauth, url },
+  );
+}
+
 async function actInternally(
   sessionId: string,
   action: ProvisionAction,
@@ -5164,6 +5232,9 @@ async function actInternally(
     // return it as a normal (non-throwing) observation instead of an error.
     if (error instanceof OAuthAwaitingHumanError && session !== undefined) {
       return { observation: oauthAwaitingHumanObservation(session, error), outcome: {} };
+    }
+    if (error instanceof OAuthOnboardingRequiredError && session !== undefined) {
+      return { observation: oauthOnboardingRequiredObservation(session, error), outcome: {} };
     }
     if (
       session?.compactV2Active === true &&
@@ -5238,6 +5309,9 @@ export async function act(
     // return it as a normal (non-throwing) observation instead of an error.
     if (error instanceof OAuthAwaitingHumanError && session !== undefined) {
       return oauthAwaitingHumanObservation(session, error);
+    }
+    if (error instanceof OAuthOnboardingRequiredError && session !== undefined) {
+      return oauthOnboardingRequiredObservation(session, error);
     }
     if (action.kind === "oauth_login") {
       if (error instanceof ProvenPreDispatchMutationError) throw error;

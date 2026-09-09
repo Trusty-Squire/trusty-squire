@@ -13,6 +13,7 @@ import {
   BrowserController,
   OAuthAwaitingHumanError,
   OAuthFailedError,
+  OAuthOnboardingRequiredError,
   oauthErrorFromReturnUrl,
 } from "../browser.js";
 import {
@@ -77,6 +78,72 @@ describe("BrowserController OAuth popup lifecycle", () => {
 
   afterAll(async () => {
     await browser?.close();
+  });
+
+  it("returns relying-party required information without treating its Continue as provider consent", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const callback = "https://product.test/auth/callback";
+    const provider = `https://accounts.google.com/oauth?redirect_uri=${encodeURIComponent(callback)}`;
+    await context.route("**/*", async (route) => {
+      const url = route.request().url();
+      await route.fulfill({
+        contentType: "text/html",
+        body:
+          url === "https://product.test/login"
+            ? `<button id="oauth" onclick='location.href=${JSON.stringify(provider)}'>Google</button>`
+            : url.startsWith("https://accounts.google.com/")
+              ? '<script>location.href="https://product.test/required-information"</script>'
+              : '<input id="name" required><button id="continue" onclick="document.body.dataset.clicked=(Number(document.body.dataset.clicked||0)+1)">Continue</button>',
+      });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 1_500, "google")).rejects.toBeInstanceOf(
+        OAuthOnboardingRequiredError,
+      );
+      expect(product.url()).toBe("https://product.test/required-information");
+      expect(await product.locator("body").getAttribute("data-clicked")).toBeNull();
+      await expect(controller.advanceOAuthConsent("google", 50)).resolves.toBe(false);
+      expect(await product.locator("body").getAttribute("data-clicked")).toBeNull();
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("does not repeat a consent click or start a second attempt while the owned attempt can settle", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: '<button id="oauth" onclick="location.href=\'https://accounts.google.com/pending\'">Google</button>',
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: '<button id="continue" onclick="document.body.dataset.clicks=(Number(document.body.dataset.clicks||0)+1)">Continue</button>',
+      }),
+    );
+    await product.goto("https://accounts.google.com/pending");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.advanceOAuthConsent("google", 500)).resolves.toBe(true);
+      expect(await product.locator("body").getAttribute("data-clicks")).toBe("1");
+      await expect(controller.advanceOAuthConsent("google", 500)).resolves.toBe(false);
+      expect(await product.locator("body").getAttribute("data-clicks")).toBe("1");
+      const driver = (controller as unknown as { pageDriver: Record<string, unknown> }).pageDriver;
+      driver.oauthProductPage = product;
+      driver.oauthProviderPage = product;
+      await expect(controller.loginWithOAuth("#oauth", 100, "google")).rejects.toMatchObject({
+        message: expect.stringContaining("second authorization attempt was not started"),
+      });
+      expect(await product.locator("body").getAttribute("data-clicks")).toBe("1");
+    } finally {
+      await context.close();
+    }
   });
 
   it("admits Google only from the active browser context", async () => {

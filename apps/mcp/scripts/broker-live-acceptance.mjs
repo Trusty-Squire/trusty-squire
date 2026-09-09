@@ -10,6 +10,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { processInventory } from "./broker-process-inventory.mjs";
+import {
+  createFreshCredentialRun,
+  FORCE_FRESH_CREDENTIAL_POLICY,
+  qualifyFreshCredentialEvidence,
+} from "./fresh-credential-policy.mjs";
 const script = fileURLToPath(import.meta.url);
 const bin = fileURLToPath(new URL("../dist/bin.js", import.meta.url));
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -56,10 +61,50 @@ async function runClient(configPath, index) {
     });
     await new Promise((r) => process.once("message", r));
     const start = Date.now();
-    // A service driver can use only MCP calls. Its successful return is not
-    // proof: the final live DOM must also carry both configured postconditions.
+    const run = createFreshCredentialRun(
+      process.env.TRUSTY_SQUIRE_BROKER_QUALIFICATION_RUN_ID,
+      index,
+      config.credential_cleanup_policy,
+      start,
+    );
+    const vaultBefore = await call("list_credentials", {});
     const driver = await import(pathToFileURL(resolve(dirname(configPath), service.driver)).href);
-    await driver.provision({ call, sessionId, initial });
+    assert.equal(
+      typeof driver.captureCredentialBaseline,
+      "function",
+      "Driver baseline hook missing",
+    );
+    const providerBaseline = await driver.captureCredentialBaseline({
+      call,
+      sessionId,
+      initial,
+      run,
+    });
+    const evidence = await driver.provision({ call, sessionId, initial, run });
+    const vaultAfter = await call("list_credentials", {});
+    const qualified = qualifyFreshCredentialEvidence({
+      run,
+      baseline: {
+        provider_credential_ids: providerBaseline.provider_credential_ids,
+        vault_references: (vaultBefore.credentials ?? []).map((credential) => credential.reference),
+      },
+      evidence,
+      vaultCredentials: vaultAfter.credentials ?? [],
+    });
+    const probeResult = await call("use_credential", {
+      reference: qualified.probe.reference,
+      http: qualified.probe.http,
+    });
+    assert.equal(
+      typeof driver.validateCredentialProbe,
+      "function",
+      "Driver probe validator missing",
+    );
+    assert.equal(
+      await driver.validateCredentialProbe(probeResult.response),
+      true,
+      "Authenticated probe failed",
+    );
     const observed = await call("operate_observe", { session_id: sessionId });
     const rendered = observed.dom ?? observed.text ?? "";
     assert.match(
@@ -83,6 +128,13 @@ async function runClient(configPath, index) {
       url: observed.url,
       authenticated: true,
       provisioned: true,
+      fresh_credential: {
+        provider_id: qualified.provider.id,
+        vault_reference: qualified.vault.reference,
+        label: run.run_label,
+        created_at: qualified.provider.created_at,
+        cleanup: qualified.cleanup,
+      },
     });
     await new Promise((r) => process.once("message", r));
     const after = await call("operate_observe", { session_id: sessionId });
@@ -106,6 +158,15 @@ async function ownedProcesses(profile) {
 
 export async function runLiveAcceptance(configPath) {
   const config = JSON.parse(await readFile(configPath, "utf8"));
+  assert.equal(
+    config.credential_policy,
+    FORCE_FRESH_CREDENTIAL_POLICY,
+    "Live qualification requires credential_policy: force_fresh",
+  );
+  assert.ok(
+    config.credential_cleanup_policy === "retain" || config.credential_cleanup_policy === "revoke",
+    "Live qualification requires an explicit credential_cleanup_policy",
+  );
   assert.equal(config.services?.length, 3, "Exactly three authorized service drivers are required");
   assert.equal(new Set(config.services.map((s) => new URL(s.url).hostname)).size, 3);
   const root = process.cwd();

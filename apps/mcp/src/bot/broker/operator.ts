@@ -25,6 +25,7 @@ import { BrokerRefusal, siteResources } from "./scheduler.js";
 import type { BrokerTransportPort } from "./transport.js";
 import { forwarderId } from "./lineage.js";
 import { provenPreDispatchMutationFailure } from "../mutation-dispatch-evidence.js";
+import { withOperatorRequestContext } from "../request-cancellation.js";
 
 class DeliveredPreDispatchFailure {
   constructor(readonly error: "stale_ref") {}
@@ -92,13 +93,19 @@ function dispatchDetail(
   operation: string,
   inputHashValue: string,
   start = false,
+  dispatchTracked = false,
 ) {
   return {
     forwarderId: journalForwarderId(principal),
     ...(start ? { start: true as const } : {}),
     operation,
     inputHash: inputHashValue,
+    ...(dispatchTracked ? { dispatchTracked: true as const } : {}),
   };
+}
+
+function brokerCommandDispatchTracked(name: string): boolean {
+  return /^(?:operate_(?:login|click|type|select|press|goto|act|fill_credential))$/.test(name);
 }
 
 async function withBrokerAuditContext<T>(
@@ -148,6 +155,10 @@ export class OperatorBroker implements BrokerTransportPort {
   private readonly apis = new Map<string, ApiClient>();
   private readonly inputBindingKeys = new Map<string, Buffer>();
   private readonly tools = buildToolRegistry();
+  private readonly requestControllers = new Map<
+    string,
+    { principalId: string; controller: AbortController }
+  >();
   private token: Buffer;
   constructor(
     private readonly config: ApiClientConfig & { accountId: string },
@@ -214,6 +225,29 @@ export class OperatorBroker implements BrokerTransportPort {
     params: Record<string, unknown>,
     requestId: string,
   ): Promise<unknown> {
+    const controller = new AbortController();
+    this.requestControllers.set(requestId, { principalId: principal.clientId, controller });
+    try {
+      return await this.callOwned(principal, method, params, requestId, controller.signal);
+    } finally {
+      this.requestControllers.delete(requestId);
+    }
+  }
+
+  cancel(principal: BrokerPrincipal, requestId: string): boolean {
+    const active = this.requestControllers.get(requestId);
+    if (active === undefined || active.principalId !== principal.clientId) return false;
+    active.controller.abort(new BrokerRefusal("cancelled", "Caller cancelled the request"));
+    return true;
+  }
+
+  private async callOwned(
+    principal: BrokerPrincipal,
+    method: string,
+    params: Record<string, unknown>,
+    requestId: string,
+    requestSignal: AbortSignal,
+  ): Promise<unknown> {
     if (method !== "tool") throw new BrokerRefusal("unknown_method", "Unknown broker method");
     const input = callSchema.parse(params);
     const tool = findTool(input.name, this.tools);
@@ -233,6 +267,7 @@ export class OperatorBroker implements BrokerTransportPort {
           : { name: tool.name, args, capability: input.capability },
       ),
       starting,
+      tool.name === "operate_recipe_run",
     );
     const completed = await this.journal?.completedOutcome(
       journalForwarderId(principal),
@@ -276,17 +311,42 @@ export class OperatorBroker implements BrokerTransportPort {
         async (id, signal, reserve) => {
           if (signal.aborted) throw new BrokerRefusal("cancelled", "Start cancelled");
           const mutationCapableStart = tool.name === "operate_recipe_run";
-          if (mutationCapableStart) await this.journal?.record(id, requestId, "entered", dispatch);
-          observation = await withBrokerAdmission(
-            { sessionId: id, reserve },
-            async () =>
-              await withBrokerAuditContext(
-                pinnedApi,
-                tool.name,
-                requestId,
-                async () => await tool.handler(args, pinnedApi),
-              ),
-          );
+          let startDispatchAttempted = false;
+          if (mutationCapableStart) await this.journal?.record(id, requestId, "prepared", dispatch);
+          try {
+            observation = await withOperatorRequestContext(
+              signal,
+              async () =>
+                await withBrokerAdmission(
+                  { sessionId: id, reserve },
+                  async () =>
+                    await withBrokerAuditContext(
+                      pinnedApi,
+                      tool.name,
+                      requestId,
+                      async () => await tool.handler(args, pinnedApi),
+                    ),
+                ),
+              mutationCapableStart
+                ? async () => {
+                    await this.journal?.record(id, requestId, "dispatch_attempted", dispatch);
+                    startDispatchAttempted = true;
+                  }
+                : undefined,
+            );
+            if (signal.aborted) throw signal.reason ?? new Error("operator_request_cancelled");
+          } catch (error) {
+            if (mutationCapableStart) {
+              await this.journal?.record(id, requestId, "unknown", {
+                ...dispatch,
+                outcome: {
+                  status: "unknown",
+                  reason: signal.aborted ? "cancelled" : "execution_error",
+                },
+              });
+            }
+            throw error;
+          }
           internalId = String((observation as { session_id: string }).session_id);
           const session = sessionForCall(internalId);
           if (session === undefined) {
@@ -303,7 +363,7 @@ export class OperatorBroker implements BrokerTransportPort {
             };
           }
           if (mutationCapableStart)
-            await this.journal?.record(id, requestId, "outcome", {
+            await this.journal?.record(id, requestId, "observed_result", {
               ...dispatch,
               outcome: reconciliationOutcome(tool.name, observation),
             });
@@ -320,7 +380,7 @@ export class OperatorBroker implements BrokerTransportPort {
                   )
                 : undefined;
             },
-            invoke: async (name, commandArgs, _signal, commandId, prepared) => {
+            invoke: async (name, commandArgs, signal, commandId, prepared) => {
               if (!session.browser.isConnected())
                 throw new BrokerRefusal(
                   "browser_lost",
@@ -332,7 +392,10 @@ export class OperatorBroker implements BrokerTransportPort {
               const translated = { ...commandArgs, session_id: internalId };
               const executeHandler = async () =>
                 await withBrokerAuditContext(pinnedApi, name, commandId, async () =>
-                  command.handler(translated, pinnedApi),
+                  command.handler(translated, pinnedApi, {
+                    signal,
+                    notifyUser: async () => undefined,
+                  }),
                 );
               const execute = async () =>
                 prepared === undefined
@@ -346,22 +409,64 @@ export class OperatorBroker implements BrokerTransportPort {
                 principal,
                 name,
                 this.inputHash(principal, { name, args: commandArgs }),
+                false,
+                brokerCommandDispatchTracked(name),
               );
-              if (mutating) await this.journal?.record(id, commandId, "entered", commandDispatch);
+              if (mutating) await this.journal?.record(id, commandId, "prepared", commandDispatch);
+              let dispatchAttempted = false;
+              const executeOwned = async () =>
+                await withOperatorRequestContext(
+                  signal,
+                  execute,
+                  mutating && commandDispatch.dispatchTracked === true
+                    ? async () => {
+                        await this.journal?.record(
+                          id,
+                          commandId,
+                          "dispatch_attempted",
+                          commandDispatch,
+                        );
+                        dispatchAttempted = true;
+                      }
+                    : undefined,
+                );
               let result: unknown;
               try {
                 result =
                   name === "operate_finish"
-                    ? await execute()
-                    : await withProvisionSessionCall(internalId, execute);
+                    ? await executeOwned()
+                    : await withProvisionSessionCall(internalId, executeOwned);
+                if (signal.aborted) throw signal.reason ?? new Error("operator_request_cancelled");
               } catch (error) {
                 const preDispatch = provenPreDispatchMutationFailure(error);
                 if (mutating && name === "operate_login" && preDispatch !== null) {
-                  await this.journal?.record(id, commandId, "outcome", {
+                  await this.journal?.record(id, commandId, "observed_result", {
                     ...commandDispatch,
                     outcome: { status: "not_dispatched", error: preDispatch.code },
                   });
                   return new DeliveredPreDispatchFailure(preDispatch.code);
+                }
+                if (
+                  mutating &&
+                  commandDispatch.dispatchTracked === true &&
+                  !dispatchAttempted &&
+                  signal.aborted
+                ) {
+                  await this.journal?.record(id, commandId, "observed_result", {
+                    ...commandDispatch,
+                    outcome: {
+                      status: "not_dispatched",
+                      error: "cancelled",
+                    },
+                  });
+                } else if (mutating) {
+                  await this.journal?.record(id, commandId, "unknown", {
+                    ...commandDispatch,
+                    outcome: {
+                      status: "unknown",
+                      reason: signal.aborted ? "cancelled" : "execution_error",
+                    },
+                  });
                 }
                 throw error;
               }
@@ -374,7 +479,7 @@ export class OperatorBroker implements BrokerTransportPort {
                 },
               );
               if (mutating)
-                await this.journal?.record(id, commandId, "outcome", {
+                await this.journal?.record(id, commandId, "observed_result", {
                   ...commandDispatch,
                   outcome: reconciliationOutcome(name, result),
                 });
@@ -426,6 +531,7 @@ export class OperatorBroker implements BrokerTransportPort {
           }
           await brokerBrowserCustody()?.orphanAdmission(id);
         },
+        requestSignal,
       );
       if (capability.targetId === "no-page") {
         await this.authority.close(principal, capability);
@@ -477,6 +583,7 @@ export class OperatorBroker implements BrokerTransportPort {
       args,
       extra,
       lane,
+      requestSignal,
     );
     if (result instanceof DeliveredPreDispatchFailure)
       return {

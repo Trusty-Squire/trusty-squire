@@ -17,6 +17,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { ApiClient } from "./api-client.js";
 import { setSelfManagedChromeTerminationSignalExitEnabled } from "./bot/browser.js";
+import { withOperatorRequestContext } from "./bot/request-cancellation.js";
 import { cancelActiveLoginBrowsers } from "./bot/google-login.js";
 import { startOwnerProcessReaper } from "./bot/owner-process-reaper.js";
 import {
@@ -280,21 +281,32 @@ export async function buildServer(
       callApi.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
       if (operatorForwarder !== undefined && tool.name.startsWith("operate_")) {
         return toolResultContent(
-          await operatorForwarder.invoke(tool.name, parsed.data, String(extra.requestId), {
-            ...brokerRecoveryRequested((req.params as { _meta?: unknown })._meta),
-          }),
+          await operatorForwarder.invoke(
+            tool.name,
+            parsed.data,
+            String(extra.requestId),
+            {
+              ...brokerRecoveryRequested((req.params as { _meta?: unknown })._meta),
+            },
+            extra.signal,
+          ),
         );
       }
       const invokeHandler = async () =>
-        await tool.handler(parsed.data, callApi, {
-          notifyUser: async (message, data) => {
-            await server.sendLoggingMessage({
-              level: "notice",
-              logger: "trusty-squire",
-              data: { message, ...data },
-            });
-          },
-        });
+        await withOperatorRequestContext(
+          extra.signal,
+          async () =>
+            await tool.handler(parsed.data, callApi, {
+              signal: extra.signal,
+              notifyUser: async (message, data) => {
+                await server.sendLoggingMessage({
+                  level: "notice",
+                  logger: "trusty-squire",
+                  data: { message, ...data },
+                });
+              },
+            }),
+        );
       const invoke = async () => {
         // Some embedders provide a narrow ApiClient test double. Production
         // clients always install the async-local audit context.

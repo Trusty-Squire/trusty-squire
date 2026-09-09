@@ -55,6 +55,11 @@ import type {
   Route,
 } from "playwright";
 import { experimentalMultiSessionEnabled } from "./session/multisession-flag.js";
+import {
+  currentOperatorRequestSignal,
+  markOperatorMutationDispatchAttempted,
+  throwIfOperatorRequestCancelled,
+} from "./request-cancellation.js";
 import { BrowserProcessOwner } from "./browser-process-owner.js";
 import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
@@ -378,6 +383,13 @@ export class OAuthFailedError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "OAuthFailedError";
+  }
+}
+
+export class OAuthOnboardingRequiredError extends Error {
+  constructor(readonly origin: string) {
+    super(`OAuth returned to a relying-party required-information form on ${origin}`);
+    this.name = "OAuthOnboardingRequiredError";
   }
 }
 
@@ -1433,6 +1445,17 @@ export function isFailFastScopeAbort(
   if (allowedHosts === null) return false;
   if (resourceType !== "xhr" && resourceType !== "fetch") return false;
   return !requestHostInScope(url, allowedHosts, siblingDomainHosts);
+}
+
+export interface HostScopeDenialDiagnostic {
+  hostname: string;
+  resource_type: "xhr" | "fetch";
+  reason: "host_not_allowed";
+  count: number;
+  first_seen_at: number;
+  last_seen_at: number;
+  document_id: string;
+  remedy: { action: "allow_host"; host: string };
 }
 
 const CURRENCY_SYMBOLS: Record<string, string> = {
@@ -2843,6 +2866,7 @@ export class BrowserController {
   private observedPaymentInstrumentMismatch: PaymentInstrumentMismatch | undefined;
   private checkoutSubmitSequence = 0;
   private clickDispatchSequence = 0;
+  private readonly oauthConsentAttemptedPhases = new Set<string>();
   private readonly humanize: boolean;
   // Tracks the simulated mouse position so successive clicks can move
   // along a continuous path (humans don't teleport between clicks).
@@ -2860,9 +2884,50 @@ export class BrowserController {
   private readonly operationScopedAllowedHosts = new Map<string, number>();
   private hostScopeGuardInstallation: Promise<void> | null = null;
   private hostScopeGuardHandler: ((route: Route) => Promise<void>) | null = null;
+  private readonly hostScopeDenials = new Map<string, HostScopeDenialDiagnostic>();
   private brokerRouteRegistration: (() => void) | null = null;
   private static readonly brokerRoutes = new WeakMap<BrowserContext, Set<BrowserController>>();
   private static readonly brokerIdentityPages = new WeakMap<BrowserContext, Set<Page>>();
+
+  private recordHostScopeDenial(page: Page, url: string, resourceType: string): void {
+    if (resourceType !== "xhr" && resourceType !== "fetch") return;
+    let hostname: string;
+    try {
+      hostname = new URL(url).hostname.toLowerCase();
+    } catch {
+      return;
+    }
+    const documentId = this.mainDocumentIdentity(page);
+    const key = JSON.stringify([documentId, hostname, resourceType]);
+    const now = Date.now();
+    const previous = this.hostScopeDenials.get(key);
+    if (previous !== undefined) {
+      previous.count += 1;
+      previous.last_seen_at = now;
+      return;
+    }
+    // Diagnostics are advisory observations, never an unbounded network log.
+    if (this.hostScopeDenials.size >= 16) return;
+    this.hostScopeDenials.set(key, {
+      hostname,
+      resource_type: resourceType,
+      reason: "host_not_allowed",
+      count: 1,
+      first_seen_at: now,
+      last_seen_at: now,
+      document_id: documentId,
+      remedy: { action: "allow_host", host: hostname },
+    });
+  }
+
+  takeHostScopeDenials(): HostScopeDenialDiagnostic[] {
+    const diagnostics = [...this.hostScopeDenials.values()].map((entry) => ({
+      ...entry,
+      remedy: { ...entry.remedy },
+    }));
+    this.hostScopeDenials.clear();
+    return diagnostics;
+  }
 
   /** One routing authority for the broker context. Clients never install routes. */
   async enableBrokerRouting(): Promise<void> {
@@ -2914,6 +2979,7 @@ export class BrowserController {
             scope.siblingDomainHosts,
           )
         ) {
+          owner.recordHostScopeDenial(page, request.url(), request.resourceType());
           await route.abort("failed");
           return;
         }
@@ -3019,6 +3085,13 @@ export class BrowserController {
         if (
           isFailFastScopeAbort(url, type, scope?.allowedHosts ?? null, scope?.siblingDomainHosts)
         ) {
+          let page: Page | null = null;
+          try {
+            page = route.request().frame().page();
+          } catch {}
+          if (page !== null && this.ownedPages.has(page)) {
+            this.recordHostScopeDenial(page, url, type);
+          }
           await route.abort("failed");
           return;
         }
@@ -3495,6 +3568,7 @@ export class BrowserController {
     return false;
   }
   async goto(url: string, page?: Page): Promise<void> {
+    await markOperatorMutationDispatchAttempted();
     return await this.pageDriver.goto(url, page);
   }
 
@@ -3651,6 +3725,7 @@ export class BrowserController {
   ): Promise<void> {
     // Wait for element to be visible and enabled before typing.
     await page.waitForSelector(selector, { state: "visible", timeout: 10000 });
+    await markOperatorMutationDispatchAttempted();
     const locator = page.locator(selector);
     // The marker is payment machinery — the card-clearing and saved-card
     // resolution passes find the fields they filled through it. It is not a
@@ -4734,6 +4809,7 @@ export class BrowserController {
       const click =
         performClick ??
         (() => (target.method === "click" ? this.clickHandle(handle) : this.jsClickHandle(handle)));
+      await markOperatorMutationDispatchAttempted();
       if (!shouldTrack(labels)) {
         await click();
         return "dispatched";
@@ -5523,6 +5599,7 @@ export class BrowserController {
     optionMatcher?: string,
   ): Promise<string> {
     await page.waitForSelector(selector, { state: "attached", timeout: 10000 });
+    await markOperatorMutationDispatchAttempted();
     let activeSelector = selector;
     let tagName = await page
       .locator(activeSelector)
@@ -7642,11 +7719,25 @@ export class BrowserController {
   }
 
   private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    const signal = currentOperatorRequestSignal();
+    if (signal === undefined) return new Promise((resolve) => setTimeout(resolve, ms));
+    if (signal.aborted)
+      return Promise.reject(signal.reason ?? new Error("operator_request_cancelled"));
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", aborted);
+        resolve();
+      }, ms);
+      const aborted = (): void => {
+        clearTimeout(timer);
+        reject(signal.reason ?? new Error("operator_request_cancelled"));
+      };
+      signal.addEventListener("abort", aborted, { once: true });
+    });
   }
 
   async wait(seconds: number): Promise<void> {
-    await new Promise((resolve) => setTimeout(resolve, seconds * 1000));
+    await this.sleep(seconds * 1000);
   }
 
   async screenshot(): Promise<string> {
@@ -13720,8 +13811,19 @@ export class BrowserController {
     if (product === null || product.isClosed() || context === null) {
       throw new Error("OAuth login cannot start because the product page is unavailable");
     }
+    if (
+      this.oauthProductPage !== null &&
+      !this.oauthProductPage.isClosed() &&
+      this.oauthProviderPage !== null &&
+      !this.oauthProviderPage.isClosed()
+    ) {
+      throw new OAuthAwaitingHumanError(
+        "An owned OAuth attempt is still pending. Call operate_observe or oauth_settle; a second authorization attempt was not started.",
+      );
+    }
 
     this.oauthProductPage = product;
+    this.oauthConsentAttemptedPhases.clear();
     this.oauthProviderPage = null;
     this.oauthProviderPageClosed = false;
     this.oauthCompletionPage = null;
@@ -13754,6 +13856,7 @@ export class BrowserController {
     let pendingOnProvider = false;
     let lastTransientUrl = productUrl;
     let observedReturn: { page: Page; url: string } | null = null;
+    let observedProductContinuation: { page: Page; url: string } | null = null;
     let onTransientNavigation: ((frame: Frame) => void) | null = null;
     let humanHandoffStarted = false;
     const startHumanHandoff = (): void => {
@@ -13843,8 +13946,20 @@ export class BrowserController {
       if (page === popupCapture.page) transientNavigated = true;
       const url = frame.url();
       captureExpectedReturnUrl(url);
-      observedReturn =
-        matchesExpectedReturn(url) && oauthErrorFromReturnUrl(url) === null ? { page, url } : null;
+      if (matchesExpectedReturn(url) && oauthErrorFromReturnUrl(url) === null) {
+        observedReturn = { page, url };
+        return;
+      }
+      // An exact, attempt-owned callback may immediately redirect onward to
+      // the product. Preserve that causal edge instead of demanding that the
+      // callback pathname remain the final visible URL.
+      if (
+        observedReturn?.page === page &&
+        safeOrigin(url) === productOrigin &&
+        oauthErrorFromReturnUrl(url) === null
+      ) {
+        observedProductContinuation = { page, url };
+      }
     };
     const onProductNavigation = (frame: Frame): void => {
       if (!actionStarted || frame !== product.mainFrame()) return;
@@ -13857,6 +13972,13 @@ export class BrowserController {
       // The creation-attributed popup can finish a reused-session redirect
       // before the initiating click resolves and assigns providerPage. The
       // outer deadline must inspect that same owned source in the meantime.
+      if (
+        observedProductContinuation !== null &&
+        !observedProductContinuation.page.isClosed() &&
+        observedProductContinuation.page.url() === observedProductContinuation.url
+      ) {
+        return observedProductContinuation.page;
+      }
       for (const page of [product, providerPage ?? popupCapture.page]) {
         if (
           page === null ||
@@ -13870,6 +13992,37 @@ export class BrowserController {
         return page;
       }
       return null;
+    };
+    const relyingPartyOnboarding = async (page: Page): Promise<boolean> => {
+      if (page.isClosed() || oauthProviderForUrl(page.url()) !== null) return false;
+      return await page
+        .evaluate(() => {
+          const visible = (element: Element): boolean => {
+            const html = element as HTMLElement;
+            const bounds = html.getBoundingClientRect();
+            const style = getComputedStyle(html);
+            return (
+              bounds.width > 1 &&
+              bounds.height > 1 &&
+              style.display !== "none" &&
+              style.visibility !== "hidden"
+            );
+          };
+          const requiredEmpty = Array.from(
+            document.querySelectorAll("input[required],select[required],textarea[required]"),
+          ).some((element) => visible(element) && !(element as HTMLInputElement).value?.trim());
+          if (!requiredEmpty) return false;
+          return Array.from(
+            document.querySelectorAll('button,input[type="submit"],[role="button"]'),
+          ).some(
+            (element) =>
+              visible(element) &&
+              /^(?:continue|next|submit|finish|create|save)\b/i.test(
+                ((element.textContent ?? "") || (element as HTMLInputElement).value || "").trim(),
+              ),
+          );
+        })
+        .catch(() => false);
     };
     const completionEvidence = async (): Promise<OAuthCompletionEvidence | null> => {
       if (!actionStarted) return null;
@@ -14091,6 +14244,7 @@ export class BrowserController {
         );
       } else {
         while (settled === null && Date.now() < oauthDeadline) {
+          throwIfOperatorRequestCancelled();
           const remaining = oauthDeadline - Date.now();
           settled = await this.waitForOAuthLifecycle(
             expectedReturnUrls,
@@ -14100,6 +14254,14 @@ export class BrowserController {
           );
           if (settled !== null || hasTerminalCompletion()) break;
           if (Date.now() >= oauthDeadline) break;
+          if (oauthProviderForUrl(transient.url()) !== consentProvider) {
+            if (await relyingPartyOnboarding(transient)) {
+              pendingOnProvider = true;
+              throw new OAuthOnboardingRequiredError(safeOrigin(transient.url()));
+            }
+            await this.sleep(Math.min(250, remainingBudgetMs()));
+            continue;
+          }
           const consentBudgetMs = oauthDeadline - Date.now();
           const advanced = await this.advanceOAuthConsent(
             consentProvider,
@@ -14159,10 +14321,10 @@ export class BrowserController {
       if (onTransientNavigation !== null) {
         (providerPage ?? product).off("framenavigated", onTransientNavigation);
       }
-      const providerStillShowing =
-        pendingOnProvider && providerPage !== null && !providerPage.isClosed();
+      const retainedProvider = providerPage ?? product;
+      const providerStillShowing = pendingOnProvider && !retainedProvider.isClosed();
       if (providerStillShowing) {
-        this.page = providerPage;
+        this.page = retainedProvider;
       } else {
         const retained = product.isClosed() ? recovery : product;
         this.page = retained?.isClosed() === false ? retained : this.primaryPage;
@@ -14306,6 +14468,7 @@ export class BrowserController {
   // passthru"): POST /…/auth/<provider> + authenticity_token → 302 to provider.
   async submitPostForm(action: string, fields: Record<string, string>): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
+    throwIfOperatorRequestCancelled();
     await this.page.evaluate(
       ({ action, fields }) => {
         const form = document.createElement("form");
@@ -14554,6 +14717,7 @@ export class BrowserController {
   // overlay handler's dismiss fallback.
   async pressKey(key: string, page: Page | null = this.page): Promise<void> {
     if (!page) return;
+    await markOperatorMutationDispatchAttempted();
     await page.keyboard.press(key).catch(() => {});
   }
 
@@ -14837,6 +15001,39 @@ export class BrowserController {
     expectedGoogleAccountEmail?: string | null,
   ): Promise<boolean> {
     if (!this.page) throw new Error("Browser not started");
+    const authorityPage = this.page;
+    const providerOwned = (): boolean =>
+      !authorityPage.isClosed() &&
+      this.page === authorityPage &&
+      oauthProviderForUrl(authorityPage.url()) === provider;
+    if (!providerOwned()) return false;
+    const phaseSignature = await authorityPage
+      .evaluate(() =>
+        JSON.stringify([
+          document.title,
+          Array.from(
+            document.querySelectorAll(
+              '[data-identifier],button,input[type="submit"],[role="button"]',
+            ),
+          )
+            .slice(0, 20)
+            .map((element) => [
+              element.getAttribute("data-identifier") ?? "",
+              (element.textContent ?? (element as HTMLInputElement).value ?? "")
+                .replace(/\s+/g, " ")
+                .trim()
+                .slice(0, 80),
+            ]),
+        ]),
+      )
+      .catch(() => "unreadable");
+    const phaseKey = `${this.mainDocumentIdentity(authorityPage)}\u0000${authorityPage.url()}\u0000${phaseSignature}`;
+    const claimPhase = (): boolean => {
+      if (!providerOwned() || this.oauthConsentAttemptedPhases.has(phaseKey)) return false;
+      this.oauthConsentAttemptedPhases.add(phaseKey);
+      return true;
+    };
+    if (this.oauthConsentAttemptedPhases.has(phaseKey)) return false;
     const deadline = Date.now() + Math.max(0, timeoutMs);
     const hasBudget = (): boolean => Date.now() < deadline;
     const boundedTimeout = (limitMs: number): number =>
@@ -14852,6 +15049,8 @@ export class BrowserController {
       if (/\/apps\/[^/]+\/installations\/select_target\b/.test(new URL(this.page.url()).pathname)) {
         const startUrl = this.page.url();
         if (!hasBudget()) return false;
+        if (!claimPhase()) return false;
+        await markOperatorMutationDispatchAttempted();
         const clicked = await this.page
           .evaluate((expiresAt) => {
             if (Date.now() >= expiresAt) return false;
@@ -14944,6 +15143,8 @@ export class BrowserController {
         }
         if (!hasBudget()) return false;
         try {
+          if (!claimPhase()) return false;
+          await markOperatorMutationDispatchAttempted();
           await btn.click({ timeout: boundedTimeout(8_000) });
         } catch {
           continue;
@@ -15016,6 +15217,8 @@ export class BrowserController {
     if (matchingTileIndexes.length === 1) {
       if (!hasBudget()) return false;
       try {
+        if (!claimPhase()) return false;
+        await markOperatorMutationDispatchAttempted();
         await tiles.nth(matchingTileIndexes[0]!).click({ timeout: boundedTimeout(1_000) });
         return true;
       } catch {
@@ -15074,6 +15277,8 @@ export class BrowserController {
     if (accountRowIndex >= 0) {
       if (!hasBudget()) return false;
       try {
+        if (!claimPhase()) return false;
+        await markOperatorMutationDispatchAttempted();
         await accountRows.nth(accountRowIndex).click({ timeout: boundedTimeout(1_000) });
         return true;
       } catch {
@@ -15098,6 +15303,8 @@ export class BrowserController {
     if ((await approve.count().catch(() => 0)) > 0) {
       if (!hasBudget()) return false;
       try {
+        if (!claimPhase()) return false;
+        await markOperatorMutationDispatchAttempted();
         await approve.click({ timeout: boundedTimeout(1_000) });
         return true;
       } catch {
@@ -15110,6 +15317,8 @@ export class BrowserController {
     // Click the first visible candidate whose text is an approve verb and
     // is NOT a cancel/deny/back. Log what was visible on failure.
     if (!hasBudget()) return false;
+    if (!claimPhase()) return false;
+    await markOperatorMutationDispatchAttempted();
     const clicked = await this.page
       .evaluate((expiresAt) => {
         if (Date.now() >= expiresAt) return null;

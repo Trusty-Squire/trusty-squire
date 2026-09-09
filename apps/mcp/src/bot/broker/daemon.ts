@@ -25,7 +25,13 @@ const DEFAULT_BROKER_IDLE_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_BROKER_DRAIN_CLEANUP_TIMEOUT_MS = 3_000;
 const SUPERVISOR_ATTACH_TIMEOUT_MS = 10_000;
 const SUPERVISOR_ATTACH_POLL_MS = 100;
-const DRAIN_RECOVERY_METHODS = new Set(["recover", "reclaim", "acknowledge", "confirm_start"]);
+const DRAIN_RECOVERY_METHODS = new Set([
+  "recover",
+  "reclaim",
+  "acknowledge",
+  "confirm_start",
+  "cancel",
+]);
 const STARTUP_RECONCILIATION_METHODS = new Set(["recover", "reclaim"]);
 
 export function brokerDrainAllowsMethod(method: string): boolean {
@@ -246,6 +252,11 @@ export async function runBrokerDaemon(): Promise<void> {
             retainedXataPreDispatchAuthorization,
           );
         return result;
+      }
+      if (method === "cancel") {
+        if (typeof params.requestId !== "string")
+          throw new Error("A broker cancellation requires its request ID");
+        return { cancelled: operator.cancel(principal, params.requestId) };
       }
       if (!brokerStartupAllowsMethod(startupReconciliation, method))
         throw new BrokerRefusal(

@@ -32,6 +32,7 @@ export interface BrokerSessionPort {
 }
 export const FORWARDER_HANDOFF_TIMEOUT_MS = 120_000;
 export const DETACHED_EXPIRY_CLOSE_TIMEOUT_MS = 10_000;
+export const REQUEST_CANCELLATION_QUIESCENCE_MS = 5_000;
 // Match the durable start-delivery retention window: a socket restart must not
 // destroy the live capability while its acknowledged start is still recoverable.
 export const FORWARDER_RECONNECT_GRACE_MS = 5 * 60_000;
@@ -196,6 +197,7 @@ export class BrokerAuthority {
     ) => Promise<BrokerSessionPort>,
     cleanupFailedAdmission?: (sessionId: string) => Promise<boolean>,
     orphanFailedAdmission?: (sessionId: string) => Promise<void>,
+    requestSignal?: AbortSignal,
   ): Promise<TabCapability> {
     this.assertPrincipal(principal);
     if (this.actors.size + this.admissions.size >= this.maxSessions) {
@@ -203,16 +205,18 @@ export class BrokerAuthority {
     }
     const id = randomUUID();
     const abort = new AbortController();
+    const signal =
+      requestSignal === undefined ? abort.signal : AbortSignal.any([abort.signal, requestSignal]);
     this.admissions.set(id, { principal: { ...principal }, abort });
     let port: BrokerSessionPort | undefined;
     let creating = false;
     try {
-      await this.scheduler.reserve(id, resources, abort.signal);
+      await this.scheduler.reserve(id, resources, signal);
       if (this.expiredAdmissions.has(id))
         throw new BrokerRefusal("cancelled", "Admission reconnect grace expired");
       if (this.admissions.get(id)?.reconnectDeadline === undefined) this.assertPrincipal(principal);
       creating = true;
-      port = await create(id, abort.signal, (resources) => this.scheduler.expand(id, resources));
+      port = await create(id, signal, (resources) => this.scheduler.expand(id, resources));
       if (this.expiredAdmissions.has(id)) {
         await this.disposeExpiredAdmission(port);
         throw new BrokerRefusal("cancelled", "Admission reconnect grace expired");
@@ -400,6 +404,7 @@ export class BrokerAuthority {
     args: Record<string, unknown>,
     resources: readonly string[] = [],
     lane?: "oauth" | "interactive",
+    requestSignal?: AbortSignal,
   ): Promise<unknown> {
     const actor = this.resolve(principal, capability);
     if (actor.state !== "active") throw new BrokerRefusal("session_closing", "Session is fenced");
@@ -408,6 +413,10 @@ export class BrokerAuthority {
     // queued work from the lost socket must stay aborted rather than becoming
     // executable merely because the actor is active again.
     const invocationLease = actor.abort;
+    const signal =
+      requestSignal === undefined
+        ? invocationLease.signal
+        : AbortSignal.any([invocationLease.signal, requestSignal]);
     const previous = actor.replies.get(requestId);
     if (previous !== undefined) {
       if (previous.input !== input)
@@ -425,20 +434,17 @@ export class BrokerAuthority {
         : Promise.resolve().then(() => actor.port.prepare!(name, args));
     actor.pending += 1;
     const invokePrepared = async (prepared: unknown): Promise<unknown> => {
-      if (actor.state !== "active" || invocationLease.signal.aborted) {
+      if (actor.state !== "active" || signal.aborted) {
         throw new BrokerRefusal("session_closing", "Command fenced before dispatch");
       }
       this.scheduler.expand(actor.capability.sessionId, resources);
       const laneOwner = randomUUID();
-      if (lane !== undefined) await this.lanes.reserve(laneOwner, [lane], invocationLease.signal);
+      if (lane !== undefined) await this.lanes.reserve(laneOwner, [lane], signal);
       try {
-        if (invocationLease.signal.aborted)
-          throw new BrokerRefusal("cancelled", "Command fenced before dispatch");
+        if (signal.aborted) throw new BrokerRefusal("cancelled", "Command fenced before dispatch");
         const execute = async () =>
-          await actor.port.invoke(name, args, invocationLease.signal, requestId, prepared);
-        return lane === "oauth"
-          ? await withBrokerIdentityLane(execute, invocationLease.signal)
-          : await execute();
+          await actor.port.invoke(name, args, signal, requestId, prepared);
+        return lane === "oauth" ? await withBrokerIdentityLane(execute, signal) : await execute();
       } finally {
         if (lane !== undefined) this.lanes.release(laneOwner);
       }
@@ -468,8 +474,31 @@ export class BrokerAuthority {
       .finally(() => {
         actor.pending -= 1;
       });
-    actor.replies.set(requestId, { input, result: trackedResult });
-    return trackedResult;
+    const deliveredResult =
+      requestSignal === undefined
+        ? trackedResult
+        : new Promise<unknown>((resolve, reject) => {
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const cancelled = (): void => {
+              timer = setTimeout(() => {
+                actor.state = "quarantined";
+                reject(
+                  new BrokerRefusal(
+                    "outcome_unknown",
+                    "Cancelled browser action did not reach bounded quiescence; exact target custody is quarantined",
+                  ),
+                );
+              }, REQUEST_CANCELLATION_QUIESCENCE_MS);
+            };
+            if (requestSignal.aborted) cancelled();
+            else requestSignal.addEventListener("abort", cancelled, { once: true });
+            void trackedResult.then(resolve, reject).finally(() => {
+              requestSignal.removeEventListener("abort", cancelled);
+              if (timer !== undefined) clearTimeout(timer);
+            });
+          });
+    actor.replies.set(requestId, { input, result: deliveredResult });
+    return deliveredResult;
   }
 
   async close(principal: BrokerPrincipal, capability: TabCapability): Promise<boolean> {

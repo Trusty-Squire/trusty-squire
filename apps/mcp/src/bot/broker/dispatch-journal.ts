@@ -2,7 +2,17 @@ import { open, readFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { BrokerRefusal } from "./scheduler.js";
 
-type DispatchPhase = "entered" | "outcome" | "acknowledged" | "settled" | "recovered";
+type DispatchPhase =
+  | "prepared"
+  | "dispatch_attempted"
+  | "observed_result"
+  | "delivery_acknowledged"
+  | "unknown"
+  | "entered"
+  | "outcome"
+  | "acknowledged"
+  | "settled"
+  | "recovered";
 export const START_DELIVERY_RETENTION_MS = 5 * 60_000;
 
 interface DispatchRecord {
@@ -14,8 +24,19 @@ interface DispatchRecord {
   start?: true;
   operation?: string;
   inputHash?: string;
+  dispatchTracked?: true;
   outcome?: ReconciledDispatchOutcome;
 }
+
+const phaseHasOutstandingCustody = (record: DispatchRecord): boolean =>
+  ["prepared", "entered", "outcome", "dispatch_attempted", "observed_result", "unknown"].includes(
+    record.phase,
+  ) || record.outcome?.status === "unknown";
+
+const phaseHasDeliverableOutcome = (record: DispatchRecord): boolean =>
+  ["outcome", "acknowledged", "observed_result", "delivery_acknowledged", "unknown"].includes(
+    record.phase,
+  );
 
 export interface ReconciledDispatchOutcome {
   status:
@@ -23,8 +44,10 @@ export interface ReconciledDispatchOutcome {
     | "done"
     | "payment_3ds_required"
     | "payment_outcome_unknown"
+    | "unknown"
     | "not_dispatched";
-  error?: "stale_ref";
+  error?: "stale_ref" | "cancelled" | "pre_dispatch_failure";
+  reason?: "cancelled" | "execution_error";
   next?: { tool: "operate_payment_status"; wait_seconds: number };
 }
 
@@ -70,12 +93,18 @@ function validOutcome(value: unknown): value is ReconciledDispatchOutcome {
       "done",
       "payment_3ds_required",
       "payment_outcome_unknown",
+      "unknown",
       "not_dispatched",
     ].includes(String(outcome.status)) ||
-    !Object.keys(outcome).every((key) => key === "status" || key === "next" || key === "error") ||
+    !Object.keys(outcome).every((key) => ["status", "next", "error", "reason"].includes(key)) ||
     (outcome.status === "not_dispatched"
-      ? outcome.error !== "stale_ref" || outcome.next !== undefined
-      : outcome.error !== undefined)
+      ? !["stale_ref", "cancelled", "pre_dispatch_failure"].includes(String(outcome.error)) ||
+        outcome.next !== undefined ||
+        outcome.reason !== undefined
+      : outcome.error !== undefined) ||
+    (outcome.status === "unknown"
+      ? !["cancelled", "execution_error"].includes(String(outcome.reason))
+      : outcome.reason !== undefined)
   )
     return false;
   if (outcome.next === undefined) return true;
@@ -112,18 +141,33 @@ export class DispatchJournal {
         if (
           typeof record.sessionId !== "string" ||
           typeof record.requestId !== "string" ||
-          !["entered", "outcome", "acknowledged", "settled", "recovered"].includes(record.phase) ||
+          ![
+            "prepared",
+            "dispatch_attempted",
+            "observed_result",
+            "delivery_acknowledged",
+            "unknown",
+            "entered",
+            "outcome",
+            "acknowledged",
+            "settled",
+            "recovered",
+          ].includes(record.phase) ||
           (record.forwarderId !== undefined && typeof record.forwarderId !== "string") ||
           (record.start !== undefined && record.start !== true) ||
           (record.operation !== undefined && typeof record.operation !== "string") ||
           (record.inputHash !== undefined && typeof record.inputHash !== "string") ||
+          (record.dispatchTracked !== undefined && record.dispatchTracked !== true) ||
           (record.outcome !== undefined && !validOutcome(record.outcome))
         )
           throw new Error("Malformed journal");
         if (record.phase === "recovered") continue;
         const key = JSON.stringify([record.sessionId, record.requestId]);
         const prior = states.get(key);
-        if (record.phase === "outcome" && prior?.outcome?.status === "payment_outcome_unknown")
+        if (
+          ["outcome", "observed_result"].includes(record.phase) &&
+          prior?.outcome?.status === "payment_outcome_unknown"
+        )
           continue;
         states.set(key, record);
       }
@@ -137,7 +181,29 @@ export class DispatchJournal {
   }
 
   async assertReconciled(): Promise<void> {
-    if ([...(await this.states()).values()].some((record) => record.phase === "entered"))
+    const records = [...(await this.states()).values()];
+    for (const record of records.filter(
+      (candidate) => candidate.phase === "prepared" && candidate.dispatchTracked === true,
+    )) {
+      await this.record(record.sessionId, record.requestId, "settled", {
+        ...(record.forwarderId === undefined ? {} : { forwarderId: record.forwarderId }),
+        ...(record.start === true ? { start: true } : {}),
+        ...(record.operation === undefined ? {} : { operation: record.operation }),
+        ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
+        dispatchTracked: true,
+        outcome: { status: "not_dispatched", error: "pre_dispatch_failure" },
+      });
+    }
+    if (
+      records.some(
+        (record) =>
+          record.phase === "entered" ||
+          record.phase === "dispatch_attempted" ||
+          record.phase === "unknown" ||
+          (record.phase === "prepared" && record.dispatchTracked !== true) ||
+          record.outcome?.status === "unknown",
+      )
+    )
       throw new BrokerRefusal(
         "outcome_unknown",
         "Prior broker lost mutation custody; reconcile before browser replacement",
@@ -173,9 +239,7 @@ export class DispatchJournal {
       authorization.operation !== retainedXataPreDispatchFailure.operation
     )
       return false;
-    const outstanding = [...(await this.states()).values()].filter(
-      (record) => record.phase === "entered" || record.phase === "outcome",
-    );
+    const outstanding = [...(await this.states()).values()].filter(phaseHasOutstandingCustody);
     if (outstanding.length !== 1) return false;
     const [record] = outstanding;
     return (
@@ -195,7 +259,7 @@ export class DispatchJournal {
       (record) =>
         (sessionId === undefined || record.sessionId === sessionId) &&
         (forwarderId === undefined || record.forwarderId === forwarderId) &&
-        (record.phase === "entered" || record.phase === "outcome"),
+        phaseHasOutstandingCustody(record),
     );
   }
 
@@ -205,7 +269,7 @@ export class DispatchJournal {
         record.forwarderId === forwarderId &&
         (sessionId === undefined || record.sessionId === sessionId) &&
         record.start === true &&
-        record.phase === "acknowledged",
+        ["acknowledged", "delivery_acknowledged"].includes(record.phase),
     );
   }
 
@@ -214,7 +278,7 @@ export class DispatchJournal {
       (record) =>
         record.sessionId === sessionId &&
         record.forwarderId === forwarderId &&
-        (record.phase === "entered" || record.phase === "outcome"),
+        phaseHasOutstandingCustody(record),
     );
     return (
       outstanding.length > 0 &&
@@ -232,14 +296,14 @@ export class DispatchJournal {
       (record) =>
         record.sessionId === sessionId &&
         record.forwarderId === forwarderId &&
-        (record.phase === "entered" || record.phase === "outcome"),
+        phaseHasOutstandingCustody(record),
     );
     return (
       outstanding.length > 0 &&
       outstanding.every(
         (record) =>
           record.operation === "operate_pay" &&
-          record.phase === "outcome" &&
+          ["outcome", "observed_result", "delivery_acknowledged"].includes(record.phase) &&
           record.outcome?.status === "payment_outcome_unknown",
       )
     );
@@ -283,7 +347,7 @@ export class DispatchJournal {
         (expected === undefined ||
           (record.operation === expected.operation && record.inputHash === expected.inputHash)) &&
         record.outcome !== undefined &&
-        (record.phase === "outcome" || record.phase === "acknowledged"),
+        phaseHasDeliverableOutcome(record),
     );
     return record === undefined
       ? undefined
@@ -310,7 +374,7 @@ export class DispatchJournal {
           record.inputHash === expected.inputHash &&
           (expected.sessionId === undefined || record.sessionId === expected.sessionId) &&
           record.outcome !== undefined &&
-          (record.phase === "outcome" || record.phase === "acknowledged"),
+          phaseHasDeliverableOutcome(record),
       );
     return record === undefined
       ? undefined
@@ -367,16 +431,17 @@ export class DispatchJournal {
       (record) =>
         record.forwarderId === forwarderId &&
         record.requestId === requestId &&
-        record.phase === "outcome",
+        ["outcome", "observed_result", "unknown"].includes(record.phase),
     );
     await Promise.all(
       outcomes.map(
         async (record) =>
-          await this.record(record.sessionId, record.requestId, "acknowledged", {
+          await this.record(record.sessionId, record.requestId, "delivery_acknowledged", {
             forwarderId,
             ...(record.start === true ? { start: true } : {}),
             ...(record.operation === undefined ? {} : { operation: record.operation }),
             ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
+            ...(record.dispatchTracked === true ? { dispatchTracked: true } : {}),
             ...(record.outcome === undefined ? {} : { outcome: record.outcome }),
           }),
       ),
@@ -390,7 +455,7 @@ export class DispatchJournal {
         record.sessionId === sessionId &&
         record.forwarderId === forwarderId &&
         record.start === true &&
-        record.phase === "acknowledged",
+        ["acknowledged", "delivery_acknowledged"].includes(record.phase),
     );
     await Promise.all(
       starts.map(
@@ -413,7 +478,7 @@ export class DispatchJournal {
         record.forwarderId === forwarderId &&
         record.start === true &&
         record.operation === "operate_start" &&
-        record.phase === "acknowledged",
+        ["acknowledged", "delivery_acknowledged"].includes(record.phase),
     );
     await Promise.all(
       starts.map(
@@ -435,7 +500,7 @@ export class DispatchJournal {
       (record) =>
         record.forwarderId !== undefined &&
         record.start === true &&
-        record.phase === "acknowledged" &&
+        ["acknowledged", "delivery_acknowledged"].includes(record.phase) &&
         now - record.at >= START_DELIVERY_RETENTION_MS,
     );
     await Promise.all(
@@ -466,7 +531,10 @@ export class DispatchJournal {
     sessionId: string,
     requestId: string,
     phase: DispatchPhase,
-    detail?: Pick<DispatchRecord, "forwarderId" | "start" | "operation" | "inputHash" | "outcome">,
+    detail?: Pick<
+      DispatchRecord,
+      "forwarderId" | "start" | "operation" | "inputHash" | "dispatchTracked" | "outcome"
+    >,
   ): Promise<void> {
     const operation = this.tail.then(async () => {
       await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });

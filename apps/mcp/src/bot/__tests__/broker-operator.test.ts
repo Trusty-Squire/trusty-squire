@@ -100,12 +100,10 @@ it("carries queued OAuth authority from broker admission through final dispatch"
   });
   const preparedSignals = new Map<string, () => void>();
   const preparedPromises = new Map<string, Promise<void>>(
-    ["unchanged", "changed"].map(
-      (sessionId): [string, Promise<void>] => [
-        sessionId,
-        new Promise<void>((resolve) => preparedSignals.set(sessionId, resolve)),
-      ],
-    ),
+    ["unchanged", "changed"].map((sessionId): [string, Promise<void>] => [
+      sessionId,
+      new Promise<void>((resolve) => preparedSignals.set(sessionId, resolve)),
+    ]),
   );
   const dispatched: string[] = [];
 
@@ -511,7 +509,18 @@ it("keeps an ambiguous thrown mutation fenced and unrecoverable", async () => {
         "login-request",
       ),
     ).rejects.toThrow("may already have dispatched");
-    await expect(broker.recover(principal, { name: "operate_login", args })).resolves.toBeNull();
+    await expect(broker.recover(principal, { name: "operate_login", args })).resolves.toMatchObject(
+      {
+        requestId: "login-request",
+        result: {
+          reconciliation: {
+            status: "unknown",
+            operation: "operate_login",
+            request_id: "login-request",
+          },
+        },
+      },
+    );
     await expect(
       broker.recover(principal, {
         name: "operate_login",
@@ -522,7 +531,10 @@ it("keeps an ambiguous thrown mutation fenced and unrecoverable", async () => {
           dispatch: "not_dispatched",
         },
       }),
-    ).resolves.toBeNull();
+    ).resolves.toMatchObject({
+      requestId: "login-request",
+      result: { reconciliation: { status: "unknown", request_id: "login-request" } },
+    });
     await expect(new DispatchJournal(path).assertReconciled()).rejects.toThrow(
       "lost mutation custody",
     );

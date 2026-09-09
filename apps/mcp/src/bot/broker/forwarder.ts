@@ -107,7 +107,9 @@ export class OperatorForwarder {
     args: Record<string, unknown>,
     requestId: string = randomUUID(),
     recovery: BrokerRecoveryRequest = {},
+    signal?: AbortSignal,
   ): Promise<unknown> {
+    if (signal?.aborted) throw signal.reason ?? new BrokerRefusal("cancelled", "Request cancelled");
     const callerRequestHash = this.callerRequestHash(requestId);
     const idempotencyKey = this.idempotencyKey(callerRequestHash);
     const starting =
@@ -147,7 +149,7 @@ export class OperatorForwarder {
     if (!starting && capability !== undefined) await this.confirmStartDelivery(client, capability);
     if (recovery.recover)
       throw new BrokerRefusal("recovery_not_found", "No matching durable outcome is available");
-    const reply = (await client.call(
+    const brokerCall = client.call(
       "tool",
       {
         name,
@@ -155,7 +157,18 @@ export class OperatorForwarder {
         ...(capability === undefined ? {} : { capability }),
       },
       idempotencyKey,
-    )) as {
+    );
+    const cancel = (): void => {
+      void client.call("cancel", { requestId: idempotencyKey }).catch(() => undefined);
+    };
+    signal?.addEventListener("abort", cancel, { once: true });
+    let rawReply: unknown;
+    try {
+      rawReply = await brokerCall;
+    } finally {
+      signal?.removeEventListener("abort", cancel);
+    }
+    const reply = rawReply as {
       result?: unknown;
       capability?: TabCapability;
       preDispatchFailure?: { error?: unknown; dispatch?: unknown };
