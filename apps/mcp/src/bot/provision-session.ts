@@ -811,6 +811,7 @@ async function runSerializedOAuthBoundary(
   provider: OAuthProviderId | undefined,
   deadline: OAuthActionDeadline,
   compactAuthorization?: CompactV2TargetAuthorization,
+  bindPreparedTargetAtDispatch = false,
 ): Promise<BrowserController> {
   const authorizedRef = provisionElementRefs(authorizedElements).get(authorizedElement);
   if (authorizedRef === undefined) {
@@ -836,48 +837,46 @@ async function runSerializedOAuthBoundary(
           resetOAuthActionDeadline(deadline, humanHandoffTimeoutMs);
           return deadline.expiresAt;
         },
-        async (dispatch) => {
-          let dispatchAttempted = false;
-          let handle: Awaited<ReturnType<BrowserController["bindOAuthClickTarget"]>> = null;
-          try {
-            const resolveCurrentTarget = async (): Promise<InteractiveElement> => {
-              const fresh =
-                session.compactV2Mode === "on"
-                  ? (await browser.extractBrowserUseObservation()).elements
-                  : await browser.extractInteractiveElements();
-              retainSessionElements(session, fresh);
-              const resolved =
-                compactAuthorization === undefined
-                  ? resolveTarget(fresh, authorizedRef)
-                  : resolveAuthorizedCompactV2Target(session, fresh, compactAuthorization);
-              if (resolved !== null) return resolved;
-              throw new Error(
-                "OAuth action target changed during the identity handoff; re-observe before retrying",
-              );
-            };
-            const resolved = await resolveCurrentTarget();
-            handle = await browser.bindOAuthClickTarget(resolved.selector, async () => {
-              return (await resolveCurrentTarget()).selector;
-            });
-            if (handle === null) {
-              throw new Error(
-                "OAuth action target changed during the identity handoff; re-observe before retrying",
-              );
+        bindPreparedTargetAtDispatch && compactAuthorization !== undefined
+          ? async (dispatch) => {
+              let dispatchAttempted = false;
+              let handle: Awaited<ReturnType<BrowserController["bindOAuthClickTarget"]>> = null;
+              try {
+                const resolveCurrentTarget = async (): Promise<InteractiveElement> => {
+                  const fresh =
+                    session.compactV2Mode === "on"
+                      ? (await browser.extractBrowserUseObservation()).elements
+                      : await browser.extractInteractiveElements();
+                  retainSessionElements(session, fresh);
+                  return resolveAuthorizedCompactV2Target(session, fresh, compactAuthorization);
+                };
+                const resolved = await resolveCurrentTarget();
+                handle = await browser.bindOAuthClickTarget(resolved.selector, async () => {
+                  return (await resolveCurrentTarget()).selector;
+                });
+                if (handle === null) {
+                  throw new Error(
+                    "OAuth action target changed during the identity handoff; re-observe before retrying",
+                  );
+                }
+                dispatchAttempted = true;
+                await dispatch(handle, async () => {
+                  const current = await resolveCurrentTarget();
+                  if (await browser.matchesOAuthClickTarget(handle!, current.selector)) return;
+                  throw new Error(
+                    "OAuth action target changed during the identity handoff; re-observe before retrying",
+                  );
+                });
+              } catch (error) {
+                if (!dispatchAttempted || clickDispatchStatusForError(error) === "not_dispatched") {
+                  throw new ProvenPreDispatchMutationError("stale_ref", { cause: error });
+                }
+                throw error;
+              } finally {
+                await handle?.dispose().catch(() => undefined);
+              }
             }
-            dispatchAttempted = true;
-            await dispatch(handle);
-          } catch (error) {
-            if (
-              compactAuthorization !== undefined &&
-              (!dispatchAttempted || clickDispatchStatusForError(error) === "not_dispatched")
-            ) {
-              throw new ProvenPreDispatchMutationError("stale_ref", { cause: error });
-            }
-            throw error;
-          } finally {
-            await handle?.dispose().catch(() => undefined);
-          }
-        },
+          : undefined,
       );
       // Human completion returns custody to bounded machine work. Give DOM
       // readiness its own short window instead of spending the human budget.
@@ -5147,6 +5146,7 @@ async function actInternally(
           compactV2Authorization,
           deadline,
           capturedOperationPage,
+          false,
         );
       return (action.kind === "click" ||
         action.kind === "js_click" ||
@@ -5189,6 +5189,7 @@ export async function act(
     action.kind === "oauth_login" || action.kind === "oauth_click" ? action.provider : undefined;
   try {
     let queuedOAuthAuthorization: CompactV2TargetAuthorization | undefined;
+    let preparedOAuthDispatch = false;
     const prepared = preparedOAuthLoginTarget.getStore();
     if (
       action.kind === "oauth_login" &&
@@ -5196,6 +5197,7 @@ export async function act(
       prepared.target === action.target
     ) {
       queuedOAuthAuthorization = prepared.authorization;
+      preparedOAuthDispatch = true;
     } else if (session?.compactV2Active === true && action.kind === "oauth_login") {
       try {
         queuedOAuthAuthorization = compactV2AuthorizationForTarget(session, action.target);
@@ -5216,6 +5218,7 @@ export async function act(
           queuedOAuthAuthorization,
           deadline,
           capturedOperationPage,
+          preparedOAuthDispatch,
         );
       return (action.kind === "click" ||
         action.kind === "js_click" ||
@@ -5272,6 +5275,7 @@ async function executeAct(
   internalAuthorization?: CompactV2TargetAuthorization,
   oauthDeadline?: OAuthActionDeadline,
   operationPage?: Page,
+  preparedOAuthDispatch = false,
 ): Promise<InternalActResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
@@ -5998,6 +6002,7 @@ async function executeAct(
           action.provider,
           oauthDeadline,
           compactV2Authorization,
+          preparedOAuthDispatch,
         );
         const completedPage = browser.completedOAuthPage() ?? undefined;
         rememberOAuthCompletionSourcePage(session, completedPage);

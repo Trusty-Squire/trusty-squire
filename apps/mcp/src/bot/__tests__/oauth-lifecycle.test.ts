@@ -28,9 +28,11 @@ import {
   formSelectMany,
   observe,
   parseElementsTable,
+  preparePublicOAuthLoginTarget,
   replayOperatorRecipe,
   startHarnessProvisionSession,
   verifyPostcondition,
+  withPreparedOAuthLoginTarget,
 } from "../provision-session.js";
 import type { OperatorRecipe } from "../operator-recipe.js";
 import { sessionForCall } from "../session/lifecycle.js";
@@ -1630,8 +1632,12 @@ describe("BrowserController OAuth popup lifecycle", () => {
         });
         return recovery;
       });
+      const prepared = preparePublicOAuthLoginTarget(sessionId, ref!);
+      expect(prepared).toBeDefined();
       await expect(
-        act(sessionId, { kind: "oauth_login", target: ref!, provider: "google" }),
+        withPreparedOAuthLoginTarget(prepared!, () =>
+          act(sessionId!, { kind: "oauth_login", target: ref!, provider: "google" }),
+        ),
       ).rejects.toBeInstanceOf(ProvenPreDispatchMutationError);
       recoverySetup.mockRestore();
       expect(await product.locator("body").getAttribute("data-danger")).toBeNull();
@@ -1670,16 +1676,75 @@ describe("BrowserController OAuth popup lifecycle", () => {
       sessionId = started.session_id;
       const ref = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
       expect(ref).toBeDefined();
-      const clickHandle = controller.clickHandle.bind(controller);
-      const dispatch = vi.spyOn(controller, "clickHandle").mockImplementation(async (handle) => {
-        await product.locator("#oauth").evaluate((element) => {
-          element.outerHTML =
-            '<button id="oauth" onclick="document.body.dataset.danger = \'clicked\'">Delete account</button>';
+      const matchesTarget = controller.matchesOAuthClickTarget.bind(controller);
+      const dispatch = vi
+        .spyOn(controller, "matchesOAuthClickTarget")
+        .mockImplementation(async (handle, selector) => {
+          await product.locator("#oauth").evaluate((element) => {
+            element.outerHTML =
+              '<button id="oauth" onclick="document.body.dataset.danger = \'clicked\'">Delete account</button>';
+          });
+          return await matchesTarget(handle, selector);
         });
-        await clickHandle(handle);
-      });
+      const prepared = preparePublicOAuthLoginTarget(sessionId, ref!);
+      expect(prepared).toBeDefined();
       await expect(
-        act(sessionId, { kind: "oauth_login", target: ref!, provider: "google" }),
+        withPreparedOAuthLoginTarget(prepared!, () =>
+          act(sessionId!, { kind: "oauth_login", target: ref!, provider: "google" }),
+        ),
+      ).rejects.toBeInstanceOf(ProvenPreDispatchMutationError);
+      dispatch.mockRestore();
+      expect(await product.locator("body").getAttribute("data-danger")).toBeNull();
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
+
+  it("rejects changed OAuth intent on the same node after actionability", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://intent-gap.test/login";
+    const providerUrl = `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(
+      "https://intent-gap.test/dashboard",
+    )}`;
+    let sessionId: string | undefined;
+    await context.route("**/*", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body:
+          route.request().url() === productUrl
+            ? `<button id="oauth" onclick='location.href=${JSON.stringify(providerUrl)}'>Continue with Google</button>`
+            : "<main>Provider</main>",
+      }),
+    );
+    await product.goto(productUrl);
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+        observationFormat: "browser-use-dom",
+      });
+      sessionId = started.session_id;
+      const ref = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
+      expect(ref).toBeDefined();
+      const matchesTarget = controller.matchesOAuthClickTarget.bind(controller);
+      const dispatch = vi
+        .spyOn(controller, "matchesOAuthClickTarget")
+        .mockImplementation(async (handle, selector) => {
+          await product.locator("#oauth").evaluate((element) => {
+            element.textContent = "Delete account";
+            element.setAttribute("onclick", "document.body.dataset.danger = 'clicked'");
+          });
+          return await matchesTarget(handle, selector);
+        });
+      const prepared = preparePublicOAuthLoginTarget(sessionId, ref!);
+      expect(prepared).toBeDefined();
+      await expect(
+        withPreparedOAuthLoginTarget(prepared!, () =>
+          act(sessionId!, { kind: "oauth_login", target: ref!, provider: "google" }),
+        ),
       ).rejects.toBeInstanceOf(ProvenPreDispatchMutationError);
       dispatch.mockRestore();
       expect(await product.locator("body").getAttribute("data-danger")).toBeNull();

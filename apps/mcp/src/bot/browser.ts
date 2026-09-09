@@ -4008,7 +4008,11 @@ export class BrowserController {
     confirmSelector: () => Promise<string>,
   ): Promise<ElementHandle<Element> | null> {
     if (!this.page) throw new Error("Browser not started");
-    const expected = await this.page.locator(selector).first().elementHandle().catch(() => null);
+    const expected = await this.page
+      .locator(selector)
+      .first()
+      .elementHandle()
+      .catch(() => null);
     if (expected === null) return null;
     let current: ElementHandle<Element> | null = null;
     try {
@@ -4030,6 +4034,26 @@ export class BrowserController {
       return null;
     } finally {
       await current?.dispose().catch(() => undefined);
+    }
+  }
+
+  async matchesOAuthClickTarget(
+    expected: ElementHandle<Element>,
+    selector: string,
+  ): Promise<boolean> {
+    if (!this.page) return false;
+    const current = await this.page
+      .locator(selector)
+      .first()
+      .elementHandle()
+      .catch(() => null);
+    if (current === null) return false;
+    try {
+      return await current.evaluate((element, target) => element === target, expected);
+    } catch {
+      return false;
+    } finally {
+      await current.dispose().catch(() => undefined);
     }
   }
 
@@ -13685,7 +13709,10 @@ export class BrowserController {
     registerCompletionCheck?: (check: () => Promise<OAuthCompletionEvidence | null>) => void,
     onHumanHandoff?: () => number,
     dispatchAuthorizedClick?: (
-      dispatch: (handle: ElementHandle<Element>) => Promise<void>,
+      dispatch: (
+        handle: ElementHandle<Element>,
+        confirmTarget: () => Promise<void>,
+      ) => Promise<void>,
     ) => Promise<void>,
   ): Promise<void> {
     const product = this.page;
@@ -13905,17 +13932,109 @@ export class BrowserController {
             actionStarted = true;
             await this.click(selector);
           } else {
-            await dispatchAuthorizedClick(async (handle) => {
-              if (Date.now() >= oauthDeadline) {
-                throw new OAuthAwaitingHumanError(
-                  `OAuth has not been attempted yet: the ${Math.ceil(oauthBudgetMs / 1000)}-second ` +
-                    `budget elapsed before the OAuth control on ${safeOrigin(productUrl)} was clicked. ` +
-                    "Retry oauth_login.",
-                  "not_attempted",
+            await dispatchAuthorizedClick(async (handle, confirmTarget) => {
+              await this.withModalInertNeutralized(selector, async () => {
+                const materialSignature = (element: Element): string => {
+                  const control = element as HTMLElement;
+                  return JSON.stringify([
+                    element.tagName.toLowerCase(),
+                    element.getAttribute("role") ?? "",
+                    element.getAttribute("aria-label") ?? "",
+                    element.getAttribute("title") ?? "",
+                    element instanceof HTMLInputElement ? element.value : "",
+                    (control.innerText || element.textContent || "").replace(/\s+/g, " ").trim(),
+                  ]);
+                };
+                let expectedSignature: string;
+                try {
+                  // Complete Playwright's actionability wait before the final
+                  // authorization check. The second click is intentionally
+                  // short: a new wait would reopen the intent-change window.
+                  await handle.click({ trial: true, timeout: 8000 });
+                  expectedSignature = await handle.evaluate(materialSignature);
+                  await confirmTarget();
+                } catch (error) {
+                  throw new BrowserClickDispatchError("not_dispatched", error);
+                }
+                if (Date.now() >= oauthDeadline) {
+                  throw new OAuthAwaitingHumanError(
+                    `OAuth has not been attempted yet: the ${Math.ceil(oauthBudgetMs / 1000)}-second ` +
+                      `budget elapsed before the OAuth control on ${safeOrigin(productUrl)} was clicked. ` +
+                      "Retry oauth_login.",
+                    "not_attempted",
+                  );
+                }
+                const guardKey = `__ts_oauth_click_${Math.random().toString(36).slice(2)}`;
+                await handle.evaluate(
+                  (element, guard) => {
+                    const signature = (candidate: Element): string => {
+                      const control = candidate as HTMLElement;
+                      return JSON.stringify([
+                        candidate.tagName.toLowerCase(),
+                        candidate.getAttribute("role") ?? "",
+                        candidate.getAttribute("aria-label") ?? "",
+                        candidate.getAttribute("title") ?? "",
+                        candidate instanceof HTMLInputElement ? candidate.value : "",
+                        (control.innerText || candidate.textContent || "")
+                          .replace(/\s+/g, " ")
+                          .trim(),
+                      ]);
+                    };
+                    const target = element as HTMLElement & Record<string, unknown>;
+                    const state = {
+                      blocked: false,
+                      listener: (event: Event): void => {
+                        if (signature(element) === guard.expected) return;
+                        state.blocked = true;
+                        event.preventDefault();
+                        event.stopImmediatePropagation();
+                      },
+                    };
+                    target[guard.key] = state;
+                    element.addEventListener("click", state.listener, {
+                      capture: true,
+                      once: true,
+                    });
+                  },
+                  { key: guardKey, expected: expectedSignature },
                 );
-              }
-              actionStarted = true;
-              await this.clickWithDispatchTracking({ kind: "handle", handle, method: "click" });
+                actionStarted = true;
+                try {
+                  await this.clickWithDispatchTracking(
+                    { kind: "handle", handle, method: "click" },
+                    undefined,
+                    async () => {
+                      await handle.click({ timeout: 1000, noWaitAfter: true });
+                      const blocked = await handle.evaluate((element, key) => {
+                        const target = element as HTMLElement &
+                          Record<string, { blocked?: boolean } | undefined>;
+                        return target[key]?.blocked === true;
+                      }, guardKey);
+                      if (blocked) {
+                        throw new BrowserClickDispatchError(
+                          "not_dispatched",
+                          new Error("OAuth target intent changed at click dispatch"),
+                        );
+                      }
+                    },
+                  );
+                } finally {
+                  await handle
+                    .evaluate((element, key) => {
+                      const target = element as HTMLElement &
+                        Record<
+                          string,
+                          { listener?: EventListenerOrEventListenerObject } | undefined
+                        >;
+                      const state = target[key];
+                      if (state?.listener !== undefined) {
+                        element.removeEventListener("click", state.listener, { capture: true });
+                      }
+                      delete target[key];
+                    }, guardKey)
+                    .catch(() => undefined);
+                }
+              });
             });
           }
         } catch (error) {

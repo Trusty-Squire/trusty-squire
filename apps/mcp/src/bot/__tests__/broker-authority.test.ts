@@ -381,6 +381,42 @@ describe("broker authority", () => {
     expect(closed).toBe(true);
   });
 
+  it("keeps actor serialization when queued preparation fails early", async () => {
+    const broker = new BrokerAuthority("account", "cell");
+    const owner = principal("a");
+    const entered: string[] = [];
+    const firstEntered = deferred<void>();
+    const releaseFirst = deferred<void>();
+    const cap = await broker.open(owner, ["site:a"], async () => ({
+      ...port("a"),
+      prepare: (name) => {
+        if (name === "stale") throw new Error("stale_ref");
+      },
+      invoke: async (name) => {
+        entered.push(name);
+        if (name === "first") {
+          firstEntered.resolve();
+          await releaseFirst.promise;
+        }
+      },
+    }));
+
+    const first = broker.invoke(owner, cap, "first-request", "first", {});
+    await firstEntered.promise;
+    const stale = broker.invoke(owner, cap, "stale-request", "stale", {});
+    const staleRejected = expect(stale).rejects.toThrow("stale_ref");
+    const third = broker.invoke(owner, cap, "third-request", "third", {});
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(entered).toEqual(["first"]);
+
+    releaseFirst.resolve();
+    await first;
+    await staleRejected;
+    await third;
+    expect(entered).toEqual(["first", "third"]);
+  });
+
   it("retains site custody when tab cleanup cannot be proved", async () => {
     const broker = new BrokerAuthority("account", "cell");
     const cap = await broker.open(principal("a"), ["site:a"], async () => ({
