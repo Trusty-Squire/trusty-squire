@@ -198,7 +198,9 @@ export class BrokerRuntime implements BrokerBrowserCustody {
   }
 
   browserLost(): boolean {
-    return this.owner !== undefined && !this.owner.isConnected();
+    return (
+      this.owner !== undefined && !this.runtimeIdentity.isLaunching() && !this.owner.isConnected()
+    );
   }
 
   resume(): void {

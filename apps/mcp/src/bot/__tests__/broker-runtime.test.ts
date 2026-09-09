@@ -8,13 +8,14 @@ const state = vi.hoisted(() => ({
   release: vi.fn(),
   attach: vi.fn(),
   guard: vi.fn(),
+  connected: true,
 }));
 vi.mock("../browser.js", () => ({
   BrowserController: class {
     start = state.start;
     close = state.close;
     forceCloseOwnedProcessTree = state.close;
-    isConnected = () => true;
+    isConnected = () => state.connected;
     enableBrokerRouting = async () => undefined;
     static attachSessionPage = state.attach;
   },
@@ -34,6 +35,7 @@ beforeEach(async () => {
   state.start.mockResolvedValue(undefined);
   state.close.mockResolvedValue("closed");
   state.guard.mockReturnValue({ release: state.release });
+  state.connected = true;
 });
 afterEach(async () => {
   vi.useRealTimers();
@@ -65,6 +67,34 @@ it("shares a physical launch, serializes duplicate tab release, and retains sibl
   await runtime.release(second as never);
   expect(await runtime.close()).toBe(true);
   expect(state.release).toHaveBeenCalledTimes(1);
+});
+it("does not classify a physical launch as lost before it finishes connecting", async () => {
+  let finishStart!: () => void;
+  state.connected = false;
+  state.start.mockImplementation(
+    () =>
+      new Promise<void>((resolve) => {
+        finishStart = resolve;
+      }),
+  );
+  const browser = { closeOwnPagesOnly: vi.fn(async () => "closed") };
+  state.attach.mockResolvedValue(browser);
+  const runtime = new BrokerRuntime("account");
+
+  const acquiring = runtime.acquire({ profileDir: root });
+  await vi.waitFor(() => expect(state.start).toHaveBeenCalledOnce());
+  expect(runtime.browserLost()).toBe(false);
+
+  state.connected = true;
+  finishStart();
+  const acquired = await acquiring;
+  expect(runtime.browserLost()).toBe(false);
+
+  state.connected = false;
+  expect(runtime.browserLost()).toBe(true);
+
+  await runtime.release(acquired.browser);
+  expect(await runtime.close()).toBe(true);
 });
 it("keeps an uncertain failed admission until its own tab cleanup succeeds", async () => {
   const closePage = vi.fn().mockResolvedValueOnce("unknown").mockResolvedValue("closed");
