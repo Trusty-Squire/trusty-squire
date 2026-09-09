@@ -18,11 +18,13 @@ export interface TabCapability {
 }
 export interface BrokerSessionPort {
   targetId: string;
+  prepare?(name: string, args: Record<string, unknown>): Promise<unknown> | unknown;
   invoke(
     name: string,
     args: Record<string, unknown>,
     signal: AbortSignal,
     requestId: string,
+    prepared?: unknown,
   ): Promise<unknown>;
   /** True only after owned tabs and pending outcome custody are resolved. */
   close(reason?: "finish" | "disconnect" | "expiry"): Promise<boolean>;
@@ -416,26 +418,30 @@ export class BrokerAuthority {
     if (actor.replies.size >= 4096 || actor.pending >= 64) {
       throw new BrokerRefusal("capacity", "Session command budget exhausted");
     }
+    const previousTail = actor.tail;
+    const preparation = Promise.resolve().then(() => actor.port.prepare?.(name, args));
     actor.pending += 1;
-    const result = actor.tail.then(async () => {
-      if (actor.state !== "active" || invocationLease.signal.aborted) {
-        throw new BrokerRefusal("session_closing", "Command fenced before dispatch");
-      }
-      this.scheduler.expand(actor.capability.sessionId, resources);
-      const laneOwner = randomUUID();
-      if (lane !== undefined) await this.lanes.reserve(laneOwner, [lane], invocationLease.signal);
-      try {
-        if (invocationLease.signal.aborted)
-          throw new BrokerRefusal("cancelled", "Command fenced before dispatch");
-        const execute = async () =>
-          await actor.port.invoke(name, args, invocationLease.signal, requestId);
-        return lane === "oauth"
-          ? await withBrokerIdentityLane(execute, invocationLease.signal)
-          : await execute();
-      } finally {
-        if (lane !== undefined) this.lanes.release(laneOwner);
-      }
-    });
+    const result = preparation.then(async (prepared) =>
+      previousTail.then(async () => {
+        if (actor.state !== "active" || invocationLease.signal.aborted) {
+          throw new BrokerRefusal("session_closing", "Command fenced before dispatch");
+        }
+        this.scheduler.expand(actor.capability.sessionId, resources);
+        const laneOwner = randomUUID();
+        if (lane !== undefined) await this.lanes.reserve(laneOwner, [lane], invocationLease.signal);
+        try {
+          if (invocationLease.signal.aborted)
+            throw new BrokerRefusal("cancelled", "Command fenced before dispatch");
+          const execute = async () =>
+            await actor.port.invoke(name, args, invocationLease.signal, requestId, prepared);
+          return lane === "oauth"
+            ? await withBrokerIdentityLane(execute, invocationLease.signal)
+            : await execute();
+        } finally {
+          if (lane !== undefined) this.lanes.release(laneOwner);
+        }
+      }),
+    );
     const trackedResult = result.catch((error: unknown) => {
       if (error instanceof BrokerRefusal && error.code === "browser_lost") {
         actor.state = "quarantined";

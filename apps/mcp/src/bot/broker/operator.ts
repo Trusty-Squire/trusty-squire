@@ -15,6 +15,11 @@ import {
   sessionForCall,
   withProvisionSessionCall,
 } from "../session/lifecycle.js";
+import {
+  preparePublicOAuthLoginTarget,
+  withPreparedOAuthLoginTarget,
+  type PreparedOAuthLoginTarget,
+} from "../provision-session.js";
 import { BrokerAuthority, type BrokerPrincipal, type TabCapability } from "./authority.js";
 import { BrokerRefusal, siteResources } from "./scheduler.js";
 import type { BrokerTransportPort } from "./transport.js";
@@ -301,7 +306,15 @@ export class OperatorBroker implements BrokerTransportPort {
           const targetId = await session.browser.brokerTargetId();
           return {
             targetId,
-            invoke: async (name, commandArgs, _signal, commandId) => {
+            prepare: async (name, commandArgs) =>
+              name === "operate_login" &&
+              typeof commandArgs.provider === "string" &&
+              typeof commandArgs.ref === "string"
+                ? await withProvisionSessionCall(internalId, async () =>
+                    preparePublicOAuthLoginTarget(internalId, commandArgs.ref),
+                  )
+                : undefined,
+            invoke: async (name, commandArgs, _signal, commandId, prepared) => {
               if (!session.browser.isConnected())
                 throw new BrokerRefusal(
                   "browser_lost",
@@ -311,13 +324,17 @@ export class OperatorBroker implements BrokerTransportPort {
               if (command === null)
                 throw new BrokerRefusal("unknown_tool", "Unknown operator command");
               const translated = { ...commandArgs, session_id: internalId };
-              const execute = async () =>
-                await withBrokerAuditContext(
-                  pinnedApi,
-                  name,
-                  commandId,
-                  async () => await command.handler(translated, pinnedApi),
+              const executeHandler = async () =>
+                await withBrokerAuditContext(pinnedApi, name, commandId, async () =>
+                  command.handler(translated, pinnedApi),
                 );
+              const execute = async () =>
+                prepared === undefined
+                  ? await executeHandler()
+                  : await withPreparedOAuthLoginTarget(
+                      prepared as PreparedOAuthLoginTarget,
+                      executeHandler,
+                    );
               const mutating = brokerCommandMutates(name, commandArgs);
               const commandDispatch = dispatchDetail(
                 principal,

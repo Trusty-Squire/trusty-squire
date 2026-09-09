@@ -441,10 +441,10 @@ function oauthRedirectChain(url: string): string[] | null {
   try {
     source = new URL(url).href;
   } catch {
-    return chain;
+    return null;
   }
   const sourceFamily = oauthEndpointFamily(source);
-  if (sourceFamily === null) return chain;
+  if (sourceFamily === null) return null;
   const seen = new Set<string>([sourceFamily]);
   while (chain.length < 2) {
     try {
@@ -457,12 +457,12 @@ function oauthRedirectChain(url: string): string[] | null {
         targetFamily === null ||
         seen.has(targetFamily)
       )
-        break;
+        return null;
       chain.push(target.href);
       seen.add(targetFamily);
       source = target.href;
     } catch {
-      break;
+      return null;
     }
   }
   if (chain.length === 2) {
@@ -486,6 +486,9 @@ function oauthProviderOrigin(
     const host = parsed.hostname.toLowerCase();
     if (provider === "google" && host !== "accounts.google.com") return null;
     if (provider === "github" && host !== "github.com") return null;
+    if (provider === undefined && host !== "accounts.google.com" && host !== "github.com") {
+      return null;
+    }
     return parsed.origin;
   } catch {
     return null;

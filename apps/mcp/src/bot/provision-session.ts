@@ -19,6 +19,7 @@ import { serializeBrowserUseDOM } from "./browser-use-serializer.js";
 //    `finish`/extract path; the vault stays write-only.
 
 import { createHash, createHmac, randomInt } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Buffer } from "node:buffer";
 import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -809,6 +810,7 @@ async function runSerializedOAuthBoundary(
   authorizedElements: readonly InteractiveElement[],
   provider: OAuthProviderId | undefined,
   deadline: OAuthActionDeadline,
+  compactAuthorization?: CompactV2TargetAuthorization,
 ): Promise<BrowserController> {
   const authorizedRef = provisionElementRefs(authorizedElements).get(authorizedElement);
   if (authorizedRef === undefined) {
@@ -823,9 +825,15 @@ async function runSerializedOAuthBoundary(
       // operation and require the identical structural element identity before
       // clicking; this keeps stale-handle protection without letting a prepared
       // canonical browser escape the boundary on reobserve_required.
-      const fresh = await browser.extractInteractiveElements();
+      const fresh =
+        session.compactV2Mode === "on"
+          ? (await browser.extractBrowserUseObservation()).elements
+          : await browser.extractInteractiveElements();
       retainSessionElements(session, fresh);
-      const resolved = resolveTarget(fresh, authorizedRef);
+      const resolved =
+        compactAuthorization === undefined
+          ? resolveTarget(fresh, authorizedRef)
+          : resolveAuthorizedCompactV2Target(session, fresh, compactAuthorization);
       if (resolved === null) {
         throw new Error(
           "OAuth action target changed during the identity handoff; re-observe before retrying",
@@ -1390,9 +1398,44 @@ function throwCompactV2StaleRef(): never {
   throw new CompactV2StaleRefError("stale_ref");
 }
 
-interface CompactV2TargetAuthorization {
+export interface CompactV2TargetAuthorization {
   legacyRef: string;
   row: SafeControlV2;
+}
+
+export interface PreparedOAuthLoginTarget {
+  sessionId: string;
+  target: string;
+  authorization: CompactV2TargetAuthorization;
+}
+
+const preparedOAuthLoginTarget = new AsyncLocalStorage<PreparedOAuthLoginTarget>();
+
+export function preparePublicOAuthLoginTarget(
+  sessionId: string,
+  target: string,
+): PreparedOAuthLoginTarget | undefined {
+  const session = sessionForCall(sessionId);
+  if (session?.compactV2Active !== true) return undefined;
+  try {
+    return {
+      sessionId,
+      target,
+      authorization: compactV2AuthorizationForTarget(session, target),
+    };
+  } catch (error) {
+    if (error instanceof CompactV2StaleRefError) {
+      throw new ProvenPreDispatchMutationError("stale_ref", { cause: error });
+    }
+    throw error;
+  }
+}
+
+export function withPreparedOAuthLoginTarget<T>(
+  prepared: PreparedOAuthLoginTarget,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return preparedOAuthLoginTarget.run(prepared, operation);
 }
 
 /**
@@ -5122,17 +5165,15 @@ export async function act(
   const oauthProvider =
     action.kind === "oauth_login" || action.kind === "oauth_click" ? action.provider : undefined;
   try {
-    // Bind a public OAuth target to the observation that authorized it before
-    // waiting for the broker-wide OAuth lane. The lane may legitimately be
-    // occupied longer than the observation TTL; that delay alone must not turn
-    // an unchanged target into stale_ref. executeAct still re-resolves this
-    // physical node and its material intent against the live document after
-    // lease acquisition, immediately before any click can dispatch.
     let queuedOAuthAuthorization: CompactV2TargetAuthorization | undefined;
+    const prepared = preparedOAuthLoginTarget.getStore();
     if (
-      session?.compactV2Active === true &&
-      (action.kind === "oauth_login" || action.kind === "oauth_click")
+      action.kind === "oauth_login" &&
+      prepared?.sessionId === sessionId &&
+      prepared.target === action.target
     ) {
+      queuedOAuthAuthorization = prepared.authorization;
+    } else if (session?.compactV2Active === true && action.kind === "oauth_login") {
       try {
         queuedOAuthAuthorization = compactV2AuthorizationForTarget(session, action.target);
       } catch (error) {
@@ -5172,10 +5213,6 @@ export async function act(
     if (error instanceof OAuthAwaitingHumanError && session !== undefined) {
       return oauthAwaitingHumanObservation(session, error);
     }
-    // Every stale-ref branch reachable from oauth_login precedes
-    // runSerializedOAuthBoundary, the sole path that can click/dispatch OAuth.
-    // Carry that code-owned proof to the journal without classifying failures
-    // by their intentionally opaque public message.
     if (action.kind === "oauth_login" && error instanceof CompactV2StaleRefError) {
       throw new ProvenPreDispatchMutationError("stale_ref", { cause: error });
     }
@@ -5876,6 +5913,7 @@ async function executeAct(
             fresh,
             action.provider,
             oauthDeadline,
+            compactV2Authorization,
           );
           const completedPage = browser.completedOAuthPage() ?? undefined;
           rememberOAuthCompletionSourcePage(session, completedPage);
@@ -5933,6 +5971,7 @@ async function executeAct(
           fresh,
           action.provider,
           oauthDeadline,
+          compactV2Authorization,
         );
         const completedPage = browser.completedOAuthPage() ?? undefined;
         rememberOAuthCompletionSourcePage(session, completedPage);

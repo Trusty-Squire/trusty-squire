@@ -821,21 +821,13 @@ describe("BrowserController OAuth popup lifecycle", () => {
         response.writeHead(200, { "content-type": "text/html" });
         response.end("<main>Projects</main>");
       });
-      const provider = createServer((request, response) => {
-        if (request.url?.startsWith("/provider")) {
-          response.writeHead(302, { location: expectedReturnUrl });
-          response.end();
-          return;
-        }
-        response.writeHead(200, { "content-type": "text/html" });
-        response.end("<main>Projects</main>");
-      });
       await new Promise<void>((resolve) => returnTarget.listen(0, "127.0.0.1", resolve));
-      await new Promise<void>((resolve) => provider.listen(0, "127.0.0.1", resolve));
       const { port: returnPort } = returnTarget.address() as AddressInfo;
-      const { port } = provider.address() as AddressInfo;
       expectedReturnUrl = `http://127.0.0.1:${returnPort}/projects`;
-      const providerUrl = `http://127.0.0.1:${port}/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`;
+      const providerUrl = `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`;
+      await context.route(providerUrl, (route) =>
+        route.fulfill({ status: 302, headers: { location: expectedReturnUrl } }),
+      );
       await context.route("https://product.test/**", (route) =>
         route.fulfill({
           contentType: "text/html",
@@ -851,9 +843,6 @@ describe("BrowserController OAuth popup lifecycle", () => {
         expect(controller.completedOAuthPage()?.url()).toBe(expectedReturnUrl);
       } finally {
         await context.close();
-        await new Promise<void>((resolve, reject) =>
-          provider.close((error) => (error === undefined ? resolve() : reject(error))),
-        );
         await new Promise<void>((resolve, reject) =>
           returnTarget.close((error) => (error === undefined ? resolve() : reject(error))),
         );
@@ -1747,6 +1736,68 @@ describe("BrowserController OAuth popup lifecycle", () => {
       expect(completion.check).toBeDefined();
       await expect(completion.check?.()).resolves.toBeNull();
       expect(controller.currentUrl()).toBe("https://resend.test/signup");
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("invalidates a callback chain that cycles to a query variant of its provider", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const providerUrl = "https://accounts.google.com/provider";
+    const providerVariantUrl = `${providerUrl}?prompt=none`;
+    const callbackUrl = `https://resend.test/auth/callback?redirect_uri=${encodeURIComponent(providerVariantUrl)}`;
+    const providerStartUrl = `${providerUrl}?redirect_uri=${encodeURIComponent(callbackUrl)}`;
+    await context.route("**/*", (route) => {
+      const url = route.request().url();
+      return route.fulfill({
+        contentType: "text/html",
+        body:
+          url === "https://resend.test/signup"
+            ? `<button id="oauth" onclick='location.href=${JSON.stringify(providerStartUrl)}'>Continue</button>`
+            : url === providerStartUrl
+              ? `<script>location.href=${JSON.stringify(callbackUrl)}</script>`
+              : url === callbackUrl
+                ? `<script>setTimeout(() => location.replace(${JSON.stringify(providerVariantUrl)}), 120)</script>`
+                : "<main>Provider</main>",
+      });
+    });
+    await product.goto("https://resend.test/signup");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 500, "google")).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+      expect(controller.currentUrl()).toBe(providerVariantUrl);
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("keeps providerless replay nonterminal for an unrecognized product mediator", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const providerUrl = "https://accounts.google.com/provider";
+    const mediatorUrl = `https://auth.resend.test/start?redirect_uri=${encodeURIComponent(providerUrl)}`;
+    await context.route("**/*", (route) => {
+      const url = route.request().url();
+      return route.fulfill({
+        contentType: "text/html",
+        body:
+          url === "https://app.resend.test/signup"
+            ? `<button id="oauth" onclick='location.href=${JSON.stringify(mediatorUrl)}'>Continue</button>`
+            : url === mediatorUrl
+              ? `<script>location.href=${JSON.stringify(providerUrl)}</script>`
+              : "<main>Provider</main>",
+      });
+    });
+    await product.goto("https://app.resend.test/signup");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 500)).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+      expect(controller.currentUrl()).toBe(providerUrl);
     } finally {
       await context.close();
     }
@@ -3265,10 +3316,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
         contentType: "text/html",
         body: callback
           ? "<main>Login cancelled</main>"
-          : '<button id="oauth" onclick="location.href=\'https://provider.test/oauth?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback\'">Login with Provider</button>',
+          : '<button id="oauth" onclick="location.href=\'https://accounts.google.com/oauth?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback\'">Login with Provider</button>',
       });
     });
-    await context.route("https://provider.test/oauth**", async (route) => {
+    await context.route("https://accounts.google.com/oauth**", async (route) => {
       await route.fulfill({
         contentType: "text/html",
         body: '<script>setTimeout(() => location.href="https://product.test/callback?error=access_denied&error_description=The+user+denied+access", 20)</script>',
@@ -3423,10 +3474,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
         contentType: "text/html",
         body: callback
           ? "<main>Signed in</main>"
-          : '<button id="oauth" onclick="location.href=\'https://provider.test/oauth?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback\'">Login with Provider</button>',
+          : '<button id="oauth" onclick="location.href=\'https://accounts.google.com/oauth?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback\'">Login with Provider</button>',
       });
     });
-    await context.route("https://provider.test/oauth**", async (route) => {
+    await context.route("https://accounts.google.com/oauth**", async (route) => {
       await route.fulfill({
         contentType: "text/html",
         body: '<script>setTimeout(() => location.href="https://product.test/callback", 20)</script>',
@@ -3460,10 +3511,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
         contentType: "text/html",
         body: callback
           ? '<main>Signed in</main><script>setInterval(() => fetch("/pulse"), 25)</script>'
-          : '<button id="oauth" onclick="location.href=\'https://provider.test/oauth?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback\'">Login with Provider</button>',
+          : '<button id="oauth" onclick="location.href=\'https://accounts.google.com/oauth?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback\'">Login with Provider</button>',
       });
     });
-    await context.route("https://provider.test/oauth**", async (route) => {
+    await context.route("https://accounts.google.com/oauth**", async (route) => {
       await route.fulfill({
         contentType: "text/html",
         body: '<script>setTimeout(() => location.href="https://product.test/callback", 100)</script>',
