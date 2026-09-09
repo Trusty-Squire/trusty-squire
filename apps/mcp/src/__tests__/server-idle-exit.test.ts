@@ -110,7 +110,11 @@ describe("server shutdown call admission", () => {
     const listener = await listenBroker(socket, {
       authenticate: async (token, _agentId, lineageCredential) =>
         token === account.agent_session_token && lineageCredential === credential
-          ? { accountId: account.account_id, agentId: "registry-test", forwarderId: forwarderId(credential) }
+          ? {
+              accountId: account.account_id,
+              agentId: "registry-test",
+              forwarderId: forwarderId(credential),
+            }
           : null,
       call: async (_principal, method) => {
         if (method === "reclaim") return { capabilities: [] };
@@ -150,10 +154,12 @@ describe("server shutdown call admission", () => {
         stdio: ["pipe", "pipe", "pipe"],
       },
     );
-    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
-      child.once("error", reject);
-      child.once("exit", (code, signal) => resolve({ code, signal }));
-    });
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+      (resolve, reject) => {
+        child.once("error", reject);
+        child.once("exit", (code, signal) => resolve({ code, signal }));
+      },
+    );
     try {
       await mcpRequest(child, {
         jsonrpc: "2.0",
@@ -178,10 +184,13 @@ describe("server shutdown call admission", () => {
       let recordPath = "";
       await waitFor(async () => {
         const entries = await readdir(records).catch(() => [] as string[]);
-        recordPath = entries.map((entry) => join(records, entry)).find((path) => {
-          const record = readServerInstanceRecord(path);
-          return record?.state === "draining" && record.in_flight_calls === 1;
-        }) ?? "";
+        recordPath =
+          entries
+            .map((entry) => join(records, entry))
+            .find((path) => {
+              const record = readServerInstanceRecord(path);
+              return record?.state === "draining" && record.in_flight_calls === 1;
+            }) ?? "";
         return recordPath.length > 0;
       }, 5_000);
       const first = readServerInstanceRecord(recordPath);
@@ -189,7 +198,10 @@ describe("server shutdown call admission", () => {
       await sleep(100);
       expect(readServerInstanceRecord(recordPath)).toMatchObject({ state: "draining" });
       await expect(exited).resolves.toEqual({ code: 0, signal: null });
-      await waitFor(async () => (await readdir(records).catch(() => [] as string[])).length === 0, 5_000);
+      await waitFor(
+        async () => (await readdir(records).catch(() => [] as string[])).length === 0,
+        5_000,
+      );
     } finally {
       if (child.exitCode === null) child.kill("SIGKILL");
       await exited.catch(() => undefined);

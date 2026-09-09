@@ -183,7 +183,8 @@ export async function connectOrLaunchBroker(
     await mkdir(launchRoot, { recursive: true, mode: 0o700 });
     launchLease = acquireProfileOperationGuard(profileDir, launchRoot);
   } catch (error) {
-    if (error instanceof ProfileBusyError) return await waitForBroker(path, token, lineageCredential);
+    if (error instanceof ProfileBusyError)
+      return await waitForBroker(path, token, lineageCredential);
     throw error;
   }
   try {

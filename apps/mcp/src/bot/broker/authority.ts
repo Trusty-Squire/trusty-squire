@@ -109,9 +109,7 @@ export class BrokerAuthority {
       [...this.admissions.values()].some(
         (admission) => admission.principal.clientId === clientId,
       ) ||
-      [...this.expiredAdmissions.values()].some(
-        (principal) => principal.clientId === clientId,
-      ) ||
+      [...this.expiredAdmissions.values()].some((principal) => principal.clientId === clientId) ||
       [...this.actors.values()].some((actor) => actor.principal.clientId === clientId)
     )
       return;
@@ -198,10 +196,7 @@ export class BrokerAuthority {
     orphanFailedAdmission?: (sessionId: string) => Promise<void>,
   ): Promise<TabCapability> {
     this.assertPrincipal(principal);
-    if (
-      this.actors.size + this.admissions.size >=
-      this.maxSessions
-    ) {
+    if (this.actors.size + this.admissions.size >= this.maxSessions) {
       throw new BrokerRefusal("capacity", "Identity cell is at capacity");
     }
     const id = randomUUID();
@@ -258,8 +253,7 @@ export class BrokerAuthority {
             orphanFailedAdmission,
           );
         this.scheduler.release(id);
-      }
-      else if (port === undefined && !creating) this.scheduler.release(id);
+      } else if (port === undefined && !creating) this.scheduler.release(id);
       else if (port === undefined) {
         const reconnectDeadline = this.admissions.get(id)?.reconnectDeadline;
         if (reconnectDeadline !== undefined) {
@@ -299,11 +293,7 @@ export class BrokerAuthority {
         }
       }
       const failed = this.actors.get(id);
-      if (
-        port === undefined &&
-        failed !== undefined &&
-        failed.state !== "detached"
-      )
+      if (port === undefined && failed !== undefined && failed.state !== "detached")
         await this.closeActor(failed);
       throw error;
     } finally {
@@ -607,8 +597,7 @@ export class BrokerAuthority {
     }
     const expired = [...this.actors.values()].filter(
       (actor) =>
-        actor.state === "detached" &&
-        (actor.reconnectDeadline ?? Number.POSITIVE_INFINITY) <= now,
+        actor.state === "detached" && (actor.reconnectDeadline ?? Number.POSITIVE_INFINITY) <= now,
     );
     await Promise.all(
       expired.map(async (actor) => {
@@ -636,12 +625,9 @@ export class BrokerAuthority {
 
   hasReconnectGrace(now = Date.now()): boolean {
     return (
-      [...this.admissions.values()].some(
-        (admission) => (admission.reconnectDeadline ?? 0) > now,
-      ) ||
+      [...this.admissions.values()].some((admission) => (admission.reconnectDeadline ?? 0) > now) ||
       [...this.actors.values()].some(
-        (actor) =>
-          actor.state === "detached" && (actor.reconnectDeadline ?? 0) > now,
+        (actor) => actor.state === "detached" && (actor.reconnectDeadline ?? 0) > now,
       )
     );
   }

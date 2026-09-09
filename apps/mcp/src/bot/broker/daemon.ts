@@ -54,9 +54,7 @@ export async function brokerShutdownCleanupComplete(
 function brokerUnavailable(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException).code;
   return (
-    code === "ENOENT" ||
-    code === "ECONNREFUSED" ||
-    (error as BrokerRefusal).code === "broker_lost"
+    code === "ENOENT" || code === "ECONNREFUSED" || (error as BrokerRefusal).code === "broker_lost"
   );
 }
 
@@ -151,7 +149,8 @@ export async function runBrokerDaemon(): Promise<void> {
   startOwnerProcessReaper();
   // Broker election is anchored beside the canonical profile, independent of
   // each client's socket path or TMPDIR. Retain it through plain-login maintenance.
-  const profileElection = election ?? acquireProfileOperationGuard(CHROME_PROFILE_DIR, electionRoot);
+  const profileElection =
+    election ?? acquireProfileOperationGuard(CHROME_PROFILE_DIR, electionRoot);
   runtime.claimProfile();
   const journal = new DispatchJournal(
     join(profilePathIdentity(CHROME_PROFILE_DIR), "trusty-squire-broker-dispatch.jsonl"),

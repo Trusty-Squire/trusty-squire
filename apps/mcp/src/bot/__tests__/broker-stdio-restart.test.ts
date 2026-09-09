@@ -59,7 +59,10 @@ function stdioClient(child: ChildProcess, diagnostics: () => string): StdioClien
       if (newline < 0) return;
       const line = buffered.slice(0, newline);
       buffered = buffered.slice(newline + 1);
-      const message = JSON.parse(line) as { id?: string | number; result?: Record<string, unknown> };
+      const message = JSON.parse(line) as {
+        id?: string | number;
+        result?: Record<string, unknown>;
+      };
       if (message.id === undefined) continue;
       const reply = pending.get(String(message.id));
       if (reply === undefined) continue;
@@ -146,7 +149,9 @@ async function waitFor<T>(read: () => Promise<T | undefined>, description: strin
 async function endpointOwner(path: string): Promise<EndpointOwner | undefined> {
   try {
     const owner = JSON.parse(await readFile(`${path}.owner.json`, "utf8")) as EndpointOwner;
-    return Number.isSafeInteger(owner.pid) && typeof owner.start_time === "string" ? owner : undefined;
+    return Number.isSafeInteger(owner.pid) && typeof owner.start_time === "string"
+      ? owner
+      : undefined;
   } catch {
     return undefined;
   }
@@ -182,7 +187,8 @@ async function closeServer(server: Server): Promise<void> {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 }
 
-const describeChromium = chromiumAvailable && process.platform === "linux" ? describe : describe.skip;
+const describeChromium =
+  chromiumAvailable && process.platform === "linux" ? describe : describe.skip;
 
 describeChromium("broker-backed MCP stdio restart", () => {
   const roots: string[] = [];
@@ -215,7 +221,8 @@ describeChromium("broker-backed MCP stdio restart", () => {
     });
     await new Promise<void>((resolve) => service.listen(0, "127.0.0.1", resolve));
     const address = service.address();
-    if (address === null || typeof address === "string") throw new Error("test service did not bind");
+    if (address === null || typeof address === "string")
+      throw new Error("test service did not bind");
     const serviceUrl = `http://127.0.0.1:${address.port}/`;
 
     let brokerDiagnostics = "";
@@ -290,13 +297,10 @@ describeChromium("broker-backed MCP stdio restart", () => {
     };
 
     try {
-      const owner = await waitFor(
-        async () => {
-          if (broker.exitCode !== null) throw new Error(brokerDiagnostics);
-          return await endpointOwner(socket);
-        },
-        "supervised broker endpoint owner",
-      );
+      const owner = await waitFor(async () => {
+        if (broker.exitCode !== null) throw new Error(brokerDiagnostics);
+        return await endpointOwner(socket);
+      }, "supervised broker endpoint owner");
       let contender: { release(): void } | undefined;
       try {
         contender = acquireProfileOperationGuard(profile, brokerElectionRoot(profile));

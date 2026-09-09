@@ -436,7 +436,11 @@ export class OperatorBroker implements BrokerTransportPort {
           }
         : {
             operation: tool.name,
-            inputHash: this.inputHash(principal, { name: tool.name, args, capability: input.capability }),
+            inputHash: this.inputHash(principal, {
+              name: tool.name,
+              args,
+              capability: input.capability,
+            }),
           },
     );
     if (completed === undefined) return null;

@@ -424,7 +424,9 @@ describe("broker authority", () => {
     expect(broker.hasReconnectGrace(now + 1)).toBe(true);
     void broker.claimForwarder(replacement);
     expect(broker.reclaim(replacement)).toEqual([capability]);
-    await expect(broker.invoke(replacement, capability, "reclaimed", "read", {})).resolves.toBe("a");
+    await expect(broker.invoke(replacement, capability, "reclaimed", "read", {})).resolves.toBe(
+      "a",
+    );
     expect(broker.inventory()).toEqual({ active: 1, quarantined: 0, admitting: 0 });
   });
 
@@ -466,9 +468,7 @@ describe("broker authority", () => {
     expect(broker.reclaim(replacement)).toEqual([]);
     expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
 
-    const capability = await broker.open(replacement, ["site:a"], async () =>
-      port("replacement"),
-    );
+    const capability = await broker.open(replacement, ["site:a"], async () => port("replacement"));
     await expect(broker.close(replacement, capability)).resolves.toBe(true);
   });
 
@@ -505,9 +505,7 @@ describe("broker authority", () => {
     cleanupProven = true;
     await broker.retryQuarantined();
     expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
-    const capability = await broker.open(replacement, ["site:a"], async () =>
-      port("replacement"),
-    );
+    const capability = await broker.open(replacement, ["site:a"], async () => port("replacement"));
     await expect(broker.close(replacement, capability)).resolves.toBe(true);
   });
 
@@ -603,8 +601,7 @@ describe("broker authority", () => {
     };
     await broker.claimForwarder(owner);
     const capability = await broker.open(owner, ["site:a"], async () => port("a"));
-    const fencedClients = () =>
-      (broker as unknown as { fencedClients: Set<string> }).fencedClients;
+    const fencedClients = () => (broker as unknown as { fencedClients: Set<string> }).fencedClients;
 
     for (let index = 1; index <= 3; index++) {
       const stale = owner;

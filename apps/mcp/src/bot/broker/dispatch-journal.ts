@@ -88,10 +88,7 @@ export class DispatchJournal {
         if (record.phase === "recovered") continue;
         const key = JSON.stringify([record.sessionId, record.requestId]);
         const prior = states.get(key);
-        if (
-          record.phase === "outcome" &&
-          prior?.outcome?.status === "payment_outcome_unknown"
-        )
+        if (record.phase === "outcome" && prior?.outcome?.status === "payment_outcome_unknown")
           continue;
         states.set(key, record);
       }
@@ -146,7 +143,10 @@ export class DispatchJournal {
     );
   }
 
-  async hasOnlyDetachedPaymentUncertainty(sessionId: string, forwarderId: string): Promise<boolean> {
+  async hasOnlyDetachedPaymentUncertainty(
+    sessionId: string,
+    forwarderId: string,
+  ): Promise<boolean> {
     const outstanding = [...(await this.states()).values()].filter(
       (record) =>
         record.sessionId === sessionId &&

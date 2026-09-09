@@ -61,7 +61,10 @@ binding. Browser epoch changes invalidate earlier capabilities.
   Additional conflicting scope is refused rather than adopted implicitly.
 - A context-level route selects the owning page's host policy. Unknown targets
   cannot issue background API traffic. Session cleanup closes only that owned
-  family; a failed close retains handles and custody for retry.
+  family. At reconnect-grace expiry, a close that cannot be proven removes the
+  actor from broker inventory and releases its slot rather than retaining or
+  reusing it; the existing exact owner-process identity backstop remains the
+  only physical-process custody.
 - OAuth and live identity probes share a broker-wide lane. Clipboard-sensitive
   extract, credential fill, and payment commands use an interactive lane.
   Per-session approval, charge dispatch fences, and post-submit outcome custody
@@ -70,12 +73,13 @@ binding. Browser epoch changes invalidate earlier capabilities.
   immediately fences queued commands and aborts the old connection lease, but
   retains that lineage's actors for a five-minute authenticated reconnect grace.
   Explicit client release or grace expiry closes only that client's sessions.
-  Uncertain tab cleanup or pending payment outcomes stay quarantined and remain
-  no-replay journal fences. The existing process marker watchdog and
-  owner-death reaper remain unchanged.
+  An expiry close that remains unproven is never reclaimable or capacity-bearing;
+  pending payment outcomes remain no-replay journal fences. The existing process
+  marker watchdog and owner-death reaper remain unchanged.
 - A bounded physical launch uses the existing cancellation/ownership machinery.
-  A failed admission has retryable cleanup; it releases site reservations only
-  after cleanup proves completion. Duplicate release calls share one operation.
+  A failed admission has bounded cleanup. Once its reconnect grace expires, its
+  scheduler capacity is permanently released; a late port is never admitted or
+  given a capability. Duplicate release calls share one operation.
 - The profile-local dispatch journal fsyncs mutation entry and completion without
   recording command arguments or credentials. A lost mutation response is never
   replayed. Unsettled or malformed journal state refuses browser replacement and
@@ -109,8 +113,8 @@ scope predecessor cleanup to one launcher lane. During terminal shutdown the
 record remains `draining` until cleanup completes or the configured
 `TRUSTY_SQUIRE_SERVER_SHUTDOWN_DEADLINE_MS` expires (30 seconds by default).
 
-Implementation entry points: `src/bot/broker/daemon.ts`, `authority.ts`,
-`runtime.ts`, `operator.ts`, and `transport.ts` under `apps/mcp`.
+Implementation entry points: `src/bot/broker/daemon.ts`, `discovery.ts`,
+`authority.ts`, `runtime.ts`, `operator.ts`, and `transport.ts` under `apps/mcp`.
 
 ## Executed mechanical acceptance
 

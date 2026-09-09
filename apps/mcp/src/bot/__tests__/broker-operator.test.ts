@@ -343,7 +343,9 @@ it("quarantines an uncertain payment after explicit close and returns its recove
 
     expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
     expect(state.sessions.size).toBe(0);
-    expect(await journal.hasOutstanding(started.capability.sessionId, principal.forwarderId)).toBe(true);
+    expect(await journal.hasOutstanding(started.capability.sessionId, principal.forwarderId)).toBe(
+      true,
+    );
 
     await broker.connected(resumed);
     expect(await broker.reclaim(resumed)).toEqual({ capabilities: [] });

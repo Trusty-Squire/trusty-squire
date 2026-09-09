@@ -1,6 +1,7 @@
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type * as BrokerTransport from "../broker/transport.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({ spawn: vi.fn() }));
@@ -44,7 +45,7 @@ describe("broker discovery election", () => {
     return { discovery, profileModule, transport };
   }
 
-  async function listen(transport: typeof import("../broker/transport.js")) {
+  async function listen(transport: typeof BrokerTransport) {
     listener = await transport.listenBroker(socket, {
       authenticate: async () => ({
         accountId: "account",
