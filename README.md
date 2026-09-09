@@ -378,8 +378,13 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   Malformed flat-verb calls return `error.code: "invalid_arguments"` without
   ending the shared server process or discarding the active session. For a
   provider login, pass the observed provider-button ref to `operate_login`.
-  It retains the product tab across provider-owned popup
-  redirects and closes. When it observes the authorized return destination still
+  It retains the product tab across provider-owned popup redirects and closes.
+  Completion requires attempt-local navigation evidence from the selected
+  provider to the exact declared return path and fixed query. A declared chain
+  may contain one return destination or one callback followed by one dashboard;
+  in the two-destination case, only the terminal dashboard completes login. An
+  unrelated same-origin page, a longer chain, or a chain that returns to the
+  provider remains pending. When the authorized completion destination is still
   open, that destination becomes the session's operation page: its post-login
   observation and later page-bound operations (actions, reads, screenshots,
   navigation, verification, and checkout) stay bound to it, leaving the retained

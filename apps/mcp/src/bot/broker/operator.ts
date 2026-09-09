@@ -487,10 +487,7 @@ export class OperatorBroker implements BrokerTransportPort {
       journalForwarderId(principal) === authorization.forwarderId &&
       args.provider === "google" &&
       args.ref === "reconciliation-only:no-dispatch"
-        ? await this.journal?.reconcileExplicitPreDispatchFailure(
-            authorization,
-            explicitFailure,
-          )
+        ? await this.journal?.reconcileExplicitPreDispatchFailure(authorization, explicitFailure)
         : await this.journal?.recoveryOutcome(
             journalForwarderId(principal),
             sessionId !== undefined
