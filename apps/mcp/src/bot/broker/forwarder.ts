@@ -51,7 +51,6 @@ export class OperatorForwarder {
   }
   private async reclaim(client: BrokerClient): Promise<void> {
     const reply = (await client.call("reclaim", {})) as { capabilities?: TabCapability[] };
-    this.sessions.clear();
     for (const capability of reply.capabilities ?? [])
       this.sessions.set(capability.sessionId, capability);
   }
@@ -103,14 +102,17 @@ export class OperatorForwarder {
     const idempotencyKey = this.idempotencyKey(callerRequestHash);
     const starting =
       name === "operate_start" || (name === "operate_recipe_run" && args.session_id === undefined);
+    let reconnecting = false;
     if (this.connection !== undefined) {
       const existing = await this.connection.catch(() => undefined);
       if (existing === undefined || !existing.isConnected()) {
         this.connection = undefined;
         this.client = undefined;
+        reconnecting = true;
       }
     }
     const client = await this.connect();
+    if (reconnecting) this.sessions.clear();
     await this.reclaim(client);
     if (!starting && args.session_id === undefined && this.sessions.size === 1)
       args = { ...args, session_id: this.sessions.keys().next().value };

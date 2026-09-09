@@ -22,6 +22,7 @@ import { BrokerClient, listenBroker } from "./transport.js";
 
 const MIN_BROKER_IDLE_TIMEOUT_MS = 60_000;
 const DEFAULT_BROKER_IDLE_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_BROKER_DRAIN_CLEANUP_TIMEOUT_MS = 3_000;
 const SUPERVISOR_ATTACH_TIMEOUT_MS = 10_000;
 const SUPERVISOR_ATTACH_POLL_MS = 100;
 const DRAIN_RECOVERY_METHODS = new Set(["recover", "reclaim", "acknowledge", "confirm_start"]);
@@ -33,13 +34,21 @@ export function brokerDrainAllowsMethod(method: string): boolean {
 export async function brokerShutdownCleanupComplete(
   inventory: { active: number; quarantined: number; admitting: number },
   closeRuntime: () => Promise<boolean>,
+  timeoutMs = DEFAULT_BROKER_DRAIN_CLEANUP_TIMEOUT_MS,
 ): Promise<boolean> {
-  return (
-    inventory.active === 0 &&
-    inventory.quarantined === 0 &&
-    inventory.admitting === 0 &&
-    (await closeRuntime())
-  );
+  if (inventory.active !== 0 || inventory.quarantined !== 0 || inventory.admitting !== 0)
+    return false;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      closeRuntime().catch(() => false),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 function brokerUnavailable(error: unknown): boolean {
@@ -167,7 +176,16 @@ export async function runBrokerDaemon(): Promise<void> {
   let maintenanceOwner: string | undefined;
   let maintenanceReady = false;
   let idleTimer: NodeJS.Timeout | undefined;
+  let runtimeClose: Promise<boolean> | undefined;
   let idleTimeout = brokerIdleTimeoutMs();
+  const closeRuntime = (): Promise<boolean> => {
+    if (runtimeClose === undefined) {
+      runtimeClose = runtime.close().finally(() => {
+        runtimeClose = undefined;
+      });
+    }
+    return runtimeClose;
+  };
   const restoreMaintenance = async () => {
     const refreshed = await guard.bind();
     if (refreshed === null) throw new Error("Enrolled account session is missing");
@@ -324,7 +342,7 @@ export async function runBrokerDaemon(): Promise<void> {
       return;
     draining = true;
     if (idleTimer !== undefined) clearTimeout(idleTimer);
-    if (!(await brokerShutdownCleanupComplete(operator.authority.inventory(), () => runtime.close()))) {
+    if (!(await brokerShutdownCleanupComplete(operator.authority.inventory(), closeRuntime))) {
       process.stderr.write("[browser-broker] cleanup unproven; retaining physical custody\n");
       return;
     }

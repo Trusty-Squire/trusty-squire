@@ -177,7 +177,7 @@ export class DispatchJournal {
         async (record) =>
           await this.record(record.sessionId, record.requestId, "outcome", {
             forwarderId,
-            operation: record.operation,
+            ...(record.operation === undefined ? {} : { operation: record.operation }),
             ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
             outcome: { status: "payment_outcome_unknown" },
           }),
@@ -301,7 +301,7 @@ export class DispatchJournal {
           await this.record(record.sessionId, record.requestId, "settled", {
             forwarderId,
             start: true,
-            operation: record.operation,
+            ...(record.operation === undefined ? {} : { operation: record.operation }),
             ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
             ...(record.outcome === undefined ? {} : { outcome: record.outcome }),
           }),

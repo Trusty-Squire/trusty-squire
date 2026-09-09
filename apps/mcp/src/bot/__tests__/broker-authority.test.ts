@@ -191,7 +191,7 @@ describe("broker authority", () => {
     expect(orphaned).toBe(1);
     expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
     expect(() => broker.invoke(owner, capability, "replay", "operate_pay", {})).toThrow(
-      "not admitted",
+      "does not name an owned live session",
     );
     const replacementOwner = principal("replacement");
     const replacement = await broker.open(replacementOwner, ["site:a"], async () =>
@@ -618,7 +618,7 @@ describe("broker authority", () => {
       await broker.claimForwarder(owner);
       expect(broker.reclaim(owner)).toEqual([capability]);
       expect(() => broker.invoke(stale, capability, `stale-${index}`, "mutate", {})).toThrow(
-        "Forwarder identity is already active",
+        "not admitted",
       );
       expect(fencedClients()).not.toContain(stale.clientId);
       expect(fencedClients().size).toBe(0);

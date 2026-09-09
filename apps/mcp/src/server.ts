@@ -434,9 +434,7 @@ export async function runServer(): Promise<void> {
     }
   };
   const api = await loadPublishedAccountSession();
-  const instanceLineage = serverLauncherLineage({
-    accountId: sessionGuard.boundAccountId() ?? undefined,
-  });
+  const instanceLineage = serverLauncherLineage();
   try {
     await reapStaleServerInstances({ launcherLineage: instanceLineage });
   } catch (err) {

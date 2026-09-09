@@ -23,6 +23,19 @@ import { forwarderId } from "../broker/lineage.js";
 import { BrokerRefusal } from "../broker/scheduler.js";
 const require = createRequire(import.meta.url);
 const sleep = async (ms: number) => await new Promise((r) => setTimeout(r, ms));
+async function within<T>(promise: Promise<T>, timeoutMs: number, description: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${description} timed out`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 const credential = "a".repeat(43);
 let chromiumAvailable = false;
 try {
@@ -223,10 +236,16 @@ itWithChromium("keeps the real daemon endpoint recoverable when real browser cle
     await journal.record(sessionId, "stuck-payment", "outcome", {
       forwarderId: forwarderId(credential),
       operation: "operate_pay",
+      inputHash: createHmac("sha256", createHash("sha256").update(credential).digest())
+        .update(
+          `{"args":{"item":"fixture purchase","reason":"drain recovery","session_id":"${sessionId}"},"name":"operate_pay"}`,
+        )
+        .digest("hex"),
       outcome: { status: "payment_outcome_unknown" },
     });
     await initial.close();
     initial = undefined;
+    await sleep(100);
     child.kill("SIGTERM");
     for (let attempt = 0; attempt < 200; attempt++) {
       if (
@@ -238,8 +257,18 @@ itWithChromium("keeps the real daemon endpoint recoverable when real browser cle
       await sleep(25);
     }
     await expect(lstat(socket)).resolves.toBeDefined();
-    client = await BrokerClient.connect(socket, account.agent_session_token, credential);
-    await expect(client.call("recover", { name: "operate_pay", args: paymentArgs })).resolves.toEqual({
+    client = await within(
+      BrokerClient.connect(socket, account.agent_session_token, credential),
+      5_000,
+      "draining broker reconnect",
+    );
+    await expect(
+      within(
+        client.call("recover", { name: "operate_pay", args: paymentArgs }),
+        5_000,
+        "draining broker recovery",
+      ),
+    ).resolves.toEqual({
       requestId: "stuck-payment",
       result: {
         reconciliation: {
@@ -253,10 +282,14 @@ itWithChromium("keeps the real daemon endpoint recoverable when real browser cle
       client.call("tool", { name: "operate_start", args: { service_url: "https://example.test" } }),
     ).rejects.toMatchObject({ code: "broker_draining" });
   } finally {
-    await initial?.close();
-    await client?.close();
+    await within(initial?.close() ?? Promise.resolve(), 1_000, "initial broker close").catch(
+      () => undefined,
+    );
+    await within(client?.close() ?? Promise.resolve(), 1_000, "recovery broker close").catch(
+      () => undefined,
+    );
     if (child.exitCode === null) child.kill("SIGKILL");
-    await exited;
+    await within(exited, 1_000, "broker daemon exit").catch(() => undefined);
     await closeServer(service);
     await rm(root, { recursive: true, force: true });
   }

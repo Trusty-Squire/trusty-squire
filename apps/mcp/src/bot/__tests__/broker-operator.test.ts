@@ -65,6 +65,7 @@ it("retains a replacement lineage binding through the old socket handoff", async
   const replacementIdentity = await broker.authenticate("token", "agent", "a".repeat(43));
   if (replacementIdentity === null) throw new Error("Test replacement authentication failed");
   const replacement = { ...replacementIdentity, clientId: "replacement" };
+  broker.authority.beginForwarderRelease(first);
   const handoff = Promise.resolve(broker.connected(replacement));
   await broker.disconnect(first);
   await handoff;
@@ -311,6 +312,10 @@ it("quarantines an uncertain payment after explicit close and returns its recove
     state.sessions.delete(sessionId);
     return { session_id: sessionId, url: "", closed: true };
   });
+  state.forceFinish.mockImplementation(async (sessionId: string) => {
+    state.sessions.delete(sessionId);
+    return true;
+  });
 
   try {
     await broker.connected(principal);
@@ -336,17 +341,16 @@ it("quarantines an uncertain payment after explicit close and returns its recove
     await broker.disconnect(principal, true);
     await broker.reap();
 
-    expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 1, admitting: 0 });
-    expect(state.sessions.size).toBe(1);
+    expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
+    expect(state.sessions.size).toBe(0);
     expect(await journal.hasOutstanding(started.capability.sessionId, principal.forwarderId)).toBe(true);
 
     await broker.connected(resumed);
-    expect(await broker.reclaim(resumed)).toEqual({ capabilities: [started.capability] });
+    expect(await broker.reclaim(resumed)).toEqual({ capabilities: [] });
     await expect(
       broker.recover(resumed, {
         name: "operate_pay",
         args: { session_id: started.capability.sessionId },
-        capability: started.capability,
       }),
     ).resolves.toMatchObject({
       requestId: "payment-request",
@@ -421,6 +425,10 @@ it("retains acknowledged start control until a same-lineage follow-up", async ()
     state.finish.mockImplementation(async (sessionId: string) => {
       state.sessions.delete(sessionId);
       return { session_id: sessionId, url: "", closed: true };
+    });
+    state.forceFinish.mockImplementation(async (sessionId: string) => {
+      state.sessions.delete(sessionId);
+      return true;
     });
     const listener = await listenBroker(path, {
       authenticate: async (token, agentId, lineageCredential) =>

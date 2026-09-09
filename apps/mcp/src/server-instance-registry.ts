@@ -342,8 +342,7 @@ export function registerServerInstance(
   let record: ServerInstanceRecord = {
     version: 1,
     agent_identity: identity,
-    launcher_lineage:
-      options.launcherLineage ?? serverLauncherLineage({ accountId: options.accountId, identity }),
+    launcher_lineage: options.launcherLineage ?? serverLauncherLineage(),
     state: "serving",
     pid: birth.pid,
     start_time: birth.start_time,
