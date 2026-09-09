@@ -74,7 +74,9 @@ it("uses a minutes-scale idle policy and disables it for supervised brokers", ()
 
 it("keeps startup browser work fenced while retained custody exposes only recovery", () => {
   expect(brokerStartupAllowsMethod(true, "recover")).toBe(true);
-  expect(brokerStartupAllowsMethod(true, "acknowledge")).toBe(true);
+  expect(brokerStartupAllowsMethod(true, "reclaim")).toBe(true);
+  expect(brokerStartupAllowsMethod(true, "acknowledge")).toBe(false);
+  expect(brokerStartupAllowsMethod(true, "confirm_start")).toBe(false);
   expect(brokerStartupAllowsMethod(true, "tool")).toBe(false);
   expect(brokerStartupAllowsMethod(false, "tool")).toBe(true);
 });

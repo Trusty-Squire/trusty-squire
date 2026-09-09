@@ -26,13 +26,14 @@ const DEFAULT_BROKER_DRAIN_CLEANUP_TIMEOUT_MS = 3_000;
 const SUPERVISOR_ATTACH_TIMEOUT_MS = 10_000;
 const SUPERVISOR_ATTACH_POLL_MS = 100;
 const DRAIN_RECOVERY_METHODS = new Set(["recover", "reclaim", "acknowledge", "confirm_start"]);
+const STARTUP_RECONCILIATION_METHODS = new Set(["recover", "reclaim"]);
 
 export function brokerDrainAllowsMethod(method: string): boolean {
   return DRAIN_RECOVERY_METHODS.has(method);
 }
 
 export function brokerStartupAllowsMethod(retainedCustody: boolean, method: string): boolean {
-  return !retainedCustody || DRAIN_RECOVERY_METHODS.has(method);
+  return !retainedCustody || STARTUP_RECONCILIATION_METHODS.has(method);
 }
 
 export async function brokerShutdownCleanupComplete(

@@ -26,6 +26,10 @@ import type { BrokerTransportPort } from "./transport.js";
 import { forwarderId } from "./lineage.js";
 import { provenPreDispatchMutationFailure } from "../mutation-dispatch-evidence.js";
 
+class DeliveredPreDispatchFailure {
+  constructor(readonly error: "stale_ref") {}
+}
+
 const capabilitySchema = z
   .object({
     cellId: z.string(),
@@ -355,6 +359,7 @@ export class OperatorBroker implements BrokerTransportPort {
                     ...commandDispatch,
                     outcome: { status: "not_dispatched", error: preDispatch.code },
                   });
+                  return new DeliveredPreDispatchFailure(preDispatch.code);
                 }
                 throw error;
               }
@@ -471,6 +476,13 @@ export class OperatorBroker implements BrokerTransportPort {
       extra,
       lane,
     );
+    if (result instanceof DeliveredPreDispatchFailure)
+      return {
+        preDispatchFailure: {
+          error: result.error,
+          dispatch: "not_dispatched" as const,
+        },
+      };
     if (tool.name === "operate_finish") await this.authority.close(principal, capability);
     return { result };
   }

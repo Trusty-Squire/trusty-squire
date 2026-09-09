@@ -1592,6 +1592,55 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it("rejects a compact OAuth target replaced during recovery-page setup", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://setup-gap.test/login";
+    const providerUrl = `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(
+      "https://setup-gap.test/dashboard",
+    )}`;
+    let sessionId: string | undefined;
+    await context.route("**/*", (route) => {
+      const url = route.request().url();
+      if (url === productUrl) {
+        return route.fulfill({
+          contentType: "text/html",
+          body: `<button id="oauth" onclick='location.href=${JSON.stringify(providerUrl)}'>Continue with Google</button>`,
+        });
+      }
+      return route.fulfill({ contentType: "text/html", body: "<main>Provider</main>" });
+    });
+    await product.goto(productUrl);
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: productUrl,
+        observationFormat: "browser-use-dom",
+      });
+      sessionId = started.session_id;
+      const ref = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
+      expect(ref).toBeDefined();
+      const createRecoveryPage = context.newPage.bind(context);
+      const recoverySetup = vi.spyOn(context, "newPage").mockImplementation(async () => {
+        const recovery = await createRecoveryPage();
+        await product.locator("#oauth").evaluate((element) => {
+          element.outerHTML =
+            '<button id="oauth" onclick="document.body.dataset.danger = \'clicked\'">Delete account</button>';
+        });
+        return recovery;
+      });
+      await expect(
+        act(sessionId, { kind: "oauth_login", target: ref!, provider: "google" }),
+      ).rejects.toBeInstanceOf(ProvenPreDispatchMutationError);
+      recoverySetup.mockRestore();
+      expect(await product.locator("body").getAttribute("data-danger")).toBeNull();
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
+
   it("rejects an owned return chain longer than callback then dashboard", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();
@@ -1769,6 +1818,42 @@ describe("BrowserController OAuth popup lifecycle", () => {
         OAuthAwaitingHumanError,
       );
       expect(controller.currentUrl()).toBe(providerVariantUrl);
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("rejects a cross-provider destination anywhere in the owned return chain", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const foreignProviderUrl = "https://accounts.google.com/consent";
+    const callbackUrl = `https://resend.test/auth/callback?redirect_uri=${encodeURIComponent(
+      foreignProviderUrl,
+    )}`;
+    const providerUrl = `https://github.com/login/oauth/authorize?redirect_uri=${encodeURIComponent(
+      callbackUrl,
+    )}`;
+    await context.route("**/*", (route) => {
+      const url = route.request().url();
+      return route.fulfill({
+        contentType: "text/html",
+        body:
+          url === "https://resend.test/signup"
+            ? `<button id="oauth" onclick='location.href=${JSON.stringify(providerUrl)}'>Continue</button>`
+            : url === providerUrl
+              ? `<script>location.href=${JSON.stringify(callbackUrl)}</script>`
+              : url === callbackUrl
+                ? `<script>location.replace(${JSON.stringify(foreignProviderUrl)})</script>`
+                : "<main>Google consent</main>",
+      });
+    });
+    await product.goto("https://resend.test/signup");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 500)).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+      expect(controller.currentUrl()).toBe(foreignProviderUrl);
     } finally {
       await context.close();
     }

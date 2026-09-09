@@ -218,8 +218,14 @@ it("carries queued OAuth authority from broker admission through final dispatch"
 
     await expect(blocking).resolves.toMatchObject({ result: { status: "completed" } });
     await expect(unchanged.result).resolves.toMatchObject({ result: { status: "completed" } });
-    await expect(changed.result).rejects.toBeInstanceOf(ProvenPreDispatchMutationError);
+    await expect(changed.result).resolves.toEqual({
+      preDispatchFailure: { error: "stale_ref", dispatch: "not_dispatched" },
+    });
     expect(dispatched).toEqual(["blocker", "unchanged"]);
+    await broker.acknowledge(clients[2]!.principal, "login-changed");
+    await expect(
+      journal.hasOutstanding(clients[2]!.capability.sessionId, clients[2]!.principal.forwarderId),
+    ).resolves.toBe(false);
     await expect(
       broker.recover(clients[2]!.principal, {
         name: "operate_login",

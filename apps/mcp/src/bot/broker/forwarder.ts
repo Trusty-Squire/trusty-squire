@@ -5,6 +5,7 @@ import type { BrokerClient } from "./transport.js";
 import type { TabCapability } from "./authority.js";
 import { BrokerRefusal } from "./scheduler.js";
 import { requireLineageCredential } from "./lineage.js";
+import { ProvenPreDispatchMutationError } from "../mutation-dispatch-evidence.js";
 
 export interface BrokerRecoveryRequest {
   recover?: boolean;
@@ -154,7 +155,18 @@ export class OperatorForwarder {
         ...(capability === undefined ? {} : { capability }),
       },
       idempotencyKey,
-    )) as { result: unknown; capability?: TabCapability };
+    )) as {
+      result?: unknown;
+      capability?: TabCapability;
+      preDispatchFailure?: { error?: unknown; dispatch?: unknown };
+    };
+    if (
+      reply.preDispatchFailure?.error === "stale_ref" &&
+      reply.preDispatchFailure.dispatch === "not_dispatched"
+    ) {
+      await client.acknowledge(idempotencyKey);
+      throw new ProvenPreDispatchMutationError("stale_ref");
+    }
     if (reply.capability !== undefined)
       this.sessions.set(reply.capability.sessionId, reply.capability);
     await client.acknowledge(idempotencyKey);

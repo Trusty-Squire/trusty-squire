@@ -820,28 +820,9 @@ async function runSerializedOAuthBoundary(
   const completed = await runSerializedGoogleIdentityOperation(
     session,
     async (browser) => {
-      // The action was authorized against the session's isolated browser before
-      // the canonical profile was opened. Re-extract inside the same serialized
-      // operation and require the identical structural element identity before
-      // clicking; this keeps stale-handle protection without letting a prepared
-      // canonical browser escape the boundary on reobserve_required.
-      const fresh =
-        session.compactV2Mode === "on"
-          ? (await browser.extractBrowserUseObservation()).elements
-          : await browser.extractInteractiveElements();
-      retainSessionElements(session, fresh);
-      const resolved =
-        compactAuthorization === undefined
-          ? resolveTarget(fresh, authorizedRef)
-          : resolveAuthorizedCompactV2Target(session, fresh, compactAuthorization);
-      if (resolved === null) {
-        throw new Error(
-          "OAuth action target changed during the identity handoff; re-observe before retrying",
-        );
-      }
       const humanHandoffTimeoutMs = oauthHumanHandoffTimeoutMs();
       await browser.loginWithOAuth(
-        resolved.selector,
+        authorizedElement.selector,
         oauthActionRemainingMs(deadline),
         provider,
         provider === "github" ? undefined : expectedGoogleAccountEmail,
@@ -854,6 +835,28 @@ async function runSerializedOAuthBoundary(
           // human budget; signalling re-arms every enclosing deadline race.
           resetOAuthActionDeadline(deadline, humanHandoffTimeoutMs);
           return deadline.expiresAt;
+        },
+        async () => {
+          try {
+            const fresh =
+              session.compactV2Mode === "on"
+                ? (await browser.extractBrowserUseObservation()).elements
+                : await browser.extractInteractiveElements();
+            retainSessionElements(session, fresh);
+            const resolved =
+              compactAuthorization === undefined
+                ? resolveTarget(fresh, authorizedRef)
+                : resolveAuthorizedCompactV2Target(session, fresh, compactAuthorization);
+            if (resolved !== null) return resolved.selector;
+            throw new Error(
+              "OAuth action target changed during the identity handoff; re-observe before retrying",
+            );
+          } catch (error) {
+            if (compactAuthorization !== undefined) {
+              throw new ProvenPreDispatchMutationError("stale_ref", { cause: error });
+            }
+            throw error;
+          }
         },
       );
       // Human completion returns custody to bounded machine work. Give DOM
@@ -5213,8 +5216,11 @@ export async function act(
     if (error instanceof OAuthAwaitingHumanError && session !== undefined) {
       return oauthAwaitingHumanObservation(session, error);
     }
-    if (action.kind === "oauth_login" && error instanceof CompactV2StaleRefError) {
-      throw new ProvenPreDispatchMutationError("stale_ref", { cause: error });
+    if (action.kind === "oauth_login") {
+      if (error instanceof ProvenPreDispatchMutationError) throw error;
+      if (error instanceof CompactV2StaleRefError) {
+        throw new ProvenPreDispatchMutationError("stale_ref", { cause: error });
+      }
     }
     if (session?.compactV2Active === true) {
       // Preserve only the retry evidence consumed by operate_click. Raw browser

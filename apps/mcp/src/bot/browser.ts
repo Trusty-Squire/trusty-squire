@@ -475,6 +475,17 @@ function oauthRedirectChain(url: string): string[] | null {
   return chain;
 }
 
+function oauthProviderForUrl(url: string): OAuthProviderId | null {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (host === "accounts.google.com") return "google";
+    if (host === "github.com") return "github";
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function oauthProviderOrigin(
   url: string,
   provider: OAuthProviderId | undefined,
@@ -483,12 +494,9 @@ function oauthProviderOrigin(
   try {
     const parsed = new URL(url);
     if (parsed.origin === productOrigin) return null;
-    const host = parsed.hostname.toLowerCase();
-    if (provider === "google" && host !== "accounts.google.com") return null;
-    if (provider === "github" && host !== "github.com") return null;
-    if (provider === undefined && host !== "accounts.google.com" && host !== "github.com") {
+    const recognizedProvider = oauthProviderForUrl(parsed.href);
+    if (recognizedProvider === null || (provider !== undefined && recognizedProvider !== provider))
       return null;
-    }
     return parsed.origin;
   } catch {
     return null;
@@ -13646,6 +13654,7 @@ export class BrowserController {
     expectedGoogleAccountEmail?: string | null,
     registerCompletionCheck?: (check: () => Promise<OAuthCompletionEvidence | null>) => void,
     onHumanHandoff?: () => number,
+    resolveSelectorBeforeClick?: () => Promise<string>,
   ): Promise<void> {
     const product = this.page;
     const context = this.context;
@@ -13710,7 +13719,7 @@ export class BrowserController {
         return;
       }
       if (chain.length === 0) return;
-      expectedReturnChain = chain.some((target) => new URL(target).origin === providerOrigin)
+      expectedReturnChain = chain.some((target) => oauthProviderForUrl(target) !== null)
         ? []
         : chain;
     };
@@ -13859,9 +13868,18 @@ export class BrowserController {
             "not_attempted",
           );
         }
+        const dispatchSelector = await resolveSelectorBeforeClick?.() ?? selector;
+        if (Date.now() >= oauthDeadline) {
+          throw new OAuthAwaitingHumanError(
+            `OAuth has not been attempted yet: the ${Math.ceil(oauthBudgetMs / 1000)}-second ` +
+              `budget elapsed before the OAuth control on ${safeOrigin(productUrl)} was clicked. ` +
+              "Retry oauth_login.",
+            "not_attempted",
+          );
+        }
         try {
           actionStarted = true;
-          await this.click(selector);
+          await this.click(dispatchSelector);
         } catch (error) {
           if (!product.isClosed()) throw error;
         }
