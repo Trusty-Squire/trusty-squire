@@ -371,6 +371,11 @@ export interface ApiPrismaClient {
     }): Promise<{ account_id: string }[]>;
   };
   vaultAuditEvent: {
+    upsert(args: {
+      where: { id: string };
+      create: Record<string, unknown>;
+      update: Record<string, unknown>;
+    }): Promise<VaultAuditEventRow>;
     create(args: { data: Record<string, unknown> }): Promise<VaultAuditEventRow>;
     // Optional/broad `where` so the metrics exporter can take a grand total
     // while audit readers pass a scoped (account_id + type + window) filter.

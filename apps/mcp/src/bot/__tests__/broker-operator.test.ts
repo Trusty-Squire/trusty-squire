@@ -1352,17 +1352,18 @@ it("retires a closing actor when terminal cleanup settles after delivery", async
       inputSchema: z.object({ session_id: z.string() }),
       jsonInputSchema: {},
       handler: async (args) => {
+        const { session_id } = z.object({ session_id: z.string() }).parse(args);
         cleanup = (async () => {
           await gate;
           await persistOperatorTerminalReceipt({
-            session_id: args.session_id,
+            session_id,
             operation_id: "finish",
             execution: "completed",
             mutation: "not_dispatched",
             cleanup: "closed",
             closed: true,
           });
-          state.sessions.delete(args.session_id);
+          state.sessions.delete(session_id);
           settleOperatorTerminalReceipt();
         })();
         return { session_id: args.session_id, closed: false, cleanup: "closing" };

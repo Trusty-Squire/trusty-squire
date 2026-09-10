@@ -51,7 +51,7 @@ it("checkpoints handle, frame, select, and phone mutations before their first ef
         throw new Error("journal unavailable");
       });
       await expect(
-        withOperatorRequestContext(new AbortController().signal, test.run, denied),
+        withOperatorRequestContext<unknown>(new AbortController().signal, test.run, denied),
       ).rejects.toThrow("journal unavailable");
       expect(denied).toHaveBeenCalledOnce();
       expect(await test.read()).toBe(test.old);
@@ -62,7 +62,7 @@ it("checkpoints handle, frame, select, and phone mutations before their first ef
       const checkpoint = vi.fn(async () => {
         expect(await test.read()).toBe(test.old);
       });
-      await withOperatorRequestContext(new AbortController().signal, test.run, checkpoint);
+      await withOperatorRequestContext<unknown>(new AbortController().signal, test.run, checkpoint);
       expect(checkpoint).toHaveBeenCalledOnce();
       expect(await test.read()).toBe(test.next);
     }

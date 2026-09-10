@@ -57,7 +57,9 @@ it("refuses direct mutation replay until original capture storage reconciles", a
       arguments: { session_id: "session", ref: "@create", capture },
     });
     expect(first.structuredContent).toMatchObject({ stored: false, retry: "extract_only" });
-    const write_id = first.structuredContent!.write_id;
+    const content = first.structuredContent as Record<string, unknown>;
+    expect(typeof content.write_id).toBe("string");
+    const write_id = content.write_id;
     const repeated = await client.callTool({
       name: "operate_click",
       arguments: { session_id: "session", ref: "@create" },
