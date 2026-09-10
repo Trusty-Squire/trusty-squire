@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.14-rc.12 (2026-09-10)
+
+- Capture plain-text API key fields, including Neon’s revealed-token dialog, directly into the vault with an explicit CSS source. Extraction-only recovery keeps the original write ID and never repeats key creation.
+
 ## 1.1.14-rc.11 (2026-09-10)
 
 - Release candidate of preserved operator hardening source `6930f3fb` for native testing: cancellation propagation, observation and OAuth ownership, credential capture, and terminal receipts.
