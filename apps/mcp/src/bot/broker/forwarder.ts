@@ -17,6 +17,20 @@ export interface BrokerRecoveryRequest {
   };
 }
 
+export class ForwardedResultError extends BrokerRefusal {
+  constructor(
+    message: string,
+    readonly detail: Record<string, unknown>,
+  ) {
+    super("invalid_broker_result", message);
+    this.name = "ForwardedResultError";
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 /** The MCP process holds only opaque capabilities. Never reconnect/replay a
  * dispatched request after transport loss: its side effect may have happened. */
 export class OperatorForwarder {
@@ -193,20 +207,77 @@ export class OperatorForwarder {
         idempotencyKey,
       );
       const rawReply = await brokerCall;
-      const reply = rawReply as {
-        result?: unknown;
-        capability?: TabCapability;
-        preDispatchFailure?: { error?: unknown; dispatch?: unknown };
-      };
+      if (!isRecord(rawReply))
+        throw new ForwardedResultError("Broker returned a non-object tool reply", {
+          cleanup: "unknown",
+          closed: false,
+        });
+      const reply = rawReply;
+      const preDispatchFailure = isRecord(reply.preDispatchFailure)
+        ? reply.preDispatchFailure
+        : undefined;
       if (
-        reply.preDispatchFailure?.error === "stale_ref" &&
-        reply.preDispatchFailure.dispatch === "not_dispatched"
+        preDispatchFailure?.error === "stale_ref" &&
+        preDispatchFailure.dispatch === "not_dispatched"
       ) {
         await client.acknowledge(idempotencyKey);
         throw new ProvenPreDispatchMutationError("stale_ref");
       }
-      if (reply.capability !== undefined)
-        this.sessions.set(reply.capability.sessionId, reply.capability);
+      const replyCapability = this.isCapability(reply.capability) ? reply.capability : undefined;
+      if (name === "operate_start") {
+        const result = isRecord(reply.result) ? reply.result : undefined;
+        const returnedSessionId = result?.session_id;
+        const refusedStart = isRecord(result?.needs_user);
+        const validStartResult =
+          typeof returnedSessionId === "string" &&
+          returnedSessionId.length > 0 &&
+          (replyCapability !== undefined
+            ? returnedSessionId === replyCapability.sessionId
+            : refusedStart);
+        if (!validStartResult) {
+          const recovered = await this.recover(client, name, args, undefined, {
+            recover: true,
+          }).catch(() => undefined);
+          const recoveredResult = isRecord(recovered?.result) ? recovered.result : undefined;
+          const recoveredSessionId = recoveredResult?.session_id;
+          const recoveredCapability = recovered?.capability;
+          if (
+            recovered !== undefined &&
+            recoveredCapability !== undefined &&
+            typeof recoveredSessionId === "string" &&
+            recoveredSessionId === recoveredCapability.sessionId &&
+            (replyCapability === undefined ||
+              recoveredCapability.sessionId === replyCapability.sessionId)
+          ) {
+            await client.acknowledge(recovered.requestId);
+            this.sessions.set(recoveredCapability.sessionId, recoveredCapability);
+            return recoveredResult;
+          }
+          if (replyCapability !== undefined) {
+            this.sessions.set(replyCapability.sessionId, replyCapability);
+            throw new ForwardedResultError(
+              "Broker retained startup custody but did not return a valid startup result",
+              {
+                session_id: replyCapability.sessionId,
+                cleanup: "open",
+                closed: false,
+                recovery: {
+                  tool: "operate_finish",
+                  session_id: replyCapability.sessionId,
+                },
+              },
+            );
+          }
+          throw new ForwardedResultError("Broker did not return a valid startup result", {
+            cleanup: "unknown",
+            closed: false,
+          });
+        }
+        if (replyCapability !== undefined)
+          this.sessions.set(replyCapability.sessionId, replyCapability);
+      } else if (replyCapability !== undefined) {
+        this.sessions.set(replyCapability.sessionId, replyCapability);
+      }
       await client.acknowledge(idempotencyKey);
       if (
         name === "operate_finish" &&
