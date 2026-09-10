@@ -42,6 +42,7 @@ import {
 
 import { isSameRecipeDomain } from "@trusty-squire/recipe-schema";
 import { type ChildProcess } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import type {
   BrowserContext,
@@ -63,6 +64,13 @@ import {
 import { BrowserProcessOwner } from "./browser-process-owner.js";
 import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
+import {
+  classifyGoogleAuthState,
+  extractGoogleHumanChallenge,
+  extractGoogleNumberMatch,
+  type GoogleHumanChallenge,
+} from "./google-auth-state.js";
+import type { HeightenedAuthNotificationResult } from "../api-client.js";
 import type { PaymentBrowser } from "./pay-operator.js";
 import { bindOwnerBrowserLaunch, untrackOwnerBrowserLaunch } from "./owner-process-reaper.js";
 import { PageDriver } from "./page-driver.js";
@@ -370,9 +378,19 @@ export class PaymentSubmitOutcomeUnknownError extends Error {
 // live recovery path) — still never a guess about the cause.
 export type OAuthAwaitingHumanPhase = "not_attempted" | "pending";
 
+export type OAuthChallengeReporter = (
+  challenge: GoogleHumanChallenge,
+  signal: AbortSignal,
+) => Promise<HeightenedAuthNotificationResult>;
+
 export class OAuthAwaitingHumanError extends Error {
   readonly phase: OAuthAwaitingHumanPhase;
-  constructor(message: string, phase: OAuthAwaitingHumanPhase = "pending") {
+  constructor(
+    message: string,
+    phase: OAuthAwaitingHumanPhase = "pending",
+    readonly challenge?: GoogleHumanChallenge,
+    readonly notification?: HeightenedAuthNotificationResult,
+  ) {
     super(message);
     this.name = "OAuthAwaitingHumanError";
     this.phase = phase;
@@ -2867,6 +2885,16 @@ export class BrowserController {
   private checkoutSubmitSequence = 0;
   private clickDispatchSequence = 0;
   private readonly oauthConsentAttemptedPhases = new Set<string>();
+  private activeOAuthAttempt: {
+    id: string;
+    provider: OAuthProviderId | undefined;
+    productPage: Page;
+    productDocumentId: string;
+    providerPage: Page | null;
+    providerDocumentId: string | null;
+    reporter: OAuthChallengeReporter | undefined;
+    reportedChallenges: Map<string, HeightenedAuthNotificationResult | undefined>;
+  } | null = null;
   private readonly humanize: boolean;
   // Tracks the simulated mouse position so successive clicks can move
   // along a continuous path (humans don't teleport between clicks).
@@ -13817,6 +13845,7 @@ export class BrowserController {
         confirmTarget: () => Promise<void>,
       ) => Promise<void>,
     ) => Promise<void>,
+    reportHumanChallenge?: OAuthChallengeReporter,
   ): Promise<void> {
     const product = this.page;
     const context = this.context;
@@ -13840,6 +13869,16 @@ export class BrowserController {
     this.oauthProviderPageClosed = false;
     this.oauthCompletionPage = null;
     this.oauthTerminalCompletionUrl = null;
+    this.activeOAuthAttempt = {
+      id: randomUUID(),
+      provider: consentProvider,
+      productPage: product,
+      productDocumentId: this.mainDocumentIdentity(product),
+      providerPage: null,
+      providerDocumentId: null,
+      reporter: reportHumanChallenge,
+      reportedChallenges: new Map(),
+    };
     const oauthBudgetMs = Math.max(1, settleTimeoutMs);
     const productUrl = product.url();
     let oauthDeadline = Date.now() + oauthBudgetMs;
@@ -13955,8 +13994,12 @@ export class BrowserController {
     });
     const recordTopLevelNavigation = (page: Page, frame: Frame): void => {
       if (!actionStarted || frame !== page.mainFrame()) return;
+      if (this.activeOAuthAttempt?.providerPage === page) {
+        this.activeOAuthAttempt.providerDocumentId = null;
+      }
       if (page === popupCapture.page) transientNavigated = true;
       const url = frame.url();
+      const priorReturn = observedReturn;
       captureExpectedReturnUrl(url);
       if (matchesExpectedReturn(url) && oauthErrorFromReturnUrl(url) === null) {
         observedReturn = { page, url };
@@ -13966,16 +14009,29 @@ export class BrowserController {
       // the product. Preserve that causal edge instead of demanding that the
       // callback pathname remain the final visible URL.
       if (
-        observedReturn?.page === page &&
+        priorReturn?.page === page &&
         safeOrigin(url) === productOrigin &&
         oauthErrorFromReturnUrl(url) === null
       ) {
         observedProductContinuation = { page, url };
+        return;
+      }
+      if (priorReturn?.page === page) {
+        observedReturn = null;
+        observedProductContinuation = null;
       }
     };
     const onProductNavigation = (frame: Frame): void => {
       if (!actionStarted || frame !== product.mainFrame()) return;
       recordTopLevelNavigation(product, frame);
+      if (
+        observedReturn?.page !== product &&
+        frame.url() !== productUrl &&
+        !matchesExpectedReturn(frame.url())
+      ) {
+        observedReturn = null;
+        observedProductContinuation = null;
+      }
       productNavigated = true;
       startHumanHandoff();
       resolveProductNavigation();
@@ -14244,6 +14300,9 @@ export class BrowserController {
       this.oauthProviderPageClosed = transient.isClosed();
       this.restoreProductPageWhenOAuthPageCloses(transient, durableProduct);
       this.page = transient;
+      if (this.activeOAuthAttempt !== null) {
+        this.activeOAuthAttempt.providerPage = transient;
+      }
       const hasTerminalCompletion = (): boolean =>
         observedReturn !== null && observedReturn.page.isClosed();
       let settled: Page | null = null;
@@ -14266,13 +14325,115 @@ export class BrowserController {
           );
           if (settled !== null || hasTerminalCompletion()) break;
           if (Date.now() >= oauthDeadline) break;
-          if (oauthProviderForUrl(transient.url()) !== consentProvider) {
+          const transientUrl = transient.url();
+          if (oauthProviderForUrl(transientUrl) !== consentProvider) {
             if (await relyingPartyOnboarding(transient)) {
               pendingOnProvider = true;
               throw new OAuthOnboardingRequiredError(safeOrigin(transient.url()));
             }
             await this.sleep(Math.min(250, remainingBudgetMs()));
             continue;
+          }
+          const providerDocumentId = this.mainDocumentIdentity(transient);
+          if (this.activeOAuthAttempt !== null) {
+            this.activeOAuthAttempt.providerPage = transient;
+            this.activeOAuthAttempt.providerDocumentId = providerDocumentId;
+          }
+          if (consentProvider === "google") {
+            const bodyText = await transient
+              .locator("body")
+              .innerText({ timeout: Math.min(1_000, Math.max(1, remaining)) })
+              .catch(() => "");
+            const googleState = classifyGoogleAuthState(transientUrl, bodyText);
+            if (googleState === "challenge") {
+              const number = extractGoogleNumberMatch(bodyText);
+              const revision = createHash("sha256")
+                .update(`${providerDocumentId}\u0000${number ?? "unreadable"}\u0000${transientUrl}`)
+                .digest("base64url")
+                .slice(0, 24);
+              const attempt = this.activeOAuthAttempt;
+              if (attempt === null) continue;
+              const challenge = extractGoogleHumanChallenge({
+                attemptId: attempt.id,
+                challengeRevision: revision,
+                documentId: providerDocumentId,
+                url: transientUrl,
+                bodyText,
+                observedAt: new Date(),
+              });
+              if (challenge !== null) {
+                let notification = attempt.reportedChallenges.get(revision);
+                if (!attempt.reportedChallenges.has(revision)) {
+                  attempt.reportedChallenges.set(revision, undefined);
+                  if (attempt.reporter !== undefined) {
+                    const notificationAbort = new AbortController();
+                    const notificationBudgetMs = Math.min(2_000, remainingBudgetMs());
+                    let notificationTimer: ReturnType<typeof setTimeout> | undefined;
+                    const timedOutNotification = new Promise<HeightenedAuthNotificationResult>(
+                      (resolve) => {
+                        notificationTimer = setTimeout(() => {
+                          notificationAbort.abort(new Error("notification_timeout"));
+                          resolve({
+                            sent: false,
+                            deduped: false,
+                            attempt_id: challenge.attempt_id,
+                            challenge_revision: challenge.challenge_revision,
+                            delivery: {
+                              channel: null,
+                              status: "failed",
+                              error: "notification_timeout",
+                            },
+                          });
+                        }, notificationBudgetMs);
+                      },
+                    );
+                    notificationTimer?.unref();
+                    try {
+                      notification = await Promise.race([
+                        attempt
+                          .reporter(challenge, notificationAbort.signal)
+                          .catch((error: unknown) => ({
+                            sent: false,
+                            deduped: false,
+                            attempt_id: challenge.attempt_id,
+                            challenge_revision: challenge.challenge_revision,
+                            delivery: {
+                              channel: null,
+                              status: "failed" as const,
+                              error: error instanceof Error ? error.message : String(error),
+                            },
+                          })),
+                        timedOutNotification,
+                      ]);
+                    } finally {
+                      if (notificationTimer !== undefined) clearTimeout(notificationTimer);
+                    }
+                    attempt.reportedChallenges.set(revision, notification);
+                  }
+                }
+                const numberMessage =
+                  challenge.number === null
+                    ? "Google is asking for human verification; the number is unreadable."
+                    : `Google is asking you to tap ${challenge.number} on your phone.`;
+                const deliveryMessage =
+                  notification === undefined
+                    ? "Paired notification was not attempted by the caller."
+                    : notification.delivery.status === "sent"
+                      ? `Paired notification sent via ${notification.delivery.channel ?? "configured channel"}.`
+                      : `Paired notification failed: ${notification.delivery.error ?? "delivery_failed"}.`;
+                throw new OAuthAwaitingHumanError(
+                  `${numberMessage} Automated consent stopped for attempt ${challenge.attempt_id}. ${deliveryMessage}`,
+                  "pending",
+                  challenge,
+                  notification,
+                );
+              }
+            }
+            if (googleState !== "chooser" && googleState !== "consent") {
+              pendingOnProvider = true;
+              await this.sleep(Math.min(250, remainingBudgetMs()));
+              continue;
+            }
           }
           const consentBudgetMs = oauthDeadline - Date.now();
           const advanced = await this.advanceOAuthConsent(
@@ -14338,6 +14499,7 @@ export class BrowserController {
       if (providerStillShowing) {
         this.page = retainedProvider;
       } else {
+        this.activeOAuthAttempt = null;
         const retained = product.isClosed() ? recovery : product;
         this.page = retained?.isClosed() === false ? retained : this.primaryPage;
         if (
@@ -15014,10 +15176,19 @@ export class BrowserController {
   ): Promise<boolean> {
     if (!this.page) throw new Error("Browser not started");
     const authorityPage = this.page;
-    const providerOwned = (): boolean =>
-      !authorityPage.isClosed() &&
-      this.page === authorityPage &&
-      oauthProviderForUrl(authorityPage.url()) === provider;
+    const providerOwned = (): boolean => {
+      const attempt = this.activeOAuthAttempt;
+      return (
+        attempt !== null &&
+        attempt.provider === provider &&
+        attempt.providerPage === authorityPage &&
+        attempt.providerDocumentId !== null &&
+        !authorityPage.isClosed() &&
+        this.page === authorityPage &&
+        oauthProviderForUrl(authorityPage.url()) === provider &&
+        this.mainDocumentIdentity(authorityPage) === attempt.providerDocumentId
+      );
+    };
     if (!providerOwned()) return false;
     const phaseSignature = await authorityPage
       .evaluate(() =>

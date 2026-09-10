@@ -29,6 +29,7 @@ import {
   cancelActiveLoginBrowsers,
   openInstallConfirmInBotChrome,
   classifyGoogleAuthState,
+  extractGoogleHumanChallenge,
   checkLoginStatusWithin,
   detectActiveProviderSessions,
   extractGoogleAccountEmail,
@@ -966,6 +967,14 @@ describe("claimed worker Google identity", () => {
 });
 
 describe("classifyGoogleAuthState (T5)", () => {
+  it("distinguishes the signed-in account chooser from a credentials page", () => {
+    expect(
+      classifyGoogleAuthState(
+        "https://accounts.google.com/v3/signin/accountchooser?continue=x",
+        "Choose an account to continue",
+      ),
+    ).toBe("chooser");
+  });
   it("detects the OAuth consent screen", () => {
     expect(
       classifyGoogleAuthState(
@@ -1036,6 +1045,54 @@ describe("extractGoogleNumberMatch", () => {
   it("returns null on unrelated pages", () => {
     expect(extractGoogleNumberMatch("Sign in with your password")).toBeNull();
     expect(extractGoogleNumberMatch("")).toBeNull();
+  });
+});
+
+describe("extractGoogleHumanChallenge", () => {
+  it("returns attempt/document-owned metadata without retaining page text", () => {
+    const challenge = extractGoogleHumanChallenge({
+      attemptId: "attempt-1",
+      challengeRevision: "revision-1",
+      documentId: "document-1",
+      url: "https://accounts.google.com/v3/signin/challenge/dp",
+      bodyText: "Verify it's you — Tap 28 on your phone to sign in",
+      observedAt: new Date("2026-09-10T12:00:00.000Z"),
+    });
+
+    expect(challenge).toEqual({
+      provider: "google",
+      kind: "number_match",
+      attempt_id: "attempt-1",
+      challenge_revision: "revision-1",
+      document_id: "document-1",
+      number: "28",
+      observed_at: "2026-09-10T12:00:00.000Z",
+      expires_at: null,
+    });
+    expect(challenge).not.toHaveProperty("bodyText");
+  });
+
+  it("reports an unreadable verification prompt and ignores non-challenges", () => {
+    expect(
+      extractGoogleHumanChallenge({
+        attemptId: "attempt-1",
+        challengeRevision: "revision-1",
+        documentId: "document-1",
+        url: "https://accounts.google.com/v3/signin/challenge/totp",
+        bodyText: "2-Step Verification",
+        observedAt: new Date("2026-09-10T12:00:00.000Z"),
+      }),
+    ).toMatchObject({ kind: "verification", number: null });
+    expect(
+      extractGoogleHumanChallenge({
+        attemptId: "attempt-1",
+        challengeRevision: "revision-1",
+        documentId: "document-1",
+        url: "https://accounts.google.com/signin/oauth/consent",
+        bodyText: "Continue",
+        observedAt: new Date("2026-09-10T12:00:00.000Z"),
+      }),
+    ).toBeNull();
   });
 });
 

@@ -130,17 +130,105 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await product.goto("https://accounts.google.com/pending");
     const controller = BrowserController.fromHarnessPage(product);
     try {
+      (
+        controller as unknown as {
+          activeOAuthAttempt: {
+            id: string;
+            provider: "google";
+            productPage: Page;
+            productDocumentId: string;
+            providerPage: Page;
+            providerDocumentId: string;
+            reporter: undefined;
+            reportedChallenges: Map<string, undefined>;
+          };
+        }
+      ).activeOAuthAttempt = {
+        id: "attempt-1",
+        provider: "google",
+        productPage: product,
+        productDocumentId: controller.mainDocumentIdentity(product),
+        providerPage: product,
+        providerDocumentId: controller.mainDocumentIdentity(product),
+        reporter: undefined,
+        reportedChallenges: new Map(),
+      };
       await expect(controller.advanceOAuthConsent("google", 500)).resolves.toBe(true);
       expect(await product.locator("body").getAttribute("data-clicks")).toBe("1");
       await expect(controller.advanceOAuthConsent("google", 500)).resolves.toBe(false);
       expect(await product.locator("body").getAttribute("data-clicks")).toBe("1");
+      await product.reload();
+      await expect(controller.advanceOAuthConsent("google", 500)).resolves.toBe(false);
+      expect(await product.locator("body").getAttribute("data-clicks")).toBeNull();
       const driver = (controller as unknown as { pageDriver: Record<string, unknown> }).pageDriver;
       driver.oauthProductPage = product;
       driver.oauthProviderPage = product;
       await expect(controller.loginWithOAuth("#oauth", 100, "google")).rejects.toMatchObject({
         message: expect.stringContaining("second authorization attempt was not started"),
       });
-      expect(await product.locator("body").getAttribute("data-clicks")).toBe("1");
+      expect(await product.locator("body").getAttribute("data-clicks")).toBeNull();
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("returns an attempt-bound Google number immediately and stops consent automation", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const challengeUrl =
+      "https://accounts.google.com/v3/signin/challenge/dp?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback";
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<button id="oauth" onclick='location.href=${JSON.stringify(challengeUrl)}'>Google</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<main>Verify it's you — Tap 28 on your phone to sign in</main>
+          <button id="continue" onclick="document.body.dataset.clicked='yes'">Continue</button>`,
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    const reporter = vi.fn(
+      async (challenge: { attempt_id: string; challenge_revision: string }) => ({
+        sent: false,
+        deduped: false,
+        attempt_id: challenge.attempt_id,
+        challenge_revision: challenge.challenge_revision,
+        delivery: { channel: null, status: "failed" as const, error: "smtp_error" },
+      }),
+    );
+    try {
+      const error = await controller
+        .loginWithOAuth(
+          "#oauth",
+          2_000,
+          "google",
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          reporter,
+        )
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(OAuthAwaitingHumanError);
+      expect(error).toMatchObject({
+        challenge: {
+          provider: "google",
+          kind: "number_match",
+          number: "28",
+          expires_at: null,
+        },
+        notification: {
+          sent: false,
+          delivery: { status: "failed", error: "smtp_error" },
+        },
+      });
+      expect(reporter).toHaveBeenCalledOnce();
+      expect(await product.locator("body").getAttribute("data-clicked")).toBeNull();
     } finally {
       await context.close();
     }
@@ -1307,7 +1395,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await context.route("https://accounts.google.com/**", (route) =>
         route.fulfill({
           contentType: "text/html",
-          body: '<main>Consent</main><input id="project-name" required autocomplete="shipping address-line1" value="provider" onchange="document.body.dataset.shippingCommitted=\'provider\'"><select id="region"><option>Provider</option><option>Product</option></select>',
+          body: '<main>Example wants access to your Google Account</main><input id="project-name" required autocomplete="shipping address-line1" value="provider" onchange="document.body.dataset.shippingCommitted=\'provider\'"><select id="region"><option>Provider</option><option>Product</option></select>',
         }),
       );
       await context.route("https://console.product.test/**", (route) =>

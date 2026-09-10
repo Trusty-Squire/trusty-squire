@@ -12,12 +12,12 @@
 //   - Body shape: subject mentions service + digit; "unreadable"
 //     branch (digit=null) sends a different subject
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "../server.js";
 import { buildInMemoryDeps } from "../services/deps.js";
 import { EmailForwarder } from "../services/email-forwarder.js";
-import { _resetNotifyDedupeForTests } from "../routes/notify.js";
+import { _notifyInFlightJoinsForTests, _resetNotifyDedupeForTests } from "../routes/notify.js";
 
 type SendDirectCall = {
   to: string;
@@ -40,6 +40,17 @@ class FailingEmailForwarder extends EmailForwarder {
   }
 }
 
+class DeferredEmailForwarder extends StubEmailForwarder {
+  release: (() => void) | null = null;
+  public override async sendDirect(params: SendDirectCall) {
+    this.calls.push(params);
+    await new Promise<void>((resolve) => {
+      this.release = resolve;
+    });
+    return { success: true };
+  }
+}
+
 describe("POST /v1/notify/heightened-auth", () => {
   let app: FastifyInstance;
   let forwarder: StubEmailForwarder;
@@ -56,6 +67,8 @@ describe("POST /v1/notify/heightened-auth", () => {
 
   afterEach(async () => {
     await app.close();
+    vi.unstubAllGlobals();
+    delete process.env.TELEGRAM_BOT_TOKEN;
   });
 
   async function issueToken(): Promise<string> {
@@ -71,6 +84,16 @@ describe("POST /v1/notify/heightened-auth", () => {
   }
 
   async function post(token: string | null, body: unknown) {
+    const payload =
+      body !== null && typeof body === "object" && !Array.isArray(body)
+        ? {
+            attempt_id: "attempt-1",
+            challenge_revision: "revision-1",
+            observed_at: "2026-09-10T12:00:00.000Z",
+            window_seconds: 120,
+            ...body,
+          }
+        : body;
     return app.inject({
       method: "POST",
       url: "/v1/notify/heightened-auth",
@@ -78,7 +101,7 @@ describe("POST /v1/notify/heightened-auth", () => {
         "content-type": "application/json",
         ...(token !== null ? { authorization: `Bearer ${token}` } : {}),
       },
-      payload: JSON.stringify(body),
+      payload: JSON.stringify(payload),
     });
   }
 
@@ -112,6 +135,7 @@ describe("POST /v1/notify/heightened-auth", () => {
     expect(call.subject).toContain("8");
     expect(call.subject).toContain("IPInfo");
     expect(call.text ?? "").toContain("Tap: 8");
+    expect(call.text ?? "").toContain("Attempt: attempt-1 / revision-1");
   });
 
   it("uses a different subject when digit is null (unreadable)", async () => {
@@ -124,7 +148,7 @@ describe("POST /v1/notify/heightened-auth", () => {
     expect(call.subject).toContain("IPInfo");
   });
 
-  it("dedupes identical sends within the 5-min window", async () => {
+  it("dedupes the same attempt and challenge revision within the 5-min window", async () => {
     const token = await issueAndPairToken("user@example.com");
     const first = await post(token, { service: "IPInfo", digit: "8" });
     const second = await post(token, { service: "IPInfo", digit: "8" });
@@ -135,18 +159,84 @@ describe("POST /v1/notify/heightened-auth", () => {
     expect(forwarder.calls).toHaveLength(1);
   });
 
-  it("does NOT dedupe when service or digit differs", async () => {
+  it("notifies again for a new revision or attempt even when the number is unchanged", async () => {
     const token = await issueAndPairToken("user@example.com");
     await post(token, { service: "IPInfo", digit: "8" });
-    await post(token, { service: "IPInfo", digit: "42" });
-    await post(token, { service: "Postmark", digit: "8" });
+    await post(token, { service: "IPInfo", digit: "8", challenge_revision: "revision-2" });
+    await post(token, { service: "IPInfo", digit: "8", attempt_id: "attempt-2" });
     expect(forwarder.calls).toHaveLength(3);
+  });
+
+  it("shares one in-flight delivery across concurrent retries", async () => {
+    const deferred = new DeferredEmailForwarder([]);
+    await app.close();
+    app = await buildServer({ deps, emailForwarder: deferred });
+    const token = await issueAndPairToken("user@example.com");
+    const first = post(token, { service: "IPInfo", digit: "8" });
+    await vi.waitFor(() => expect(deferred.calls).toHaveLength(1));
+    const second = post(token, { service: "IPInfo", digit: "8" });
+    await vi.waitFor(() => expect(_notifyInFlightJoinsForTests()).toBe(1));
+    expect(deferred.calls).toHaveLength(1);
+    deferred.release?.();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    expect(firstResult.json()).toMatchObject({ sent: true, deduped: false });
+    expect(secondResult.json()).toMatchObject({ sent: true, deduped: true });
+  });
+
+  it("prefers the paired Telegram channel and does not also email", async () => {
+    process.env.TELEGRAM_BOT_TOKEN = "test-token";
+    const telegramFetch = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", telegramFetch);
+    const token = await issueAndPairToken("user@example.com");
+    const tokenRow = await deps.machineTokenStore.find(token);
+    await deps.accountStore.setTelegramChatId(tokenRow!.paired_account_id!, "chat-42");
+
+    const res = await post(token, { service: "IPInfo", digit: "8" });
+
+    expect(res.json()).toMatchObject({
+      sent: true,
+      delivery: { channel: "telegram", status: "sent" },
+    });
+    expect(telegramFetch).toHaveBeenCalledOnce();
+    expect(forwarder.calls).toHaveLength(0);
+  });
+
+  it("falls back to email when paired Telegram delivery fails", async () => {
+    process.env.TELEGRAM_BOT_TOKEN = "test-token";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("{}", { status: 503 })),
+    );
+    const token = await issueAndPairToken("user@example.com");
+    const tokenRow = await deps.machineTokenStore.find(token);
+    await deps.accountStore.setTelegramChatId(tokenRow!.paired_account_id!, "chat-42");
+
+    const res = await post(token, { service: "IPInfo", digit: "8" });
+
+    expect(res.json()).toMatchObject({
+      sent: true,
+      delivery: { channel: "email", status: "sent" },
+    });
+    expect(forwarder.calls).toHaveLength(1);
   });
 
   it("rejects missing service", async () => {
     const token = await issueAndPairToken("user@example.com");
     const res = await post(token, { digit: "8" });
     expect(res.statusCode).toBe(400);
+    expect(forwarder.calls).toHaveLength(0);
+  });
+
+  it("rejects missing or unbounded challenge identity", async () => {
+    const token = await issueAndPairToken("user@example.com");
+    const res = await post(token, {
+      service: "IPInfo",
+      digit: "8",
+      attempt_id: "",
+      challenge_revision: "x".repeat(161),
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ error: "invalid_challenge_identity" });
     expect(forwarder.calls).toHaveLength(0);
   });
 

@@ -6,18 +6,18 @@
 // surface is stderr on the harvester box, which the user usually
 // isn't watching.
 //
-// Flow: bot POSTs {service, digit, window_seconds} authenticated by
+// Flow: bot POSTs attempt-bound challenge metadata authenticated by
 // its machine token; this route resolves token → paired account →
-// account.email (the OAuth-registered address) and fires a short
-// email via the same Gmail SMTP transporter that powers
-// /v1/webhooks/ses forwarding.
+// paired-account delivery. Telegram is preferred when linked; email uses the
+// same Gmail SMTP transporter that powers /v1/webhooks/ses forwarding as the
+// fallback.
 //
-// Idempotency: an in-memory 5-min dedupe window keyed by
-// (account_id, digit, service) so a flaky detector that fires
-// twice doesn't double-notify.
+// Idempotency is process-local and deliberately honest: a bounded 5-min window
+// is keyed by account + attempt + challenge revision, and concurrent retries
+// share one in-flight send. Separate API replicas can still duplicate a send.
 //
-// Failure modes (all return 4xx/5xx without sending; the bot's
-// caller is fire-and-forget so it never escalates):
+// Failure modes are returned to the bot so the current challenge can remain
+// visible even when paired delivery fails:
 //   401 — missing/invalid machine token
 //   412 — machine token not paired to an account (anonymous tier;
 //         there's no email to send to)
@@ -29,11 +29,15 @@ import type { MachineTokenStore } from "../services/machine-tokens.js";
 import type { AccountStore } from "../services/in-memory-account-store.js";
 import type { EmailForwarder } from "../services/email-forwarder.js";
 import { buildEmailForwarder } from "../services/webhook-forwarder.js";
+import { sendTelegramMessage } from "../services/telegram.js";
+
+type TelegramSender = (chatId: string, text: string) => Promise<boolean>;
 
 export interface NotifyRouteDeps {
   machineTokenStore: MachineTokenStore;
   accountStore: AccountStore;
   emailForwarder?: EmailForwarder;
+  telegramSender?: TelegramSender;
   now?: () => Date;
 }
 
@@ -41,13 +45,29 @@ export interface NotifyRouteDeps {
 // challenge page render but the planner re-reads the page on each loop
 // iteration; we don't want each re-read to spam another email.
 const DEDUPE_WINDOW_MS = 5 * 60 * 1000;
-const recentSends = new Map<string, number>();
+const MAX_DEDUPE_ENTRIES = 1_000;
+type DeliveryResult = {
+  sent: boolean;
+  delivery: {
+    channel: "telegram" | "email" | null;
+    status: "sent" | "failed";
+    error?: string;
+  };
+};
+const recentSends = new Map<string, { sentAt: number; result: DeliveryResult }>();
+const inFlightSends = new Map<string, Promise<DeliveryResult>>();
+let inFlightJoins = 0;
 
 function pruneDedupe(nowMs: number): void {
   // Keep the map bounded — sweep anything past the window. Cheap
   // because nothing here is hot (one POST per signup at most).
-  for (const [key, ts] of recentSends) {
-    if (nowMs - ts > DEDUPE_WINDOW_MS) recentSends.delete(key);
+  for (const [key, entry] of recentSends) {
+    if (nowMs - entry.sentAt > DEDUPE_WINDOW_MS) recentSends.delete(key);
+  }
+  while (recentSends.size > MAX_DEDUPE_ENTRIES) {
+    const oldest = recentSends.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    recentSends.delete(oldest);
   }
 }
 
@@ -55,6 +75,10 @@ function buildEmail(opts: {
   digit: string | null;
   service: string;
   windowSeconds: number;
+  attemptId: string;
+  challengeRevision: string;
+  observedAt: string;
+  expiresAt: string | null;
 }): { subject: string; text: string } {
   const minutes = Math.max(1, Math.round(opts.windowSeconds / 60));
   if (opts.digit !== null) {
@@ -68,6 +92,10 @@ function buildEmail(opts: {
         `You have about ${minutes} minute${minutes === 1 ? "" : "s"}.`,
         ``,
         `Open the Google app on your phone (or any device signed into your Google account) and tap ${opts.digit}.`,
+        `This applies only while the matching prompt is still visible.`,
+        `Observed: ${opts.observedAt}`,
+        `Expires: ${opts.expiresAt ?? "unknown; use only while the prompt remains visible"}`,
+        `Attempt: ${opts.attemptId} / ${opts.challengeRevision}`,
         ``,
         `— Trusty Squire`,
       ].join("\n"),
@@ -81,6 +109,10 @@ function buildEmail(opts: {
       `You have about ${minutes} minute${minutes === 1 ? "" : "s"}.`,
       ``,
       `Open the Google app on your phone — it will show the number to tap.`,
+      `This applies only while the matching prompt is still visible.`,
+      `Observed: ${opts.observedAt}`,
+      `Expires: ${opts.expiresAt ?? "unknown; use only while the prompt remains visible"}`,
+      `Attempt: ${opts.attemptId} / ${opts.challengeRevision}`,
       ``,
       `— Trusty Squire`,
     ].join("\n"),
@@ -93,6 +125,7 @@ export async function registerNotifyRoute(
 ): Promise<void> {
   const now = (): Date => opts.deps.now?.() ?? new Date();
   const forwarder = buildEmailForwarder(opts.deps.emailForwarder);
+  const sendTelegram = opts.deps.telegramSender ?? sendTelegramMessage;
 
   fastify.post("/v1/notify/heightened-auth", async (req, reply) => {
     const token = extractMachineToken(req);
@@ -126,7 +159,13 @@ export async function registerNotifyRoute(
     }
     const b = body as Record<string, unknown>;
 
-    const service = typeof b.service === "string" && b.service.length > 0 ? b.service : null;
+    const service =
+      typeof b.service === "string" &&
+      b.service.length > 0 &&
+      b.service.length <= 120 &&
+      /^[\p{L}\p{N} ._()+&'/-]+$/u.test(b.service)
+        ? b.service
+        : null;
     if (service === null) {
       reply.code(400).send({ error: "missing_service" });
       return;
@@ -136,8 +175,7 @@ export async function registerNotifyRoute(
     // didn't recognize the number". The email body is different but
     // the route shape is the same.
     const rawDigit = b.digit;
-    const digit =
-      typeof rawDigit === "string" && /^\d{1,3}$/.test(rawDigit) ? rawDigit : null;
+    const digit = typeof rawDigit === "string" && /^\d{1,3}$/.test(rawDigit) ? rawDigit : null;
 
     const rawWindow = b.window_seconds;
     const windowSeconds =
@@ -145,31 +183,125 @@ export async function registerNotifyRoute(
         ? Math.floor(rawWindow)
         : 120;
 
+    const boundedId = (value: unknown): string | null =>
+      typeof value === "string" &&
+      value.length > 0 &&
+      value.length <= 160 &&
+      /^[A-Za-z0-9_.:-]+$/.test(value)
+        ? value
+        : null;
+    const attemptId = boundedId(b.attempt_id);
+    const challengeRevision = boundedId(b.challenge_revision);
+    const observedAt =
+      typeof b.observed_at === "string" &&
+      b.observed_at.length <= 40 &&
+      Number.isFinite(Date.parse(b.observed_at))
+        ? new Date(b.observed_at).toISOString()
+        : null;
+    const expiresAt =
+      b.expires_at === null || b.expires_at === undefined
+        ? null
+        : typeof b.expires_at === "string" &&
+            b.expires_at.length <= 40 &&
+            Number.isFinite(Date.parse(b.expires_at))
+          ? new Date(b.expires_at).toISOString()
+          : undefined;
+    if (
+      attemptId === null ||
+      challengeRevision === null ||
+      observedAt === null ||
+      expiresAt === undefined
+    ) {
+      reply.code(400).send({ error: "invalid_challenge_identity" });
+      return;
+    }
+
     const nowMs = now().getTime();
     pruneDedupe(nowMs);
-    const dedupeKey = `${account.id}:${digit ?? "unreadable"}:${service}`;
-    const lastSent = recentSends.get(dedupeKey);
-    if (lastSent !== undefined && nowMs - lastSent < DEDUPE_WINDOW_MS) {
-      reply.code(200).send({ sent: false, deduped: true });
+    const dedupeKey = JSON.stringify([account.id, attemptId, challengeRevision]);
+    const prior = recentSends.get(dedupeKey);
+    if (prior !== undefined && nowMs - prior.sentAt < DEDUPE_WINDOW_MS) {
+      reply.code(200).send({
+        ...prior.result,
+        sent: false,
+        deduped: true,
+        attempt_id: attemptId,
+        challenge_revision: challengeRevision,
+      });
       return;
     }
 
-    const { subject, text } = buildEmail({ digit, service, windowSeconds });
-    const result = await forwarder.sendDirect({
-      to: account.email,
-      subject,
-      text,
+    const existingSend = inFlightSends.get(dedupeKey);
+    const isConcurrentRetry = existingSend !== undefined;
+    if (isConcurrentRetry) inFlightJoins += 1;
+    if (existingSend === undefined && inFlightSends.size >= MAX_DEDUPE_ENTRIES) {
+      reply.code(503).send({
+        sent: false,
+        deduped: false,
+        attempt_id: attemptId,
+        challenge_revision: challengeRevision,
+        delivery: { channel: null, status: "failed", error: "notification_capacity" },
+        error: "notification_capacity",
+      });
+      return;
+    }
+    const send =
+      existingSend ??
+      (async (): Promise<DeliveryResult> => {
+        const { subject, text } = buildEmail({
+          digit,
+          service,
+          windowSeconds,
+          attemptId,
+          challengeRevision,
+          observedAt,
+          expiresAt,
+        });
+        if (account.telegram_chat_id !== null) {
+          const telegramSent = await sendTelegram(account.telegram_chat_id, text).catch(
+            () => false,
+          );
+          if (telegramSent) {
+            return { sent: true, delivery: { channel: "telegram", status: "sent" } };
+          }
+        }
+        const result = await forwarder.sendDirect({ to: account.email, subject, text });
+        if (result.success) {
+          return { sent: true, delivery: { channel: "email", status: "sent" } };
+        }
+        return {
+          sent: false,
+          delivery: {
+            channel: "email",
+            status: "failed",
+            error: result.error ?? "send_failed",
+          },
+        };
+      })();
+    if (existingSend === undefined) inFlightSends.set(dedupeKey, send);
+    const result = await send.finally(() => {
+      if (inFlightSends.get(dedupeKey) === send) inFlightSends.delete(dedupeKey);
     });
 
-    if (!result.success) {
-      reply
-        .code(503)
-        .send({ sent: false, error: result.error ?? "send_failed" });
+    if (!result.sent) {
+      reply.code(503).send({
+        ...result,
+        deduped: isConcurrentRetry,
+        attempt_id: attemptId,
+        challenge_revision: challengeRevision,
+        error: result.delivery.error ?? "send_failed",
+      });
       return;
     }
 
-    recentSends.set(dedupeKey, nowMs);
-    reply.code(200).send({ sent: true });
+    recentSends.set(dedupeKey, { sentAt: nowMs, result });
+    pruneDedupe(nowMs);
+    reply.code(200).send({
+      ...result,
+      deduped: isConcurrentRetry,
+      attempt_id: attemptId,
+      challenge_revision: challengeRevision,
+    });
   });
 }
 
@@ -177,4 +309,10 @@ export async function registerNotifyRoute(
 // state between runs. Not exported in the package barrel.
 export function _resetNotifyDedupeForTests(): void {
   recentSends.clear();
+  inFlightSends.clear();
+  inFlightJoins = 0;
+}
+
+export function _notifyInFlightJoinsForTests(): number {
+  return inFlightJoins;
 }
