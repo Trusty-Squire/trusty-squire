@@ -133,6 +133,10 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
       });
       expect(next.isError).toBe(true);
       expect(resultText(next)).toContain("unknown provision session");
+      expect(JSON.parse(resultText(next)).error).toMatchObject({
+        code: "unknown_session",
+        retry: { max_attempts: 0, mutation: "do_not_replay" },
+      });
     } finally {
       await client.close();
     }

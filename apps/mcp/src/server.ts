@@ -384,11 +384,12 @@ export async function buildServer(
           "Cancelled work has not settled; retain the session and use finish. Do not repeat a mutation.",
         );
       const malformedAction = /^operate_act kind=.* requires /i.test(message);
+      const retryableRead = tool.name === "operate_observe" || tool.name === "operate_screenshot";
       return serverUnavailable
         ? errorContent(
-            "unknown_session",
-            `${message}. Recover a same-lineage receipt if available; absence of a live session is not closure proof.`,
-            { retry: { mutation: "do_not_replay" } },
+            retryableRead ? "server_unavailable" : "unknown_session",
+            `${message}. ${retryableRead ? "Retry once." : "Do not replay mutations."} Never kill or restart the shared operator process; it serves every lane/home. Recover a same-lineage receipt if available; absence of a live session is not closure proof.`,
+            { retry: { max_attempts: retryableRead ? 1 : 0, mutation: "do_not_replay" } },
           )
         : errorContent(
             err instanceof BrokerRefusal
