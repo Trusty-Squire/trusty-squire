@@ -219,50 +219,84 @@ its cookies into the harness.
    must complete the account/passkey and real Google sign-in. Finish and close
    the plain login browser before running the acceptance arm.
 2. Supply three distinct authorized service URLs and an ES-module provisioning
-   driver for each. Each driver exports `provision({ call, sessionId, initial })`
-   and uses only MCP tool calls. Specify evidence for the intended account,
-   provider-side creation, the exact vault identity, and a reviewed read-only
-   provider probe; a dashboard title, page text, or an old valid credential is
+   driver for each. Each driver exports
+   `captureCredentialBaseline({ call, sessionId, initial, run })` and
+   `provision({ call, sessionId, initial, run })`, using only MCP tool calls.
+   The baseline returns `account_id`, `provider_credential_ids`, and an
+   `initial_auth_state` of `authenticated`, `unauthenticated`, or `unknown`.
+   `provision` returns only the run-bound provider credential identity and exact
+   vault reference; it does not choose the probe or perform cleanup. For a
+   `revoke` manifest, the driver additionally exports
+   `revokeCredential({ call, sessionId, initial, run, providerCredential })`.
+   The harness selects the reviewed provider GET, probes the old valid control,
+   creates and probes the fresh exact vault reference, and only then invokes
+   optional revocation.
+   Specify evidence for the intended account, provider-side creation, and the
+   exact vault identity. A dashboard title or an old valid credential is
    insufficient. Choose flows without unapproved purchases or destructive
    account changes.
-3. Create an ignored local JSON configuration:
 
-```json
-{
-  "profileDir": "/absolute/worktree/test-identity/profile",
-  "configHome": "/absolute/worktree/test-identity/config",
-  "accountId": "enrolled-test-account-id",
-  "services": [
-    {
-      "url": "https://service-one.example",
-      "driver": "one.mjs",
-      "authPattern": "expected account",
-      "provisionPattern": "created project"
-    },
-    {
-      "url": "https://service-two.example",
-      "driver": "two.mjs",
-      "authPattern": "expected account",
-      "provisionPattern": "created project"
-    },
-    {
-      "url": "https://service-three.example",
-      "driver": "three.mjs",
-      "authPattern": "expected account",
-      "provisionPattern": "created project"
-    }
-  ]
-}
+   Credential creation uses core's existing mutation capture grammar:
+   `capture: {store, source: {role, name?, container?}, write_id?}`. If the
+   initial capture returns a `write_id` with an uncertain storage result, the
+   driver may pass that identity only to `operate_extract` for extraction/storage
+   recovery. It must never replay the click/type/select/press or recipe mutation.
+   The final `operate_finish` result is validated against core's lifecycle-owned
+   additive receipt; the acceptance harness does not persist separate closure
+   truth.
+3. Copy `apps/mcp/scripts/broker-live-acceptance.example.json` to an ignored
+   worktree-local file. Fill in the exact release/native command, isolated
+   profile and config paths, expected provider account identities, DOM evidence,
+   and old valid provider/vault controls. An old credential proves the negative
+   control works but cannot satisfy the fresh result.
+
+   Provider probes are reviewed in
+   `apps/mcp/scripts/fresh-credential-policy.mjs`; drivers cannot substitute an
+   arbitrary request or self-assert harmlessness. The current probes are Resend
+   `GET /domains`, Neon `GET /api/v2/projects`, and Xata `GET /workspaces`.
+4. Build and run the hermetic qualification tests before live acceptance:
+
+```bash
+pnpm --filter @trusty-squire/mcp build
+pnpm --filter @trusty-squire/mcp exec vitest run \
+  scripts/fresh-credential-policy.test.mjs \
+  scripts/native-launch-diagnostics.test.mjs \
+  scripts/broker-live-acceptance.test.mjs \
+  src/__tests__/install-targets-e2e.test.ts \
+  src/bot/__tests__/broker-stdio-restart.test.ts
 ```
 
-4. Through `chrome-devtools-axi run`, import
-   `apps/mcp/scripts/broker-live-acceptance.mjs` and call
-   `runLiveAcceptance('/absolute/path/to/config.json')`. It launches three real
-   MCP stdio servers and the production broker, requires actual Google admission,
-   checks service postconditions, and measures isolation and teardown. Preserve
-   its evidence file and run the broader reviewed auth matrix. A fully successful
-   run writes an inert profile-local evidence record bound to that account and
-   the three tested service hosts. The record is evidence of that run only; it
-   neither enables concurrency nor substitutes for the reviewed real-auth matrix.
-   A failed or interrupted run removes its in-progress record; never create or
-   copy this record manually.
+5. Firstmate runs the final live arm through the native browser harness. This is
+   the only command here that may use the enrolled isolated profile or perform
+   the manifest's fresh provider mutations:
+
+```bash
+chrome-devtools-axi run < /absolute/path/to/final-acceptance-run.mjs
+```
+
+The ignored runner contains:
+
+```js
+const { runNativeAndConcurrencyAcceptance } = await import(
+  "file:///absolute/worktree/apps/mcp/scripts/broker-live-acceptance.mjs"
+);
+
+console.log(
+  await runNativeAndConcurrencyAcceptance("/absolute/worktree/.broker-acceptance/manifest.json"),
+);
+```
+
+The native arm performs only MCP initialization and records the selected
+command, expected and initialized versions, connection epoch, bounded exit, and
+sanitized stderr classification. It must report `ready`; SDK concurrency never
+substitutes for a failed native arm.
+
+The concurrency arm launches three independent MCP stdio servers and the
+production broker, requires actual Google admission, validates old and new keys
+with provider-specific read-only probes, checks overlap/isolation, and records
+every closure receipt. Preserve its evidence file and run the broader reviewed
+auth matrix. A fully successful run writes an inert profile-local evidence record
+bound to that account and the three tested service hosts. The record is evidence
+of that run only; it neither enables concurrency nor substitutes for the reviewed
+real-auth matrix. A failed or interrupted run removes its in-progress record;
+never create or copy this record manually.

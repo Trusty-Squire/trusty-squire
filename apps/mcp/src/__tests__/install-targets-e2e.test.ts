@@ -92,6 +92,8 @@ import { detectActiveProviderSessions } from "../bot/google-login.js";
 import { connect, resolveServerLaunch } from "../install/cli.js";
 import { AGENTS } from "../install/agents.js";
 import { openSessionStorage } from "../session.js";
+import { VERSION } from "../version.js";
+import { nativeLaunchSpecFromInstalledConfig } from "../../scripts/native-launch-diagnostics.mjs";
 
 const TARGETS = ["claude-code", "codex", "goose", "cursor", "opencode"] as const;
 
@@ -151,6 +153,16 @@ function expectSquireConfig(
   const launch = resolveServerLaunch();
   expect(config.command).toBe(launch.command);
   expect(config.args).toEqual(launch.args);
+  if (
+    typeof config.command !== "string" ||
+    !Array.isArray(config.args) ||
+    !config.args.every((arg): arg is string => typeof arg === "string")
+  ) {
+    throw new Error(`${target}: installed launch is not executable`);
+  }
+  expect(
+    nativeLaunchSpecFromInstalledConfig({ command: config.command, args: config.args }, VERSION),
+  ).toEqual({ command: launch.command, args: launch.args, expectedVersion: VERSION });
   const env = asRecord(config.env, `${target} squire environment`);
   expect(env).toMatchObject({
     TRUSTY_SQUIRE_AGENT_IDENTITY: target,

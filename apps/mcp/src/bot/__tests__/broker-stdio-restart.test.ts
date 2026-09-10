@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { SessionStore } from "../../session.js";
 import { brokerElectionRoot } from "../broker/discovery.js";
 import { ProfileBusyError, acquireProfileOperationGuard } from "../profile.js";
+import { VERSION } from "../../version.js";
 
 const require = createRequire(import.meta.url);
 const credential = "a".repeat(43);
@@ -314,6 +315,7 @@ describeChromium("broker-backed MCP stdio restart", () => {
       const first = launchServer();
       const firstClient = stdioClient(first.child, first.diagnostics);
       await firstClient.initialize();
+      expect(first.diagnostics()).toContain(`[trusty-squire] server v${VERSION} starting`);
       const started = await firstClient.callTool("operate_start", { service_url: serviceUrl });
       expect(started).toMatchObject({ needs_user: { wall: "google_session" } });
       const before = await waitFor(
@@ -332,6 +334,7 @@ describeChromium("broker-backed MCP stdio restart", () => {
       const second = launchServer();
       const secondClient = stdioClient(second.child, second.diagnostics);
       await secondClient.initialize();
+      expect(second.diagnostics()).toContain(`[trusty-squire] server v${VERSION} starting`);
       const resumed = await secondClient.callTool("operate_start", { service_url: serviceUrl });
       expect(resumed).toMatchObject({ needs_user: { wall: "google_session" } });
       const after = await waitFor(

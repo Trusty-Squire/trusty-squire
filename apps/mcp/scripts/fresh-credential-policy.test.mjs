@@ -1,11 +1,34 @@
 import { describe, expect, it } from "vitest";
 import {
   createFreshCredentialRun,
+  probeThenCleanupFreshCredential,
+  qualifyCredentialCleanup,
   qualifyFreshCredentialEvidence,
+  qualifyOldCredentialControl,
+  reviewedCredentialProbe,
+  validateReviewedCredentialProbeResponse,
 } from "./fresh-credential-policy.mjs";
 
 const started = 1_000;
-const run = createFreshCredentialRun("run-unique", 1, "retain", started);
+const run = createFreshCredentialRun("run-unique", 1, "retain", "resend", "account-a", started);
+const baseline = {
+  provider_credential_ids: ["provider-old"],
+  vault_references: ["vault-old"],
+};
+const vaultCredentials = [
+  {
+    reference: "vault-old",
+    label: "old",
+    service: "Resend",
+    allowed_hosts: ["api.resend.com"],
+  },
+  {
+    reference: "vault-new",
+    label: run.run_label,
+    service: "Resend",
+    allowed_hosts: ["api.resend.com"],
+  },
+];
 const validEvidence = () => ({
   credential_policy: "force_fresh",
   provider_credential: {
@@ -15,65 +38,204 @@ const validEvidence = () => ({
     account_id: "account-a",
   },
   vault_reference: "vault-new",
-  probe: {
-    reference: "vault-new",
-    harmless: true,
-    http: { method: "GET", url: "https://api.fake.test/whoami" },
-  },
-  cleanup: { policy: "retain", status: "retained" },
 });
 const qualify = (evidence = validEvidence()) =>
   qualifyFreshCredentialEvidence({
     run,
-    baseline: { provider_credential_ids: ["provider-old"], vault_references: ["vault-old"] },
+    baseline,
     evidence,
-    vaultCredentials: [{ reference: "vault-new", label: run.run_label, service: "fake" }],
+    vaultCredentials,
     now: started + 10,
   });
 
 describe("force-fresh credential acceptance policy", () => {
-  it("rejects existing credentials and healthy-account evidence as a fresh success", () => {
-    const existing = validEvidence();
-    existing.provider_credential.id = "provider-old";
-    expect(() => qualify(existing)).toThrow(/Existing provider credential/);
+  it("uses a fixed provider-reviewed GET instead of driver-asserted harmlessness", () => {
+    expect(reviewedCredentialProbe("resend")).toEqual({
+      id: "resend:list-domains:v1",
+      http: {
+        method: "GET",
+        url: "https://api.resend.com/domains",
+        headers: {
+          Authorization: "Bearer ${SECRET}",
+          "User-Agent": "trusty-squire-credential-qualification",
+        },
+      },
+    });
+    expect(() => reviewedCredentialProbe("driver-says-this-is-safe")).toThrow(/No reviewed/);
+    const selfAsserted = { ...validEvidence(), probe: { harmless: true, method: "DELETE" } };
+    expect(() => qualify(selfAsserted)).toThrow(/metadata-only/);
+  });
+
+  it("requires an old valid key in both provider and vault baselines", () => {
+    expect(
+      qualifyOldCredentialControl({
+        run,
+        baseline,
+        control: {
+          provider_credential_id: "provider-old",
+          vault_reference: "vault-old",
+        },
+        vaultCredentials,
+      }),
+    ).toMatchObject({
+      provider_credential_id: "provider-old",
+      vault_reference: "vault-old",
+      probe: { id: "resend:list-domains:v1" },
+    });
+    expect(() =>
+      qualifyOldCredentialControl({
+        run,
+        baseline,
+        control: { provider_credential_id: "provider-new", vault_reference: "vault-old" },
+        vaultCredentials,
+      }),
+    ).toThrow(/pre-run baseline/);
+  });
+
+  it("rejects old identities, wrong accounts, stale creation, and extra raw fields", () => {
+    for (const mutate of [
+      (e) => (e.provider_credential.id = "provider-old"),
+      (e) => (e.vault_reference = "vault-old"),
+      (e) => (e.provider_credential.account_id = "account-b"),
+      (e) => (e.provider_credential.created_at = started - 1),
+      (e) => (e.secret = "should-never-appear"),
+    ]) {
+      const evidence = validEvidence();
+      mutate(evidence);
+      expect(() => qualify(evidence)).toThrow();
+    }
+  });
+
+  it("accepts only the exact new provider identity and vault reference", () => {
+    expect(qualify()).toMatchObject({
+      provider: { id: "provider-new", account_id: "account-a" },
+      vault: { reference: "vault-new" },
+      probe: { id: "resend:list-domains:v1" },
+    });
+  });
+
+  it("requires the exact vault entry to authorize the reviewed probe host", () => {
+    const credentials = structuredClone(vaultCredentials);
+    credentials[1].allowed_hosts = ["example.invalid"];
     expect(() =>
       qualifyFreshCredentialEvidence({
         run,
-        baseline: { provider_credential_ids: ["provider-old"], vault_references: ["vault-old"] },
-        evidence: { healthy_project: true },
-        vaultCredentials: [],
+        baseline,
+        evidence: validEvidence(),
+        vaultCredentials: credentials,
         now: started + 10,
       }),
-    ).toThrow(/metadata-only|cleanup policy/);
+    ).toThrow(/reviewed probe host/);
   });
 
   it.each([
-    ["old vault copy", (e) => (e.vault_reference = e.probe.reference = "vault-old")],
-    ["wrong account", (e) => (e.provider_credential.account_id = "")],
-    ["stale creation", (e) => (e.provider_credential.created_at = started - 1)],
-    ["missing probe", (e) => delete e.probe],
-  ])("rejects %s", (_name, mutate) => {
-    const evidence = validEvidence();
-    mutate(evidence);
-    expect(() => qualify(evidence)).toThrow();
+    ["resend", { object: "list", data: [] }],
+    ["neon", { projects: [] }],
+    ["xata", { workspaces: [] }],
+  ])("validates the provider-specific %s response shape", (provider, body) => {
+    expect(
+      validateReviewedCredentialProbeResponse(provider, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+        truncated: false,
+      }),
+    ).toBe(true);
   });
 
-  it("accepts only the exact new provider identity, vault reference, and harmless probe", () => {
-    expect(qualify()).toMatchObject({
-      provider: { id: "provider-new" },
-      vault: { reference: "vault-new" },
-      probe: { reference: "vault-new", harmless: true },
+  it("rejects cleanup evidence that precedes the exact fresh-key probe", () => {
+    const qualified = qualify();
+    expect(() =>
+      qualifyCredentialCleanup({
+        run,
+        qualified,
+        probeCompletedAt: started + 5,
+        cleanupEvidence: {
+          policy: "retain",
+          status: "retained",
+          provider_credential_id: "provider-new",
+          completed_at: started + 4,
+        },
+        now: started + 10,
+      }),
+    ).toThrow(/before the authenticated probe/);
+  });
+
+  it("accepts retention only after probing the exact fresh identity", () => {
+    const qualified = qualify();
+    expect(
+      qualifyCredentialCleanup({
+        run,
+        qualified,
+        probeCompletedAt: started + 5,
+        cleanupEvidence: {
+          policy: "retain",
+          status: "retained",
+          provider_credential_id: "provider-new",
+          completed_at: started + 6,
+        },
+        now: started + 10,
+      }),
+    ).toMatchObject({ status: "retained", provider_credential_id: "provider-new" });
+  });
+
+  it("executes the reviewed probe before optional revoke", async () => {
+    const revokeRun = createFreshCredentialRun(
+      "run-revoke",
+      1,
+      "revoke",
+      "resend",
+      "account-a",
+      started,
+    );
+    const revokeEvidence = validEvidence();
+    revokeEvidence.provider_credential.label = revokeRun.run_label;
+    const qualified = qualifyFreshCredentialEvidence({
+      run: revokeRun,
+      baseline,
+      evidence: revokeEvidence,
+      vaultCredentials: [
+        vaultCredentials[0],
+        {
+          reference: "vault-new",
+          label: revokeRun.run_label,
+          service: "Resend",
+          allowed_hosts: ["api.resend.com"],
+        },
+      ],
+      now: started + 10,
     });
-    const leaked = { ...validEvidence(), secret: "should-never-appear" };
-    expect(() => qualify(leaked)).toThrow(/metadata-only/);
-  });
-
-  it("requires explicit cleanup status and never silently changes retention policy", () => {
-    const missing = validEvidence();
-    delete missing.cleanup;
-    expect(() => qualify(missing)).toThrow(/cleanup policy/);
-    const changed = validEvidence();
-    changed.cleanup = { policy: "revoke", status: "revoked" };
-    expect(() => qualify(changed)).toThrow(/changed during the run/);
+    const events = [];
+    let clock = started + 2;
+    const result = await probeThenCleanupFreshCredential({
+      run: revokeRun,
+      qualified,
+      callUseCredential: async (request) => {
+        events.push(["probe", request.reference, request.http.method]);
+        return {
+          response: {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ object: "list", data: [] }),
+            truncated: false,
+          },
+        };
+      },
+      revokeCredential: async (providerCredential) => {
+        events.push(["revoke", providerCredential.id]);
+        return {
+          policy: "revoke",
+          status: "revoked",
+          provider_credential_id: providerCredential.id,
+          completed_at: ++clock,
+        };
+      },
+      now: () => ++clock,
+    });
+    expect(events).toEqual([
+      ["probe", "vault-new", "GET"],
+      ["revoke", "provider-new"],
+    ]);
+    expect(result.cleanup.status).toBe("revoked");
   });
 });
