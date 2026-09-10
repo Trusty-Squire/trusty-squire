@@ -1,3 +1,8 @@
+import {
+  persistOperatorTerminalReceipt,
+  settleOperatorTerminalReceipt,
+  markOperatorMutationDispatchAttempted,
+} from "../request-cancellation.js";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -100,12 +105,10 @@ it("carries queued OAuth authority from broker admission through final dispatch"
   });
   const preparedSignals = new Map<string, () => void>();
   const preparedPromises = new Map<string, Promise<void>>(
-    ["unchanged", "changed"].map(
-      (sessionId): [string, Promise<void>] => [
-        sessionId,
-        new Promise<void>((resolve) => preparedSignals.set(sessionId, resolve)),
-      ],
-    ),
+    ["unchanged", "changed"].map((sessionId): [string, Promise<void>] => [
+      sessionId,
+      new Promise<void>((resolve) => preparedSignals.set(sessionId, resolve)),
+    ]),
   );
   const dispatched: string[] = [];
 
@@ -511,7 +514,18 @@ it("keeps an ambiguous thrown mutation fenced and unrecoverable", async () => {
         "login-request",
       ),
     ).rejects.toThrow("may already have dispatched");
-    await expect(broker.recover(principal, { name: "operate_login", args })).resolves.toBeNull();
+    await expect(broker.recover(principal, { name: "operate_login", args })).resolves.toMatchObject(
+      {
+        requestId: "login-request",
+        result: {
+          reconciliation: {
+            status: "unknown",
+            operation: "operate_login",
+            request_id: "login-request",
+          },
+        },
+      },
+    );
     await expect(
       broker.recover(principal, {
         name: "operate_login",
@@ -522,7 +536,10 @@ it("keeps an ambiguous thrown mutation fenced and unrecoverable", async () => {
           dispatch: "not_dispatched",
         },
       }),
-    ).resolves.toBeNull();
+    ).resolves.toMatchObject({
+      requestId: "login-request",
+      result: { reconciliation: { status: "unknown", request_id: "login-request" } },
+    });
     await expect(new DispatchJournal(path).assertReconciled()).rejects.toThrow(
       "lost mutation custody",
     );
@@ -1006,7 +1023,8 @@ it("retains acknowledged start control until a same-lineage follow-up", async ()
       description: "",
       inputSchema: z.object({ session_id: z.string() }).strict(),
       jsonInputSchema: {},
-      handler: async () => (toolName === "operate_observe" ? { dom: "ready" } : { done: true }),
+      handler: async () =>
+        toolName === "operate_observe" ? { dom: "ready" } : { done: true, closed: true },
     });
     Object.defineProperty(broker, "tools", {
       value: [startTool, sessionTool("operate_observe"), sessionTool("operate_finish")],
@@ -1094,5 +1112,407 @@ it("retains acknowledged start control until a same-lineage follow-up", async ()
       await listener.close();
       await rm(root, { recursive: true, force: true });
     }
+  }
+});
+
+it("retains pre-registration cancellations without crossing connection identities", async () => {
+  const broker = new OperatorBroker(
+    {
+      accountId: "account",
+      agentSessionToken: "token",
+      apiBaseUrl: "http://unused.test",
+      registryBaseUrl: "http://unused.test",
+    },
+    "cell",
+  );
+  const owner = { accountId: "account", agentId: "agent", clientId: "one" };
+  const foreign = { ...owner, clientId: "two" };
+  expect(broker.cancel(owner, "queued")).toBe(true);
+  await expect(broker.call(foreign, "wrong-method", {}, "queued")).rejects.toThrow(
+    "Unknown broker method",
+  );
+  await expect(broker.call(owner, "wrong-method", {}, "queued")).rejects.toThrow(
+    "cancelled before registration",
+  );
+  // Consumed cancellation cannot leak into another request.
+  await expect(broker.call(owner, "wrong-method", {}, "different")).rejects.toThrow(
+    "Unknown broker method",
+  );
+});
+
+it("bounds cancellation tombstones instead of evicting older cancellation evidence", async () => {
+  const broker = new OperatorBroker(
+    {
+      accountId: "account",
+      agentSessionToken: "token",
+      apiBaseUrl: "http://unused.test",
+      registryBaseUrl: "http://unused.test",
+    },
+    "cell",
+  );
+  const owner = { accountId: "account", agentId: "agent", clientId: "one" };
+  for (let i = 0; i < 8192; i++) broker.cancel(owner, String(i));
+  expect(() => broker.cancel(owner, "overflow")).toThrow("budget exhausted");
+  await expect(broker.call(owner, "wrong-method", {}, "0")).rejects.toThrow(
+    "cancelled before registration",
+  );
+});
+
+it("permits only lineage-bound extraction recovery for a journaled capture write", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ts-capture-recovery-"));
+  try {
+    const journal = new DispatchJournal(join(root, "dispatch.jsonl"));
+    const broker = new OperatorBroker(
+      {
+        accountId: "account",
+        agentSessionToken: "token",
+        apiBaseUrl: "http://unused.test",
+        registryBaseUrl: "http://unused.test",
+      },
+      "cell",
+      journal,
+    );
+    const identity = await broker.authenticate("token", "agent", "c".repeat(43));
+    if (identity === null) throw new Error("authentication failed");
+    const principal = { ...identity, clientId: "client" };
+    const capability = {
+      cellId: "cell",
+      browserEpoch: "epoch",
+      sessionId: "session",
+      targetId: "target",
+      leaseGeneration: "lease",
+    };
+    const hasCapability = vi.spyOn(broker.authority, "hasCapability").mockReturnValue(true);
+    const params = {
+      name: "operate_extract",
+      capability,
+      args: { session_id: "session", capture: { write_id: "capture-1" } },
+    };
+    expect(await broker.canReconcileCapture(principal, params)).toBe(false);
+    await journal.record("session", "create", "unknown", {
+      forwarderId: identity.forwarderId!,
+      operation: "operate_click",
+      outcome: {
+        status: "unknown",
+        reason: "cancelled",
+        capture: { write_id: "capture-1", stored: false, storage: "unknown" },
+      },
+    });
+    expect(await broker.canReconcileCapture(principal, params)).toBe(true);
+    expect(await broker.canReconcileCapture(principal, { ...params, name: "operate_click" })).toBe(
+      false,
+    );
+    expect(await broker.canReconcileCapture({ ...principal, forwarderId: "foreign" }, params)).toBe(
+      false,
+    );
+    expect(
+      await broker.canReconcileCapture(principal, {
+        ...params,
+        args: { session_id: "session", capture: { write_id: "guessed" } },
+      }),
+    ).toBe(false);
+    hasCapability.mockReturnValue(false);
+    expect(await broker.canReconcileCapture(principal, params)).toBe(false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("records cancelled navigation before its executor checkpoint as not dispatched", async () => {
+  const root = await mkdtemp(join(tmpdir(), "navigate-checkpoint-"));
+  const journal = new DispatchJournal(join(root, "journal.jsonl"));
+  const broker = new OperatorBroker(
+    {
+      accountId: "account",
+      agentSessionToken: "token",
+      apiBaseUrl: "http://unused.test",
+      registryBaseUrl: "http://unused.test",
+    },
+    "cell",
+    journal,
+  );
+  let entered!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const dispatch = vi.fn();
+  const tools: Tool[] = [
+    {
+      name: "operate_start",
+      description: "",
+      inputSchema: z.object({}),
+      jsonInputSchema: {},
+      handler: async () => {
+        state.sessions.set("internal", {
+          browser: {
+            brokerTargetId: async () => "target",
+            isConnected: () => true,
+            waitForThreeDsResolution: async () => "succeeded",
+          },
+          pendingThreeDs: null,
+        });
+        return { session_id: "internal" };
+      },
+    },
+    {
+      name: "operate_navigate",
+      description: "",
+      inputSchema: z.object({ session_id: z.string() }),
+      jsonInputSchema: {},
+      handler: async () => {
+        entered();
+        await gate;
+        await markOperatorMutationDispatchAttempted();
+        dispatch();
+        return {};
+      },
+    },
+  ];
+  Object.defineProperty(broker, "tools", { value: tools });
+  try {
+    const identity = await broker.authenticate("token", "agent", "n".repeat(43));
+    if (!identity) throw new Error("authentication failed");
+    const principal = { ...identity, clientId: "client" };
+    await broker.connected(principal);
+    const { capability } = (await broker.call(
+      principal,
+      "tool",
+      { name: "operate_start", args: {} },
+      "start",
+    )) as { capability: TabCapability };
+    await broker.acknowledge(principal, "start");
+    await broker.confirmStartDelivery(principal, { capability });
+    const work = broker
+      .call(
+        principal,
+        "tool",
+        { name: "operate_navigate", capability, args: { session_id: capability.sessionId } },
+        "navigate",
+      )
+      .catch((error: unknown) => error);
+    await started;
+    broker.cancel(principal, "navigate");
+    release();
+    await work;
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(await journal.completedOutcome(identity.forwarderId!, "navigate")).toMatchObject({
+      outcome: { status: "not_dispatched", error: "cancelled" },
+    });
+  } finally {
+    release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("retires a closing actor when terminal cleanup settles after delivery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "late-finish-"));
+  const journal = new DispatchJournal(join(root, "journal.jsonl"));
+  const broker = new OperatorBroker(
+    {
+      accountId: "account",
+      agentSessionToken: "token",
+      apiBaseUrl: "http://unused.test",
+      registryBaseUrl: "http://unused.test",
+    },
+    "cell",
+    journal,
+  );
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let cleanup: Promise<void> | undefined;
+  let count = 0;
+  const tools: Tool[] = [
+    {
+      name: "operate_start",
+      description: "",
+      inputSchema: z.object({ service_url: z.string() }),
+      jsonInputSchema: {},
+      handler: async () => {
+        const id = `internal-${++count}`;
+        state.sessions.set(id, {
+          browser: {
+            brokerTargetId: async () => id,
+            isConnected: () => true,
+            waitForThreeDsResolution: async () => "succeeded",
+          },
+          pendingThreeDs: null,
+        });
+        return { session_id: id };
+      },
+    },
+    {
+      name: "operate_finish",
+      description: "",
+      inputSchema: z.object({ session_id: z.string() }),
+      jsonInputSchema: {},
+      handler: async (args) => {
+        const { session_id } = z.object({ session_id: z.string() }).parse(args);
+        cleanup = (async () => {
+          await gate;
+          await persistOperatorTerminalReceipt({
+            session_id,
+            operation_id: "finish",
+            execution: "completed",
+            mutation: "not_dispatched",
+            cleanup: "closed",
+            closed: true,
+          });
+          state.sessions.delete(session_id);
+          settleOperatorTerminalReceipt();
+        })();
+        return { session_id: args.session_id, closed: false, cleanup: "closing" };
+      },
+    },
+  ];
+  Object.defineProperty(broker, "tools", { value: tools });
+  try {
+    const identity = await broker.authenticate("token", "agent", "q".repeat(43));
+    if (!identity) throw new Error("authentication failed");
+    const principal = { ...identity, clientId: "client" };
+    await broker.connected(principal);
+    const { capability } = (await broker.call(
+      principal,
+      "tool",
+      { name: "operate_start", args: { service_url: "https://resend.com/" } },
+      "start",
+    )) as { capability: TabCapability };
+    await broker.acknowledge(principal, "start");
+    await broker.confirmStartDelivery(principal, { capability });
+    expect(
+      await broker.call(
+        principal,
+        "tool",
+        { name: "operate_finish", capability, args: { session_id: capability.sessionId } },
+        "finish",
+      ),
+    ).toMatchObject({ result: { closed: false } });
+    expect(broker.authority.inventory().quarantined).toBe(1);
+    release();
+    await cleanup;
+    expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
+    expect(
+      await broker.call(
+        principal,
+        "tool",
+        { name: "operate_finish", capability, args: { session_id: capability.sessionId } },
+        "retry",
+      ),
+    ).toMatchObject({ result: { closed: true, cleanup: "already_closed" } });
+    expect(
+      await broker.call(
+        principal,
+        "tool",
+        { name: "operate_start", args: { service_url: "https://resend.com/" } },
+        "next",
+      ),
+    ).toHaveProperty("capability");
+  } finally {
+    release();
+    await cleanup;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("refuses credential finish when capture becomes unresolved during call draining", async () => {
+  const root = await mkdtemp(join(tmpdir(), "finish-capture-"));
+  const journal = new DispatchJournal(join(root, "journal.jsonl"));
+  const broker = new OperatorBroker(
+    {
+      accountId: "account",
+      agentSessionToken: "token",
+      apiBaseUrl: "http://unused.test",
+      registryBaseUrl: "http://unused.test",
+    },
+    "cell",
+    journal,
+  );
+  let entered!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const dispatch = vi.fn();
+  const tools: Tool[] = [
+    {
+      name: "operate_start",
+      description: "",
+      inputSchema: z.object({}),
+      jsonInputSchema: {},
+      handler: async () => {
+        state.sessions.set("internal", {
+          browser: {
+            brokerTargetId: async () => "target",
+            isConnected: () => true,
+            waitForThreeDsResolution: async () => "succeeded",
+          },
+          pendingThreeDs: null,
+        });
+        return { session_id: "internal" };
+      },
+    },
+    {
+      name: "operate_finish",
+      description: "",
+      inputSchema: z.object({ session_id: z.string() }),
+      jsonInputSchema: {},
+      handler: async () => {
+        entered();
+        await gate;
+        await markOperatorMutationDispatchAttempted();
+        dispatch();
+        return {};
+      },
+    },
+  ];
+  Object.defineProperty(broker, "tools", { value: tools });
+  try {
+    const identity = await broker.authenticate("token", "agent", "n".repeat(43));
+    if (!identity) throw new Error("authentication failed");
+    const principal = { ...identity, clientId: "client" };
+    await broker.connected(principal);
+    const { capability } = (await broker.call(
+      principal,
+      "tool",
+      { name: "operate_start", args: {} },
+      "start",
+    )) as { capability: TabCapability };
+    await broker.acknowledge(principal, "start");
+    await broker.confirmStartDelivery(principal, { capability });
+    const work = broker
+      .call(
+        principal,
+        "tool",
+        { name: "operate_finish", capability, args: { session_id: capability.sessionId } },
+        "navigate",
+      )
+      .catch((error: unknown) => error);
+    await started;
+    await journal.recordCapture(
+      identity.forwarderId!,
+      capability.sessionId,
+      "create",
+      {
+        write_id: "original",
+        binding: "service",
+        stored: false,
+        storage: "unknown",
+      },
+      false,
+    );
+    release();
+    expect(await work).toMatchObject({ message: expect.stringContaining("original capture") });
+    expect(dispatch).not.toHaveBeenCalled();
+  } finally {
+    release();
+    await rm(root, { recursive: true, force: true });
   }
 });

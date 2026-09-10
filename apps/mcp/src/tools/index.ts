@@ -27,6 +27,7 @@ export interface Tool<TArgs extends Record<string, unknown> = Record<string, unk
   description: string;
   inputSchema: ZodTypeAny;
   jsonInputSchema: Record<string, unknown>;
+  jsonOutputSchema?: Record<string, unknown>;
   // Standard MCP tool annotations (readOnlyHint / destructiveHint /
   // idempotentHint). Client-only — they don't reach the model.
   annotations?: Record<string, unknown>;
@@ -45,6 +46,7 @@ export interface ToolContext {
   // In-process override for hosts/tests with a tighter transport deadline.
   // Omitted by the MCP server, which uses operate_pay's one-minute default.
   paymentApprovalWaitMs?: number;
+  signal?: AbortSignal;
 }
 
 // Re-exported for convenience; defined in its own module to avoid a

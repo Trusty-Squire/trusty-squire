@@ -172,6 +172,28 @@ export interface PaymentApproval {
   expires_at: string;
 }
 
+export interface HeightenedAuthNotificationInput {
+  service: string;
+  attempt_id: string;
+  challenge_revision: string;
+  digit: string | null;
+  observed_at: string;
+  expires_at: string | null;
+  window_seconds: number;
+}
+
+export interface HeightenedAuthNotificationResult {
+  sent: boolean;
+  deduped: boolean;
+  attempt_id: string;
+  challenge_revision: string;
+  delivery: {
+    channel: "telegram" | "email" | null;
+    status: "sent" | "failed";
+    error?: string;
+  };
+}
+
 export class ApiClient {
   private readonly fetchImpl: typeof fetch;
   private requestingAgent: string | undefined;
@@ -288,6 +310,13 @@ export class ApiClient {
     return this.post(`/v1/pay/approvals/${encodeURIComponent(approvalId)}/notify-3ds`, { mode });
   }
 
+  async notifyHeightenedAuth(
+    input: HeightenedAuthNotificationInput,
+    signal?: AbortSignal,
+  ): Promise<HeightenedAuthNotificationResult> {
+    return this.post<HeightenedAuthNotificationResult>("/v1/notify/heightened-auth", input, signal);
+  }
+
   async auditPayment(input: {
     merchant: string;
     amount_cents: number;
@@ -322,6 +351,7 @@ export class ApiClient {
   // ── store: upsert (create or overwrite by service+label) ──
 
   async storeCredential(input: {
+    write_id?: string;
     service: string;
     label?: string;
     value?: string;
@@ -646,11 +676,12 @@ export class ApiClient {
     return (await this.handleResponse(res, "GET", path)) as T;
   }
 
-  private async post<T>(path: string, body: unknown): Promise<T> {
+  private async post<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
     const res = await this.fetchImpl(`${this.config.apiBaseUrl}${path}`, {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify(body),
+      ...(signal !== undefined ? { signal } : {}),
     });
     return (await this.handleResponse(res, "POST", path)) as T;
   }

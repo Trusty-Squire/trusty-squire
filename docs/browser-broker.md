@@ -56,9 +56,11 @@ binding. Browser epoch changes invalidate earlier capabilities.
   held through maintenance. A separate physical-profile lease coordinates Chrome
   and the existing plain-login path. Profile enrollment pins the account on disk.
 - Each session owns a target family, capability generation, serialized command
-  queue, and site reservations. Resources use registrable domains, including
-  private suffixes; recipe-resolved startup hosts reserve before page acquisition.
-  Additional conflicting scope is refused rather than adopted implicitly.
+  queue, and site reservations. Startup merchant hosts authorize matching
+  registrable-domain siblings; recipe-resolved startup hosts reserve before
+  page acquisition. Other required hosts must be declared at startup.
+  `operate_allow_host` cannot widen that startup entitlement. Conflicting
+  site custody queues until the existing owner releases it.
 - A context-level route selects the owning page's host policy. Unknown targets
   cannot issue background API traffic. Session cleanup closes only that owned
   family. At reconnect-grace expiry, a close that cannot be proven removes the
@@ -171,10 +173,10 @@ Implementation entry points: `src/bot/broker/daemon.ts`, `discovery.ts`,
 
 ## Executed mechanical acceptance
 
-Run via the authorized browser tool from the worktree after building:
+Run the isolated Node/SDK harness from the worktree after building:
 
 ```bash
-chrome-devtools-axi run <<'JS'
+node --input-type=module <<'JS'
 const { runFixtureAcceptance } = await import(process.cwd() + '/apps/mcp/scripts/broker-acceptance.mjs');
 await runFixtureAcceptance(process.cwd(), true);
 JS
@@ -200,6 +202,12 @@ Evidence and limitations are recorded in [the evidence ledger](evidence/browser-
 
 ## Human setup for real-service qualification
 
+The shared evidence contract, including fresh-credential negative controls and
+native-transport distinctions, is in
+[operator-acceptance-runbook.md](operator-acceptance-runbook.md). This section
+adds the broker-specific setup; it does not make a fixture-only run a real
+qualification.
+
 No enrolled real test Google profile or three authorized service drivers were
 provided for this worktree. Existing harness profiles contain fixture cookies;
 they are not real Google identities. Do not clone a live operator profile or copy
@@ -210,49 +218,146 @@ its cookies into the harness.
    TRUSTY_SQUIRE_PROFILE_DIR, and pinned TRUSTY_SQUIRE_ACCOUNT_ID values. A human
    must complete the account/passkey and real Google sign-in. Finish and close
    the plain login browser before running the acceptance arm.
-2. Supply three distinct authorized service URLs and an ES-module provisioning
-   driver for each. Each driver exports `provision({ call, sessionId, initial })`
-   and uses only MCP tool calls. Specify DOM evidence patterns that prove the
-   intended account is authenticated and the service was provisioned. Choose
-   flows without unapproved purchases or destructive account changes.
-3. Create an ignored local JSON configuration:
+2. Supply three sessions across Resend and Neon: one of each runs concurrently,
+   then a duplicate-provider third session queues and is admitted after release. Reusing a provider, URL, account, and driver is
+   expected; Xata is not a required live resource. Each driver exports
+   `captureCredentialBaseline({ call, sessionId, initial, run })` and
+   `provision({ call, sessionId, initial, run })`, using only MCP tool calls.
+   The baseline returns `account_id`, `provider_credential_ids`, and an
+   `initial_auth_state` of `authenticated`, `unauthenticated`, or `unknown`.
+   `provision` returns only the run-bound provider credential identity and exact
+   vault reference; it does not choose the probe or perform cleanup. For a
+   `revoke` manifest, the driver additionally exports
+   `revokeCredential({ call, sessionId, initial, run, providerCredential })`.
+   The harness selects the reviewed provider GET, probes the old valid control,
+   creates and probes the fresh exact vault reference, and only then invokes
+   optional revocation. The checked-in
+   `apps/mcp/scripts/bounded-credential-driver.mjs` is the supported reusable
+   driver for all three sessions, so no per-session JavaScript module is needed.
+   Specify evidence for the intended account, provider-side creation, and the
+   exact vault identity. A dashboard title or an old valid credential is
+   insufficient. Choose flows without unapproved purchases or destructive
+   account changes.
 
-```json
-{
-  "profileDir": "/absolute/worktree/test-identity/profile",
-  "configHome": "/absolute/worktree/test-identity/config",
-  "accountId": "enrolled-test-account-id",
-  "services": [
-    {
-      "url": "https://service-one.example",
-      "driver": "one.mjs",
-      "authPattern": "expected account",
-      "provisionPattern": "created project"
-    },
-    {
-      "url": "https://service-two.example",
-      "driver": "two.mjs",
-      "authPattern": "expected account",
-      "provisionPattern": "created project"
-    },
-    {
-      "url": "https://service-three.example",
-      "driver": "three.mjs",
-      "authPattern": "expected account",
-      "provisionPattern": "created project"
-    }
-  ]
-}
+   Credential creation uses core's existing mutation capture grammar:
+   `capture: {store, source: {role, name?, container?}, write_id?}`. If the
+   initial capture returns a `write_id` with an uncertain storage result, the
+   driver may pass that identity only to `operate_extract` for extraction/storage
+   recovery. It must never replay the click/type/select/press or recipe mutation.
+   The final `operate_finish` result is validated against core's lifecycle-owned
+   additive receipt; the acceptance harness does not persist separate closure
+   truth.
+   Its `driverEvidence.baseline` and `driverEvidence.provision` stages contain
+   at most 12 ordered MCP calls. Allowed calls are `operate_navigate`,
+   `operate_observe`, `operate_click`, `operate_type`, `operate_select`, and
+   `operate_extract`; every call has an `id`, `tool`, and `arguments`, and may
+   have `require_pattern` and `timeout_ms`. `$RUN_LABEL` and `$SESSION_ID` are
+   substituted in arguments. Use `format:"full"` for provider-rendered evidence
+   read from `dom`; control queries intentionally omit non-control page text. A capture step may set `continue_on_error: true`
+   to retain core's metadata-only error result. A following `operate_extract`
+   recovery step uses `{ "$from": { "step": "capture-step", "path":
+   "write_id" } }` in its arguments and may be gated with `{ "when": {
+   "step": "capture-step", "path": "storage", "equals": "unknown"
+   } }`. This is extraction/storage recovery only; the scaffold never loops or
+   repeats a mutation step. Evidence fields are either `{ "literal": ... }`
+   or `{ "step": "step-id", "path": "result.path" }`; string evidence may
+   additionally use a named `(?<value>...)` `pattern` (`as: "timestamp"`
+   converts an observed ISO time).
+
+   Before filling a live manifest, observe and record these facts from each
+   provider page: the authenticated account identifier; the complete pre-run
+   credential IDs including the old-control ID; the unique create-key control,
+   name field, and final create control refs; the result path containing core's
+   captured vault reference; and provider-rendered new key ID, exact run label,
+   account ID, and creation timestamp. If any fact is absent or ambiguous, stop:
+   a guessed selector, harness timestamp, or old key is not qualifying evidence.
+   For `revoke`, add a bounded stage whose first calls re-observe the exact new
+   provider ID, revokes that ID, and reads the resulting confirmation. Set
+   `driverEvidence.revoke.evidence.provider_credential_id` and `.status` to
+   observed step/path evidence (not literals); status must resolve to `revoked`
+   and the ID must equal the supplied fresh credential. `$CREDENTIAL_ID` binds
+   that credential in revoke-stage arguments and patterns. The driver returns
+   the bound cleanup receipt only after confirmation; it runs after the probe.
+   `apps/mcp/scripts/bounded-driver-evidence.example.json` is the copyable,
+   executable schema; replace its `observed-*` refs and evidence patterns only
+   after those values have been read from the live page. Use unique stable
+   `@label` aliases for a reusable driver; `@e:` IDs belong to one session and
+   must never be copied from a preparatory session into a fresh harness session.
+   Alternatively, add a current-session query step and bind its returned ref
+   through `$from`; verify uniqueness before authorizing the mutation.
+   The manifest may inline that object as `driverEvidence` or point
+   `driverEvidenceFile` at a per-session JSON copy beside the manifest, as the
+   manifest example does.
+
+3. Copy `apps/mcp/scripts/broker-live-acceptance.example.json` to an ignored
+   worktree-local file. Fill in the exact release/native command, isolated
+   profile and config paths, expected provider account identities, DOM evidence,
+   and old valid provider/vault controls. An old credential proves the negative
+   control works but cannot satisfy the fresh result.
+
+   Add the `driverEvidence` object described above to each service. Provider probes are reviewed in
+   `apps/mcp/scripts/fresh-credential-policy.mjs`; drivers cannot substitute an
+   arbitrary request or self-assert harmlessness. The current probes are Resend
+   `GET /domains` and Neon `GET /api/v2/projects`. The final manifest and probe
+   catalog accept only these two providers.
+
+   Installed-command initialization is only a packaging/stdio diagnostic. It
+   does not prove that the configured native host selected or connected to that
+   command. From the actual configured native host connection, record the
+   initialize server version, host connection/session ID, a tools/list result
+   containing `operate_start`, and one completed read-only `list_credentials`
+   call in the shape shown by
+   `apps/mcp/scripts/configured-native-evidence.example.json`. Save it beside
+   the ignored manifest and set `configuredNativeEvidence` to its relative
+   path. The combined harness rejects installed-command evidence in this slot.
+4. Build and run the hermetic qualification tests before live acceptance:
+
+```bash
+pnpm --filter @trusty-squire/mcp build
+pnpm --filter @trusty-squire/mcp exec vitest run \
+  scripts/fresh-credential-policy.test.mjs \
+  scripts/native-launch-diagnostics.test.mjs \
+  scripts/bounded-credential-driver.test.mjs \
+  scripts/broker-live-acceptance.test.mjs \
+  src/__tests__/install-targets-e2e.test.ts \
+  src/bot/__tests__/broker-stdio-restart.test.ts
 ```
 
-4. Through `chrome-devtools-axi run`, import
-   `apps/mcp/scripts/broker-live-acceptance.mjs` and call
-   `runLiveAcceptance('/absolute/path/to/config.json')`. It launches three real
-   MCP stdio servers and the production broker, requires actual Google admission,
-   checks service postconditions, and measures isolation and teardown. Preserve
-   its evidence file and run the broader reviewed auth matrix. A fully successful
-   run writes an inert profile-local evidence record bound to that account and
-   the three tested service hosts. The record is evidence of that run only; it
-   neither enables concurrency nor substitutes for the reviewed real-auth matrix.
-   A failed or interrupted run removes its in-progress record; never create or
-   copy this record manually.
+5. Firstmate runs the SDK concurrency arm directly in Node, after recording
+   actual configured-host evidence through that host's native MCP tools. This
+   command may use the enrolled isolated profile and perform the manifest's
+   authorized fresh provider mutations; it is not a native-host invocation.
+
+```bash
+node --input-type=module <<'JS'
+import { runNativeAndConcurrencyAcceptance } from './apps/mcp/scripts/broker-live-acceptance.mjs';
+console.log(await runNativeAndConcurrencyAcceptance('./.broker-acceptance/manifest.json'));
+JS
+```
+
+`chrome-devtools-axi run` executes scripts against its browser `page` object;
+it is not a Node module runner for the SDK harness. Obtain configured native MCP
+proof from the actual host connection. Use `operate_screenshot` on the relevant
+Squire session to record visual transitions. Preserve missing provider account,
+key ID, creation-time, and native-host evidence as missing; do not fill templates
+with inferred success.
+
+The installed-command arm performs only MCP initialization and records the
+selected command, expected and initialized versions, connection epoch, bounded
+exit, and sanitized stderr classification. It must report `ready`. The separate
+configured-host evidence must also validate; neither installed-command nor SDK
+concurrency substitutes for the actual configured native host connection.
+
+The concurrency arm launches three independent MCP stdio servers against one
+production broker and one enrolled profile. Resend and Neon run concurrently;
+the duplicate-provider third start remains pending while its site's owner is
+active, then is admitted within the start budget after that owner closes.
+Exclusive site custody and distinct mutable page ownership remain enforced.
+The harness requires actual Google admission, validates old and new keys
+with provider-specific read-only probes, checks overlap/isolation, and records
+every closure receipt. Preserve its evidence file and run the broader reviewed
+auth matrix. A fully successful run writes an inert profile-local evidence record
+bound to that account and the three tested service hosts. The record is evidence
+of that run only; it neither enables concurrency nor substitutes for the reviewed
+real-auth matrix. A failed or interrupted run removes its in-progress record;
+never create or copy this record manually.

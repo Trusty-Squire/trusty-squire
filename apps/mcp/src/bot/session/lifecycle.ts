@@ -1,3 +1,9 @@
+import {
+  currentOperatorOperationId,
+  persistOperatorTerminalReceipt,
+  settleOperatorTerminalReceipt,
+} from "../request-cancellation.js";
+import type { OperationReceipt } from "../operation-receipt.js";
 import { reserveBrokerAdmission } from "../broker/admission-context.js";
 import { brokerBrowserCustody } from "../broker/custody.js";
 // Phase 2 of the operator session-management restructure: the session
@@ -442,10 +448,11 @@ async function releaseWarmBrowserPage(
   browser: BrowserController,
   _persistState: boolean,
   owner?: SessionTerminalTeardownOwner,
+  beforeRelease?: () => Promise<void>,
 ): Promise<void> {
   const custody = brokerBrowserCustody();
   if (custody !== undefined) {
-    await custody.release(browser);
+    await custody.release(browser, beforeRelease);
     return;
   }
   const leased = leasedBrowsers.get(browser);
@@ -466,14 +473,22 @@ async function releaseWarmBrowserPage(
     if (group === undefined) {
       // Production still tears the identity's Chrome down at every session
       // finish (flag off, or no multisession group formed).
-      await browser.close();
+      const closed = await browser.close();
+      if (closed !== "closed") throw new Error("operator browser cleanup unproven");
     } else if (!emptiedGroup) {
-      await browser.closeOwnPagesOnly();
+      const closed = await browser.closeOwnPagesOnly();
+      if (closed !== "closed") throw new Error("operator page cleanup unproven");
     } else {
       if (browser !== group.primary) await browser.closeOwnPagesOnly().catch(() => undefined);
-      await group.primary.close();
+      const closed = await group.primary.close();
+      if (closed !== "closed") throw new Error("operator browser cleanup unproven");
     }
-  } finally {
+    await beforeRelease?.();
+  } catch (error) {
+    if (group !== undefined) group.refCount += 1;
+    throw error;
+  }
+  {
     leasedBrowsers.delete(browser);
     if (leased !== undefined) {
       if (group === undefined) {
@@ -914,7 +929,11 @@ export function paymentSession(sessionId?: string): Session {
   return session;
 }
 
+const cancelledCallLeases = new WeakMap<Session, Set<AbortSignal>>();
+
 function acquireSessionCallLease(session: Session): () => void {
+  if ((cancelledCallLeases.get(session)?.size ?? 0) > 0)
+    throw new Error("operator_session_busy: cancelled execution still owns this session");
   if (session.closing) throw new Error(`provision session ${session.id} is closing`);
   session.lastActivityAt = Date.now();
   session.callCount += 1;
@@ -975,10 +994,23 @@ async function withSelectedProvisionSessionCall<T>(
 export async function withProvisionSessionCall<T>(
   sessionId: string,
   fn: (session: Session) => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  return await withSelectedProvisionSessionCall(session, fn);
+  if (signal?.aborted) throw signal.reason ?? new Error("operator_request_cancelled");
+  const cancelled = (): void => {
+    const leases = cancelledCallLeases.get(session) ?? new Set<AbortSignal>();
+    leases.add(signal!);
+    cancelledCallLeases.set(session, leases);
+  };
+  signal?.addEventListener("abort", cancelled, { once: true });
+  try {
+    return await withSelectedProvisionSessionCall(session, fn);
+  } finally {
+    signal?.removeEventListener("abort", cancelled);
+    if (signal !== undefined) cancelledCallLeases.get(session)?.delete(signal);
+  }
 }
 
 export async function withPaymentSessionCall<T>(
@@ -1304,15 +1336,27 @@ export async function startHarnessProvisionSession(
   }
 }
 
-export interface FinishResult {
-  session_id: string;
+export interface FinishResult extends OperationReceipt {
   url: string;
-  closed: true;
+}
+
+const FINISH_RESPONSE_TIMEOUT_MS = 4_000;
+
+function finishReceipt(sessionId: string, url: string, closed: boolean): FinishResult {
+  return {
+    session_id: sessionId,
+    operation_id: currentOperatorOperationId() ?? randomUUID(),
+    execution: closed ? "completed" : "pending",
+    mutation: "not_dispatched",
+    cleanup: closed ? "closed" : "closing",
+    closed,
+    url,
+  };
 }
 
 export interface PreparedFinishResult<T> {
   finish: FinishResult;
-  prepared: T;
+  prepared: T | undefined;
 }
 
 function profileRequiresDestroy(session: Session): boolean {
@@ -1470,15 +1514,35 @@ async function closeFinishingProvisionSession(
   session.paymentFieldSealActive = false;
   session.pendingThreeDs = null;
   stopSessionWatchdog(session);
+  const finish = finishReceipt(sessionId, url, true);
+  const receipt: OperationReceipt = {
+    session_id: finish.session_id,
+    operation_id: finish.operation_id,
+    execution: finish.execution,
+    mutation: finish.mutation,
+    cleanup: finish.cleanup,
+    closed: finish.closed,
+  };
   await releaseWarmBrowserPage(
     session.browser,
     persistState,
     session.terminalTeardownOwner ?? undefined,
+    async () => {
+      clearSessionArtifacts(session);
+      if (observeSnapshotPathState(observeSnapshotDir(session.id)) !== "missing")
+        throw new Error("operator artifact cleanup unproven");
+      await persistOperatorTerminalReceipt(receipt);
+    },
   );
   deregisterProvisionSession(session);
   disposeSessionWatchdog(session);
-  return { session_id: sessionId, url, closed: true };
+  settleOperatorTerminalReceipt();
+  return finish;
 }
+
+// A failed close/persistence attempt may be retried without replaying finish
+// preparation (which can store a credential or publish a recipe).
+const finishCleanupRetries = new WeakMap<Session, () => Promise<FinishResult>>();
 
 export async function finishProvisionSessionWithPreparation<T>(
   sessionId: string,
@@ -1487,7 +1551,33 @@ export async function finishProvisionSessionWithPreparation<T>(
 ): Promise<PreparedFinishResult<T>> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  if (session.closing) throw new Error(`provision session ${sessionId} is already closing`);
+  if (session.closing) {
+    const retry = finishCleanupRetries.get(session);
+    if (retry !== undefined) {
+      finishCleanupRetries.delete(session);
+      const retrying = retry().catch((error: unknown) => {
+        finishCleanupRetries.set(session, retry);
+        throw error;
+      });
+      try {
+        const finish = await withTerminalTimeout(
+          retrying,
+          FINISH_RESPONSE_TIMEOUT_MS,
+          "operator cleanup remains pending",
+        );
+        return { finish, prepared: undefined };
+      } catch {
+        return {
+          finish: finishReceipt(sessionId, session.browser.currentUrl(), false),
+          prepared: undefined,
+        };
+      }
+    }
+    return {
+      finish: finishReceipt(sessionId, session.browser.currentUrl(), false),
+      prepared: undefined,
+    };
+  }
   const owner: SessionTerminalTeardownOwner = {
     forced: false,
     forcePromise: null,
@@ -1497,6 +1587,7 @@ export async function finishProvisionSessionWithPreparation<T>(
   session.terminalTeardownOwner = owner;
   session.closing = true;
   stopSessionWatchdog(session);
+  let closingStarted = false;
   const transition = (async (): Promise<PreparedFinishResult<T>> => {
     await waitForSessionCallsToDrain(session);
     const prepared = await prepare();
@@ -1504,23 +1595,44 @@ export async function finishProvisionSessionWithPreparation<T>(
       throw new Error(`provision session ${sessionId} terminal transition was forced`);
     }
     const persistState = successfulOutcome() && !profileRequiresDestroy(session);
+    closingStarted = true;
+    const retryCleanup = () => closeFinishingProvisionSession(session, persistState);
     try {
-      const finish = await closeFinishingProvisionSession(session, persistState);
+      const finish = await retryCleanup();
       return { finish, prepared };
     } catch (error) {
-      await forceTerminateProvisionSession(
-        session,
-        "finish_forced_terminate",
-        { reason: "terminal_close_failed" },
-        false,
-      );
+      finishCleanupRetries.set(session, retryCleanup);
       throw error;
     }
-  })();
+  })().catch((error: unknown) => {
+    if (!closingStarted && !owner.forced && sessions.get(sessionId) === session) {
+      session.closing = false;
+      session.terminalTeardownOwner = null;
+      startSessionWatchdog(session);
+    }
+    throw error;
+  });
   try {
-    return await transition;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        transition,
+        new Promise<PreparedFinishResult<T>>((resolve) => {
+          timer = setTimeout(
+            () =>
+              resolve({
+                finish: finishReceipt(sessionId, session.browser.currentUrl(), false),
+                prepared: undefined,
+              }),
+            FINISH_RESPONSE_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   } catch (error) {
-    if (!owner.forced && sessions.get(sessionId) === session) {
+    if (!closingStarted && !owner.forced && sessions.get(sessionId) === session) {
       session.closing = false;
       session.terminalTeardownOwner = null;
       startSessionWatchdog(session);
@@ -1531,7 +1643,7 @@ export async function finishProvisionSessionWithPreparation<T>(
 
 export async function finishProvisionSession(sessionId: string): Promise<FinishResult> {
   if (refusedStartSessionIds.delete(sessionId)) {
-    return { session_id: sessionId, url: "", closed: true };
+    return finishReceipt(sessionId, "", true);
   }
   return (await finishProvisionSessionWithPreparation(sessionId, async () => undefined)).finish;
 }

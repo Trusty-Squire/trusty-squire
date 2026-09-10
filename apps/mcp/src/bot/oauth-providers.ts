@@ -14,7 +14,7 @@
 // repo/admin/org scopes must abort. Each provider carries its own
 // allowlist.
 
-import { classifyGoogleAuthState } from "./google-login.js";
+import { classifyGoogleAuthState } from "./google-auth-state.js";
 import { scopesAreBasic as googleScopesAreBasic, extractOAuthScopes } from "./oauth-scope.js";
 
 // extractOAuthScopes reads the `scope` query parameter — provider-
@@ -30,6 +30,7 @@ export type OAuthProviderId = "google" | "github";
 // vocabulary across providers — Google's classifier reports the same
 // shape via `not_google`, normalized to `not_provider` below.
 export type OAuthAuthState =
+  | "chooser" // a valid session — the provider is asking which account to use
   | "consent" // a valid session — the provider is asking to authorize the service
   | "needs_login" // session absent/expired — the provider wants credentials
   | "challenge" // 2FA / verify-it's-you — the provider interrupted

@@ -1,3 +1,4 @@
+import { markOperatorMutationDispatchAttempted } from "../request-cancellation.js";
 import { mkdtemp, rm, appendFile, readFile } from "node:fs/promises";
 import { createHash, createHmac } from "node:crypto";
 import { join } from "node:path";
@@ -76,6 +77,7 @@ describe("broker dispatch custody", () => {
       inputSchema: z.object({}).strict(),
       jsonInputSchema: {},
       handler: async () => {
+        if (name === "operate_recipe_run") await markOperatorMutationDispatchAttempted();
         throw new Error(`${name} failed`);
       },
     });
@@ -588,4 +590,107 @@ describe("broker dispatch custody", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+});
+
+it("retains lineage-bound closure proof across acknowledgement and journal restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ts-terminal-receipt-"));
+  const path = join(root, "dispatch.jsonl");
+  try {
+    const journal = new DispatchJournal(path);
+    const receipt = {
+      session_id: "session",
+      operation_id: "finish-1",
+      execution: "completed" as const,
+      mutation: "not_dispatched" as const,
+      cleanup: "closed" as const,
+      closed: true,
+    };
+    await journal.recordTerminalReceipt("owner", receipt);
+    await journal.acknowledge("owner", "finish-1");
+    const restarted = new DispatchJournal(path);
+    expect(await restarted.terminalReceipt("owner", "session")).toEqual(receipt);
+    expect(await restarted.terminalReceipt("foreign", "session")).toBeUndefined();
+    expect(await restarted.terminalReceipt("owner", "unknown")).toBeUndefined();
+    await expect(
+      restarted.recordTerminalReceipt("owner", { ...receipt, closed: false, cleanup: "unknown" }),
+    ).rejects.toThrow("established closure");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("retries terminal persistence after a failure before any journal append", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ts-terminal-write-retry-"));
+  const directory = join(root, "journal");
+  try {
+    await appendFile(directory, "fixture blocking directory creation");
+    const journal = new DispatchJournal(join(directory, "dispatch.jsonl"));
+    const receipt = {
+      session_id: "session",
+      operation_id: "finish",
+      execution: "completed" as const,
+      mutation: "not_dispatched" as const,
+      cleanup: "closed" as const,
+      closed: true,
+    };
+    await expect(journal.recordTerminalReceipt("owner", receipt)).rejects.toThrow();
+    await rm(directory);
+    await journal.recordTerminalReceipt("owner", receipt);
+    expect(await journal.terminalReceipt("owner", "session")).toEqual(receipt);
+    expect(
+      await new DispatchJournal(join(directory, "dispatch.jsonl")).terminalReceipt(
+        "owner",
+        "session",
+      ),
+    ).toEqual(receipt);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("retains the capture identity across durable dispatch transitions and restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "capture-dispatch-"));
+  const path = join(root, "journal.jsonl");
+  try {
+    const journal = new DispatchJournal(path);
+    const detail = {
+      operation: "operate_click",
+      inputHash: "input",
+      dispatchTracked: true as const,
+    };
+    const capture = {
+      write_id: "original",
+      binding: "account-service",
+      stored: false,
+      storage: "unknown" as const,
+    };
+    await journal.recordCapture("lineage", "session", "create", capture, false, detail);
+    await journal.record("session", "create", "dispatch_attempted", {
+      forwarderId: "lineage",
+      ...detail,
+    });
+    const restarted = new DispatchJournal(path);
+    expect(await restarted.hasCaptureWrite("lineage", "session", "original")).toBe(true);
+    expect(await restarted.unresolvedCapture("lineage", "session")).toEqual(capture);
+    await expect(restarted.assertReconciled()).rejects.toThrow("lost mutation custody");
+    await expect(
+      restarted.recordCapture(
+        "lineage",
+        "session",
+        "recover",
+        { ...capture, binding: "other" },
+        true,
+      ),
+    ).rejects.toThrow("original service-bound");
+    await restarted.recordCapture(
+      "lineage",
+      "session",
+      "recover",
+      { ...capture, stored: true, storage: "stored", reference: "vault://new" },
+      true,
+    );
+    expect(await restarted.unresolvedCapture("lineage", "session")).toBeUndefined();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

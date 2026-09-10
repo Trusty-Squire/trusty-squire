@@ -1,3 +1,4 @@
+import type { ApiClient } from "../../api-client.js";
 // Real-browser regression for the operator OAuth lifecycle. The provider popup
 // intentionally redirects to a token-exchange page and then closes itself,
 // which is the normal OAuth return shape that previously left the controller
@@ -13,6 +14,7 @@ import {
   BrowserController,
   OAuthAwaitingHumanError,
   OAuthFailedError,
+  OAuthOnboardingRequiredError,
   oauthErrorFromReturnUrl,
 } from "../browser.js";
 import {
@@ -77,6 +79,259 @@ describe("BrowserController OAuth popup lifecycle", () => {
 
   afterAll(async () => {
     await browser?.close();
+  });
+
+  it("returns relying-party required information without treating its Continue as provider consent", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const callback = "https://product.test/auth/callback";
+    const provider = `https://accounts.google.com/oauth?redirect_uri=${encodeURIComponent(callback)}`;
+    await context.route("**/*", async (route) => {
+      const url = route.request().url();
+      await route.fulfill({
+        contentType: "text/html",
+        body:
+          url === "https://product.test/login"
+            ? `<button id="oauth" onclick='location.href=${JSON.stringify(provider)}'>Google</button>`
+            : url.startsWith("https://accounts.google.com/")
+              ? '<script>location.href="https://product.test/required-information"</script>'
+              : '<input id="name" required><button id="continue" onclick="document.body.dataset.clicked=(Number(document.body.dataset.clicked||0)+1)">Continue</button>',
+      });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 1_500, "google")).rejects.toBeInstanceOf(
+        OAuthOnboardingRequiredError,
+      );
+      expect(product.url()).toBe("https://product.test/required-information");
+      expect(await product.locator("body").getAttribute("data-clicked")).toBeNull();
+      await expect(controller.advanceOAuthConsent("google", 50)).resolves.toBe(false);
+      expect(await product.locator("body").getAttribute("data-clicked")).toBeNull();
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("does not repeat a consent click or start a second attempt while the owned attempt can settle", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: '<button id="oauth" onclick="location.href=\'https://accounts.google.com/pending\'">Google</button>',
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: '<button id="continue" onclick="document.body.dataset.clicks=(Number(document.body.dataset.clicks||0)+1)">Continue</button>',
+      }),
+    );
+    await product.goto("https://accounts.google.com/pending");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      (
+        controller as unknown as {
+          activeOAuthAttempt: {
+            id: string;
+            provider: "google";
+            productPage: Page;
+            productDocumentId: string;
+            providerPage: Page;
+            providerDocumentId: string;
+            reporter: undefined;
+            reportedChallenges: Map<string, undefined>;
+          };
+        }
+      ).activeOAuthAttempt = {
+        id: "attempt-1",
+        provider: "google",
+        productPage: product,
+        productDocumentId: controller.mainDocumentIdentity(product),
+        providerPage: product,
+        providerDocumentId: controller.mainDocumentIdentity(product),
+        reporter: undefined,
+        reportedChallenges: new Map(),
+      };
+      await expect(controller.advanceOAuthConsent("google", 500)).resolves.toBe(true);
+      expect(await product.locator("body").getAttribute("data-clicks")).toBe("1");
+      await expect(controller.advanceOAuthConsent("google", 500)).resolves.toBe(false);
+      expect(await product.locator("body").getAttribute("data-clicks")).toBe("1");
+      await product.reload();
+      await expect(controller.advanceOAuthConsent("google", 500)).resolves.toBe(false);
+      expect(await product.locator("body").getAttribute("data-clicks")).toBeNull();
+      const driver = (controller as unknown as { pageDriver: Record<string, unknown> }).pageDriver;
+      driver.oauthProductPage = product;
+      driver.oauthProviderPage = product;
+      await expect(controller.loginWithOAuth("#oauth", 100, "google")).rejects.toMatchObject({
+        message: expect.stringContaining("second authorization attempt was not started"),
+      });
+      expect(await product.locator("body").getAttribute("data-clicks")).toBeNull();
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("returns an attempt-bound Google number immediately and stops consent automation", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const challengeUrl =
+      "https://accounts.google.com/v3/signin/challenge/dp?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback";
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<button id="oauth" onclick='location.href=${JSON.stringify(challengeUrl)}'>Google</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<main>Verify it's you — Tap 28 on your phone to sign in</main>
+          <button id="continue" onclick="document.body.dataset.clicked='yes'">Continue</button>`,
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    const reporter = vi.fn(
+      async (challenge: { attempt_id: string; challenge_revision: string }) => ({
+        sent: false,
+        deduped: false,
+        attempt_id: challenge.attempt_id,
+        challenge_revision: challenge.challenge_revision,
+        delivery: { channel: null, status: "failed" as const, error: "smtp_error" },
+      }),
+    );
+    try {
+      const error = await controller
+        .loginWithOAuth(
+          "#oauth",
+          2_000,
+          "google",
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          reporter,
+        )
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(OAuthAwaitingHumanError);
+      expect(error).toMatchObject({
+        challenge: {
+          provider: "google",
+          kind: "number_match",
+          number: "28",
+          expires_at: null,
+        },
+        notification: {
+          sent: false,
+          delivery: { status: "failed", error: "smtp_error" },
+        },
+      });
+      expect(reporter).toHaveBeenCalledOnce();
+      expect(await product.locator("body").getAttribute("data-clicked")).toBeNull();
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("projects changed Google challenge revisions through ordinary observations and clears disappeared challenges", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const challengeUrl = "https://accounts.google.com/v3/signin/challenge/dp";
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<button id="oauth" onclick='location.href=${JSON.stringify(challengeUrl)}'>Continue with Google</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<main>Verify it's you — Tap 28 on your phone</main><button onclick="document.body.dataset.clicked='yes'">Continue</button>`,
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    const notifyHeightenedAuth = vi.fn(
+      async (input: { attempt_id: string; challenge_revision: string }, signal: AbortSignal) => {
+        expect(signal).toBeInstanceOf(AbortSignal);
+        return {
+          sent: false,
+          deduped: false,
+          attempt_id: input.attempt_id,
+          challenge_revision: input.challenge_revision,
+          delivery: { channel: null, status: "failed" as const, error: "fixture_delivery_failure" },
+        };
+      },
+    );
+    let sessionId: string | undefined;
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: "https://product.test/login",
+        api: { notifyHeightenedAuth } as unknown as ApiClient,
+      });
+      sessionId = started.session_id;
+      const ref = parseElementsTable(started.el_table ?? "").find(
+        (element) => element.label === "Continue with Google",
+      )?.ref;
+      expect(ref).toBeDefined();
+      const first = await act(sessionId, { kind: "oauth_login", target: ref!, provider: "google" });
+      expect(first.oauth).toMatchObject({
+        state: "awaiting_human",
+        challenge: { number: "28" },
+        notification: { delivery: { status: "failed" } },
+      });
+      expect(notifyHeightenedAuth).toHaveBeenCalledTimes(1);
+      const same = await observe(sessionId);
+      expect(same.oauth).toMatchObject({ challenge: { number: "28" } });
+      expect(notifyHeightenedAuth).toHaveBeenCalledTimes(1);
+      await product.locator("main").evaluate((node) => {
+        node.textContent = "Verify it's you — Tap 64 on your phone";
+      });
+      const changed = await observe(sessionId);
+      expect(changed.oauth).toMatchObject({
+        challenge: { number: "64" },
+        notification: { delivery: { status: "failed" } },
+      });
+      expect(notifyHeightenedAuth).toHaveBeenCalledTimes(2);
+      expect(notifyHeightenedAuth.mock.calls[1]![0].challenge_revision).not.toBe(
+        notifyHeightenedAuth.mock.calls[0]![0].challenge_revision,
+      );
+      expect(notifyHeightenedAuth.mock.calls[1]![0].attempt_id).toBe(
+        notifyHeightenedAuth.mock.calls[0]![0].attempt_id,
+      );
+      expect(await product.locator("body").getAttribute("data-clicked")).toBeNull();
+      await product.locator("main").evaluate((node) => {
+        node.textContent = "Choose an account";
+      });
+      expect((await observe(sessionId)).oauth).toBeUndefined();
+      await product.locator("main").evaluate((node) => {
+        node.textContent = "Verify it's you — Tap 64 on your phone";
+      });
+      expect((await observe(sessionId)).oauth).toMatchObject({ challenge: { number: "64" } });
+      expect(notifyHeightenedAuth).toHaveBeenCalledTimes(3);
+      expect(notifyHeightenedAuth.mock.calls[2]![0].challenge_revision).not.toBe(
+        notifyHeightenedAuth.mock.calls[1]![0].challenge_revision,
+      );
+      await product.locator("main").evaluate((node) => {
+        node.textContent = "Verification request expired";
+      });
+      expect((await observe(sessionId)).oauth).toBeUndefined();
+      await product.locator("main").evaluate((node) => {
+        node.textContent = "Verify it's you — Tap 64 on your phone";
+      });
+      await observe(sessionId);
+      expect(notifyHeightenedAuth).toHaveBeenCalledTimes(4);
+      await product.goto("https://product.test/done");
+      const disappeared = await observe(sessionId);
+      expect(disappeared.oauth).toBeUndefined();
+      expect(notifyHeightenedAuth).toHaveBeenCalledTimes(4);
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
+      await context.close();
+    }
   });
 
   it("admits Google only from the active browser context", async () => {
@@ -1240,7 +1495,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await context.route("https://accounts.google.com/**", (route) =>
         route.fulfill({
           contentType: "text/html",
-          body: '<main>Consent</main><input id="project-name" required autocomplete="shipping address-line1" value="provider" onchange="document.body.dataset.shippingCommitted=\'provider\'"><select id="region"><option>Provider</option><option>Product</option></select>',
+          body: '<main>Example wants access to your Google Account</main><input id="project-name" required autocomplete="shipping address-line1" value="provider" onchange="document.body.dataset.shippingCommitted=\'provider\'"><select id="region"><option>Provider</option><option>Product</option></select>',
         }),
       );
       await context.route("https://console.product.test/**", (route) =>

@@ -25,7 +25,13 @@ const DEFAULT_BROKER_IDLE_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_BROKER_DRAIN_CLEANUP_TIMEOUT_MS = 3_000;
 const SUPERVISOR_ATTACH_TIMEOUT_MS = 10_000;
 const SUPERVISOR_ATTACH_POLL_MS = 100;
-const DRAIN_RECOVERY_METHODS = new Set(["recover", "reclaim", "acknowledge", "confirm_start"]);
+const DRAIN_RECOVERY_METHODS = new Set([
+  "recover",
+  "reclaim",
+  "acknowledge",
+  "confirm_start",
+  "cancel",
+]);
 const STARTUP_RECONCILIATION_METHODS = new Set(["recover", "reclaim"]);
 
 export function brokerDrainAllowsMethod(method: string): boolean {
@@ -217,104 +223,127 @@ export async function runBrokerDaemon(): Promise<void> {
       if (idleTimer !== undefined) clearTimeout(idleTimer);
     },
     call: async (principal, method, params, id) => {
-      connected.add(principal.clientId);
-      if (idleTimer !== undefined) clearTimeout(idleTimer);
-      if (closing || (draining && !brokerDrainAllowsMethod(method)))
-        throw new BrokerRefusal(
-          "broker_draining",
-          "Broker is draining; only durable recovery is available",
-        );
-      if (principal.supervisor && method !== "supervise")
-        throw new BrokerRefusal("unauthorized", "Supervisor connections may only supervise");
-      const report = await guard.inspect();
-      if (report.problem !== null) throw new Error(report.problem.message);
-      if (runtime.browserLost() && method === "reclaim")
-        throw new BrokerRefusal(
-          "browser_lost",
-          "Browser transport is lost; the pending start cannot be recovered",
-        );
-      if (method === "supervise") {
-        if (!principal.supervisor)
-          throw new BrokerRefusal("unauthorized", "Supervisor identity is required");
-        idleTimeout = undefined;
-        return { state: "supervised" };
-      }
-      if (method === "recover") {
-        const result = await operator.recover(principal, params);
-        if (startupReconciliation && retainedXataPreDispatchAuthorization !== undefined)
-          startupReconciliation = await journal.hasOnlyAuthorizedPreDispatchFailure(
-            retainedXataPreDispatchAuthorization,
+      const execute = async (registeredSignal?: AbortSignal): Promise<unknown> => {
+        connected.add(principal.clientId);
+        if (idleTimer !== undefined) clearTimeout(idleTimer);
+        if (closing || (draining && !brokerDrainAllowsMethod(method)))
+          throw new BrokerRefusal(
+            "broker_draining",
+            "Broker is draining; only durable recovery is available",
           );
-        return result;
-      }
-      if (!brokerStartupAllowsMethod(startupReconciliation, method))
-        throw new BrokerRefusal(
-          "outcome_unknown",
-          "Prior broker lost mutation custody; only explicit reconciliation is available",
-        );
-      if (method === "reclaim") return await operator.reclaim(principal);
-      if (method === "acknowledge") {
-        if (typeof params.requestId !== "string")
-          throw new Error("A broker acknowledgement requires its request ID");
-        await operator.acknowledge(principal, params.requestId);
-        return {};
-      }
-      if (method === "confirm_start") {
-        await operator.confirmStartDelivery(principal, params);
-        return {};
-      }
-      if (
-        (await journal.hasOutstanding(undefined, principal.forwarderId)) &&
-        !(method === "tool" && (await operator.canContinuePaymentStatus(principal, params)))
-      )
-        throw new BrokerRefusal(
-          "outcome_unknown",
-          "Prior mutation outcome awaits reconciliation; reconnect without replaying it",
-        );
-      if (method === "maintenance") {
-        if (maintenanceOwner !== undefined && maintenanceOwner !== principal.clientId)
-          throw new Error("Identity maintenance is already owned");
-        maintenanceOwner = principal.clientId;
-        const inventory = operator.authority.inventory();
-        const ready =
-          inventory.active === 0 &&
-          inventory.quarantined === 0 &&
-          inventory.admitting === 0 &&
-          (await runtime.close());
-        maintenanceReady = ready;
-        return { state: ready ? "ready" : "draining", ...inventory };
-      }
-      if (method === "resume") {
-        if (maintenanceOwner !== principal.clientId)
-          throw new Error("Identity maintenance is not owned by this client");
-        if (!(await waitForProfileFree(CHROME_PROFILE_DIR, { deadlineMs: 0 })))
-          throw new Error("Plain login browser is still open");
-        await restoreMaintenance();
-        return { state: "resumed" };
-      }
-      if (
-        maintenanceOwner !== undefined &&
-        (params.name === "operate_start" ||
-          (params.name === "operate_recipe_run" &&
-            (params.args as Record<string, unknown> | undefined)?.session_id === undefined))
-      )
-        throw new Error("Identity maintenance is draining; retry after connect completes");
-      if (runtime.browserLost()) {
-        operator.authority.fenceRuntime();
-        await operator.reap();
-        const inventory = operator.authority.inventory();
-        if (inventory.active === 0 && inventory.quarantined === 0 && inventory.admitting === 0) {
-          await journal.assertReconciled();
-          if (!(await runtime.close())) throw new Error("Old browser cleanup is not proven");
-          runtime.resume();
-          runtime.claimProfile();
-          operator.authority.rotateEpoch();
-        } else
-          throw new Error(
-            "browser_lost: old session outcomes remain in custody; do not replay mutations",
+        if (principal.supervisor && method !== "supervise")
+          throw new BrokerRefusal("unauthorized", "Supervisor connections may only supervise");
+        if (method === "cancel") {
+          if (typeof params.requestId !== "string")
+            throw new Error("A broker cancellation requires its request ID");
+          return { cancelled: operator.cancel(principal, params.requestId) };
+        }
+        if (method === "tool") {
+          const busy = operator.busyReadResult(principal, params, id);
+          if (busy !== undefined) return busy;
+        }
+        const report = await guard.inspect();
+        if (report.problem !== null) throw new Error(report.problem.message);
+        if (runtime.browserLost() && method === "reclaim")
+          throw new BrokerRefusal(
+            "browser_lost",
+            "Browser transport is lost; the pending start cannot be recovered",
           );
-      }
-      return await operator.call(principal, method, params, id);
+        if (method === "supervise") {
+          if (!principal.supervisor)
+            throw new BrokerRefusal("unauthorized", "Supervisor identity is required");
+          idleTimeout = undefined;
+          return { state: "supervised" };
+        }
+        if (method === "recover") {
+          const result = await operator.recover(principal, params);
+          if (startupReconciliation && retainedXataPreDispatchAuthorization !== undefined)
+            startupReconciliation = await journal.hasOnlyAuthorizedPreDispatchFailure(
+              retainedXataPreDispatchAuthorization,
+            );
+          return result;
+        }
+        if (!brokerStartupAllowsMethod(startupReconciliation, method))
+          throw new BrokerRefusal(
+            "outcome_unknown",
+            "Prior broker lost mutation custody; only explicit reconciliation is available",
+          );
+        if (method === "reclaim") return await operator.reclaim(principal);
+        if (method === "acknowledge") {
+          if (typeof params.requestId !== "string")
+            throw new Error("A broker acknowledgement requires its request ID");
+          await operator.acknowledge(principal, params.requestId);
+          return {};
+        }
+        if (method === "confirm_start") {
+          await operator.confirmStartDelivery(principal, params);
+          return {};
+        }
+        if (
+          (await journal.hasOutstanding(undefined, principal.forwarderId)) &&
+          !(
+            method === "tool" &&
+            (params.name === "operate_finish" ||
+              (await operator.canReconcileCapture(principal, params)) ||
+              (await operator.canContinuePaymentStatus(principal, params)))
+          )
+        )
+          throw new BrokerRefusal(
+            "outcome_unknown",
+            "Prior mutation outcome awaits reconciliation; reconnect without replaying it",
+          );
+        if (method === "maintenance") {
+          if (maintenanceOwner !== undefined && maintenanceOwner !== principal.clientId)
+            throw new Error("Identity maintenance is already owned");
+          maintenanceOwner = principal.clientId;
+          const inventory = operator.authority.inventory();
+          const ready =
+            inventory.active === 0 &&
+            inventory.quarantined === 0 &&
+            inventory.admitting === 0 &&
+            (await runtime.close());
+          maintenanceReady = ready;
+          return { state: ready ? "ready" : "draining", ...inventory };
+        }
+        if (method === "resume") {
+          if (maintenanceOwner !== principal.clientId)
+            throw new Error("Identity maintenance is not owned by this client");
+          if (!(await waitForProfileFree(CHROME_PROFILE_DIR, { deadlineMs: 0 })))
+            throw new Error("Plain login browser is still open");
+          await restoreMaintenance();
+          return { state: "resumed" };
+        }
+        if (
+          maintenanceOwner !== undefined &&
+          (params.name === "operate_start" ||
+            (params.name === "operate_recipe_run" &&
+              (params.args as Record<string, unknown> | undefined)?.session_id === undefined))
+        )
+          throw new Error("Identity maintenance is draining; retry after connect completes");
+        if (runtime.browserLost()) {
+          operator.authority.fenceRuntime();
+          await operator.reap();
+          const inventory = operator.authority.inventory();
+          if (inventory.active === 0 && inventory.quarantined === 0 && inventory.admitting === 0) {
+            await journal.assertReconciled();
+            if (!(await runtime.close())) throw new Error("Old browser cleanup is not proven");
+            runtime.resume();
+            runtime.claimProfile();
+            operator.authority.rotateEpoch();
+          } else
+            throw new Error(
+              "browser_lost: old session outcomes remain in custody; do not replay mutations",
+            );
+        }
+        return registeredSignal === undefined
+          ? await operator.call(principal, method, params, id)
+          : await operator.callRegistered(principal, method, params, id, registeredSignal);
+      };
+      // Register before guard inspection, journal recovery, or runtime awaits.
+      // Disconnect/cancel therefore always sees the actual in-flight request.
+      return method === "tool"
+        ? await operator.withRegisteredRequest(principal, id, execute)
+        : await execute();
     },
     disconnect: async (principal, explicit) => {
       await operator.disconnect(principal, explicit);

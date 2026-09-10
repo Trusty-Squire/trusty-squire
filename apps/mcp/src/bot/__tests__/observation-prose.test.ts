@@ -90,7 +90,7 @@ describe("interleaved observation DOM", () => {
       const queryCapture = await captureThroughController(page);
       const queryEmail = queryCapture.elements.find((candidate) => candidate.id === "query-email")!;
       expect(controlMatchesPrivateQueryV2(queryEmail, "work email")).toBe(true);
-      expect(controlMatchesPrivateQueryV2(queryEmail, "billing contact")).toBe(false);
+      expect(controlMatchesPrivateQueryV2(queryEmail, "billing contact")).toBe(true);
       const volume = capture.elements.find((candidate) => candidate.id === "volume")!;
       expect(controlMatchesPrivateQueryV2(volume, "master volume")).toBe(false);
       const shadowAssociated = queryCapture.elements.find(
@@ -523,6 +523,52 @@ describe("interleaved observation DOM", () => {
       expect(shadow).toBeDefined();
       await page.locator(shadow.selector).click();
       expect(await page.locator("#host").getAttribute("data-clicked")).toBe("yes");
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("shares one semantic action owner without manufacturing page-root or decorative controls", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`
+        <style>
+          #page-root { cursor:pointer; width:700px; height:500px }
+          #native-choice { position:absolute; opacity:0; width:1px; height:1px }
+          #choice-proxy { display:block; width:160px; height:32px }
+        </style>
+        <div id="page-root" class="search destructive delete-account">
+          <h1>Delete account settings</h1>
+          <button id="delete">Delete account <svg><path d="M0 0h8v8z"></path></svg></button>
+          <label id="choice-proxy" for="native-choice">Enable API keys</label>
+          <input id="native-choice" type="checkbox">
+          <div id="nested-owner" role="button" onclick="this.dataset.owner='yes'">
+            Outer action
+            <button id="nested-child" onclick="this.dataset.child='yes'">Inner action</button>
+          </div>
+        </div>
+      `);
+      const capture = await captureThroughController(page);
+      const ids = capture.elements.map((element) => element.id);
+      expect(ids).not.toContain("page-root");
+      expect(ids).not.toContain("native-choice");
+      expect(ids).not.toContain(null);
+      expect(ids.filter((id) => id === "delete")).toHaveLength(1);
+      expect(ids).toEqual(expect.arrayContaining(["choice-proxy", "nested-owner", "nested-child"]));
+      const proxy = capture.elements.find((element) => element.id === "choice-proxy")!;
+      expect(proxy).toMatchObject({ role: "checkbox", type: "checkbox" });
+      await page.locator(proxy.selector).click();
+      expect(await page.locator("#native-choice").isChecked()).toBe(true);
+
+      const handles = new Map(capture.elements.map((element) => [element, `@e:${element.index}`]));
+      const rows = buildSafeControlsV2({
+        elements: capture.elements,
+        legacyRefs: handles,
+        handles,
+        pageOrigin: "https://merchant.invalid",
+      }).rows;
+      expect(rows.filter((row) => row.action === "destructive")).toHaveLength(1);
+      expect(rows.find((row) => row.label === "@enable-api-keys")?.role).toBe("checkbox");
     } finally {
       await page.close();
     }

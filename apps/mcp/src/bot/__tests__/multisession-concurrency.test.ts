@@ -71,9 +71,10 @@ vi.mock("../browser.js", async (importOriginal) => {
     isConnected(): boolean {
       return true;
     }
-    async close(): Promise<void> {
+    async close(): Promise<"closed"> {
       this.record.closeCalls += 1;
       if (!this.record.isSatellite && h.primaryCloseGate !== null) await h.primaryCloseGate;
+      return "closed";
     }
     async closeOwnPagesOnly(): Promise<string> {
       this.record.closeOwnPagesOnlyCalls += 1;

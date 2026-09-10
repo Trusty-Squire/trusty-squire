@@ -1,8 +1,20 @@
+import { captureEvidenceSchema, type CaptureEvidence } from "../credential-capture.js";
+import { operationReceiptSchema, type OperationReceipt } from "../operation-receipt.js";
 import { open, readFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { BrokerRefusal } from "./scheduler.js";
 
-type DispatchPhase = "entered" | "outcome" | "acknowledged" | "settled" | "recovered";
+type DispatchPhase =
+  | "prepared"
+  | "dispatch_attempted"
+  | "observed_result"
+  | "delivery_acknowledged"
+  | "unknown"
+  | "entered"
+  | "outcome"
+  | "acknowledged"
+  | "settled"
+  | "recovered";
 export const START_DELIVERY_RETENTION_MS = 5 * 60_000;
 
 interface DispatchRecord {
@@ -14,17 +26,32 @@ interface DispatchRecord {
   start?: true;
   operation?: string;
   inputHash?: string;
+  dispatchTracked?: true;
   outcome?: ReconciledDispatchOutcome;
+  terminalReceipt?: OperationReceipt;
 }
 
+const phaseHasOutstandingCustody = (record: DispatchRecord): boolean =>
+  ["prepared", "entered", "outcome", "dispatch_attempted", "observed_result", "unknown"].includes(
+    record.phase,
+  ) || record.outcome?.status === "unknown";
+
+const phaseHasDeliverableOutcome = (record: DispatchRecord): boolean =>
+  ["outcome", "acknowledged", "observed_result", "delivery_acknowledged", "unknown"].includes(
+    record.phase,
+  );
+
 export interface ReconciledDispatchOutcome {
+  capture?: CaptureEvidence;
   status:
     | "completed"
     | "done"
     | "payment_3ds_required"
     | "payment_outcome_unknown"
+    | "unknown"
     | "not_dispatched";
-  error?: "stale_ref";
+  error?: "stale_ref" | "cancelled" | "pre_dispatch_failure";
+  reason?: "cancelled" | "execution_error";
   next?: { tool: "operate_payment_status"; wait_seconds: number };
 }
 
@@ -70,12 +97,21 @@ function validOutcome(value: unknown): value is ReconciledDispatchOutcome {
       "done",
       "payment_3ds_required",
       "payment_outcome_unknown",
+      "unknown",
       "not_dispatched",
     ].includes(String(outcome.status)) ||
-    !Object.keys(outcome).every((key) => key === "status" || key === "next" || key === "error") ||
+    !Object.keys(outcome).every((key) =>
+      ["status", "next", "error", "reason", "capture"].includes(key),
+    ) ||
+    (outcome.capture !== undefined && !captureEvidenceSchema.safeParse(outcome.capture).success) ||
     (outcome.status === "not_dispatched"
-      ? outcome.error !== "stale_ref" || outcome.next !== undefined
-      : outcome.error !== undefined)
+      ? !["stale_ref", "cancelled", "pre_dispatch_failure"].includes(String(outcome.error)) ||
+        outcome.next !== undefined ||
+        outcome.reason !== undefined
+      : outcome.error !== undefined) ||
+    (outcome.status === "unknown"
+      ? !["cancelled", "execution_error"].includes(String(outcome.reason))
+      : outcome.reason !== undefined)
   )
     return false;
   if (outcome.next === undefined) return true;
@@ -112,19 +148,39 @@ export class DispatchJournal {
         if (
           typeof record.sessionId !== "string" ||
           typeof record.requestId !== "string" ||
-          !["entered", "outcome", "acknowledged", "settled", "recovered"].includes(record.phase) ||
+          ![
+            "prepared",
+            "dispatch_attempted",
+            "observed_result",
+            "delivery_acknowledged",
+            "unknown",
+            "entered",
+            "outcome",
+            "acknowledged",
+            "settled",
+            "recovered",
+          ].includes(record.phase) ||
           (record.forwarderId !== undefined && typeof record.forwarderId !== "string") ||
           (record.start !== undefined && record.start !== true) ||
           (record.operation !== undefined && typeof record.operation !== "string") ||
           (record.inputHash !== undefined && typeof record.inputHash !== "string") ||
-          (record.outcome !== undefined && !validOutcome(record.outcome))
+          (record.dispatchTracked !== undefined && record.dispatchTracked !== true) ||
+          (record.outcome !== undefined && !validOutcome(record.outcome)) ||
+          (record.terminalReceipt !== undefined &&
+            !operationReceiptSchema.safeParse(record.terminalReceipt).success)
         )
           throw new Error("Malformed journal");
         if (record.phase === "recovered") continue;
         const key = JSON.stringify([record.sessionId, record.requestId]);
         const prior = states.get(key);
-        if (record.phase === "outcome" && prior?.outcome?.status === "payment_outcome_unknown")
+        if (
+          ["outcome", "observed_result"].includes(record.phase) &&
+          prior?.outcome?.status === "payment_outcome_unknown"
+        )
           continue;
+        if (prior?.outcome?.capture && !record.outcome?.capture) {
+          record.outcome = { ...(record.outcome ?? prior.outcome), capture: prior.outcome.capture };
+        }
         states.set(key, record);
       }
     } catch {
@@ -137,7 +193,29 @@ export class DispatchJournal {
   }
 
   async assertReconciled(): Promise<void> {
-    if ([...(await this.states()).values()].some((record) => record.phase === "entered"))
+    const records = [...(await this.states()).values()];
+    for (const record of records.filter(
+      (candidate) => candidate.phase === "prepared" && candidate.dispatchTracked === true,
+    )) {
+      await this.record(record.sessionId, record.requestId, "settled", {
+        ...(record.forwarderId === undefined ? {} : { forwarderId: record.forwarderId }),
+        ...(record.start === true ? { start: true } : {}),
+        ...(record.operation === undefined ? {} : { operation: record.operation }),
+        ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
+        dispatchTracked: true,
+        outcome: { status: "not_dispatched", error: "pre_dispatch_failure" },
+      });
+    }
+    if (
+      records.some(
+        (record) =>
+          record.phase === "entered" ||
+          record.phase === "dispatch_attempted" ||
+          record.phase === "unknown" ||
+          (record.phase === "prepared" && record.dispatchTracked !== true) ||
+          record.outcome?.status === "unknown",
+      )
+    )
       throw new BrokerRefusal(
         "outcome_unknown",
         "Prior broker lost mutation custody; reconcile before browser replacement",
@@ -173,9 +251,7 @@ export class DispatchJournal {
       authorization.operation !== retainedXataPreDispatchFailure.operation
     )
       return false;
-    const outstanding = [...(await this.states()).values()].filter(
-      (record) => record.phase === "entered" || record.phase === "outcome",
-    );
+    const outstanding = [...(await this.states()).values()].filter(phaseHasOutstandingCustody);
     if (outstanding.length !== 1) return false;
     const [record] = outstanding;
     return (
@@ -195,7 +271,7 @@ export class DispatchJournal {
       (record) =>
         (sessionId === undefined || record.sessionId === sessionId) &&
         (forwarderId === undefined || record.forwarderId === forwarderId) &&
-        (record.phase === "entered" || record.phase === "outcome"),
+        phaseHasOutstandingCustody(record),
     );
   }
 
@@ -205,7 +281,7 @@ export class DispatchJournal {
         record.forwarderId === forwarderId &&
         (sessionId === undefined || record.sessionId === sessionId) &&
         record.start === true &&
-        record.phase === "acknowledged",
+        ["acknowledged", "delivery_acknowledged"].includes(record.phase),
     );
   }
 
@@ -214,7 +290,7 @@ export class DispatchJournal {
       (record) =>
         record.sessionId === sessionId &&
         record.forwarderId === forwarderId &&
-        (record.phase === "entered" || record.phase === "outcome"),
+        phaseHasOutstandingCustody(record),
     );
     return (
       outstanding.length > 0 &&
@@ -232,14 +308,14 @@ export class DispatchJournal {
       (record) =>
         record.sessionId === sessionId &&
         record.forwarderId === forwarderId &&
-        (record.phase === "entered" || record.phase === "outcome"),
+        phaseHasOutstandingCustody(record),
     );
     return (
       outstanding.length > 0 &&
       outstanding.every(
         (record) =>
           record.operation === "operate_pay" &&
-          record.phase === "outcome" &&
+          ["outcome", "observed_result", "delivery_acknowledged"].includes(record.phase) &&
           record.outcome?.status === "payment_outcome_unknown",
       )
     );
@@ -283,7 +359,7 @@ export class DispatchJournal {
         (expected === undefined ||
           (record.operation === expected.operation && record.inputHash === expected.inputHash)) &&
         record.outcome !== undefined &&
-        (record.phase === "outcome" || record.phase === "acknowledged"),
+        phaseHasDeliverableOutcome(record),
     );
     return record === undefined
       ? undefined
@@ -310,7 +386,7 @@ export class DispatchJournal {
           record.inputHash === expected.inputHash &&
           (expected.sessionId === undefined || record.sessionId === expected.sessionId) &&
           record.outcome !== undefined &&
-          (record.phase === "outcome" || record.phase === "acknowledged"),
+          phaseHasDeliverableOutcome(record),
       );
     return record === undefined
       ? undefined
@@ -367,16 +443,17 @@ export class DispatchJournal {
       (record) =>
         record.forwarderId === forwarderId &&
         record.requestId === requestId &&
-        record.phase === "outcome",
+        ["outcome", "observed_result", "unknown"].includes(record.phase),
     );
     await Promise.all(
       outcomes.map(
         async (record) =>
-          await this.record(record.sessionId, record.requestId, "acknowledged", {
+          await this.record(record.sessionId, record.requestId, "delivery_acknowledged", {
             forwarderId,
             ...(record.start === true ? { start: true } : {}),
             ...(record.operation === undefined ? {} : { operation: record.operation }),
             ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
+            ...(record.dispatchTracked === true ? { dispatchTracked: true } : {}),
             ...(record.outcome === undefined ? {} : { outcome: record.outcome }),
           }),
       ),
@@ -390,7 +467,7 @@ export class DispatchJournal {
         record.sessionId === sessionId &&
         record.forwarderId === forwarderId &&
         record.start === true &&
-        record.phase === "acknowledged",
+        ["acknowledged", "delivery_acknowledged"].includes(record.phase),
     );
     await Promise.all(
       starts.map(
@@ -413,7 +490,7 @@ export class DispatchJournal {
         record.forwarderId === forwarderId &&
         record.start === true &&
         record.operation === "operate_start" &&
-        record.phase === "acknowledged",
+        ["acknowledged", "delivery_acknowledged"].includes(record.phase),
     );
     await Promise.all(
       starts.map(
@@ -435,7 +512,7 @@ export class DispatchJournal {
       (record) =>
         record.forwarderId !== undefined &&
         record.start === true &&
-        record.phase === "acknowledged" &&
+        ["acknowledged", "delivery_acknowledged"].includes(record.phase) &&
         now - record.at >= START_DELIVERY_RETENTION_MS,
     );
     await Promise.all(
@@ -462,16 +539,142 @@ export class DispatchJournal {
     });
   }
 
+  async recordCapture(
+    forwarderId: string,
+    sessionId: string,
+    requestId: string,
+    capture: CaptureEvidence,
+    recovery: boolean,
+    detail?: Pick<DispatchRecord, "operation" | "inputHash" | "dispatchTracked">,
+  ): Promise<void> {
+    const matching = [...(await this.states()).values()].filter(
+      (record) =>
+        record.forwarderId === forwarderId &&
+        record.sessionId === sessionId &&
+        record.outcome?.capture?.write_id === capture.write_id,
+    );
+    if (
+      !recovery &&
+      !matching.length &&
+      [...(await this.states()).values()].some(
+        (record) =>
+          record.forwarderId === forwarderId &&
+          record.sessionId === sessionId &&
+          record.outcome?.capture?.storage === "unknown",
+      )
+    )
+      throw new BrokerRefusal(
+        "outcome_unknown",
+        "Recover the original capture write identity before another capture",
+      );
+    if (
+      recovery &&
+      (!matching.length ||
+        matching.some((record) => record.outcome?.capture?.binding !== capture.binding))
+    )
+      throw new BrokerRefusal(
+        "unauthorized",
+        "Capture recovery requires the original service-bound write identity",
+      );
+    await this.record(sessionId, requestId, capture.storage === "unknown" ? "unknown" : "settled", {
+      forwarderId,
+      operation: "operate_extract",
+      ...detail,
+      outcome:
+        capture.storage === "unknown"
+          ? { status: "unknown", reason: "execution_error", capture }
+          : { status: "completed", capture },
+    });
+    if (capture.stored || capture.storage === "not_attempted") {
+      for (const record of matching)
+        await this.record(sessionId, record.requestId, "settled", {
+          forwarderId,
+          ...(record.operation === undefined ? {} : { operation: record.operation }),
+          ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
+          ...(record.dispatchTracked === undefined
+            ? {}
+            : { dispatchTracked: record.dispatchTracked }),
+          outcome: { status: "completed", capture },
+        });
+    }
+  }
+
+  async unresolvedCapture(
+    forwarderId: string,
+    sessionId: string,
+  ): Promise<CaptureEvidence | undefined> {
+    return [...(await this.states()).values()].find(
+      (record) =>
+        record.forwarderId === forwarderId &&
+        record.sessionId === sessionId &&
+        record.outcome?.capture?.storage === "unknown",
+    )?.outcome?.capture;
+  }
+
+  async hasCaptureWrite(forwarderId: string, sessionId: string, writeId: string): Promise<boolean> {
+    return [...(await this.states()).values()].some(
+      (record) =>
+        record.forwarderId === forwarderId &&
+        record.sessionId === sessionId &&
+        record.outcome?.capture?.write_id === writeId,
+    );
+  }
+
+  async terminalReceipt(
+    forwarderId: string,
+    sessionId: string,
+  ): Promise<OperationReceipt | undefined> {
+    const record = [...(await this.states()).values()].find(
+      (candidate) =>
+        candidate.sessionId === sessionId &&
+        candidate.forwarderId === forwarderId &&
+        candidate.requestId === "terminal-receipt" &&
+        candidate.terminalReceipt?.closed === true &&
+        Date.now() - candidate.at < START_DELIVERY_RETENTION_MS,
+    );
+    return record?.terminalReceipt;
+  }
+
+  async recordTerminalReceipt(forwarderId: string, receipt: OperationReceipt): Promise<void> {
+    const safe = operationReceiptSchema.parse(receipt);
+    if (!safe.closed || !["closed", "already_closed"].includes(safe.cleanup))
+      throw new Error("Terminal receipt requires established closure");
+    await this.record(safe.session_id, "terminal-receipt", "settled", {
+      forwarderId,
+      operation: "operate_finish",
+      terminalReceipt: safe,
+    });
+  }
+
   record(
     sessionId: string,
     requestId: string,
     phase: DispatchPhase,
-    detail?: Pick<DispatchRecord, "forwarderId" | "start" | "operation" | "inputHash" | "outcome">,
+    detail?: Pick<
+      DispatchRecord,
+      | "forwarderId"
+      | "start"
+      | "operation"
+      | "inputHash"
+      | "dispatchTracked"
+      | "outcome"
+      | "terminalReceipt"
+    >,
   ): Promise<void> {
+    let started = false;
+    let writeAttempted = false;
     const operation = this.tail.then(async () => {
+      started = true;
       await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
       const file = await open(this.path, "a", 0o600);
       try {
+        // Refuse capacity rather than forget mutation or closure evidence.
+        if ((await file.stat()).size >= 32 * 1024 * 1024)
+          throw new BrokerRefusal(
+            "capacity",
+            "Dispatch journal capacity exhausted; retain custody",
+          );
+        writeAttempted = true;
         await file.write(
           JSON.stringify({
             sessionId,
@@ -486,7 +689,12 @@ export class DispatchJournal {
         await file.close();
       }
     });
-    this.tail = operation;
+    // A failure before any append can be retried without losing evidence.
+    // Partial writes/fsync uncertainty poison this instance until recovery;
+    // never let a later append claim durable closure over a damaged journal.
+    this.tail = operation.catch((error: unknown) => {
+      if (!started || writeAttempted) throw error;
+    });
     return operation;
   }
 }

@@ -22,21 +22,22 @@ export class PrismaVaultAuditStore implements VaultAuditStore {
   constructor(private readonly prisma: ApiPrismaClient) {}
 
   async record(event: VaultAuditEventInput): Promise<void> {
-    const id = ulid();
-    await this.prisma.vaultAuditEvent.create({
-      data: {
-        id,
-        account_id: event.account_id,
-        type: event.type,
-        // Cast through Record<string, unknown> so Prisma's Json column
-        // accepts the structural payload without complaining about
-        // the optional-field surface area.
-        payload: attributedVaultAuditPayload(event.payload, event.type, id) as unknown as Record<
-          string,
-          unknown
-        >,
-      },
-    });
+    const id = event.idempotency_key ?? ulid();
+    const data = {
+      id,
+      account_id: event.account_id,
+      type: event.type,
+      // Cast through Record<string, unknown> so Prisma's Json column
+      // accepts the structural payload without complaining about
+      // the optional-field surface area.
+      payload: attributedVaultAuditPayload(event.payload, event.type, id) as unknown as Record<
+        string,
+        unknown
+      >,
+    };
+    if (event.idempotency_key)
+      await this.prisma.vaultAuditEvent.upsert({ where: { id }, create: data, update: {} });
+    else await this.prisma.vaultAuditEvent.create({ data });
   }
 
   async countRecentRetrievals(accountId: string, since: Date): Promise<number> {

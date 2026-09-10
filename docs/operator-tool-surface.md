@@ -1,116 +1,156 @@
 # Flat operator tool surface
 
-The public operator contract is the 14 driving verbs in
-`apps/mcp/src/tools/provision-drive.ts`'s `OPERATE_TOOLS` (excluding the two
-separate recipe tools), plus `operate_pay`, `operate_payment_status`,
-`list_credentials`, and `list_payment_cards` in `apps/mcp/src/tools/index.ts`.
-That named set contains **18 tools** (the original design's 17-tool heading was
-a counting error).
-The exact-set check applies to the operator driving surface and the two named vault
-lists, not to other MCP surfaces. The two recipe tools and nine other vault/account
-tools remain separately exposed, as explicitly reconfirmed during implementation:
-29 default tools total, or 31 with maintainer diagnostics enabled.
+Trusty Squire’s operator surface is a set of flat, single-purpose MCP tools.
+Discover the installed server’s exact input and output schemas with `tools/list`;
+that registered schema is authoritative for a particular server version.
 
-Actions use `ref` from the current observation. `operate_start` and
-`operate_observe` default to `format:"compact"`, the paged control map;
-`format:"full"` is the explicit verbatim-DOM escape hatch. `query`, `role`, and
-`cursor` retain the compact map's query/paging semantics. The authoritative
-observation contract is [observation-model.md](observation-model.md).
-`operate_extract(store=...)` still vaults credentials and strips their values
-from its response. Extraction without `store` retains its existing behavior.
+The named operator surface contains 18 tools: the 14 driving verbs in
+`OPERATE_TOOLS`, excluding the separately exposed recipe tools, plus
+`operate_pay`, `operate_payment_status`, `list_credentials`, and
+`list_payment_cards`. Recipe tools and vault/account tools are separate surfaces.
 
-`operate_fill_credential` is only a rename and description change. It retains the
-existing `reference`/`service`, `fields`, and `slot_prefix` schema and encrypted,
-host-gated slot-loading handler. Fill its returned slots with `operate_type(slot=...)`.
-It does not introduce an observation seal or expose vault values.
-
-`operate_login(provider, ref)` delegates to the existing atomic OAuth flow on the
-real profile. A pending chooser/challenge remains an honest `awaiting_human` result;
-observe that session to continue. The existing password lifecycle actions
-`prepare_signup`, `store_signup`, and `load_saved` remain available through the
-same login tool. The OAuth lifecycle's callback-completion behavior is documented
-in the [MCP tools guide](../README.md#mcp-tools).
-
-`operate_allow_host` retains the existing hostname/control-plane validator and
-adds a public startup-scope check. Only hosts already entitled by the startup
-hosts (including their subdomains, service login routes, and existing auth-provider
-allowances) may be granted. A `mid_session` grant from an internal caller cannot
-bootstrap further public grants. For an unrelated host, start a new session with
-that host declared in `allowed_hosts`. Internal action/replay scope behavior is
-unchanged. Refusals retain the blocked host and a remedy.
-
-## Capability migration (include in the PR body)
-
-| Old kind/tool | New tool or explicit removal |
+| Purpose | Tool |
 | --- | --- |
-| `operate_start` | `operate_start(service_url, format?)`, where `format` is `compact` (default) or `full` |
-| `operate_finish`, `operate_finish_task` | `operate_finish(session_id, outcome?, store?, summary?, data?, verify_recipe?)`; outcome is `none`, `credentials`, or `result`, replacing the nested kind union; terminal preparation and teardown are unchanged |
-| `operate_observe` | `operate_observe(session_id, query?, role?, cursor?, format?)`, where `format` is `compact` (default) or `full` |
-| `operate_screenshot` | Same capture handler/schema and cost warning; reader name in guidance updated |
-| `operate_act` | Removed public union; use the verbs below |
-| `goto`, `navigate` | `operate_navigate(session_id, url)` (`navigate` was already absent in this checkout) |
-| `click`, `js_click` | `operate_click(session_id, ref)`; DOM dispatch is an internal fallback only for pointer-interception failure with positive no-dispatch evidence, with all existing action guards re-applied |
-| `type`, `fill` | `operate_type(session_id, ref, text, submit?)`; `fill` was already absent |
-| `type_secret` | `operate_type(session_id, ref, slot, submit?)`; mutually exclusive with text |
-| `select`, `select_many`, `operate_form_select_many` | `operate_select(ref, values)` for one option, or `operate_select(selections)` for ordered multi-field selection with partial results; native multi-select arrays were not supported by the old executor and are not added |
-| `set_phone_country` | `operate_select(session_id, country)` preserves the native phone-country control helper |
-| `press` | `operate_press(session_id, key)`; fill followed by Enter can use `operate_type(submit=true)` |
-| `scroll` | `operate_scroll(session_id, direction)`; preserves the existing viewport scroll operation; element-scoped scrolling is not added |
-| `allow_host` | `operate_allow_host(session_id, host)` with startup entitlement enforced |
-| `oauth_login`, `oauth_click`, `oauth_settle` | `operate_login(session_id, provider, ref)` invokes the atomic OAuth flow; an internal `oauth_click` may intentionally return `observed: "none"`, so call `operate_observe` for a stable post-redirect observation without exposing click/settle choreography |
-| `lease` | Removed as a public configuration verb (already absent); the server's session call lease and internal OAuth boundary remain automatic |
-| `login_prepare_signup`, `operate_prepare_login` | Existing `operate_login(action='prepare_signup', ...)` |
-| `login_store_signup`, `operate_store_login` | Existing `operate_login(action='store_signup', ...)` |
-| `login_load_saved` | Existing `operate_login(action='load_saved', ...)`, also `operate_fill_credential` |
-| `operate_seal_vault_credential` | `operate_fill_credential`; handler and schema unchanged |
-| `extract`, `operate_extract` | `operate_extract(session_id, store?, into_slot?, secret_label?)`; vault persistence and slot capture retained |
-| `cart_add`, `operate_cart_add` | Removed specialized cart mutation/idempotency helper from the public surface; add items with `operate_click` and inspect the resulting cart |
-| `cart_clear` | Removed specialized cart helper; use cart UI clicks and observation |
-| `solve_captcha`, `operate_captcha_gate` | Removed dedicated solver/gate dispatch; the page state is visible through observe/screenshot and ordinary controls through click/type; autonomous solver dispatch is explicitly gone |
-| `await_verification`, `operate_await_verification` | Removed dedicated inbox polling/OTP-slot helper; verification is a page state, and ordinary navigation/reading/interaction remain available; automatic inbox search/backoff and OTP-slot transfer are explicitly gone from the public surface |
-| `upload` | Removed local-file chooser dispatch from the public surface: no upload verb is in the approved named target |
-| `full`, `frame`, `handle` | Removed public configuration kinds (already absent); existing observe detail and screenshot frame capture remain, and action refs retain their existing frame identity |
-| `confirm`, `missing_confirm`, `execute_capability` | Removed public kinds (already absent); task reporting uses finish, payments retain their existing separate approval flow |
-| `operate_remember`, `operate_use` | Removed aliases; unchanged `operate_recipe_save` and `operate_recipe_run` remain |
-| `operate_pay`, `operate_payment_status`, `list_credentials`, `list_payment_cards` | Unchanged |
+| Start and finish | `operate_start`, `operate_finish` |
+| Read the page | `operate_observe`, `operate_screenshot` |
+| Drive ordinary UI | `operate_navigate`, `operate_click`, `operate_type`, `operate_select`, `operate_press`, `operate_scroll` |
+| Scope and login | `operate_allow_host`, `operate_login` |
+| Vault-aware browser work | `operate_fill_credential`, `operate_extract` |
+| Payments and vault lists | `operate_pay`, `operate_payment_status`, `list_credentials`, `list_payment_cards` |
 
-Recorded-recipe compatibility is not an acceptance constraint. The superseded Tool objects, union input schema, alias wrappers, and union dispatch
-are deleted. The flat verbs call the existing guarded executor through a private
-function. Tests invoke the new verbs or test internal executor behavior directly.
-No work is spent migrating recordings.
-No recipe assertions were deleted or quarantined for this change.
+Use an action `ref` from the current observation. `operate_start` and
+`operate_observe` default to `format: "compact"`, a paged control map;
+`format: "full"` is the explicit, verbatim-DOM view. Neither observation mode
+masks, seals, or refuses page content. `operate_screenshot` likewise returns
+the page’s actual pixels and is not a secret-redaction surface. Payment approval,
+3-D Secure, and vault write-only boundaries remain separate safety controls.
 
-The serializer, observation payload, payment/3DS implementation, vault internals,
-and OAuth mechanics are out of scope. In particular, serializer-owned guidance
-may still mention the legacy union while the concurrent serializer task replaces
-it; this change does not edit `compact-observation-v2.ts` or rewrite its output.
+## Scope is declared at session start
 
-## Click fallback validation follow-up
+Startup merchant hosts also authorize matching registrable-domain siblings,
+such as `shop.example.com` and `api.example.com`. Declare other required
+non-provider hosts in `allowed_hosts` on `operate_start`. `operate_allow_host`
+can activate a host only inside the declared startup entitlement and existing
+identity-provider allowance; it cannot broaden that entitlement.
 
-Ordinary click dispatch tracking wraps the original click operation, retaining
-checkbox/toggle, widget and modal behavior. The browser-use DOM format carries only a sanitized,
-proven pre-dispatch pointer-interception signal to the internal `operate_click`
-fallback. Other failures retain their existing mapping; payment callers retain
-the existing handle-bound tracking path.
+```json
+{
+  "service_url": "https://console.example.test",
+  "allowed_hosts": ["api.example.test"]
+}
+```
 
-Reachability is tested deterministically through the browser-use DOM session and tool
-seam using the production dispatch error class and classifier. A legacy
-real-Chromium overlay case also proves a failed plain click reaches DOM dispatch
-and activates the control exactly once. The optional browser-use DOM fixture
-was dropped after stale-ref failures before dispatch, as explicitly authorized;
-it did not exercise the intended failure path. No existing flow assertions were
-weakened or skipped to fix tracking regressions.
+If an observation reports a scope denial, treat it as a bounded diagnostic:
+record the owning document/frame, exact hostname, resource type, reason, and
+occurrence range. Do not add a permission or retry against another host. Start a
+new session with the required host declared instead. Diagnostics must not include
+request bodies or URL query values.
 
-## Validation
+## Finish with the flat schema
 
-- MCP typecheck, ESLint for changed TypeScript files, Prettier checks, and `git diff --check` passed.
-- The complete static `test:fast` run passed all 109 files: 84 fast-core files
-  (1,431 tests, 1 existing skip), 16 required behavior files (584 tests,
-  3 existing skips), and 9 payment-safety files (469 tests).
-  Required behavior/payment files were not filtered or moved to the slow tier.
-- The operator export test checks the literal name set, uniqueness, registration
-  parity, and absence of public `kind` schemas while preserving separate surfaces.
-- `provision-session.test.ts` passed 155 tests and `operator-recipe.test.ts`
-  passed 54 tests. No recipe assertions were deleted or quarantined.
-- A direct comparison against the pre-change source confirmed the credential-fill
-  handler is byte-identical; only its tool name and description changed.
+`operate_finish` uses the flat enum shape, not a nested union:
+
+```json
+{ "session_id": "session-id", "outcome": "none" }
+```
+
+```json
+{
+  "session_id": "session-id",
+  "outcome": "credentials",
+  "store": { "service": "Example Service" }
+}
+```
+
+```json
+{
+  "session_id": "session-id",
+  "outcome": "result",
+  "summary": "Provider setup reached its reported completion page.",
+  "data": { "provider_reported": true }
+}
+```
+
+`credentials` requires `store`; `result` requires `summary` or `data`.
+Agent-supplied data is reported data, not proof that login, provisioning, or a
+mutation completed. Preserve booleans as booleans in result data.
+
+`operate_finish` returns a common, additive finish receipt:
+
+```json
+{
+  "session_id": "session-id",
+  "operation_id": "operation-id",
+  "execution": "completed",
+  "mutation": "not_dispatched",
+  "cleanup": "closed",
+  "closed": true
+}
+```
+
+Its allowed values are `execution: completed | cancelled | pending | unknown`,
+`mutation: not_dispatched | dispatched | unknown`, and
+`cleanup: open | closing | closed | already_closed | unknown`. `closed` is true
+only when closure is positively established. A bounded finish can return
+`execution: "pending"`, `cleanup: "closing"`, and `closed: false` while the
+lifecycle retains ownership and drains work. Repeat finish to obtain closure
+proof; do not replay a mutation. Broker closure proof survives delivery
+acknowledgement and restart within its five-minute retention window and remains
+bound to the original forwarder lineage. Missing proof is unknown, never an
+inferred `already_closed`. Clients should feature-detect the output schema in
+`tools/list` when talking to older installed servers.
+
+## Credential capture and retrieval
+
+`operate_extract(store=...)` sends a revealed credential directly to the
+write-only vault and returns storage metadata, not the secret. Its default
+behavior without `store` is unchanged. `operate_click`, `operate_type`,
+`operate_select`, and `operate_press` accept an optional `capture` field:
+
+```json
+{
+  "store": { "service": "Example Service", "label": "fresh-key" },
+  "source": {
+    "role": "textbox",
+    "name": "API key",
+    "container": { "role": "dialog", "name": "New API key" }
+  }
+}
+```
+
+The source role is `textbox` or `code`; an optional named `dialog` or `region`
+limits the selection. Capture pins exactly one element and returns vault metadata
+or explicit ambiguity, never the captured value or a screenshot. Default actions
+and reads remain unredacted. On an uncertain storage result, pass the returned
+`write_id` in the same `capture` object to `operate_extract` for extraction-only
+recovery. Never resend the create action. Mutation verbs refuse a supplied
+`capture.write_id`; the vault binds retries to the account, service, label, and
+original value and refuses rotation of an existing credential slot.
+
+
+`fetch_credential` is the only raw-value path. Its first call returns an
+approval link and no value; only a user’s passkey signature for that exact fetch
+permits one resumed call with the returned `approval_id` to receive the value.
+Do not use a payment or mutation approval as a substitute. Prefer
+`use_credential` or a scoped app grant whenever server-side injection can do the
+job without exposing plaintext to the agent.
+
+## Using the rest of the surface
+
+- `operate_login(provider, ref)` keeps OAuth and password lifecycle actions on
+  the real profile. A chooser, challenge, return with uncertain authentication,
+  or other human step is an honest pending result; stop automation and observe
+  the owned session rather than treating a page title or same-origin URL as
+  success.
+- `operate_type` accepts exactly one of literal `text` or a protected `slot`.
+  Use `operate_fill_credential` for login slots; it does not expose vault values.
+- `operate_extract`, `use_credential`, and `grant_app_access` preserve the
+  write-only vault boundary. `fetch_credential` has the separate passkey gate
+  above.
+- `operate_pay` and `operate_payment_status` retain their independent approval,
+  card-selection, and 3-D Secure rules. Never infer a charge from form
+  validation, repeat an uncertain submit, or use page reads as approval.
+
+Legacy union verbs and aliases are not part of this contract. Use the flat names
+shown above, and use the installed server’s `tools/list` schema for optional
+arguments and output details.

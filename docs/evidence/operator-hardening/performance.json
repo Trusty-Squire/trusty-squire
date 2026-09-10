@@ -1,0 +1,87 @@
+{
+  "baseline_commit": "ee3ee9abaa4b4e3319025dd785c3027ca02fd18c",
+  "integrated_observation_commit": "514bcd8ec88dc8463eb846d4e6a701d105524f3a",
+  "node": "v24.16.0",
+  "method": "Same machine; isolated Chromium contexts; emitted JavaScript; five warmups then 30 samples per fixture and mode. Delta DOM retained for full-read recall; query aliases checked with their control roles. No live provider access.",
+  "measured_at": "2026-09-10T04:05:08.195Z",
+  "fixtures": [
+    {
+      "fixture": "settings",
+      "warmups": 5,
+      "samples": 30,
+      "p95_ms": {
+        "full": 13.726988000000006,
+        "query": 13.732785000000035
+      },
+      "mean_bytes": {
+        "full": 209,
+        "query": 488
+      },
+      "labeled_control_recall": true,
+      "process_cpu_microseconds": {
+        "user": 620071,
+        "system": 20843
+      },
+      "process_memory_bytes": {
+        "rss": 134705152,
+        "heapTotal": 68595712,
+        "heapUsed": 45757640,
+        "external": 3254938,
+        "arrayBuffers": 308792
+      },
+      "browser_metrics": {
+        "TaskDuration": 0.31398,
+        "JSHeapUsedSize": 3102024,
+        "JSHeapTotalSize": 6291456
+      },
+      "p95_ratio": {
+        "full": 1.022215539998284,
+        "query": 1.0825033721851949
+      },
+      "baseline_p95_ms": {
+        "full": 13.428663000000029,
+        "query": 12.686136000000033
+      },
+      "gate_passed": true
+    },
+    {
+      "fixture": "key-table",
+      "warmups": 5,
+      "samples": 30,
+      "p95_ms": {
+        "full": 130.80630199999996,
+        "query": 131.26263900000004
+      },
+      "mean_bytes": {
+        "full": 211,
+        "query": 4061.8
+      },
+      "labeled_control_recall": true,
+      "process_cpu_microseconds": {
+        "user": 6256426,
+        "system": 161026
+      },
+      "process_memory_bytes": {
+        "rss": 263000064,
+        "heapTotal": 182104064,
+        "heapUsed": 45175176,
+        "external": 3237136,
+        "arrayBuffers": 297932
+      },
+      "browser_metrics": {
+        "TaskDuration": 3.918022,
+        "JSHeapUsedSize": 1713272,
+        "JSHeapTotalSize": 10485760
+      },
+      "p95_ratio": {
+        "full": 0.8280679034370656,
+        "query": 1.0118764821984938
+      },
+      "baseline_p95_ms": {
+        "full": 157.96567100000084,
+        "query": 129.72199799999999
+      },
+      "gate_passed": true
+    }
+  ]
+}

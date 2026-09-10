@@ -1,0 +1,17 @@
+{
+  "kind": "configured-native-host-mcp-connection",
+  "release_version": "VERSION",
+  "host_name": "actual native MCP host name",
+  "connection_id": "host-reported connection or session id",
+  "observed_at": "2026-09-09T00:00:00Z",
+  "initialize": {
+    "server_version": "VERSION"
+  },
+  "tools_list": {
+    "names": ["operate_start", "list_credentials"]
+  },
+  "read_only_probe": {
+    "name": "list_credentials",
+    "outcome": "completed"
+  }
+}

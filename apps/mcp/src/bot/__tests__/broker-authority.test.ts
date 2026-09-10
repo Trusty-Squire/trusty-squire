@@ -27,6 +27,55 @@ function port(
 }
 
 describe("broker authority", () => {
+  it("routes finish outside the active mutation tail and retains its lane until settlement", async () => {
+    const broker = new BrokerAuthority("account", "cell");
+    const owner = principal("finish-owner");
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    let cancelled = false;
+    const cap = await broker.open(owner, ["site:finish"], async () =>
+      port("target", async (name, _args, signal) => {
+        if (name === "operate_finish") return { closed: false, cleanup: "closing" };
+        signal.addEventListener(
+          "abort",
+          () => {
+            cancelled = true;
+          },
+          { once: true },
+        );
+        entered.resolve();
+        await release.promise;
+        return undefined;
+      }),
+    );
+    const mutation = broker.invoke(owner, cap, "mutation", "operate_click", {}, [], "oauth");
+    await entered.promise;
+    expect(broker.busyReadReceipt(owner, cap, "poll")).toMatchObject({
+      session_id: cap.sessionId,
+      operation_id: "poll",
+      status: "session_busy",
+      execution: "pending",
+      cleanup: "open",
+      closed: false,
+    });
+    expect(() => broker.busyReadReceipt(principal("foreign"), cap, "poll")).toThrow();
+    expect(await broker.finish(owner, cap, "finish", {})).toEqual({
+      closed: false,
+      cleanup: "closing",
+    });
+    expect(cancelled).toBe(true);
+    expect(broker.busyReadReceipt(owner, cap, "closing-poll")).toMatchObject({
+      cleanup: "closing",
+      closed: false,
+    });
+    expect(() => broker.invoke(owner, cap, "another", "operate_click", {})).toThrow("fenced");
+    expect(broker.inventory().quarantined).toBe(1);
+    release.resolve();
+    await mutation;
+    await broker.close(owner, cap);
+    expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
+  });
+
   it("runs three independent actors concurrently, preserving ownership and request deduplication", async () => {
     const broker = new BrokerAuthority("account", "cell");
     const entered: string[] = [];

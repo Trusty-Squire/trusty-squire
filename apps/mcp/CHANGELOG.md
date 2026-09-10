@@ -1,5 +1,11 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.14-rc.11 (2026-09-10)
+
+- Release candidate of preserved operator hardening source `6930f3fb` for native testing: cancellation propagation, observation and OAuth ownership, credential capture, and terminal receipts.
+- Requires the accompanying API changes for idempotent capture writes and agent-session challenge notifications.
+- Known review findings remain: recovery after refused credential finish, direct capture identity on timeout, finish mutation receipt accuracy, and exact-host wording in the agent skill. This RC is not full hardening acceptance.
+
 ## 1.1.14-rc.4 (2026-09-07)
 
 - feat(mcp): reduce the operator tool surface to 16 single-purpose verbs,

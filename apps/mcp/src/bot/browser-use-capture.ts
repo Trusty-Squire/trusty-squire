@@ -710,6 +710,39 @@ export async function captureBrowserUseDOM(
       if (n.contentDocument) indexLabels(n.contentDocument, n, ownScope);
     };
     indexLabels(root, undefined, rootScope);
+    // A visible <label for> is a positive browser-owned activation proxy for
+    // its checkbox/radio. Collapse that pair onto the visible label only when
+    // the native control is itself visually hidden and exactly one visible
+    // label owns it. Similar names or geometry never establish this relation.
+    const proxyTargets = new Map<BrowserUseNode, BrowserUseNode>();
+    const proxyOwners = new Map<BrowserUseNode, BrowserUseNode>();
+    const cssVisible = (n: BrowserUseNode): boolean => {
+      const layout = viewMetadata.get(n.id)?.layout;
+      return (
+        n.nodeType === 1 &&
+        layout?.bounds !== null &&
+        layout?.bounds !== undefined &&
+        layout.bounds.width > 1 &&
+        layout.bounds.height > 1 &&
+        layout.styles.display !== "none" &&
+        layout.styles.visibility !== "hidden" &&
+        Number(layout.styles.opacity ?? "1") > 0
+      );
+    };
+    const indexPositiveLabelProxies = (n: BrowserUseNode): void => {
+      if (n.nodeName === "INPUT" && ["checkbox", "radio"].includes(n.attributes.type ?? "")) {
+        const scope = labelScopeFor.get(n);
+        const labels = n.attributes.id ? (scope?.labelsFor.get(n.attributes.id) ?? []) : [];
+        const visibleLabels = labels.filter(cssVisible);
+        if (!cssVisible(n) && visibleLabels.length === 1) {
+          proxyTargets.set(visibleLabels[0]!, n);
+          proxyOwners.set(n, visibleLabels[0]!);
+        }
+      }
+      n.children.forEach(indexPositiveLabelProxies);
+      if (n.contentDocument) indexPositiveLabelProxies(n.contentDocument);
+    };
+    indexPositiveLabelProxies(root);
     const labelText = (n: BrowserUseNode): string | null => {
       const text = (node: BrowserUseNode): string =>
         node.nodeType === 3 ? node.value : node.children.map(text).join(" ");
@@ -865,7 +898,16 @@ export async function captureBrowserUseDOM(
       if (["IFRAME", "FRAME"].includes(n.nodeName)) form = undefined;
       const raw = rawById.get(n.id)!,
         frame = nodeFrame.get(n.id)!;
-      let el = bindings.get(raw.backendNodeId);
+      const proxyTarget = proxyTargets.get(n);
+      const bound = bindings.get(raw.backendNodeId);
+      const ownsAction =
+        proxyTarget !== undefined ||
+        (proxyOwners.get(n) === undefined &&
+          (browserUseInteractive(n) ||
+            (bound !== undefined && ["IFRAME", "FRAME"].includes(n.nodeName))));
+      n.actionOwned = ownsAction;
+      let el = bound;
+      if (el && !ownsAction) el = undefined;
       // Playwright selectors cannot enter closed shadow roots. Preserve their
       // nodes for display, but do not manufacture an unusable action binding.
       if (
@@ -876,7 +918,7 @@ export async function captureBrowserUseDOM(
         !inClosedShadow &&
         opaqueFrames.get(frame) === false &&
         n.nodeType === 1 &&
-        (browserUseInteractive(n) || n.scrollable)
+        ownsAction
       ) {
         const l = layouts.get(raw.backendNodeId),
           cssVisible =
@@ -892,14 +934,18 @@ export async function captureBrowserUseDOM(
           el = {
             index: nextSyntheticIndex++,
             tag: t,
-            type: a.type ?? null,
+            type: proxyTarget?.attributes.type ?? a.type ?? null,
             id: a.id ?? null,
-            name: a.name ?? null,
-            placeholder: a.placeholder ?? null,
-            ariaLabel: a["aria-label"] ?? null,
+            name: proxyTarget?.attributes.name ?? a.name ?? null,
+            placeholder: proxyTarget?.attributes.placeholder ?? a.placeholder ?? null,
+            ariaLabel: proxyTarget?.attributes["aria-label"] ?? a["aria-label"] ?? null,
             role:
-              a.role ??
-              (["a", "button", "input", "select", "textarea"].includes(t) ? null : "button"),
+              proxyTarget?.attributes.role ??
+              (proxyTarget === undefined
+                ? (a.role ??
+                  n.axRole ??
+                  (["a", "button", "input", "select", "textarea"].includes(t) ? null : "button"))
+                : (proxyTarget.attributes.type ?? "button")),
             labelText: null,
             visibleText: rawText(n).trim() || null,
             selector,
@@ -933,6 +979,14 @@ export async function captureBrowserUseDOM(
         // Include destinations and form ownership even when the visible name
         // stays the same. State/value and surrounding text are not identity.
         el.observationIntent = JSON.stringify([
+          ...(proxyTarget === undefined
+            ? []
+            : [
+                "label-proxy",
+                rawById.get(proxyTarget.id)?.backendNodeId,
+                proxyTarget.attributes.type,
+                proxyTarget.attributes.name,
+              ]),
           n.nodeName,
           n.axRole,
           viewMetadata.get(n.id)?.name,
@@ -961,23 +1015,38 @@ export async function captureBrowserUseDOM(
         }
       }
       if (el) {
+        const semanticNode = proxyTarget ?? n;
+        if (proxyTarget !== undefined) {
+          el.type = proxyTarget.attributes.type ?? null;
+          el.role = proxyTarget.attributes.role ?? proxyTarget.attributes.type ?? "button";
+          el.checked = proxyTarget.attributes.checked === "true";
+          el.disabled =
+            "disabled" in proxyTarget.attributes ||
+            proxyTarget.attributes["aria-disabled"] === "true";
+          el.required =
+            "required" in proxyTarget.attributes ||
+            proxyTarget.attributes["aria-required"] === "true";
+        }
         const ownedLabel = ownedLabels.get(n.id);
         if (ownedLabel && !el.ariaLabel && !n.attributes["aria-labelledby"]) {
           el.ariaLabel = ownedLabel;
           n.attributes.ax_name ??= ownedLabel;
         }
         el.compactNames = {
-          ariaLabel: n.attributes["aria-label"]?.trim() || ownedLabel || null,
-          labelledByText: labelledByText(n),
-          accessibleName: viewMetadata.get(n.id)?.name.trim() || null,
-          labelText: associatedLabelText(n),
+          ariaLabel: semanticNode.attributes["aria-label"]?.trim() || ownedLabel || null,
+          labelledByText: labelledByText(semanticNode),
+          accessibleName:
+            viewMetadata.get(semanticNode.id)?.name.trim() ||
+            (proxyTarget === undefined ? null : labelText(n)),
+          labelText:
+            proxyTarget === undefined ? associatedLabelText(n) : associatedLabelText(proxyTarget),
           visibleText: visibleText(n).trim() || null,
-          alt: n.attributes.alt ?? null,
+          alt: semanticNode.attributes.alt ?? null,
           iconLabel: iconLabel(n),
-          title: n.attributes.title ?? null,
-          placeholder: n.attributes.placeholder ?? null,
-          name: n.attributes.name ?? null,
-          value: n.attributes.value ?? null,
+          title: semanticNode.attributes.title ?? null,
+          placeholder: semanticNode.attributes.placeholder ?? null,
+          name: semanticNode.attributes.name ?? null,
+          value: semanticNode.attributes.value ?? null,
           container: syntheticContainer(n),
         };
         if (!elements.includes(el)) elements.push(el);

@@ -1,4 +1,5 @@
 import { withBrokerIdentityLane } from "./identity-lane.js";
+import { composeOperatorSignals } from "../request-cancellation.js";
 import { randomUUID } from "node:crypto";
 import { BrokerRefusal, ScopeScheduler } from "./scheduler.js";
 
@@ -32,6 +33,7 @@ export interface BrokerSessionPort {
 }
 export const FORWARDER_HANDOFF_TIMEOUT_MS = 120_000;
 export const DETACHED_EXPIRY_CLOSE_TIMEOUT_MS = 10_000;
+export const REQUEST_CANCELLATION_QUIESCENCE_MS = 2_000;
 // Match the durable start-delivery retention window: a socket restart must not
 // destroy the live capability while its acknowledged start is still recoverable.
 export const FORWARDER_RECONNECT_GRACE_MS = 5 * 60_000;
@@ -196,6 +198,7 @@ export class BrokerAuthority {
     ) => Promise<BrokerSessionPort>,
     cleanupFailedAdmission?: (sessionId: string) => Promise<boolean>,
     orphanFailedAdmission?: (sessionId: string) => Promise<void>,
+    requestSignal?: AbortSignal,
   ): Promise<TabCapability> {
     this.assertPrincipal(principal);
     if (this.actors.size + this.admissions.size >= this.maxSessions) {
@@ -203,16 +206,21 @@ export class BrokerAuthority {
     }
     const id = randomUUID();
     const abort = new AbortController();
+    const composed = composeOperatorSignals([
+      abort.signal,
+      ...(requestSignal ? [requestSignal] : []),
+    ]);
+    const signal = composed.signal;
     this.admissions.set(id, { principal: { ...principal }, abort });
     let port: BrokerSessionPort | undefined;
     let creating = false;
     try {
-      await this.scheduler.reserve(id, resources, abort.signal);
+      await this.scheduler.reserve(id, resources, signal);
       if (this.expiredAdmissions.has(id))
         throw new BrokerRefusal("cancelled", "Admission reconnect grace expired");
       if (this.admissions.get(id)?.reconnectDeadline === undefined) this.assertPrincipal(principal);
       creating = true;
-      port = await create(id, abort.signal, (resources) => this.scheduler.expand(id, resources));
+      port = await create(id, signal, (resources) => this.scheduler.expand(id, resources));
       if (this.expiredAdmissions.has(id)) {
         await this.disposeExpiredAdmission(port);
         throw new BrokerRefusal("cancelled", "Admission reconnect grace expired");
@@ -299,6 +307,7 @@ export class BrokerAuthority {
         await this.closeActor(failed);
       throw error;
     } finally {
+      composed.dispose();
       this.admissions.delete(id);
       this.expiredAdmissions.delete(id);
       this.retireFencedClient(principal.clientId);
@@ -392,6 +401,24 @@ export class BrokerAuthority {
     );
   }
 
+  busyReadReceipt(
+    principal: BrokerPrincipal,
+    capability: TabCapability,
+    requestId: string,
+  ): Record<string, unknown> | undefined {
+    const actor = this.resolve(principal, capability);
+    if (actor.pending === 0 && actor.state === "active") return undefined;
+    return {
+      session_id: capability.sessionId,
+      operation_id: requestId,
+      status: "session_busy",
+      execution: actor.pending > 0 ? "pending" : "unknown",
+      mutation: "unknown",
+      cleanup: actor.state === "active" ? "open" : "closing",
+      closed: false,
+    };
+  }
+
   invoke(
     principal: BrokerPrincipal,
     capability: TabCapability,
@@ -400,14 +427,25 @@ export class BrokerAuthority {
     args: Record<string, unknown>,
     resources: readonly string[] = [],
     lane?: "oauth" | "interactive",
+    requestSignal?: AbortSignal,
   ): Promise<unknown> {
     const actor = this.resolve(principal, capability);
+    if (["operate_observe", "operate_screenshot"].includes(name) && actor.pending > 0)
+      return Promise.resolve({
+        session_id: capability.sessionId,
+        status: "session_busy",
+        execution: "pending",
+        mutation: "unknown",
+        cleanup: actor.state === "active" ? "open" : "closing",
+        closed: false,
+      });
     if (actor.state !== "active") throw new BrokerRefusal("session_closing", "Session is fenced");
     const input = JSON.stringify([name, args, resources, lane]);
     // Capture this connection lease. A reconnect installs a fresh controller;
     // queued work from the lost socket must stay aborted rather than becoming
     // executable merely because the actor is active again.
     const invocationLease = actor.abort;
+
     const previous = actor.replies.get(requestId);
     if (previous !== undefined) {
       if (previous.input !== input)
@@ -418,27 +456,32 @@ export class BrokerAuthority {
     if (actor.replies.size >= 4096 || actor.pending >= 64) {
       throw new BrokerRefusal("capacity", "Session command budget exhausted");
     }
+    const composed = composeOperatorSignals([
+      invocationLease.signal,
+      ...(requestSignal ? [requestSignal] : []),
+    ]);
+    const signal = composed.signal;
     const previousTail = actor.tail;
     const preparation =
       actor.port.prepare === undefined
         ? undefined
-        : Promise.resolve().then(() => actor.port.prepare!(name, args));
+        : Promise.resolve().then(() => {
+            if (signal.aborted) throw new BrokerRefusal("cancelled", "Preparation cancelled");
+            return actor.port.prepare!(name, args);
+          });
     actor.pending += 1;
     const invokePrepared = async (prepared: unknown): Promise<unknown> => {
-      if (actor.state !== "active" || invocationLease.signal.aborted) {
+      if (actor.state !== "active" || signal.aborted) {
         throw new BrokerRefusal("session_closing", "Command fenced before dispatch");
       }
       this.scheduler.expand(actor.capability.sessionId, resources);
       const laneOwner = randomUUID();
-      if (lane !== undefined) await this.lanes.reserve(laneOwner, [lane], invocationLease.signal);
+      if (lane !== undefined) await this.lanes.reserve(laneOwner, [lane], signal);
       try {
-        if (invocationLease.signal.aborted)
-          throw new BrokerRefusal("cancelled", "Command fenced before dispatch");
+        if (signal.aborted) throw new BrokerRefusal("cancelled", "Command fenced before dispatch");
         const execute = async () =>
-          await actor.port.invoke(name, args, invocationLease.signal, requestId, prepared);
-        return lane === "oauth"
-          ? await withBrokerIdentityLane(execute, invocationLease.signal)
-          : await execute();
+          await actor.port.invoke(name, args, signal, requestId, prepared);
+        return lane === "oauth" ? await withBrokerIdentityLane(execute, signal) : await execute();
       } finally {
         if (lane !== undefined) this.lanes.release(laneOwner);
       }
@@ -467,12 +510,81 @@ export class BrokerAuthority {
       )
       .finally(() => {
         actor.pending -= 1;
+        composed.dispose();
       });
-    actor.replies.set(requestId, { input, result: trackedResult });
-    return trackedResult;
+    const deliveredResult =
+      requestSignal === undefined
+        ? trackedResult
+        : new Promise<unknown>((resolve, reject) => {
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            let settled = false;
+            const cancelled = (): void => {
+              timer = setTimeout(() => {
+                if (settled) return;
+                if (
+                  this.actors.get(capability.sessionId) === actor &&
+                  actor.abort === invocationLease &&
+                  actor.state === "active"
+                )
+                  actor.state = "quarantined";
+                reject(
+                  new BrokerRefusal(
+                    "outcome_unknown",
+                    "Cancelled browser action did not reach bounded quiescence; exact target custody is quarantined",
+                  ),
+                );
+              }, REQUEST_CANCELLATION_QUIESCENCE_MS);
+            };
+            if (requestSignal.aborted) cancelled();
+            else requestSignal.addEventListener("abort", cancelled, { once: true });
+            void trackedResult.then(resolve, reject).finally(() => {
+              settled = true;
+              requestSignal.removeEventListener("abort", cancelled);
+              if (timer !== undefined) clearTimeout(timer);
+            });
+          });
+    actor.replies.set(requestId, { input, result: deliveredResult });
+    return deliveredResult;
   }
 
-  async close(principal: BrokerPrincipal, capability: TabCapability): Promise<boolean> {
+  /** Terminal intent fences immediately; lifecycle owns draining and cleanup.
+   * It must never sit behind the mutation tail it is trying to cancel. */
+  async finish(
+    principal: BrokerPrincipal,
+    capability: TabCapability,
+    requestId: string,
+    args: Record<string, unknown>,
+  ): Promise<unknown> {
+    const actor = this.resolve(principal, capability);
+    actor.state = "closing";
+    actor.closeReason = "finish";
+    actor.abort.abort(new BrokerRefusal("cancelled", "Session finishing"));
+    const signal = new AbortController().signal;
+    return await actor.port.invoke("operate_finish", args, signal, requestId);
+  }
+
+  retireFinished(principal: BrokerPrincipal, sessionId: string): void {
+    const actor = this.actors.get(sessionId);
+    if (actor === undefined) return;
+    if (
+      (principal.forwarderId === undefined
+        ? actor.principal.clientId !== principal.clientId
+        : actor.principal.forwarderId !== principal.forwarderId) ||
+      actor.principal.accountId !== principal.accountId ||
+      actor.state !== "closing"
+    )
+      throw new BrokerRefusal("stale_lease", "Terminal completion does not own this closing actor");
+    this.actors.delete(sessionId);
+    this.scheduler.release(sessionId);
+    this.retireFencedClient(actor.principal.clientId);
+  }
+
+  async close(
+    principal: BrokerPrincipal,
+    capability: TabCapability,
+    terminalProven = false,
+  ): Promise<boolean> {
+    if (terminalProven && !this.actors.has(capability.sessionId)) return true;
     return await this.closeActor(this.resolve(principal, capability), "finish");
   }
 
@@ -674,7 +786,8 @@ export class BrokerAuthority {
     return {
       active: [...this.actors.values()].filter((actor) => actor.state === "active").length,
       quarantined: [...this.actors.values()].filter(
-        (actor) => actor.state === "quarantined" || actor.state === "detached",
+        (actor) =>
+          actor.state === "quarantined" || actor.state === "detached" || actor.state === "closing",
       ).length,
       admitting: this.admissions.size,
     };

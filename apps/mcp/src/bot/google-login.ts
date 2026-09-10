@@ -311,87 +311,16 @@ export async function detectActiveProviderSessions(
   });
 }
 
-// --- T5: Google auth-page state detection ------------------------------
-// After the bot clicks "Sign in with Google" on a service the browser
-// lands on a Google page. This classifies which one — so the OAuth
-// signup flow (T6) proceeds ONLY on a consent screen and otherwise
-// stops. CRITICAL: a `needs_login` or `challenge` result means the bot
-// must hand back to the human and NEVER type into Google's form — there
-// is no password to give, and driving Google's login is exactly what
-// trips its automation detection.
-export type GoogleAuthState =
-  | "consent" // valid session — Google is asking to share account info
-  | "needs_login" // session absent/expired — Google wants credentials
-  | "challenge" // Google interrupted with a verify-it's-you / 2FA step
-  | "not_google"; // not on a Google auth page (flow moved on, or completed)
-
-export function classifyGoogleAuthState(url: string, bodyText: string): GoogleAuthState {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return "not_google";
-  }
-  if (!/(^|\.)accounts\.google\.com$/i.test(parsed.hostname)) {
-    return "not_google";
-  }
-  const path = parsed.pathname.toLowerCase();
-  const text = bodyText.toLowerCase();
-
-  // Consent — a valid session; Google is asking to share account data.
-  if (
-    path.includes("/oauth/consent") ||
-    path.includes("/signin/oauth") ||
-    text.includes("wants access to your google account") ||
-    text.includes("wants to access your google account") ||
-    (text.includes("to continue to") && (text.includes("allow") || text.includes("continue")))
-  ) {
-    return "consent";
-  }
-
-  // Challenge — a verify-it's-you / 2FA step. Not /challenge/pwd, which
-  // is the password step of an ordinary login (→ needs_login).
-  if (
-    (path.includes("/challenge/") && !path.includes("/challenge/pwd")) ||
-    text.includes("verify it's you") ||
-    text.includes("verify it’s you") ||
-    text.includes("2-step verification")
-  ) {
-    return "challenge";
-  }
-
-  // Everything else on accounts.google.com → Google wants credentials.
-  // Erring toward needs_login is the safe default: it stops the bot
-  // rather than risk it proceeding into a page it must not automate.
-  return "needs_login";
-}
-
-// Google's "number-match" challenge (URL: /signin/challenge/dp) shows
-// ONE big number on the desktop browser; the user's phone shows three
-// options and they tap the matching one. The number is the only piece
-// of state the user needs to complete the challenge — extract it from
-// the page text so the bot can surface it to the user. Returns null
-// when the text isn't a number-match page.
-//
-// Exported for unit testing — phrasing varies by locale/version.
-export function extractGoogleNumberMatch(text: string): string | null {
-  const m1 = text.match(/tap\s+(\d{1,3})\s+on\s+your/i);
-  if (m1 && m1[1] !== undefined) return m1[1];
-  const m2 = text.match(/\b(\d{1,3})\s+on\s+your\s+(?:phone|other\s+device)/i);
-  if (m2 && m2[1] !== undefined) return m2[1];
-  // Fallback: text mentions the number-match challenge but used a
-  // phrasing we don't know yet. Pull the most plausible digit group —
-  // a 2-digit number is the current Google pattern.
-  if (/match the number|tap the number|google wants to make sure/i.test(text)) {
-    const digits = text.match(/\b\d{1,3}\b/g);
-    if (digits) {
-      const twoDigit = digits.find((d) => d.length === 2);
-      if (twoDigit !== undefined) return twoDigit;
-      if (digits[0] !== undefined) return digits[0];
-    }
-  }
-  return null;
-}
+// Kept as the public import surface for existing callers. The pure helper is
+// split out so browser.ts can consume it without forming a runtime cycle with
+// this profile/login lifecycle module.
+export {
+  classifyGoogleAuthState,
+  extractGoogleHumanChallenge,
+  extractGoogleNumberMatch,
+  type GoogleAuthState,
+  type GoogleHumanChallenge,
+} from "./google-auth-state.js";
 
 // --- environment helpers ----------------------------------------------
 export function hasDisplay(

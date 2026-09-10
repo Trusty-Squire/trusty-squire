@@ -6,6 +6,12 @@
 // tests lock the per-call boundary; the process-level unhandledRejection
 // backstop is covered in bin-smoke.test.ts against the built artifact.
 
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DispatchJournal } from "../bot/broker/dispatch-journal.js";
+import type { OperatorForwarder } from "../bot/broker/forwarder.js";
+import { createServerCallAdmission } from "../server.js";
 import { describe, expect, it, vi } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -17,9 +23,9 @@ import {
   startHarnessProvisionSession,
 } from "../bot/provision-session.js";
 
-async function connectedClient(): Promise<Client> {
+async function connectedClient(persistence?: Parameters<typeof buildServer>[5]): Promise<Client> {
   const api = { setRequestingAgent: vi.fn() } as unknown as ApiClient;
-  const server = await buildServer(api);
+  const server = await buildServer(api, undefined, undefined, undefined, undefined, persistence);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
   const client = new Client({ name: "resilience-test", version: "1.0.0" });
@@ -133,6 +139,10 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
       });
       expect(next.isError).toBe(true);
       expect(resultText(next)).toContain("unknown provision session");
+      expect(JSON.parse(resultText(next)).error).toMatchObject({
+        code: "unknown_session",
+        retry: { max_attempts: 0, mutation: "do_not_replay" },
+      });
     } finally {
       await client.close();
     }
@@ -217,3 +227,167 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
     }
   });
 });
+
+it("roundtrips flat finish schemas and typed receipts through the MCP SDK", async () => {
+  const root = await mkdtemp(join(tmpdir(), "direct-receipt-"));
+  const path = join(root, "journal.jsonl");
+  const client = await connectedClient({
+    journal: new DispatchJournal(path),
+    lineage: () => "account-lineage",
+  });
+  const browser = {
+    goto: vi.fn().mockResolvedValue(undefined),
+    recoverActivePage: vi.fn(),
+    armOpenedTabAdoption: vi.fn(),
+    adoptOpenedTab: vi.fn(async () => null),
+    extractInteractiveElements: vi.fn().mockResolvedValue([]),
+    extractVisibleText: vi.fn().mockResolvedValue("Ready"),
+    currentUrl: () => "https://schema.test/",
+    activePage: () => null,
+    takeOAuthTerminalCompletionUrl: () => null,
+    readCheckoutSummary: vi.fn().mockRejectedValue(new Error("none")),
+    close: vi.fn().mockResolvedValue("closed"),
+  } as unknown as BrowserController;
+  const started = await startHarnessProvisionSession({
+    serviceUrl: "https://schema.test/",
+    browser,
+  });
+  try {
+    const listed = await client.listTools();
+    const finish = listed.tools.find((tool) => tool.name === "operate_finish");
+    expect(finish?.inputSchema.properties?.outcome).toMatchObject({
+      type: "string",
+      enum: ["none", "credentials", "result"],
+    });
+    expect(finish?.outputSchema).toMatchObject({
+      type: "object",
+      properties: { closed: { type: "boolean" } },
+    });
+    for (const name of [
+      "operate_click",
+      "operate_type",
+      "operate_select",
+      "operate_press",
+      "operate_extract",
+    ]) {
+      const tool = listed.tools.find((tool) => tool.name === name);
+      expect(tool?.inputSchema.properties?.capture).toMatchObject({
+        type: "object",
+        required: ["store", "source"],
+      });
+      expect(tool?.outputSchema).toMatchObject({
+        type: "object",
+        properties: {
+          write_id: { type: "string" },
+          stored: { type: "boolean" },
+          closed: { type: "boolean" },
+        },
+      });
+    }
+    const result = await client.callTool({
+      name: "operate_finish",
+      arguments: {
+        session_id: started.session_id,
+        outcome: "result",
+        data: { confirmed: true, count: 3 },
+      },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      session_id: started.session_id,
+      closed: true,
+      cleanup: "closed",
+      data: { confirmed: true, count: 3 },
+    });
+    expect(JSON.parse(resultText(result))).toEqual(result.structuredContent);
+    await client.close();
+    const restarted = await connectedClient({
+      journal: new DispatchJournal(path),
+      lineage: () => "account-lineage",
+    });
+    const foreign = await connectedClient({
+      journal: new DispatchJournal(path),
+      lineage: () => "other-lineage",
+    });
+    try {
+      expect(
+        (
+          await restarted.callTool({
+            name: "operate_finish",
+            arguments: { session_id: started.session_id },
+          })
+        ).structuredContent,
+      ).toMatchObject({ closed: true, cleanup: "already_closed" });
+      expect(
+        (
+          await foreign.callTool({
+            name: "operate_finish",
+            arguments: { session_id: started.session_id },
+          })
+        ).isError,
+      ).toBe(true);
+      expect(browser.close).toHaveBeenCalledOnce();
+    } finally {
+      await restarted.close();
+      await foreign.close();
+    }
+  } finally {
+    await client.close();
+    await closeAllProvisionSessions();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+for (const [name, args, budget] of [
+  ["operate_navigate", { session_id: "session", url: "https://example.test/" }, 17_000],
+  ["operate_login", { session_id: "session", provider: "google", ref: "@login" }, 17_000],
+  ["operate_start", { service_url: "https://example.test/" }, 32_000],
+  ["operate_finish", { session_id: "session" }, 5_000],
+] as const)
+  it(`bounds forwarded ${name} delivery while retaining execution custody`, async () => {
+    const admission = createServerCallAdmission();
+    let release!: (value: unknown) => void;
+    let entered!: () => void;
+    let signal: AbortSignal | undefined;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const work = new Promise<unknown>((resolve) => {
+      release = resolve;
+    });
+    const forwarder = {
+      invoke: vi.fn(async (...input: unknown[]) => {
+        signal = input[4] as AbortSignal;
+        entered();
+        return await work;
+      }),
+    } as unknown as OperatorForwarder;
+    const server = await buildServer(
+      { setRequestingAgent: vi.fn() } as unknown as ApiClient,
+      admission,
+      undefined,
+      undefined,
+      forwarder,
+    );
+    const [transport, peer] = InMemoryTransport.createLinkedPair();
+    await server.connect(peer);
+    const client = new Client({ name: "deadline-test", version: "1" });
+    await client.connect(transport);
+    vi.useFakeTimers();
+    try {
+      const response = client.callTool({ name, arguments: args });
+      await started;
+      await vi.advanceTimersByTimeAsync(budget);
+      expect((await response).isError).toBe(true);
+      expect(signal?.aborted).toBe(true);
+      expect(admission.inFlightCount()).toBe(1);
+      release({ done: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(admission.inFlightCount()).toBe(0);
+    } finally {
+      release({});
+      vi.useRealTimers();
+      await client.close();
+      await server.close();
+    }
+  });

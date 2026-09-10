@@ -27,6 +27,8 @@ export class BrokerRuntime implements BrokerBrowserCustody {
   private readonly admissionIds = new Map<BrowserController, string>();
   private readonly pendingAdmissions = new Map<string, number>();
   private readonly releases = new Map<BrowserController, Promise<void>>();
+  private readonly releaseHooks = new Map<BrowserController, Set<() => Promise<void>>>();
+  private readonly provenClosed = new WeakSet<BrowserController>();
   private lease: ProfileOperationLease | undefined;
   private leaseProfile: string | undefined;
   private owner: BrowserController | undefined;
@@ -174,24 +176,41 @@ export class BrokerRuntime implements BrokerBrowserCustody {
     release();
   }
 
-  async release(browser: BrowserController): Promise<void> {
+  async release(browser: BrowserController, beforeRelease?: () => Promise<void>): Promise<void> {
     const existing = this.releases.get(browser);
-    if (existing !== undefined) return await existing;
-    const operation = this.releaseOnce(browser);
+    if (existing !== undefined) {
+      if (beforeRelease !== undefined) this.releaseHooks.get(browser)!.add(beforeRelease);
+      return await existing;
+    }
+    const hooks = new Set<() => Promise<void>>();
+    if (beforeRelease !== undefined) hooks.add(beforeRelease);
+    this.releaseHooks.set(browser, hooks);
+    const operation = this.releaseOnce(browser, hooks);
     this.releases.set(browser, operation);
     try {
       await operation;
     } finally {
       this.releases.delete(browser);
+      this.releaseHooks.delete(browser);
     }
   }
 
-  private async releaseOnce(browser: BrowserController): Promise<void> {
+  private async releaseOnce(
+    browser: BrowserController,
+    hooks: Set<() => Promise<void>>,
+  ): Promise<void> {
     const release = this.sessions.get(browser);
-    if (release === undefined) return;
+    if (release === undefined) {
+      if (hooks.size > 0 && !this.provenClosed.has(browser))
+        throw new BrokerRefusal("cleanup_unknown", "No retained closure proof for this tab family");
+      for (const hook of hooks) await hook();
+      return;
+    }
     const state = await browser.closeOwnPagesOnly();
     if (state !== "closed")
       throw new BrokerRefusal("cleanup_unknown", "Tab family remains quarantined");
+    for (const hook of hooks) await hook();
+    this.provenClosed.add(browser);
     this.sessions.delete(browser);
     this.admissionIds.delete(browser);
     release();

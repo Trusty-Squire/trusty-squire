@@ -194,7 +194,7 @@ describe("observation byte efficiency", () => {
         node(name, {
           paintOrder: 1,
           computedStyles: transparent,
-          attributes: name === "INPUT" ? { type: "text" } : {},
+          attributes: name === "INPUT" ? { type: "text" } : name === "A" ? { href: "#target" } : {},
           clickListener: ["SVG", "G", "PATH", "SPAN"].includes(name),
         }),
     );
@@ -548,9 +548,9 @@ describe("observation byte efficiency", () => {
       children: [text("Plan"), cursorChild],
     });
     const cursorResult = serializeBrowserUseDOM(cursorParent);
-    expect(cursorResult.dom).not.toContain("state_icons=");
+    expect(cursorResult.dom).toContain('state_icons=["aria-pressed=true"]');
     expect(cursorResult.dom).toContain("aria-pressed=true");
-    expect(cursorResult.refs).toEqual([cursorParent.id, cursorChild.id]);
+    expect(cursorResult.refs).toEqual([cursorParent.id]);
   });
   it("emits selection evidence for reachable controls without card tag heuristics", () => {
     const link = node("A", {
