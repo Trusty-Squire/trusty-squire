@@ -928,7 +928,11 @@ export function paymentSession(sessionId?: string): Session {
   return session;
 }
 
+const cancelledCallLeases = new WeakMap<Session, Set<AbortSignal>>();
+
 function acquireSessionCallLease(session: Session): () => void {
+  if ((cancelledCallLeases.get(session)?.size ?? 0) > 0)
+    throw new Error("operator_session_busy: cancelled execution still owns this session");
   if (session.closing) throw new Error(`provision session ${session.id} is closing`);
   session.lastActivityAt = Date.now();
   session.callCount += 1;
@@ -989,10 +993,23 @@ async function withSelectedProvisionSessionCall<T>(
 export async function withProvisionSessionCall<T>(
   sessionId: string,
   fn: (session: Session) => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  return await withSelectedProvisionSessionCall(session, fn);
+  if (signal?.aborted) throw signal.reason ?? new Error("operator_request_cancelled");
+  const cancelled = (): void => {
+    const leases = cancelledCallLeases.get(session) ?? new Set<AbortSignal>();
+    leases.add(signal!);
+    cancelledCallLeases.set(session, leases);
+  };
+  signal?.addEventListener("abort", cancelled, { once: true });
+  try {
+    return await withSelectedProvisionSessionCall(session, fn);
+  } finally {
+    signal?.removeEventListener("abort", cancelled);
+    if (signal !== undefined) cancelledCallLeases.get(session)?.delete(signal);
+  }
 }
 
 export async function withPaymentSessionCall<T>(
@@ -1497,7 +1514,14 @@ async function closeFinishingProvisionSession(
   session.pendingThreeDs = null;
   stopSessionWatchdog(session);
   const finish = finishReceipt(sessionId, url, true);
-  const { url: _url, ...receipt } = finish;
+  const receipt: OperationReceipt = {
+    session_id: finish.session_id,
+    operation_id: finish.operation_id,
+    execution: finish.execution,
+    mutation: finish.mutation,
+    cleanup: finish.cleanup,
+    closed: finish.closed,
+  };
   await releaseWarmBrowserPage(
     session.browser,
     persistState,

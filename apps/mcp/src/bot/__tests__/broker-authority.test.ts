@@ -50,11 +50,24 @@ describe("broker authority", () => {
     );
     const mutation = broker.invoke(owner, cap, "mutation", "operate_click", {}, [], "oauth");
     await entered.promise;
+    expect(broker.busyReadReceipt(owner, cap, "poll")).toMatchObject({
+      session_id: cap.sessionId,
+      operation_id: "poll",
+      status: "session_busy",
+      execution: "pending",
+      cleanup: "open",
+      closed: false,
+    });
+    expect(() => broker.busyReadReceipt(principal("foreign"), cap, "poll")).toThrow();
     expect(await broker.finish(owner, cap, "finish", {})).toEqual({
       closed: false,
       cleanup: "closing",
     });
     expect(cancelled).toBe(true);
+    expect(broker.busyReadReceipt(owner, cap, "closing-poll")).toMatchObject({
+      cleanup: "closing",
+      closed: false,
+    });
     expect(() => broker.invoke(owner, cap, "another", "operate_click", {})).toThrow("fenced");
     expect(broker.inventory().quarantined).toBe(1);
     release.resolve();

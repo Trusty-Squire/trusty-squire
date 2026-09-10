@@ -1,6 +1,7 @@
 // The release acceptance arm uses three independent MCP stdio servers and
 // an enrolled, isolated real profile. It never seeds cookies or bypasses the
-// Google admission gate. Invoke through chrome-devtools-axi run.
+// Google admission gate. Invoke the exported entrypoint directly in Node;
+// configured native-host evidence is collected separately via actual MCP tools.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";

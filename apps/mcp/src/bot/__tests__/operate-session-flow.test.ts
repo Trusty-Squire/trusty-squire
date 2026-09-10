@@ -4862,7 +4862,7 @@ describe("Compact V2 action-map boundary", () => {
     expect(h.clickCalls).toBe(0);
   });
 
-  it("shows OTP-shaped control descriptions — masking is payment-only", async () => {
+  it("shows and queries OTP-shaped control descriptions", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
@@ -4881,12 +4881,12 @@ describe("Compact V2 action-map boundary", () => {
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
     // A code rendered on the page is ordinary content the agent must be able to
-    // read; only card material is screened out.
+    // read and query without a numeric-content filter.
     expect(JSON.stringify(started)).toContain("481920");
     expect(JSON.stringify(started)).toContain("735104");
     const query = await observeQuery(started.session_id, "481920");
     expect(query.safe_table).toEqual([
-      [expect.stringMatching(/^@e:/), "b", "@your-verification-code-is-481920"],
+      [expect.stringMatching(/^@e:/), "b", "@your-verification-code-is-481920|m=t"],
     ]);
   });
 

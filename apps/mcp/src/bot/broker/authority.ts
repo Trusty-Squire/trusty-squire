@@ -401,6 +401,24 @@ export class BrokerAuthority {
     );
   }
 
+  busyReadReceipt(
+    principal: BrokerPrincipal,
+    capability: TabCapability,
+    requestId: string,
+  ): Record<string, unknown> | undefined {
+    const actor = this.resolve(principal, capability);
+    if (actor.pending === 0 && actor.state === "active") return undefined;
+    return {
+      session_id: capability.sessionId,
+      operation_id: requestId,
+      status: "session_busy",
+      execution: actor.pending > 0 ? "pending" : "unknown",
+      mutation: "unknown",
+      cleanup: actor.state === "active" ? "open" : "closing",
+      closed: false,
+    };
+  }
+
   invoke(
     principal: BrokerPrincipal,
     capability: TabCapability,

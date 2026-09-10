@@ -882,3 +882,37 @@ it("retains custody after terminal persistence failure and retries only cleanup"
   expect(persist).toHaveBeenCalledTimes(2);
   expect(activeSessionCount()).toBe(0);
 });
+
+it("fences new direct calls until cancelled execution actually releases its session lease", async () => {
+  const first = await startHarnessProvisionSession({
+    serviceUrl: "https://first.example.com/",
+    browser: new BrowserController({}),
+  });
+  const second = await startHarnessProvisionSession({
+    serviceUrl: "https://second.example.com/",
+    browser: new BrowserController({}),
+  });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const abort = new AbortController();
+  const running = withProvisionSessionCall(first.session_id, async () => await gate, abort.signal);
+  abort.abort(new Error("fixture cancellation"));
+  try {
+    await expect(
+      withProvisionSessionCall(first.session_id, async () => "must not run"),
+    ).rejects.toThrow("operator_session_busy");
+    await expect(
+      withProvisionSessionCall(second.session_id, async () => "sibling remains live"),
+    ).resolves.toBe("sibling remains live");
+  } finally {
+    release();
+    await running;
+  }
+  await expect(withProvisionSessionCall(first.session_id, async () => "settled")).resolves.toBe(
+    "settled",
+  );
+  await finishProvisionSession(first.session_id);
+  await finishProvisionSession(second.session_id);
+});

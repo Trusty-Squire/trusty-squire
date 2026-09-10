@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type * as ProvisionSession from "../../bot/provision-session.js";
 import type { ApiClient } from "../../api-client.js";
 import {
   withOperatorRequestContext,
@@ -7,7 +8,7 @@ import {
 
 const state = vi.hoisted(() => ({ action: vi.fn(), capture: vi.fn() }));
 vi.mock("../../bot/provision-session.js", async (original) => ({
-  ...(await original<typeof import("../../bot/provision-session.js")>()),
+  ...(await original<typeof ProvisionSession>()),
   act: state.action,
   captureCredentialSource: state.capture,
   observedHostsForSession: () => ["example.test"],

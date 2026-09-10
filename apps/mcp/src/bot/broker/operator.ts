@@ -536,7 +536,7 @@ export class OperatorBroker implements BrokerTransportPort {
                 result =
                   name === "operate_finish"
                     ? await executeOwned()
-                    : await withProvisionSessionCall(internalId, executeOwned);
+                    : await withProvisionSessionCall(internalId, executeOwned, signal);
                 if (name !== "operate_finish" && signal.aborted)
                   throw signal.reason ?? new Error("operator_request_cancelled");
               } catch (error) {
@@ -829,6 +829,20 @@ export class OperatorBroker implements BrokerTransportPort {
     if (await this.journal?.acknowledge(journalForwarderId(principal), requestId))
       await this.authority.retryQuarantined();
   }
+  busyReadResult(
+    principal: BrokerPrincipal,
+    params: Record<string, unknown>,
+    requestId: string,
+  ): unknown | undefined {
+    const parsed = callSchema.safeParse(params);
+    if (!parsed.success || !["operate_observe", "operate_screenshot"].includes(parsed.data.name))
+      return undefined;
+    const { capability, args } = parsed.data;
+    if (capability === undefined || args.session_id !== capability.sessionId) return undefined;
+    const receipt = this.authority.busyReadReceipt(principal, capability, requestId);
+    return receipt === undefined ? undefined : { result: receipt };
+  }
+
   async canReconcileCapture(
     principal: BrokerPrincipal,
     params: Record<string, unknown>,

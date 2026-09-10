@@ -306,6 +306,7 @@ export async function buildServer(
             workBudgetMs,
           )
         : undefined;
+    let lifecycleHeldByWork = false;
     try {
       const callApi = activeApi;
       callApi.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
@@ -360,15 +361,22 @@ export async function buildServer(
         typeof parsed.data.session_id === "string" ? parsed.data.session_id : undefined;
       const work =
         sessionId !== undefined && !/^operate_finish(?:_task)?$/.test(tool.name)
-          ? withProvisionSessionCall(sessionId, async () => await invoke())
+          ? withProvisionSessionCall(sessionId, async () => await invoke(), composed.signal)
           : invoke();
-      const result = await awaitOperatorSettlement(work, composed.signal);
+      lifecycleHeldByWork = true;
+      const trackedWork = work.finally(() => callLifecycle?.finished());
+      const result = await awaitOperatorSettlement(trackedWork, composed.signal);
       return toolResultContent(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const serverUnavailable =
         /unknown provision session|requires one active operate_start browser session/i.test(
           message,
+        );
+      if (message.startsWith("operator_session_busy:"))
+        return errorContent(
+          "session_busy",
+          "Cancelled work retains this session; wait for settlement or use finish. Do not replay mutations.",
         );
       if (message === "operator_execution_unsettled")
         return errorContent(
@@ -393,7 +401,7 @@ export async function buildServer(
     } finally {
       if (budgetTimer !== undefined) clearTimeout(budgetTimer);
       composed.dispose();
-      callLifecycle?.finished();
+      if (!lifecycleHeldByWork) callLifecycle?.finished();
     }
   });
 

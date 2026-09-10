@@ -586,7 +586,10 @@ export class DispatchJournal {
       | "terminalReceipt"
     >,
   ): Promise<void> {
+    let started = false;
+    let writeAttempted = false;
     const operation = this.tail.then(async () => {
+      started = true;
       await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
       const file = await open(this.path, "a", 0o600);
       try {
@@ -596,6 +599,7 @@ export class DispatchJournal {
             "capacity",
             "Dispatch journal capacity exhausted; retain custody",
           );
+        writeAttempted = true;
         await file.write(
           JSON.stringify({
             sessionId,
@@ -610,7 +614,12 @@ export class DispatchJournal {
         await file.close();
       }
     });
-    this.tail = operation;
+    // A failure before any append can be retried without losing evidence.
+    // Partial writes/fsync uncertainty poison this instance until recovery;
+    // never let a later append claim durable closure over a damaged journal.
+    this.tail = operation.catch((error: unknown) => {
+      if (!started || writeAttempted) throw error;
+    });
     return operation;
   }
 }

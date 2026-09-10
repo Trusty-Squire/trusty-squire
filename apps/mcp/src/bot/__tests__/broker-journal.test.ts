@@ -618,3 +618,32 @@ it("retains lineage-bound closure proof across acknowledgement and journal resta
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it("retries terminal persistence after a failure before any journal append", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ts-terminal-write-retry-"));
+  const directory = join(root, "journal");
+  try {
+    await appendFile(directory, "fixture blocking directory creation");
+    const journal = new DispatchJournal(join(directory, "dispatch.jsonl"));
+    const receipt = {
+      session_id: "session",
+      operation_id: "finish",
+      execution: "completed" as const,
+      mutation: "not_dispatched" as const,
+      cleanup: "closed" as const,
+      closed: true,
+    };
+    await expect(journal.recordTerminalReceipt("owner", receipt)).rejects.toThrow();
+    await rm(directory);
+    await journal.recordTerminalReceipt("owner", receipt);
+    expect(await journal.terminalReceipt("owner", "session")).toEqual(receipt);
+    expect(
+      await new DispatchJournal(join(directory, "dispatch.jsonl")).terminalReceipt(
+        "owner",
+        "session",
+      ),
+    ).toEqual(receipt);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

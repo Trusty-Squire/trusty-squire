@@ -173,10 +173,10 @@ Implementation entry points: `src/bot/broker/daemon.ts`, `discovery.ts`,
 
 ## Executed mechanical acceptance
 
-Run via the authorized browser tool from the worktree after building:
+Run the isolated Node/SDK harness from the worktree after building:
 
 ```bash
-chrome-devtools-axi run <<'JS'
+node --input-type=module <<'JS'
 const { runFixtureAcceptance } = await import(process.cwd() + '/apps/mcp/scripts/broker-acceptance.mjs');
 await runFixtureAcceptance(process.cwd(), true);
 JS
@@ -252,11 +252,12 @@ its cookies into the harness.
    `operate_observe`, `operate_click`, `operate_type`, `operate_select`, and
    `operate_extract`; every call has an `id`, `tool`, and `arguments`, and may
    have `require_pattern` and `timeout_ms`. `$RUN_LABEL` and `$SESSION_ID` are
-   substituted in arguments. A capture step may set `continue_on_error: true`
+   substituted in arguments. Use `format:"full"` for provider-rendered evidence
+   read from `dom`; control queries intentionally omit non-control page text. A capture step may set `continue_on_error: true`
    to retain core's metadata-only error result. A following `operate_extract`
    recovery step uses `{ "$from": { "step": "capture-step", "path":
    "write_id" } }` in its arguments and may be gated with `{ "when": {
-   "step": "capture-step", "path": "storage.outcome", "equals": "unknown"
+   "step": "capture-step", "path": "storage", "equals": "unknown"
    } }`. This is extraction/storage recovery only; the scaffold never loops or
    repeats a mutation step. Evidence fields are either `{ "literal": ... }`
    or `{ "step": "step-id", "path": "result.path" }`; string evidence may
@@ -275,7 +276,11 @@ its cookies into the harness.
    credential probe succeeds.
    `apps/mcp/scripts/bounded-driver-evidence.example.json` is the copyable,
    executable schema; replace its `observed-*` refs and evidence patterns only
-   after those values have been read from the live page.
+   after those values have been read from the live page. Use unique stable
+   `@label` aliases for a reusable driver; `@e:` IDs belong to one session and
+   must never be copied from a preparatory session into a fresh harness session.
+   Alternatively, add a current-session query step and bind its returned ref
+   through `$from`; verify uniqueness before authorizing the mutation.
    The manifest may inline that object as `driverEvidence` or point
    `driverEvidenceFile` at a per-session JSON copy beside the manifest, as the
    manifest example does.
@@ -315,25 +320,24 @@ pnpm --filter @trusty-squire/mcp exec vitest run \
   src/bot/__tests__/broker-stdio-restart.test.ts
 ```
 
-5. Firstmate runs the final live arm through the native browser harness. This is
-   the only command here that may use the enrolled isolated profile or perform
-   the manifest's fresh provider mutations:
+5. Firstmate runs the SDK concurrency arm directly in Node, after recording
+   actual configured-host evidence through that host's native MCP tools. This
+   command may use the enrolled isolated profile and perform the manifest's
+   authorized fresh provider mutations; it is not a native-host invocation.
 
 ```bash
-chrome-devtools-axi run < /absolute/path/to/final-acceptance-run.mjs
+node --input-type=module <<'JS'
+import { runNativeAndConcurrencyAcceptance } from './apps/mcp/scripts/broker-live-acceptance.mjs';
+console.log(await runNativeAndConcurrencyAcceptance('./.broker-acceptance/manifest.json'));
+JS
 ```
 
-The ignored runner contains:
-
-```js
-const { runNativeAndConcurrencyAcceptance } = await import(
-  "file:///absolute/worktree/apps/mcp/scripts/broker-live-acceptance.mjs"
-);
-
-console.log(
-  await runNativeAndConcurrencyAcceptance("/absolute/worktree/.broker-acceptance/manifest.json"),
-);
-```
+`chrome-devtools-axi run` executes scripts against its browser `page` object;
+it is not a Node module runner for the SDK harness. Obtain configured native MCP
+proof from the actual host connection. Use `operate_screenshot` on the relevant
+Squire session to record visual transitions. Preserve missing provider account,
+key ID, creation-time, and native-host evidence as missing; do not fill templates
+with inferred success.
 
 The installed-command arm performs only MCP initialization and records the
 selected command, expected and initialized versions, connection epoch, bounded

@@ -58,3 +58,8 @@ tools/bin/
 # Isolated browser-broker qualification profiles, sockets and evidence
 .broker-acceptance/
 .t/
+
+# Worktree-local dependency cache and isolated validation artifacts
+/.pnpm-store/
+/.core-baseline/
+/.core-performance/

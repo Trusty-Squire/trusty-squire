@@ -1072,8 +1072,7 @@ function privateQueryTokenV2(value: string): string | null {
   if (
     normalized.length < 1 ||
     normalized.length > 48 ||
-    !/^[\p{L}\p{M}\p{N}]{1,48}$/u.test(normalized) ||
-    (/^\p{N}+$/u.test(normalized) && normalized.length > 4)
+    !/^[\p{L}\p{M}\p{N}]{1,48}$/u.test(normalized)
   ) {
     return null;
   }

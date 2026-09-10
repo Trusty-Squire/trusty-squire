@@ -238,6 +238,10 @@ export async function runBrokerDaemon(): Promise<void> {
             throw new Error("A broker cancellation requires its request ID");
           return { cancelled: operator.cancel(principal, params.requestId) };
         }
+        if (method === "tool") {
+          const busy = operator.busyReadResult(principal, params, id);
+          if (busy !== undefined) return busy;
+        }
         const report = await guard.inspect();
         if (report.problem !== null) throw new Error(report.problem.message);
         if (runtime.browserLost() && method === "reclaim")

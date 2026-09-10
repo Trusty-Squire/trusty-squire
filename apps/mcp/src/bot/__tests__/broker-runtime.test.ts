@@ -147,3 +147,49 @@ it("refuses another account on a previously enrolled profile before launching", 
   await expect(second.acquire({ profileDir: root })).rejects.toThrow("different account");
   expect(state.start).toHaveBeenCalledTimes(1);
 });
+
+it("persists every concurrent terminal hook before releasing target custody", async () => {
+  let close!: (state: string) => void;
+  const browser = {
+    closeOwnPagesOnly: vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          close = resolve;
+        }),
+    ),
+  };
+  state.attach.mockResolvedValue(browser);
+  const runtime = new BrokerRuntime("account");
+  await runtime.acquire({ profileDir: root });
+  const first = runtime.release(browser as never);
+  const persisted = vi.fn(async () => {
+    expect(await runtime.close()).toBe(false);
+    expect(state.release).not.toHaveBeenCalled();
+  });
+  const second = runtime.release(browser as never, persisted);
+  close("closed");
+  await Promise.all([first, second]);
+  expect(persisted).toHaveBeenCalledOnce();
+  expect(await runtime.close()).toBe(true);
+});
+
+it("retains target custody when terminal persistence fails and refuses orphan closure proof", async () => {
+  const browser = { closeOwnPagesOnly: vi.fn(async () => "closed") };
+  state.attach.mockResolvedValue(browser);
+  const runtime = new BrokerRuntime("account");
+  await runtime.acquire({ profileDir: root });
+  await expect(
+    runtime.release(browser as never, async () => {
+      throw new Error("disk unavailable");
+    }),
+  ).rejects.toThrow("disk unavailable");
+  expect(await runtime.close()).toBe(false);
+  const persisted = vi.fn(async () => undefined);
+  await runtime.release(browser as never, persisted);
+  expect(persisted).toHaveBeenCalledOnce();
+  await expect(runtime.release({} as never, persisted)).rejects.toThrow(
+    "No retained closure proof",
+  );
+  expect(persisted).toHaveBeenCalledOnce();
+  expect(await runtime.close()).toBe(true);
+});
