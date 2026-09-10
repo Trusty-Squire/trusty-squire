@@ -27,6 +27,7 @@ export interface Tool<TArgs extends Record<string, unknown> = Record<string, unk
   description: string;
   inputSchema: ZodTypeAny;
   jsonInputSchema: Record<string, unknown>;
+  jsonOutputSchema?: Record<string, unknown>;
   // Standard MCP tool annotations (readOnlyHint / destructiveHint /
   // idempotentHint). Client-only — they don't reach the model.
   annotations?: Record<string, unknown>;

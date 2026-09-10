@@ -1,3 +1,4 @@
+import { awaitOperatorPreparation } from "../request-cancellation.js";
 import { connectOrLaunchBroker } from "./discovery.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { SessionGuard } from "../../session-guard.js";
@@ -109,83 +110,119 @@ export class OperatorForwarder {
     recovery: BrokerRecoveryRequest = {},
     signal?: AbortSignal,
   ): Promise<unknown> {
-    if (signal?.aborted) throw signal.reason ?? new BrokerRefusal("cancelled", "Request cancelled");
     const callerRequestHash = this.callerRequestHash(requestId);
     const idempotencyKey = this.idempotencyKey(callerRequestHash);
-    const starting =
-      name === "operate_start" || (name === "operate_recipe_run" && args.session_id === undefined);
-    let reconnecting = false;
-    if (this.connection !== undefined) {
-      const existing = await this.connection.catch(() => undefined);
-      if (existing === undefined || !existing.isConnected()) {
-        this.connection = undefined;
-        this.client = undefined;
-        reconnecting = true;
-      }
-    }
-    const client = await this.connect();
-    if (reconnecting) this.sessions.clear();
-    await this.reclaim(client);
-    if (!starting && args.session_id === undefined && this.sessions.size === 1)
-      args = { ...args, session_id: this.sessions.keys().next().value };
-    const id = typeof args.session_id === "string" ? args.session_id : undefined;
-    const capability = id === undefined ? undefined : this.sessions.get(id);
-    const recovered = recovery.recover
-      ? await this.recover(client, name, args, capability, recovery)
-      : undefined;
-    if (recovered !== undefined) {
-      await client.acknowledge(recovered.requestId);
-      if (recovered.capability !== undefined)
-        this.sessions.set(recovered.capability.sessionId, recovered.capability);
-      if (name === "operate_finish" && id !== undefined) this.sessions.delete(id);
-      return recovered.result;
-    }
-    if (
-      name !== "operate_start" &&
-      !(name === "operate_recipe_run" && id === undefined) &&
-      capability === undefined
-    )
-      throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
-    if (!starting && capability !== undefined) await this.confirmStartDelivery(client, capability);
-    if (recovery.recover)
-      throw new BrokerRefusal("recovery_not_found", "No matching durable outcome is available");
-    const brokerCall = client.call(
-      "tool",
-      {
-        name,
-        args,
-        ...(capability === undefined ? {} : { capability }),
-      },
-      idempotencyKey,
-    );
+    let dispatchedClient: BrokerClient | undefined;
+    const checkCancelled = (): void => {
+      if (signal?.aborted)
+        throw signal.reason ?? new BrokerRefusal("cancelled", "Request cancelled before dispatch");
+    };
     const cancel = (): void => {
-      void client.call("cancel", { requestId: idempotencyKey }).catch(() => undefined);
+      void dispatchedClient?.call("cancel", { requestId: idempotencyKey }).catch(() => undefined);
     };
     signal?.addEventListener("abort", cancel, { once: true });
-    let rawReply: unknown;
     try {
-      rawReply = await brokerCall;
+      checkCancelled();
+      const starting =
+        name === "operate_start" ||
+        (name === "operate_recipe_run" && args.session_id === undefined);
+      let reconnecting = false;
+      if (this.connection !== undefined) {
+        const existing = await awaitOperatorPreparation(
+          this.connection.catch(() => undefined),
+          signal,
+        );
+        checkCancelled();
+        if (existing === undefined || !existing.isConnected()) {
+          this.connection = undefined;
+          this.client = undefined;
+          reconnecting = true;
+        }
+      }
+      const client = await awaitOperatorPreparation(this.connect(), signal);
+      checkCancelled();
+      if (reconnecting) this.sessions.clear();
+      await awaitOperatorPreparation(this.reclaim(client), signal);
+      checkCancelled();
+      if (!starting && args.session_id === undefined && this.sessions.size === 1)
+        args = { ...args, session_id: this.sessions.keys().next().value };
+      const id = typeof args.session_id === "string" ? args.session_id : undefined;
+      const capability = id === undefined ? undefined : this.sessions.get(id);
+      const recovered = recovery.recover
+        ? await awaitOperatorPreparation(
+            this.recover(client, name, args, capability, recovery),
+            signal,
+          )
+        : undefined;
+      checkCancelled();
+      if (recovered !== undefined) {
+        await client.acknowledge(recovered.requestId);
+        if (recovered.capability !== undefined)
+          this.sessions.set(recovered.capability.sessionId, recovered.capability);
+        if (
+          name === "operate_finish" &&
+          id !== undefined &&
+          typeof recovered.result === "object" &&
+          recovered.result !== null &&
+          "closed" in recovered.result &&
+          recovered.result.closed === true
+        )
+          this.sessions.delete(id);
+        return recovered.result;
+      }
+      if (
+        name !== "operate_start" &&
+        !(name === "operate_recipe_run" && id === undefined) &&
+        capability === undefined &&
+        name !== "operate_finish"
+      )
+        throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
+      if (!starting && capability !== undefined)
+        await awaitOperatorPreparation(this.confirmStartDelivery(client, capability), signal);
+      if (recovery.recover)
+        throw new BrokerRefusal("recovery_not_found", "No matching durable outcome is available");
+      checkCancelled();
+      dispatchedClient = client;
+      const brokerCall = client.call(
+        "tool",
+        {
+          name,
+          args,
+          ...(capability === undefined ? {} : { capability }),
+        },
+        idempotencyKey,
+      );
+      const rawReply = await brokerCall;
+      const reply = rawReply as {
+        result?: unknown;
+        capability?: TabCapability;
+        preDispatchFailure?: { error?: unknown; dispatch?: unknown };
+      };
+      if (
+        reply.preDispatchFailure?.error === "stale_ref" &&
+        reply.preDispatchFailure.dispatch === "not_dispatched"
+      ) {
+        await client.acknowledge(idempotencyKey);
+        throw new ProvenPreDispatchMutationError("stale_ref");
+      }
+      if (reply.capability !== undefined)
+        this.sessions.set(reply.capability.sessionId, reply.capability);
+      await client.acknowledge(idempotencyKey);
+      if (
+        name === "operate_finish" &&
+        id !== undefined &&
+        typeof reply.result === "object" &&
+        reply.result !== null &&
+        "closed" in reply.result &&
+        reply.result.closed === true
+      )
+        this.sessions.delete(id);
+      return reply.result;
     } finally {
       signal?.removeEventListener("abort", cancel);
     }
-    const reply = rawReply as {
-      result?: unknown;
-      capability?: TabCapability;
-      preDispatchFailure?: { error?: unknown; dispatch?: unknown };
-    };
-    if (
-      reply.preDispatchFailure?.error === "stale_ref" &&
-      reply.preDispatchFailure.dispatch === "not_dispatched"
-    ) {
-      await client.acknowledge(idempotencyKey);
-      throw new ProvenPreDispatchMutationError("stale_ref");
-    }
-    if (reply.capability !== undefined)
-      this.sessions.set(reply.capability.sessionId, reply.capability);
-    await client.acknowledge(idempotencyKey);
-    if (name === "operate_finish" && id !== undefined) this.sessions.delete(id);
-    return reply.result;
   }
+
   sessionCount(): number {
     return this.sessions.size;
   }

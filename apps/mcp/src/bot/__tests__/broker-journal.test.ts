@@ -1,3 +1,4 @@
+import { markOperatorMutationDispatchAttempted } from "../request-cancellation.js";
 import { mkdtemp, rm, appendFile, readFile } from "node:fs/promises";
 import { createHash, createHmac } from "node:crypto";
 import { join } from "node:path";
@@ -76,6 +77,7 @@ describe("broker dispatch custody", () => {
       inputSchema: z.object({}).strict(),
       jsonInputSchema: {},
       handler: async () => {
+        if (name === "operate_recipe_run") await markOperatorMutationDispatchAttempted();
         throw new Error(`${name} failed`);
       },
     });
@@ -588,4 +590,31 @@ describe("broker dispatch custody", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+});
+
+it("retains lineage-bound closure proof across acknowledgement and journal restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ts-terminal-receipt-"));
+  const path = join(root, "dispatch.jsonl");
+  try {
+    const journal = new DispatchJournal(path);
+    const receipt = {
+      session_id: "session",
+      operation_id: "finish-1",
+      execution: "completed" as const,
+      mutation: "not_dispatched" as const,
+      cleanup: "closed" as const,
+      closed: true,
+    };
+    await journal.recordTerminalReceipt("owner", receipt);
+    await journal.acknowledge("owner", "finish-1");
+    const restarted = new DispatchJournal(path);
+    expect(await restarted.terminalReceipt("owner", "session")).toEqual(receipt);
+    expect(await restarted.terminalReceipt("foreign", "session")).toBeUndefined();
+    expect(await restarted.terminalReceipt("owner", "unknown")).toBeUndefined();
+    await expect(
+      restarted.recordTerminalReceipt("owner", { ...receipt, closed: false, cleanup: "unknown" }),
+    ).rejects.toThrow("established closure");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

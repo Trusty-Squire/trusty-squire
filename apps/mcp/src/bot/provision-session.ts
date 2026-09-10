@@ -1,3 +1,8 @@
+import type { CaptureSource } from "./credential-capture.js";
+import {
+  markOperatorMutationDispatchAttempted,
+  throwIfOperatorRequestCancelled,
+} from "./request-cancellation.js";
 import type { BrowserUseCapture } from "./browser-use-capture.js";
 import { serializeBrowserUseDOM } from "./browser-use-serializer.js";
 // Phase 1 — the session-holding "thick tools" surface a frontier host agent
@@ -8105,6 +8110,7 @@ export async function replayOperatorRecipe(
   };
 
   for (let i = fromIndex; i < recipe.trace.length; i += 1) {
+    throwIfOperatorRequestCancelled();
     const step = recipe.trace[i] as TraceEntry;
     const recorded = step.action;
     await options.beforeStep?.({ step_index: i, action: recorded });
@@ -8260,6 +8266,7 @@ export async function replayOperatorRecipe(
 
     try {
       await options.beforeAction?.({ step_index: i, action });
+      await markOperatorMutationDispatchAttempted();
       const acted = await actInternally(
         sessionId,
         action,
@@ -8438,6 +8445,52 @@ export function classifyVouchflowCredentials(text: string): Record<string, strin
 // SAME exported regex policy the bot uses (extractApiKeyFromText +
 // isTruncatedCapture + extraction.ts accumulation). Reuses the substrate —
 // no new credential regexes.
+/** Explicit capture reads one named source without revealing other controls or
+ * scanning unrelated page text. Normal extract/observe remain unchanged. */
+export async function captureCredentialSource(
+  sessionId: string,
+  source: CaptureSource,
+): Promise<{
+  candidate_count: number;
+  value?: string;
+}> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error("unknown provision session");
+  const page = operationPageForSession(session);
+  if (page === undefined) throw new Error("capture page unavailable");
+  const container =
+    source.container === undefined
+      ? page
+      : page.getByRole(source.container.role, {
+          ...(source.container.name !== undefined
+            ? { name: source.container.name, exact: true }
+            : {}),
+        });
+  const targets = container.getByRole(source.role, {
+    ...(source.name !== undefined ? { name: source.name, exact: true } : {}),
+  });
+  // Pin the selected element in its current document. A new document must not
+  // satisfy the same locator while capture is in flight.
+  const handles = await targets.elementHandles();
+  try {
+    if (handles.length !== 1) return { candidate_count: handles.length };
+    const value = await handles[0]!.evaluate((node) => {
+      if (!node.isConnected || node.ownerDocument !== document)
+        throw new Error("capture source changed");
+      const value =
+        node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
+          ? node.value
+          : node instanceof HTMLElement
+            ? node.innerText
+            : "";
+      return value.length <= 8192 ? value.trim() : "";
+    });
+    return { candidate_count: 1, ...(value.length > 0 ? { value } : {}) };
+  } finally {
+    await Promise.all(handles.map((handle) => handle.dispose().catch(() => undefined)));
+  }
+}
+
 export async function extractCredentials(sessionId: string): Promise<ExtractResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);

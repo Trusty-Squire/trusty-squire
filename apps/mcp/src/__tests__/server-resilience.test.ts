@@ -217,3 +217,65 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
     }
   });
 });
+
+it("roundtrips flat finish schemas and typed receipts through the MCP SDK", async () => {
+  const client = await connectedClient();
+  const browser = {
+    goto: vi.fn().mockResolvedValue(undefined),
+    recoverActivePage: vi.fn(),
+    armOpenedTabAdoption: vi.fn(),
+    adoptOpenedTab: vi.fn(async () => null),
+    extractInteractiveElements: vi.fn().mockResolvedValue([]),
+    extractVisibleText: vi.fn().mockResolvedValue("Ready"),
+    currentUrl: () => "https://schema.test/",
+    activePage: () => null,
+    takeOAuthTerminalCompletionUrl: () => null,
+    readCheckoutSummary: vi.fn().mockRejectedValue(new Error("none")),
+    close: vi.fn().mockResolvedValue("closed"),
+  } as unknown as BrowserController;
+  const started = await startHarnessProvisionSession({
+    serviceUrl: "https://schema.test/",
+    browser,
+  });
+  try {
+    const listed = await client.listTools();
+    const finish = listed.tools.find((tool) => tool.name === "operate_finish");
+    expect(finish?.inputSchema.properties?.outcome).toMatchObject({
+      type: "string",
+      enum: ["none", "credentials", "result"],
+    });
+    expect(finish?.outputSchema).toMatchObject({
+      type: "object",
+      properties: { closed: { type: "boolean" } },
+    });
+    for (const name of [
+      "operate_click",
+      "operate_type",
+      "operate_select",
+      "operate_press",
+      "operate_extract",
+    ])
+      expect(
+        listed.tools.find((tool) => tool.name === name)?.inputSchema.properties?.capture,
+      ).toMatchObject({ type: "object", required: ["store", "source"] });
+    const result = await client.callTool({
+      name: "operate_finish",
+      arguments: {
+        session_id: started.session_id,
+        outcome: "result",
+        data: { confirmed: true, count: 3 },
+      },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      session_id: started.session_id,
+      closed: true,
+      cleanup: "closed",
+      data: { confirmed: true, count: 3 },
+    });
+    expect(JSON.parse(resultText(result))).toEqual(result.structuredContent);
+  } finally {
+    await client.close();
+    await closeAllProvisionSessions();
+  }
+});

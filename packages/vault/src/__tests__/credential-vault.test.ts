@@ -525,3 +525,47 @@ describe("LocalKMS sanity", () => {
     expect((await kms.decrypt(blob)).toString("utf8")).toBe("secret");
   });
 });
+
+describe("capture write identity", () => {
+  it("stores a concurrent capture once and reconciles without rotation", async () => {
+    const { vault, store, audit } = makeVault();
+    const insert = vi.spyOn(store, "insert");
+    const rotate = vi.spyOn(store, "replaceSecret");
+    const input = storeInput({ write_id: "operation-1", label: "fresh" });
+    const [first, second] = await Promise.all([vault.store(input), vault.store(input)]);
+    expect(second).toEqual(first);
+    expect(first.updated).toBe(false);
+    expect(rotate).not.toHaveBeenCalled();
+    const calls = insert.mock.calls.length;
+    const restarted = new CredentialVault({
+      store,
+      audit,
+      kms: LocalKMS.withFixedKey(Buffer.alloc(32, 0x42)),
+    });
+    expect(await restarted.store(input)).toEqual(first);
+    expect(insert).toHaveBeenCalledTimes(calls);
+    expect(JSON.stringify(first)).not.toContain(input.fields.value);
+    await expect(vault.store({ ...input, service: "Other" })).rejects.toThrow("conflicts");
+    await expect(vault.store({ ...input, fields: { value: "different" } })).rejects.toThrow(
+      "conflicts",
+    );
+    await expect(vault.store({ ...input, write_id: "operation-2" })).rejects.toThrow(
+      "refuses to rotate",
+    );
+    expect(rotate).not.toHaveBeenCalled();
+  });
+
+  it("cannot replace an old credential or share capture identity across accounts", async () => {
+    const { vault } = makeVault();
+    const old = await vault.store(storeInput());
+    await expect(
+      vault.store(storeInput({ write_id: "capture", fields: { value: "new" } })),
+    ).rejects.toThrow("refuses to rotate");
+    const other = await vault.store(
+      storeInput({ account_id: "other-account", write_id: "capture" }),
+    );
+    expect(other.reference).not.toBe(old.reference);
+    const first = await vault.store(storeInput({ write_id: "capture", label: "fresh" }));
+    expect(first.reference).not.toBe(other.reference);
+  });
+});

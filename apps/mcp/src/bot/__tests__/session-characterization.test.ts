@@ -57,9 +57,10 @@ vi.mock("../browser.js", async (importOriginal) => {
       isConnected(): boolean {
         return true;
       }
-      async close(): Promise<void> {
+      async close(): Promise<"closed"> {
         h.closeCalls += 1;
         h.terminalOrder.push("browser_close");
+        return "closed";
       }
       async waitForThreeDsResolution(): Promise<string> {
         return "challenge_pending";
@@ -790,4 +791,94 @@ describe("characterization: agent-facing observation payload shapes", () => {
     expect(result).not.toHaveProperty("dom");
     expect(JSON.stringify(result)).not.toContain("#submit");
   });
+});
+
+it("returns bounded closing while retaining an active call, then persists closure before removal", async () => {
+  const { withOperatorRequestContext } = await import("../request-cancellation.js");
+  const browser = new BrowserController({});
+  const started = await startHarnessProvisionSession({
+    serviceUrl: "https://shop.example.com/cart",
+    browser,
+  });
+  let release!: () => void;
+  let entered!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const ready = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const running = withProvisionSessionCall(started.session_id, async () => {
+    entered();
+    await gate;
+  });
+  await ready;
+  let persisted = false;
+  vi.useFakeTimers();
+  try {
+    const finishing = withOperatorRequestContext(
+      new AbortController().signal,
+      async () => await finishProvisionSession(started.session_id),
+      undefined,
+      {
+        operationId: "finish-owned",
+        onTerminal: async (receipt) => {
+          expect(receipt).toMatchObject({
+            operation_id: "finish-owned",
+            closed: true,
+            cleanup: "closed",
+          });
+          expect(sessionLifecycle.sessionForCall(started.session_id)).toBeDefined();
+          expect(h.closeCalls).toBe(1);
+          persisted = true;
+        },
+      },
+    );
+    await vi.advanceTimersByTimeAsync(4_001);
+    expect(await finishing).toMatchObject({
+      closed: false,
+      execution: "pending",
+      cleanup: "closing",
+    });
+    expect(persisted).toBe(false);
+    expect(activeSessionCount()).toBe(1);
+    expect(h.closeCalls).toBe(0);
+    release();
+    await running;
+    await vi.advanceTimersByTimeAsync(1);
+    expect(persisted).toBe(true);
+    expect(activeSessionCount()).toBe(0);
+  } finally {
+    release();
+    vi.useRealTimers();
+  }
+});
+
+it("retains custody after terminal persistence failure and retries only cleanup", async () => {
+  const { withOperatorRequestContext } = await import("../request-cancellation.js");
+  const { BrowserController } = await import("../browser.js");
+  const browser = new BrowserController({});
+  const started = await startHarnessProvisionSession({
+    serviceUrl: "https://shop.example.com/cart",
+    browser,
+  });
+  const prepare = vi.fn(async () => ({ saved: true }));
+  const persist = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("disk unavailable"))
+    .mockResolvedValue(undefined);
+  const finish = () =>
+    withOperatorRequestContext(
+      new AbortController().signal,
+      () => sessionLifecycle.finishProvisionSessionWithPreparation(started.session_id, prepare),
+      undefined,
+      { operationId: "retry-cleanup", onTerminal: persist },
+    );
+  await expect(finish()).rejects.toThrow("disk unavailable");
+  expect(activeSessionCount()).toBe(1);
+  expect(sessionLifecycle.sessionForCall(started.session_id)?.closing).toBe(true);
+  await expect(finish()).resolves.toMatchObject({ finish: { closed: true, cleanup: "closed" } });
+  expect(prepare).toHaveBeenCalledTimes(1);
+  expect(persist).toHaveBeenCalledTimes(2);
+  expect(activeSessionCount()).toBe(0);
 });

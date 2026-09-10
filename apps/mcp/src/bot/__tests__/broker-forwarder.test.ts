@@ -11,6 +11,80 @@ import { ProvenPreDispatchMutationError } from "../mutation-dispatch-evidence.js
 const credential = (character: string) => character.repeat(43);
 
 describe("MCP broker forwarding", () => {
+  it.each(["connect", "reclaim", "confirm_start", "recover"])(
+    "never dispatches when cancelled during %s",
+    async (barrier) => {
+      const root = await mkdtemp(join(tmpdir(), "ts-forward-cancel-"));
+      const capability = {
+        cellId: "cell",
+        browserEpoch: "epoch",
+        sessionId: "session",
+        targetId: "target",
+        leaseGeneration: "one",
+      };
+      let release!: () => void;
+      let enter!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const entered = new Promise<void>((resolve) => {
+        enter = resolve;
+      });
+      const pause = async () => {
+        enter();
+        await gate;
+      };
+      let dispatches = 0;
+      const broker = await listenBroker(join(root, "b.sock"), {
+        authenticate: async () => ({ accountId: "account", agentId: "agent" }),
+        call: async (_principal, method) => {
+          if (method === barrier) await pause();
+          if (method === "reclaim") return { capabilities: [capability] };
+          if (method === "recover") return null;
+          if (method === "confirm_start" || method === "acknowledge") return {};
+          dispatches++;
+          return { result: {} };
+        },
+        disconnect: async () => undefined,
+      });
+      const guard: SessionGuard = {
+        bind: async () => {
+          if (barrier === "connect") await pause();
+          return {
+            account_id: "account",
+            agent_session_token: "test",
+            api_base_url: "http://unused.test",
+            saved_at: "",
+          };
+        },
+        inspect: async () => ({ problem: null }),
+        boundAccountId: () => "account",
+      };
+      const forwarder = new OperatorForwarder(join(root, "b.sock"), guard, credential("a"));
+      const controller = new AbortController();
+      try {
+        const pending = forwarder.invoke(
+          "operate_click",
+          { session_id: "session", ref: "@continue" },
+          "cancelled",
+          { recover: barrier === "recover" },
+          controller.signal,
+        );
+        const rejected = expect(pending).rejects.toThrow("cancelled");
+        await entered;
+        controller.abort(new Error("cancelled"));
+        release();
+        await rejected;
+        expect(dispatches).toBe(0);
+      } finally {
+        release();
+        await forwarder.close();
+        await broker.close();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("acknowledges a delivered pre-dispatch failure before rejecting it", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-forward-pre-dispatch-"));
     const path = join(root, "b.sock");
@@ -545,6 +619,7 @@ describe("MCP broker forwarding", () => {
           };
           return { capability, result: { session_id: principal.clientId } };
         }
+        if (params.name === "operate_finish") return { result: { closed: true } };
         return { result: { dom: "| Access Key: fixture-visible-value" } };
       },
       disconnect: async (principal) => {

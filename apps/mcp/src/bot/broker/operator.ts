@@ -1,3 +1,4 @@
+import { captureEvidenceSchema } from "../credential-capture.js";
 import { withBrokerAdmission } from "./admission-context.js";
 import { brokerBrowserCustody } from "./custody.js";
 import type {
@@ -105,7 +106,9 @@ function dispatchDetail(
 }
 
 function brokerCommandDispatchTracked(name: string): boolean {
-  return /^(?:operate_(?:login|click|type|select|press|goto|act|fill_credential))$/.test(name);
+  return /^(?:operate_(?:login|click|type|select|press|goto|act|fill_credential|recipe_run))$/.test(
+    name,
+  );
 }
 
 async function withBrokerAuditContext<T>(
@@ -121,8 +124,26 @@ export function reconciliationOutcome(
   operation: string,
   result: unknown,
 ): ReconciledDispatchOutcome {
-  if (operation !== "operate_pay" || result === null || typeof result !== "object")
+  if (operation !== "operate_pay" || result === null || typeof result !== "object") {
+    if (
+      result !== null &&
+      typeof result === "object" &&
+      "write_id" in result &&
+      "stored" in result
+    ) {
+      const stored = "stored_credential" in result ? result.stored_credential : undefined;
+      const capture = captureEvidenceSchema.safeParse({
+        write_id: result.write_id,
+        stored: result.stored,
+        storage: result.stored === true ? "stored" : "unknown",
+        ...(stored !== null && typeof stored === "object" && "reference" in stored
+          ? { reference: stored.reference }
+          : {}),
+      });
+      if (capture.success) return { status: "completed", capture: capture.data };
+    }
     return { status: "completed" };
+  }
   const payment = result as Record<string, unknown>;
   if (payment.status === "payment_submitted") return { status: "done" };
   if (payment.status !== "payment_3ds_required" && payment.status !== "payment_outcome_unknown")
@@ -144,7 +165,7 @@ export function reconciliationOutcome(
 export function brokerCommandMutates(name: string, args: Record<string, unknown>): boolean {
   return (
     !["operate_observe", "operate_screenshot", "operate_payment_status"].includes(name) &&
-    !(name === "operate_extract" && args.store === undefined)
+    !(name === "operate_extract" && args.store === undefined && args.capture === undefined)
   );
 }
 
@@ -159,6 +180,9 @@ export class OperatorBroker implements BrokerTransportPort {
     string,
     { principalId: string; controller: AbortController }
   >();
+  // Missing registrations are retained per authenticated connection. Never
+  // evict them for capacity: that could resurrect a cancelled queued mutation.
+  private readonly pendingCancellations = new Map<string, Set<string>>();
   private token: Buffer;
   constructor(
     private readonly config: ApiClientConfig & { accountId: string },
@@ -225,19 +249,59 @@ export class OperatorBroker implements BrokerTransportPort {
     params: Record<string, unknown>,
     requestId: string,
   ): Promise<unknown> {
+    return await this.withRegisteredRequest(principal, requestId, (signal) =>
+      this.callRegistered(principal, method, params, requestId, signal),
+    );
+  }
+
+  async callRegistered(
+    principal: BrokerPrincipal,
+    method: string,
+    params: Record<string, unknown>,
+    requestId: string,
+    signal: AbortSignal,
+  ): Promise<unknown> {
+    return await this.callOwned(principal, method, params, requestId, signal);
+  }
+
+  async withRegisteredRequest<T>(
+    principal: BrokerPrincipal,
+    requestId: string,
+    operation: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    const key = JSON.stringify([principal.clientId, requestId]);
+    if (this.requestControllers.has(key))
+      throw new BrokerRefusal("duplicate_pending", "Request is already registered");
     const controller = new AbortController();
-    this.requestControllers.set(requestId, { principalId: principal.clientId, controller });
+    const pending = this.pendingCancellations.get(principal.clientId);
+    if (pending?.delete(requestId))
+      controller.abort(new BrokerRefusal("cancelled", "Caller cancelled before registration"));
+    if (pending?.size === 0) this.pendingCancellations.delete(principal.clientId);
+    this.requestControllers.set(key, { principalId: principal.clientId, controller });
     try {
-      return await this.callOwned(principal, method, params, requestId, controller.signal);
+      return await operation(controller.signal);
     } finally {
-      this.requestControllers.delete(requestId);
+      this.requestControllers.delete(key);
     }
   }
 
   cancel(principal: BrokerPrincipal, requestId: string): boolean {
-    const active = this.requestControllers.get(requestId);
-    if (active === undefined || active.principalId !== principal.clientId) return false;
-    active.controller.abort(new BrokerRefusal("cancelled", "Caller cancelled the request"));
+    if (requestId.length === 0 || requestId.length > 128 || principal.supervisor) return false;
+    const active = this.requestControllers.get(JSON.stringify([principal.clientId, requestId]));
+    if (active !== undefined) {
+      active.controller.abort(new BrokerRefusal("cancelled", "Caller cancelled the request"));
+      return true;
+    }
+    let pending = this.pendingCancellations.get(principal.clientId);
+    if (pending === undefined) {
+      if (this.pendingCancellations.size >= 128)
+        throw new BrokerRefusal("capacity", "Pending cancellation connection budget exhausted");
+      pending = new Set();
+      this.pendingCancellations.set(principal.clientId, pending);
+    }
+    if (!pending.has(requestId) && pending.size >= 8192)
+      throw new BrokerRefusal("capacity", "Pending cancellation budget exhausted");
+    pending.add(requestId);
     return true;
   }
 
@@ -248,12 +312,21 @@ export class OperatorBroker implements BrokerTransportPort {
     requestId: string,
     requestSignal: AbortSignal,
   ): Promise<unknown> {
+    if (requestSignal.aborted) throw requestSignal.reason;
     if (method !== "tool") throw new BrokerRefusal("unknown_method", "Unknown broker method");
     const input = callSchema.parse(params);
     const tool = findTool(input.name, this.tools);
     if (tool === null || !tool.name.startsWith("operate_"))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
+    if (tool.name === "operate_finish" && typeof args.session_id === "string") {
+      const terminal = await this.journal?.terminalReceipt(
+        journalForwarderId(principal),
+        args.session_id,
+      );
+      if (terminal !== undefined)
+        return { result: { ...terminal, cleanup: "already_closed", url: "" } };
+    }
     const starting =
       tool.name === "operate_start" ||
       (tool.name === "operate_recipe_run" && args.session_id === undefined);
@@ -284,6 +357,7 @@ export class OperatorBroker implements BrokerTransportPort {
           },
         },
       };
+    if (requestSignal.aborted) throw requestSignal.reason;
     let api = this.apis.get(principal.clientId);
     if (api === undefined) {
       api = new ApiClient({ ...this.config, agentIdentity: principal.agentId });
@@ -337,13 +411,23 @@ export class OperatorBroker implements BrokerTransportPort {
             if (signal.aborted) throw signal.reason ?? new Error("operator_request_cancelled");
           } catch (error) {
             if (mutationCapableStart) {
-              await this.journal?.record(id, requestId, "unknown", {
-                ...dispatch,
-                outcome: {
-                  status: "unknown",
-                  reason: signal.aborted ? "cancelled" : "execution_error",
+              await this.journal?.record(
+                id,
+                requestId,
+                startDispatchAttempted ? "unknown" : "observed_result",
+                {
+                  ...dispatch,
+                  outcome: startDispatchAttempted
+                    ? {
+                        status: "unknown",
+                        reason: signal.aborted ? "cancelled" : "execution_error",
+                      }
+                    : {
+                        status: "not_dispatched",
+                        error: signal.aborted ? "cancelled" : "pre_dispatch_failure",
+                      },
                 },
-              });
+              );
             }
             throw error;
           }
@@ -429,6 +513,21 @@ export class OperatorBroker implements BrokerTransportPort {
                         dispatchAttempted = true;
                       }
                     : undefined,
+                  {
+                    operationId: commandId,
+                    onCapture: async (capture) => {
+                      await this.journal?.record(id, commandId, "unknown", {
+                        ...commandDispatch,
+                        outcome: { status: "unknown", reason: "execution_error", capture },
+                      });
+                    },
+                    onTerminal: async (receipt) => {
+                      await this.journal?.recordTerminalReceipt(journalForwarderId(principal), {
+                        ...receipt,
+                        session_id: id,
+                      });
+                    },
+                  },
                 );
               let result: unknown;
               try {
@@ -436,7 +535,8 @@ export class OperatorBroker implements BrokerTransportPort {
                   name === "operate_finish"
                     ? await executeOwned()
                     : await withProvisionSessionCall(internalId, executeOwned);
-                if (signal.aborted) throw signal.reason ?? new Error("operator_request_cancelled");
+                if (name !== "operate_finish" && signal.aborted)
+                  throw signal.reason ?? new Error("operator_request_cancelled");
               } catch (error) {
                 const preDispatch = provenPreDispatchMutationFailure(error);
                 if (mutating && name === "operate_login" && preDispatch !== null) {
@@ -450,13 +550,13 @@ export class OperatorBroker implements BrokerTransportPort {
                   mutating &&
                   commandDispatch.dispatchTracked === true &&
                   !dispatchAttempted &&
-                  signal.aborted
+                  (signal.aborted || name === "operate_recipe_run")
                 ) {
                   await this.journal?.record(id, commandId, "observed_result", {
                     ...commandDispatch,
                     outcome: {
                       status: "not_dispatched",
-                      error: "cancelled",
+                      error: signal.aborted ? "cancelled" : "pre_dispatch_failure",
                     },
                   });
                 } else if (mutating) {
@@ -575,16 +675,19 @@ export class OperatorBroker implements BrokerTransportPort {
         : ["operate_extract", "operate_fill_credential", "operate_pay"].includes(tool.name)
           ? "interactive"
           : undefined;
-    const result = await this.authority.invoke(
-      principal,
-      capability,
-      requestId,
-      tool.name,
-      args,
-      extra,
-      lane,
-      requestSignal,
-    );
+    const result =
+      tool.name === "operate_finish"
+        ? await this.authority.finish(principal, capability, requestId, args)
+        : await this.authority.invoke(
+            principal,
+            capability,
+            requestId,
+            tool.name,
+            args,
+            extra,
+            lane,
+            requestSignal,
+          );
     if (result instanceof DeliveredPreDispatchFailure)
       return {
         preDispatchFailure: {
@@ -592,7 +695,14 @@ export class OperatorBroker implements BrokerTransportPort {
           dispatch: "not_dispatched" as const,
         },
       };
-    if (tool.name === "operate_finish") await this.authority.close(principal, capability);
+    if (
+      tool.name === "operate_finish" &&
+      result !== null &&
+      typeof result === "object" &&
+      "closed" in result &&
+      result.closed === true
+    )
+      await this.authority.close(principal, capability);
     return { result };
   }
   async recover(
@@ -742,6 +852,12 @@ export class OperatorBroker implements BrokerTransportPort {
     );
   }
   async disconnect(principal: BrokerPrincipal, explicit = false): Promise<void> {
+    this.pendingCancellations.delete(principal.clientId);
+    for (const [key, request] of this.requestControllers) {
+      if (request.principalId !== principal.clientId) continue;
+      request.controller.abort(new BrokerRefusal("cancelled", "Connection retired"));
+      this.requestControllers.delete(key);
+    }
     this.authority.beginForwarderRelease(principal);
     const forwarder = principal.forwarderId;
     if (!explicit) this.authority.detach(principal);

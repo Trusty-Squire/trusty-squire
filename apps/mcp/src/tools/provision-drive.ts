@@ -1,3 +1,11 @@
+import { captureSourceSchema } from "../bot/credential-capture.js";
+import {
+  currentOperatorOperationId,
+  operatorMutationDispatchPhase,
+  persistOperatorCaptureEvidence,
+  throwIfOperatorRequestCancelled,
+} from "../bot/request-cancellation.js";
+import { randomUUID } from "node:crypto";
 // Phase 1 — the interactive provisioning tool surface a frontier HOST agent
 // drives. The host is the planner; these tools are the browser + the moat.
 // Backed by ../bot/provision-session.ts (the session registry over the existing
@@ -18,6 +26,7 @@ import {
   formSelectMany,
   TargetStaleError,
   extractCredentials,
+  captureCredentialSource,
   finishProvisionSession,
   finishProvisionSessionWithPreparation,
   observedHostsForSession,
@@ -526,6 +535,117 @@ const storeShape = z.object({
 });
 type StoreSpec = z.infer<typeof storeShape>;
 
+const captureSchema = z
+  .object({
+    store: storeShape,
+    source: captureSourceSchema,
+    write_id: z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(/^[a-zA-Z0-9:_-]+$/)
+      .optional(),
+  })
+  .strict();
+const captureJson = {
+  type: "object",
+  additionalProperties: false,
+  required: ["store", "source"],
+  properties: {
+    store: {
+      type: "object",
+      required: ["service"],
+      properties: {
+        service: { type: "string" },
+        label: { type: "string" },
+        env_var_suggestion: { type: "string" },
+        type: { type: "string" },
+        egress_hosts: { type: "array", items: { type: "string" } },
+        auth_shape: { type: "string" },
+      },
+    },
+    source: {
+      type: "object",
+      additionalProperties: false,
+      required: ["role"],
+      properties: {
+        role: { type: "string", enum: ["textbox", "code"] },
+        name: { type: "string", maxLength: 200 },
+        container: {
+          type: "object",
+          additionalProperties: false,
+          required: ["role"],
+          properties: {
+            role: { type: "string", enum: ["dialog", "region"] },
+            name: { type: "string", maxLength: 200 },
+          },
+        },
+      },
+    },
+    write_id: { type: "string", minLength: 1, maxLength: 128, pattern: "^[a-zA-Z0-9:_-]+$" },
+  },
+};
+
+async function captureIntoVault(
+  sessionId: string,
+  capture: z.infer<typeof captureSchema>,
+  api: ApiClient,
+) {
+  const writeId = capture.write_id ?? currentOperatorOperationId() ?? randomUUID();
+  const base = {
+    session_id: sessionId,
+    operation_id: currentOperatorOperationId() ?? writeId,
+    write_id: writeId,
+    mutation:
+      operatorMutationDispatchPhase() === "prepared"
+        ? "not_dispatched"
+        : operatorMutationDispatchPhase() === "dispatch_attempted"
+          ? "dispatched"
+          : "unknown",
+    cleanup: "open",
+    closed: false,
+  };
+  try {
+    throwIfOperatorRequestCancelled();
+    const extracted = await captureCredentialSource(sessionId, capture.source);
+    if (extracted.candidate_count !== 1 || extracted.value === undefined)
+      return {
+        ...base,
+        execution: "completed",
+        stored: false,
+        error: "capture_ambiguous",
+        candidate_count: extracted.candidate_count,
+        retry: "extract_only",
+      };
+    await persistOperatorCaptureEvidence({ write_id: writeId, stored: false, storage: "unknown" });
+    const stored = await persistExtracted(
+      sessionId,
+      { api_key: extracted.value },
+      capture.store,
+      api,
+      writeId,
+    );
+    await persistOperatorCaptureEvidence({
+      write_id: writeId,
+      stored: true,
+      storage: "stored",
+      reference: stored.reference,
+    });
+    return { ...base, execution: "completed", stored: true, stored_credential: stored };
+  } catch {
+    // Errors may carry echoed provider values. Capture returns fixed metadata;
+    // the page stays available for explicit reads and extraction-only recovery.
+    return {
+      ...base,
+      execution: "unknown",
+      stored: false,
+      storage: "unknown",
+      error: "capture_unresolved",
+      retry: "extract_only",
+    };
+  }
+}
+
 const storeJsonProps = {
   service: { type: "string" },
   label: { type: "string" },
@@ -608,6 +728,7 @@ async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
 }
 
 const extractSchema = z.object({
+  capture: captureSchema.optional(),
   session_id: z.string().min(1),
   into_slot: z.string().min(1).max(60).optional(),
   secret_label: z.string().min(1).max(60).optional(),
@@ -670,6 +791,7 @@ async function persistExtracted(
   credentials: Record<string, string>,
   store: StoreSpec,
   api: ApiClient,
+  writeId?: string,
 ): Promise<StoredCredentialMetadata> {
   const observedHosts = [
     ...new Set([...(store.egress_hosts ?? []), ...observedHostsForSession(sessionId)]),
@@ -681,6 +803,7 @@ async function persistExtracted(
       : { fields: credentials };
   const stored = await api.storeCredential({
     service: store.service,
+    ...(writeId !== undefined ? { write_id: writeId } : {}),
     ...(store.label !== undefined ? { label: store.label } : {}),
     ...storeInput,
     ...(store.env_var_suggestion !== undefined
@@ -722,9 +845,7 @@ export function storedExtractResult(extracted: ExtractResult, stored: StoredCred
 // store path) and `result` (any operate task — a summary + optional structured
 // data: design-review findings, "task done" with confirmed in data, etc.).
 // operate_finish is the single terminal. `outcome.kind` picks the shape.
-const finishDataSchema = z.record(
-  z.union([z.string().max(4000), z.number(), z.boolean()]).transform(String),
-);
+const finishDataSchema = z.record(z.union([z.string().max(4000), z.number(), z.boolean()]));
 
 const finishOutcomeSchema = z.union([
   z.object({ kind: z.literal("none") }),
@@ -785,9 +906,7 @@ async function handleFinishOutcome(
               await readRecipe(outcome.verify_recipe),
             )));
       successfulOutcome =
-        outcome.verify_recipe === undefined
-          ? outcome.data?.confirmed === "true"
-          : verified?.confirmed === true;
+        outcome.verify_recipe === undefined ? false : verified?.confirmed === true;
       emitProvisionMeasurement(sessionId, successfulOutcome ? "success" : "fail");
       return {
         kind: "result" as const,
@@ -798,7 +917,7 @@ async function handleFinishOutcome(
     },
     () => successfulOutcome,
   );
-  return { ...prepared, url: finish.url };
+  return { ...prepared, ...finish };
 }
 
 // ── operator-recipe tools (Phase A — docs/ARCHITECTURE.md) ──
@@ -1437,7 +1556,11 @@ export const operateNavigateTool: Tool<z.infer<typeof navigateSchema>> = {
   handler: async (args) => await runAction(args.session_id, { kind: "goto", url: args.url }),
 };
 
-const clickSchema = z.object({ ...sessionShape, ref: refSchema });
+const clickSchema = z.object({
+  ...sessionShape,
+  ref: refSchema,
+  capture: captureSchema.optional(),
+});
 export const operateClickTool: Tool<z.infer<typeof clickSchema>> = {
   name: "operate_click",
   description:
@@ -1474,6 +1597,7 @@ const typeSchema = z
     text: z.string().max(4096).optional(),
     slot: z.string().min(1).max(60).optional(),
     submit: z.boolean().optional(),
+    capture: captureSchema.optional(),
   })
   .refine((args) => (args.text !== undefined) !== (args.slot !== undefined), {
     message: "Provide exactly one of text or slot",
@@ -1522,6 +1646,7 @@ const selectSchema = z
     ref: refSchema.optional(),
     values: z.array(z.string().min(1).max(4096)).length(1).optional(),
     selections: formSelectionsSchema.optional(),
+    capture: captureSchema.optional(),
     country: z.string().min(1).max(60).optional(),
   })
   .superRefine((args, ctx) => {
@@ -1583,7 +1708,11 @@ export const operateSelectTool: Tool<z.infer<typeof selectSchema>> = {
   },
 };
 
-const pressSchema = z.object({ ...sessionShape, key: z.string().min(1).max(40) });
+const pressSchema = z.object({
+  ...sessionShape,
+  key: z.string().min(1).max(40),
+  capture: captureSchema.optional(),
+});
 export const operatePressTool: Tool<z.infer<typeof pressSchema>> = {
   name: "operate_press",
   description: "Press a keyboard key in the current session, such as Enter, Tab, or Escape.",
@@ -1669,6 +1798,20 @@ const publicFinishSchema = z
   });
 export const operateFinishTool: Tool<z.infer<typeof publicFinishSchema>> = {
   name: "operate_finish",
+  jsonOutputSchema: {
+    type: "object",
+    required: ["session_id", "operation_id", "execution", "mutation", "cleanup", "closed"],
+    properties: {
+      session_id: { type: "string" },
+      operation_id: { type: "string" },
+      execution: { type: "string", enum: ["completed", "cancelled", "pending", "unknown"] },
+      mutation: { type: "string", enum: ["not_dispatched", "dispatched", "unknown"] },
+      cleanup: { type: "string", enum: ["open", "closing", "closed", "already_closed", "unknown"] },
+      closed: { type: "boolean" },
+      data: { type: "object", additionalProperties: { type: ["string", "number", "boolean"] } },
+    },
+    additionalProperties: true,
+  },
   description:
     "Finish the task and close its session. outcome='none' closes without a reported outcome; 'credentials' extracts and vault-stores using store; 'result' reports summary or data. Success requires verified recipe evidence or data.confirmed=true. Successful completion saves eligible login state through the existing teardown.",
   inputSchema: publicFinishSchema,
@@ -1724,3 +1867,64 @@ export const OPERATE_TOOLS: Tool[] = [
   operateRecipeSaveTool,
   operateRecipeRunTool,
 ] as Tool[];
+
+for (const tool of OPERATE_TOOLS) {
+  if (
+    ![
+      "operate_click",
+      "operate_type",
+      "operate_select",
+      "operate_press",
+      "operate_extract",
+    ].includes(tool.name)
+  )
+    continue;
+  const properties = tool.jsonInputSchema.properties;
+  if (properties !== null && typeof properties === "object")
+    Object.assign(properties, { capture: captureJson });
+  tool.description +=
+    " Optional capture:{store,source:{role,name?,container?}} vaults exactly one revealed source and returns metadata only. If storage is unresolved, retry operate_extract with capture.write_id; never repeat creation.";
+  const handler = tool.handler;
+  tool.handler = async (args, api, context) => {
+    if (args.capture === undefined) return await handler(args, api, context);
+    if (api === null) throw new Error("capture requires an active Trusty Squire session");
+    const capture = captureSchema.parse(args.capture);
+    if (typeof args.session_id !== "string") throw new Error("capture requires a session");
+    if (tool.name !== "operate_extract") {
+      if (capture.write_id !== undefined)
+        throw new Error("capture.write_id is for extraction-only recovery, not another mutation");
+      try {
+        const result = await handler(args, api, context);
+        if (
+          result !== null &&
+          typeof result === "object" &&
+          ("status" in result || "needs_user" in result)
+        )
+          return {
+            session_id: args.session_id,
+            operation_id: currentOperatorOperationId(),
+            mutation: "unknown",
+            execution: "unknown",
+            cleanup: "open",
+            closed: false,
+            stored: false,
+            error: "capture_action_unresolved",
+            retry: "extract_only",
+          };
+      } catch {
+        return {
+          session_id: args.session_id,
+          operation_id: currentOperatorOperationId(),
+          mutation: operatorMutationDispatchPhase() === "prepared" ? "not_dispatched" : "unknown",
+          execution: "unknown",
+          cleanup: "open",
+          closed: false,
+          stored: false,
+          error: "capture_action_unresolved",
+          retry: "extract_only",
+        };
+      }
+    }
+    return await captureIntoVault(args.session_id, capture, api);
+  };
+}

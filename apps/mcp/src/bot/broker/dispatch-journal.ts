@@ -1,3 +1,5 @@
+import { captureEvidenceSchema, type CaptureEvidence } from "../credential-capture.js";
+import { operationReceiptSchema, type OperationReceipt } from "../operation-receipt.js";
 import { open, readFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { BrokerRefusal } from "./scheduler.js";
@@ -26,6 +28,7 @@ interface DispatchRecord {
   inputHash?: string;
   dispatchTracked?: true;
   outcome?: ReconciledDispatchOutcome;
+  terminalReceipt?: OperationReceipt;
 }
 
 const phaseHasOutstandingCustody = (record: DispatchRecord): boolean =>
@@ -39,6 +42,7 @@ const phaseHasDeliverableOutcome = (record: DispatchRecord): boolean =>
   );
 
 export interface ReconciledDispatchOutcome {
+  capture?: CaptureEvidence;
   status:
     | "completed"
     | "done"
@@ -96,7 +100,10 @@ function validOutcome(value: unknown): value is ReconciledDispatchOutcome {
       "unknown",
       "not_dispatched",
     ].includes(String(outcome.status)) ||
-    !Object.keys(outcome).every((key) => ["status", "next", "error", "reason"].includes(key)) ||
+    !Object.keys(outcome).every((key) =>
+      ["status", "next", "error", "reason", "capture"].includes(key),
+    ) ||
+    (outcome.capture !== undefined && !captureEvidenceSchema.safeParse(outcome.capture).success) ||
     (outcome.status === "not_dispatched"
       ? !["stale_ref", "cancelled", "pre_dispatch_failure"].includes(String(outcome.error)) ||
         outcome.next !== undefined ||
@@ -158,7 +165,9 @@ export class DispatchJournal {
           (record.operation !== undefined && typeof record.operation !== "string") ||
           (record.inputHash !== undefined && typeof record.inputHash !== "string") ||
           (record.dispatchTracked !== undefined && record.dispatchTracked !== true) ||
-          (record.outcome !== undefined && !validOutcome(record.outcome))
+          (record.outcome !== undefined && !validOutcome(record.outcome)) ||
+          (record.terminalReceipt !== undefined &&
+            !operationReceiptSchema.safeParse(record.terminalReceipt).success)
         )
           throw new Error("Malformed journal");
         if (record.phase === "recovered") continue;
@@ -527,19 +536,57 @@ export class DispatchJournal {
     });
   }
 
+  async terminalReceipt(
+    forwarderId: string,
+    sessionId: string,
+  ): Promise<OperationReceipt | undefined> {
+    const record = [...(await this.states()).values()].find(
+      (candidate) =>
+        candidate.sessionId === sessionId &&
+        candidate.forwarderId === forwarderId &&
+        candidate.requestId === "terminal-receipt" &&
+        candidate.terminalReceipt?.closed === true &&
+        Date.now() - candidate.at < START_DELIVERY_RETENTION_MS,
+    );
+    return record?.terminalReceipt;
+  }
+
+  async recordTerminalReceipt(forwarderId: string, receipt: OperationReceipt): Promise<void> {
+    const safe = operationReceiptSchema.parse(receipt);
+    if (!safe.closed || !["closed", "already_closed"].includes(safe.cleanup))
+      throw new Error("Terminal receipt requires established closure");
+    await this.record(safe.session_id, "terminal-receipt", "settled", {
+      forwarderId,
+      operation: "operate_finish",
+      terminalReceipt: safe,
+    });
+  }
+
   record(
     sessionId: string,
     requestId: string,
     phase: DispatchPhase,
     detail?: Pick<
       DispatchRecord,
-      "forwarderId" | "start" | "operation" | "inputHash" | "dispatchTracked" | "outcome"
+      | "forwarderId"
+      | "start"
+      | "operation"
+      | "inputHash"
+      | "dispatchTracked"
+      | "outcome"
+      | "terminalReceipt"
     >,
   ): Promise<void> {
     const operation = this.tail.then(async () => {
       await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
       const file = await open(this.path, "a", 0o600);
       try {
+        // Refuse capacity rather than forget mutation or closure evidence.
+        if ((await file.stat()).size >= 32 * 1024 * 1024)
+          throw new BrokerRefusal(
+            "capacity",
+            "Dispatch journal capacity exhausted; retain custody",
+          );
         await file.write(
           JSON.stringify({
             sessionId,

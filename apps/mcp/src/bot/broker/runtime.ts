@@ -174,10 +174,10 @@ export class BrokerRuntime implements BrokerBrowserCustody {
     release();
   }
 
-  async release(browser: BrowserController): Promise<void> {
+  async release(browser: BrowserController, beforeRelease?: () => Promise<void>): Promise<void> {
     const existing = this.releases.get(browser);
     if (existing !== undefined) return await existing;
-    const operation = this.releaseOnce(browser);
+    const operation = this.releaseOnce(browser, beforeRelease);
     this.releases.set(browser, operation);
     try {
       await operation;
@@ -186,12 +186,16 @@ export class BrokerRuntime implements BrokerBrowserCustody {
     }
   }
 
-  private async releaseOnce(browser: BrowserController): Promise<void> {
+  private async releaseOnce(
+    browser: BrowserController,
+    beforeRelease?: () => Promise<void>,
+  ): Promise<void> {
     const release = this.sessions.get(browser);
     if (release === undefined) return;
     const state = await browser.closeOwnPagesOnly();
     if (state !== "closed")
       throw new BrokerRefusal("cleanup_unknown", "Tab family remains quarantined");
+    await beforeRelease?.();
     this.sessions.delete(browser);
     this.admissionIds.delete(browser);
     release();

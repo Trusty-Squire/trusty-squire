@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { BrokerRefusal } from "./bot/broker/scheduler.js";
 import { OperatorForwarder, type BrokerRecoveryRequest } from "./bot/broker/forwarder.js";
 // MCP server: reads its account's session from the session file, sets up an ApiClient
 // against the configured API base URL, and exposes the registered tools
@@ -17,7 +19,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { ApiClient } from "./api-client.js";
 import { setSelfManagedChromeTerminationSignalExitEnabled } from "./bot/browser.js";
-import { withOperatorRequestContext } from "./bot/request-cancellation.js";
+import {
+  awaitOperatorSettlement,
+  composeOperatorSignals,
+  withOperatorRequestContext,
+} from "./bot/request-cancellation.js";
 import { cancelActiveLoginBrowsers } from "./bot/google-login.js";
 import { startOwnerProcessReaper } from "./bot/owner-process-reaper.js";
 import {
@@ -222,6 +228,7 @@ export async function buildServer(
       name: t.name,
       description: t.description,
       inputSchema: t.jsonInputSchema,
+      ...(t.jsonOutputSchema !== undefined ? { outputSchema: t.jsonOutputSchema } : {}),
       ...(t.annotations !== undefined ? { annotations: t.annotations } : {}),
       ...(t.meta !== undefined ? { _meta: t.meta } : {}),
     })),
@@ -276,6 +283,29 @@ export async function buildServer(
     if (callLifecycle !== undefined && !callLifecycle.started()) {
       return errorContent("server_unavailable", "server is shutting down");
     }
+    const budget = new AbortController();
+    const composed = composeOperatorSignals([extra.signal, budget.signal]);
+    const workBudgetMs =
+      tool.name === "operate_start" ||
+      (tool.name === "operate_recipe_run" && parsed.data.session_id === undefined)
+        ? 30_000
+        : tool.name === "operate_finish"
+          ? 4_500
+          : 15_000;
+    const budgetTimer =
+      tool.name.startsWith("operate_") &&
+      !["operate_pay", "operate_payment_status"].includes(tool.name)
+        ? setTimeout(
+            () =>
+              budget.abort(
+                new BrokerRefusal(
+                  "request_timeout",
+                  "Operator work budget expired; reconcile before repeating mutations",
+                ),
+              ),
+            workBudgetMs,
+          )
+        : undefined;
     try {
       const callApi = activeApi;
       callApi.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
@@ -288,16 +318,16 @@ export async function buildServer(
             {
               ...brokerRecoveryRequested((req.params as { _meta?: unknown })._meta),
             },
-            extra.signal,
+            composed.signal,
           ),
         );
       }
       const invokeHandler = async () =>
         await withOperatorRequestContext(
-          extra.signal,
+          composed.signal,
           async () =>
             await tool.handler(parsed.data, callApi, {
-              signal: extra.signal,
+              signal: composed.signal,
               notifyUser: async (message, data) => {
                 await server.sendLoggingMessage({
                   level: "notice",
@@ -306,6 +336,8 @@ export async function buildServer(
                 });
               },
             }),
+          undefined,
+          { operationId: randomUUID() },
         );
       const invoke = async () => {
         // Some embedders provide a narrow ApiClient test double. Production
@@ -326,10 +358,11 @@ export async function buildServer(
       // eligible state and closes the browser. `operate_finish*` owns that transition.
       const sessionId =
         typeof parsed.data.session_id === "string" ? parsed.data.session_id : undefined;
-      const result =
+      const work =
         sessionId !== undefined && !/^operate_finish(?:_task)?$/.test(tool.name)
-          ? await withProvisionSessionCall(sessionId, async () => await invoke())
-          : await invoke();
+          ? withProvisionSessionCall(sessionId, async () => await invoke())
+          : invoke();
+      const result = await awaitOperatorSettlement(work, composed.signal);
       return toolResultContent(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -337,17 +370,29 @@ export async function buildServer(
         /unknown provision session|requires one active operate_start browser session/i.test(
           message,
         );
+      if (message === "operator_execution_unsettled")
+        return errorContent(
+          "outcome_unknown",
+          "Cancelled work has not settled; retain the session and use finish. Do not repeat a mutation.",
+        );
       const malformedAction = /^operate_act kind=.* requires /i.test(message);
       return serverUnavailable
         ? errorContent(
-            "server_unavailable",
-            `${message}. Retry once. Never kill or restart the shared operator process; it serves every lane/home.`,
-            {
-              retry: { max_attempts: 1 },
-            },
+            "unknown_session",
+            `${message}. Recover a same-lineage receipt if available; absence of a live session is not closure proof.`,
+            { retry: { mutation: "do_not_replay" } },
           )
-        : errorContent(malformedAction ? "invalid_arguments" : "tool_execution_failed", message);
+        : errorContent(
+            err instanceof BrokerRefusal
+              ? err.code
+              : malformedAction
+                ? "invalid_arguments"
+                : "tool_execution_failed",
+            message,
+          );
     } finally {
+      if (budgetTimer !== undefined) clearTimeout(budgetTimer);
+      composed.dispose();
       callLifecycle?.finished();
     }
   });
@@ -375,6 +420,7 @@ function toolResultContent(result: unknown) {
   if (hasImagePayload(result)) {
     const { image, ...meta } = result;
     return {
+      structuredContent: meta,
       content: [
         { type: "text" as const, text: compactToolResultText(meta) },
         { type: "image" as const, data: image.data_base64, mimeType: image.mime_type },
@@ -382,6 +428,9 @@ function toolResultContent(result: unknown) {
     };
   }
   return {
+    ...(result !== null && typeof result === "object" && !Array.isArray(result)
+      ? { structuredContent: result as Record<string, unknown> }
+      : {}),
     content: [{ type: "text" as const, text: compactToolResultText(result) }],
   };
 }

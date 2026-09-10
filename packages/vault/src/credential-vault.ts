@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 // CredentialVault — encrypted credential store, write-only sink, with
 // multi-field credentials.
 //
@@ -149,6 +150,8 @@ export function normalizeCredentialLabel(raw: string): string | null {
 }
 
 export interface VaultStoreInput {
+  /** Stable capture identity: create-only, never rotate an existing slot. */
+  write_id?: string;
   account_id: string;
   subscription_id: string;
   service: string;
@@ -365,6 +368,7 @@ export class CredentialVault implements VaultClient {
     if (fieldNames.length === 0) {
       throw new Error("store requires at least one field");
     }
+    if (input.write_id !== undefined) return await this.storeCapture(input, label);
     const now = this.now();
     const existing = await this.deps.store.findActiveByServiceLabel(
       input.account_id,
@@ -483,6 +487,81 @@ export class CredentialVault implements VaultClient {
       created_at: now.toISOString(),
       updated: false,
     };
+  }
+
+  private async storeCapture(input: VaultStoreInput, label: string): Promise<VaultEntry> {
+    if (input.write_id === undefined || !/^[a-zA-Z0-9:_-]{1,128}$/.test(input.write_id))
+      throw new Error("invalid vault write identity");
+    const digest = createHash("sha256")
+      .update(JSON.stringify([input.account_id, input.write_id]))
+      .digest("hex");
+    const reference = `vault://${input.account_id}/capture/${digest}`;
+    const existing = await this.deps.store.findActive(reference);
+    const receipt = async (record: CredentialRecord): Promise<VaultEntry> => {
+      if (
+        record.account_id !== input.account_id ||
+        record.metadata.service !== input.service ||
+        record.label !== label
+      )
+        throw new Error("vault write identity conflicts with account/service/label");
+      const fields = await this.decryptFields(record);
+      const keys = Object.keys(input.fields).sort();
+      if (
+        keys.length !== Object.keys(fields).length ||
+        keys.some((key) => fields[key] !== input.fields[key])
+      )
+        throw new Error("vault write identity conflicts with credential fields");
+      return {
+        reference,
+        service: input.service,
+        label,
+        field_names: record.field_names,
+        allowed_hosts: record.allowed_hosts,
+        created_at: record.created_at.toISOString(),
+        updated: false,
+      };
+    };
+    if (existing !== null) return await receipt(existing);
+    if (await this.deps.store.findActiveByServiceLabel(input.account_id, input.service, label))
+      throw new Error("capture refuses to rotate an existing credential; choose a fresh label");
+    const now = this.now();
+    const encrypted = await this.encryptFields(reference, input.account_id, input.fields);
+    const record: CredentialRecord = {
+      id: ulid(),
+      reference,
+      account_id: input.account_id,
+      subscription_id: input.subscription_id,
+      label,
+      type: input.type ?? null,
+      env_var_suggestion: input.env_var_suggestion ?? null,
+      field_names: Object.keys(input.fields),
+      allowed_hosts: mergeAllowedHosts(input.service, input.observed_hosts),
+      ...encrypted,
+      algorithm: "AES-256-GCM",
+      metadata: { ...input.metadata, service: input.service },
+      rotated_at: null,
+      retrieval_count: 0,
+      last_retrieved_at: null,
+      deleted_at: null,
+      created_at: now,
+    };
+    try {
+      await this.deps.store.insert(record);
+    } catch (error) {
+      const winner = await this.deps.store.findActive(reference);
+      if (winner !== null) return await receipt(winner);
+      throw error;
+    }
+    await this.recordAudit(input.account_id, VAULT_AUDIT_TYPES.stored, {
+      reference,
+      requester: "system",
+      service: input.service,
+      label,
+      ...(input.audit_attribution
+        ? { attribution: input.audit_attribution, purpose: input.audit_attribution.purpose }
+        : {}),
+    });
+    return await receipt(record);
   }
 
   // Web-only: replace an existing entry's fields, by reference,

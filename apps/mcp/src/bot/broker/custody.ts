@@ -10,7 +10,7 @@ export interface BrokerBrowserCustody {
   cleanupAdmission(sessionId: string): Promise<boolean>;
   orphanAdmission(sessionId: string): Promise<void>;
   orphan(browser: BrowserController): Promise<void>;
-  release(browser: BrowserController): Promise<void>;
+  release(browser: BrowserController, beforeRelease?: () => Promise<void>): Promise<void>;
   identity<T>(operation: () => Promise<T>): Promise<T>;
 }
 let custody: BrokerBrowserCustody | undefined;

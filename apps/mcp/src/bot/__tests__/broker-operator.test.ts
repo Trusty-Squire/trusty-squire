@@ -1018,7 +1018,8 @@ it("retains acknowledged start control until a same-lineage follow-up", async ()
       description: "",
       inputSchema: z.object({ session_id: z.string() }).strict(),
       jsonInputSchema: {},
-      handler: async () => (toolName === "operate_observe" ? { dom: "ready" } : { done: true }),
+      handler: async () =>
+        toolName === "operate_observe" ? { dom: "ready" } : { done: true, closed: true },
     });
     Object.defineProperty(broker, "tools", {
       value: [startTool, sessionTool("operate_observe"), sessionTool("operate_finish")],
@@ -1107,4 +1108,47 @@ it("retains acknowledged start control until a same-lineage follow-up", async ()
       await rm(root, { recursive: true, force: true });
     }
   }
+});
+
+it("retains pre-registration cancellations without crossing connection identities", async () => {
+  const broker = new OperatorBroker(
+    {
+      accountId: "account",
+      agentSessionToken: "token",
+      apiBaseUrl: "http://unused.test",
+      registryBaseUrl: "http://unused.test",
+    },
+    "cell",
+  );
+  const owner = { accountId: "account", agentId: "agent", clientId: "one" };
+  const foreign = { ...owner, clientId: "two" };
+  expect(broker.cancel(owner, "queued")).toBe(true);
+  await expect(broker.call(foreign, "wrong-method", {}, "queued")).rejects.toThrow(
+    "Unknown broker method",
+  );
+  await expect(broker.call(owner, "wrong-method", {}, "queued")).rejects.toThrow(
+    "cancelled before registration",
+  );
+  // Consumed cancellation cannot leak into another request.
+  await expect(broker.call(owner, "wrong-method", {}, "different")).rejects.toThrow(
+    "Unknown broker method",
+  );
+});
+
+it("bounds cancellation tombstones instead of evicting older cancellation evidence", async () => {
+  const broker = new OperatorBroker(
+    {
+      accountId: "account",
+      agentSessionToken: "token",
+      apiBaseUrl: "http://unused.test",
+      registryBaseUrl: "http://unused.test",
+    },
+    "cell",
+  );
+  const owner = { accountId: "account", agentId: "agent", clientId: "one" };
+  for (let i = 0; i < 8192; i++) broker.cancel(owner, String(i));
+  expect(() => broker.cancel(owner, "overflow")).toThrow("budget exhausted");
+  await expect(broker.call(owner, "wrong-method", {}, "0")).rejects.toThrow(
+    "cancelled before registration",
+  );
 });

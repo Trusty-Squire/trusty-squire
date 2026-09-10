@@ -322,6 +322,7 @@ export class ApiClient {
   // ── store: upsert (create or overwrite by service+label) ──
 
   async storeCredential(input: {
+    write_id?: string;
     service: string;
     label?: string;
     value?: string;

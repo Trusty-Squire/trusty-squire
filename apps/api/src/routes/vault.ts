@@ -64,6 +64,12 @@ function faviconDomain(service: string | null, allowedHosts: string[]): string |
 const storeBody = z
   .object({
     service: z.string().min(1).max(120),
+    write_id: z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(/^[a-zA-Z0-9:_-]+$/)
+      .optional(),
     label: credentialLabelSchema.optional(),
     value: z.string().min(1).max(8192).optional(),
     fields: z.record(z.string().min(1).max(8192)).optional(),
@@ -575,6 +581,7 @@ async function storeUpsert(
     account_id: accountId,
     subscription_id: ulid(),
     service: data.service,
+    ...(data.write_id !== undefined ? { write_id: data.write_id } : {}),
     ...(data.label !== undefined ? { label: data.label } : {}),
     fields: fieldsFrom(data),
     ...(data.type !== undefined ? { type: data.type } : {}),
@@ -594,7 +601,7 @@ async function storeUpsert(
   // Send the legacy email when a key lands unattended. Only on a fresh
   // create (not a rotation), and never fatal to the store. Telegram
   // lifecycle alerts are separate and already follow the audit write.
-  if (notifyOnCreate && !entry.updated) {
+  if (notifyOnCreate && !entry.updated && data.write_id === undefined) {
     await notifyNewKey(opts.deps, forwarder, accountId, entry.service, entry.label);
   }
   const persisted = entry.updated
