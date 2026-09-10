@@ -509,8 +509,16 @@ export class OperatorBroker implements BrokerTransportPort {
                 await withOperatorRequestContext(
                   signal,
                   execute,
-                  mutating && commandDispatch.dispatchTracked === true
+                  mutating
                     ? async () => {
+                        if (
+                          name === "operate_finish" &&
+                          (await this.journal?.unresolvedCapture(journalForwarderId(principal), id))
+                        )
+                          throw new BrokerRefusal(
+                            "outcome_unknown",
+                            "Recover the original capture write identity before credential finish",
+                          );
                         await this.journal?.record(
                           id,
                           commandId,

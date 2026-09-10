@@ -27,11 +27,11 @@ the page’s actual pixels and is not a secret-redaction surface. Payment approv
 
 ## Scope is declared at session start
 
-Host authority is exact-host entitlement. Declare every non-provider host the
-task needs in `allowed_hosts` on `operate_start`; do not rely on a sibling domain
-or a later navigation to grant authority. `operate_allow_host` can activate a
-host only inside that session’s declared startup entitlement and existing
-identity-provider allowance. It cannot broaden a session to a new host.
+Startup merchant hosts also authorize matching registrable-domain siblings,
+such as `shop.example.com` and `api.example.com`. Declare other required
+non-provider hosts in `allowed_hosts` on `operate_start`. `operate_allow_host`
+can activate a host only inside the declared startup entitlement and existing
+identity-provider allowance; it cannot broaden that entitlement.
 
 ```json
 {

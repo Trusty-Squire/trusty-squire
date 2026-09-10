@@ -178,6 +178,9 @@ export class DispatchJournal {
           prior?.outcome?.status === "payment_outcome_unknown"
         )
           continue;
+        if (prior?.outcome?.capture && !record.outcome?.capture) {
+          record.outcome = { ...(record.outcome ?? prior.outcome), capture: prior.outcome.capture };
+        }
         states.set(key, record);
       }
     } catch {

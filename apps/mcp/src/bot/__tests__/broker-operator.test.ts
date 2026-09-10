@@ -1417,3 +1417,101 @@ it("retires a closing actor when terminal cleanup settles after delivery", async
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it("refuses credential finish when capture becomes unresolved during call draining", async () => {
+  const root = await mkdtemp(join(tmpdir(), "finish-capture-"));
+  const journal = new DispatchJournal(join(root, "journal.jsonl"));
+  const broker = new OperatorBroker(
+    {
+      accountId: "account",
+      agentSessionToken: "token",
+      apiBaseUrl: "http://unused.test",
+      registryBaseUrl: "http://unused.test",
+    },
+    "cell",
+    journal,
+  );
+  let entered!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const dispatch = vi.fn();
+  const tools: Tool[] = [
+    {
+      name: "operate_start",
+      description: "",
+      inputSchema: z.object({}),
+      jsonInputSchema: {},
+      handler: async () => {
+        state.sessions.set("internal", {
+          browser: {
+            brokerTargetId: async () => "target",
+            isConnected: () => true,
+            waitForThreeDsResolution: async () => "succeeded",
+          },
+          pendingThreeDs: null,
+        });
+        return { session_id: "internal" };
+      },
+    },
+    {
+      name: "operate_finish",
+      description: "",
+      inputSchema: z.object({ session_id: z.string() }),
+      jsonInputSchema: {},
+      handler: async () => {
+        entered();
+        await gate;
+        await markOperatorMutationDispatchAttempted();
+        dispatch();
+        return {};
+      },
+    },
+  ];
+  Object.defineProperty(broker, "tools", { value: tools });
+  try {
+    const identity = await broker.authenticate("token", "agent", "n".repeat(43));
+    if (!identity) throw new Error("authentication failed");
+    const principal = { ...identity, clientId: "client" };
+    await broker.connected(principal);
+    const { capability } = (await broker.call(
+      principal,
+      "tool",
+      { name: "operate_start", args: {} },
+      "start",
+    )) as { capability: TabCapability };
+    await broker.acknowledge(principal, "start");
+    await broker.confirmStartDelivery(principal, { capability });
+    const work = broker
+      .call(
+        principal,
+        "tool",
+        { name: "operate_finish", capability, args: { session_id: capability.sessionId } },
+        "navigate",
+      )
+      .catch((error: unknown) => error);
+    await started;
+    await journal.recordCapture(
+      identity.forwarderId!,
+      capability.sessionId,
+      "create",
+      {
+        write_id: "original",
+        binding: "service",
+        stored: false,
+        storage: "unknown",
+      },
+      false,
+    );
+    release();
+    expect(await work).toMatchObject({ message: expect.stringContaining("original capture") });
+    expect(dispatch).not.toHaveBeenCalled();
+  } finally {
+    release();
+    await rm(root, { recursive: true, force: true });
+  }
+});

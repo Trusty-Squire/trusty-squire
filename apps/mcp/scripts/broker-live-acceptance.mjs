@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { getDomain } from "tldts";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { readFile, writeFile, mkdir, readdir, realpath } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -123,6 +123,7 @@ async function runClient(configPath, index) {
         throw error;
       }
     };
+    process.send({ event: "starting", at: Date.now() });
     const initial = await call(
       "operate_start",
       {
@@ -140,6 +141,7 @@ async function runClient(configPath, index) {
     assert.equal(typeof sessionId, "string");
     process.send({
       event: "ready",
+      at: Date.now(),
       pid: process.pid,
       mcpPid: transport.pid,
       sessionId,
@@ -339,11 +341,7 @@ export function validateAcceptanceManifest(config) {
     config.credential_cleanup_policy === "retain" || config.credential_cleanup_policy === "revoke",
     "Live qualification requires an explicit credential_cleanup_policy",
   );
-  assert.equal(
-    config.services?.length,
-    3,
-    "Exactly three overlapping client sessions are required",
-  );
+  assert.equal(config.services?.length, 3, "Exactly three client sessions are required");
   assert.deepEqual(
     new Set(config.services.map((service) => service.provider)),
     new Set(["resend", "neon"]),
@@ -373,35 +371,46 @@ export function validateAcceptanceManifest(config) {
       "Each session requires driverEvidence or driverEvidenceFile; see docs/browser-broker.md",
     );
   }
-  acceptanceProfileGroups(config);
+  acceptanceSessionOrder(config);
   return config;
 }
 
-export function acceptanceProfileGroups(config) {
-  const groups = new Map();
-  config.services.forEach((service, index) => {
-    const profile = resolve(service.profileDir ?? config.profileDir);
-    const group = groups.get(profile) ?? { profile, indices: [], sites: new Set() };
-    const sites = [service.url, ...(service.allowedHosts ?? [])].map((host) => {
-      const hostname = new URL(host.includes("://") ? host : `https://${host}`).hostname;
-      return getDomain(hostname, { allowPrivateDomains: true }) ?? hostname;
-    });
-    for (const site of new Set(sites)) {
-      assert.ok(
-        !group.sites.has(site),
-        "Overlapping sites require separately enrolled profileDir identities",
-      );
-      group.sites.add(site);
-    }
-    group.indices.push(index);
-    groups.set(profile, group);
-  });
-  return [...groups.values()];
+export function acceptanceSessionOrder(config) {
+  assert.ok(
+    config.services.every((service) => service.profileDir === undefined),
+    "Use the single enrolled profileDir",
+  );
+  const sites = config.services.map(
+    (service) =>
+      new Set(
+        [service.url, ...(service.allowedHosts ?? [])].map((host) => {
+          const hostname = new URL(host.includes("://") ? host : `https://${host}`).hostname;
+          return getDomain(hostname, { allowPrivateDomains: true }) ?? hostname;
+        }),
+      ),
+  );
+  const second = config.services.findIndex(
+    (service) => service.provider !== config.services[0].provider,
+  );
+  const third = [1, 2].find((index) => index !== second);
+  assert.ok(
+    [...sites[0]].every((site) => !sites[second].has(site)),
+    "Resend and Neon require disjoint site scopes",
+  );
+  const release = [0, second].filter((index) =>
+    [...sites[index]].some((site) => sites[third].has(site)),
+  );
+  assert.equal(
+    release.length,
+    1,
+    "The duplicate provider must queue behind exactly one active session",
+  );
+  return { active: [0, second], queued: third, release: release[0] };
 }
 
 async function runConcurrencyAcceptance(configPath, config, nativeEvidence = null) {
   const root = process.cwd();
-  const groups = acceptanceProfileGroups(config);
+  const order = acceptanceSessionOrder(config);
   const profile = resolve(config.profileDir);
   const configHome = resolve(config.configHome);
   assert.ok(
@@ -412,22 +421,13 @@ async function runConcurrencyAcceptance(configPath, config, nativeEvidence = nul
     configHome.startsWith(root + "/"),
     "This task may use only an isolated config home inside its worktree",
   );
-  for (const group of groups) {
-    assert.ok(group.profile.startsWith(root + "/"), "Each enrolled profile must be worktree-local");
-    await readFile(join(group.profile, "Local State"));
-  }
-  assert.equal(
-    new Set(await Promise.all(groups.map((group) => realpath(group.profile)))).size,
-    groups.length,
-    "Profile aliases cannot share browser custody",
-  );
+  await readFile(join(profile, "Local State"));
   assert.ok(
     config.accountId && config.configHome,
     "Pinned account and isolated session-store path are required",
   );
   const qualification = await import("../dist/bot/broker/qualification.js");
-  for (const group of groups)
-    group.runId = await qualification.beginBrokerQualification(group.profile, config.accountId);
+  const runId = await qualification.beginBrokerQualification(profile, config.accountId);
   let evidenceRecorded = false;
   const lab = resolve(root, ".broker-acceptance", `live-${Date.now()}`);
   await mkdir(lab, { recursive: true, mode: 0o700 });
@@ -440,13 +440,13 @@ async function runConcurrencyAcceptance(configPath, config, nativeEvidence = nul
     TRUSTY_SQUIRE_ACCOUNT_ID: config.accountId,
     TRUSTY_SQUIRE_PROFILE_DIR: profile,
     TRUSTY_SQUIRE_BROKER_SOCKET: socket,
+    TRUSTY_SQUIRE_BROKER_QUALIFICATION_RUN_ID: runId,
     TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION: "0",
     TRUSTY_SQUIRE_REAPER_DIR: join(lab, "reapers"),
     TMPDIR: join(root, ".t"),
     BOT_CDP_ENDPOINT: "",
   };
-  const inventory = async () =>
-    (await Promise.all(groups.map((group) => ownedProcesses(group.profile)))).flat();
+  const inventory = () => ownedProcesses(profile);
   const baseline = await inventory();
   assert.deepEqual(baseline, [], "Test identity is already in use");
   const children = [];
@@ -482,59 +482,73 @@ async function runConcurrencyAcceptance(configPath, config, nativeEvidence = nul
         reject(error);
       });
     });
-  const brokers = groups.map((group, index) => {
-    group.env = {
-      TRUSTY_SQUIRE_PROFILE_DIR: group.profile,
-      TRUSTY_SQUIRE_BROKER_SOCKET: `${socket}.${index}`,
-      TRUSTY_SQUIRE_BROKER_QUALIFICATION_RUN_ID: group.runId,
-    };
-    return spawnChild([bin, "broker"], false, group.env);
-  });
+  const broker = spawnChild([bin, "broker"], false);
   try {
-    for (const [index, group] of groups.entries()) {
-      for (let n = 0; n < 100; n++) {
-        if (
-          (await readdir(dirname(socket))).includes(
-            group.env.TRUSTY_SQUIRE_BROKER_SOCKET.split("/").at(-1),
-          )
-        )
-          break;
-        if (brokers[index].exitCode !== null) await brokers[index].done;
-        await delay(100);
-      }
+    for (let n = 0; n < 100; n++) {
+      if ((await readdir(dirname(socket))).includes(socket.split("/").at(-1))) break;
+      if (broker.exitCode !== null) await broker.done;
+      await delay(100);
     }
-    const clients = [0, 1, 2].map((index) =>
-      spawnChild([script, "client", resolve(configPath), String(index)], true, {
-        ...groups.find((group) => group.indices.includes(index)).env,
+    const clients = [];
+    const startClient = (index) =>
+      (clients[index] = spawnChild([script, "client", resolve(configPath), String(index)], true, {
         TRUSTY_SQUIRE_FORWARDER_CREDENTIAL: randomBytes(32).toString("base64url"),
+      }));
+    const ready = [];
+    await Promise.all(
+      order.active.map(async (index) => {
+        ready[index] = await receive(startClient(index), "ready");
       }),
     );
-    const ready = await Promise.all(clients.map((child) => receive(child, "ready")));
+    const chromeRoots = (await processInventory(profile)).chromeRoots;
+    assert.equal(chromeRoots.length, 1);
+    const rows = [];
+    await Promise.all(
+      order.active.map(async (index) => {
+        const pending = receive(clients[index], "evidence");
+        clients[index].send("go");
+        rows[index] = await pending;
+      }),
+    );
+    assert.ok(
+      Math.max(...rows.filter(Boolean).map((r) => r.start)) <
+        Math.min(...rows.filter(Boolean).map((r) => r.end)),
+    );
+    const third = startClient(order.queued);
+    const starting = receive(third, "starting");
+    let admitted = false;
+    const thirdReady = receive(third, "ready").then((row) => {
+      admitted = true;
+      return row;
+    });
+    const queuedAt = (await starting).at;
+    await delay(1000);
+    assert.equal(admitted, false, "Duplicate site admitted before custody release");
+    const releaseAt = Date.now();
+    const closed = [];
+    const released = receive(clients[order.release], "closed");
+    clients[order.release].send("finish");
+    closed[order.release] = await released;
+    ready[order.queued] = await thirdReady;
+    assert.ok(ready[order.queued].at >= releaseAt);
+    assert.ok(ready[order.queued].at - queuedAt < 35000);
+    const pendingThird = receive(third, "evidence");
+    third.send("go");
+    rows[order.queued] = await pendingThird;
     assert.equal(new Set(ready.map((row) => row.mcpPid)).size, 3);
     assert.equal(new Set(ready.map((row) => row.sessionId)).size, 3);
-    assert.equal(
-      new Set(ready.map((row) => `${row.broker.browserEpoch}:${row.broker.targetId}`)).size,
-      3,
+    assert.equal(new Set(ready.map((row) => row.broker.targetId)).size, 3);
+    assert.equal(new Set(ready.map((row) => row.broker.browserEpoch)).size, 1);
+    await Promise.all(
+      clients.map(async (child, index) => {
+        if (index === order.release) return;
+        const pending = receive(child, "closed");
+        child.send("finish");
+        closed[index] = await pending;
+      }),
     );
-    assert.equal(new Set(ready.map((row) => row.broker.browserEpoch)).size, groups.length);
-    const chromeRoots = [];
-    for (const group of groups) {
-      assert.equal(new Set(group.indices.map((index) => ready[index].broker.browserEpoch)).size, 1);
-      const processes = await processInventory(group.profile);
-      assert.equal(processes.chromeRoots.length, 1);
-      chromeRoots.push(...processes.chromeRoots);
-    }
-    const pending = clients.map((child) => receive(child, "evidence"));
-    clients.forEach((child) => child.send("go"));
-    const rows = await Promise.all(pending);
-    assert.ok(Math.max(...rows.map((r) => r.start)) < Math.min(...rows.map((r) => r.end)));
-    const closedPending = clients.map((child) => receive(child, "closed"));
-    clients[0].send("finish");
-    await clients[0].done;
-    clients.slice(1).forEach((child) => child.send("finish"));
-    const closed = await Promise.all(closedPending);
     await Promise.all(clients.map((child) => child.done));
-    await Promise.all(brokers.map((broker) => broker.done));
+    await broker.done;
     for (let n = 0; n < 200 && (await inventory()).length !== 0; n++) await delay(100);
     const after = await inventory();
     assert.deepEqual(after, baseline);
@@ -542,6 +556,7 @@ async function runConcurrencyAcceptance(configPath, config, nativeEvidence = nul
       kind: "configured-native-and-real-service-three-session-acceptance",
       release: config.release,
       native: nativeEvidence,
+      queue: { queuedAt, releaseAt, admittedAt: ready[order.queued].at },
       chromeRoots,
       ready,
       rows,
@@ -551,25 +566,20 @@ async function runConcurrencyAcceptance(configPath, config, nativeEvidence = nul
     };
     const evidencePath = join(lab, "evidence.json");
     await writeFile(evidencePath, JSON.stringify(evidence, null, 2));
-    for (const group of groups)
-      await qualification.recordBrokerQualificationEvidence(
-        group.profile,
-        config.accountId,
-        group.runId,
-        evidencePath,
-        config.services.map((service) => new URL(service.url).hostname),
-      );
+    await qualification.recordBrokerQualificationEvidence(
+      profile,
+      config.accountId,
+      runId,
+      evidencePath,
+      config.services.map((service) => new URL(service.url).hostname),
+    );
     evidenceRecorded = true;
     return { evidencePath, ...evidence };
   } finally {
     for (const child of children) if (child.exitCode === null) child.kill("SIGTERM");
     await Promise.allSettled(children.map((child) => child.done));
     if (!evidenceRecorded)
-      await Promise.all(
-        groups.map((group) =>
-          qualification.abandonBrokerQualification(group.profile, config.accountId, group.runId),
-        ),
-      );
+      await qualification.abandonBrokerQualification(profile, config.accountId, runId);
   }
 }
 

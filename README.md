@@ -355,11 +355,12 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   solving, inbox polling, local upload, and specialized cart mutation are not
   operator verbs; inspect and drive the page's ordinary UI or hand the task back
   to the user.
-  Host authority is exact-host entitlement: declare each non-provider host a
-  task needs in `allowed_hosts` at `operate_start`. A later
-  `operate_allow_host` call can activate only a host already declared in that
-  startup entitlement; it cannot widen the session to a sibling or unrelated
-  host. Calls outside the session scope fail promptly instead of hanging.
+  Startup hosts seed the session's merchant scope, including matching
+  registrable-domain siblings (for example, `shop.example.com` and
+  `api.example.com`). Declare other required non-provider hosts in
+  `allowed_hosts` at `operate_start`. A later `operate_allow_host` call can
+  activate only a host already in the startup entitlement; it cannot widen
+  that entitlement. Calls outside the session scope fail promptly.
   Recognized payment-provider frames, OAuth/captcha providers, and 3-D Secure
   ACS/directory-server hosts retain their narrowly scoped protocol allowances.
   A scope-denial observation identifies its owner document/frame, exact host,

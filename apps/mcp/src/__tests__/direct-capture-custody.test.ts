@@ -64,6 +64,12 @@ it("refuses direct mutation replay until original capture storage reconciles", a
     });
     expect(repeated.isError).toBe(true);
     expect(state.action).toHaveBeenCalledOnce();
+    const finish = await client.callTool({
+      name: "operate_finish",
+      arguments: { session_id: "session", outcome: "credentials", store: { service: "Example" } },
+    });
+    expect(finish.isError).toBe(true);
+    expect(storeCredential).toHaveBeenCalledOnce();
     const wrong = await client.callTool({
       name: "operate_extract",
       arguments: { session_id: "session", capture: { ...capture, write_id: "other" } },

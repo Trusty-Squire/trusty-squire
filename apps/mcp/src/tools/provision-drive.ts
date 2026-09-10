@@ -1,6 +1,7 @@
 import { captureSourceSchema } from "../bot/credential-capture.js";
 import {
   currentOperatorOperationId,
+  markOperatorMutationDispatchAttempted,
   operatorMutationDispatchPhase,
   persistOperatorCaptureEvidence,
   throwIfOperatorRequestCancelled,
@@ -882,6 +883,7 @@ async function handleFinishOutcome(
     sessionId,
     async () => {
       if (outcome.kind === "credentials") {
+        await markOperatorMutationDispatchAttempted();
         const extracted = await extractCredentials(sessionId);
         const blocked = extracted.blocked_reason;
         const stored =
@@ -1320,6 +1322,7 @@ async function handleStoreLogin(args: z.infer<typeof storeLoginSchema>, api: Api
   const login = readSecretSlotValue(args.session_id, args.login_slot ?? "login");
   const password = readSecretSlotValue(args.session_id, args.password_slot ?? "password");
   const observedHosts = observedHostsForSession(args.session_id);
+  await markOperatorMutationDispatchAttempted();
   const stored = await api.storeCredential({
     service: args.service,
     ...(args.label !== undefined ? { label: args.label } : {}),

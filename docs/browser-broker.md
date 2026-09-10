@@ -56,11 +56,11 @@ binding. Browser epoch changes invalidate earlier capabilities.
   held through maintenance. A separate physical-profile lease coordinates Chrome
   and the existing plain-login path. Profile enrollment pins the account on disk.
 - Each session owns a target family, capability generation, serialized command
-  queue, and site reservations. Public browser authority is exact-host and is
-  declared at session start; recipe-resolved startup hosts reserve before page
-  acquisition. Registrable-domain logic may validate recipe ownership, but it
-  does not turn a sibling host into session authority. Additional or conflicting
-  scope is refused rather than adopted implicitly.
+  queue, and site reservations. Startup merchant hosts authorize matching
+  registrable-domain siblings; recipe-resolved startup hosts reserve before
+  page acquisition. Other required hosts must be declared at startup.
+  `operate_allow_host` cannot widen that startup entitlement. Conflicting
+  site custody queues until the existing owner releases it.
 - A context-level route selects the owning page's host policy. Unknown targets
   cannot issue background API traffic. Session cleanup closes only that owned
   family. At reconnect-grace expiry, a close that cannot be proven removes the
@@ -218,8 +218,8 @@ its cookies into the harness.
    TRUSTY_SQUIRE_PROFILE_DIR, and pinned TRUSTY_SQUIRE_ACCOUNT_ID values. A human
    must complete the account/passkey and real Google sign-in. Finish and close
    the plain login browser before running the acceptance arm.
-2. Supply exactly three overlapping sessions across Resend and Neon, with both
-   providers represented. Reusing a provider, URL, account, and driver is
+2. Supply three sessions across Resend and Neon: one of each runs concurrently,
+   then a duplicate-provider third session queues and is admitted after release. Reusing a provider, URL, account, and driver is
    expected; Xata is not a required live resource. Each driver exports
    `captureCredentialBaseline({ call, sessionId, initial, run })` and
    `provision({ call, sessionId, initial, run })`, using only MCP tool calls.
@@ -348,11 +348,11 @@ exit, and sanitized stderr classification. It must report `ready`. The separate
 configured-host evidence must also validate; neither installed-command nor SDK
 concurrency substitutes for the actual configured native host connection.
 
-The concurrency arm launches three independent MCP stdio servers and a production
-broker per enrolled profile. Set `services[].profileDir` to a separately enrolled,
-worktree-local profile for any repeated provider/site; otherwise it inherits
-`profileDir`. Sessions sharing a profile must have disjoint site scopes. Each
-profile retains its own Chrome process, Google admission, and broker custody.
+The concurrency arm launches three independent MCP stdio servers against one
+production broker and one enrolled profile. Resend and Neon run concurrently;
+the duplicate-provider third start remains pending while its site's owner is
+active, then is admitted within the start budget after that owner closes.
+Exclusive site custody and distinct mutable page ownership remain enforced.
 The harness requires actual Google admission, validates old and new keys
 with provider-specific read-only probes, checks overlap/isolation, and records
 every closure receipt. Preserve its evidence file and run the broader reviewed

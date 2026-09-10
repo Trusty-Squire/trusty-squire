@@ -647,3 +647,50 @@ it("retries terminal persistence after a failure before any journal append", asy
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it("retains the capture identity across durable dispatch transitions and restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "capture-dispatch-"));
+  const path = join(root, "journal.jsonl");
+  try {
+    const journal = new DispatchJournal(path);
+    const detail = {
+      operation: "operate_click",
+      inputHash: "input",
+      dispatchTracked: true as const,
+    };
+    const capture = {
+      write_id: "original",
+      binding: "account-service",
+      stored: false,
+      storage: "unknown" as const,
+    };
+    await journal.recordCapture("lineage", "session", "create", capture, false, detail);
+    await journal.record("session", "create", "dispatch_attempted", {
+      forwarderId: "lineage",
+      ...detail,
+    });
+    const restarted = new DispatchJournal(path);
+    expect(await restarted.hasCaptureWrite("lineage", "session", "original")).toBe(true);
+    expect(await restarted.unresolvedCapture("lineage", "session")).toEqual(capture);
+    await expect(restarted.assertReconciled()).rejects.toThrow("lost mutation custody");
+    await expect(
+      restarted.recordCapture(
+        "lineage",
+        "session",
+        "recover",
+        { ...capture, binding: "other" },
+        true,
+      ),
+    ).rejects.toThrow("original service-bound");
+    await restarted.recordCapture(
+      "lineage",
+      "session",
+      "recover",
+      { ...capture, stored: true, storage: "stored", reference: "vault://new" },
+      true,
+    );
+    expect(await restarted.unresolvedCapture("lineage", "session")).toBeUndefined();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

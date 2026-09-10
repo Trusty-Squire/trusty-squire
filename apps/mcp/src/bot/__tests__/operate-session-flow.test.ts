@@ -1,3 +1,4 @@
+import { withOperatorRequestContext } from "../request-cancellation.js";
 import type { BrowserUseCapture } from "../browser-use-capture.js";
 import type { InteractiveElement } from "../browser.js";
 import { mockBrowserUseCapture } from "./browser-use-test-capture.js";
@@ -7720,6 +7721,20 @@ describe("operate session — PR3c username/password login (capture-at-login sou
       login_hosts: ["example.com"],
       signin_url: "https://app.example.com/login",
     };
+    await expect(
+      withOperatorRequestContext(
+        new AbortController().signal,
+        () =>
+          operateLoginTool.handler(
+            operateLoginTool.inputSchema.parse({ ...args, action: "store_signup" }),
+            api,
+          ),
+        async () => {
+          throw new Error("checkpoint unavailable");
+        },
+      ),
+    ).rejects.toThrow("checkpoint unavailable");
+    expect(captured).toHaveLength(0);
     const legacy = (await operateLoginTool.handler(
       operateLoginTool.inputSchema.parse({ ...args, action: "store_signup" }),
       api,

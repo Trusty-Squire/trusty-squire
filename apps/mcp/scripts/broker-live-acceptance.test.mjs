@@ -4,7 +4,7 @@ import { siteResources } from "../src/bot/broker/scheduler.ts";
 import { describe, expect, it } from "vitest";
 import {
   validateAcceptanceManifest,
-  acceptanceProfileGroups,
+  acceptanceSessionOrder,
   validateClosureReceipt,
   validateConfiguredNativeConnectionEvidence,
 } from "./broker-live-acceptance.mjs";
@@ -40,7 +40,7 @@ const manifest = () => ({
   services: [
     service("resend", "resend.test"),
     service("neon", "neon.test"),
-    { ...service("resend", "resend.test"), profileDir: "/isolated/second-profile" },
+    service("resend", "resend.test"),
   ],
 });
 
@@ -74,7 +74,7 @@ describe("native + concurrency acceptance manifest", () => {
     ).toThrow(/contradicts/);
   });
 
-  it("accepts three overlapping sessions spanning Resend and Neon", () => {
+  it("accepts concurrent Resend and Neon with a queued duplicate provider", () => {
     expect(validateAcceptanceManifest(manifest())).toMatchObject({
       release: { version: "1.2.3" },
       credential_policy: "force_fresh",
@@ -82,60 +82,65 @@ describe("native + concurrency acceptance manifest", () => {
     });
   });
 
-  it("assigns repeated providers to separate browser identities while preserving shared-site exclusion", () => {
+  it("preserves one profile and requires a single conflicting active provider", () => {
     const config = manifest();
-    expect(acceptanceProfileGroups(config).map((group) => group.indices)).toEqual([[0, 1], [2]]);
+    expect(acceptanceSessionOrder(config)).toEqual({ active: [0, 1], queued: 2, release: 0 });
+    config.services[2].profileDir = "/another/profile";
+    expect(() => validateAcceptanceManifest(config)).toThrow(/single enrolled/);
     delete config.services[2].profileDir;
-    expect(() => validateAcceptanceManifest(config)).toThrow(/separately enrolled/);
-    config.services[2].profileDir = "/isolated/second-profile";
-    config.services[1].allowedHosts = ["resend.test"];
-    expect(() => validateAcceptanceManifest(config)).toThrow(/separately enrolled/);
+    config.services[2].allowedHosts = ["neon.test"];
+    expect(() => validateAcceptanceManifest(config)).toThrow(/exactly one active/);
   });
 
-  it("admits three overlapping Resend/Neon sessions using their isolated broker cells", async () => {
+  it("queues the duplicate provider until its active owner releases custody", async () => {
     const config = manifest();
-    config.services[0].url = "https://resend.com/api-keys";
-    config.services[1].url = "https://console.neon.tech/app/settings/api-keys";
-    config.services[2].url = config.services[0].url;
-    const groups = acceptanceProfileGroups(config);
-    const authorities = groups.map((_, index) => new BrokerAuthority("account", `cell-${index}`));
-    const sessions = await Promise.all(
-      config.services.map(async (service, index) => {
-        const authority = authorities[groups.findIndex((group) => group.indices.includes(index))];
-        const principal = {
-          accountId: "account",
-          agentId: `agent-${index}`,
-          clientId: `client-${index}`,
-        };
-        const capability = await authority.open(
-          principal,
-          siteResources([service.url]),
-          async () => ({
-            targetId: `target-${index}`,
-            invoke: async () => ({}),
-            close: async () => true,
-            orphan: async () => undefined,
-          }),
-        );
-        return { authority, principal, capability };
+    config.services.forEach((service) => {
+      service.url = `https://${service.provider === "resend" ? "resend.com" : "console.neon.tech"}/keys`;
+    });
+    const order = acceptanceSessionOrder(config);
+    const authority = new BrokerAuthority("account", "cell");
+    const principals = config.services.map((_, index) => ({
+      accountId: "account",
+      agentId: "agent",
+      clientId: `client-${index}`,
+    }));
+    const open = (index) =>
+      authority.open(principals[index], siteResources([config.services[index].url]), async () => ({
+        targetId: `target-${index}`,
+        invoke: async () => ({}),
+        close: async () => true,
+        orphan: async () => undefined,
+      }));
+    const sessions = [];
+    await Promise.all(
+      order.active.map(async (index) => {
+        sessions[index] = await open(index);
       }),
     );
-    expect(authorities.map((authority) => authority.inventory().active)).toEqual([2, 1]);
-    expect(new Set(sessions.map((session) => session.capability.targetId)).size).toBe(3);
-    await Promise.all(
-      sessions.map(({ authority, principal, capability }) =>
-        authority.close(principal, capability),
-      ),
-    );
+    let admitted = false;
+    const pending = open(order.queued).then((capability) => {
+      admitted = true;
+      return capability;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(admitted).toBe(false);
+    expect(authority.inventory()).toMatchObject({ active: 2, admitting: 1 });
+    await authority.close(principals[order.release], sessions[order.release]);
+    sessions[order.queued] = await pending;
+    expect(authority.inventory()).toMatchObject({ active: 2, admitting: 0 });
+    expect(new Set(sessions.map((session) => session.targetId)).size).toBe(3);
+    await Promise.all([1, 2].map((index) => authority.close(principals[index], sessions[index])));
   });
 
-  it("accepts the published manifest example with isolated repeated-provider custody", () => {
+  it("accepts the published single-profile manifest", () => {
     const example = JSON.parse(
       readFileSync(new URL("./broker-live-acceptance.example.json", import.meta.url), "utf8"),
     );
-    expect(
-      acceptanceProfileGroups(validateAcceptanceManifest(example)).map((group) => group.indices),
-    ).toEqual([[0, 1], [2]]);
+    expect(acceptanceSessionOrder(validateAcceptanceManifest(example))).toEqual({
+      active: [0, 1],
+      queued: 2,
+      release: 0,
+    });
   });
 
   it("rejects native version drift and unreviewed provider probes", () => {

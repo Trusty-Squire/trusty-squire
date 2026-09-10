@@ -4942,6 +4942,7 @@ export class BrowserController {
   async typeHandle(handle: ElementHandle<Element>, text: string, sealed = false): Promise<void> {
     const ownerFrame = await handle.ownerFrame();
     if (ownerFrame === null) throw new Error("locator target has no owning frame");
+    await markOperatorMutationDispatchAttempted();
     if (sealed) {
       await handle.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
     }
@@ -5954,6 +5955,7 @@ export class BrowserController {
     // .value directly is swallowed by React's value tracker, so we go through
     // the prototype setter the tracker also patches, then fire the event React
     // listens on. Works on the opacity:0 select without a visibility check.
+    await markOperatorMutationDispatchAttempted();
     const assigned = await page.evaluate(
       ({ marker, val }) => {
         const sel = document.querySelector(`select[data-ts-phone-cc="${marker}"]`);
@@ -13596,6 +13598,7 @@ export class BrowserController {
       await handle.waitForElementState("visible", { timeout: 10000 });
       const frame = await handle.ownerFrame();
       if (frame === null) throw new Error("type target has no owning frame");
+      await markOperatorMutationDispatchAttempted();
       if (sealed) {
         await handle.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
       }
@@ -13631,6 +13634,7 @@ export class BrowserController {
       );
     }
     try {
+      await markOperatorMutationDispatchAttempted();
       const result = await handle.evaluate(
         (element, needle) => {
           let control: Element | null = element;
