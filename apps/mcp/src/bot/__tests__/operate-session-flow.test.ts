@@ -1,4 +1,7 @@
-import { withOperatorRequestContext } from "../request-cancellation.js";
+import {
+  markOperatorMutationDispatchAttempted,
+  withOperatorRequestContext,
+} from "../request-cancellation.js";
 import type { BrowserUseCapture } from "../browser-use-capture.js";
 import type { InteractiveElement } from "../browser.js";
 import { mockBrowserUseCapture } from "./browser-use-test-capture.js";
@@ -22,6 +25,7 @@ const h = vi.hoisted(() => ({
   providers: ["google"] as string[] | null,
   oauthStatus: "already_valid" as string,
   oauthLoginCalls: [] as string[],
+  oauthDispatchCalls: 0,
   oauthLoginTimeouts: [] as number[],
   oauthHumanHandoffTimeouts: [] as number[],
   oauthLoginError: null as Error | null,
@@ -789,6 +793,8 @@ vi.mock("../browser.js", async (importOriginal) => ({
       if (humanDeadline !== undefined) {
         h.oauthHumanHandoffTimeouts.push(humanDeadline - Date.now());
       }
+      await markOperatorMutationDispatchAttempted();
+      h.oauthDispatchCalls += 1;
       const gate = h.oauthLoginGates.get(this.index);
       if (gate !== undefined) await gate;
       h.currentUrl = h.oauthResultUrl;
@@ -1165,6 +1171,7 @@ beforeEach(() => {
   h.providers = ["google"];
   h.oauthStatus = "already_valid";
   h.oauthLoginCalls = [];
+  h.oauthDispatchCalls = 0;
   h.oauthLoginTimeouts = [];
   h.oauthHumanHandoffTimeouts = [];
   h.oauthLoginError = null;
@@ -3692,6 +3699,65 @@ describe("operate session — OAuth lifecycle", () => {
       session_id: started.session_id,
       closed: true,
     });
+  });
+
+  it("returns progress when the request budget expires after OAuth dispatch", async () => {
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    const controller = new AbortController();
+    let dispatched!: () => void;
+    const dispatchObserved = new Promise<void>((resolve) => {
+      dispatched = resolve;
+    });
+    h.oauthLoginGates.set(
+      0,
+      new Promise<void>((resolve) => {
+        controller.signal.addEventListener(
+          "abort",
+          () => {
+            h.oauthLoginError = controller.signal.reason as Error;
+            resolve();
+          },
+          { once: true },
+        );
+      }),
+    );
+    h.oauthResultUrl = "https://accounts.google.com/consent";
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+
+    const login = withOperatorRequestContext(
+      controller.signal,
+      async () =>
+        await operateLoginTool.handler(
+          { session_id: started.session_id, provider: "google", ref: "Continue with Google" },
+          null,
+        ),
+      async (phase) => {
+        if (phase === "dispatch_attempted") dispatched();
+      },
+    );
+    await dispatchObserved;
+    await expect.poll(() => h.oauthDispatchCalls).toBe(1);
+    const completed = expect(login).resolves.toMatchObject({
+      session_id: started.session_id,
+      url: "https://accounts.google.com/consent",
+      oauth: {
+        state: "awaiting_human",
+        next_action: "operate_observe",
+      },
+    });
+    controller.abort(new Error("Operator work budget expired"));
+
+    await completed;
+    expect(h.oauthLoginCalls).toHaveLength(1);
+    await finishProvisionSession(started.session_id);
   });
 
   it("returns awaiting_human inside the compact-v2 budget even when the live challenge URL is huge", async () => {

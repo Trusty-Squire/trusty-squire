@@ -556,8 +556,9 @@ export class OperatorBroker implements BrokerTransportPort {
                   name === "operate_finish"
                     ? await executeOwned()
                     : await withProvisionSessionCall(internalId, executeOwned, signal);
-                if (name !== "operate_finish" && signal.aborted)
-                  throw signal.reason ?? new Error("operator_request_cancelled");
+                // The handler returns only after its post-action observation.
+                // That observed result is stronger outcome evidence than a
+                // cancellation that arrived while the handler was settling.
               } catch (error) {
                 const preDispatch = provenPreDispatchMutationFailure(error);
                 if (mutating && name === "operate_login" && preDispatch !== null) {
@@ -567,12 +568,12 @@ export class OperatorBroker implements BrokerTransportPort {
                   });
                   return new DeliveredPreDispatchFailure(preDispatch.code);
                 }
-                if (
+                const knownNotDispatched =
                   mutating &&
                   commandDispatch.dispatchTracked === true &&
                   !dispatchAttempted &&
-                  (signal.aborted || name === "operate_recipe_run")
-                ) {
+                  (signal.aborted || name === "operate_recipe_run");
+                if (knownNotDispatched) {
                   await this.journal?.record(id, commandId, "observed_result", {
                     ...commandDispatch,
                     outcome: {
@@ -589,6 +590,19 @@ export class OperatorBroker implements BrokerTransportPort {
                       ...(captureEvidence === undefined ? {} : { capture: captureEvidence }),
                     },
                   });
+                }
+                if (mutating) {
+                  const message = error instanceof Error ? error.message : String(error);
+                  const code =
+                    error instanceof BrokerRefusal ? error.code : "tool_execution_failed";
+                  const recovery = knownNotDispatched
+                    ? "operate_observe_then_retry"
+                    : "repeat_same_arguments_with_trusty-squire/recover=true_do_not_replay";
+                  throw new BrokerRefusal(
+                    code,
+                    `${message}; session_id=${id}; operation=${name}; operation_id=${commandId}; ` +
+                      `mutation=${knownNotDispatched ? "not_dispatched" : "unknown"}; recovery=${recovery}`,
+                  );
                 }
                 throw error;
               }

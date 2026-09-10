@@ -2,6 +2,7 @@ import type { GoogleHumanChallenge } from "./google-auth-state.js";
 import type { CaptureSource } from "./credential-capture.js";
 import {
   markOperatorMutationDispatchAttempted,
+  operatorMutationDispatchPhase,
   throwIfOperatorRequestCancelled,
   currentOperatorRequestSignal,
   composeOperatorSignals,
@@ -5231,6 +5232,26 @@ function oauthAwaitingHumanObservation(
   );
 }
 
+function oauthRequestEndedAfterDispatchAttempt(
+  session: Session,
+  error: unknown,
+): Observation | null {
+  const signal = currentOperatorRequestSignal();
+  if (
+    signal?.aborted !== true ||
+    operatorMutationDispatchPhase() !== "dispatch_attempted" ||
+    signal.reason !== error
+  ) {
+    return null;
+  }
+  return oauthAwaitingHumanObservation(
+    session,
+    new OAuthAwaitingHumanError(
+      "OAuth dispatch was attempted and browser progress may have occurred, but the request ended before completion was confirmed. Call operate_observe on this session before deciding the next action; do not repeat the OAuth action.",
+    ),
+  );
+}
+
 function oauthOnboardingRequiredObservation(
   session: Session,
   error: OAuthOnboardingRequiredError,
@@ -5293,6 +5314,10 @@ async function actInternally(
       ? await withOAuthActionBoundary(session, oauthProvider, execute)
       : await execute(undefined);
   } catch (error) {
+    if (session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")) {
+      const progress = oauthRequestEndedAfterDispatchAttempt(session, error);
+      if (progress !== null) return { observation: progress, outcome: {} };
+    }
     // Fix C: an OAuth wait timing out is honest uncertainty, not a failure —
     // return it as a normal (non-throwing) observation instead of an error.
     if (error instanceof OAuthAwaitingHumanError && session !== undefined) {
@@ -5370,6 +5395,10 @@ export async function act(
         : await execute(undefined);
     return result.observation;
   } catch (error) {
+    if (session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")) {
+      const progress = oauthRequestEndedAfterDispatchAttempt(session, error);
+      if (progress !== null) return progress;
+    }
     // Fix C: an OAuth wait timing out is honest uncertainty, not a failure —
     // return it as a normal (non-throwing) observation instead of an error.
     if (error instanceof OAuthAwaitingHumanError && session !== undefined) {

@@ -461,6 +461,7 @@ it("keeps an ambiguous thrown mutation fenced and unrecoverable", async () => {
   if (identity === null) throw new Error("Test broker authentication failed");
   const principal = { ...identity, clientId: "client" };
   const internalId = "ambiguous-session";
+  let loginCalls = 0;
   const startTool: Tool = {
     name: "operate_start",
     description: "",
@@ -486,6 +487,7 @@ it("keeps an ambiguous thrown mutation fenced and unrecoverable", async () => {
       .strict(),
     jsonInputSchema: {},
     handler: async () => {
+      loginCalls += 1;
       throw new Error("provider navigation may already have dispatched");
     },
   };
@@ -513,7 +515,12 @@ it("keeps an ambiguous thrown mutation fenced and unrecoverable", async () => {
         { name: "operate_login", args, capability: started.capability },
         "login-request",
       ),
-    ).rejects.toThrow("may already have dispatched");
+    ).rejects.toMatchObject({
+      code: "tool_execution_failed",
+      message: expect.stringMatching(
+        /may already have dispatched; session_id=.*; operation=operate_login; operation_id=login-request; mutation=unknown; recovery=.*do_not_replay/,
+      ),
+    });
     await expect(broker.recover(principal, { name: "operate_login", args })).resolves.toMatchObject(
       {
         requestId: "login-request",
@@ -543,6 +550,7 @@ it("keeps an ambiguous thrown mutation fenced and unrecoverable", async () => {
     await expect(new DispatchJournal(path).assertReconciled()).rejects.toThrow(
       "lost mutation custody",
     );
+    expect(loginCalls).toBe(1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1307,6 +1315,114 @@ it("records cancelled navigation before its executor checkpoint as not dispatche
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it.each([
+  ["consent", "https://app.example.test/onboarding", "form"],
+  ["onboarding", "https://app.example.test/home", "app"],
+])(
+  "keeps an observed successful %s transition when cancellation arrives after dispatch",
+  async (_transition, resultUrl, resultStage) => {
+    const root = await mkdtemp(join(tmpdir(), "late-action-cancel-"));
+    const journal = new DispatchJournal(join(root, "journal.jsonl"));
+    const broker = new OperatorBroker(
+      {
+        accountId: "account",
+        agentSessionToken: "token",
+        apiBaseUrl: "http://unused.test",
+        registryBaseUrl: "http://unused.test",
+      },
+      "cell",
+      journal,
+    );
+    let dispatched!: () => void;
+    let release!: () => void;
+    const dispatchObserved = new Promise<void>((resolve) => {
+      dispatched = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let actionCalls = 0;
+    const tools: Tool[] = [
+      {
+        name: "operate_start",
+        description: "",
+        inputSchema: z.object({}),
+        jsonInputSchema: {},
+        handler: async () => {
+          state.sessions.set("internal", {
+            browser: {
+              brokerTargetId: async () => "target",
+              isConnected: () => true,
+              waitForThreeDsResolution: async () => "succeeded",
+            },
+            pendingThreeDs: null,
+          });
+          return { session_id: "internal" };
+        },
+      },
+      {
+        name: "operate_click",
+        description: "",
+        inputSchema: z.object({ session_id: z.string(), ref: z.string() }),
+        jsonInputSchema: {},
+        handler: async (args) => {
+          actionCalls += 1;
+          await markOperatorMutationDispatchAttempted();
+          dispatched();
+          await gate;
+          return {
+            session_id: args.session_id,
+            url: resultUrl,
+            stage: resultStage,
+          };
+        },
+      },
+    ];
+    Object.defineProperty(broker, "tools", { value: tools });
+    try {
+      const identity = await broker.authenticate("token", "agent", "o".repeat(43));
+      if (!identity) throw new Error("authentication failed");
+      const principal = { ...identity, clientId: "client" };
+      await broker.connected(principal);
+      const { capability } = (await broker.call(
+        principal,
+        "tool",
+        { name: "operate_start", args: {} },
+        "start",
+      )) as { capability: TabCapability };
+      await broker.acknowledge(principal, "start");
+      await broker.confirmStartDelivery(principal, { capability });
+
+      const action = broker.call(
+        principal,
+        "tool",
+        {
+          name: "operate_click",
+          capability,
+          args: { session_id: capability.sessionId, ref: "@e:continue" },
+        },
+        "continue",
+      );
+      await dispatchObserved;
+      broker.cancel(principal, "continue");
+      release();
+
+      await expect(action).resolves.toMatchObject({
+        result: { url: resultUrl, stage: resultStage },
+      });
+      expect(actionCalls).toBe(1);
+      await expect(
+        journal.completedOutcome(identity.forwarderId!, "continue"),
+      ).resolves.toMatchObject({
+        outcome: { status: "completed" },
+      });
+    } finally {
+      release();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 it("retires a closing actor when terminal cleanup settles after delivery", async () => {
   const root = await mkdtemp(join(tmpdir(), "late-finish-"));
