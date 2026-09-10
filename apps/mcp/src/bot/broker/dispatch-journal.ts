@@ -536,6 +536,15 @@ export class DispatchJournal {
     });
   }
 
+  async hasCaptureWrite(forwarderId: string, sessionId: string, writeId: string): Promise<boolean> {
+    return [...(await this.states()).values()].some(
+      (record) =>
+        record.forwarderId === forwarderId &&
+        record.sessionId === sessionId &&
+        record.outcome?.capture?.write_id === writeId,
+    );
+  }
+
   async terminalReceipt(
     forwarderId: string,
     sessionId: string,

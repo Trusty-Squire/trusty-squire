@@ -280,6 +280,7 @@ export async function runBrokerDaemon(): Promise<void> {
           !(
             method === "tool" &&
             (params.name === "operate_finish" ||
+              (await operator.canReconcileCapture(principal, params)) ||
               (await operator.canContinuePaymentStatus(principal, params)))
           )
         )

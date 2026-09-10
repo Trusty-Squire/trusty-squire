@@ -75,7 +75,7 @@ request bodies or URL query values.
 Agent-supplied data is reported data, not proof that login, provisioning, or a
 mutation completed. Preserve booleans as booleans in result data.
 
-The next operator-contract integration adds a common, additive finish receipt:
+`operate_finish` returns a common, additive finish receipt:
 
 ```json
 {
@@ -91,21 +91,42 @@ The next operator-contract integration adds a common, additive finish receipt:
 Its allowed values are `execution: completed | cancelled | pending | unknown`,
 `mutation: not_dispatched | dispatched | unknown`, and
 `cleanup: open | closing | closed | already_closed | unknown`. `closed` is true
-only when closure is positively established. This receipt is **not yet available
-until the corresponding server implementation is installed**; clients must use
-`tools/list` and feature-detect it rather than assuming an older server returns
-these fields.
+only when closure is positively established. A bounded finish can return
+`execution: "pending"`, `cleanup: "closing"`, and `closed: false` while the
+lifecycle retains ownership and drains work. Repeat finish to obtain closure
+proof; do not replay a mutation. Broker closure proof survives delivery
+acknowledgement and restart within its five-minute retention window and remains
+bound to the original forwarder lineage. Missing proof is unknown, never an
+inferred `already_closed`. Clients should feature-detect the output schema in
+`tools/list` when talking to older installed servers.
 
 ## Credential capture and retrieval
 
 `operate_extract(store=...)` sends a revealed credential directly to the
 write-only vault and returns storage metadata, not the secret. Its default
-behavior without `store` is unchanged. The planned `capture` option on eligible
-mutation verbs is also **not yet registered**: when available, it will bind one
-guarded action to a bounded source selection and vault store request. It will
-return metadata or an explicit ambiguity, never a raw credential. Until its
-schema appears in `tools/list`, use the registered extract/store flow instead of
-passing a speculative `capture` object.
+behavior without `store` is unchanged. `operate_click`, `operate_type`,
+`operate_select`, and `operate_press` accept an optional `capture` field:
+
+```json
+{
+  "store": { "service": "Example Service", "label": "fresh-key" },
+  "source": {
+    "role": "textbox",
+    "name": "API key",
+    "container": { "role": "dialog", "name": "New API key" }
+  }
+}
+```
+
+The source role is `textbox` or `code`; an optional named `dialog` or `region`
+limits the selection. Capture pins exactly one element and returns vault metadata
+or explicit ambiguity, never the captured value or a screenshot. Default actions
+and reads remain unredacted. On an uncertain storage result, pass the returned
+`write_id` in the same `capture` object to `operate_extract` for extraction-only
+recovery. Never resend the create action. Mutation verbs refuse a supplied
+`capture.write_id`; the vault binds retries to the account, service, label, and
+original value and refuses rotation of an existing credential slot.
+
 
 `fetch_credential` is the only raw-value path. Its first call returns an
 approval link and no value; only a user’s passkey signature for that exact fetch

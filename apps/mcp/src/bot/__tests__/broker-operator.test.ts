@@ -1152,3 +1152,63 @@ it("bounds cancellation tombstones instead of evicting older cancellation eviden
     "cancelled before registration",
   );
 });
+
+it("permits only lineage-bound extraction recovery for a journaled capture write", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ts-capture-recovery-"));
+  try {
+    const journal = new DispatchJournal(join(root, "dispatch.jsonl"));
+    const broker = new OperatorBroker(
+      {
+        accountId: "account",
+        agentSessionToken: "token",
+        apiBaseUrl: "http://unused.test",
+        registryBaseUrl: "http://unused.test",
+      },
+      "cell",
+      journal,
+    );
+    const identity = await broker.authenticate("token", "agent", "c".repeat(43));
+    if (identity === null) throw new Error("authentication failed");
+    const principal = { ...identity, clientId: "client" };
+    const capability = {
+      cellId: "cell",
+      browserEpoch: "epoch",
+      sessionId: "session",
+      targetId: "target",
+      leaseGeneration: "lease",
+    };
+    const hasCapability = vi.spyOn(broker.authority, "hasCapability").mockReturnValue(true);
+    const params = {
+      name: "operate_extract",
+      capability,
+      args: { session_id: "session", capture: { write_id: "capture-1" } },
+    };
+    expect(await broker.canReconcileCapture(principal, params)).toBe(false);
+    await journal.record("session", "create", "unknown", {
+      forwarderId: identity.forwarderId!,
+      operation: "operate_click",
+      outcome: {
+        status: "unknown",
+        reason: "cancelled",
+        capture: { write_id: "capture-1", stored: false, storage: "unknown" },
+      },
+    });
+    expect(await broker.canReconcileCapture(principal, params)).toBe(true);
+    expect(await broker.canReconcileCapture(principal, { ...params, name: "operate_click" })).toBe(
+      false,
+    );
+    expect(await broker.canReconcileCapture({ ...principal, forwarderId: "foreign" }, params)).toBe(
+      false,
+    );
+    expect(
+      await broker.canReconcileCapture(principal, {
+        ...params,
+        args: { session_id: "session", capture: { write_id: "guessed" } },
+      }),
+    ).toBe(false);
+    hasCapability.mockReturnValue(false);
+    expect(await broker.canReconcileCapture(principal, params)).toBe(false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

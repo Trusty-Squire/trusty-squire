@@ -1,4 +1,4 @@
-import { captureEvidenceSchema } from "../credential-capture.js";
+import { captureEvidenceSchema, type CaptureEvidence } from "../credential-capture.js";
 import { withBrokerAdmission } from "./admission-context.js";
 import { brokerBrowserCustody } from "./custody.js";
 import type {
@@ -498,6 +498,7 @@ export class OperatorBroker implements BrokerTransportPort {
               );
               if (mutating) await this.journal?.record(id, commandId, "prepared", commandDispatch);
               let dispatchAttempted = false;
+              let captureEvidence: CaptureEvidence | undefined;
               const executeOwned = async () =>
                 await withOperatorRequestContext(
                   signal,
@@ -516,6 +517,7 @@ export class OperatorBroker implements BrokerTransportPort {
                   {
                     operationId: commandId,
                     onCapture: async (capture) => {
+                      captureEvidence = capture;
                       await this.journal?.record(id, commandId, "unknown", {
                         ...commandDispatch,
                         outcome: { status: "unknown", reason: "execution_error", capture },
@@ -565,6 +567,7 @@ export class OperatorBroker implements BrokerTransportPort {
                     outcome: {
                       status: "unknown",
                       reason: signal.aborted ? "cancelled" : "execution_error",
+                      ...(captureEvidence === undefined ? {} : { capture: captureEvidence }),
                     },
                   });
                 }
@@ -826,6 +829,34 @@ export class OperatorBroker implements BrokerTransportPort {
     if (await this.journal?.acknowledge(journalForwarderId(principal), requestId))
       await this.authority.retryQuarantined();
   }
+  async canReconcileCapture(
+    principal: BrokerPrincipal,
+    params: Record<string, unknown>,
+  ): Promise<boolean> {
+    const input = callSchema.safeParse(params);
+    if (!input.success || input.data.name !== "operate_extract") return false;
+    const capability = input.data.capability;
+    const capture = input.data.args.capture as Record<string, unknown> | undefined;
+    if (
+      capability === undefined ||
+      input.data.args.session_id !== capability.sessionId ||
+      typeof capture?.write_id !== "string" ||
+      this.journal === undefined
+    )
+      return false;
+    try {
+      if (!this.authority.hasCapability(principal, capability)) return false;
+    } catch (error) {
+      if (error instanceof BrokerRefusal) return false;
+      throw error;
+    }
+    return await this.journal.hasCaptureWrite(
+      journalForwarderId(principal),
+      capability.sessionId,
+      capture.write_id,
+    );
+  }
+
   async canContinuePaymentStatus(
     principal: BrokerPrincipal,
     params: Record<string, unknown>,

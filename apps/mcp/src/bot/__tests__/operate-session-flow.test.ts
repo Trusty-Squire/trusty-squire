@@ -254,6 +254,8 @@ const h = vi.hoisted(() => ({
 let compactV2ModeBeforeTest: string | undefined;
 
 vi.mock("../browser.js", async (importOriginal) => ({
+  OAuthOnboardingRequiredError: (await importOriginal<typeof BrowserModule>())
+    .OAuthOnboardingRequiredError,
   BrowserClickDispatchError: (await importOriginal<typeof BrowserModule>())
     .BrowserClickDispatchError,
   registerLocalBrowserLaunch: (
@@ -2962,7 +2964,7 @@ describe("verified recipe recording", () => {
         null,
       ),
     );
-    expect(consolidatedFinished).toEqual(finished);
+    expect(normalizeFinishReceipt(consolidatedFinished)).toEqual(normalizeFinishReceipt(finished));
     expect(h.gotos).toContain("https://shop.example.com/account/buyer%2540example.com");
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
     rmSync(dir, { recursive: true, force: true });
@@ -7274,6 +7276,22 @@ describe("operate session — captcha gate", () => {
   });
 });
 
+function normalizeFinishReceipt(value: unknown): Record<string, unknown> {
+  expect(value).toMatchObject({
+    session_id: expect.any(String),
+    operation_id: expect.any(String),
+    closed: true,
+    cleanup: "closed",
+    execution: "completed",
+    mutation: "not_dispatched",
+  });
+  return {
+    ...(value as Record<string, unknown>),
+    session_id: "normalized",
+    operation_id: "normalized",
+  };
+}
+
 describe("operate_finish lifecycle consolidation", () => {
   it("owns the session before outcome extraction begins", async () => {
     const previousAutoPromote = process.env.TRUSTY_SQUIRE_AUTO_PROMOTE;
@@ -7313,7 +7331,7 @@ describe("operate_finish lifecycle consolidation", () => {
           operateFinishTool.inputSchema.parse({ session_id: started.session_id, outcome: "none" }),
           null,
         ),
-      ).rejects.toThrow(/already closing/);
+      ).resolves.toMatchObject({ closed: false, cleanup: "closing", execution: "pending" });
       expect(h.closeCalls).toBe(0);
 
       releaseExtraction?.();
@@ -7352,10 +7370,7 @@ describe("operate_finish lifecycle consolidation", () => {
       null,
     )) as Record<string, unknown>;
 
-    expect({ ...consolidated, session_id: "normalized" }).toEqual({
-      ...legacy,
-      session_id: "normalized",
-    });
+    expect(normalizeFinishReceipt(consolidated)).toEqual(normalizeFinishReceipt(legacy));
     expect(h.storageStateWrites).toEqual([]);
     expect(h.destroyedProfiles).toEqual([]);
   });
@@ -7417,7 +7432,7 @@ describe("operate_finish lifecycle consolidation", () => {
       null,
     );
 
-    expect(failed).toMatchObject({ kind: "result", data: { confirmed: "false" } });
+    expect(failed).toMatchObject({ kind: "result", data: { confirmed: false } });
     expect(unconfirmed).toMatchObject({ kind: "result", summary: "Task stopped before success" });
     expect(h.storageStateWrites).toEqual([]);
     expect(h.storageStates.get(canonical)).toBe(prior);
@@ -7469,7 +7484,7 @@ describe("operate_finish lifecycle consolidation", () => {
     }
   });
 
-  it("returns the legacy result shape from outcome=result, including scalar data coercion", async () => {
+  it("returns the legacy result shape from outcome=result, preserving scalar data types", async () => {
     const legacySession = await startProvisionSession({
       serviceUrl: "https://app.example.com/done",
     });
@@ -7498,11 +7513,11 @@ describe("operate_finish lifecycle consolidation", () => {
       null,
     );
 
-    expect(consolidated).toEqual(legacy);
+    expect(normalizeFinishReceipt(consolidated)).toEqual(normalizeFinishReceipt(legacy));
     expect(consolidated).toMatchObject({
       kind: "result",
       summary: "Task complete",
-      data: { confirmed: "true", count: "2" },
+      data: { confirmed: true, count: 2 },
     });
   });
 
@@ -7548,7 +7563,7 @@ describe("operate_finish lifecycle consolidation", () => {
         api,
       );
 
-      expect(consolidated).toEqual(legacy);
+      expect(normalizeFinishReceipt(consolidated)).toEqual(normalizeFinishReceipt(legacy));
       expect(consolidated).toMatchObject({
         kind: "credentials",
         stored_credential: { reference: "vault://acct/finish-parity" },
@@ -7719,7 +7734,7 @@ describe("operate session — PR3c username/password login (capture-at-login sou
       api,
     )) as typeof legacy;
 
-    expect(consolidated).toEqual(legacy);
+    expect(normalizeFinishReceipt(consolidated)).toEqual(normalizeFinishReceipt(legacy));
     expect(viaAct).toEqual(legacy);
     expect(captured).toHaveLength(3);
     for (const call of captured) {
@@ -7794,7 +7809,7 @@ describe("operate session — PR3c username/password login (capture-at-login sou
       api,
     )) as typeof legacy;
 
-    expect(consolidated).toEqual(legacy);
+    expect(normalizeFinishReceipt(consolidated)).toEqual(normalizeFinishReceipt(legacy));
     expect(viaAct).toEqual(legacy);
     expect(captured).toHaveLength(3);
     for (const call of captured) {
