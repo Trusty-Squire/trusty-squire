@@ -358,6 +358,8 @@ const CONTROL_QUERY_CONTRACT =
   "b=button, l=link, t=textbox, s=select, c=checkbox, r=radio, tb=tab, m=menuitem, or f=file. " +
   "facts is a `|`-joined `@label` alias followed by present s=state (c=checked, u=unchecked, d=disabled, r=required), " +
   "a=action, f=field, q=choice-position/total, and x=s same-origin or x=x cross-origin frame; absent x means main frame. " +
+  "Query matches include m=n (exact name), m=r (exact role), m=t (local text), or m=c (explicit form/fieldset/dialog context), ranked in that order. " +
+  "Cursors page an immutable snapshot and require the same query and role; document changes invalidate them. A cursorless query captures fresh controls and semantics. " +
   "Use overflow.next_cursor to page safe_table. A cursor from hint_overflow returns `hint` and pages with hint_overflow.next_cursor. ";
 
 export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {

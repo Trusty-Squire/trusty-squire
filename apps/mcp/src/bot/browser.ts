@@ -14338,6 +14338,7 @@ export class BrowserController {
           if (this.activeOAuthAttempt !== null) {
             this.activeOAuthAttempt.providerPage = transient;
             this.activeOAuthAttempt.providerDocumentId = providerDocumentId;
+            this.activeOAuthAttempt.provider = consentProvider;
           }
           if (consentProvider === "google") {
             const bodyText = await transient
@@ -14362,71 +14363,8 @@ export class BrowserController {
                 observedAt: new Date(),
               });
               if (challenge !== null) {
-                let notification = attempt.reportedChallenges.get(revision);
-                if (!attempt.reportedChallenges.has(revision)) {
-                  attempt.reportedChallenges.set(revision, undefined);
-                  if (attempt.reporter !== undefined) {
-                    const notificationAbort = new AbortController();
-                    const notificationBudgetMs = Math.min(2_000, remainingBudgetMs());
-                    let notificationTimer: ReturnType<typeof setTimeout> | undefined;
-                    const timedOutNotification = new Promise<HeightenedAuthNotificationResult>(
-                      (resolve) => {
-                        notificationTimer = setTimeout(() => {
-                          notificationAbort.abort(new Error("notification_timeout"));
-                          resolve({
-                            sent: false,
-                            deduped: false,
-                            attempt_id: challenge.attempt_id,
-                            challenge_revision: challenge.challenge_revision,
-                            delivery: {
-                              channel: null,
-                              status: "failed",
-                              error: "notification_timeout",
-                            },
-                          });
-                        }, notificationBudgetMs);
-                      },
-                    );
-                    notificationTimer?.unref();
-                    try {
-                      notification = await Promise.race([
-                        attempt
-                          .reporter(challenge, notificationAbort.signal)
-                          .catch((error: unknown) => ({
-                            sent: false,
-                            deduped: false,
-                            attempt_id: challenge.attempt_id,
-                            challenge_revision: challenge.challenge_revision,
-                            delivery: {
-                              channel: null,
-                              status: "failed" as const,
-                              error: error instanceof Error ? error.message : String(error),
-                            },
-                          })),
-                        timedOutNotification,
-                      ]);
-                    } finally {
-                      if (notificationTimer !== undefined) clearTimeout(notificationTimer);
-                    }
-                    attempt.reportedChallenges.set(revision, notification);
-                  }
-                }
-                const numberMessage =
-                  challenge.number === null
-                    ? "Google is asking for human verification; the number is unreadable."
-                    : `Google is asking you to tap ${challenge.number} on your phone.`;
-                const deliveryMessage =
-                  notification === undefined
-                    ? "Paired notification was not attempted by the caller."
-                    : notification.delivery.status === "sent"
-                      ? `Paired notification sent via ${notification.delivery.channel ?? "configured channel"}.`
-                      : `Paired notification failed: ${notification.delivery.error ?? "delivery_failed"}.`;
-                throw new OAuthAwaitingHumanError(
-                  `${numberMessage} Automated consent stopped for attempt ${challenge.attempt_id}. ${deliveryMessage}`,
-                  "pending",
-                  challenge,
-                  notification,
-                );
+                pendingOnProvider = true;
+                throw await this.oauthHumanChallengeError(challenge);
               }
             }
             if (googleState !== "chooser" && googleState !== "consent") {
@@ -15163,6 +15101,123 @@ export class BrowserController {
       if (probes !== undefined && identityPage !== null && identityPage.isClosed())
         probes.delete(identityPage);
     }
+  }
+
+  /** Read-only continuation of the same attempt. Never advances consent. */
+  async refreshOAuthHumanChallenge(): Promise<OAuthAwaitingHumanError | null> {
+    const attempt = this.activeOAuthAttempt;
+    if (attempt === null || attempt.provider !== "google" || attempt.providerPage === null)
+      return null;
+    const page = attempt.providerPage;
+    if (
+      page.isClosed() ||
+      this.page !== page ||
+      oauthProviderForUrl(page.url()) !== "google" ||
+      (page !== attempt.productPage &&
+        (attempt.productPage.isClosed() ||
+          this.mainDocumentIdentity(attempt.productPage) !== attempt.productDocumentId))
+    ) {
+      this.activeOAuthAttempt = null;
+      return null;
+    }
+    const documentId = this.mainDocumentIdentity(page);
+    const url = page.url();
+    const text = await page
+      .locator("body")
+      .innerText({ timeout: 1_000 })
+      .catch(() => "");
+    if (
+      this.activeOAuthAttempt !== attempt ||
+      page.isClosed() ||
+      this.page !== page ||
+      this.mainDocumentIdentity(page) !== documentId ||
+      page.url() !== url
+    )
+      return null;
+    const number = extractGoogleNumberMatch(text);
+    const revision = createHash("sha256")
+      .update(`${documentId}\u0000${number ?? "unreadable"}\u0000${url}`)
+      .digest("base64url")
+      .slice(0, 24);
+    const challenge = extractGoogleHumanChallenge({
+      attemptId: attempt.id,
+      challengeRevision: revision,
+      documentId,
+      url,
+      bodyText: text,
+      observedAt: new Date(),
+    });
+    if (challenge === null) return null;
+    attempt.providerDocumentId = documentId;
+    return await this.oauthHumanChallengeError(challenge);
+  }
+
+  private async oauthHumanChallengeError(
+    challenge: GoogleHumanChallenge,
+  ): Promise<OAuthAwaitingHumanError> {
+    const attempt = this.activeOAuthAttempt;
+    if (attempt === null) return new OAuthAwaitingHumanError("OAuth attempt changed");
+    let notification = attempt.reportedChallenges.get(challenge.challenge_revision);
+    if (!attempt.reportedChallenges.has(challenge.challenge_revision)) {
+      attempt.reportedChallenges.set(challenge.challenge_revision, undefined);
+      if (attempt.reporter !== undefined) {
+        const notificationAbort = new AbortController();
+        const notificationBudgetMs = 2_000;
+        let notificationTimer: ReturnType<typeof setTimeout> | undefined;
+        const timedOutNotification = new Promise<HeightenedAuthNotificationResult>((resolve) => {
+          notificationTimer = setTimeout(() => {
+            notificationAbort.abort(new Error("notification_timeout"));
+            resolve({
+              sent: false,
+              deduped: false,
+              attempt_id: challenge.attempt_id,
+              challenge_revision: challenge.challenge_revision,
+              delivery: {
+                channel: null,
+                status: "failed",
+                error: "notification_timeout",
+              },
+            });
+          }, notificationBudgetMs);
+        });
+        notificationTimer?.unref();
+        try {
+          notification = await Promise.race([
+            attempt.reporter(challenge, notificationAbort.signal).catch((error: unknown) => ({
+              sent: false,
+              deduped: false,
+              attempt_id: challenge.attempt_id,
+              challenge_revision: challenge.challenge_revision,
+              delivery: {
+                channel: null,
+                status: "failed" as const,
+                error: error instanceof Error ? error.message : String(error),
+              },
+            })),
+            timedOutNotification,
+          ]);
+        } finally {
+          if (notificationTimer !== undefined) clearTimeout(notificationTimer);
+        }
+        attempt.reportedChallenges.set(challenge.challenge_revision, notification);
+      }
+    }
+    const numberMessage =
+      challenge.number === null
+        ? "Google is asking for human verification; the number is unreadable."
+        : `Google is asking you to tap ${challenge.number} on your phone.`;
+    const deliveryMessage =
+      notification === undefined
+        ? "Paired notification was not attempted by the caller."
+        : notification.delivery.status === "sent"
+          ? `Paired notification sent via ${notification.delivery.channel ?? "configured channel"}.`
+          : `Paired notification failed: ${notification.delivery.error ?? "delivery_failed"}.`;
+    return new OAuthAwaitingHumanError(
+      `${numberMessage} Automated consent stopped for attempt ${challenge.attempt_id}. ${deliveryMessage}`,
+      "pending",
+      challenge,
+      notification,
+    );
   }
 
   // Advance a provider's consent / account-chooser screen by one click.

@@ -1,7 +1,10 @@
+import type { GoogleHumanChallenge } from "./google-auth-state.js";
 import type { CaptureSource } from "./credential-capture.js";
 import {
   markOperatorMutationDispatchAttempted,
   throwIfOperatorRequestCancelled,
+  currentOperatorRequestSignal,
+  composeOperatorSignals,
 } from "./request-cancellation.js";
 import type { BrowserUseCapture } from "./browser-use-capture.js";
 import { serializeBrowserUseDOM } from "./browser-use-serializer.js";
@@ -38,6 +41,7 @@ import {
   OAuthFailedError,
   OAuthOnboardingRequiredError,
   type BrowserController,
+  type HostScopeDenialDiagnostic,
   type ClickDispatchStatus,
   type CheckoutSummary,
   type FrameTarget,
@@ -80,7 +84,7 @@ import {
   type SafeObservationIndexV2,
   type SafeStageV2,
 } from "./compact-observation-v2.js";
-import type { ApiClient } from "../api-client.js";
+import type { ApiClient, HeightenedAuthNotificationResult } from "../api-client.js";
 import { ProvenPreDispatchMutationError } from "./mutation-dispatch-evidence.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
 import { pickVerificationLink, type VerificationLinkCandidate } from "./email-verification.js";
@@ -271,7 +275,7 @@ export interface Observation {
   url: string;
   // Bounded, document-attributed request-scope denials. Hostnames only: never
   // paths, query strings, request bodies, headers, or page-provided secrets.
-  scope_denials?: import("./browser.js").HostScopeDenialDiagnostic[];
+  scope_denials?: HostScopeDenialDiagnostic[];
   // Registry route guidance, present ONLY on the first (start) observation when
   // a skill exists for the service. The host agent reads it before driving.
   hint?: string;
@@ -379,6 +383,8 @@ export interface Observation {
     | {
         state: "awaiting_human";
         reason: string;
+        challenge?: GoogleHumanChallenge;
+        notification?: HeightenedAuthNotificationResult;
         next_action: "operate_observe";
       }
     | {
@@ -891,6 +897,33 @@ async function runSerializedOAuthBoundary(
               }
             }
           : undefined,
+        async (challenge, signal) => {
+          const composed = composeOperatorSignals([
+            signal,
+            ...(currentOperatorRequestSignal() ? [currentOperatorRequestSignal()!] : []),
+          ]);
+          try {
+            if (session.api === null || session.api === undefined)
+              throw new Error("notification_unavailable");
+            return await session.api.notifyHeightenedAuth(
+              {
+                service: new URL(session.startUrl).hostname.slice(0, 120),
+                attempt_id: challenge.attempt_id,
+                challenge_revision: challenge.challenge_revision,
+                digit: challenge.number,
+                observed_at: challenge.observed_at,
+                expires_at: challenge.expires_at,
+                window_seconds: Math.max(
+                  1,
+                  Math.min(600, Math.ceil(humanHandoffTimeoutMs / 1_000)),
+                ),
+              },
+              composed.signal,
+            );
+          } finally {
+            composed.dispose();
+          }
+        },
       );
       // Human completion returns custody to bounded machine work. Give DOM
       // readiness its own short window instead of spending the human budget.
@@ -2352,10 +2385,31 @@ export async function startHarnessProvisionSession(
   return await startHarnessProvisionSessionInternal(opts, sessionStartPorts);
 }
 
+async function observedOAuthChallenge(
+  sessionId: string,
+): Promise<Observation["oauth"] | undefined> {
+  const session = sessionForCall(sessionId);
+  const error = await session?.browser.refreshOAuthHumanChallenge?.();
+  if (error == null || error.challenge === undefined) return undefined;
+  return {
+    state: "awaiting_human",
+    reason: error.message,
+    next_action: "operate_observe",
+    challenge: error.challenge,
+    ...(error.notification === undefined ? {} : { notification: error.notification }),
+  };
+}
+
 export async function observe(
   sessionId: string,
   format?: "compact" | "full",
 ): Promise<Observation> {
+  const result = await observeOwned(sessionId, format);
+  const oauth = await observedOAuthChallenge(sessionId);
+  return oauth === undefined ? result : { ...result, oauth };
+}
+
+async function observeOwned(sessionId: string, format?: "compact" | "full"): Promise<Observation> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const requestedFormat = format ?? (session.compactV2Mode === "on" ? "full" : "compact");
@@ -4649,6 +4703,17 @@ export async function observeQuery(
   role?: SafeControlV2["role"],
   cursor?: string,
 ): Promise<Record<string, unknown>> {
+  const result = await observeQueryOwned(sessionId, query, role, cursor);
+  const oauth = await observedOAuthChallenge(sessionId);
+  return oauth === undefined ? result : { ...result, oauth };
+}
+
+async function observeQueryOwned(
+  sessionId: string,
+  query: string,
+  role?: SafeControlV2["role"],
+  cursor?: string,
+): Promise<Record<string, unknown>> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const sourcePage = operationPageForSession(session);
@@ -5148,6 +5213,8 @@ function oauthAwaitingHumanObservation(
   const oauth: NonNullable<Observation["oauth"]> = {
     state: "awaiting_human",
     reason,
+    ...(error.challenge === undefined ? {} : { challenge: error.challenge }),
+    ...(error.notification === undefined ? {} : { notification: error.notification }),
     next_action: "operate_observe",
   };
   return compactV2PublicObservation(

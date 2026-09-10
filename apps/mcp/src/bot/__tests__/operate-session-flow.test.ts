@@ -6750,6 +6750,10 @@ describe("operate session — live-profile precondition gate", () => {
     expect(h.storageStateWrites).toEqual([]);
     await expect(finishProvisionSession(obs.session_id)).resolves.toEqual({
       session_id: obs.session_id,
+      operation_id: expect.any(String),
+      execution: "completed",
+      mutation: "not_dispatched",
+      cleanup: "closed",
       url: "",
       closed: true,
     });
@@ -7733,7 +7737,7 @@ describe("operate session — PR3c username/password login (capture-at-login sou
       api,
     )) as typeof legacy;
 
-    expect(normalizeFinishReceipt(consolidated)).toEqual(normalizeFinishReceipt(legacy));
+    expect(consolidated).toEqual(legacy);
     expect(viaAct).toEqual(legacy);
     expect(captured).toHaveLength(3);
     for (const call of captured) {
@@ -7808,7 +7812,7 @@ describe("operate session — PR3c username/password login (capture-at-login sou
       api,
     )) as typeof legacy;
 
-    expect(normalizeFinishReceipt(consolidated)).toEqual(normalizeFinishReceipt(legacy));
+    expect(consolidated).toEqual(legacy);
     expect(viaAct).toEqual(legacy);
     expect(captured).toHaveLength(3);
     for (const call of captured) {

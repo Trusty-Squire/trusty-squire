@@ -1,3 +1,4 @@
+import type { ApiClient } from "../../api-client.js";
 // Real-browser regression for the operator OAuth lifecycle. The provider popup
 // intentionally redirects to a token-exchange page and then closes itself,
 // which is the normal OAuth return shape that previously left the controller
@@ -230,6 +231,84 @@ describe("BrowserController OAuth popup lifecycle", () => {
       expect(reporter).toHaveBeenCalledOnce();
       expect(await product.locator("body").getAttribute("data-clicked")).toBeNull();
     } finally {
+      await context.close();
+    }
+  });
+
+  it("projects changed Google challenge revisions through ordinary observations and clears disappeared challenges", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const challengeUrl = "https://accounts.google.com/v3/signin/challenge/dp";
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<button id="oauth" onclick='location.href=${JSON.stringify(challengeUrl)}'>Continue with Google</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<main>Verify it's you — Tap 28 on your phone</main><button onclick="document.body.dataset.clicked='yes'">Continue</button>`,
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    const notifyHeightenedAuth = vi.fn(
+      async (input: { attempt_id: string; challenge_revision: string }, signal: AbortSignal) => {
+        expect(signal).toBeInstanceOf(AbortSignal);
+        return {
+          sent: false,
+          deduped: false,
+          attempt_id: input.attempt_id,
+          challenge_revision: input.challenge_revision,
+          delivery: { channel: null, status: "failed" as const, error: "fixture_delivery_failure" },
+        };
+      },
+    );
+    let sessionId: string | undefined;
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: "https://product.test/login",
+        api: { notifyHeightenedAuth } as unknown as ApiClient,
+      });
+      sessionId = started.session_id;
+      const ref = parseElementsTable(started.el_table ?? "").find(
+        (element) => element.label === "Continue with Google",
+      )?.ref;
+      expect(ref).toBeDefined();
+      const first = await act(sessionId, { kind: "oauth_login", target: ref!, provider: "google" });
+      expect(first.oauth).toMatchObject({
+        state: "awaiting_human",
+        challenge: { number: "28" },
+        notification: { delivery: { status: "failed" } },
+      });
+      expect(notifyHeightenedAuth).toHaveBeenCalledTimes(1);
+      const same = await observe(sessionId);
+      expect(same.oauth).toMatchObject({ challenge: { number: "28" } });
+      expect(notifyHeightenedAuth).toHaveBeenCalledTimes(1);
+      await product.locator("main").evaluate((node) => {
+        node.textContent = "Verify it's you — Tap 64 on your phone";
+      });
+      const changed = await observe(sessionId);
+      expect(changed.oauth).toMatchObject({
+        challenge: { number: "64" },
+        notification: { delivery: { status: "failed" } },
+      });
+      expect(notifyHeightenedAuth).toHaveBeenCalledTimes(2);
+      expect(notifyHeightenedAuth.mock.calls[1]![0].challenge_revision).not.toBe(
+        notifyHeightenedAuth.mock.calls[0]![0].challenge_revision,
+      );
+      expect(notifyHeightenedAuth.mock.calls[1]![0].attempt_id).toBe(
+        notifyHeightenedAuth.mock.calls[0]![0].attempt_id,
+      );
+      expect(await product.locator("body").getAttribute("data-clicked")).toBeNull();
+      await product.goto("https://product.test/done");
+      const disappeared = await observe(sessionId);
+      expect(disappeared.oauth).toBeUndefined();
+      expect(notifyHeightenedAuth).toHaveBeenCalledTimes(2);
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
       await context.close();
     }
   });
