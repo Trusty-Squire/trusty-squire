@@ -253,6 +253,7 @@ export const VAULT_AUDIT_TYPES = {
 export type VaultAuditType = (typeof VAULT_AUDIT_TYPES)[keyof typeof VAULT_AUDIT_TYPES];
 
 export interface VaultAuditEventInput {
+  idempotency_key?: string;
   account_id: string;
   type: VaultAuditType;
   payload: VaultAuditPayload;

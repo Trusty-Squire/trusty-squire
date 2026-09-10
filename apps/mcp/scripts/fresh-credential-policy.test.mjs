@@ -61,6 +61,7 @@ describe("force-fresh credential acceptance policy", () => {
         },
       },
     });
+    expect(() => reviewedCredentialProbe("xata")).toThrow(/No reviewed/);
     expect(() => reviewedCredentialProbe("driver-says-this-is-safe")).toThrow(/No reviewed/);
     const selfAsserted = { ...validEvidence(), probe: { harmless: true, method: "DELETE" } };
     expect(() => qualify(selfAsserted)).toThrow(/metadata-only/);
@@ -131,7 +132,6 @@ describe("force-fresh credential acceptance policy", () => {
   it.each([
     ["resend", { object: "list", data: [] }],
     ["neon", { projects: [] }],
-    ["xata", { workspaces: [] }],
   ])("validates the provider-specific %s response shape", (provider, body) => {
     expect(
       validateReviewedCredentialProbeResponse(provider, {
@@ -141,6 +141,17 @@ describe("force-fresh credential acceptance policy", () => {
         truncated: false,
       }),
     ).toBe(true);
+  });
+
+  it("rejects Xata qualification even with a valid provider response", () => {
+    expect(() =>
+      validateReviewedCredentialProbeResponse("xata", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspaces: [] }),
+        truncated: false,
+      }),
+    ).toThrow(/No reviewed/);
   });
 
   it("rejects cleanup evidence that precedes the exact fresh-key probe", () => {

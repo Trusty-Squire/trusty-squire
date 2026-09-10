@@ -511,6 +511,23 @@ export class CredentialVault implements VaultClient {
         keys.some((key) => fields[key] !== input.fields[key])
       )
         throw new Error("vault write identity conflicts with credential fields");
+      await this.deps.audit.record({
+        idempotency_key: createHash("sha256")
+          .update(`capture-audit:${reference}`)
+          .digest("base64url")
+          .slice(0, 26),
+        account_id: input.account_id,
+        type: VAULT_AUDIT_TYPES.stored,
+        payload: {
+          reference,
+          requester: "system",
+          service: input.service,
+          label,
+          ...(input.audit_attribution
+            ? { attribution: input.audit_attribution, purpose: input.audit_attribution.purpose }
+            : {}),
+        },
+      });
       return {
         reference,
         service: input.service,
@@ -552,15 +569,6 @@ export class CredentialVault implements VaultClient {
       if (winner !== null) return await receipt(winner);
       throw error;
     }
-    await this.recordAudit(input.account_id, VAULT_AUDIT_TYPES.stored, {
-      reference,
-      requester: "system",
-      service: input.service,
-      label,
-      ...(input.audit_attribution
-        ? { attribution: input.audit_attribution, purpose: input.audit_attribution.purpose }
-        : {}),
-    });
     return await receipt(record);
   }
 

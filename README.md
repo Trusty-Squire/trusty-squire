@@ -428,11 +428,10 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   login, provisioning operation, or mutation completed. Finish first fences new
   calls and drives the owned terminal transition; callers must not infer closure
   merely from a delivery timeout. Callers should finish promptly instead of
-  treating an open browser as durable background state. The corresponding
-  operator-contract integration will add an additive receipt with `session_id`,
-  `operation_id`, `execution`, `mutation`, `cleanup`, and `closed`. Until a
-  server advertises those fields through `tools/list`, they are not available and
-  clients must not assume a missing receipt proves cleanup.
+  treating an open browser as durable background state. The current server advertises an additive receipt through `tools/list` with `session_id`,
+  `operation_id`, `execution`, `mutation`, `cleanup`, and `closed:boolean`.
+  Closure is established only when `closed` is true. Older servers may omit
+  these fields; a missing receipt never proves cleanup.
 - `operate_recipe_save` saves a postcondition-verified local recipe under a
   closed task verb plus the service's registrable domain. It records stable target
   attributes and exact provenance for Squire-supplied values, not observed refs

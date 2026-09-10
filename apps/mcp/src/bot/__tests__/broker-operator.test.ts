@@ -1,3 +1,4 @@
+import { markOperatorMutationDispatchAttempted } from "../request-cancellation.js";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -1209,6 +1210,96 @@ it("permits only lineage-bound extraction recovery for a journaled capture write
     hasCapability.mockReturnValue(false);
     expect(await broker.canReconcileCapture(principal, params)).toBe(false);
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("records cancelled navigation before its executor checkpoint as not dispatched", async () => {
+  const root = await mkdtemp(join(tmpdir(), "navigate-checkpoint-"));
+  const journal = new DispatchJournal(join(root, "journal.jsonl"));
+  const broker = new OperatorBroker(
+    {
+      accountId: "account",
+      agentSessionToken: "token",
+      apiBaseUrl: "http://unused.test",
+      registryBaseUrl: "http://unused.test",
+    },
+    "cell",
+    journal,
+  );
+  let entered!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const dispatch = vi.fn();
+  const tools: Tool[] = [
+    {
+      name: "operate_start",
+      description: "",
+      inputSchema: z.object({}),
+      jsonInputSchema: {},
+      handler: async () => {
+        state.sessions.set("internal", {
+          browser: {
+            brokerTargetId: async () => "target",
+            isConnected: () => true,
+            waitForThreeDsResolution: async () => "succeeded",
+          },
+          pendingThreeDs: null,
+        });
+        return { session_id: "internal" };
+      },
+    },
+    {
+      name: "operate_navigate",
+      description: "",
+      inputSchema: z.object({ session_id: z.string() }),
+      jsonInputSchema: {},
+      handler: async () => {
+        entered();
+        await gate;
+        await markOperatorMutationDispatchAttempted();
+        dispatch();
+        return {};
+      },
+    },
+  ];
+  Object.defineProperty(broker, "tools", { value: tools });
+  try {
+    const identity = await broker.authenticate("token", "agent", "n".repeat(43));
+    if (!identity) throw new Error("authentication failed");
+    const principal = { ...identity, clientId: "client" };
+    await broker.connected(principal);
+    const { capability } = (await broker.call(
+      principal,
+      "tool",
+      { name: "operate_start", args: {} },
+      "start",
+    )) as { capability: TabCapability };
+    await broker.acknowledge(principal, "start");
+    await broker.confirmStartDelivery(principal, { capability });
+    const work = broker
+      .call(
+        principal,
+        "tool",
+        { name: "operate_navigate", capability, args: { session_id: capability.sessionId } },
+        "navigate",
+      )
+      .catch((error: unknown) => error);
+    await started;
+    broker.cancel(principal, "navigate");
+    release();
+    await work;
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(await journal.completedOutcome(identity.forwarderId!, "navigate")).toMatchObject({
+      outcome: { status: "not_dispatched", error: "cancelled" },
+    });
+  } finally {
+    release();
     await rm(root, { recursive: true, force: true });
   }
 });

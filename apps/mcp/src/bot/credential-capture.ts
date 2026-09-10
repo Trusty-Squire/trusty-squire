@@ -18,8 +18,9 @@ export type CaptureSource = z.infer<typeof captureSourceSchema>;
 export const captureEvidenceSchema = z
   .object({
     write_id: z.string().min(1).max(128),
+    binding: z.string().optional(),
     stored: z.boolean(),
-    storage: z.enum(["stored", "unknown"]),
+    storage: z.enum(["stored", "unknown", "not_attempted"]),
     reference: z.string().max(512).optional(),
   })
   .strict();

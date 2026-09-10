@@ -106,7 +106,7 @@ function dispatchDetail(
 }
 
 function brokerCommandDispatchTracked(name: string): boolean {
-  return /^(?:operate_(?:login|click|type|select|press|goto|act|fill_credential|recipe_run))$/.test(
+  return /^(?:operate_(?:login|click|type|select|press|navigate|fill_credential|recipe_run))$/.test(
     name,
   );
 }
@@ -135,12 +135,18 @@ export function reconciliationOutcome(
       const capture = captureEvidenceSchema.safeParse({
         write_id: result.write_id,
         stored: result.stored,
-        storage: result.stored === true ? "stored" : "unknown",
+        storage:
+          result.stored === true ? "stored" : "storage" in result ? result.storage : "unknown",
         ...(stored !== null && typeof stored === "object" && "reference" in stored
           ? { reference: stored.reference }
           : {}),
       });
-      if (capture.success) return { status: "completed", capture: capture.data };
+      if (capture.success && capture.data.storage === "not_attempted")
+        return { status: "not_dispatched", error: "pre_dispatch_failure", capture: capture.data };
+      if (capture.success)
+        return result.stored === true
+          ? { status: "completed", capture: capture.data }
+          : { status: "unknown", reason: "execution_error", capture: capture.data };
     }
     return { status: "completed" };
   }
@@ -516,12 +522,16 @@ export class OperatorBroker implements BrokerTransportPort {
                     : undefined,
                   {
                     operationId: commandId,
-                    onCapture: async (capture) => {
+                    onCapture: async (capture, recovery) => {
+                      await this.journal?.recordCapture(
+                        journalForwarderId(principal),
+                        id,
+                        commandId,
+                        capture,
+                        recovery,
+                        commandDispatch,
+                      );
                       captureEvidence = capture;
-                      await this.journal?.record(id, commandId, "unknown", {
-                        ...commandDispatch,
-                        outcome: { status: "unknown", reason: "execution_error", capture },
-                      });
                     },
                     onTerminal: async (receipt) => {
                       await this.journal?.recordTerminalReceipt(journalForwarderId(principal), {
@@ -584,7 +594,10 @@ export class OperatorBroker implements BrokerTransportPort {
               if (mutating)
                 await this.journal?.record(id, commandId, "observed_result", {
                   ...commandDispatch,
-                  outcome: reconciliationOutcome(name, result),
+                  outcome: {
+                    ...reconciliationOutcome(name, result),
+                    ...(captureEvidence ? { capture: captureEvidence } : {}),
+                  },
                 });
               return remapSession(result, internalId, id);
             },

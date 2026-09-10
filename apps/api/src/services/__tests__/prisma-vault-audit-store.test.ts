@@ -45,6 +45,15 @@ function fakePrisma(): Fake {
       created.push(row);
       return { ...row, emitted_at: new Date() };
     },
+    async upsert(args: {
+      where: { id: string };
+      create: Record<string, unknown>;
+    }): Promise<unknown> {
+      return (
+        created.find((row) => row.id === args.where.id) ??
+        (await this.create({ data: args.create }))
+      );
+    },
     async count(args: CountCall) {
       countCalls.push(args);
       return state.countResult;
@@ -76,6 +85,24 @@ function fakePrisma(): Fake {
 const ACCOUNT = "01HACCOUNTAAAAAAAAAAAAAAAA";
 
 describe("PrismaVaultAuditStore", () => {
+  it("repairs retries through one durable audit identity", async () => {
+    const fake = fakePrisma();
+    const store = new PrismaVaultAuditStore(fake.prisma);
+    const event: VaultAuditEventInput = {
+      idempotency_key: "capture-audit-identity",
+      account_id: ACCOUNT,
+      type: VAULT_AUDIT_TYPES.stored,
+      payload: { reference: "vault://capture", requester: "system" },
+    };
+    await Promise.all([store.record(event), store.record(event)]);
+    await new PrismaVaultAuditStore(fake.prisma).record(event);
+    expect(fake.created).toHaveLength(1);
+    expect(fake.created[0]).toMatchObject({
+      id: event.idempotency_key,
+      account_id: ACCOUNT,
+      type: VAULT_AUDIT_TYPES.stored,
+    });
+  });
   it("record() writes a row with a ULID, the event type, and the payload as JSON", async () => {
     const fake = fakePrisma();
     const store = new PrismaVaultAuditStore(fake.prisma);

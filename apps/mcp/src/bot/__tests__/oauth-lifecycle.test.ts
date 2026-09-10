@@ -303,10 +303,31 @@ describe("BrowserController OAuth popup lifecycle", () => {
         notifyHeightenedAuth.mock.calls[0]![0].attempt_id,
       );
       expect(await product.locator("body").getAttribute("data-clicked")).toBeNull();
+      await product.locator("main").evaluate((node) => {
+        node.textContent = "Choose an account";
+      });
+      expect((await observe(sessionId)).oauth).toBeUndefined();
+      await product.locator("main").evaluate((node) => {
+        node.textContent = "Verify it's you — Tap 64 on your phone";
+      });
+      expect((await observe(sessionId)).oauth).toMatchObject({ challenge: { number: "64" } });
+      expect(notifyHeightenedAuth).toHaveBeenCalledTimes(3);
+      expect(notifyHeightenedAuth.mock.calls[2]![0].challenge_revision).not.toBe(
+        notifyHeightenedAuth.mock.calls[1]![0].challenge_revision,
+      );
+      await product.locator("main").evaluate((node) => {
+        node.textContent = "Verification request expired";
+      });
+      expect((await observe(sessionId)).oauth).toBeUndefined();
+      await product.locator("main").evaluate((node) => {
+        node.textContent = "Verify it's you — Tap 64 on your phone";
+      });
+      await observe(sessionId);
+      expect(notifyHeightenedAuth).toHaveBeenCalledTimes(4);
       await product.goto("https://product.test/done");
       const disappeared = await observe(sessionId);
       expect(disappeared.oauth).toBeUndefined();
-      expect(notifyHeightenedAuth).toHaveBeenCalledTimes(2);
+      expect(notifyHeightenedAuth).toHaveBeenCalledTimes(4);
     } finally {
       if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
       await context.close();

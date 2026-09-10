@@ -2893,7 +2893,13 @@ export class BrowserController {
     providerPage: Page | null;
     providerDocumentId: string | null;
     reporter: OAuthChallengeReporter | undefined;
-    reportedChallenges: Map<string, HeightenedAuthNotificationResult | undefined>;
+    challengeEpoch?: {
+      fingerprint: string;
+      revision: string;
+      expiresAt: number;
+      reported: boolean;
+      notification?: HeightenedAuthNotificationResult;
+    };
   } | null = null;
   private readonly humanize: boolean;
   // Tracks the simulated mouse position so successive clicks can move
@@ -13877,7 +13883,6 @@ export class BrowserController {
       providerPage: null,
       providerDocumentId: null,
       reporter: reportHumanChallenge,
-      reportedChallenges: new Map(),
     };
     const oauthBudgetMs = Math.max(1, settleTimeoutMs);
     const productUrl = product.url();
@@ -14349,7 +14354,9 @@ export class BrowserController {
             if (googleState === "challenge") {
               const number = extractGoogleNumberMatch(bodyText);
               const revision = createHash("sha256")
-                .update(`${providerDocumentId}\u0000${number ?? "unreadable"}\u0000${transientUrl}`)
+                .update(
+                  `${providerDocumentId}\u0000${number ?? bodyText.trim()}\u0000${transientUrl}`,
+                )
                 .digest("base64url")
                 .slice(0, 24);
               const attempt = this.activeOAuthAttempt;
@@ -15136,7 +15143,7 @@ export class BrowserController {
       return null;
     const number = extractGoogleNumberMatch(text);
     const revision = createHash("sha256")
-      .update(`${documentId}\u0000${number ?? "unreadable"}\u0000${url}`)
+      .update(`${documentId}\u0000${number ?? text.trim()}\u0000${url}`)
       .digest("base64url")
       .slice(0, 24);
     const challenge = extractGoogleHumanChallenge({
@@ -15147,7 +15154,19 @@ export class BrowserController {
       bodyText: text,
       observedAt: new Date(),
     });
-    if (challenge === null) return null;
+    const renderedState = classifyGoogleAuthState(new URL(url).origin, text);
+    if (
+      challenge === null ||
+      text.trim() === "" ||
+      renderedState === "chooser" ||
+      renderedState === "consent" ||
+      /(?:challenge|request|code|prompt).{0,40}expired|expired.{0,40}(?:challenge|request|code|prompt)/i.test(
+        text,
+      )
+    ) {
+      delete attempt.challengeEpoch;
+      return null;
+    }
     attempt.providerDocumentId = documentId;
     return await this.oauthHumanChallengeError(challenge);
   }
@@ -15157,9 +15176,24 @@ export class BrowserController {
   ): Promise<OAuthAwaitingHumanError> {
     const attempt = this.activeOAuthAttempt;
     if (attempt === null) return new OAuthAwaitingHumanError("OAuth attempt changed");
-    let notification = attempt.reportedChallenges.get(challenge.challenge_revision);
-    if (!attempt.reportedChallenges.has(challenge.challenge_revision)) {
-      attempt.reportedChallenges.set(challenge.challenge_revision, undefined);
+    const fingerprint = challenge.challenge_revision;
+    if (
+      attempt.challengeEpoch?.fingerprint !== fingerprint ||
+      Date.now() >= attempt.challengeEpoch.expiresAt
+    ) {
+      attempt.challengeEpoch = {
+        fingerprint,
+        reported: false,
+        revision: randomUUID(),
+        expiresAt:
+          challenge.expires_at === null ? Date.now() + 120_000 : Date.parse(challenge.expires_at),
+      };
+    }
+    challenge = { ...challenge, challenge_revision: attempt.challengeEpoch.revision };
+    const epoch = attempt.challengeEpoch;
+    let notification = epoch.notification;
+    if (!epoch.reported) {
+      epoch.reported = true;
       if (attempt.reporter !== undefined) {
         const notificationAbort = new AbortController();
         const notificationBudgetMs = 2_000;
@@ -15199,7 +15233,7 @@ export class BrowserController {
         } finally {
           if (notificationTimer !== undefined) clearTimeout(notificationTimer);
         }
-        attempt.reportedChallenges.set(challenge.challenge_revision, notification);
+        epoch.notification = notification;
       }
     }
     const numberMessage =

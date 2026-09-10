@@ -536,6 +536,66 @@ export class DispatchJournal {
     });
   }
 
+  async recordCapture(
+    forwarderId: string,
+    sessionId: string,
+    requestId: string,
+    capture: CaptureEvidence,
+    recovery: boolean,
+    detail?: Pick<DispatchRecord, "operation" | "inputHash" | "dispatchTracked">,
+  ): Promise<void> {
+    const matching = [...(await this.states()).values()].filter(
+      (record) =>
+        record.forwarderId === forwarderId &&
+        record.sessionId === sessionId &&
+        record.outcome?.capture?.write_id === capture.write_id,
+    );
+    if (
+      !recovery &&
+      !matching.length &&
+      [...(await this.states()).values()].some(
+        (record) =>
+          record.forwarderId === forwarderId &&
+          record.sessionId === sessionId &&
+          record.outcome?.capture?.storage === "unknown",
+      )
+    )
+      throw new BrokerRefusal(
+        "outcome_unknown",
+        "Recover the original capture write identity before another capture",
+      );
+    if (
+      recovery &&
+      (!matching.length ||
+        matching.some((record) => record.outcome?.capture?.binding !== capture.binding))
+    )
+      throw new BrokerRefusal(
+        "unauthorized",
+        "Capture recovery requires the original service-bound write identity",
+      );
+    await this.record(sessionId, requestId, capture.storage === "unknown" ? "unknown" : "settled", {
+      forwarderId,
+      operation: "operate_extract",
+      ...detail,
+      outcome:
+        capture.storage === "unknown"
+          ? { status: "unknown", reason: "execution_error", capture }
+          : { status: "completed", capture },
+    });
+    if (capture.stored || capture.storage === "not_attempted") {
+      for (const record of matching)
+        await this.record(sessionId, record.requestId, "settled", {
+          forwarderId,
+          ...(record.operation === undefined ? {} : { operation: record.operation }),
+          ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
+          ...(record.dispatchTracked === undefined
+            ? {}
+            : { dispatchTracked: record.dispatchTracked }),
+          outcome: { status: "completed", capture },
+        });
+    }
+  }
+
   async hasCaptureWrite(forwarderId: string, sessionId: string, writeId: string): Promise<boolean> {
     return [...(await this.states()).values()].some(
       (record) =>

@@ -527,6 +527,27 @@ describe("LocalKMS sanity", () => {
 });
 
 describe("capture write identity", () => {
+  it("repairs a failed storage audit across restart without duplicate events", async () => {
+    const { vault, store, audit } = makeVault();
+    const input = storeInput({ write_id: "audit-repair", label: "fresh" });
+    vi.spyOn(audit, "record").mockRejectedValueOnce(new Error("audit unavailable"));
+    await expect(vault.store(input)).rejects.toThrow("audit unavailable");
+    expect(audit.events).toHaveLength(0);
+    const insert = vi.spyOn(store, "insert");
+    const restarted = new CredentialVault({
+      store,
+      audit,
+      kms: LocalKMS.withFixedKey(Buffer.alloc(32, 0x42)),
+    });
+    const receipt = await restarted.store(input);
+    expect(await restarted.store(input)).toEqual(receipt);
+    expect(insert).not.toHaveBeenCalled();
+    expect(audit.events).toHaveLength(1);
+    expect(audit.events[0]).toMatchObject({
+      type: VAULT_AUDIT_TYPES.stored,
+      payload: { reference: receipt.reference },
+    });
+  });
   it("stores a concurrent capture once and reconciles without rotation", async () => {
     const { vault, store, audit } = makeVault();
     const insert = vi.spyOn(store, "insert");

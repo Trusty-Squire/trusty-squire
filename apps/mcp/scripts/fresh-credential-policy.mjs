@@ -27,17 +27,6 @@ const PROVIDER_PROBES = Object.freeze({
       query: Object.freeze({ limit: "1", timeout: "100" }),
     }),
   }),
-  xata: Object.freeze({
-    id: "xata:list-workspaces:v1",
-    http: Object.freeze({
-      method: "GET",
-      url: "https://api.xata.io/workspaces",
-      headers: Object.freeze({
-        Authorization: "Bearer ${SECRET}",
-        "Content-Type": "application/json",
-      }),
-    }),
-  }),
 });
 
 const copy = (value) => structuredClone(value);
@@ -199,11 +188,6 @@ export function validateReviewedCredentialProbeResponse(provider, response) {
     assert.ok(Array.isArray(body?.data), "Resend probe response data missing");
   } else if (provider === "neon") {
     assert.ok(Array.isArray(body?.projects), "Neon probe response projects missing");
-  } else if (provider === "xata") {
-    assert.ok(
-      Array.isArray(body) || Array.isArray(body?.workspaces),
-      "Xata probe response workspaces missing",
-    );
   }
   return true;
 }

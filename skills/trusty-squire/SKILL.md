@@ -165,9 +165,10 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   unresolved. Use its flat `outcome` enum (`none`, `credentials`, or `result`),
   not a nested outcome object. A result’s agent-provided `data` reports what the
   agent saw; it does not establish authentication, provisioning, or mutation
-  success. The planned common finish receipt (`execution`, `mutation`,
-  `cleanup`, `closed`) is unavailable until an installed server advertises it
-  through `tools/list`; do not assume it on older servers. The authoritative
+  success. The current server advertises the common finish receipt (`session_id`,
+  `operation_id`, `execution`, `mutation`, `cleanup`, `closed:boolean`) through
+  `tools/list`. Only `closed:true` establishes closure. Older servers may omit
+  this receipt; absence is never closure proof. The authoritative
   teardown contract is in the
   [README tool guide](https://github.com/Trusty-Squire/trusty-squire#mcp-tools).
 

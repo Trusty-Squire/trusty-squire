@@ -1,4 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DispatchJournal } from "../../bot/broker/dispatch-journal.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ProvisionSession from "../../bot/provision-session.js";
 import type { ApiClient } from "../../api-client.js";
 import {
@@ -19,7 +23,11 @@ const capture = {
   store: { service: "Example", label: "fresh" },
   source: { role: "textbox", name: "API key", container: { role: "dialog" } },
 };
-beforeEach(() => {
+let root: string;
+let journal: DispatchJournal;
+beforeEach(async () => {
+  root = await mkdtemp(join(tmpdir(), "capture-review-"));
+  journal = new DispatchJournal(join(root, "journal.jsonl"));
   state.action.mockReset();
   state.capture.mockReset();
   state.action.mockImplementation(async () => {
@@ -28,6 +36,7 @@ beforeEach(() => {
   });
   state.capture.mockResolvedValue({ candidate_count: 1, value: secret });
 });
+afterEach(async () => await rm(root, { recursive: true, force: true }));
 function api(store: ApiClient["storeCredential"]): ApiClient {
   return { storeCredential: store } as ApiClient;
 }
@@ -52,7 +61,16 @@ async function click(client: ApiClient) {
         client,
       ),
     undefined,
-    { operationId: "create-one" },
+    {
+      operationId: "create-one",
+      onCapture: async (evidence, recovery) => {
+        if (state.action.mock.calls.length === 0)
+          expect(await journal.hasCaptureWrite("lineage", "session", evidence.write_id)).toBe(
+            false,
+          );
+        await journal.recordCapture("lineage", "session", "create-one", evidence, recovery);
+      },
+    },
   );
 }
 describe("explicit mutation capture", () => {
@@ -77,7 +95,23 @@ describe("explicit mutation capture", () => {
       stored: false,
       error: "capture_ambiguous",
       candidate_count: 2,
+      write_id: "create-one",
     });
+    await journal.acknowledge("lineage", "create-one");
+    expect(await journal.hasOutstanding("session")).toBe(true);
+    await expect(
+      journal.recordCapture(
+        "lineage",
+        "session",
+        "new",
+        {
+          write_id: "new",
+          stored: false,
+          storage: "unknown",
+        },
+        false,
+      ),
+    ).rejects.toThrow("original capture write identity");
     expect(store).not.toHaveBeenCalled();
     expect(state.action).toHaveBeenCalledOnce();
   });
@@ -91,12 +125,22 @@ describe("explicit mutation capture", () => {
       retry: "extract_only",
     });
     expect(JSON.stringify(first)).not.toContain(secret);
-    const retry = await provisionExtractTool.handler(
-      provisionExtractTool.inputSchema.parse({
-        session_id: "session",
-        capture: { ...capture, write_id: "create-one" },
-      }),
-      api(store),
+    const retry = await withOperatorRequestContext(
+      new AbortController().signal,
+      async () =>
+        await provisionExtractTool.handler(
+          provisionExtractTool.inputSchema.parse({
+            session_id: "session",
+            capture: { ...capture, write_id: "create-one" },
+          }),
+          api(store),
+        ),
+      undefined,
+      {
+        operationId: "extract-retry",
+        onCapture: async (evidence, recovery) =>
+          await journal.recordCapture("lineage", "session", "extract-retry", evidence, recovery),
+      },
     );
     expect(retry).toMatchObject({ stored: true });
     expect(state.action).toHaveBeenCalledOnce();
@@ -108,6 +152,10 @@ describe("explicit mutation capture", () => {
     expect(await click(api(store))).toMatchObject({
       stored: false,
       error: "capture_action_unresolved",
+      status: "stale_ref",
+      action_result: { status: "stale_ref" },
+      mutation: "not_dispatched",
+      retry: "action",
     });
     expect(state.capture).not.toHaveBeenCalled();
     expect(store).not.toHaveBeenCalled();
@@ -121,6 +169,45 @@ describe("explicit mutation capture", () => {
         api(store),
       ),
     ).rejects.toThrow("extraction-only recovery");
+  });
+  it("journals unresolved action identity and preserves human outcome booleans", async () => {
+    state.action.mockImplementation(async () => {
+      expect(await journal.hasCaptureWrite("lineage", "session", "create-one")).toBe(true);
+      await markOperatorMutationDispatchAttempted();
+      return { needs_user: true, acknowledged: false };
+    });
+    expect(await click(api(vi.fn()))).toMatchObject({
+      write_id: "create-one",
+      needs_user: true,
+      acknowledged: false,
+      action_result: { needs_user: true, acknowledged: false },
+      retry: "extract_only",
+    });
+    await journal.acknowledge("lineage", "create-one");
+    expect(await journal.hasOutstanding("session")).toBe(true);
+    await expect(
+      journal.recordCapture(
+        "lineage",
+        "session",
+        "recovery",
+        {
+          write_id: "create-one",
+          binding: "other-service",
+          stored: false,
+          storage: "unknown",
+        },
+        true,
+      ),
+    ).rejects.toThrow("original service-bound");
+    await expect(
+      provisionExtractTool.handler(
+        provisionExtractTool.inputSchema.parse({
+          session_id: "session",
+          capture: { ...capture, write_id: "guessed" },
+        }),
+        api(vi.fn()),
+      ),
+    ).rejects.toThrow("recorded write identity");
   });
   it("leaves ordinary action results unredacted", async () => {
     expect(await operateClickTool.handler({ session_id: "session", ref: "@create" }, null)).toEqual(

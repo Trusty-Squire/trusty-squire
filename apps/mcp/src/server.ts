@@ -1,4 +1,9 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import type { CaptureEvidence } from "./bot/credential-capture.js";
+import type { OperationReceipt } from "./bot/operation-receipt.js";
+import { DispatchJournal } from "./bot/broker/dispatch-journal.js";
 import { BrokerRefusal } from "./bot/broker/scheduler.js";
 import { OperatorForwarder, type BrokerRecoveryRequest } from "./bot/broker/forwarder.js";
 // MCP server: reads its account's session from the session file, sets up an ApiClient
@@ -215,6 +220,7 @@ export async function buildServer(
   loadPublishedAccountSession?: AccountSessionLoader,
   sessionGuard?: SessionGuard,
   operatorForwarder?: OperatorForwarder,
+  directPersistence?: { journal: DispatchJournal; lineage: () => string },
 ): Promise<Server> {
   let activeApi = api;
   const tools = buildToolRegistry();
@@ -310,18 +316,13 @@ export async function buildServer(
     try {
       const callApi = activeApi;
       callApi.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
-      if (operatorForwarder !== undefined && tool.name.startsWith("operate_")) {
-        return toolResultContent(
-          await operatorForwarder.invoke(
-            tool.name,
-            parsed.data,
-            String(extra.requestId),
-            {
-              ...brokerRecoveryRequested((req.params as { _meta?: unknown })._meta),
-            },
-            composed.signal,
-          ),
-        );
+      const sessionId =
+        typeof parsed.data.session_id === "string" ? parsed.data.session_id : undefined;
+      const operationId = randomUUID();
+      const directLineage = directPersistence?.lineage();
+      if (directPersistence && directLineage && tool.name === "operate_finish" && sessionId) {
+        const receipt = await directPersistence.journal.terminalReceipt(directLineage, sessionId);
+        if (receipt) return toolResultContent({ ...receipt, cleanup: "already_closed" });
       }
       const invokeHandler = async () =>
         await withOperatorRequestContext(
@@ -338,7 +339,25 @@ export async function buildServer(
               },
             }),
           undefined,
-          { operationId: randomUUID() },
+          {
+            operationId,
+            ...(directPersistence && directLineage
+              ? {
+                  onTerminal: async (receipt: OperationReceipt) =>
+                    await directPersistence.journal.recordTerminalReceipt(directLineage, receipt),
+                  onCapture: async (capture: CaptureEvidence, recovery: boolean) => {
+                    if (!sessionId) throw new Error("capture requires a session");
+                    await directPersistence.journal.recordCapture(
+                      directLineage,
+                      sessionId,
+                      operationId,
+                      capture,
+                      recovery,
+                    );
+                  },
+                }
+              : {}),
+          },
         );
       const invoke = async () => {
         // Some embedders provide a narrow ApiClient test double. Production
@@ -357,15 +376,25 @@ export async function buildServer(
       // Tool handlers await independently.  A finish must therefore close the
       // admission gate and drain calls that already entered before it snapshots
       // eligible state and closes the browser. `operate_finish*` owns that transition.
-      const sessionId =
-        typeof parsed.data.session_id === "string" ? parsed.data.session_id : undefined;
-      const work =
-        sessionId !== undefined && !/^operate_finish(?:_task)?$/.test(tool.name)
+      const forwarded = operatorForwarder !== undefined && tool.name.startsWith("operate_");
+      const work = forwarded
+        ? operatorForwarder.invoke(
+            tool.name,
+            parsed.data,
+            String(extra.requestId),
+            brokerRecoveryRequested((req.params as { _meta?: unknown })._meta),
+            composed.signal,
+          )
+        : sessionId !== undefined && !/^operate_finish(?:_task)?$/.test(tool.name)
           ? withProvisionSessionCall(sessionId, async () => await invoke(), composed.signal)
           : invoke();
       lifecycleHeldByWork = true;
       const trackedWork = work.finally(() => callLifecycle?.finished());
-      const result = await awaitOperatorSettlement(trackedWork, composed.signal);
+      const result = await awaitOperatorSettlement(
+        trackedWork,
+        composed.signal,
+        tool.name === "operate_finish" ? 500 : 2_000,
+      );
       return toolResultContent(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -515,6 +544,7 @@ export async function runServer(): Promise<void> {
 
   // Owns this server's answer to "which account am I serving?".
   const sessionGuard = createSessionGuard();
+  let directLineage = "";
   const loadPublishedAccountSession = async (): Promise<ApiClient | null> => {
     try {
       const session = await sessionGuard.bind();
@@ -523,6 +553,19 @@ export async function runServer(): Promise<void> {
       // machine_token (pre-collapse install) yields api=null, and every
       // tool call returns the re-install instruction.
       if (session === null || session.agent_session_token === undefined) return null;
+      directLineage = createHash("sha256")
+        .update(
+          JSON.stringify([
+            session.account_id,
+            session.api_base_url,
+            session.agent_session_token,
+            serverLauncherLineage() || [
+              process.cwd(),
+              process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "unknown",
+            ],
+          ]),
+        )
+        .digest("hex");
       return new ApiClient({
         apiBaseUrl: session.api_base_url,
         registryBaseUrl: DEFAULT_REGISTRY_BASE,
@@ -558,6 +601,16 @@ export async function runServer(): Promise<void> {
     loadPublishedAccountSession,
     sessionGuard,
     forwarder,
+    {
+      journal: new DispatchJournal(
+        join(
+          process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"),
+          "trusty-squire",
+          "operator-receipts.jsonl",
+        ),
+      ),
+      lineage: () => directLineage,
+    },
   );
   const transport = new StdioServerTransport();
   // Publishes what a later launch of this identity needs to tell "still

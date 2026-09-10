@@ -208,7 +208,8 @@ export class InMemoryVaultAuditStore implements VaultAuditStore {
   constructor(private readonly now: () => Date = () => new Date()) {}
 
   async record(event: VaultAuditEventInput): Promise<void> {
-    const id = ulid();
+    const id = event.idempotency_key ?? ulid();
+    if (this.events.some((entry) => entry.id === id)) return;
     this.events.push({
       id,
       emitted_at: this.now(),
