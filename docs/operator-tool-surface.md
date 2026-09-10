@@ -118,8 +118,12 @@ behavior without `store` is unchanged. `operate_click`, `operate_type`,
 }
 ```
 
-The source role is `textbox` or `code`; an optional named `dialog` or `region`
-limits the selection. Capture pins exactly one element and returns vault metadata
+The source role is `textbox` or `code`. For a plain-text copy field without
+those roles, use `source: {"selector": "<observed CSS selector>"}` instead of
+`role`/`name`. Choose the selector from the actual element structure, never from
+the secret value; CSS sources select visible elements only. Either source can
+include an optional named `dialog` or `region` container to limit the selection.
+Capture pins exactly one element and returns vault metadata
 or explicit ambiguity, never the captured value or a screenshot. Default actions
 and reads remain unredacted. On an uncertain storage result, pass the returned
 `write_id` in the same `capture` object to `operate_extract` for extraction-only
@@ -127,6 +131,41 @@ recovery. Never resend the create action. Mutation verbs refuse a supplied
 `capture.write_id`; the vault binds retries to the account, service, label, and
 original value and refuses rotation of an existing credential slot.
 
+
+For the Neon success dialog structure observed on 2026-09-10 (a LABEL named
+`API token`, followed by a nested plain-DIV value and a Copy button), the
+value-free source is:
+
+```json
+{
+  "selector": "label:text-is(\"API token\") + div div:not(:has(*))",
+  "container": { "role": "dialog" }
+}
+```
+
+This uses Playwright's CSS text-label matcher and selects leaf DIVs in the
+label's following value group. It does not match on token content or click Copy.
+The native operator can use this documented source directly in atomic capture,
+or in `operate_extract` with the original `capture.write_id`, unchanged store
+service/label, and the same still-open session. Zero or multiple matches remain
+an explicit ambiguity; do not repeat creation. The selector is grounded in the
+reported structure and synthetic regression, not a live validation of this fix.
+
+For Firstmate's live retest: create one uniquely labelled Neon key with this
+capture source; if needed retry extraction only with that write ID. Require
+`stored: true` and vault metadata without plaintext, then use that returned
+reference with server-side credential injection for the read-only
+`GET https://console.neon.tech/api/v2/projects` and require HTTP 200. Finish the
+session and require `cleanup: "closed"` and `closed: true`. Preserve existing
+keys. Closed sessions from earlier diagnostics cannot be recovered by replaying
+their write IDs in a new session.
+
+This adds capture for a known field structure, not general secret-free selector
+discovery. The native capture response supplies counts/metadata, not DOM
+structure; the Neon selector above came from Firstmate's bounded inspection.
+Do not request an unredacted snapshot of a newly revealed key to discover a
+selector. If another page needs a different selector, obtain value-free
+structure evidence before choosing it.
 
 `fetch_credential` is the only raw-value path. Its first call returns an
 approval link and no value; only a user’s passkey signature for that exact fetch

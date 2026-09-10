@@ -146,6 +146,45 @@ describe("explicit mutation capture", () => {
     expect(state.action).toHaveBeenCalledOnce();
     expect(store.mock.calls.map(([input]) => input.write_id)).toEqual(["create-one", "create-one"]);
   });
+  it("recovers a zero-match textbox capture through an explicit plain-text source", async () => {
+    state.capture.mockResolvedValueOnce({ candidate_count: 0 });
+    const store = vi.fn().mockResolvedValue(stored);
+    expect(await click(api(store))).toMatchObject({
+      stored: false,
+      candidate_count: 0,
+      write_id: "create-one",
+    });
+    expect(store).not.toHaveBeenCalled();
+    const source = {
+      selector: 'label:text-is("API token") + div div:not(:has(*))',
+      container: { role: "dialog" },
+    };
+    const result = await withOperatorRequestContext(
+      new AbortController().signal,
+      async () =>
+        await provisionExtractTool.handler(
+          provisionExtractTool.inputSchema.parse({
+            session_id: "session",
+            capture: { ...capture, source, write_id: "create-one" },
+          }),
+          api(store),
+        ),
+      undefined,
+      {
+        operationId: "extract-retry",
+        onCapture: async (evidence, recovery) =>
+          await journal.recordCapture("lineage", "session", "extract-retry", evidence, recovery),
+      },
+    );
+    expect(state.capture).toHaveBeenLastCalledWith("session", source);
+    expect(state.action).toHaveBeenCalledOnce();
+    expect(store).toHaveBeenCalledOnce();
+    expect(store).toHaveBeenCalledWith(
+      expect.objectContaining({ value: secret, write_id: "create-one" }),
+    );
+    expect(result).toMatchObject({ stored: true, write_id: "create-one" });
+    expect(JSON.stringify(result)).not.toContain(secret);
+  });
   it("does not capture after a refused action or advertise a replay on mutation inputs", async () => {
     state.action.mockResolvedValue({ status: "stale_ref" });
     const store = vi.fn();
