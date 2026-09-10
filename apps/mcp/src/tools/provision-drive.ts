@@ -570,8 +570,15 @@ const captureJson = {
     source: {
       type: "object",
       additionalProperties: false,
-      required: ["role"],
+      oneOf: [
+        { required: ["role"], not: { required: ["selector"] } },
+        {
+          required: ["selector"],
+          not: { anyOf: [{ required: ["role"] }, { required: ["name"] }] },
+        },
+      ],
       properties: {
+        selector: { type: "string", minLength: 1, maxLength: 2000 },
         role: { type: "string", enum: ["textbox", "code"] },
         name: { type: "string", maxLength: 200 },
         container: {
@@ -1915,7 +1922,7 @@ for (const tool of OPERATE_TOOLS) {
   if (properties !== null && typeof properties === "object")
     Object.assign(properties, { capture: captureJson });
   tool.description +=
-    " Optional capture:{store,source:{role,name?,container?}} vaults exactly one revealed source and returns metadata only. If storage is unresolved, retry operate_extract with capture.write_id; never repeat creation.";
+    " Optional capture:{store,source:{role,name?,container?}|{selector,container?}} vaults exactly one revealed source and returns metadata only. Use a value-free CSS selector for a plain-text copy field without a textbox/code role. If storage is unresolved, retry operate_extract with capture.write_id; never repeat creation.";
   tool.jsonOutputSchema = captureOutputSchema;
   const handler = tool.handler;
   tool.handler = async (args, api, context) => {

@@ -1,18 +1,28 @@
 import { z } from "zod";
 
-export const captureSourceSchema = z
+const captureContainerSchema = z
   .object({
-    role: z.enum(["textbox", "code"]),
+    role: z.enum(["dialog", "region"]),
     name: z.string().max(200).optional(),
-    container: z
-      .object({
-        role: z.enum(["dialog", "region"]),
-        name: z.string().max(200).optional(),
-      })
-      .strict()
-      .optional(),
   })
-  .strict();
+  .strict()
+  .optional();
+
+export const captureSourceSchema = z.union([
+  z
+    .object({
+      role: z.enum(["textbox", "code"]),
+      name: z.string().max(200).optional(),
+      container: captureContainerSchema,
+    })
+    .strict(),
+  z
+    .object({
+      selector: z.string().min(1).max(2000),
+      container: captureContainerSchema,
+    })
+    .strict(),
+]);
 export type CaptureSource = z.infer<typeof captureSourceSchema>;
 
 export const captureEvidenceSchema = z

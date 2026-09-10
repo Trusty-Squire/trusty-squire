@@ -8528,9 +8528,12 @@ export async function captureCredentialSource(
             ? { name: source.container.name, exact: true }
             : {}),
         });
-  const targets = container.getByRole(source.role, {
-    ...(source.name !== undefined ? { name: source.name, exact: true } : {}),
-  });
+  const targets =
+    "selector" in source
+      ? container.locator(`css=${source.selector}`).filter({ visible: true })
+      : container.getByRole(source.role, {
+          ...(source.name !== undefined ? { name: source.name, exact: true } : {}),
+        });
   // Pin the selected element in its current document. A new document must not
   // satisfy the same locator while capture is in flight.
   const handles = await targets.elementHandles();
