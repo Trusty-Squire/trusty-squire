@@ -1,0 +1,69 @@
+{
+  "baseline": {
+    "steps": [
+      {
+        "id": "baseline-page",
+        "tool": "operate_observe",
+        "arguments": { "query": "API keys and authenticated account identity" },
+        "require_pattern": "expected-account-id"
+      }
+    ],
+    "evidence": {
+      "account_id": { "literal": "expected-account-id" },
+      "provider_credential_ids": [{ "literal": "existing-provider-key-id" }],
+      "initial_auth_state": { "literal": "authenticated" }
+    }
+  },
+  "provision": {
+    "steps": [
+      {
+        "id": "open-create",
+        "tool": "operate_click",
+        "arguments": { "ref": "@observed-unique-create-key-control" }
+      },
+      {
+        "id": "name-key",
+        "tool": "operate_type",
+        "arguments": { "ref": "@observed-key-name-field", "text": "$RUN_LABEL" }
+      },
+      {
+        "id": "create-and-capture",
+        "tool": "operate_click",
+        "arguments": {
+          "ref": "@observed-final-create-control",
+          "capture": {
+            "store": {
+              "service": "resend-or-neon",
+              "label": "$RUN_LABEL",
+              "egress_hosts": ["provider-api-host"],
+              "auth_shape": "bearer"
+            },
+            "source": { "role": "textbox", "name": "observed-new-key-output-name" }
+          }
+        }
+      },
+      {
+        "id": "created-row",
+        "tool": "operate_observe",
+        "arguments": { "query": "$RUN_LABEL provider key row with id, account, and created time" },
+        "require_pattern": "$RUN_LABEL"
+      }
+    ],
+    "evidence": {
+      "provider_id": {
+        "step": "created-row",
+        "path": "dom",
+        "pattern": "provider id: (?<value>[^\\s]+)"
+      },
+      "label": { "literal": "$RUN_LABEL" },
+      "account_id": { "literal": "expected-account-id" },
+      "created_at": {
+        "step": "created-row",
+        "path": "dom",
+        "pattern": "created: (?<value>[^\\s]+)",
+        "as": "timestamp"
+      },
+      "vault_reference": { "step": "create-and-capture", "path": "stored_credential.reference" }
+    }
+  }
+}

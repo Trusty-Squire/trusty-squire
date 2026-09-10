@@ -10,6 +10,7 @@
     "expectedVersion": "VERSION",
     "timeoutMs": 35000
   },
+  "configuredNativeEvidence": "configured-native-evidence.json",
   "profileDir": "/absolute/worktree/test-identity/profile",
   "configHome": "/absolute/worktree/test-identity/config",
   "accountId": "enrolled-test-account-id",
@@ -21,7 +22,8 @@
       "providerAccountId": "expected-resend-account-id",
       "url": "https://resend.com/api-keys",
       "allowedHosts": ["api.resend.com"],
-      "driver": "resend-driver.mjs",
+      "driver": "../apps/mcp/scripts/bounded-credential-driver.mjs",
+      "driverEvidenceFile": "resend-session-1-driver-evidence.json",
       "authPattern": "expected account evidence",
       "provisionPattern": "trusty-squire-run label",
       "oldCredentialControl": {
@@ -34,7 +36,8 @@
       "providerAccountId": "expected-neon-account-id",
       "url": "https://console.neon.tech/app/settings/api-keys",
       "allowedHosts": ["console.neon.tech"],
-      "driver": "neon-driver.mjs",
+      "driver": "../apps/mcp/scripts/bounded-credential-driver.mjs",
+      "driverEvidenceFile": "neon-session-2-driver-evidence.json",
       "authPattern": "expected account evidence",
       "provisionPattern": "trusty-squire-run label",
       "oldCredentialControl": {
@@ -43,16 +46,17 @@
       }
     },
     {
-      "provider": "xata",
-      "providerAccountId": "expected-xata-account-id",
-      "url": "https://app.xata.io/settings/api-keys",
-      "allowedHosts": ["api.xata.io"],
-      "driver": "xata-driver.mjs",
+      "provider": "resend",
+      "providerAccountId": "expected-resend-account-id",
+      "url": "https://resend.com/api-keys",
+      "allowedHosts": ["api.resend.com"],
+      "driver": "../apps/mcp/scripts/bounded-credential-driver.mjs",
+      "driverEvidenceFile": "resend-session-3-driver-evidence.json",
       "authPattern": "expected account evidence",
       "provisionPattern": "trusty-squire-run label",
       "oldCredentialControl": {
         "provider_credential_id": "existing-provider-key-id",
-        "vault_reference": "vault://existing-xata-reference"
+        "vault_reference": "vault://existing-resend-reference"
       }
     }
   ]

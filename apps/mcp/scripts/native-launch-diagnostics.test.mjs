@@ -33,7 +33,7 @@ describe("native MCP launch diagnostics", () => {
   it("records the selected command, initialized version, epoch, and clean client close", async () => {
     const result = await run("ready");
     expect(result).toMatchObject({
-      kind: "native-mcp-launch-diagnostic",
+      kind: "installed-command-mcp-initialization",
       expected_version: "1.2.3",
       outcome: "ready",
       initialized: {

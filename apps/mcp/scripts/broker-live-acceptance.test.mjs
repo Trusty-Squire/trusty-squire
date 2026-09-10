@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { validateAcceptanceManifest, validateClosureReceipt } from "./broker-live-acceptance.mjs";
+import {
+  validateAcceptanceManifest,
+  validateClosureReceipt,
+  validateConfiguredNativeConnectionEvidence,
+} from "./broker-live-acceptance.mjs";
 
 const service = (provider, host) => ({
   provider,
@@ -8,6 +12,7 @@ const service = (provider, host) => ({
   driver: `${provider}.mjs`,
   authPattern: "account",
   provisionPattern: "run-label",
+  driverEvidence: {},
   oldCredentialControl: {
     provider_credential_id: `${provider}-old-provider-id`,
     vault_reference: `vault://${provider}/old`,
@@ -27,10 +32,11 @@ const manifest = () => ({
   profileDir: "/isolated/profile",
   configHome: "/isolated/config",
   accountId: "vault-account",
+  configuredNativeEvidence: "configured-native-evidence.json",
   services: [
     service("resend", "resend.test"),
     service("neon", "neon.test"),
-    service("xata", "xata.test"),
+    service("resend", "resend.test"),
   ],
 });
 
@@ -64,11 +70,11 @@ describe("native + concurrency acceptance manifest", () => {
     ).toThrow(/contradicts/);
   });
 
-  it("pins one artifact/version and requires old-key controls for all three providers", () => {
+  it("accepts three overlapping sessions spanning Resend and Neon", () => {
     expect(validateAcceptanceManifest(manifest())).toMatchObject({
       release: { version: "1.2.3" },
       credential_policy: "force_fresh",
-      services: [{ provider: "resend" }, { provider: "neon" }, { provider: "xata" }],
+      services: [{ provider: "resend" }, { provider: "neon" }, { provider: "resend" }],
     });
   });
 
@@ -78,8 +84,32 @@ describe("native + concurrency acceptance manifest", () => {
     expect(() => validateAcceptanceManifest(drift)).toThrow(/must equal the release/);
 
     const arbitrary = manifest();
-    arbitrary.services[2].provider = "driver-defined";
-    expect(() => validateAcceptanceManifest(arbitrary)).toThrow(/No reviewed/);
+    arbitrary.services[2].provider = "xata";
+    expect(() => validateAcceptanceManifest(arbitrary)).toThrow(/cover Resend and Neon/);
+  });
+
+  it("keeps configured-host connection evidence distinct from installed-command initialization", () => {
+    expect(
+      validateConfiguredNativeConnectionEvidence(
+        {
+          kind: "configured-native-host-mcp-connection",
+          release_version: "1.2.3",
+          host_name: "Codex",
+          connection_id: "connection-1",
+          observed_at: "2026-09-09T12:00:00Z",
+          initialize: { server_version: "1.2.3" },
+          tools_list: { names: ["operate_start", "list_credentials"] },
+          read_only_probe: { name: "list_credentials", outcome: "completed" },
+        },
+        "1.2.3",
+      ),
+    ).toMatchObject({ connection_id: "connection-1" });
+    expect(() =>
+      validateConfiguredNativeConnectionEvidence(
+        { kind: "installed-command-mcp-initialization", release_version: "1.2.3" },
+        "1.2.3",
+      ),
+    ).toThrow(/Configured native-host/);
   });
 
   it("rejects a service without an explicit old valid credential control", () => {

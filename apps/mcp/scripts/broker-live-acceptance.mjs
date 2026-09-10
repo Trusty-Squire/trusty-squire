@@ -43,9 +43,53 @@ export function validateClosureReceipt(receipt, sessionId) {
   return receipt;
 }
 
+export function validateConfiguredNativeConnectionEvidence(evidence, releaseVersion) {
+  assert.equal(
+    evidence?.kind,
+    "configured-native-host-mcp-connection",
+    "Configured native-host MCP evidence missing",
+  );
+  assert.equal(evidence.release_version, releaseVersion, "Configured host version mismatch");
+  assert.equal(typeof evidence.host_name, "string", "Configured host name missing");
+  assert.equal(typeof evidence.connection_id, "string", "Configured host connection id missing");
+  assert.equal(typeof evidence.observed_at, "string", "Configured host observation time missing");
+  assert.equal(
+    evidence.initialize?.server_version,
+    releaseVersion,
+    "Configured host did not initialize the release",
+  );
+  assert.ok(
+    Array.isArray(evidence.tools_list?.names) &&
+      evidence.tools_list.names.includes("operate_start"),
+    "Configured host tools/list evidence missing operate_start",
+  );
+  assert.equal(
+    evidence.read_only_probe?.name,
+    "list_credentials",
+    "Configured host evidence must include the bounded read-only list_credentials call",
+  );
+  assert.equal(
+    evidence.read_only_probe?.outcome,
+    "completed",
+    "Configured host read-only probe failed",
+  );
+  return evidence;
+}
+
 async function runClient(configPath, index) {
   const config = JSON.parse(await readFile(configPath, "utf8"));
-  const service = config.services[index];
+  const configuredService = config.services[index];
+  const service = configuredService.driverEvidenceFile
+    ? {
+        ...configuredService,
+        driverEvidence: JSON.parse(
+          await readFile(
+            resolve(dirname(configPath), configuredService.driverEvidenceFile),
+            "utf8",
+          ),
+        ),
+      }
+    : configuredService;
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [bin, "server"],
@@ -62,10 +106,14 @@ async function runClient(configPath, index) {
       const started_at = Date.now();
       try {
         const result = await client.callTool({ name, arguments: args }, undefined, { timeout });
-        if (result.isError) throw new Error(JSON.stringify(result.content));
         const text = result.content.find((item) => item.type === "text")?.text;
         assert.equal(typeof text, "string");
         const value = JSON.parse(text);
+        if (result.isError) {
+          const error = new Error(JSON.stringify(result.content));
+          error.toolResult = value;
+          throw error;
+        }
         calls.push({ name, started_at, completed_at: Date.now(), outcome: "completed" });
         return value;
       } catch (error) {
@@ -117,6 +165,7 @@ async function runClient(configPath, index) {
       sessionId,
       initial,
       run,
+      service,
     });
     assert.equal(
       providerBaseline.account_id,
@@ -143,7 +192,7 @@ async function runClient(configPath, index) {
     });
     validateReviewedCredentialProbeResponse(run.provider, oldProbeResult.response);
     const oldProbeCompletedAt = Date.now();
-    const evidence = await driver.provision({ call, sessionId, initial, run });
+    const evidence = await driver.provision({ call, sessionId, initial, run, service });
     const vaultAfter = await call("list_credentials", {});
     const qualified = qualifyFreshCredentialEvidence({
       run,
@@ -176,6 +225,7 @@ async function runClient(configPath, index) {
                 sessionId,
                 initial,
                 run,
+                service,
                 providerCredential,
               })
           : undefined,
@@ -287,8 +337,21 @@ export function validateAcceptanceManifest(config) {
     config.credential_cleanup_policy === "retain" || config.credential_cleanup_policy === "revoke",
     "Live qualification requires an explicit credential_cleanup_policy",
   );
-  assert.equal(config.services?.length, 3, "Exactly three authorized service drivers are required");
-  assert.equal(new Set(config.services.map((s) => new URL(s.url).hostname)).size, 3);
+  assert.equal(
+    config.services?.length,
+    3,
+    "Exactly three overlapping client sessions are required",
+  );
+  assert.deepEqual(
+    new Set(config.services.map((service) => service.provider)),
+    new Set(["resend", "neon"]),
+    "The three sessions must cover Resend and Neon without requiring another provider",
+  );
+  assert.equal(
+    typeof config.configuredNativeEvidence,
+    "string",
+    "Configured native-host evidence path missing",
+  );
   for (const service of config.services) {
     assert.equal(typeof service.provider, "string", "Each service requires a reviewed provider");
     reviewedCredentialProbe(service.provider);
@@ -301,11 +364,17 @@ export function validateAcceptanceManifest(config) {
       service.oldCredentialControl && typeof service.oldCredentialControl === "object",
       "Each service requires an old valid credential negative control",
     );
+    assert.equal(typeof service.driver, "string", "Each session requires a bounded driver module");
+    assert.ok(
+      (service.driverEvidence && typeof service.driverEvidence === "object") ||
+        typeof service.driverEvidenceFile === "string",
+      "Each session requires driverEvidence or driverEvidenceFile; see docs/browser-broker.md",
+    );
   }
   return config;
 }
 
-async function runConcurrencyAcceptance(configPath, config, nativeDiagnostic = null) {
+async function runConcurrencyAcceptance(configPath, config, nativeEvidence = null) {
   const root = process.cwd();
   const profile = resolve(config.profileDir);
   const configHome = resolve(config.configHome);
@@ -412,9 +481,9 @@ async function runConcurrencyAcceptance(configPath, config, nativeDiagnostic = n
     const after = await ownedProcesses(profile);
     assert.deepEqual(after, baseline);
     const evidence = {
-      kind: "native-and-real-service-three-MCP-process-acceptance",
+      kind: "configured-native-and-real-service-three-session-acceptance",
       release: config.release,
-      native: nativeDiagnostic,
+      native: nativeEvidence,
       chromeRoots,
       ready,
       rows,
@@ -449,7 +518,7 @@ export async function runNativeAndConcurrencyAcceptance(configPath) {
   assert.ok(profile.startsWith(root + "/"), "Native diagnostic profile must be worktree-local");
   assert.ok(configHome.startsWith(root + "/"), "Native diagnostic config must be worktree-local");
   await mkdir(join(root, ".t"), { recursive: true, mode: 0o700 });
-  const nativeResult = await runNativeLaunchDiagnostic({
+  const installedCommandResult = await runNativeLaunchDiagnostic({
     command: config.nativeLaunch.command,
     args: config.nativeLaunch.args,
     expectedVersion: config.nativeLaunch.expectedVersion,
@@ -468,13 +537,21 @@ export async function runNativeAndConcurrencyAcceptance(configPath) {
   const nativeLab = resolve(root, ".broker-acceptance", `native-${Date.now()}`);
   await mkdir(nativeLab, { recursive: true, mode: 0o700 });
   const nativeEvidencePath = join(nativeLab, "evidence.json");
-  await writeFile(nativeEvidencePath, JSON.stringify(nativeResult, null, 2));
-  const native = { ...nativeResult, evidence_path: nativeEvidencePath };
+  await writeFile(nativeEvidencePath, JSON.stringify(installedCommandResult, null, 2));
+  const installedCommand = { ...installedCommandResult, evidence_path: nativeEvidencePath };
   assert.equal(
-    native.outcome,
+    installedCommand.outcome,
     "ready",
-    `Native MCP qualification failed; evidence=${nativeEvidencePath}: ${JSON.stringify(native)}`,
+    `Installed-command MCP initialization failed; evidence=${nativeEvidencePath}: ${JSON.stringify(installedCommand)}`,
   );
-  return await runConcurrencyAcceptance(configPath, config, native);
+  const configuredNativePath = resolve(dirname(configPath), config.configuredNativeEvidence);
+  const configuredNative = validateConfiguredNativeConnectionEvidence(
+    JSON.parse(await readFile(configuredNativePath, "utf8")),
+    config.release.version,
+  );
+  return await runConcurrencyAcceptance(configPath, config, {
+    installed_command: installedCommand,
+    configured_host_connection: { ...configuredNative, evidence_path: configuredNativePath },
+  });
 }
 if (process.argv[2] === "client") await runClient(process.argv[3], Number(process.argv[4]));

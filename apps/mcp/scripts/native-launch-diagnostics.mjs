@@ -168,7 +168,7 @@ export async function runNativeLaunchDiagnostic({
   }
 
   return {
-    kind: "native-mcp-launch-diagnostic",
+    kind: "installed-command-mcp-initialization",
     connection_epoch: connectionEpoch,
     selected_command: sanitizeNativeDiagnosticText(command),
     selected_args: args.map(sanitizeNativeDiagnosticText),
