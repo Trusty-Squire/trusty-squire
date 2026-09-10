@@ -73,6 +73,7 @@ import {
   compactV2AuditValue,
   recordableTokenV2,
   safeDescriptionV2,
+  safeBlockersV2,
   safeOriginV2,
   safePageSemanticsV2,
   sealRetainedInteractiveElementsV2,
@@ -4541,13 +4542,22 @@ function compactV2Observation(
     session.compactV2HintPages = [...startMetadata.hintPages];
   const pageUrl = sourcePage?.url() ?? session.browser.currentUrl();
   const stage = safeStageV2(pageUrl, elements);
-  const semantics = safePageSemanticsV2(semanticSource);
   const epochDoc = compactV2EpochDoc(session, sourcePage);
   const previous = session.compactV2Previous;
   const sameDocument = previous !== null && previous.epoch.doc === epochDoc;
   const sameFullDocument = sameDocument && previous.dom !== undefined;
   const handles = compactV2Handles(session, elements, sourcePage);
   const safe = compactV2LiveControls(session, elements, sourcePage, handles);
+  const targetableRefs = new Set(safe.rows.map((row) => row.ref));
+  const blockers = safeBlockersV2(capture.root, (node) => {
+    const element = capture.nodeElements.get(node.id);
+    const ref = element === undefined ? undefined : handles.get(element);
+    return ref !== undefined && targetableRefs.has(ref) ? ref : undefined;
+  });
+  const semantics = {
+    ...safePageSemanticsV2(semanticSource),
+    ...(blockers.length === 0 ? {} : { blockers }),
+  };
   const rendered = serializeBrowserUseDOM(capture.root, {
     ref: (node) => {
       const element = capture.nodeElements.get(node.id);

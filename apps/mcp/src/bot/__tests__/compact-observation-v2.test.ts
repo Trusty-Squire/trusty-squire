@@ -315,6 +315,31 @@ describe("compact observation v2", () => {
     );
   });
 
+  it("drops title and headings before bounded blocker semantics under wire pressure", () => {
+    const denseHint = "!".repeat(OBSERVE_V2_MAX_WIRE_BYTES + 64);
+    const blockers = [
+      {
+        kind: "challenge" as const,
+        text: "Please complete the verification challenge.",
+        target: "unavailable" as const,
+      },
+    ];
+    const page = encodeV2QueryPage({
+      sessionId: "session",
+      stage: "auth",
+      rows: [],
+      cursorFor: (offset) => `cursor-${offset}`,
+      semantics: { title: "Fixture login", headings: ["Sign in"], blockers },
+      startMetadata: { hint: denseHint },
+    });
+
+    expect(page.payload.hint).toBeUndefined();
+    expect(page.payload.semantic).toEqual({ blockers });
+    expect(Buffer.byteLength(JSON.stringify(page.payload), "utf8")).toBeLessThanOrEqual(
+      OBSERVE_V2_MAX_WIRE_BYTES,
+    );
+  });
+
   it("shrinks a URL that exceeds the wire budget before packing so the first page keeps multiple rows", () => {
     const dense = Array.from({ length: 40 }, (_, index) =>
       element({
