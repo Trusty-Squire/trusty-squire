@@ -10256,6 +10256,11 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
         kind: "challenge",
         text: "Please complete the verification challenge.",
         target: "unavailable",
+      },
+      {
+        kind: "challenge",
+        text: "Verify you are human",
+        target: "unavailable",
         focus: "focusable",
         keyboard: "tab_space",
       },

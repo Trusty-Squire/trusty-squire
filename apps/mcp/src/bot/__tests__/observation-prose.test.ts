@@ -1828,9 +1828,14 @@ describe("interleaved observation DOM", () => {
       expect(compactJson).not.toContain("workspace settings");
       expect(compactJson).not.toContain("Frame helper copy");
       expect(blockers).toEqual([
-        expect.objectContaining({
+        {
           kind: "challenge",
           text: "Please complete the verification challenge.",
+          target: "unavailable",
+        },
+        expect.objectContaining({
+          kind: "challenge",
+          text: "Verify you are human",
           target: "unavailable",
           focus: "focusable",
           keyboard: "tab_space",
@@ -1839,9 +1844,12 @@ describe("interleaved observation DOM", () => {
       ]);
       for (let index = 0; index < 4; index += 1) await page.keyboard.press("Tab");
       const focusedCapture = await controller.extractBrowserUseObservation();
-      expect(safeBlockersV2(focusedCapture.root)[0]).toEqual(
+      expect(
+        safeBlockersV2(focusedCapture.root).find((blocker) => blocker.focus === "focused"),
+      ).toEqual(
         expect.objectContaining({
           kind: "challenge",
+          text: "Verify you are human",
           focus: "focused",
           keyboard: "space",
         }),

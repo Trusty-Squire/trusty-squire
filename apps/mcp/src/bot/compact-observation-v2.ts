@@ -1017,11 +1017,21 @@ export function safeBlockersV2(
   refForNode: (node: BrowserUseNode) => string | undefined = () => undefined,
 ): SafeBlockerV2[] {
   const nodes: BrowserUseNode[] = [];
+  const parentFor = new Map<BrowserUseNode, BrowserUseNode>();
+  const visibleFor = new Map<BrowserUseNode, boolean>();
   const scopeFor = new Map<BrowserUseNode, BrowserUseNode>();
   const idsByScope = new Map<BrowserUseNode, Map<string, BrowserUseNode>>();
-  const visit = (node: BrowserUseNode, enclosingScope: BrowserUseNode): void => {
+  const visit = (
+    node: BrowserUseNode,
+    enclosingScope: BrowserUseNode,
+    parent: BrowserUseNode | undefined,
+    ancestorsVisible: boolean,
+  ): void => {
     const scope = [9, 11].includes(node.nodeType) ? node : enclosingScope;
+    const visible = ancestorsVisible && ([9, 11].includes(node.nodeType) ? true : node.visible);
     nodes.push(node);
+    if (parent !== undefined) parentFor.set(node, parent);
+    visibleFor.set(node, visible);
     scopeFor.set(node, scope);
     let ids = idsByScope.get(scope);
     if (ids === undefined) {
@@ -1030,12 +1040,12 @@ export function safeBlockersV2(
     }
     const id = node.attributes.id?.trim();
     if (id) ids.set(id, node);
-    descendantsV2(node).forEach((child) => visit(child, scope));
+    descendantsV2(node).forEach((child) => visit(child, scope, node, visible));
   };
-  visit(root, root);
+  visit(root, root, undefined, true);
 
-  const challengeRoots = nodes.filter((node) => {
-    if (!node.visible && !node.contentDocument) return false;
+  const challengeCandidates = nodes.filter((node) => {
+    if (visibleFor.get(node) !== true) return false;
     const tag = nodeTagV2(node);
     const identity = [
       tag,
@@ -1062,15 +1072,28 @@ export function safeBlockersV2(
     }
     return CHALLENGE_SIGNAL_RE.test(blockerTextV2(node) ?? "");
   });
+  const challengeCandidateSet = new Set(challengeCandidates);
+  const challengeRoots = challengeCandidates.filter((node) => {
+    let parent = parentFor.get(node);
+    while (parent !== undefined) {
+      if (challengeCandidateSet.has(parent)) return false;
+      parent = parentFor.get(parent);
+    }
+    return true;
+  });
 
   const blockers: SafeBlockerV2[] = [];
-  if (challengeRoots.length > 0) {
+  for (const challengeRoot of challengeRoots) {
+    if (blockers.length >= BLOCKER_MAX_ITEMS) break;
+    const boundaryNodes: BrowserUseNode[] = [];
     const controls = new Set<BrowserUseNode>();
     const collectControls = (node: BrowserUseNode): void => {
+      if (visibleFor.get(node) !== true) return;
+      boundaryNodes.push(node);
       if (blockerControlV2(node)) controls.add(node);
       descendantsV2(node).forEach(collectControls);
     };
-    challengeRoots.forEach(collectControls);
+    collectControls(challengeRoot);
     const namedChallengeControls = [...controls].filter((node) =>
       CHALLENGE_SIGNAL_RE.test(blockerTextV2(node) ?? ""),
     );
@@ -1082,29 +1105,34 @@ export function safeBlockersV2(
     });
     const challengeControls =
       checkboxControls.length > 0 ? checkboxControls : namedChallengeControls;
-    const grounded = [
-      ...challengeControls,
-      ...challengeRoots.filter((node) => nodeTagV2(node) === "label"),
-    ].find((node) => refForNode(node) !== undefined);
-    const focused = challengeControls.find((node) => axBooleanV2(node, "focused"));
-    const focusable = focused ?? challengeControls.find((node) => axBooleanV2(node, "focusable"));
-    const challengeTexts = challengeRoots
+    const grounded = challengeControls.find((node) => refForNode(node) !== undefined);
+    const focusControl =
+      grounded ??
+      challengeControls.find((node) => axBooleanV2(node, "focused")) ??
+      challengeControls.find((node) => axBooleanV2(node, "focusable"));
+    const focused = focusControl !== undefined && axBooleanV2(focusControl, "focused");
+    const focusable = focusControl !== undefined && axBooleanV2(focusControl, "focusable");
+    const challengeTexts = boundaryNodes
       .map(blockerTextV2)
       .filter((value): value is string => value !== undefined && CHALLENGE_SIGNAL_RE.test(value));
+    const labelText = boundaryNodes
+      .filter((node) => nodeTagV2(node) === "label")
+      .map(blockerTextV2)
+      .find((value) => value !== undefined && CHALLENGE_SIGNAL_RE.test(value));
     const message = challengeTexts.find((value) => VALIDATION_SIGNAL_RE.test(value));
+    const controlText =
+      (focusControl === undefined ? undefined : blockerTextV2(focusControl)) ??
+      challengeControls.map(blockerTextV2).find((value) => value !== undefined);
     const text =
-      message ??
-      challengeControls.map(blockerTextV2).find((value) => value !== undefined) ??
-      challengeTexts[0] ??
-      "Verification challenge";
+      message ?? controlText ?? labelText ?? challengeTexts[0] ?? "Verification challenge";
     const ref = grounded === undefined ? undefined : refForNode(grounded);
     blockers.push({
       kind: "challenge",
       text,
       ...(ref === undefined ? { target: "unavailable" as const } : { ref }),
-      ...(focused !== undefined
+      ...(focused
         ? { focus: "focused" as const, keyboard: "space" as const }
-        : focusable !== undefined
+        : focusable
           ? { focus: "focusable" as const, keyboard: "tab_space" as const }
           : {}),
     });
@@ -1117,7 +1145,7 @@ export function safeBlockersV2(
       .filter((value): value is string => typeof value === "string")
       .some((value) => /(?:^|[-_:])(error|invalid|validation|feedback)(?:$|[-_:])/i.test(value));
     if (
-      node.visible &&
+      visibleFor.get(node) === true &&
       (["alert", "alertdialog", "status"].includes(role) ||
         node.attributes["aria-live"] === "assertive" ||
         validationMarker)
@@ -1134,7 +1162,7 @@ export function safeBlockersV2(
     const invalid = [node.attributes["aria-invalid"], node.attributes.invalid].some(
       (value) => value?.toLowerCase() === "true",
     );
-    if (!invalid) continue;
+    if (!invalid || visibleFor.get(node) !== true) continue;
     const ids = idsByScope.get(scopeFor.get(node)!);
     for (const [relation, explicitError] of [
       [node.attributes["aria-errormessage"], true],
@@ -1144,7 +1172,8 @@ export function safeBlockersV2(
         const related = ids?.get(id);
         const relatedText = related === undefined ? undefined : blockerTextV2(related);
         if (
-          related?.visible &&
+          related !== undefined &&
+          visibleFor.get(related) === true &&
           relatedText !== undefined &&
           (explicitError || VALIDATION_SIGNAL_RE.test(relatedText))
         ) {
