@@ -302,6 +302,8 @@ enabled). The 18-tool operator driving surface uses flat, single-purpose verbs:
 `operate_payment_status`, `list_credentials`, and `list_payment_cards`.
 Recipe and vault/account tools remain separate surfaces. The complete migration
 table and input contracts are in [operator-tool-surface.md](docs/operator-tool-surface.md).
+The evidence required to qualify an operator build is in
+[operator-acceptance-runbook.md](docs/operator-acceptance-runbook.md).
 Continue a pending pre-charge approval by re-calling
 `operate_pay` with the same arguments; use
 `operate_payment_status(wait_seconds)` as a non-charging alternative and for
@@ -353,15 +355,17 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   solving, inbox polling, local upload, and specialized cart mutation are not
   operator verbs; inspect and drive the page's ordinary UI or hand the task back
   to the user.
-  In a live operator session, in-page XHR/fetch calls to merchant API sibling
-  subdomains are automatically in scope only when they share the registrable
-  domain of a host trusted at session start. Calls outside the session scope fail
-  promptly instead of hanging; page-load resources continue normally, and a
-  mid-session `allow_host` does not seed sibling-domain widening. A small set of
-  always-in-scope hosts (recognized payment-provider frames, OAuth/captcha
-  providers, and 3-D Secure ACS/directory-server hosts) is exempt from that
-  session-start-trust requirement — otherwise a checkout's own out-of-band 3DS
-  challenge could never complete its own status poll.
+  Host authority is exact-host entitlement: declare each non-provider host a
+  task needs in `allowed_hosts` at `operate_start`. A later
+  `operate_allow_host` call can activate only a host already declared in that
+  startup entitlement; it cannot widen the session to a sibling or unrelated
+  host. Calls outside the session scope fail promptly instead of hanging.
+  Recognized payment-provider frames, OAuth/captcha providers, and 3-D Secure
+  ACS/directory-server hosts retain their narrowly scoped protocol allowances.
+  A scope-denial observation identifies its owner document/frame, exact host,
+  resource type, reason, and occurrence range without including request bodies
+  or URL-query values. Start a new session with the needed host declared rather
+  than trying to repair the denial in place.
   Every operator task uses the user's Chrome profile directly. Before it starts,
   the operator checks the live Google My Account identity; if the profile is
   signed out, it returns a clear login handoff before navigating to the service.
@@ -417,19 +421,18 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   as the recommended action. Typing a Luhn-valid, card-number-shaped value
   manually through `operate_type` is refused with `safe_alternative: "operate_pay"`
   and the missing prerequisite `verified_cart_total`.
-- `operate_finish` closes the session and optionally accepts a nested `outcome`.
-  `none` only closes; `credentials` requires `store` and preserves credential
-  extraction, vault storage, and auto-promotion; `result` requires `summary` or
-  `data`. A result is eligible to save portable login state only when
-  `verify_recipe` confirms it or `data.confirmed` is `true`; credential outcomes
-  qualify only after unblocked extraction and vault storage. `none`, failed or
-  unconfirmed outcomes, and payment-sensitive sessions preserve the prior saved
-  snapshot. Finish first stops new calls and drains calls already using that
-  session within a bounded terminal transition, then closes its browser and
-  schedules private-profile removal. Sessions also close automatically after 10 minutes without an
-  operation and begin terminal teardown at 30 minutes; only an active payment
-  receives the short bounded close grace. Callers should finish promptly instead
-  of treating an open browser as durable background state.
+- `operate_finish` closes the session with a flat `outcome` enum — never a
+  nested union. `none` only closes; `credentials` requires `store` and preserves
+  credential extraction and vault storage; `result` requires `summary` or
+  `data`. Agent-provided result data is reported information, not proof that a
+  login, provisioning operation, or mutation completed. Finish first fences new
+  calls and drives the owned terminal transition; callers must not infer closure
+  merely from a delivery timeout. Callers should finish promptly instead of
+  treating an open browser as durable background state. The corresponding
+  operator-contract integration will add an additive receipt with `session_id`,
+  `operation_id`, `execution`, `mutation`, `cleanup`, and `closed`. Until a
+  server advertises those fields through `tools/list`, they are not available and
+  clients must not assume a missing receipt proves cleanup.
 - `operate_recipe_save` saves a postcondition-verified local recipe under a
   closed task verb plus the service's registrable domain. It records stable target
   attributes and exact provenance for Squire-supplied values, not observed refs

@@ -8,6 +8,11 @@ launch reader.
   flow, and skill lifecycle.
 - [VAULT-OPERATIONS.md](VAULT-OPERATIONS.md) is the operator runbook for the
   credential vault.
+- [operator-tool-surface.md](operator-tool-surface.md) is the canonical flat
+  MCP operator-tool contract, including scope, finish, capture, and
+  `fetch_credential` boundaries.
+- [operator-acceptance-runbook.md](operator-acceptance-runbook.md) defines the
+  deterministic and live evidence required to qualify an operator build.
 - [DEPLOY-registry.md](DEPLOY-registry.md) covers deploying the skill registry.
 - [PROMPT-opencode-support.md](PROMPT-opencode-support.md) records the implementation brief for
   first-class OpenCode MCP support.

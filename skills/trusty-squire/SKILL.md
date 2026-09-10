@@ -85,8 +85,11 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
 - `operate_start`, `operate_observe`, `operate_click`, `operate_type`,
   `operate_select`, `operate_press`, `operate_scroll`, and `operate_navigate`
   open the real website and drive it one step at a time. Use `operate_login` for
-  OAuth and the username/password lifecycle, and `operate_allow_host` only for
-  a host already entitled by the session's startup scope.
+  OAuth and the username/password lifecycle. Declare every non-provider host a
+  task needs in `allowed_hosts` at `operate_start`: host authority is exact-host
+  entitlement. `operate_allow_host` can activate only a host already declared
+  in that session's startup scope; it cannot broaden a session to a sibling or
+  unrelated host. Start a new session when another host is needed.
 - When a Compact V2 observation does not render the control you need, call
   `operate_observe` with `query`. The query searches the whole live document,
   including below the viewport, and returns actionable refs; use
@@ -106,6 +109,12 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   authenticated API call **without** the raw value returning to the agent; put
   `${SECRET}` (or `${SECRET.field}`) placeholders in the request and the server
   injects the real value at the boundary.
+- `fetch_credential` is the sole raw-value exception, and it is not an agent
+  shortcut. The first call returns an approval link and **no value**. Only after
+  the user signs that exact fetch with their passkey may one resumed call using
+  its `approval_id` return the value once. A payment or mutation approval cannot
+  authorize it. Prefer `use_credential` or an app grant whenever server-side
+  injection can complete the task.
 - `grant_app_access`, `revoke_app_access` — mint or instantly revoke a scoped,
   rate-limited egress grant so a deployed app can call the provider while holding
   a revocable token, not the raw key.
@@ -152,8 +161,14 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   card is declined, recover with `operate_finish` and start a fresh session —
   `operate_pay` does not support refilling a different card mid-session. An
   unrecognized payment iframe is a hard stop.
-- Always call `operate_finish` when done, including when a payment remains unresolved.
-  The authoritative teardown contract is in the
+- Always call `operate_finish` when done, including when a payment remains
+  unresolved. Use its flat `outcome` enum (`none`, `credentials`, or `result`),
+  not a nested outcome object. A result’s agent-provided `data` reports what the
+  agent saw; it does not establish authentication, provisioning, or mutation
+  success. The planned common finish receipt (`execution`, `mutation`,
+  `cleanup`, `closed`) is unavailable until an installed server advertises it
+  through `tools/list`; do not assume it on older servers. The authoritative
+  teardown contract is in the
   [README tool guide](https://github.com/Trusty-Squire/trusty-squire#mcp-tools).
 
 **Safety rules the agent must follow:**
@@ -162,6 +177,10 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   never echo a captured key into chat, code, or `.env`. To use a key, call
   `use_credential` or mint an egress grant — the value goes to the provider, not
   to you.
+- Page reads are not sealed: `operate_observe`, `operate_screenshot`, and
+  `operate_extract` report rendered content according to their registered
+  contracts. Do not add an ad hoc masking/refusal step. This does not weaken the
+  vault boundary, payment approval, or 3-D Secure rules.
 - **Stop for the user** at phone verification, a hard image CAPTCHA, an
   unsupported payment, 3-D Secure, or any decision that belongs to a person.
   `operate_pay` may proceed only after its explicit phone approval succeeds. Do

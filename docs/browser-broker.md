@@ -56,9 +56,11 @@ binding. Browser epoch changes invalidate earlier capabilities.
   held through maintenance. A separate physical-profile lease coordinates Chrome
   and the existing plain-login path. Profile enrollment pins the account on disk.
 - Each session owns a target family, capability generation, serialized command
-  queue, and site reservations. Resources use registrable domains, including
-  private suffixes; recipe-resolved startup hosts reserve before page acquisition.
-  Additional conflicting scope is refused rather than adopted implicitly.
+  queue, and site reservations. Public browser authority is exact-host and is
+  declared at session start; recipe-resolved startup hosts reserve before page
+  acquisition. Registrable-domain logic may validate recipe ownership, but it
+  does not turn a sibling host into session authority. Additional or conflicting
+  scope is refused rather than adopted implicitly.
 - A context-level route selects the owning page's host policy. Unknown targets
   cannot issue background API traffic. Session cleanup closes only that owned
   family. At reconnect-grace expiry, a close that cannot be proven removes the
@@ -200,6 +202,12 @@ Evidence and limitations are recorded in [the evidence ledger](evidence/browser-
 
 ## Human setup for real-service qualification
 
+The shared evidence contract, including fresh-credential negative controls and
+native-transport distinctions, is in
+[operator-acceptance-runbook.md](operator-acceptance-runbook.md). This section
+adds the broker-specific setup; it does not make a fixture-only run a real
+qualification.
+
 No enrolled real test Google profile or three authorized service drivers were
 provided for this worktree. Existing harness profiles contain fixture cookies;
 they are not real Google identities. Do not clone a live operator profile or copy
@@ -212,9 +220,11 @@ its cookies into the harness.
    the plain login browser before running the acceptance arm.
 2. Supply three distinct authorized service URLs and an ES-module provisioning
    driver for each. Each driver exports `provision({ call, sessionId, initial })`
-   and uses only MCP tool calls. Specify DOM evidence patterns that prove the
-   intended account is authenticated and the service was provisioned. Choose
-   flows without unapproved purchases or destructive account changes.
+   and uses only MCP tool calls. Specify evidence for the intended account,
+   provider-side creation, the exact vault identity, and a reviewed read-only
+   provider probe; a dashboard title, page text, or an old valid credential is
+   insufficient. Choose flows without unapproved purchases or destructive
+   account changes.
 3. Create an ignored local JSON configuration:
 
 ```json
