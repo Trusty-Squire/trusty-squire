@@ -8,6 +8,7 @@ import {
   controlLabelV2,
   isCompactV2Handle,
   isCompactV2Label,
+  controlQueryMatchV2,
   controlMatchesPrivateQueryV2,
   disambiguateDuplicateLabelsV2,
   encodeV2QueryPage,
@@ -941,6 +942,68 @@ describe("compact observation v2", () => {
     expect(controlMatchesPrivateQueryV2(model2024, "Model 2024")).toBe(true);
   });
 
+  it("ranks exact names before local text and permits only explicit local context", () => {
+    const exact = element({
+      visibleText: "Open credentials",
+      compactNames: {
+        ariaLabel: "API keys",
+        labelledByText: null,
+        accessibleName: "API keys",
+        labelText: null,
+        visibleText: "Open credentials",
+        alt: null,
+        iconLabel: null,
+        title: null,
+        placeholder: null,
+        name: null,
+        value: null,
+        container: "navigation:Developer settings",
+      },
+    });
+    const local = element({ visibleText: "API keys export" });
+    const broadSidebarNeighbor = element({
+      visibleText: "Webhooks",
+      compactNames: {
+        ariaLabel: null,
+        labelledByText: null,
+        accessibleName: "Webhooks",
+        labelText: null,
+        visibleText: "Webhooks",
+        alt: null,
+        iconLabel: null,
+        title: null,
+        placeholder: null,
+        name: null,
+        value: null,
+        container: "navigation:API keys",
+      },
+    });
+    const dialogContext = element({
+      visibleText: "Continue",
+      compactNames: {
+        ariaLabel: null,
+        labelledByText: null,
+        accessibleName: "Continue",
+        labelText: null,
+        visibleText: "Continue",
+        alt: null,
+        iconLabel: null,
+        title: null,
+        placeholder: null,
+        name: null,
+        value: null,
+        container: "dialog:API keys",
+      },
+    });
+    expect(controlQueryMatchV2(exact, "API keys")).toEqual({ rank: 0, provenance: "name" });
+    expect(controlQueryMatchV2(local, "API keys")).toEqual({ rank: 2, provenance: "text" });
+    expect(controlQueryMatchV2(broadSidebarNeighbor, "API keys")).toBeNull();
+    expect(controlQueryMatchV2(dialogContext, "API keys")).toEqual({
+      rank: 3,
+      provenance: "context",
+    });
+  });
+
   it("classifies password-masked card security controls as payment fields", () => {
     const cvc = element({
       tag: "input",
@@ -1060,6 +1123,16 @@ describe("compact observation v2", () => {
       safeStageV2("https://merchant.invalid/checkout", [
         element({ tag: "input", type: "password", role: "textbox" }),
       ]),
+    ).toBe("checkout");
+    expect(
+      safeStageV2("https://merchant.invalid/settings/security", [
+        element({ tag: "input", type: "password", role: "textbox", labelText: "New password" }),
+      ]),
+    ).toBe("form");
+    expect(
+      safeStageV2("https://merchant.invalid/login", [
+        element({ tag: "input", type: "password", role: "textbox" }),
+      ]),
     ).toBe("auth");
     expect(
       safeStageV2("https://merchant.invalid/products/widget", [
@@ -1073,7 +1146,7 @@ describe("compact observation v2", () => {
           formId: 4,
         }),
       ]),
-    ).toBe("auth");
+    ).toBe("form");
     expect(
       safeStageV2("https://merchant.invalid/account", [
         element({ visibleText: "Log in", role: "button", containerId: 8, formId: 7 }),

@@ -1454,8 +1454,8 @@ export interface HostScopeDenialDiagnostic {
   count: number;
   first_seen_at: number;
   last_seen_at: number;
-  document_id: string;
-  remedy: { action: "allow_host"; host: string };
+  owner: { document_id: string; frame: "main" | string; hostname: string };
+  remedy: { action: "restart_session"; tool: "operate_start"; allowed_host: string };
 }
 
 const CURRENCY_SYMBOLS: Record<string, string> = {
@@ -2889,7 +2889,7 @@ export class BrowserController {
   private static readonly brokerRoutes = new WeakMap<BrowserContext, Set<BrowserController>>();
   private static readonly brokerIdentityPages = new WeakMap<BrowserContext, Set<Page>>();
 
-  private recordHostScopeDenial(page: Page, url: string, resourceType: string): void {
+  private recordHostScopeDenial(frame: Frame, url: string, resourceType: string): void {
     if (resourceType !== "xhr" && resourceType !== "fetch") return;
     let hostname: string;
     try {
@@ -2897,7 +2897,14 @@ export class BrowserController {
     } catch {
       return;
     }
-    const documentId = this.mainDocumentIdentity(page);
+    const page = frame.page();
+    const framePath = frame === page.mainFrame() ? "main" : this.framePath(frame);
+    let ownerHostname = "";
+    try {
+      const ownerUrl = new URL(frame.url());
+      ownerHostname = ownerUrl.hostname.toLowerCase();
+    } catch {}
+    const documentId = `${this.mainDocumentIdentity(page)}:${framePath}`;
     const key = JSON.stringify([documentId, hostname, resourceType]);
     const now = Date.now();
     const previous = this.hostScopeDenials.get(key);
@@ -2915,8 +2922,12 @@ export class BrowserController {
       count: 1,
       first_seen_at: now,
       last_seen_at: now,
-      document_id: documentId,
-      remedy: { action: "allow_host", host: hostname },
+      owner: { document_id: documentId, frame: framePath, hostname: ownerHostname },
+      remedy: {
+        action: "restart_session",
+        tool: "operate_start",
+        allowed_host: hostname,
+      },
     });
   }
 
@@ -2946,7 +2957,8 @@ export class BrowserController {
         }
         // Service-worker traffic cannot be attributed to a tab family. Shared
         // admission does not qualify it by guessing a URL-based owner.
-        const page = request.frame().page();
+        const frame = request.frame();
+        const page = frame.page();
         if (BrowserController.brokerIdentityPages.get(context)?.has(page)) {
           if (
             isFailFastScopeAbort(request.url(), request.resourceType(), [
@@ -2979,7 +2991,7 @@ export class BrowserController {
             scope.siblingDomainHosts,
           )
         ) {
-          owner.recordHostScopeDenial(page, request.url(), request.resourceType());
+          owner.recordHostScopeDenial(frame, request.url(), request.resourceType());
           await route.abort("failed");
           return;
         }
@@ -3085,12 +3097,12 @@ export class BrowserController {
         if (
           isFailFastScopeAbort(url, type, scope?.allowedHosts ?? null, scope?.siblingDomainHosts)
         ) {
-          let page: Page | null = null;
+          let frame: Frame | null = null;
           try {
-            page = route.request().frame().page();
+            frame = route.request().frame();
           } catch {}
-          if (page !== null && this.ownedPages.has(page)) {
-            this.recordHostScopeDenial(page, url, type);
+          if (frame !== null && this.ownedPages.has(frame.page())) {
+            this.recordHostScopeDenial(frame, url, type);
           }
           await route.abort("failed");
           return;

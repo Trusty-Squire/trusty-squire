@@ -96,6 +96,7 @@ export type SafeFieldV2 =
   | "promo"
   | "payment";
 export type SafeStageV2 = "browse" | "auth" | "form" | "cart" | "checkout" | "complete";
+export type SafeQueryMatchV2 = "name" | "role" | "text" | "context";
 
 export interface SafeControlV2 {
   ref: string;
@@ -111,6 +112,8 @@ export interface SafeControlV2 {
   label?: string;
   choice?: string;
   frame: "main" | "same_origin" | "cross_origin";
+  /** Query-only match provenance; absent from the default action map. */
+  match?: SafeQueryMatchV2;
 }
 
 /** Raw DOM input is accepted only from title and visible heading elements. */
@@ -380,7 +383,8 @@ type WireControlV2 = [string, string, string?];
 // The protocol is intentionally positional to keep repeated observes small.
 // Tuple schema: [ref, role(b/l/t/s/c/r/tb/m/f), optional compact description].
 // The description starts with the `@label` alias (itself a valid act target)
-// and appends only present code-owned facts (`s=`, `a=`, `f=`, `q=`, `x=`). It
+// and appends only present code-owned facts (`s=`, `a=`, `f=`, `q=`, `x=`,
+// and query-only `m=` provenance). It
 // is deliberately one sparse string rather than nullable columns:
 // checked/unchecked, disabled, action, field, card choice, and frame context
 // remain distinguishable without paying for empty slots on every row. The
@@ -404,6 +408,9 @@ function wireControl(row: SafeControlV2): WireControlV2 {
     ...(row.field === undefined ? [] : [`f=${row.field}`]),
     ...(row.choice === undefined ? [] : [`q=${row.choice}`]),
     ...(row.frame === "main" ? [] : [`x=${row.frame === "same_origin" ? "s" : "x"}`]),
+    ...(row.match === undefined
+      ? []
+      : [`m=${{ name: "n", role: "r", text: "t", context: "c" }[row.match]}`]),
   ].filter((value): value is string => value !== undefined);
   return facts.length === 0
     ? [row.ref, role[row.role]]
@@ -1084,26 +1091,47 @@ function privateQueryTermsV2(value: string): string[] | null {
   return terms.every((term): term is string => term !== null) ? [...new Set(terms)] : null;
 }
 
-export function controlMatchesPrivateQueryV2(el: InteractiveElement, query: string): boolean {
+export function controlQueryMatchV2(
+  el: InteractiveElement,
+  query: string,
+): { rank: number; provenance: SafeQueryMatchV2 } | null {
   const needles = privateQueryTermsV2(query);
-  if (needles === null) return false;
-  // AND-match every needle against the COMBINED token set across all naming
-  // sources — visible text, label, aria label, icon, title, placeholder,
-  // value, plus name/id slugs (so choice-group members without their own copy
-  // — Shopify shipping-rate radios — stay queryable; these are DOM
-  // identifiers, never field values) and the control's own role word.
-  // Requiring each needle to hit ONE source (the old behavior) made generic
-  // multi-term queries — "region dropdown" for a combobox labeled "Region",
-  // "use case textbox" for a textarea — return empty on real pages.
+  if (needles === null) return null;
+  const phrase = (value: string | null | undefined): string | null => {
+    if (!value) return null;
+    const terms = privateQueryTermsV2(value);
+    return terms === null ? null : terms.join(" ");
+  };
+  const queryPhrase = needles.join(" ");
+  const names = el.compactNames;
+  const accessibleNames = names
+    ? [
+        names.accessibleName,
+        names.ariaLabel,
+        names.labelledByText,
+        ["button", "input", "select", "textarea"].includes(el.tag) ? names.labelText : null,
+      ]
+    : [el.ariaLabel, el.labelText];
+  if (accessibleNames.some((candidate) => phrase(candidate) === queryPhrase)) {
+    return { rank: 0, provenance: "name" };
+  }
   const role = roleOf(el);
-  const candidates: Array<string | null | undefined> = [
+  const roleWords =
+    role === "select" ? ["select", "dropdown", "combobox"] : role === null ? [] : [role];
+  if (needles.length === 1 && roleWords.includes(needles[0]!)) {
+    return { rank: 1, provenance: "role" };
+  }
+  // AND-match every term against this control's own name/text/DOM metadata.
+  // Ancestor/page text is excluded, so a page root or sidebar cannot lend its
+  // name to every descendant action.
+  const localCandidates: Array<string | null | undefined> = [
     ...controlNamingTexts(el),
     el.name,
     el.id,
-    role,
+    ...roleWords,
   ];
   const combined = new Set<string>();
-  for (const candidate of candidates) {
+  for (const candidate of localCandidates) {
     if (typeof candidate !== "string" || candidate.length === 0) continue;
     const tokens = candidate.normalize("NFKC").match(/[\p{L}\p{M}\p{N}]{1,48}/gu);
     if (tokens === null) continue;
@@ -1112,12 +1140,28 @@ export function controlMatchesPrivateQueryV2(el: InteractiveElement, query: stri
       if (safe !== null) combined.add(safe);
     }
   }
-  if (role === "select") {
-    // Common spoken words for the wire role keep role-term queries reachable.
-    combined.add("dropdown");
-    combined.add("combobox");
+  if (needles.every((needle) => combined.has(needle))) {
+    return { rank: 2, provenance: "text" };
   }
-  return needles.every((needle) => combined.has(needle));
+  const container = names?.container ?? el.container;
+  const separator = container?.indexOf(":") ?? -1;
+  const kind = separator < 0 ? "" : container!.slice(0, separator).toLowerCase();
+  // Explicit form/dialog ownership is local enough to be useful. Broad main,
+  // navigation and section copy is not query authority.
+  if (["form", "fieldset", "dialog"].includes(kind)) {
+    const contextTerms = privateQueryTermsV2(container!.slice(separator + 1));
+    if (contextTerms !== null) {
+      const context = new Set(contextTerms);
+      if (needles.every((needle) => context.has(needle))) {
+        return { rank: 3, provenance: "context" };
+      }
+    }
+  }
+  return null;
+}
+
+export function controlMatchesPrivateQueryV2(el: InteractiveElement, query: string): boolean {
+  return controlQueryMatchV2(el, query) !== null;
 }
 
 function roleOf(el: InteractiveElement): SafeRoleV2 | null {
@@ -1132,11 +1176,7 @@ function roleOf(el: InteractiveElement): SafeRoleV2 | null {
   if (el.tag === "a" || role === "link") return "link";
   if (role === "tab") return "tab";
   if (role === "menuitem" || role === "option") return "menuitem";
-  if (
-    el.tag === "button" ||
-    role === "button" ||
-    (el.topmost !== null && el.topmost !== undefined)
-  ) {
+  if (el.tag === "button" || role === "button") {
     return "button";
   }
   return null;
@@ -1275,6 +1315,10 @@ export function safeStageV2(url: string, elements: readonly InteractiveElement[]
     return field === "email" || field === "username" || field === "password";
   });
   const hasPasswordField = authFields.some((el) => fieldOf(el, paymentContext) === "password");
+  const authRoute =
+    /(?:^|\/)(?:login|log-in|signin|sign-in|signup|sign-up|register|auth)(?:\.(?:php|html?))?(?:\/|$)/.test(
+      pathname,
+    );
   const hasScopedAuthForm = actionableElements.some((el) => {
     if (roleOf(el) !== "button" || (intentOf(el) !== "login" && intentOf(el) !== "signup")) {
       return false;
@@ -1291,7 +1335,11 @@ export function safeStageV2(url: string, elements: readonly InteractiveElement[]
       )
     );
   });
-  if (hasPasswordField || hasScopedAuthForm) return "auth";
+  // A password editor on an authenticated settings page is a form, not proof
+  // that the whole document is a login surface. Require a local login/signup
+  // submit owner, or an auth route plus an auth field.
+  if (hasScopedAuthForm || (authRoute && (hasPasswordField || authFields.length > 0)))
+    return "auth";
   if (routeStage !== null) return routeStage;
   const hasPaymentField = actionableElements.some((el) => {
     const role = roleOf(el);

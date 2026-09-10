@@ -44,7 +44,12 @@ describe("broker context coordination", () => {
           resource_type: "fetch",
           reason: "host_not_allowed",
           count: 1,
-          remedy: { action: "allow_host", host: "b.test" },
+          owner: expect.objectContaining({ frame: "main", hostname: "a.test" }),
+          remedy: {
+            action: "restart_session",
+            tool: "operate_start",
+            allowed_host: "b.test",
+          },
         }),
       ]);
       expect(b.takeHostScopeDenials()).toEqual([]);
@@ -62,15 +67,27 @@ describe("broker context coordination", () => {
         "fetch('https://api.external.test/private/path?secret=never-report').then(() => 'escaped', () => 'blocked')",
       ),
     ).toBe("blocked");
+    expect(
+      await page(a).evaluate(
+        "fetch('https://api.external.test/another?secret=also-never-report').then(() => 'escaped', () => 'blocked')",
+      ),
+    ).toBe("blocked");
     const [diagnostic] = a.takeHostScopeDenials();
     expect(diagnostic).toMatchObject({
       hostname: "api.external.test",
       resource_type: "fetch",
       reason: "host_not_allowed",
-      remedy: { action: "allow_host", host: "api.external.test" },
+      count: 2,
+      owner: { frame: "main", hostname: "a.test" },
+      remedy: {
+        action: "restart_session",
+        tool: "operate_start",
+        allowed_host: "api.external.test",
+      },
     });
     expect(JSON.stringify(diagnostic)).not.toContain("private/path");
     expect(JSON.stringify(diagnostic)).not.toContain("never-report");
+    expect(diagnostic!.first_seen_at).toBeLessThanOrEqual(diagnostic!.last_seen_at);
 
     aHosts.push("api.external.test");
     expect(
@@ -89,6 +106,7 @@ describe("broker context coordination", () => {
     ).toBe("blocked");
     expect(a.takeHostScopeDenials()).toEqual([]);
     expect(b.takeHostScopeDenials()).toHaveLength(1);
+    expect(root.takeHostScopeDenials()).toEqual([]);
   });
 
   it("clears Cloudflare cookies only for the recovering site's exact cookie scope", async () => {

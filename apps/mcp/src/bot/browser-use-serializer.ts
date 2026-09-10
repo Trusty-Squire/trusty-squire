@@ -28,6 +28,13 @@ export interface BrowserUseNode {
   showScroll: boolean;
   scrollText: string;
   clickListener: boolean;
+  /**
+   * Production action ownership resolved by the capture adapter. `undefined`
+   * keeps the pinned canonical predicate for generated fixtures; a boolean is
+   * authoritative for live Squire projections so full DOM and query share one
+   * action inventory.
+   */
+  actionOwned?: boolean;
   formAssociated?: boolean;
   axRole: string | null;
   axProperties: Array<{ name: string; value: unknown }>;
@@ -174,14 +181,14 @@ export function browserUseInteractive(n: BrowserUseNode, canonical = false): boo
   const t = tag(n),
     a = n.attributes;
   if (n.nodeType !== 1 || t === "html" || t === "body") return false;
+  if (!canonical && n.actionOwned !== undefined) return n.actionOwned;
   // Production action authority comes only from executable/semantic evidence.
   // Keep the pinned browser-use predicate available under `canonical`, but do
   // not let presentation (pointer cursor, icon geometry, search-like classes,
   // or focusability alone) manufacture an operator target.
   if (!canonical) {
-    if ("inert" in a || "disabled" in a || a["aria-disabled"] === "true") return false;
-    if (n.axProperties.some((p) => ["disabled", "hidden"].includes(p.name) && p.value))
-      return false;
+    if ("inert" in a || n.axProperties.some((p) => p.name === "hidden" && p.value)) return false;
+    if (t === "label" && a.for) return false;
     const native =
       ["button", "select", "textarea", "details", "summary", "option", "optgroup"].includes(t) ||
       (t === "a" && "href" in a) ||

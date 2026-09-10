@@ -4225,7 +4225,7 @@ describe("Compact V2 action-map boundary", () => {
     }
   });
 
-  it("pages the map cursor with query/role filters and keeps filtered pages bound to their filter", async () => {
+  it("keeps every continuation cursor bound to its original query and snapshot", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = Array.from({ length: 250 }, (_, index) =>
       elem({
@@ -4249,27 +4249,20 @@ describe("Compact V2 action-map boundary", () => {
       OBSERVE_V2_MAX_WIRE_BYTES,
     );
     const pageCursor = defaultPage.overflow.next_cursor;
-    // A filter riding on the MAP cursor means "search the whole map for this":
-    // it resolves the filtered lookup instead of rejecting with invalid_cursor
-    // (the live Xata failure).
-    const byQuery = (await provisionObserveTool.handler(
-      {
-        session_id: started.session_id,
-        query: "Item 149",
-        cursor: pageCursor,
-        format: "full",
-      },
-      null,
-    )) as {
-      format: string;
-      safe_table: unknown[];
-    };
-    expect(byQuery.format).toBe("browser-use-control-query");
-    expect(byQuery.safe_table).toHaveLength(1);
-    const byRole = (await observeQuery(started.session_id, "", "button", pageCursor)) as {
-      safe_table: unknown[];
-    };
-    expect(byRole.safe_table.length).toBeGreaterThan(0);
+    await expect(
+      provisionObserveTool.handler(
+        {
+          session_id: started.session_id,
+          query: "Item 149",
+          cursor: pageCursor,
+          format: "full",
+        },
+        null,
+      ),
+    ).rejects.toThrow("invalid_cursor");
+    await expect(observeQuery(started.session_id, "", "button", pageCursor)).rejects.toThrow(
+      "invalid_cursor",
+    );
     retainActivePaymentFieldSeal();
     // A cursor minted on a FILTERED page continues that filtered list.
     const queryPage = await observeQuery(started.session_id, "Item");
@@ -4321,7 +4314,7 @@ describe("Compact V2 action-map boundary", () => {
     expect(finalPage.overflow).toBeUndefined();
   });
 
-  it("pages across a benign form re-render, retiring cursors but not refs", async () => {
+  it("keeps a continuation immutable across a rerender while a cursorless query refreshes", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = Array.from({ length: 250 }, (_, index) =>
       elem({
@@ -4338,19 +4331,25 @@ describe("Compact V2 action-map boundary", () => {
     const pageCursor = (
       (await observeQuery(started.session_id, "")).overflow as { next_cursor: string }
     ).next_cursor;
-    // A validation state appears on a live field between pages: the element
-    // set no longer byte-matches the frozen snapshot, but paging must
-    // re-serialize the same document instead of failing with stale_cursor.
+    // A validation state appears between pages. The continuation still means
+    // the original result snapshot; it does not silently change membership or
+    // facts underneath its positional offset.
     (h.elements[3] as { required?: boolean }).required = true;
     const nextPage = (await observeQuery(started.session_id, "", undefined, pageCursor)) as {
-      safe_table: Array<[string]>;
+      safe_table: Array<[string, string, string?]>;
       overflow?: { next_cursor: string };
     };
     expect(nextPage.safe_table.length).toBeGreaterThan(0);
-    // The pre-resync cursor is a positional offset into the OLD serialization
-    // and must be dead, never silently re-paged.
-    await expect(observeQuery(started.session_id, "", undefined, pageCursor)).rejects.toThrow(
-      "stale_cursor",
+    expect(JSON.stringify(nextPage.safe_table)).not.toContain("s=r");
+    const repeated = await observeQuery(started.session_id, "", undefined, pageCursor);
+    expect(repeated.safe_table).toEqual(nextPage.safe_table);
+
+    const refreshed = await observeQuery(started.session_id, "Item 3");
+    expect(JSON.stringify(refreshed.safe_table)).toContain("s=r");
+    // The bounded old snapshot survives the fresh read and still has its old
+    // meaning. Returned refs are independently revalidated at action time.
+    expect((await observeQuery(started.session_id, "", undefined, pageCursor)).safe_table).toEqual(
+      nextPage.safe_table,
     );
     // A ref issued before the re-render is NOT positional and stays valid:
     // the element it names is still there and unchanged.
@@ -10252,7 +10251,7 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
     expect(h.clickCalls).toBe(1);
   });
 
-  it("pages overflow deterministically and accepts query/role filters without invalid_cursor", async () => {
+  it("pages overflow deterministically and rejects a different filter on a map cursor", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = Array.from({ length: 400 }, (_, index) =>
       elem({
@@ -10293,51 +10292,30 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
     }
     expect(seen.size).toBe(400);
 
-    // The cursor minted by an UNFILTERED overflow page is still a map cursor:
-    // paging twice and then naming what the model is looking for must resolve
-    // the filtered lookup, not reject with invalid_cursor one page in.
+    // A continuation token keeps the exact map/query meaning it was minted
+    // with; a new filter is a new cursorless read.
     expect(pagedCursors.length).toBeGreaterThan(0);
     const secondPageCursor = pagedCursors[0]!;
-    const fromSecondPage = (await observeQuery(
-      started.session_id,
-      "control 399",
-      undefined,
-      secondPageCursor,
-    )) as { safe_table: Array<[string, string, string?]> };
-    expect(fromSecondPage.safe_table).toHaveLength(1);
-    const roleFromSecondPage = (await observeQuery(
-      started.session_id,
-      "",
-      "button",
-      secondPageCursor,
-    )) as { safe_table: unknown[] };
-    expect(roleFromSecondPage.safe_table.length).toBeGreaterThan(0);
+    await expect(
+      observeQuery(started.session_id, "control 399", undefined, secondPageCursor),
+    ).rejects.toThrow("invalid_cursor");
+    await expect(observeQuery(started.session_id, "", "button", secondPageCursor)).rejects.toThrow(
+      "invalid_cursor",
+    );
 
-    // Paging while naming what the model is looking for (a query or role
-    // filter alongside the MAP cursor — exactly how the live run drove the
-    // Xata page) must never reject with invalid_cursor; it performs the
-    // filtered lookup over the whole map and stays paged.
-    const byQuery = (await observeQuery(
-      started.session_id,
-      "control 399",
-      undefined,
-      mapCursor,
-    )) as { safe_table: Array<[string, string, string?]> };
-    expect(byQuery.safe_table).toHaveLength(1);
-    const byRole = (await observeQuery(started.session_id, "", "button", mapCursor)) as {
-      safe_table: unknown[];
-      overflow?: { next_cursor: string } | undefined;
+    // The original live misuse now receives a precise refusal; removing the
+    // cursor performs the requested fresh filtered read.
+    await expect(
+      observeQuery(started.session_id, "control 399", undefined, mapCursor),
+    ).rejects.toThrow("invalid_cursor");
+    await expect(observeQuery(started.session_id, "", "button", mapCursor)).rejects.toThrow(
+      "invalid_cursor",
+    );
+    const byQuery = (await observeQuery(started.session_id, "control 399")) as {
+      safe_table: Array<[string, string, string?]>;
     };
-    expect(byRole.safe_table.length).toBeGreaterThan(0);
-    if (byRole.overflow !== undefined) {
-      const nextPage = (await observeQuery(
-        started.session_id,
-        "",
-        "button",
-        byRole.overflow.next_cursor,
-      )) as { safe_table: unknown[] };
-      expect(Array.isArray(nextPage.safe_table)).toBe(true);
-    }
+    expect(byQuery.safe_table).toHaveLength(1);
+    expect(byQuery.safe_table[0]![2]).toContain("m=t");
   });
 
   it("finds controls by generic terms across label, role word, and placeholder", async () => {
@@ -10382,6 +10360,32 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
       safe_table: unknown[];
     };
     expect(placeholder.safe_table).toHaveLength(1);
+  });
+
+  it("refreshes rows and page semantics on every cursorless query", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.observationSemantics = { title: "Loading", headings: ["Please wait"] };
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Old action", selector: "#old" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://xata.example.com/settings",
+    });
+    const first = await observeQuery(started.session_id, "action");
+    expect(first.semantic).toEqual({ title: "Loading", headings: ["Please wait"] });
+    expect(JSON.stringify(first.safe_table)).toContain("@old-action");
+
+    h.observationSemantics = { title: "API keys", headings: ["Developer settings"] };
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Create key", selector: "#create" }),
+    ];
+    const second = await observeQuery(started.session_id, "key");
+    expect(second.semantic).toEqual({
+      title: "API keys",
+      headings: ["Developer settings"],
+    });
+    expect(JSON.stringify(second.safe_table)).toContain("@create-key");
+    expect(JSON.stringify(second.safe_table)).not.toContain("@old-action");
   });
 
   it("never trips the budget cliff on a real-world OAuth-shaped URL", async () => {

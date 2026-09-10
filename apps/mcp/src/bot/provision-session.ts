@@ -62,7 +62,7 @@ import {
   StableObservationRefs,
   isCompactV2Handle,
   isCompactV2Label,
-  controlMatchesPrivateQueryV2,
+  controlQueryMatchV2,
   encodeV2QueryPage,
   compactV2AuditHost,
   compactV2AuditUrl,
@@ -1489,20 +1489,6 @@ function sameCompactV2Intent(left: SafeControlV2, right: SafeControlV2): boolean
     left.field === right.field &&
     left.frame === right.frame &&
     left.label === right.label
-  );
-}
-
-/** Row equality over the normalized action-map representation. */
-function sameCompactV2Control(left: SafeControlV2, right: SafeControlV2): boolean {
-  return (
-    left.role === right.role &&
-    left.state === right.state &&
-    left.visibility === right.visibility &&
-    left.action === right.action &&
-    left.field === right.field &&
-    left.label === right.label &&
-    left.choice === right.choice &&
-    left.frame === right.frame
   );
 }
 
@@ -4189,12 +4175,70 @@ function compactV2HintCursorScope(session: Session): string {
     .slice(0, 10);
 }
 
-function compactV2Cursor(session: Session, rev: number, offset: number, scope: string): string {
-  // The session-held index owns the five-minute expiry, so the cursor need not
-  // repeat a UUID/timestamp on every dense-page observation. A session-secret
-  // HMAC makes this compact in-MCP token unforgeable across sessions. Binding
-  // the epoch revision is what kills a page offset across a re-serialization.
-  const body = `${rev.toString(36)}:${offset.toString(36)}:${scope}`;
+interface CompactV2PagingSnapshot {
+  id: string;
+  scope: string;
+  epoch: ObservationEpochV2;
+  stage: SafeStageV2;
+  semantics: SafePageSemanticsV2;
+  pageUrl: string;
+  rows: readonly SafeControlV2[];
+  hintPages: readonly string[];
+  expiresAt: number;
+}
+
+const compactV2PagingSnapshots = new WeakMap<
+  Session,
+  { sequence: number; snapshots: Map<string, CompactV2PagingSnapshot> }
+>();
+const COMPACT_V2_MAX_PAGING_SNAPSHOTS = 12;
+
+function retainCompactV2PagingSnapshot(
+  session: Session,
+  index: SafeObservationIndexV2,
+  scope: string,
+  pageUrl: string,
+  rows: readonly SafeControlV2[],
+  hintPages: readonly string[] = [],
+): CompactV2PagingSnapshot {
+  let state = compactV2PagingSnapshots.get(session);
+  if (state === undefined) {
+    state = { sequence: 0, snapshots: new Map() };
+    compactV2PagingSnapshots.set(session, state);
+  }
+  const now = Date.now();
+  for (const [id, snapshot] of state.snapshots) {
+    if (snapshot.expiresAt < now) state.snapshots.delete(id);
+  }
+  const snapshot: CompactV2PagingSnapshot = {
+    id: (++state.sequence).toString(36),
+    scope,
+    epoch: { ...index.epoch },
+    stage: index.stage,
+    semantics: { ...index.semantics },
+    pageUrl,
+    rows: rows.map((row) => ({ ...row })),
+    hintPages: [...hintPages],
+    expiresAt: Math.min(index.expiresAt, now + 5 * 60_000),
+  };
+  state.snapshots.set(snapshot.id, snapshot);
+  while (state.snapshots.size > COMPACT_V2_MAX_PAGING_SNAPSHOTS) {
+    const oldest = state.snapshots.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    state.snapshots.delete(oldest);
+  }
+  return snapshot;
+}
+
+function compactV2Cursor(
+  session: Session,
+  snapshot: CompactV2PagingSnapshot,
+  offset: number,
+): string {
+  // The cursor identifies an immutable, bounded paging snapshot. Fresh reads
+  // may replace the live action map without changing what an older cursor
+  // means; action-time resolution still revalidates every returned ref.
+  const body = `${snapshot.id}:${snapshot.epoch.rev.toString(36)}:${offset.toString(36)}:${snapshot.scope}`;
   const signature = createHmac("sha256", session.compactV2Secret)
     .update(body)
     .digest("base64url")
@@ -4319,7 +4363,7 @@ function parseCompactV2Cursor(
   session: Session,
   cursor: string,
   expectedScope: string,
-): { rev: number; offset: number } {
+): { snapshot: CompactV2PagingSnapshot; offset: number } {
   const [body, signature, extra] = cursor.split(".");
   if (body === undefined || signature === undefined || extra !== undefined)
     throw new Error("invalid_cursor");
@@ -4328,8 +4372,9 @@ function parseCompactV2Cursor(
     .digest("base64url")
     .slice(0, 12);
   if (signature !== expected) throw new Error("invalid_cursor");
-  const [revRaw, offsetRaw, scope, extraPart] = body.split(":");
+  const [id, revRaw, offsetRaw, scope, extraPart] = body.split(":");
   if (
+    id === undefined ||
     revRaw === undefined ||
     offsetRaw === undefined ||
     scope === undefined ||
@@ -4349,34 +4394,38 @@ function parseCompactV2Cursor(
   ) {
     throw new Error("stale_cursor");
   }
-  return { rev, offset };
+  const snapshot = compactV2PagingSnapshots.get(session)?.snapshots.get(id);
+  if (
+    snapshot === undefined ||
+    snapshot.scope !== expectedScope ||
+    snapshot.epoch.rev !== rev ||
+    snapshot.expiresAt < Date.now()
+  ) {
+    throw new Error("stale_cursor");
+  }
+  return { snapshot, offset };
 }
 
 function compactV2HintPage(
   session: Session,
-  index: SafeObservationIndexV2,
+  snapshot: CompactV2PagingSnapshot,
   offset: number,
 ): Record<string, unknown> {
-  const hint = session.compactV2HintPages[offset];
+  const hint = snapshot.hintPages[offset];
   if (hint === undefined) throw new Error("invalid_cursor");
   const nextOffset = offset + 1;
-  const remaining = session.compactV2HintPages.length - nextOffset;
+  const remaining = snapshot.hintPages.length - nextOffset;
   const payload = {
     format: "browser-use-control-query",
     url: "",
     session_id: session.id,
-    stage: index.stage,
+    stage: snapshot.stage,
     hint,
     ...(remaining > 0
       ? {
           hint_overflow: {
             remaining,
-            next_cursor: compactV2Cursor(
-              session,
-              index.epoch.rev,
-              nextOffset,
-              compactV2HintCursorScope(session),
-            ),
+            next_cursor: compactV2Cursor(session, snapshot, nextOffset),
           },
         }
       : {}),
@@ -4472,6 +4521,24 @@ function compactV2Observation(
     byRef: safe.byRef,
     expiresAt: Date.now() + 5 * 60_000,
   };
+  const controlSnapshot = retainCompactV2PagingSnapshot(
+    session,
+    session.compactV2Index,
+    compactV2ControlCursorScope(session),
+    pageUrl,
+    safe.rows,
+  );
+  const hintSnapshot =
+    session.compactV2HintPages.length > 1
+      ? retainCompactV2PagingSnapshot(
+          session,
+          session.compactV2Index,
+          compactV2HintCursorScope(session),
+          pageUrl,
+          [],
+          session.compactV2HintPages,
+        )
+      : undefined;
   session.compactV2Refs = safe.byRef;
   session.compactV2Previous = {
     epoch,
@@ -4493,8 +4560,7 @@ function compactV2Observation(
       pageUrl,
       semantics,
       rows: safe.rows,
-      cursorFor: (next) =>
-        compactV2Cursor(session, epoch.rev, next, compactV2ControlCursorScope(session)),
+      cursorFor: (next) => compactV2Cursor(session, controlSnapshot, next),
       ...(startMetadata === undefined
         ? {}
         : {
@@ -4510,12 +4576,7 @@ function compactV2Observation(
                 : {
                     hintOverflow: {
                       remaining: session.compactV2HintPages.length - 1,
-                      next_cursor: compactV2Cursor(
-                        session,
-                        epoch.rev,
-                        1,
-                        compactV2HintCursorScope(session),
-                      ),
+                      next_cursor: compactV2Cursor(session, hintSnapshot!, 1),
                     },
                   }),
             },
@@ -4542,7 +4603,7 @@ function compactV2Observation(
       ? {
           hint_overflow: {
             remaining: session.compactV2HintPages.length - 1,
-            next_cursor: compactV2Cursor(session, epoch.rev, 1, compactV2HintCursorScope(session)),
+            next_cursor: compactV2Cursor(session, hintSnapshot!, 1),
           },
         }
       : {}),
@@ -4591,162 +4652,94 @@ export async function observeQuery(
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const sourcePage = operationPageForSession(session);
-  let index = session.compactV2Index;
-  const currentDocument = compactV2EpochDoc(session, sourcePage);
-  const invalidSnapshot =
-    index === null || index.expiresAt < Date.now() || index.epoch.doc !== currentDocument;
-  // A query/role without a cursor is a fresh read, not a continuation. Capture
-  // the current document before filtering. Only a caller-supplied continuation
-  // token inherits stale-snapshot preconditions.
-  if (invalidSnapshot && cursor === undefined) {
-    if (index?.epoch.doc !== currentDocument) invalidateCompactV2Snapshot(session);
-    session.generation += 1;
-    const capture = await session.browser.extractBrowserUseObservation(sourcePage);
-    let semanticSource: ObservationSemanticSourceV2 = { title: "", headings: [] };
-    try {
-      semanticSource = await session.browser.extractObservationSemantics(sourcePage);
-    } catch {
-      // Semantics are optional; action membership comes from the canonical capture.
-    }
-    compactV2Observation(
-      session,
-      session.generation,
-      capture,
-      semanticSource,
-      undefined,
-      sourcePage,
-      "compact",
-    );
-    index = session.compactV2Index;
-  }
-  if (index === null || index.expiresAt < Date.now()) throw new Error("stale_cursor");
-  // Query/paging is part of the same session-bound action-map protocol: never return
-  // rows from a page whose private binding no longer matches the live page.
-  if (index.epoch.doc !== compactV2EpochDoc(session, sourcePage)) {
-    invalidateCompactV2Snapshot(session);
-    throw new Error("stale_cursor");
-  }
   const needle = norm(query);
   const unfiltered = needle.length === 0 && role === undefined;
   const cursorScope = unfiltered
     ? compactV2ControlCursorScope(session)
     : compactV2QueryCursorScope(session, needle, role);
-  let offset = 0;
   if (cursor !== undefined) {
-    if (unfiltered && session.compactV2HintPages.length > 0) {
+    if (unfiltered) {
       try {
         const parsed = parseCompactV2Cursor(session, cursor, compactV2HintCursorScope(session));
-        if (parsed.rev !== index.epoch.rev) throw new Error("stale_cursor");
-        return compactV2HintPage(session, index, parsed.offset);
+        if (parsed.snapshot.epoch.doc !== compactV2EpochDoc(session, sourcePage))
+          throw new Error("stale_cursor");
+        return compactV2HintPage(session, parsed.snapshot, parsed.offset);
       } catch (error) {
         if (!(error instanceof Error) || error.message !== "invalid_cursor") throw error;
       }
     }
-    // Two cursor producers share the map paging surface: the default map
-    // (scope-free with respect to filters) and filtered search pages (bound
-    // to the exact query/role). Try the map scope first; a filter riding on a
-    // MAP cursor means "search the whole map for this" — start the filtered
-    // page from the beginning rather than rejecting with invalid_cursor (the
-    // live Xata failure). Only a cursor minted on a filtered page continues
-    // that filtered list positionally.
-    let parsed: { rev: number; offset: number } | null = null;
-    try {
-      parsed = parseCompactV2Cursor(session, cursor, compactV2ControlCursorScope(session));
-    } catch (error) {
-      if (!(error instanceof Error) || error.message !== "invalid_cursor") throw error;
+    const parsed = parseCompactV2Cursor(session, cursor, cursorScope);
+    const snapshot = parsed.snapshot;
+    if (snapshot.epoch.doc !== compactV2EpochDoc(session, sourcePage)) {
+      throw new Error("stale_cursor");
     }
-    let filterBound = false;
-    if (parsed === null) {
-      parsed = parseCompactV2Cursor(session, cursor, cursorScope);
-      filterBound = true;
-    }
-    if (parsed.rev !== index.epoch.rev) throw new Error("stale_cursor");
-    offset = filterBound || unfiltered ? parsed.offset : 0;
+    const page = encodeV2QueryPage({
+      sessionId: session.id,
+      stage: snapshot.stage,
+      pageUrl: snapshot.pageUrl,
+      semantics: snapshot.semantics,
+      rows: snapshot.rows,
+      offset: parsed.offset,
+      cursorFor: (next) => compactV2Cursor(session, snapshot, next),
+    });
+    return withHostScopeDenials(session, page.payload);
   }
-  const liveElements = (await session.browser.extractBrowserUseObservation(sourcePage)).elements;
-  const liveSafe = compactV2LiveControls(session, liveElements);
-  const liveUnchanged =
-    liveSafe.rows.length === index.rows.length &&
-    liveSafe.byRef.size === session.compactV2Refs.size &&
-    liveSafe.rows.every((row, rowIndex) => sameCompactV2Control(row, index.rows[rowIndex]!)) &&
-    [...liveSafe.byRef].every(([ref, legacy]) => session.compactV2Refs.get(ref) === legacy);
-  let snapshotRows = index.rows;
-  let pagingStage = index.stage;
-  let pagingRev = index.epoch.rev;
-  if (!liveUnchanged) {
-    // Benign live re-render (validation states appearing, dynamic fields
-    // toggling, rotating checkout query tokens): re-serialize the same
-    // document instead of failing the page. Refs are unaffected — they are
-    // node-bound — but the positional page offsets are not, so the
-    // epoch's revision advances and cursors minted here bind to the fresh map.
-    session.generation += 1;
-    pagingRev = session.generation;
-    pagingStage = safeStageV2(sourcePage?.url() ?? session.browser.currentUrl(), liveElements);
-    snapshotRows = liveSafe.rows;
-    const epoch: ObservationEpochV2 = { doc: index.epoch.doc, rev: pagingRev };
-    session.compactV2Index = {
-      epoch,
-      stage: pagingStage,
-      semantics: index.semantics,
-      rows: liveSafe.rows,
-      byRef: liveSafe.byRef,
-      expiresAt: Date.now() + 5 * 60_000,
-    };
-    session.compactV2Refs = liveSafe.byRef;
-    session.compactV2Previous = {
-      epoch,
-      stage: pagingStage,
-      semantics: index.semantics,
-      byRef: new Map(liveSafe.rows.map((row) => [row.ref, row])),
-      ...(session.compactV2Previous?.dom === undefined
-        ? {}
-        : { dom: session.compactV2Previous.dom }),
-      ...(session.compactV2Previous?.renderedRefs === undefined
-        ? {}
-        : { renderedRefs: session.compactV2Previous.renderedRefs }),
-    };
+
+  // A cursorless query/role is always a fresh observation. Capture action rows
+  // and semantic page hints once, together, before filtering.
+  session.generation += 1;
+  const capture = await session.browser.extractBrowserUseObservation(sourcePage);
+  let semanticSource: ObservationSemanticSourceV2 = { title: "", headings: [] };
+  try {
+    semanticSource = await session.browser.extractObservationSemantics(sourcePage);
+  } catch {
+    // Semantics are optional; action membership comes from the canonical capture.
   }
+  compactV2Observation(
+    session,
+    session.generation,
+    capture,
+    semanticSource,
+    undefined,
+    sourcePage,
+    "compact",
+  );
+  const index = session.compactV2Index;
+  if (index === null) throw new Error("stale_cursor");
+  const liveElements = capture.elements;
   const liveByLegacy = new Map<string, InteractiveElement>();
   for (const [element, legacy] of provisionElementRefs(liveElements)) {
     liveByLegacy.set(legacy, element);
   }
-  const privateMatches = new Set<string>();
-  if (needle.length > 0) {
-    for (const [ref, legacy] of session.compactV2Refs) {
-      const element = liveByLegacy.get(legacy);
-      if (element !== undefined && controlMatchesPrivateQueryV2(element, query)) {
-        privateMatches.add(ref);
-      }
-    }
-  }
-  const rows = snapshotRows.filter((row) => {
-    const searchable = [
-      row.label,
-      row.role,
-      row.state,
-      row.visibility,
-      row.action,
-      row.field,
-      row.choice,
-      row.frame,
-    ]
-      .filter((value): value is string => value !== undefined)
-      .map(norm);
-    return (
-      (needle.length === 0 ||
-        searchable.some((value) => value.includes(needle)) ||
-        privateMatches.has(row.ref)) &&
-      (role === undefined || row.role === role)
+  const ranked = index.rows.flatMap((row, position) => {
+    if (role !== undefined && row.role !== role) return [];
+    if (needle.length === 0) return [{ row, position, rank: 0 }];
+    const legacy = index.byRef.get(row.ref);
+    const element = legacy === undefined ? undefined : liveByLegacy.get(legacy);
+    const match = element === undefined ? null : controlQueryMatchV2(element, query);
+    const semanticMatch = [row.role, row.action, row.field].some(
+      (value) => value !== undefined && norm(value) === needle,
     );
+    if (match === null && !semanticMatch) return [];
+    return [
+      {
+        row: { ...row, match: match?.provenance ?? ("text" as const) },
+        position,
+        rank: match?.rank ?? 2,
+      },
+    ];
   });
+  ranked.sort((left, right) => left.rank - right.rank || left.position - right.position);
+  const rows = ranked.map(({ row }) => row);
+  const pageUrl = sourcePage?.url() ?? session.browser.currentUrl();
+  const snapshot = retainCompactV2PagingSnapshot(session, index, cursorScope, pageUrl, rows);
   const page = encodeV2QueryPage({
     sessionId: session.id,
-    stage: pagingStage,
-    pageUrl: sourcePage?.url() ?? session.browser.currentUrl(),
+    stage: snapshot.stage,
+    pageUrl: snapshot.pageUrl,
     semantics: index.semantics,
     rows,
-    offset,
-    cursorFor: (next) => compactV2Cursor(session, pagingRev, next, cursorScope),
+    cursorFor: (next) => compactV2Cursor(session, snapshot, next),
   });
   return withHostScopeDenials(session, page.payload);
 }
@@ -6166,10 +6159,12 @@ async function executeAct(
           );
   return {
     ...(actionPageAfter === undefined ? {} : { operationPage: actionPageAfter }),
-    observation:
+    observation: withHostScopeDenials(
+      session,
       completedAction.kind === "select" && observation.format !== "browser-use-dom"
         ? { ...observation, selected_option: completedAction.text }
         : observation,
+    ),
     outcome: {
       ...(completedAction.kind === "select" ? { selectedOption: completedAction.text } : {}),
       ...(checkoutState === undefined ? {} : { checkoutState }),
