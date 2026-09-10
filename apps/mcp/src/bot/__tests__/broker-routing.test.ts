@@ -109,6 +109,33 @@ describe("broker context coordination", () => {
     expect(root.takeHostScopeDenials()).toEqual([]);
   });
 
+  it("separates subframe document generations before diagnostic delivery", async () => {
+    const { a, aHosts, page } = await fixture();
+    aHosts.push("frame-a.test", "frame-b.test");
+    await page(a).evaluate(() => {
+      const frame = document.createElement("iframe");
+      frame.src = "https://frame-a.test/";
+      document.body.append(frame);
+    });
+    await page(a).locator("iframe").contentFrame().locator("main").waitFor();
+    const frame = page(a)
+      .frames()
+      .find((item) => item.url().includes("frame-a.test"))!;
+    await frame.evaluate(() =>
+      fetch("https://denied.test/private?secret=one").catch(() => undefined),
+    );
+    await frame.goto("https://frame-b.test/");
+    await frame.evaluate(() =>
+      fetch("https://denied.test/private?secret=two").catch(() => undefined),
+    );
+    const rows = a.takeHostScopeDenials();
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.owner.hostname)).toEqual(["frame-a.test", "frame-b.test"]);
+    expect(rows[0]!.owner.document_id).not.toBe(rows[1]!.owner.document_id);
+    expect(rows.map((row) => row.count)).toEqual([1, 1]);
+    expect(JSON.stringify(rows)).not.toContain("secret=");
+  });
+
   it("clears Cloudflare cookies only for the recovering site's exact cookie scope", async () => {
     const { context, a } = await fixture();
     await context.addCookies([

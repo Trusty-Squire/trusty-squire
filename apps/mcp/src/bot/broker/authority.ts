@@ -563,7 +563,28 @@ export class BrokerAuthority {
     return await actor.port.invoke("operate_finish", args, signal, requestId);
   }
 
-  async close(principal: BrokerPrincipal, capability: TabCapability): Promise<boolean> {
+  retireFinished(principal: BrokerPrincipal, sessionId: string): void {
+    const actor = this.actors.get(sessionId);
+    if (actor === undefined) return;
+    if (
+      (principal.forwarderId === undefined
+        ? actor.principal.clientId !== principal.clientId
+        : actor.principal.forwarderId !== principal.forwarderId) ||
+      actor.principal.accountId !== principal.accountId ||
+      actor.state !== "closing"
+    )
+      throw new BrokerRefusal("stale_lease", "Terminal completion does not own this closing actor");
+    this.actors.delete(sessionId);
+    this.scheduler.release(sessionId);
+    this.retireFencedClient(actor.principal.clientId);
+  }
+
+  async close(
+    principal: BrokerPrincipal,
+    capability: TabCapability,
+    terminalProven = false,
+  ): Promise<boolean> {
+    if (terminalProven && !this.actors.has(capability.sessionId)) return true;
     return await this.closeActor(this.resolve(principal, capability), "finish");
   }
 

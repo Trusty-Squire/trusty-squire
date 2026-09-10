@@ -1,4 +1,4 @@
-import type { BrowserContext, Page } from "playwright";
+import type { BrowserContext, Frame, Page } from "playwright";
 import { OwnedPages } from "./owned-pages.js";
 
 /** One session's page lifetime; never launches or terminates a browser process. */
@@ -28,6 +28,8 @@ export class PageDriver {
   private readonly documentSubscriptions = new Map<Page, () => void>();
 
   private mainDocumentSequence = 0;
+  private readonly frameDocuments = new WeakMap<Frame, number>();
+  private frameDocumentSequence = 0;
 
   private readonly mainDocumentIdentities = new WeakMap<Page, number>();
 
@@ -79,15 +81,27 @@ export class PageDriver {
     const onDocument = (): void => {
       this.mainDocumentIdentities.set(page, ++this.mainDocumentSequence);
     };
+    const onFrameDocument = (frame: Frame): void => {
+      this.frameDocuments.set(frame, ++this.frameDocumentSequence);
+    };
     const dispose = (): void => {
+      page.off("framenavigated", onFrameDocument);
       page.off("domcontentloaded", onDocument);
       page.off("close", dispose);
       this.documentSubscriptions.delete(page);
       this.trackedMainDocumentPages.delete(page);
     };
     this.documentSubscriptions.set(page, dispose);
+    page.on("framenavigated", onFrameDocument);
     page.on("domcontentloaded", onDocument);
     page.on("close", dispose);
+  }
+
+  frameDocumentIdentity(frame: Frame): string {
+    this.trackMainDocument(frame.page());
+    if (!this.frameDocuments.has(frame))
+      this.frameDocuments.set(frame, ++this.frameDocumentSequence);
+    return `frame-${this.frameDocuments.get(frame)}`;
   }
 
   mainDocumentIdentity(page: Page | null = this.page): string {

@@ -1,4 +1,8 @@
-import { markOperatorMutationDispatchAttempted } from "../request-cancellation.js";
+import {
+  persistOperatorTerminalReceipt,
+  settleOperatorTerminalReceipt,
+  markOperatorMutationDispatchAttempted,
+} from "../request-cancellation.js";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -1300,6 +1304,116 @@ it("records cancelled navigation before its executor checkpoint as not dispatche
     });
   } finally {
     release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("retires a closing actor when terminal cleanup settles after delivery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "late-finish-"));
+  const journal = new DispatchJournal(join(root, "journal.jsonl"));
+  const broker = new OperatorBroker(
+    {
+      accountId: "account",
+      agentSessionToken: "token",
+      apiBaseUrl: "http://unused.test",
+      registryBaseUrl: "http://unused.test",
+    },
+    "cell",
+    journal,
+  );
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let cleanup: Promise<void> | undefined;
+  let count = 0;
+  const tools: Tool[] = [
+    {
+      name: "operate_start",
+      description: "",
+      inputSchema: z.object({ service_url: z.string() }),
+      jsonInputSchema: {},
+      handler: async () => {
+        const id = `internal-${++count}`;
+        state.sessions.set(id, {
+          browser: {
+            brokerTargetId: async () => id,
+            isConnected: () => true,
+            waitForThreeDsResolution: async () => "succeeded",
+          },
+          pendingThreeDs: null,
+        });
+        return { session_id: id };
+      },
+    },
+    {
+      name: "operate_finish",
+      description: "",
+      inputSchema: z.object({ session_id: z.string() }),
+      jsonInputSchema: {},
+      handler: async (args) => {
+        cleanup = (async () => {
+          await gate;
+          await persistOperatorTerminalReceipt({
+            session_id: args.session_id,
+            operation_id: "finish",
+            execution: "completed",
+            mutation: "not_dispatched",
+            cleanup: "closed",
+            closed: true,
+          });
+          state.sessions.delete(args.session_id);
+          settleOperatorTerminalReceipt();
+        })();
+        return { session_id: args.session_id, closed: false, cleanup: "closing" };
+      },
+    },
+  ];
+  Object.defineProperty(broker, "tools", { value: tools });
+  try {
+    const identity = await broker.authenticate("token", "agent", "q".repeat(43));
+    if (!identity) throw new Error("authentication failed");
+    const principal = { ...identity, clientId: "client" };
+    await broker.connected(principal);
+    const { capability } = (await broker.call(
+      principal,
+      "tool",
+      { name: "operate_start", args: { service_url: "https://resend.com/" } },
+      "start",
+    )) as { capability: TabCapability };
+    await broker.acknowledge(principal, "start");
+    await broker.confirmStartDelivery(principal, { capability });
+    expect(
+      await broker.call(
+        principal,
+        "tool",
+        { name: "operate_finish", capability, args: { session_id: capability.sessionId } },
+        "finish",
+      ),
+    ).toMatchObject({ result: { closed: false } });
+    expect(broker.authority.inventory().quarantined).toBe(1);
+    release();
+    await cleanup;
+    expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
+    expect(
+      await broker.call(
+        principal,
+        "tool",
+        { name: "operate_finish", capability, args: { session_id: capability.sessionId } },
+        "retry",
+      ),
+    ).toMatchObject({ result: { closed: true, cleanup: "already_closed" } });
+    expect(
+      await broker.call(
+        principal,
+        "tool",
+        { name: "operate_start", args: { service_url: "https://resend.com/" } },
+        "next",
+      ),
+    ).toHaveProperty("capability");
+  } finally {
+    release();
+    await cleanup;
     await rm(root, { recursive: true, force: true });
   }
 });

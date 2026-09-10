@@ -13,7 +13,8 @@ function interpolate(value, bindings, results) {
   if (typeof value === "string") {
     return value
       .replaceAll("$RUN_LABEL", bindings.run.run_label)
-      .replaceAll("$SESSION_ID", bindings.sessionId);
+      .replaceAll("$SESSION_ID", bindings.sessionId)
+      .replaceAll("$CREDENTIAL_ID", bindings.providerCredential?.id ?? "$CREDENTIAL_ID");
   }
   if (Array.isArray(value)) return value.map((item) => interpolate(item, bindings, results));
   if (value && typeof value === "object") {
@@ -50,7 +51,7 @@ function evidenceValue(spec, results, bindings) {
   return spec.as === "timestamp" ? Date.parse(match.groups.value) : match.groups.value;
 }
 
-async function execute(stage, call, sessionId, run) {
+async function execute(stage, call, sessionId, run, providerCredential) {
   assert.ok(
     Array.isArray(stage.steps) && stage.steps.length <= 12,
     "Driver stage requires at most 12 bounded steps",
@@ -66,7 +67,7 @@ async function execute(stage, call, sessionId, run) {
     }
     const args = interpolate(
       { ...(step.arguments ?? {}), session_id: sessionId },
-      { run, sessionId },
+      { run, sessionId, providerCredential },
       results,
     );
     let result;
@@ -80,11 +81,14 @@ async function execute(stage, call, sessionId, run) {
     if (step.require_pattern)
       assert.match(
         rendered,
-        new RegExp(interpolate(step.require_pattern, { run, sessionId }, results), "u"),
+        new RegExp(
+          interpolate(step.require_pattern, { run, sessionId, providerCredential }, results),
+          "u",
+        ),
       );
     results.set(step.id, result);
   }
-  return { results, bindings: { run, sessionId } };
+  return { results, bindings: { run, sessionId, providerCredential } };
 }
 
 export async function captureCredentialBaseline({ call, sessionId, run, service }) {
@@ -124,10 +128,43 @@ export async function provision({ call, sessionId, run, service }) {
   };
 }
 
-export async function revokeCredential({ call, sessionId, run, service }) {
+export async function revokeCredential({ call, sessionId, run, service, providerCredential }) {
   assert.ok(
     service.driverEvidence.revoke,
     "Revoke policy requires an explicit bounded revoke stage",
   );
-  await execute(service.driverEvidence.revoke, call, sessionId, run);
+  assert.equal(
+    providerCredential.label,
+    run.run_label,
+    "Revocation requires the run-bound credential",
+  );
+  assert.equal(
+    providerCredential.account_id,
+    run.provider_account_id,
+    "Revocation account mismatch",
+  );
+  const stage = service.driverEvidence.revoke;
+  for (const key of ["provider_credential_id", "status"]) {
+    assert.ok(
+      stage.evidence?.[key]?.step && !Object.hasOwn(stage.evidence[key], "literal"),
+      "Revocation requires observed cleanup evidence",
+    );
+  }
+  const { results, bindings } = await execute(stage, call, sessionId, run, providerCredential);
+  assert.equal(
+    evidenceValue(stage.evidence.provider_credential_id, results, bindings),
+    providerCredential.id,
+    "Revocation credential mismatch",
+  );
+  assert.equal(
+    evidenceValue(stage.evidence.status, results, bindings),
+    "revoked",
+    "Revocation is not confirmed",
+  );
+  return {
+    policy: "revoke",
+    status: "revoked",
+    provider_credential_id: providerCredential.id,
+    completed_at: Date.now(),
+  };
 }

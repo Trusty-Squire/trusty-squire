@@ -678,3 +678,55 @@ describe("MCP broker forwarding", () => {
     }
   });
 });
+
+it("retries finish without requiring an already closing actor to confirm start delivery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "late-finish-forward-"));
+  const capability = {
+    cellId: "cell",
+    browserEpoch: "epoch",
+    sessionId: "session",
+    targetId: "target",
+    leaseGeneration: "one",
+  };
+  let finished = false;
+  const broker = await listenBroker(join(root, "b.sock"), {
+    authenticate: async () => ({ accountId: "account", agentId: "agent" }),
+    call: async (_principal, method) => {
+      if (method === "reclaim") return { capabilities: [capability] };
+      if (method === "confirm_start") throw new Error("actor is closing");
+      if (method === "acknowledge") return {};
+      return {
+        result: {
+          session_id: "session",
+          closed: finished,
+          cleanup: finished ? "already_closed" : "closing",
+        },
+      };
+    },
+    disconnect: async () => undefined,
+  });
+  const guard: SessionGuard = {
+    bind: async () => ({
+      account_id: "account",
+      agent_session_token: "test",
+      api_base_url: "http://unused.test",
+      saved_at: "",
+    }),
+    inspect: async () => ({ problem: null }),
+    boundAccountId: () => "account",
+  };
+  const forwarder = new OperatorForwarder(join(root, "b.sock"), guard, credential("f"));
+  try {
+    expect(
+      await forwarder.invoke("operate_finish", { session_id: "session" }, "first"),
+    ).toMatchObject({ closed: false });
+    finished = true;
+    expect(
+      await forwarder.invoke("operate_finish", { session_id: "session" }, "second"),
+    ).toMatchObject({ closed: true, cleanup: "already_closed" });
+  } finally {
+    await forwarder.close();
+    await broker.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

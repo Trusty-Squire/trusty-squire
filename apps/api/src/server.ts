@@ -240,8 +240,8 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     },
   });
   await fastify.register(registerNotifyRoute, {
+    requireAgent: auth.requireAgent,
     deps: {
-      machineTokenStore: deps.machineTokenStore,
       accountStore: deps.accountStore,
       ...(opts.emailForwarder !== undefined ? { emailForwarder: opts.emailForwarder } : {}),
       ...(deps.now !== undefined ? { now: deps.now } : {}),

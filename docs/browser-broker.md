@@ -272,8 +272,12 @@ its cookies into the harness.
    account ID, and creation timestamp. If any fact is absent or ambiguous, stop:
    a guessed selector, harness timestamp, or old key is not qualifying evidence.
    For `revoke`, add a bounded stage whose first calls re-observe the exact new
-   provider ID and whose final call revokes that ID; it runs only after the new
-   credential probe succeeds.
+   provider ID, revokes that ID, and reads the resulting confirmation. Set
+   `driverEvidence.revoke.evidence.provider_credential_id` and `.status` to
+   observed step/path evidence (not literals); status must resolve to `revoked`
+   and the ID must equal the supplied fresh credential. `$CREDENTIAL_ID` binds
+   that credential in revoke-stage arguments and patterns. The driver returns
+   the bound cleanup receipt only after confirmation; it runs after the probe.
    `apps/mcp/scripts/bounded-driver-evidence.example.json` is the copyable,
    executable schema; replace its `observed-*` refs and evidence patterns only
    after those values have been read from the live page. Use unique stable
@@ -294,9 +298,8 @@ its cookies into the harness.
    Add the `driverEvidence` object described above to each service. Provider probes are reviewed in
    `apps/mcp/scripts/fresh-credential-policy.mjs`; drivers cannot substitute an
    arbitrary request or self-assert harmlessness. The current probes are Resend
-   `GET /domains` and Neon `GET /api/v2/projects`. The policy library retains
-   an optional Xata probe, but the final manifest neither needs nor accepts a
-   Xata session.
+   `GET /domains` and Neon `GET /api/v2/projects`. The final manifest and probe
+   catalog accept only these two providers.
 
    Installed-command initialization is only a packaging/stdio diagnostic. It
    does not prove that the configured native host selected or connected to that
@@ -345,8 +348,12 @@ exit, and sanitized stderr classification. It must report `ready`. The separate
 configured-host evidence must also validate; neither installed-command nor SDK
 concurrency substitutes for the actual configured native host connection.
 
-The concurrency arm launches three independent MCP stdio servers and the
-production broker, requires actual Google admission, validates old and new keys
+The concurrency arm launches three independent MCP stdio servers and a production
+broker per enrolled profile. Set `services[].profileDir` to a separately enrolled,
+worktree-local profile for any repeated provider/site; otherwise it inherits
+`profileDir`. Sessions sharing a profile must have disjoint site scopes. Each
+profile retains its own Chrome process, Google admission, and broker custody.
+The harness requires actual Google admission, validates old and new keys
 with provider-specific read-only probes, checks overlap/isolation, and records
 every closure receipt. Preserve its evidence file and run the broader reviewed
 auth matrix. A fully successful run writes an inert profile-local evidence record

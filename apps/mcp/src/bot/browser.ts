@@ -2938,7 +2938,10 @@ export class BrowserController {
       const ownerUrl = new URL(frame.url());
       ownerHostname = ownerUrl.hostname.toLowerCase();
     } catch {}
-    const documentId = `${this.mainDocumentIdentity(page)}:${framePath}`;
+    const documentId =
+      frame === page.mainFrame()
+        ? `${this.mainDocumentIdentity(page)}:${framePath}`
+        : this.pageDriver.frameDocumentIdentity(frame);
     const key = JSON.stringify([documentId, hostname, resourceType]);
     const now = Date.now();
     const previous = this.hostScopeDenials.get(key);

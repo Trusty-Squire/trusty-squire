@@ -1,0 +1,96 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { expect, it, vi } from "vitest";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import type * as ProvisionSession from "../bot/provision-session.js";
+import type { ApiClient } from "../api-client.js";
+import { markOperatorMutationDispatchAttempted } from "../bot/request-cancellation.js";
+const state = vi.hoisted(() => ({ action: vi.fn(), capture: vi.fn() }));
+vi.mock("../bot/provision-session.js", async (original) => ({
+  ...(await original<typeof ProvisionSession>()),
+  withProvisionSessionCall: async (_id: string, call: () => Promise<unknown>) => await call(),
+  act: state.action,
+  captureCredentialSource: state.capture,
+  observedHostsForSession: () => ["example.test"],
+}));
+import { buildServer } from "../server.js";
+import { DispatchJournal } from "../bot/broker/dispatch-journal.js";
+
+it("refuses direct mutation replay until original capture storage reconciles", async () => {
+  const root = await mkdtemp(join(tmpdir(), "direct-capture-"));
+  const journal = new DispatchJournal(join(root, "journal.jsonl"));
+  state.action.mockImplementation(async () => {
+    await markOperatorMutationDispatchAttempted();
+    return { done: true };
+  });
+  state.capture.mockResolvedValue({ candidate_count: 1, value: "fixture-secret" });
+  const storeCredential = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("storage lost"))
+    .mockResolvedValue({
+      reference: "vault://new",
+      service: "Example",
+      label: "fresh",
+      field_names: ["value"],
+      allowed_hosts: ["example.test"],
+      created_at: new Date().toISOString(),
+      updated: false,
+    });
+  const server = await buildServer(
+    { setRequestingAgent: vi.fn(), storeCredential } as unknown as ApiClient,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { journal, lineage: () => "lineage" },
+  );
+  const [transport, peer] = InMemoryTransport.createLinkedPair();
+  await server.connect(peer);
+  const client = new Client({ name: "capture-test", version: "1" });
+  await client.connect(transport);
+  const capture = { store: { service: "Example", label: "fresh" }, source: { role: "code" } };
+  try {
+    const first = await client.callTool({
+      name: "operate_click",
+      arguments: { session_id: "session", ref: "@create", capture },
+    });
+    expect(first.structuredContent).toMatchObject({ stored: false, retry: "extract_only" });
+    const write_id = first.structuredContent!.write_id;
+    const repeated = await client.callTool({
+      name: "operate_click",
+      arguments: { session_id: "session", ref: "@create" },
+    });
+    expect(repeated.isError).toBe(true);
+    expect(state.action).toHaveBeenCalledOnce();
+    const wrong = await client.callTool({
+      name: "operate_extract",
+      arguments: { session_id: "session", capture: { ...capture, write_id: "other" } },
+    });
+    expect(wrong.isError).toBe(true);
+    expect(state.capture).toHaveBeenCalledOnce();
+    const recovered = await client.callTool({
+      name: "operate_extract",
+      arguments: { session_id: "session", capture: { ...capture, write_id } },
+    });
+    expect(recovered.structuredContent).toMatchObject({ stored: true });
+    expect(storeCredential.mock.calls.map(([input]) => input.write_id)).toEqual([
+      write_id,
+      write_id,
+    ]);
+    expect(
+      (
+        await client.callTool({
+          name: "operate_click",
+          arguments: { session_id: "session", ref: "@other" },
+        })
+      ).isError,
+    ).not.toBe(true);
+    expect(state.action).toHaveBeenCalledTimes(2);
+  } finally {
+    await client.close();
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

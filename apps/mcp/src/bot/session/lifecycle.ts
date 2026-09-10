@@ -1,6 +1,7 @@
 import {
   currentOperatorOperationId,
   persistOperatorTerminalReceipt,
+  settleOperatorTerminalReceipt,
 } from "../request-cancellation.js";
 import type { OperationReceipt } from "../operation-receipt.js";
 import { reserveBrokerAdmission } from "../broker/admission-context.js";
@@ -1535,6 +1536,7 @@ async function closeFinishingProvisionSession(
   );
   deregisterProvisionSession(session);
   disposeSessionWatchdog(session);
+  settleOperatorTerminalReceipt();
   return finish;
 }
 

@@ -1,17 +1,4 @@
-// Coverage for POST /v1/notify/heightened-auth — the bot fires this
-// when Google throws a number-match challenge mid-OAuth. The API
-// resolves the machine token to a paired account and emails the
-// digit to the account's OAuth-registered address.
-//
-// Focus areas:
-//   - Auth: 401 without token, 401 with unknown token
-//   - Anonymous tier: 412 when token isn't paired (no email to send)
-//   - Happy path: 200 + emailForwarder.sendDirect called with the
-//     account.email and a body containing the digit
-//   - Dedupe: second identical send within 5min returns deduped:true
-//   - Body shape: subject mentions service + digit; "unreadable"
-//     branch (digit=null) sends a different subject
-
+import { issueAgentSession, hashToken } from "../auth/agent.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "../server.js";
@@ -76,11 +63,16 @@ describe("POST /v1/notify/heightened-auth", () => {
     return (res.json() as { machine_token: string }).machine_token;
   }
 
-  async function issueAndPairToken(email: string): Promise<string> {
-    const token = await issueToken();
+  async function issueAccountToken(email: string): Promise<string> {
     const account = await deps.accountStore.createAccount(email, "test user");
-    await deps.machineTokenStore.markPaired(token, account.id);
-    return token;
+    const issued = issueAgentSession({
+      account_id: account.id,
+      agent_identity: "operator",
+      agent_version: "test",
+      now: new Date(),
+    });
+    await deps.agentSessionStore.insert(issued.record);
+    return issued.raw_token;
   }
 
   async function post(token: string | null, body: unknown) {
@@ -116,16 +108,27 @@ describe("POST /v1/notify/heightened-auth", () => {
     expect(res.statusCode).toBe(401);
   });
 
-  it("returns 412 when the machine token isn't paired to an account", async () => {
+  it("rejects legacy machine tokens without dispatching notifications", async () => {
     const token = await issueToken();
     const res = await post(token, { service: "IPInfo", digit: "8" });
-    expect(res.statusCode).toBe(412);
-    expect(res.json()).toMatchObject({ error: "not_paired" });
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toMatchObject({ error: "agent_session_required" });
     expect(forwarder.calls).toHaveLength(0);
   });
 
+  it("rejects revoked agent sessions and ignores caller account overrides", async () => {
+    const token = await issueAccountToken("owner@example.com");
+    const record = await deps.agentSessionStore.findActiveByHash(hashToken(token), new Date());
+    const sent = await post(token, { service: "Example", digit: "8", account_id: "foreign" });
+    expect(sent.statusCode).toBe(200);
+    expect(forwarder.calls[0]?.to).toBe("owner@example.com");
+    await deps.agentSessionStore.revoke(record!.id, "test");
+    expect((await post(token, { service: "Example", digit: "8" })).statusCode).toBe(401);
+    expect(forwarder.calls).toHaveLength(1);
+  });
+
   it("sends to the account's email on a valid digit", async () => {
-    const token = await issueAndPairToken("user@example.com");
+    const token = await issueAccountToken("user@example.com");
     const res = await post(token, { service: "IPInfo", digit: "8" });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ sent: true });
@@ -139,7 +142,7 @@ describe("POST /v1/notify/heightened-auth", () => {
   });
 
   it("uses a different subject when digit is null (unreadable)", async () => {
-    const token = await issueAndPairToken("user@example.com");
+    const token = await issueAccountToken("user@example.com");
     const res = await post(token, { service: "IPInfo", digit: null });
     expect(res.statusCode).toBe(200);
     expect(forwarder.calls).toHaveLength(1);
@@ -149,7 +152,7 @@ describe("POST /v1/notify/heightened-auth", () => {
   });
 
   it("dedupes the same attempt and challenge revision within the 5-min window", async () => {
-    const token = await issueAndPairToken("user@example.com");
+    const token = await issueAccountToken("user@example.com");
     const first = await post(token, { service: "IPInfo", digit: "8" });
     const second = await post(token, { service: "IPInfo", digit: "8" });
     expect(first.statusCode).toBe(200);
@@ -160,7 +163,7 @@ describe("POST /v1/notify/heightened-auth", () => {
   });
 
   it("notifies again for a new revision or attempt even when the number is unchanged", async () => {
-    const token = await issueAndPairToken("user@example.com");
+    const token = await issueAccountToken("user@example.com");
     await post(token, { service: "IPInfo", digit: "8" });
     await post(token, { service: "IPInfo", digit: "8", challenge_revision: "revision-2" });
     await post(token, { service: "IPInfo", digit: "8", attempt_id: "attempt-2" });
@@ -171,7 +174,7 @@ describe("POST /v1/notify/heightened-auth", () => {
     const deferred = new DeferredEmailForwarder([]);
     await app.close();
     app = await buildServer({ deps, emailForwarder: deferred });
-    const token = await issueAndPairToken("user@example.com");
+    const token = await issueAccountToken("user@example.com");
     const first = post(token, { service: "IPInfo", digit: "8" });
     await vi.waitFor(() => expect(deferred.calls).toHaveLength(1));
     const second = post(token, { service: "IPInfo", digit: "8" });
@@ -187,9 +190,9 @@ describe("POST /v1/notify/heightened-auth", () => {
     process.env.TELEGRAM_BOT_TOKEN = "test-token";
     const telegramFetch = vi.fn(async () => new Response("{}", { status: 200 }));
     vi.stubGlobal("fetch", telegramFetch);
-    const token = await issueAndPairToken("user@example.com");
-    const tokenRow = await deps.machineTokenStore.find(token);
-    await deps.accountStore.setTelegramChatId(tokenRow!.paired_account_id!, "chat-42");
+    const token = await issueAccountToken("user@example.com");
+    const tokenRow = await deps.agentSessionStore.findActiveByHash(hashToken(token), new Date());
+    await deps.accountStore.setTelegramChatId(tokenRow!.account_id, "chat-42");
 
     const res = await post(token, { service: "IPInfo", digit: "8" });
 
@@ -207,9 +210,9 @@ describe("POST /v1/notify/heightened-auth", () => {
       "fetch",
       vi.fn(async () => new Response("{}", { status: 503 })),
     );
-    const token = await issueAndPairToken("user@example.com");
-    const tokenRow = await deps.machineTokenStore.find(token);
-    await deps.accountStore.setTelegramChatId(tokenRow!.paired_account_id!, "chat-42");
+    const token = await issueAccountToken("user@example.com");
+    const tokenRow = await deps.agentSessionStore.findActiveByHash(hashToken(token), new Date());
+    await deps.accountStore.setTelegramChatId(tokenRow!.account_id, "chat-42");
 
     const res = await post(token, { service: "IPInfo", digit: "8" });
 
@@ -221,14 +224,14 @@ describe("POST /v1/notify/heightened-auth", () => {
   });
 
   it("rejects missing service", async () => {
-    const token = await issueAndPairToken("user@example.com");
+    const token = await issueAccountToken("user@example.com");
     const res = await post(token, { digit: "8" });
     expect(res.statusCode).toBe(400);
     expect(forwarder.calls).toHaveLength(0);
   });
 
   it("rejects missing or unbounded challenge identity", async () => {
-    const token = await issueAndPairToken("user@example.com");
+    const token = await issueAccountToken("user@example.com");
     const res = await post(token, {
       service: "IPInfo",
       digit: "8",
@@ -244,14 +247,14 @@ describe("POST /v1/notify/heightened-auth", () => {
     const failing = new FailingEmailForwarder([]);
     await app.close();
     app = await buildServer({ deps, emailForwarder: failing });
-    const token = await issueAndPairToken("user@example.com");
+    const token = await issueAccountToken("user@example.com");
     const res = await post(token, { service: "IPInfo", digit: "8" });
     expect(res.statusCode).toBe(503);
     expect(res.json()).toMatchObject({ sent: false });
   });
 
   it("treats non-numeric digit as unreadable rather than rejecting", async () => {
-    const token = await issueAndPairToken("user@example.com");
+    const token = await issueAccountToken("user@example.com");
     const res = await post(token, { service: "IPInfo", digit: "abc" });
     expect(res.statusCode).toBe(200);
     expect(forwarder.calls[0]?.subject).toContain("unreadable");

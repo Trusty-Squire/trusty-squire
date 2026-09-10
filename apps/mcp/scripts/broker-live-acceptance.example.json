@@ -57,7 +57,8 @@
       "oldCredentialControl": {
         "provider_credential_id": "existing-provider-key-id",
         "vault_reference": "vault://existing-resend-reference"
-      }
+      },
+      "profileDir": "/absolute/worktree/second-test-identity/profile"
     }
   ]
 }

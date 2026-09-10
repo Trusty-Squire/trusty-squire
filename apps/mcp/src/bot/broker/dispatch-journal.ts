@@ -596,6 +596,18 @@ export class DispatchJournal {
     }
   }
 
+  async unresolvedCapture(
+    forwarderId: string,
+    sessionId: string,
+  ): Promise<CaptureEvidence | undefined> {
+    return [...(await this.states()).values()].find(
+      (record) =>
+        record.forwarderId === forwarderId &&
+        record.sessionId === sessionId &&
+        record.outcome?.capture?.storage === "unknown",
+    )?.outcome?.capture;
+  }
+
   async hasCaptureWrite(forwarderId: string, sessionId: string, writeId: string): Promise<boolean> {
     return [...(await this.states()).values()].some(
       (record) =>

@@ -533,6 +533,7 @@ export class OperatorBroker implements BrokerTransportPort {
                       );
                       captureEvidence = capture;
                     },
+                    onTerminalSettled: () => this.authority.retireFinished(principal, id),
                     onTerminal: async (receipt) => {
                       await this.journal?.recordTerminalReceipt(journalForwarderId(principal), {
                         ...receipt,
@@ -718,7 +719,7 @@ export class OperatorBroker implements BrokerTransportPort {
       "closed" in result &&
       result.closed === true
     )
-      await this.authority.close(principal, capability);
+      await this.authority.close(principal, capability, true);
     return { result };
   }
   async recover(

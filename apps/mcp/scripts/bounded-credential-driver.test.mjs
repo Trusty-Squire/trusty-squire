@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { captureCredentialBaseline, provision } from "./bounded-credential-driver.mjs";
+import {
+  captureCredentialBaseline,
+  provision,
+  revokeCredential,
+} from "./bounded-credential-driver.mjs";
 
 const run = { run_label: "trusty-squire-run-0" };
 
@@ -61,6 +65,56 @@ describe("bounded credential driver", () => {
       vault_reference: "vault://new",
     });
     expect(call).toHaveBeenCalledWith("operate_observe", { session_id: "session-1" }, 20_000);
+  });
+
+  it("returns observed revocation metadata for the supplied new credential", async () => {
+    const providerCredential = { id: "new-key", account_id: "acct-1", label: run.run_label };
+    const service = {
+      driverEvidence: {
+        revoke: {
+          steps: [
+            { id: "remove", tool: "operate_click", arguments: { ref: "$CREDENTIAL_ID" } },
+            { id: "evidence", tool: "operate_observe" },
+          ],
+          evidence: {
+            provider_credential_id: { step: "evidence", path: "id" },
+            status: { step: "evidence", path: "status" },
+          },
+        },
+      },
+    };
+    const call = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ id: "new-key", status: "revoked" });
+    const receipt = await revokeCredential({
+      call,
+      sessionId: "session",
+      run: { ...run, provider_account_id: "acct-1" },
+      service,
+      providerCredential,
+    });
+    expect(receipt).toEqual({
+      policy: "revoke",
+      status: "revoked",
+      provider_credential_id: "new-key",
+      completed_at: expect.any(Number),
+    });
+    expect(call).toHaveBeenCalledWith(
+      "operate_click",
+      { ref: "new-key", session_id: "session" },
+      20000,
+    );
+    call.mockResolvedValue({ id: "other-key", status: "revoked" });
+    await expect(
+      revokeCredential({
+        call,
+        sessionId: "session",
+        run: { ...run, provider_account_id: "acct-1" },
+        service,
+        providerCredential,
+      }),
+    ).rejects.toThrow(/credential mismatch/);
   });
 
   it("rejects unbounded or unreviewed driver calls", async () => {

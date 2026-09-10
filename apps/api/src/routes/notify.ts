@@ -1,31 +1,4 @@
-// Heightened-auth notification route.
-//
-// The universal bot can't complete some OAuth flows on its own — when
-// Google throws a number-match challenge ("tap N on your phone"), the
-// user has a ~2-minute window to react. Without this route the only
-// surface is stderr on the harvester box, which the user usually
-// isn't watching.
-//
-// Flow: bot POSTs attempt-bound challenge metadata authenticated by
-// its machine token; this route resolves token → paired account →
-// paired-account delivery. Telegram is preferred when linked; email uses the
-// same Gmail SMTP transporter that powers /v1/webhooks/ses forwarding as the
-// fallback.
-//
-// Idempotency is process-local and deliberately honest: a bounded 5-min window
-// is keyed by account + attempt + challenge revision, and concurrent retries
-// share one in-flight send. Separate API replicas can still duplicate a send.
-//
-// Failure modes are returned to the bot so the current challenge can remain
-// visible even when paired delivery fails:
-//   401 — missing/invalid machine token
-//   412 — machine token not paired to an account (anonymous tier;
-//         there's no email to send to)
-//   503 — Gmail SMTP not configured on the API host
-
-import type { FastifyInstance } from "fastify";
-import { extractMachineToken } from "./install.js";
-import type { MachineTokenStore } from "../services/machine-tokens.js";
+import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import type { AccountStore } from "../services/in-memory-account-store.js";
 import type { EmailForwarder } from "../services/email-forwarder.js";
 import { buildEmailForwarder } from "../services/webhook-forwarder.js";
@@ -34,7 +7,6 @@ import { sendTelegramMessage } from "../services/telegram.js";
 type TelegramSender = (chatId: string, text: string) => Promise<boolean>;
 
 export interface NotifyRouteDeps {
-  machineTokenStore: MachineTokenStore;
   accountStore: AccountStore;
   emailForwarder?: EmailForwarder;
   telegramSender?: TelegramSender;
@@ -121,188 +93,177 @@ function buildEmail(opts: {
 
 export async function registerNotifyRoute(
   fastify: FastifyInstance,
-  opts: { deps: NotifyRouteDeps },
+  opts: {
+    deps: NotifyRouteDeps;
+    requireAgent: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
+  },
 ): Promise<void> {
   const now = (): Date => opts.deps.now?.() ?? new Date();
   const forwarder = buildEmailForwarder(opts.deps.emailForwarder);
   const sendTelegram = opts.deps.telegramSender ?? sendTelegramMessage;
 
-  fastify.post("/v1/notify/heightened-auth", async (req, reply) => {
-    const token = extractMachineToken(req);
-    if (token === null) {
-      reply.code(401).send({ error: "missing_machine_token" });
-      return;
-    }
-    const tokenRow = await opts.deps.machineTokenStore.find(token);
-    if (tokenRow === null) {
-      reply.code(401).send({ error: "invalid_machine_token" });
-      return;
-    }
-    if (tokenRow.paired_account_id === null) {
-      // Anonymous machine token — no account, no email to send to.
-      // Distinct status so the bot can degrade gracefully (the
-      // stderr banner still fires regardless).
-      reply.code(412).send({ error: "not_paired" });
-      return;
-    }
-    const account = await opts.deps.accountStore.findAccountById(tokenRow.paired_account_id);
-    if (account === null) {
-      // Token references a deleted account. Treat as unauthorized.
-      reply.code(401).send({ error: "invalid_machine_token" });
-      return;
-    }
+  fastify.post(
+    "/v1/notify/heightened-auth",
+    { preHandler: opts.requireAgent },
+    async (req, reply) => {
+      const account = await opts.deps.accountStore.findAccountById(req.auth!.account_id);
+      if (account === null) {
+        reply.code(401).send({ error: "agent_session_required" });
+        return;
+      }
 
-    const body = req.body;
-    if (body === null || typeof body !== "object") {
-      reply.code(400).send({ error: "invalid_body" });
-      return;
-    }
-    const b = body as Record<string, unknown>;
+      const body = req.body;
+      if (body === null || typeof body !== "object") {
+        reply.code(400).send({ error: "invalid_body" });
+        return;
+      }
+      const b = body as Record<string, unknown>;
 
-    const service =
-      typeof b.service === "string" &&
-      b.service.length > 0 &&
-      b.service.length <= 120 &&
-      /^[\p{L}\p{N} ._()+&'/-]+$/u.test(b.service)
-        ? b.service
-        : null;
-    if (service === null) {
-      reply.code(400).send({ error: "missing_service" });
-      return;
-    }
+      const service =
+        typeof b.service === "string" &&
+        b.service.length > 0 &&
+        b.service.length <= 120 &&
+        /^[\p{L}\p{N} ._()+&'/-]+$/u.test(b.service)
+          ? b.service
+          : null;
+      if (service === null) {
+        reply.code(400).send({ error: "missing_service" });
+        return;
+      }
 
-    // digit is optional — null means "Google challenge but extractor
-    // didn't recognize the number". The email body is different but
-    // the route shape is the same.
-    const rawDigit = b.digit;
-    const digit = typeof rawDigit === "string" && /^\d{1,3}$/.test(rawDigit) ? rawDigit : null;
+      // digit is optional — null means "Google challenge but extractor
+      // didn't recognize the number". The email body is different but
+      // the route shape is the same.
+      const rawDigit = b.digit;
+      const digit = typeof rawDigit === "string" && /^\d{1,3}$/.test(rawDigit) ? rawDigit : null;
 
-    const rawWindow = b.window_seconds;
-    const windowSeconds =
-      typeof rawWindow === "number" && rawWindow > 0 && rawWindow < 3600
-        ? Math.floor(rawWindow)
-        : 120;
+      const rawWindow = b.window_seconds;
+      const windowSeconds =
+        typeof rawWindow === "number" && rawWindow > 0 && rawWindow < 3600
+          ? Math.floor(rawWindow)
+          : 120;
 
-    const boundedId = (value: unknown): string | null =>
-      typeof value === "string" &&
-      value.length > 0 &&
-      value.length <= 160 &&
-      /^[A-Za-z0-9_.:-]+$/.test(value)
-        ? value
-        : null;
-    const attemptId = boundedId(b.attempt_id);
-    const challengeRevision = boundedId(b.challenge_revision);
-    const observedAt =
-      typeof b.observed_at === "string" &&
-      b.observed_at.length <= 40 &&
-      Number.isFinite(Date.parse(b.observed_at))
-        ? new Date(b.observed_at).toISOString()
-        : null;
-    const expiresAt =
-      b.expires_at === null || b.expires_at === undefined
-        ? null
-        : typeof b.expires_at === "string" &&
-            b.expires_at.length <= 40 &&
-            Number.isFinite(Date.parse(b.expires_at))
-          ? new Date(b.expires_at).toISOString()
-          : undefined;
-    if (
-      attemptId === null ||
-      challengeRevision === null ||
-      observedAt === null ||
-      expiresAt === undefined
-    ) {
-      reply.code(400).send({ error: "invalid_challenge_identity" });
-      return;
-    }
+      const boundedId = (value: unknown): string | null =>
+        typeof value === "string" &&
+        value.length > 0 &&
+        value.length <= 160 &&
+        /^[A-Za-z0-9_.:-]+$/.test(value)
+          ? value
+          : null;
+      const attemptId = boundedId(b.attempt_id);
+      const challengeRevision = boundedId(b.challenge_revision);
+      const observedAt =
+        typeof b.observed_at === "string" &&
+        b.observed_at.length <= 40 &&
+        Number.isFinite(Date.parse(b.observed_at))
+          ? new Date(b.observed_at).toISOString()
+          : null;
+      const expiresAt =
+        b.expires_at === null || b.expires_at === undefined
+          ? null
+          : typeof b.expires_at === "string" &&
+              b.expires_at.length <= 40 &&
+              Number.isFinite(Date.parse(b.expires_at))
+            ? new Date(b.expires_at).toISOString()
+            : undefined;
+      if (
+        attemptId === null ||
+        challengeRevision === null ||
+        observedAt === null ||
+        expiresAt === undefined
+      ) {
+        reply.code(400).send({ error: "invalid_challenge_identity" });
+        return;
+      }
 
-    const nowMs = now().getTime();
-    pruneDedupe(nowMs);
-    const dedupeKey = JSON.stringify([account.id, attemptId, challengeRevision]);
-    const prior = recentSends.get(dedupeKey);
-    if (prior !== undefined && nowMs - prior.sentAt < DEDUPE_WINDOW_MS) {
-      reply.code(200).send({
-        ...prior.result,
-        sent: false,
-        deduped: true,
-        attempt_id: attemptId,
-        challenge_revision: challengeRevision,
-      });
-      return;
-    }
-
-    const existingSend = inFlightSends.get(dedupeKey);
-    const isConcurrentRetry = existingSend !== undefined;
-    if (isConcurrentRetry) inFlightJoins += 1;
-    if (existingSend === undefined && inFlightSends.size >= MAX_DEDUPE_ENTRIES) {
-      reply.code(503).send({
-        sent: false,
-        deduped: false,
-        attempt_id: attemptId,
-        challenge_revision: challengeRevision,
-        delivery: { channel: null, status: "failed", error: "notification_capacity" },
-        error: "notification_capacity",
-      });
-      return;
-    }
-    const send =
-      existingSend ??
-      (async (): Promise<DeliveryResult> => {
-        const { subject, text } = buildEmail({
-          digit,
-          service,
-          windowSeconds,
-          attemptId,
-          challengeRevision,
-          observedAt,
-          expiresAt,
-        });
-        if (account.telegram_chat_id !== null) {
-          const telegramSent = await sendTelegram(account.telegram_chat_id, text).catch(
-            () => false,
-          );
-          if (telegramSent) {
-            return { sent: true, delivery: { channel: "telegram", status: "sent" } };
-          }
-        }
-        const result = await forwarder.sendDirect({ to: account.email, subject, text });
-        if (result.success) {
-          return { sent: true, delivery: { channel: "email", status: "sent" } };
-        }
-        return {
+      const nowMs = now().getTime();
+      pruneDedupe(nowMs);
+      const dedupeKey = JSON.stringify([account.id, attemptId, challengeRevision]);
+      const prior = recentSends.get(dedupeKey);
+      if (prior !== undefined && nowMs - prior.sentAt < DEDUPE_WINDOW_MS) {
+        reply.code(200).send({
+          ...prior.result,
           sent: false,
-          delivery: {
-            channel: "email",
-            status: "failed",
-            error: result.error ?? "send_failed",
-          },
-        };
-      })();
-    if (existingSend === undefined) inFlightSends.set(dedupeKey, send);
-    const result = await send.finally(() => {
-      if (inFlightSends.get(dedupeKey) === send) inFlightSends.delete(dedupeKey);
-    });
+          deduped: true,
+          attempt_id: attemptId,
+          challenge_revision: challengeRevision,
+        });
+        return;
+      }
 
-    if (!result.sent) {
-      reply.code(503).send({
+      const existingSend = inFlightSends.get(dedupeKey);
+      const isConcurrentRetry = existingSend !== undefined;
+      if (isConcurrentRetry) inFlightJoins += 1;
+      if (existingSend === undefined && inFlightSends.size >= MAX_DEDUPE_ENTRIES) {
+        reply.code(503).send({
+          sent: false,
+          deduped: false,
+          attempt_id: attemptId,
+          challenge_revision: challengeRevision,
+          delivery: { channel: null, status: "failed", error: "notification_capacity" },
+          error: "notification_capacity",
+        });
+        return;
+      }
+      const send =
+        existingSend ??
+        (async (): Promise<DeliveryResult> => {
+          const { subject, text } = buildEmail({
+            digit,
+            service,
+            windowSeconds,
+            attemptId,
+            challengeRevision,
+            observedAt,
+            expiresAt,
+          });
+          if (account.telegram_chat_id !== null) {
+            const telegramSent = await sendTelegram(account.telegram_chat_id, text).catch(
+              () => false,
+            );
+            if (telegramSent) {
+              return { sent: true, delivery: { channel: "telegram", status: "sent" } };
+            }
+          }
+          const result = await forwarder.sendDirect({ to: account.email, subject, text });
+          if (result.success) {
+            return { sent: true, delivery: { channel: "email", status: "sent" } };
+          }
+          return {
+            sent: false,
+            delivery: {
+              channel: "email",
+              status: "failed",
+              error: result.error ?? "send_failed",
+            },
+          };
+        })();
+      if (existingSend === undefined) inFlightSends.set(dedupeKey, send);
+      const result = await send.finally(() => {
+        if (inFlightSends.get(dedupeKey) === send) inFlightSends.delete(dedupeKey);
+      });
+
+      if (!result.sent) {
+        reply.code(503).send({
+          ...result,
+          deduped: isConcurrentRetry,
+          attempt_id: attemptId,
+          challenge_revision: challengeRevision,
+          error: result.delivery.error ?? "send_failed",
+        });
+        return;
+      }
+
+      recentSends.set(dedupeKey, { sentAt: nowMs, result });
+      pruneDedupe(nowMs);
+      reply.code(200).send({
         ...result,
         deduped: isConcurrentRetry,
         attempt_id: attemptId,
         challenge_revision: challengeRevision,
-        error: result.delivery.error ?? "send_failed",
       });
-      return;
-    }
-
-    recentSends.set(dedupeKey, { sentAt: nowMs, result });
-    pruneDedupe(nowMs);
-    reply.code(200).send({
-      ...result,
-      deduped: isConcurrentRetry,
-      attempt_id: attemptId,
-      challenge_revision: challengeRevision,
-    });
-  });
+    },
+  );
 }
 
 // Test-only — clears the in-memory dedupe map so tests don't bleed

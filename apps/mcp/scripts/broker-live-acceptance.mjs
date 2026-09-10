@@ -3,9 +3,10 @@
 // Google admission gate. Invoke the exported entrypoint directly in Node;
 // configured native-host evidence is collected separately via actual MCP tools.
 import assert from "node:assert/strict";
+import { getDomain } from "tldts";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir, realpath } from "node:fs/promises";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -372,11 +373,35 @@ export function validateAcceptanceManifest(config) {
       "Each session requires driverEvidence or driverEvidenceFile; see docs/browser-broker.md",
     );
   }
+  acceptanceProfileGroups(config);
   return config;
+}
+
+export function acceptanceProfileGroups(config) {
+  const groups = new Map();
+  config.services.forEach((service, index) => {
+    const profile = resolve(service.profileDir ?? config.profileDir);
+    const group = groups.get(profile) ?? { profile, indices: [], sites: new Set() };
+    const sites = [service.url, ...(service.allowedHosts ?? [])].map((host) => {
+      const hostname = new URL(host.includes("://") ? host : `https://${host}`).hostname;
+      return getDomain(hostname, { allowPrivateDomains: true }) ?? hostname;
+    });
+    for (const site of new Set(sites)) {
+      assert.ok(
+        !group.sites.has(site),
+        "Overlapping sites require separately enrolled profileDir identities",
+      );
+      group.sites.add(site);
+    }
+    group.indices.push(index);
+    groups.set(profile, group);
+  });
+  return [...groups.values()];
 }
 
 async function runConcurrencyAcceptance(configPath, config, nativeEvidence = null) {
   const root = process.cwd();
+  const groups = acceptanceProfileGroups(config);
   const profile = resolve(config.profileDir);
   const configHome = resolve(config.configHome);
   assert.ok(
@@ -387,13 +412,22 @@ async function runConcurrencyAcceptance(configPath, config, nativeEvidence = nul
     configHome.startsWith(root + "/"),
     "This task may use only an isolated config home inside its worktree",
   );
-  await readFile(join(profile, "Local State"));
+  for (const group of groups) {
+    assert.ok(group.profile.startsWith(root + "/"), "Each enrolled profile must be worktree-local");
+    await readFile(join(group.profile, "Local State"));
+  }
+  assert.equal(
+    new Set(await Promise.all(groups.map((group) => realpath(group.profile)))).size,
+    groups.length,
+    "Profile aliases cannot share browser custody",
+  );
   assert.ok(
     config.accountId && config.configHome,
     "Pinned account and isolated session-store path are required",
   );
   const qualification = await import("../dist/bot/broker/qualification.js");
-  const runId = await qualification.beginBrokerQualification(profile, config.accountId);
+  for (const group of groups)
+    group.runId = await qualification.beginBrokerQualification(group.profile, config.accountId);
   let evidenceRecorded = false;
   const lab = resolve(root, ".broker-acceptance", `live-${Date.now()}`);
   await mkdir(lab, { recursive: true, mode: 0o700 });
@@ -406,13 +440,14 @@ async function runConcurrencyAcceptance(configPath, config, nativeEvidence = nul
     TRUSTY_SQUIRE_ACCOUNT_ID: config.accountId,
     TRUSTY_SQUIRE_PROFILE_DIR: profile,
     TRUSTY_SQUIRE_BROKER_SOCKET: socket,
-    TRUSTY_SQUIRE_BROKER_QUALIFICATION_RUN_ID: runId,
     TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION: "0",
     TRUSTY_SQUIRE_REAPER_DIR: join(lab, "reapers"),
     TMPDIR: join(root, ".t"),
     BOT_CDP_ENDPOINT: "",
   };
-  const baseline = await ownedProcesses(profile);
+  const inventory = async () =>
+    (await Promise.all(groups.map((group) => ownedProcesses(group.profile)))).flat();
+  const baseline = await inventory();
   assert.deepEqual(baseline, [], "Test identity is already in use");
   const children = [];
   const spawnChild = (args, ipc = true, extraEnv = {}) => {
@@ -447,26 +482,48 @@ async function runConcurrencyAcceptance(configPath, config, nativeEvidence = nul
         reject(error);
       });
     });
-  const broker = spawnChild([bin, "broker"], false);
+  const brokers = groups.map((group, index) => {
+    group.env = {
+      TRUSTY_SQUIRE_PROFILE_DIR: group.profile,
+      TRUSTY_SQUIRE_BROKER_SOCKET: `${socket}.${index}`,
+      TRUSTY_SQUIRE_BROKER_QUALIFICATION_RUN_ID: group.runId,
+    };
+    return spawnChild([bin, "broker"], false, group.env);
+  });
   try {
-    // Endpoint existence is readiness to attempt authentication, not success.
-    for (let n = 0; n < 100; n++) {
-      if ((await readdir(dirname(socket))).includes(socket.split("/").at(-1))) break;
-      if (broker.exitCode !== null) await broker.done;
-      await delay(100);
+    for (const [index, group] of groups.entries()) {
+      for (let n = 0; n < 100; n++) {
+        if (
+          (await readdir(dirname(socket))).includes(
+            group.env.TRUSTY_SQUIRE_BROKER_SOCKET.split("/").at(-1),
+          )
+        )
+          break;
+        if (brokers[index].exitCode !== null) await brokers[index].done;
+        await delay(100);
+      }
     }
     const clients = [0, 1, 2].map((index) =>
       spawnChild([script, "client", resolve(configPath), String(index)], true, {
+        ...groups.find((group) => group.indices.includes(index)).env,
         TRUSTY_SQUIRE_FORWARDER_CREDENTIAL: randomBytes(32).toString("base64url"),
       }),
     );
     const ready = await Promise.all(clients.map((child) => receive(child, "ready")));
     assert.equal(new Set(ready.map((row) => row.mcpPid)).size, 3);
     assert.equal(new Set(ready.map((row) => row.sessionId)).size, 3);
-    assert.equal(new Set(ready.map((row) => row.broker.targetId)).size, 3);
-    assert.equal(new Set(ready.map((row) => row.broker.browserEpoch)).size, 1);
-    const { chromeRoots } = await processInventory(profile);
-    assert.equal(chromeRoots.length, 1);
+    assert.equal(
+      new Set(ready.map((row) => `${row.broker.browserEpoch}:${row.broker.targetId}`)).size,
+      3,
+    );
+    assert.equal(new Set(ready.map((row) => row.broker.browserEpoch)).size, groups.length);
+    const chromeRoots = [];
+    for (const group of groups) {
+      assert.equal(new Set(group.indices.map((index) => ready[index].broker.browserEpoch)).size, 1);
+      const processes = await processInventory(group.profile);
+      assert.equal(processes.chromeRoots.length, 1);
+      chromeRoots.push(...processes.chromeRoots);
+    }
     const pending = clients.map((child) => receive(child, "evidence"));
     clients.forEach((child) => child.send("go"));
     const rows = await Promise.all(pending);
@@ -477,9 +534,9 @@ async function runConcurrencyAcceptance(configPath, config, nativeEvidence = nul
     clients.slice(1).forEach((child) => child.send("finish"));
     const closed = await Promise.all(closedPending);
     await Promise.all(clients.map((child) => child.done));
-    await broker.done;
-    for (let n = 0; n < 200 && (await ownedProcesses(profile)).length !== 0; n++) await delay(100);
-    const after = await ownedProcesses(profile);
+    await Promise.all(brokers.map((broker) => broker.done));
+    for (let n = 0; n < 200 && (await inventory()).length !== 0; n++) await delay(100);
+    const after = await inventory();
     assert.deepEqual(after, baseline);
     const evidence = {
       kind: "configured-native-and-real-service-three-session-acceptance",
@@ -494,20 +551,25 @@ async function runConcurrencyAcceptance(configPath, config, nativeEvidence = nul
     };
     const evidencePath = join(lab, "evidence.json");
     await writeFile(evidencePath, JSON.stringify(evidence, null, 2));
-    await qualification.recordBrokerQualificationEvidence(
-      profile,
-      config.accountId,
-      runId,
-      evidencePath,
-      config.services.map((service) => new URL(service.url).hostname),
-    );
+    for (const group of groups)
+      await qualification.recordBrokerQualificationEvidence(
+        group.profile,
+        config.accountId,
+        group.runId,
+        evidencePath,
+        config.services.map((service) => new URL(service.url).hostname),
+      );
     evidenceRecorded = true;
     return { evidencePath, ...evidence };
   } finally {
     for (const child of children) if (child.exitCode === null) child.kill("SIGTERM");
     await Promise.allSettled(children.map((child) => child.done));
     if (!evidenceRecorded)
-      await qualification.abandonBrokerQualification(profile, config.accountId, runId);
+      await Promise.all(
+        groups.map((group) =>
+          qualification.abandonBrokerQualification(group.profile, config.accountId, group.runId),
+        ),
+      );
   }
 }
 

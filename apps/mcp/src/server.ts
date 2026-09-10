@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import type { CaptureEvidence } from "./bot/credential-capture.js";
 import type { OperationReceipt } from "./bot/operation-receipt.js";
+import { brokerCommandMutates } from "./bot/broker/operator.js";
 import { DispatchJournal } from "./bot/broker/dispatch-journal.js";
 import { BrokerRefusal } from "./bot/broker/scheduler.js";
 import { OperatorForwarder, type BrokerRecoveryRequest } from "./bot/broker/forwarder.js";
@@ -324,6 +325,30 @@ export async function buildServer(
         const receipt = await directPersistence.journal.terminalReceipt(directLineage, sessionId);
         if (receipt) return toolResultContent({ ...receipt, cleanup: "already_closed" });
       }
+      const assertDirectCapture = async (checkpoint = false): Promise<void> => {
+        if (
+          directPersistence &&
+          directLineage &&
+          sessionId &&
+          (tool.name !== "operate_finish" || parsed.data.outcome === "credentials") &&
+          brokerCommandMutates(tool.name, parsed.data)
+        ) {
+          const pending = await directPersistence.journal.unresolvedCapture(
+            directLineage,
+            sessionId,
+          );
+          const capture = parsed.data.capture as { write_id?: string } | undefined;
+          if (
+            pending &&
+            !(checkpoint && pending.write_id === operationId) &&
+            !(tool.name === "operate_extract" && capture?.write_id === pending.write_id)
+          )
+            throw new BrokerRefusal(
+              "outcome_unknown",
+              "Capture storage is unresolved; use operate_extract with the original capture.write_id. Do not repeat creation.",
+            );
+        }
+      };
       const invokeHandler = async () =>
         await withOperatorRequestContext(
           composed.signal,
@@ -338,7 +363,7 @@ export async function buildServer(
                 });
               },
             }),
-          undefined,
+          async () => await assertDirectCapture(true),
           {
             operationId,
             ...(directPersistence && directLineage
@@ -360,6 +385,7 @@ export async function buildServer(
           },
         );
       const invoke = async () => {
+        await assertDirectCapture();
         // Some embedders provide a narrow ApiClient test double. Production
         // clients always install the async-local audit context.
         const withAuditContext = callApi.withAuditContext?.bind(callApi);

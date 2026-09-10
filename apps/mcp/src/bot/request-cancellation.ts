@@ -10,6 +10,7 @@ interface RequestAutomationContext {
   onPhase?: (phase: MutationDispatchPhase) => Promise<void>;
   operationId?: string;
   onTerminal?: (receipt: OperationReceipt) => Promise<void>;
+  onTerminalSettled?: () => void;
   onCapture?: (evidence: CaptureEvidence, recovery: boolean) => Promise<void>;
 }
 
@@ -22,6 +23,7 @@ export async function withOperatorRequestContext<T>(
   receiptContext?: {
     operationId: string;
     onTerminal?: (receipt: OperationReceipt) => Promise<void>;
+    onTerminalSettled?: () => void;
     onCapture?: (evidence: CaptureEvidence, recovery: boolean) => Promise<void>;
   },
 ): Promise<T> {
@@ -88,6 +90,10 @@ export function composeOperatorSignals(signals: readonly AbortSignal[]): {
 
 export function currentOperatorOperationId(): string | undefined {
   return contexts.getStore()?.operationId;
+}
+
+export function settleOperatorTerminalReceipt(): void {
+  contexts.getStore()?.onTerminalSettled?.();
 }
 
 export async function persistOperatorTerminalReceipt(receipt: OperationReceipt): Promise<void> {
