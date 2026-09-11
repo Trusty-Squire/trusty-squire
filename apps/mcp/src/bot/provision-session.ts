@@ -8819,14 +8819,22 @@ export interface CaptureFoundCandidate {
 async function shadowPiercingCapture(
   page: Page,
   source: CaptureSource,
-  handles: ElementHandle<HTMLElement | SVGElement>[],
-  containerHandles: ElementHandle<HTMLElement | SVGElement>[],
+  handles: ElementHandle<Node>[],
+  containerHandles: ElementHandle<Node>[],
 ): Promise<{ candidate_count: number; value?: string; found?: CaptureFoundCandidate[] }> {
-  return await page.evaluate(({ source: spec, nodes, scopeNodes }) => {
-    for (const node of [...nodes, ...scopeNodes]) {
-      if (!node.isConnected || node.ownerDocument !== document)
+  return await page.evaluate(({ source: spec, nodes: sourceNodes, scopeNodes: containerNodes }) => {
+    const captureElement = (node: Node): Element => {
+      if (!(node instanceof Element) || !node.isConnected || node.ownerDocument !== document)
         throw new Error("capture source changed");
-    }
+      return node;
+    };
+    // Playwright's role engine maps password inputs to textbox; ARIA gives
+    // them no role, so they never satisfy a textbox request.
+    const nodes = sourceNodes.map(captureElement).filter(
+      (el) => !("role" in spec && spec.role === "textbox" &&
+        el instanceof HTMLInputElement && el.type === "password"),
+    );
+    const scopeNodes = containerNodes.map(captureElement);
     const nativeShadowGet = Object.getOwnPropertyDescriptor(Element.prototype, "shadowRoot")?.get;
     const shadowRootOf = (el: Element): ShadowRoot | null => {
       try {
