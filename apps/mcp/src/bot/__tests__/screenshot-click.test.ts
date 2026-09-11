@@ -118,6 +118,49 @@ describe("screenshot-bound native pointer dispatch", () => {
     },
   );
 
+  it.each([
+    ["wrapping", "associated"],
+    ["explicit", "associated"],
+    ["wrapping", "unrelated"],
+    ["explicit", "unrelated"],
+  ] as const)("binds %s checkbox labels when %s text changes", async (kind, change) => {
+    const f = await fixture();
+    try {
+      await f.page.evaluate((kind) => {
+        const input =
+          '<input id="choice" type="checkbox" style="position:absolute;left:150px;top:220px;width:24px;height:24px;margin:0">';
+        document.body.innerHTML =
+          (kind === "wrapping"
+            ? `<label>${input}<span id="caption">Enable alerts</span></label>`
+            : `${input}<label for="choice"><span id="caption">Enable alerts</span></label>`) +
+          '<label for="other"><span id="unrelated">Other choice</span></label><input id="other" type="checkbox">';
+      }, kind);
+      const shot = await f.controller.captureOperatorScreenshot();
+      await f.page.locator(change === "associated" ? "#caption" : "#unrelated").evaluate((el) => {
+        el.firstChild!.nodeValue = "Share activity";
+      });
+      const mouse = vi.spyOn(f.page.mouse, "click");
+      const authorize = vi.fn();
+      const result = clickScreenshot(f.page, point(shot, 162, 232), authorize);
+      if (change === "associated") {
+        await expect(result).rejects.toMatchObject({
+          code: "stale_screenshot",
+          dispatch: "not_dispatched",
+        });
+        expect(mouse).not.toHaveBeenCalled();
+        expect(authorize).not.toHaveBeenCalled();
+        expect(await f.page.locator("#choice").isChecked()).toBe(false);
+      } else {
+        await expect(result).resolves.toBe("dispatched");
+        expect(mouse).toHaveBeenCalledOnce();
+        expect(await f.page.locator("#choice").isChecked()).toBe(true);
+      }
+    } finally {
+      vi.restoreAllMocks();
+      await f.close();
+    }
+  });
+
   it("cancels during final geometry before authorization or input", async () => {
     const f = await fixture();
     try {

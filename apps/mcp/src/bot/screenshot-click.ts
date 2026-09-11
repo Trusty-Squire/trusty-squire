@@ -78,6 +78,29 @@ async function geometry(page: Page, cdp: CDPSession) {
         (role >= 0 && ["button", "checkbox", "radio"].includes(attributes[role + 1] ?? ""))
       );
     });
+    const associatedLabels = new Map<number, string[]>();
+    await Promise.all(
+      doc.nodes.nodeName.map(async (name, i) => {
+        if (!/^(BUTTON|INPUT|SELECT|TEXTAREA)$/.test(snapshot.strings[name] ?? "")) return;
+        const node = await cdp.send("DOM.resolveNode", {
+          backendNodeId: doc.nodes.backendNodeId![i]!,
+        });
+        const objectId = node.object.objectId;
+        if (!objectId) throw new Error("screenshot_target_unavailable");
+        try {
+          const result = await cdp.send("Runtime.callFunctionOn", {
+            objectId,
+            functionDeclaration: `function() { return Array.from(this.labels || [], l => l.innerText); }`,
+            returnByValue: true,
+          });
+          if (result.exceptionDetails || !Array.isArray(result.result.value))
+            throw new Error("screenshot_target_unavailable");
+          associatedLabels.set(i, result.result.value);
+        } finally {
+          await cdp.send("Runtime.releaseObject", { objectId }).catch(() => undefined);
+        }
+      }),
+    );
     for (const [j, i] of doc.layout.nodeIndex.entries()) {
       const id = doc.nodes.backendNodeId?.[i];
       const nameIndex = doc.nodes.nodeName?.[i];
@@ -95,6 +118,7 @@ async function geometry(page: Page, cdp: CDPSession) {
           text: snapshot.strings[doc.nodes.nodeValue?.[i] ?? -1],
           control: doc.nodes.backendNodeId[control],
           controlText: texts[control]?.replace(/\s+/g, " ").trim(),
+          associatedLabels: associatedLabels.get(control),
           controlAttributes: doc.nodes.attributes?.[control]?.map((v) => snapshot.strings[v]),
         }),
       );
