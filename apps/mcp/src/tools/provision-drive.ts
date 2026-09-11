@@ -665,9 +665,8 @@ async function captureIntoVault(
         retry: "extract_only",
       };
     if (extracted.candidate_count !== 1 || extracted.value === undefined) {
-      // ONE code for a miss: capture_unresolved means nothing matched (with a
-      // found list of rendered roles/names — never values — so the caller can
-      // pick a better source). capture_ambiguous is reserved for >1 match.
+      // Missing sources and single sources without a usable value share the
+      // extraction-only recovery path; only multiple sources are ambiguous.
       const ambiguous = extracted.candidate_count > 1;
       return {
         ...base,

@@ -8822,242 +8822,256 @@ async function shadowPiercingCapture(
   handles: ElementHandle<Node>[],
   containerHandles: ElementHandle<Node>[],
 ): Promise<{ candidate_count: number; value?: string; found?: CaptureFoundCandidate[] }> {
-  return await page.evaluate(({ source: spec, nodes: sourceNodes, scopeNodes: containerNodes }) => {
-    const captureElement = (node: Node): Element => {
-      if (!(node instanceof Element) || !node.isConnected || node.ownerDocument !== document)
-        throw new Error("capture source changed");
-      return node;
-    };
-    // Playwright's role engine maps password inputs to textbox; ARIA gives
-    // them no role, so they never satisfy a textbox request.
-    const nodes = sourceNodes.map(captureElement).filter(
-      (el) => !("role" in spec && spec.role === "textbox" &&
-        el instanceof HTMLInputElement && el.type === "password"),
-    );
-    const scopeNodes = containerNodes.map(captureElement);
-    const nativeShadowGet = Object.getOwnPropertyDescriptor(Element.prototype, "shadowRoot")?.get;
-    const shadowRootOf = (el: Element): ShadowRoot | null => {
-      try {
-        return nativeShadowGet?.call(el) ?? null;
-      } catch {
-        return null;
-      }
-    };
-
-    const isVisible = (el: Element): boolean => {
-      const r = el.getBoundingClientRect?.();
-      if (!r || r.width <= 0 || r.height <= 0) return false;
-      const s = window.getComputedStyle(el);
-      return (
-        s.display !== "none" && s.visibility !== "hidden" && parseFloat(s.opacity || "1") > 0.01
-      );
-    };
-
-    // Walk the light DOM and every OPEN shadow root. Defensive against
-    // detached/closed custom elements whose shadowRoot reads undefined at
-    // runtime (the #59 redis-cloud crash pattern): skip such nodes.
-    const elements: Element[] = [];
-    const walk = (root: Document | ShadowRoot | null | undefined): void => {
-      if (root == null || typeof root.querySelectorAll !== "function") return;
-      for (const el of Array.from(root.querySelectorAll("*"))) {
-        elements.push(el);
-        walk(shadowRootOf(el));
-      }
-    };
-    walk(document);
-
-    const accessibleName = (el: Element): string => {
-      const root = el.getRootNode() as Document | ShadowRoot;
-      const labelledby = el.getAttribute("aria-labelledby");
-      if (labelledby) {
-        const text = labelledby
-          .split(/\s+/)
-          .map((id) => root.getElementById(id)?.textContent ?? "")
-          .join(" ")
-          .trim();
-        if (text) return text;
-      }
-      const label = (el.getAttribute("aria-label") ?? "").trim();
-      if (label) return label;
-      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-        const text = Array.from(el.labels ?? [])
-          .map((label) => label.textContent ?? "")
-          .join(" ")
-          .trim();
-        if (text) return text;
-      }
-      const title = (el.getAttribute("title") ?? "").trim();
-      if (title) return title;
-      return "";
-    };
-
-    const ariaRole = (el: Element): string => {
-      const explicit = el.getAttribute("role");
-      if (explicit) return explicit;
-      if (el instanceof HTMLInputElement) {
-        const t = (el.getAttribute("type") ?? "text").toLowerCase();
-        if (["text", "search", "tel", "url", "email"].includes(t) && el.list !== null)
-          return "combobox";
-        if (t === "search") return "searchbox";
-        if (t === "text" || t === "tel" || t === "url" || t === "email")
-          return "textbox";
-        if (t === "number") return "spinbutton";
-        if (t === "checkbox") return "checkbox";
-        if (t === "radio") return "radio";
-        if (t === "range") return "slider";
-        return ""; // password/button/file/hidden/... carry no textbox role
-      }
-      if (el instanceof HTMLTextAreaElement) return "textbox";
-      if (el instanceof HTMLSelectElement) return "combobox";
-      if (el instanceof HTMLDialogElement && el.open) return "dialog";
-      if (el.tagName === "CODE") return "code";
-      const name = accessibleName(el);
-      if (el.tagName === "SECTION" && name) return "region";
-      if (el.tagName === "FORM" && name) return "form";
-      return "";
-    };
-
-    // Shadow-inclusive containment: parentElement stops at the shadow
-    // boundary, so climb from each node through its root's host.
-    const within = (node: Element, scopeEl: Element | null): boolean => {
-      if (scopeEl === null) return true;
-      let cur: Element | null = node;
-      while (cur !== null) {
-        if (cur === scopeEl) return true;
-        const root = cur.getRootNode();
-        cur = cur.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
-      }
-      return false;
-    };
-
-    const isAriaIncluded = (el: Element): boolean => {
-      for (let current: Element | null = el; current;) {
-        if (current.getAttribute("aria-hidden") === "true") return false;
-        const root = current.getRootNode();
-        current = current.assignedSlot ?? current.parentElement ??
-          (root instanceof ShadowRoot ? root.host : null);
-      }
-      return true;
-    };
-
-    const readValue = (node: Element): string => {
-      const value =
-        node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
-          ? node.value
-          : node instanceof HTMLElement
-            ? node.innerText
-            : "";
-      return value.length <= 8192 ? value.trim() : "";
-    };
-
-    const containerSpec = spec.container ?? null;
-    const containers = scopeNodes.length > 0 ? scopeNodes : containerSpec
-      ? elements.filter(
+  return await page.evaluate(
+    ({ source: spec, nodes: sourceNodes, scopeNodes: containerNodes }) => {
+      const captureElement = (node: Node): Element => {
+        if (!(node instanceof Element) || !node.isConnected || node.ownerDocument !== document)
+          throw new Error("capture source changed");
+        return node;
+      };
+      // Playwright's role engine maps password inputs to textbox; ARIA gives
+      // them no role, so they never satisfy a textbox request.
+      const nodes = sourceNodes
+        .map(captureElement)
+        .filter(
           (el) =>
-            isVisible(el) &&
-            isAriaIncluded(el) &&
-            ariaRole(el) === containerSpec.role &&
-            (containerSpec.name === undefined || accessibleName(el) === containerSpec.name),
-        )
-      : [];
-    const inScope = (el: Element): boolean =>
-      containerSpec === null || containers.some((container) => within(el, container));
-
-    const foundReport = (): CaptureFoundCandidate[] => {
-      const out: CaptureFoundCandidate[] = [];
-      for (const el of elements) {
-        if (out.length >= 12) break;
-        if (!isVisible(el)) continue;
-        const role = ariaRole(el);
-        const tag = el.tagName;
-        const named =
-          el.getAttribute("aria-label") !== null || el.getAttribute("aria-labelledby") !== null;
-        if (role === "" && !named && tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "CODE")
-          continue;
-        out.push({ role: role || tag.toLowerCase(), name: accessibleName(el) || null });
-      }
-      return out;
-    };
-    // A demanded container that never rendered scopes nothing: refuse rather
-    // than let the walk resolve a match outside the requested container.
-    if (containerSpec && containers.length === 0 && nodes.length === 0)
-      return { candidate_count: 0, found: foundReport() };
-
-    const resolve = (matches: Element[]) => {
-      const candidates = Array.from(new Set([...nodes, ...matches]));
-      if (candidates.length === 0) return { candidate_count: 0, found: foundReport() };
-      if (candidates.length > 1) return { candidate_count: candidates.length };
-      const value = readValue(candidates[0]!);
-      return { candidate_count: 1, ...(value.length > 0 ? { value } : {}) };
-    };
-
-    if ("selector" in spec) {
-      const parentOf = (el: Element): Element | null => {
-        const root = el.getRootNode();
-        return el.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
-      };
-      const compound = /(?:[a-zA-Z_][\w-]*|\*|[.#][\w-]+|\[[\w-]+(?:[~|^$*]?=(?:"[^"\\]*"|'[^'\\]*'|[\w-]+))?\])+/y;
-      const selector = spec.selector.trim();
-      const parts: string[] = [];
-      let offset = 0;
-      while (offset < selector.length) {
-        compound.lastIndex = offset;
-        const part = compound.exec(selector);
-        if (part === null) return resolve([]);
-        parts.push(part[0]);
-        offset = compound.lastIndex;
-        if (offset === selector.length) break;
-        const space = selector.slice(offset).match(/^\s+/);
-        if (space === null) return resolve([]);
-        offset += space[0].length;
-      }
-      if (parts.length === 0) return resolve([]);
-      const anchors = parts.length > 1
-        ? (containerSpec === null ? elements : containers).filter((el) => el.matches(parts[0]!))
-        : [];
-      const matchesSelector = (el: Element): boolean => {
-        if (!el.matches(parts[parts.length - 1]!)) return false;
-        if (parts.length === 1) return el.getRootNode() instanceof ShadowRoot;
-        return anchors.some((anchor) => {
-          if (el === anchor || !within(el, anchor)) return false;
-          let current: Element | null = el;
-          let remaining = parts.length - 2;
-          let crossedShadow = false;
-          while (current !== null && current !== anchor) {
-            if (current.parentElement === null && current.getRootNode() instanceof ShadowRoot)
-              crossedShadow = true;
-            current = parentOf(current);
-            if (current === anchor) return crossedShadow && remaining === 0;
-            if (current !== null && remaining > 0 && current.matches(parts[remaining]!))
-              remaining--;
-          }
-          return false;
-        });
-      };
-      let visible: Element[] = [];
-      try {
-        document.querySelector(spec.selector);
-        visible = elements.filter(
-          (el) => isVisible(el) && inScope(el) && matchesSelector(el),
+            !(
+              "role" in spec &&
+              spec.role === "textbox" &&
+              el instanceof HTMLInputElement &&
+              el.type === "password"
+            ),
         );
-      } catch {
-        return resolve([]);
-      }
-      return resolve(visible);
-    }
+      const scopeNodes = containerNodes.map(captureElement);
+      const nativeShadowGet = Object.getOwnPropertyDescriptor(Element.prototype, "shadowRoot")?.get;
+      const shadowRootOf = (el: Element): ShadowRoot | null => {
+        try {
+          return nativeShadowGet?.call(el) ?? null;
+        } catch {
+          return null;
+        }
+      };
 
-    const role = spec.role;
-    let candidates = elements.filter(
-      (el) => isVisible(el) && isAriaIncluded(el) && inScope(el) && ariaRole(el) === role,
-    );
-    if (spec.name !== undefined)
-      candidates = candidates.filter((el) => accessibleName(el) === spec.name);
-    return resolve(candidates);
-  }, { source, nodes: handles, scopeNodes: containerHandles });
+      const isVisible = (el: Element): boolean => {
+        const r = el.getBoundingClientRect?.();
+        if (!r || r.width <= 0 || r.height <= 0) return false;
+        const s = window.getComputedStyle(el);
+        return (
+          s.display !== "none" && s.visibility !== "hidden" && parseFloat(s.opacity || "1") > 0.01
+        );
+      };
+
+      // Walk the light DOM and every OPEN shadow root. Defensive against
+      // detached/closed custom elements whose shadowRoot reads undefined at
+      // runtime (the #59 redis-cloud crash pattern): skip such nodes.
+      const elements: Element[] = [];
+      const walk = (root: Document | ShadowRoot | null | undefined): void => {
+        if (root == null || typeof root.querySelectorAll !== "function") return;
+        for (const el of Array.from(root.querySelectorAll("*"))) {
+          elements.push(el);
+          walk(shadowRootOf(el));
+        }
+      };
+      walk(document);
+
+      const accessibleName = (el: Element): string => {
+        const root = el.getRootNode() as Document | ShadowRoot;
+        const labelledby = el.getAttribute("aria-labelledby");
+        if (labelledby) {
+          const text = labelledby
+            .split(/\s+/)
+            .map((id) => root.getElementById(id)?.textContent ?? "")
+            .join(" ")
+            .trim();
+          if (text) return text;
+        }
+        const label = (el.getAttribute("aria-label") ?? "").trim();
+        if (label) return label;
+        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+          const text = Array.from(el.labels ?? [])
+            .map((label) => label.textContent ?? "")
+            .join(" ")
+            .trim();
+          if (text) return text;
+        }
+        const title = (el.getAttribute("title") ?? "").trim();
+        if (title) return title;
+        return "";
+      };
+
+      const ariaRole = (el: Element): string => {
+        const explicit = el.getAttribute("role");
+        if (explicit) return explicit;
+        if (el instanceof HTMLInputElement) {
+          const t = (el.getAttribute("type") ?? "text").toLowerCase();
+          if (["text", "search", "tel", "url", "email"].includes(t) && el.list !== null)
+            return "combobox";
+          if (t === "search") return "searchbox";
+          if (t === "text" || t === "tel" || t === "url" || t === "email") return "textbox";
+          if (t === "number") return "spinbutton";
+          if (t === "checkbox") return "checkbox";
+          if (t === "radio") return "radio";
+          if (t === "range") return "slider";
+          return ""; // password/button/file/hidden/... carry no textbox role
+        }
+        if (el instanceof HTMLTextAreaElement) return "textbox";
+        if (el instanceof HTMLSelectElement) return "combobox";
+        if (el instanceof HTMLDialogElement && el.open) return "dialog";
+        if (el.tagName === "CODE") return "code";
+        const name = accessibleName(el);
+        if (el.tagName === "SECTION" && name) return "region";
+        if (el.tagName === "FORM" && name) return "form";
+        return "";
+      };
+
+      // Shadow-inclusive containment: parentElement stops at the shadow
+      // boundary, so climb from each node through its root's host.
+      const within = (node: Element, scopeEl: Element | null): boolean => {
+        if (scopeEl === null) return true;
+        let cur: Element | null = node;
+        while (cur !== null) {
+          if (cur === scopeEl) return true;
+          const root = cur.getRootNode();
+          cur = cur.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+        }
+        return false;
+      };
+
+      const isAriaIncluded = (el: Element): boolean => {
+        for (let current: Element | null = el; current; ) {
+          if (current.getAttribute("aria-hidden") === "true") return false;
+          const root = current.getRootNode();
+          current =
+            current.assignedSlot ??
+            current.parentElement ??
+            (root instanceof ShadowRoot ? root.host : null);
+        }
+        return true;
+      };
+
+      const readValue = (node: Element): string => {
+        const value =
+          node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
+            ? node.value
+            : node instanceof HTMLElement
+              ? node.innerText
+              : "";
+        return value.length <= 8192 ? value.trim() : "";
+      };
+
+      const containerSpec = spec.container ?? null;
+      const containers =
+        scopeNodes.length > 0
+          ? scopeNodes
+          : containerSpec
+            ? elements.filter(
+                (el) =>
+                  isVisible(el) &&
+                  isAriaIncluded(el) &&
+                  ariaRole(el) === containerSpec.role &&
+                  (containerSpec.name === undefined || accessibleName(el) === containerSpec.name),
+              )
+            : [];
+      const inScope = (el: Element): boolean =>
+        containerSpec === null || containers.some((container) => within(el, container));
+
+      const foundReport = (): CaptureFoundCandidate[] => {
+        const out: CaptureFoundCandidate[] = [];
+        for (const el of elements) {
+          if (out.length >= 12) break;
+          if (!isVisible(el)) continue;
+          const role = ariaRole(el);
+          const tag = el.tagName;
+          const named =
+            el.getAttribute("aria-label") !== null || el.getAttribute("aria-labelledby") !== null;
+          if (role === "" && !named && tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "CODE")
+            continue;
+          out.push({ role: role || tag.toLowerCase(), name: accessibleName(el) || null });
+        }
+        return out;
+      };
+      // A demanded container that never rendered scopes nothing: refuse rather
+      // than let the walk resolve a match outside the requested container.
+      if (containerSpec && containers.length === 0 && nodes.length === 0)
+        return { candidate_count: 0, found: foundReport() };
+
+      const resolve = (matches: Element[]) => {
+        const candidates = Array.from(new Set([...nodes, ...matches]));
+        if (candidates.length === 0) return { candidate_count: 0, found: foundReport() };
+        if (candidates.length > 1) return { candidate_count: candidates.length };
+        const value = readValue(candidates[0]!);
+        return { candidate_count: 1, ...(value.length > 0 ? { value } : {}) };
+      };
+
+      if ("selector" in spec) {
+        const parentOf = (el: Element): Element | null => {
+          const root = el.getRootNode();
+          return el.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+        };
+        const compound =
+          /(?:[a-zA-Z_][\w-]*|\*|[.#][\w-]+|\[[\w-]+(?:[~|^$*]?=(?:"[^"\\]*"|'[^'\\]*'|[\w-]+))?\])+/y;
+        const selector = spec.selector.trim();
+        const parts: string[] = [];
+        let offset = 0;
+        while (offset < selector.length) {
+          compound.lastIndex = offset;
+          const part = compound.exec(selector);
+          if (part === null) return resolve([]);
+          parts.push(part[0]);
+          offset = compound.lastIndex;
+          if (offset === selector.length) break;
+          const space = selector.slice(offset).match(/^\s+/);
+          if (space === null) return resolve([]);
+          offset += space[0].length;
+        }
+        if (parts.length === 0) return resolve([]);
+        const anchors =
+          parts.length > 1
+            ? (containerSpec === null ? elements : containers).filter((el) => el.matches(parts[0]!))
+            : [];
+        const matchesSelector = (el: Element): boolean => {
+          if (!el.matches(parts[parts.length - 1]!)) return false;
+          if (parts.length === 1) return el.getRootNode() instanceof ShadowRoot;
+          return anchors.some((anchor) => {
+            if (el === anchor || !within(el, anchor)) return false;
+            let current: Element | null = el;
+            let remaining = parts.length - 2;
+            let crossedShadow = false;
+            while (current !== null && current !== anchor) {
+              if (current.parentElement === null && current.getRootNode() instanceof ShadowRoot)
+                crossedShadow = true;
+              current = parentOf(current);
+              if (current === anchor) return crossedShadow && remaining === 0;
+              if (current !== null && remaining > 0 && current.matches(parts[remaining]!))
+                remaining--;
+            }
+            return false;
+          });
+        };
+        let visible: Element[] = [];
+        try {
+          document.querySelector(spec.selector);
+          visible = elements.filter((el) => isVisible(el) && inScope(el) && matchesSelector(el));
+        } catch {
+          return resolve([]);
+        }
+        return resolve(visible);
+      }
+
+      const role = spec.role;
+      let candidates = elements.filter(
+        (el) => isVisible(el) && isAriaIncluded(el) && inScope(el) && ariaRole(el) === role,
+      );
+      if (spec.name !== undefined)
+        candidates = candidates.filter((el) => accessibleName(el) === spec.name);
+      return resolve(candidates);
+    },
+    { source, nodes: handles, scopeNodes: containerHandles },
+  );
 }
 
-/** Explicit capture reads one named source without revealing other controls or
- * scanning unrelated page text. Normal extract/observe remain unchanged. */
+/** Explicit capture reads one source value; zero-match diagnostics expose only
+ * rendered roles/names. Normal extract/observe remain unchanged. */
 export async function captureCredentialSource(
   sessionId: string,
   source: CaptureSource,
@@ -9101,9 +9115,9 @@ export async function captureCredentialSource(
       containerHandles = await container.elementHandles().catch(() => []);
     return await shadowPiercingCapture(page, source, handles, containerHandles);
   } finally {
-    await Promise.all([...handles, ...containerHandles].map(
-      (handle) => handle.dispose().catch(() => undefined),
-    ));
+    await Promise.all(
+      [...handles, ...containerHandles].map((handle) => handle.dispose().catch(() => undefined)),
+    );
   }
 }
 

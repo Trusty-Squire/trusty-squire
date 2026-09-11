@@ -635,3 +635,77 @@ it.each([
     lookup.mockRestore();
   }
 });
+
+it("returns operate_extract capture receipts from a real open-shadow dialog", async () => {
+  const { mkdir, writeFile } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+  const sessionModule = await import("../provision-session.js");
+  const { provisionExtractTool } = await import("../../tools/provision-drive.js");
+  const { withOperatorRequestContext } = await import("../request-cancellation.js");
+  const hosts = vi.spyOn(sessionModule, "observedHostsForSession").mockReturnValue(["groq.example.test"]);
+  const value = "gsk_synthetic_fixture_0123456789";
+  const writes: unknown[] = [];
+  const store = vi.fn(async (input: unknown) => {
+    writes.push(input);
+    return {
+      reference: "vault://fixture/groq/created-key", service: "Groq fixture",
+      label: "created", field_names: ["value"], allowed_hosts: ["groq.example.test"],
+      updated: false,
+    };
+  });
+  const api = { storeCredential: store } as unknown as import("../../api-client.js").ApiClient;
+  const receipts: unknown[] = [];
+  const evidence = process.env.CAPTURE_TEST_EVIDENCE_DIR;
+  try {
+    await page.setContent('<h1>Groq-style capture fixture</h1><p>Synthetic key; local browser fixture, not the live Groq website.</p><section role="dialog" aria-label="Created key"><h2>Created key</h2><div id="host"></div></section>');
+    await page.locator("#host").evaluate((host, key) => {
+      host.attachShadow({ mode: "open" }).innerHTML = '<input value="' + key + '" style="width:360px">';
+    }, value);
+    if (evidence) {
+      await mkdir(evidence, { recursive: true });
+      await page.screenshot({ path: join(evidence, "shadow-key-dialog.png") });
+    }
+    const invoke = async (source: Record<string, unknown>) => {
+      const result = await withOperatorRequestContext(new AbortController().signal, () =>
+        provisionExtractTool.handler(provisionExtractTool.inputSchema.parse({
+          session_id: "fixture", capture: { store: { service: "Groq fixture", label: "created" }, source },
+        }), api), undefined, { operationId: "fixture-extract-" + receipts.length, onCapture: async () => {} });
+      receipts.push({ source, response: result });
+      expect(JSON.stringify(result)).not.toContain(value);
+      return result;
+    };
+    for (const source of [
+      { role: "textbox", container: { role: "dialog" } },
+      { selector: "input", container: { role: "dialog" } },
+      { selector: "[role=dialog] input", container: { role: "dialog" } },
+    ]) {
+      expect(await invoke(source)).toMatchObject({ stored: true, stored_credential: { reference: "vault://fixture/groq/created-key" } });
+    }
+    expect(writes).toHaveLength(3);
+    for (const write of writes) expect(write).toMatchObject({ value });
+    expect(await invoke({ role: "textbox", name: "Missing key" })).toMatchObject({
+      stored: false, error: "capture_unresolved", candidate_count: 0,
+      found: [{ role: "dialog", name: "Created key" }, { role: "textbox", name: null }],
+    });
+    await page.locator("#host").evaluate((host) => {
+      host.shadowRoot!.append(document.createElement("input"));
+    });
+    expect(await invoke({ role: "textbox" })).toMatchObject({ stored: false, error: "capture_ambiguous", candidate_count: 2 });
+    await page.setContent('<section role="dialog">First</section><section role="dialog">Second</section>');
+    expect(await invoke({ role: "textbox", container: { role: "dialog" } })).toMatchObject({
+      stored: false, error: "capture_unresolved", candidate_count: 0, found: expect.any(Array),
+    });
+    await page.setContent("");
+    expect(await invoke({ role: "textbox" })).toMatchObject({
+      stored: false, error: "capture_unresolved", candidate_count: 0, found: [],
+    });
+    expect(store).toHaveBeenCalledTimes(3);
+    if (evidence) await writeFile(join(evidence, "operate-extract-responses.json"), JSON.stringify({
+      environment: "Real headless Chromium, real capture resolver and operate_extract handler; session lookup and vault API stubbed; synthetic values only.",
+      receipts,
+      storage: { writes: writes.length, exactSyntheticValueReceived: true, writesOnUnresolvedOrAmbiguous: 0 },
+    }, null, 2));
+  } finally {
+    hosts.mockRestore();
+  }
+});
