@@ -1881,6 +1881,7 @@ describe("interleaved observation DOM", () => {
         <script>document.querySelector('#continue').onclick = () => document.querySelector('#result').textContent = 'Sign-in continuation reached';</script>
       `);
       const frame = page.frames()[1];
+      if (!frame) throw new Error("Turnstile fixture iframe was not attached");
       await frame.setContent(
         `<style>body { font: 18px system-ui; } button { padding: 12px; }</style><button>Verify you are human</button>`,
       );

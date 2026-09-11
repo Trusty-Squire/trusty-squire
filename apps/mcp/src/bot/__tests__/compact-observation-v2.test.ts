@@ -541,13 +541,14 @@ describe("compact observation v2", () => {
     });
 
     it("keeps unrelated host success blocked until a real token arrives", () => {
+      const response = responseInput("response", "");
       const root = hostPage([
         node("form", {
           nodeName: "FORM",
           children: [
             challengeIframe("frame"),
             text("success", "Success!"),
-            responseInput("response", ""),
+            response,
           ],
         }),
       ]);
@@ -558,7 +559,7 @@ describe("compact observation v2", () => {
           target: "unavailable",
         },
       ]);
-      root.children[0].children[2].attributes.value = "0.token123";
+      response.attributes.value = "0.token123";
       expect(safeBlockersV2(root)).toEqual([]);
     });
 
@@ -628,7 +629,8 @@ describe("compact observation v2", () => {
       (rendered) => {
         const frame = challengeIframe("frame");
         frame.visible = false;
-        frame.rendered = rendered;
+        if (rendered === undefined) delete frame.rendered;
+        else frame.rendered = rendered;
         frame.bounds = { x: 0, y: 2000, width: 300, height: 80 };
         const response = responseInput("response", "");
         const root = hostPage([
