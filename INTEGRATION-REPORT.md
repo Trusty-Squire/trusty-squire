@@ -175,3 +175,18 @@ existing denial, unrelated navigation, and pre-existing error-query cases in
 `Test Files 1 passed (1); Tests 10 passed | 89 skipped (99)`, exit 0, 24.78s.
 The 89 skips are selection-only. Both new denial regressions passed alongside
 pending/completed recovery cases. No full test/lint or downstream phase ran here.
+
+## Test-phase schema characterization fix
+
+On 2026-09-11 at 13:24:40, the focused command
+`pnpm --filter @trusty-squire/mcp exec vitest run src/bot/__tests__/session-characterization.test.ts -t 'merges query and cursor into the observation schema'`
+reproduced the reported failure (exit 1): the intentional published-schema
+characterization still expected the old role enum after R3 introduced bounded
+literal roles. Updated only that expectation to require the string length bounds
+and role pattern, retaining exact schema equality and existing behavioral coverage.
+
+The same command at 13:24:54 exited 0: `Test Files 1 passed (1); Tests 1 passed |
+18 skipped (19)`. Skips are test-name selection only. R1–R5 remain intact; no
+production code, live provider sessions, shared profiles, or screenshot component
+changed. No transient untracked artifacts remained. This is focused fixture
+evidence; the outer executor owns remaining pipeline validation and delivery.
