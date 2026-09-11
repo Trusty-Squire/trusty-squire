@@ -1,3 +1,4 @@
+import { ScreenshotClickError } from "../bot/screenshot-click.js";
 import { captureSourceSchema } from "../bot/credential-capture.js";
 import {
   currentOperatorOperationId,
@@ -492,7 +493,7 @@ export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
     "selected V1 session, isn't enough to tell what state " +
     "a stuck page is actually in — a challenge that never advances, an unexpected layout, a captcha you " +
     "need to SEE. Read-only: never navigates, clicks, types, submits, or steals focus; it only reads " +
-    "pixels. The image is the page's real pixels, whatever the page is showing.",
+    "pixels. The image is the page's real pixels, whatever the page is showing. When click_binding is present, its screenshot_id and original image width/height authorize one operate_click screenshot point for 60 seconds. Navigation, viewport/scroll or frame geometry changes invalidate it. An absent binding means this image is read-only; capture again for a coordinate click.",
   inputSchema: screenshotSchema,
   jsonInputSchema: {
     type: "object",
@@ -503,6 +504,22 @@ export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
       frame_url_contains: { type: "string" },
       full_page: { type: "boolean" },
     },
+  },
+  jsonOutputSchema: {
+    type: "object",
+    properties: {
+      click_binding: {
+        type: "object",
+        required: ["screenshot_id", "width", "height", "coordinate_space"],
+        properties: {
+          screenshot_id: { type: "string", format: "uuid" },
+          width: { type: "integer", minimum: 1 },
+          height: { type: "integer", minimum: 1 },
+          coordinate_space: { const: "image_pixels" },
+        },
+      },
+    },
+    additionalProperties: true,
   },
   async handler(args) {
     return await captureScreenshot(args.session_id, {
@@ -1568,26 +1585,84 @@ export const operateNavigateTool: Tool<z.infer<typeof navigateSchema>> = {
   handler: async (args) => await runAction(args.session_id, { kind: "goto", url: args.url }),
 };
 
-const clickSchema = z.object({
-  ...sessionShape,
-  ref: refSchema,
-  capture: captureSchema.optional(),
-});
+const screenshotPointSchema = z
+  .object({
+    screenshot_id: z.string().uuid(),
+    x: z.number().finite().min(0),
+    y: z.number().finite().min(0),
+  })
+  .strict();
+const clickSchema = z
+  .object({
+    ...sessionShape,
+    ref: refSchema.optional(),
+    screenshot: screenshotPointSchema.optional(),
+    capture: captureSchema.optional(),
+  })
+  .refine((args) => (args.ref !== undefined) !== (args.screenshot !== undefined), {
+    message: "Provide exactly one of ref or screenshot",
+  });
 export const operateClickTool: Tool<z.infer<typeof clickSchema>> = {
   name: "operate_click",
   description:
-    "Click a control using its current observation ref or unique @label. Re-observe after stale_ref. Card charges require operate_pay. A pointer-interception failure may use guarded DOM dispatch internally only when the executor proves no click was dispatched.",
+    "Prefer a current observation ref or unique @label. If a screenshot-visible control has no usable ref, pass screenshot:{screenshot_id,x,y} from operate_screenshot.click_binding, in original image pixels. Provide exactly one of ref or screenshot. target_unresolved means the label was never issued in this document; stale_ref means its reference or alias expired. stale_screenshot requires a new image. Each image binding permits one attempt; after an uncertain click, observe before deciding any new action. Dispatch does not guarantee challenge clearance. Card charges require operate_pay. A pointer-interception failure may use guarded DOM dispatch internally only when the executor proves no click was dispatched.",
   inputSchema: clickSchema,
   jsonInputSchema: {
     type: "object",
-    required: ["session_id", "ref"],
-    properties: { ...sessionJson, ...refJson },
+    required: ["session_id"],
+    oneOf: [
+      { required: ["ref"], not: { required: ["screenshot"] } },
+      { required: ["screenshot"], not: { required: ["ref"] } },
+    ],
+    properties: {
+      ...sessionJson,
+      ...refJson,
+      screenshot: {
+        type: "object",
+        additionalProperties: false,
+        required: ["screenshot_id", "x", "y"],
+        properties: {
+          screenshot_id: { type: "string", format: "uuid" },
+          x: { type: "number", minimum: 0 },
+          y: { type: "number", minimum: 0 },
+        },
+      },
+    },
   },
   async handler(args) {
-    const action = { kind: "click" as const, target: args.ref };
+    const action = {
+      kind: "click" as const,
+      target: args.ref ?? "<screenshot-point>",
+      ...(args.screenshot ? { screenshot: args.screenshot } : {}),
+    };
     try {
-      return await runAction(args.session_id, action);
+      const result = await runAction(args.session_id, action);
+      return args.screenshot
+        ? {
+            ...result,
+            screenshot_click: {
+              dispatch: "dispatched",
+              outcome: "unknown",
+              retry_policy: "observe_before_new_action",
+            },
+          }
+        : result;
     } catch (error) {
+      if (args.screenshot) {
+        if (error instanceof ScreenshotClickError)
+          return {
+            status: error.code,
+            screenshot_click: {
+              dispatch: error.dispatch,
+              outcome: "unknown",
+              retry_policy:
+                error.dispatch === "not_dispatched"
+                  ? "capture_new_screenshot"
+                  : "observe_before_new_action",
+            },
+          };
+        throw error; // Coordinate dispatch never falls through to a second click.
+      }
       // Require positive executor evidence: old interception log lines can remain
       // in an error even after a later click dispatched. Text alone is not proof.
       // Unknown failures, stale refs and payment refusals must never double-click.
@@ -1950,7 +2025,14 @@ for (const tool of OPERATE_TOOLS) {
             ("status" in actionResult || "needs_user" in actionResult)
           )
         )
-          return await captureIntoVault(args.session_id, capture, api);
+          return {
+            ...(await captureIntoVault(args.session_id, capture, api)),
+            ...(actionResult !== null &&
+            typeof actionResult === "object" &&
+            "screenshot_click" in actionResult
+              ? { screenshot_click: actionResult.screenshot_click }
+              : {}),
+          };
       } catch {
         actionResult = undefined;
       }
@@ -1981,3 +2063,20 @@ for (const tool of OPERATE_TOOLS) {
     return await captureIntoVault(args.session_id, capture, api);
   };
 }
+
+// Keep the additive click receipt discoverable alongside the shared capture result.
+operateClickTool.jsonOutputSchema = {
+  ...captureOutputSchema,
+  properties: {
+    ...captureOutputSchema.properties,
+    screenshot_click: {
+      type: "object",
+      required: ["dispatch", "outcome", "retry_policy"],
+      properties: {
+        dispatch: { enum: ["dispatched", "not_dispatched", "unknown"] },
+        outcome: { const: "unknown" },
+        retry_policy: { enum: ["observe_before_new_action", "capture_new_screenshot"] },
+      },
+    },
+  },
+};

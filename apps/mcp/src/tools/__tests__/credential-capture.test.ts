@@ -74,6 +74,30 @@ async function click(client: ApiClient) {
   );
 }
 describe("explicit mutation capture", () => {
+  it("preserves the screenshot dispatch receipt alongside successful capture metadata", async () => {
+    const store = vi.fn().mockResolvedValue(stored);
+    const screenshot = { screenshot_id: "12345678-1234-4234-8234-123456789abc", x: 10, y: 20 };
+    const result = await withOperatorRequestContext(new AbortController().signal, () =>
+      operateClickTool.handler(
+        operateClickTool.inputSchema.parse({ session_id: "session", screenshot, capture }),
+        api(store),
+      ),
+    );
+    expect(result).toMatchObject({
+      mutation: "dispatched",
+      stored: true,
+      stored_credential: { reference: stored.reference },
+      screenshot_click: {
+        dispatch: "dispatched",
+        outcome: "unknown",
+        retry_policy: "observe_before_new_action",
+      },
+    });
+    expect(state.action).toHaveBeenCalledOnce();
+    expect(store).toHaveBeenCalledOnce();
+    expect(JSON.stringify(result)).not.toContain(secret);
+  });
+
   it("executes once and returns only storage metadata", async () => {
     const store = vi.fn().mockResolvedValue(stored);
     const result = await click(api(store));

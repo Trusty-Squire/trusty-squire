@@ -25,6 +25,76 @@ masks, seals, or refuses page content. `operate_screenshot` likewise returns
 the page’s actual pixels and is not a secret-redaction surface. Payment approval,
 3-D Secure, and vault write-only boundaries remain separate safety controls.
 
+## Clicking a screenshot-visible control
+
+Prefer an observed `ref` or unique `@label`. A closed-shadow control may be
+visible in a screenshot without a usable DOM ref. In that case,
+`operate_screenshot` can return an additive `click_binding`:
+
+```json
+{
+  "click_binding": {
+    "screenshot_id": "12345678-1234-4234-8234-123456789abc",
+    "width": 1600,
+    "height": 1200,
+    "coordinate_space": "image_pixels"
+  }
+}
+```
+
+Pass coordinates in that original image's pixels, measured from its top-left:
+
+```json
+{
+  "session_id": "session-id",
+  "screenshot": {
+    "screenshot_id": "12345678-1234-4234-8234-123456789abc",
+    "x": 348,
+    "y": 488
+  }
+}
+```
+
+This is an `operate_click` input. Supply exactly one of `ref` or `screenshot`.
+If your image viewer resizes the image, scale the displayed coordinates back to
+`click_binding.width` and `height`. The server handles device scale, frame crops,
+full-page origins, and current scroll, rounding to the nearest CSS pixel for
+both hit testing and dispatch. Points outside the current viewport cannot
+be clicked from a full-page or frame image; scroll and take a new screenshot.
+
+The binding belongs to the captured page, expires after 60 seconds, is replaced
+by the next screenshot, and permits one attempt. Navigation, viewport/scroll or
+frame-geometry changes invalidate it. The hit node must retain its physical
+identity, attributes and bounds, including its control's text and associated
+label text, across capture and dispatch preparation. Overlapping surfaces must
+retain their geometry, relative paint order and hit-affecting styles: removing, hiding or
+moving an overlay cannot authorize a newly exposed control from the old image.
+Unrelated text changes do not invalidate an otherwise unchanged target. This is
+a geometry/identity binding, not proof that every pixel or page animation stayed
+unchanged. If capture cannot establish a binding, the image is still returned
+without `click_binding`; observations and other actions remain usable.
+
+Results include `screenshot_click.dispatch` (`dispatched`, `not_dispatched`, or
+`unknown`), `outcome: "unknown"`, and a retry policy. `dispatched` means the
+native pointer call completed, not that the provider accepted the action or
+cleared a challenge. A lost pointer acknowledgement reports unknown dispatch; a
+failed observation after an acknowledged click retains `dispatch: "dispatched"`.
+Both leave the outcome unknown; observe before deciding a new action. The same image token
+cannot replay an uncertain click. `stale_screenshot` requires a new screenshot;
+`invalid_screenshot_point` means the point was outside the image/current viewport.
+For ordinary clicks, `target_unresolved` means the label was never issued in this document;
+`stale_ref` remains the response for an expired physical ref or retired alias.
+
+When combined with `capture`, the vault capture result retains the click receipt;
+storage success does not establish the provider outcome. Screenshot clicks also
+use the existing popup adoption rules, so subsequent observations follow an
+adopted tab opened by the click.
+
+Coordinate clicks use the session's existing domain and payment predicates and
+are not promoted into replay recipes. They do not change vault storage,
+credential capture, payment approval, or 3-D Secure behavior. Local regression
+fixtures prove pointer mechanics; they do not guarantee Cloudflare clearance.
+
 ## Scope is declared at session start
 
 Startup merchant hosts also authorize matching registrable-domain siblings,
