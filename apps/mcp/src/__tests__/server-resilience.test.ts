@@ -17,7 +17,14 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv-provider.js";
 import type { JsonSchemaType } from "@modelcontextprotocol/sdk/validation/types.js";
-import { provisionObserveTool } from "../tools/provision-drive.js";
+import {
+  operateClickTool,
+  operatePressTool,
+  operateScrollTool,
+  operateSelectTool,
+  operateTypeTool,
+  provisionObserveTool,
+} from "../tools/provision-drive.js";
 import { brokerRecoveryRequested, buildServer } from "../server.js";
 import type { ApiClient } from "../api-client.js";
 import type { BrowserController } from "../bot/browser.js";
@@ -503,6 +510,76 @@ it("publishes literal role constraints matching the observe runtime validator", 
       const args = { session_id: "fixture", role };
       expect(validate(args).valid, role).toBe(accepted);
       expect(provisionObserveTool.inputSchema.safeParse(args).success, role).toBe(accepted);
+    }
+  } finally {
+    await client.close();
+  }
+});
+
+it("publishes action format and capture-role enums matching the runtime validators", async () => {
+  const client = await connectedClient();
+  const cases = [
+    [operateClickTool, { session_id: "fixture", ref: "@continue" }],
+    [operateTypeTool, { session_id: "fixture", ref: "@name", text: "Ada" }],
+    [operateSelectTool, { session_id: "fixture", ref: "@region", values: ["US"] }],
+    [operatePressTool, { session_id: "fixture", key: "Tab" }],
+    [operateScrollTool, { session_id: "fixture", direction: "down" }],
+  ] as const;
+  try {
+    const listed = await client.listTools();
+    for (const [runtimeTool, baseArgs] of cases) {
+      const published = listed.tools.find((candidate) => candidate.name === runtimeTool.name)!;
+      expect(published.inputSchema.properties?.format).toEqual({
+        type: "string",
+        enum: ["compact", "full"],
+      });
+      const validate = new AjvJsonSchemaValidator().getValidator(
+        published.inputSchema as JsonSchemaType,
+      );
+      for (const [format, accepted] of [
+        ["compact", true],
+        ["full", true],
+        ["browser-use-dom", false],
+      ] as const) {
+        const args = { ...baseArgs, format };
+        expect(validate(args).valid, `${runtimeTool.name}:${format}`).toBe(accepted);
+        expect(
+          runtimeTool.inputSchema.safeParse(args).success,
+          `${runtimeTool.name}:${format}`,
+        ).toBe(accepted);
+      }
+    }
+
+    for (const [runtimeTool, baseArgs] of cases.slice(0, 4)) {
+      const published = listed.tools.find((candidate) => candidate.name === runtimeTool.name)!;
+      const capture = published.inputSchema.properties?.capture as
+        | {
+            properties?: {
+              source?: { properties?: { role?: unknown } };
+            };
+          }
+        | undefined;
+      expect(capture?.properties?.source?.properties?.role).toEqual({
+        type: "string",
+        enum: ["textbox", "code"],
+      });
+      const validate = new AjvJsonSchemaValidator().getValidator(
+        published.inputSchema as JsonSchemaType,
+      );
+      for (const [role, accepted] of [
+        ["textbox", true],
+        ["code", true],
+        ["button", false],
+      ] as const) {
+        const args = {
+          ...baseArgs,
+          capture: { store: { service: "Fixture" }, source: { role } },
+        };
+        expect(validate(args).valid, `${runtimeTool.name}:${role}`).toBe(accepted);
+        expect(runtimeTool.inputSchema.safeParse(args).success, `${runtimeTool.name}:${role}`).toBe(
+          accepted,
+        );
+      }
     }
   } finally {
     await client.close();

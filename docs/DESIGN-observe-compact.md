@@ -60,11 +60,12 @@ format: compact  <  full
         default     rich V1 (compact + screen + accessibility + raw fields)
 ```
 
-`operate_observe({ format })` accepts `compact|full`. Flat action verbs return
-their normal action result; there is no public observation-detail union. In V1,
-a genuinely ambiguous step can escalate to `format:"full"` for that one call.
-In V2, `compact` is the default paged control map and `full` is the verbatim DOM
-escape hatch.
+`operate_observe({ format })` accepts `compact|full`. The click/type/select/press/scroll
+verbs accept the same format choice and default to a compact changed-control delta;
+`format:"full"` opts that action into the verbatim DOM. In V1, a genuinely
+ambiguous step can escalate to `format:"full"` for that one call. In V2,
+`compact` is the default paged control map and `full` is the verbatim DOM escape
+hatch.
 
 ## Current Compact V2 wire-contract ownership
 

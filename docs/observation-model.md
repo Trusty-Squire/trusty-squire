@@ -66,7 +66,15 @@ regardless of page size. A huge page yields a bounded control-map page, not a
 huge payload. `format:"full"` is an explicit escape hatch when the agent needs
 the verbatim DOM.
 
-Concretely, `operate_start` and `operate_observe` default to `format:"compact"`: the existing paged `browser-use-control-query` map of all actionable controls, with each `[ref, role, facts?]` row carrying only the identity and state needed to act. `overflow.next_cursor` continues the map under the existing observation-v2 wire budget. Non-control nodes are absent by construction; this is a size/shape choice, never screening or redaction. `format:"full"` explicitly selects the unchanged, verbatim `browser-use-dom` tree when arbitrary page text, raw attributes, or layout context is needed.
+Concretely, `operate_start`, `operate_observe`, and the ordinary click/type/select/press/scroll
+actions default to `format:"compact"`: the existing paged `browser-use-control-query` map of
+actionable controls, with each `[ref, role, facts?]` row carrying only the identity and state
+needed to act. After a complete compact map has been emitted, an action on the same document
+returns `delta:true`, changed/new rows in `safe_table`, and any departed stable refs in `removed`;
+a fresh observe returns the complete current map. `overflow.next_cursor` continues either map under the existing observation-v2 wire
+budget. Non-control nodes are absent by construction; this is a size/shape choice, never
+screening or redaction. `format:"full"` explicitly selects the unchanged, verbatim
+`browser-use-dom` tree when arbitrary page text, raw attributes, or layout context is needed.
 
 Because the source of truth (loaded DOM) never leaves the browser, rendering
 either shape is an in-memory read; the compact map remains bounded and the full

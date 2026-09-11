@@ -365,6 +365,14 @@ const CONTROL_QUERY_CONTRACT =
   "Cursors page an immutable snapshot and require the same query and role; document changes invalidate them. A cursorless query captures fresh controls and semantics. " +
   "Use overflow.next_cursor to page safe_table. A cursor from hint_overflow returns `hint` and pages with hint_overflow.next_cursor. ";
 
+const ACTION_FORMAT_NOTE =
+  "The action response is the compact `browser-use-control-query` control map by default: after a compact map on the same document, `delta:true` carries changed/new controls in `safe_table` and departed refs in `removed`, never the verbatim DOM. " +
+  'Pass `format:"full"` to receive the verbatim `browser-use-dom` tree instead. Nothing is redacted in either format. ';
+
+const ACTION_FORMATS = ["compact", "full"] as const;
+const actionFormatSchema = z.enum(ACTION_FORMATS);
+const actionFormatJson = { type: "string", enum: [...ACTION_FORMATS] };
+
 export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   name: "operate_start",
   description:
@@ -1547,7 +1555,11 @@ export const operateLoginTool: Tool<z.infer<typeof loginSchema>> = {
 
 // Every public verb delegates directly to the guarded session executor.
 // This is a function, not a second Tool definition or public union schema.
-async function runAction(sessionId: string, action: ProvisionAction) {
+async function runAction(
+  sessionId: string,
+  action: ProvisionAction,
+  outputFormat: "compact" | "full" = "full",
+) {
   if (action.kind === "type") {
     const reason = manualCardEntryBlockReason(action.text);
     if (reason !== null)
@@ -1559,7 +1571,7 @@ async function runAction(sessionId: string, action: ProvisionAction) {
       };
   }
   try {
-    return await act(sessionId, action);
+    return await act(sessionId, action, "compact", undefined, outputFormat);
   } catch (error) {
     if (error instanceof TargetStaleError) return error.result;
     throw error;
@@ -1598,6 +1610,7 @@ const clickSchema = z
     ref: refSchema.optional(),
     screenshot: screenshotPointSchema.optional(),
     capture: captureSchema.optional(),
+    format: actionFormatSchema.optional(),
   })
   .refine((args) => (args.ref !== undefined) !== (args.screenshot !== undefined), {
     message: "Provide exactly one of ref or screenshot",
@@ -1605,6 +1618,7 @@ const clickSchema = z
 export const operateClickTool: Tool<z.infer<typeof clickSchema>> = {
   name: "operate_click",
   description:
+    ACTION_FORMAT_NOTE +
     "Prefer a current observation ref or unique @label. If a screenshot-visible control has no usable ref, pass screenshot:{screenshot_id,x,y} from operate_screenshot.click_binding, in original image pixels. Provide exactly one of ref or screenshot. target_unresolved means the label was never issued in this document; stale_ref means its reference or alias expired. stale_screenshot requires a new image. Each image binding permits one attempt; after an uncertain click, observe before deciding any new action. Dispatch does not guarantee challenge clearance. Card charges require operate_pay. A pointer-interception failure may use guarded DOM dispatch internally only when the executor proves no click was dispatched.",
   inputSchema: clickSchema,
   jsonInputSchema: {
@@ -1617,6 +1631,7 @@ export const operateClickTool: Tool<z.infer<typeof clickSchema>> = {
     properties: {
       ...sessionJson,
       ...refJson,
+      format: actionFormatJson,
       screenshot: {
         type: "object",
         additionalProperties: false,
@@ -1636,7 +1651,7 @@ export const operateClickTool: Tool<z.infer<typeof clickSchema>> = {
       ...(args.screenshot ? { screenshot: args.screenshot } : {}),
     };
     try {
-      const result = await runAction(args.session_id, action);
+      const result = await runAction(args.session_id, action, args.format ?? "compact");
       return args.screenshot
         ? {
             ...result,
@@ -1672,7 +1687,11 @@ export const operateClickTool: Tool<z.infer<typeof clickSchema>> = {
         !/intercepts pointer events/.test(error.message)
       )
         throw error;
-      return await runAction(args.session_id, { ...action, kind: "js_click" });
+      return await runAction(
+        args.session_id,
+        { ...action, kind: "js_click" },
+        args.format ?? "compact",
+      );
     }
   },
 };
@@ -1685,6 +1704,7 @@ const typeSchema = z
     slot: z.string().min(1).max(60).optional(),
     submit: z.boolean().optional(),
     capture: captureSchema.optional(),
+    format: actionFormatSchema.optional(),
   })
   .refine((args) => (args.text !== undefined) !== (args.slot !== undefined), {
     message: "Provide exactly one of text or slot",
@@ -1692,6 +1712,7 @@ const typeSchema = z
 export const operateTypeTool: Tool<z.infer<typeof typeSchema>> = {
   name: "operate_type",
   description:
+    ACTION_FORMAT_NOTE +
     "Fill a control with text, or a session slot returned by operate_login, operate_fill_credential, or operate_extract. Provide exactly one of text or slot. submit presses Enter after a successful fill. Model-supplied card-number-shaped text is refused; use operate_pay.",
   inputSchema: typeSchema,
   jsonInputSchema: {
@@ -1707,15 +1728,20 @@ export const operateTypeTool: Tool<z.infer<typeof typeSchema>> = {
       text: { type: "string" },
       slot: { type: "string" },
       submit: { type: "boolean" },
+      format: actionFormatJson,
     },
   },
   async handler(args) {
-    const result = await runAction(args.session_id, {
-      target: args.ref,
-      ...(args.slot !== undefined
-        ? { kind: "type_secret" as const, slot: args.slot }
-        : { kind: "type" as const, text: args.text! }),
-    });
+    const result = await runAction(
+      args.session_id,
+      {
+        target: args.ref,
+        ...(args.slot !== undefined
+          ? { kind: "type_secret" as const, slot: args.slot }
+          : { kind: "type" as const, text: args.text! }),
+      },
+      args.format ?? "compact",
+    );
     if (
       args.submit !== true ||
       (typeof result === "object" &&
@@ -1723,7 +1749,11 @@ export const operateTypeTool: Tool<z.infer<typeof typeSchema>> = {
         ("status" in result || "needs_user" in result))
     )
       return result;
-    return await runAction(args.session_id, { kind: "press", key: "Enter" });
+    return await runAction(
+      args.session_id,
+      { kind: "press", key: "Enter" },
+      args.format ?? "compact",
+    );
   },
 };
 
@@ -1735,6 +1765,7 @@ const selectSchema = z
     selections: formSelectionsSchema.optional(),
     capture: captureSchema.optional(),
     country: z.string().min(1).max(60).optional(),
+    format: actionFormatSchema.optional(),
   })
   .superRefine((args, ctx) => {
     const modes =
@@ -1751,6 +1782,7 @@ const selectSchema = z
 export const operateSelectTool: Tool<z.infer<typeof selectSchema>> = {
   name: "operate_select",
   description:
+    ACTION_FORMAT_NOTE +
     "Choose an option by visible text with ref + values (one value per control). For several controls, supply an ordered selections map of ref to option; partial results are retained. country selects the phone field's native country dropdown.",
   inputSchema: selectSchema,
   jsonInputSchema: {
@@ -1780,18 +1812,33 @@ export const operateSelectTool: Tool<z.infer<typeof selectSchema>> = {
       values: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 1 },
       selections: { type: "object", additionalProperties: { type: "string" } },
       country: { type: "string" },
+      format: actionFormatJson,
     },
   },
   async handler(args) {
-    if (args.selections !== undefined)
-      return await formSelectMany(args.session_id, args.selections);
+    if (args.selections !== undefined) {
+      const result = await formSelectMany(
+        args.session_id,
+        args.selections,
+        args.format ?? "compact",
+      );
+      return { ...result.observation, fields: result.fields };
+    }
     if (args.country !== undefined)
-      return await runAction(args.session_id, { kind: "set_phone_country", country: args.country });
-    return await runAction(args.session_id, {
-      kind: "select",
-      target: args.ref!,
-      text: args.values![0]!,
-    });
+      return await runAction(
+        args.session_id,
+        { kind: "set_phone_country", country: args.country },
+        args.format ?? "compact",
+      );
+    return await runAction(
+      args.session_id,
+      {
+        kind: "select",
+        target: args.ref!,
+        text: args.values![0]!,
+      },
+      args.format ?? "compact",
+    );
   },
 };
 
@@ -1799,26 +1846,36 @@ const pressSchema = z.object({
   ...sessionShape,
   key: z.string().min(1).max(40),
   capture: captureSchema.optional(),
+  format: actionFormatSchema.optional(),
 });
 export const operatePressTool: Tool<z.infer<typeof pressSchema>> = {
   name: "operate_press",
-  description: "Press a keyboard key in the current session, such as Enter, Tab, or Escape.",
+  description:
+    ACTION_FORMAT_NOTE +
+    "Press a keyboard key in the current session, such as Enter, Tab, or Escape.",
   inputSchema: pressSchema,
   jsonInputSchema: {
     type: "object",
     required: ["session_id", "key"],
-    properties: { ...sessionJson, key: { type: "string" } },
+    properties: {
+      ...sessionJson,
+      key: { type: "string" },
+      format: actionFormatJson,
+    },
   },
-  handler: async (args) => await runAction(args.session_id, { kind: "press", key: args.key }),
+  handler: async (args) =>
+    await runAction(args.session_id, { kind: "press", key: args.key }, args.format ?? "compact"),
 };
 
 const scrollSchema = z.object({
   ...sessionShape,
   direction: z.enum(["down", "up", "bottom", "top"]).default("down"),
+  format: actionFormatSchema.optional(),
 });
 export const operateScrollTool: Tool<z.infer<typeof scrollSchema>> = {
   name: "operate_scroll",
   description:
+    ACTION_FORMAT_NOTE +
     "Scroll the page viewport down, up, to the bottom, or to the top. Observe again to discover newly visible controls.",
   inputSchema: scrollSchema,
   jsonInputSchema: {
@@ -1827,10 +1884,15 @@ export const operateScrollTool: Tool<z.infer<typeof scrollSchema>> = {
     properties: {
       ...sessionJson,
       direction: { type: "string", enum: ["down", "up", "bottom", "top"], default: "down" },
+      format: actionFormatJson,
     },
   },
   handler: async (args) =>
-    await runAction(args.session_id, { kind: "scroll", direction: args.direction }),
+    await runAction(
+      args.session_id,
+      { kind: "scroll", direction: args.direction },
+      args.format ?? "compact",
+    ),
 };
 
 const allowHostSchema = z.object({ ...sessionShape, host: z.string().min(1).max(253) });

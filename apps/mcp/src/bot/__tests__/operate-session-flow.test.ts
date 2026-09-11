@@ -6744,7 +6744,8 @@ describe("operate session — sealed credential transfer", () => {
         },
       }),
       null,
-    )) as Awaited<ReturnType<typeof formSelectMany>>;
+    )) as Awaited<ReturnType<typeof formSelectMany>>["observation"] &
+      Pick<Awaited<ReturnType<typeof formSelectMany>>, "fields">;
 
     expect(h.selected).toEqual([
       { selector: "#variant", matcher: "Blue" },
@@ -6760,7 +6761,7 @@ describe("operate session — sealed credential transfer", () => {
       { label: "Size", option: "Large", status: "selected", selected_option: "Large" },
       { label: "Color", option: "Red", status: "failed" },
     ]);
-    expect(result.observation.session_id).toBe(started.session_id);
+    expect(result.session_id).toBe(started.session_id);
     expect(h.extractInteractiveElementsCalls).toBe(7);
   });
 
@@ -10850,11 +10851,156 @@ describe("flat operator verbs", () => {
       dispatchStatus: "not_dispatched",
       message: "overlay intercepts pointer events",
     };
-    await expect(
-      operateClickTool.handler({ session_id: started.session_id, ref: "@continue" }, null),
-    ).resolves.toMatchObject({ format: "browser-use-dom" });
+    const fallback = (await operateClickTool.handler(
+      { session_id: started.session_id, ref: "@continue" },
+      null,
+    )) as Record<string, unknown>;
+    expect(fallback).toMatchObject({
+      format: "browser-use-control-query",
+      safe_table: [expect.any(Array)],
+    });
+    expect(fallback).not.toHaveProperty("delta");
     expect(h.clickCalls).toBe(0);
     expect(h.jsClickCalls).toBe(1);
+  });
+
+  it("returns the compact control map after an action by default; full DOM only on request", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        role: "textbox",
+        selector: "#api-key",
+        name: "api-key",
+        ariaLabel: "API key",
+        value: "••••••••",
+      }),
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+      elem({ tag: "select", role: "select", labelText: "Region", selector: "#region" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    const baseline = await observe(started.session_id, "compact");
+    expect(baseline.format).toBe("browser-use-control-query");
+    type ActionResult = {
+      format?: string;
+      safe_table?: unknown;
+      dom?: unknown;
+      delta?: boolean;
+      removed?: string[];
+    };
+    const refsOf = (observation: { safe_table?: unknown }): Set<string> =>
+      new Set(
+        ((observation.safe_table as unknown as Array<[string, string]> | undefined) ?? []).map(
+          (row) => row[0]!,
+        ),
+      );
+    const baselineRefs = refsOf(baseline);
+    expect(baselineRefs.size).toBe(3);
+    const refForRole = (role: string): string =>
+      ((baseline.safe_table as unknown as Array<[string, string]>) ?? []).find(
+        (row) => row[1] === role,
+      )?.[0]!;
+    const buttonRef = refForRole("b");
+    const keyRef = refForRole("t");
+    const selectRef = refForRole("s");
+    expect(buttonRef).toBeDefined();
+    expect(keyRef).toBeDefined();
+    expect(selectRef).toBeDefined();
+
+    // Default action returns: the same browser-use-control-query shape as
+    // observe, with only changed/new refs. The raw value that appeared after
+    // the reveal click never enters that compact response.
+    h.elements = [
+      elem({
+        tag: "input",
+        role: "textbox",
+        selector: "#api-key",
+        name: "api-key",
+        ariaLabel: "API key",
+        value: "sk-test-revealed",
+      }),
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+      elem({ tag: "select", role: "select", labelText: "Region", selector: "#region" }),
+      elem({ tag: "button", role: "button", visibleText: "Copy", selector: "#copy" }),
+    ];
+    const clicked = (await operateClickTool.handler(
+      { session_id: started.session_id, ref: buttonRef },
+      null,
+    )) as ActionResult;
+    expect(clicked.format).toBe("browser-use-control-query");
+    expect(clicked.delta).toBe(true);
+    expect(clicked).not.toHaveProperty("dom");
+    expect(JSON.stringify(clicked)).not.toContain("sk-test-revealed");
+    expect(refsOf(clicked).size).toBe(1);
+    const [copyRef] = refsOf(clicked);
+    expect(copyRef).toBeDefined();
+
+    const afterClick = await observe(started.session_id, "compact");
+    const afterClickRefs = refsOf(afterClick);
+    expect(afterClickRefs.size).toBe(4);
+    expect([...refsOf(clicked)].every((ref) => afterClickRefs.has(ref))).toBe(true);
+    expect([...baselineRefs].every((ref) => afterClickRefs.has(ref))).toBe(true);
+
+    // Opt-in verbatim returns the unredacted DOM tree, including raw values.
+    h.elements[0] = elem({
+      tag: "input",
+      role: "textbox",
+      selector: "#api-key",
+      name: "api-key",
+      ariaLabel: "API key",
+      value: "sk-test-revealed-again",
+    });
+    const full = (await operateClickTool.handler(
+      { session_id: started.session_id, ref: buttonRef, format: "full" },
+      null,
+    )) as ActionResult;
+    expect(full.format).toBe("browser-use-dom");
+    expect(full.dom).toContain("sk-test-revealed-again");
+
+    const typed = (await operateTypeTool.handler(
+      { session_id: started.session_id, ref: keyRef, text: "hello" },
+      null,
+    )) as ActionResult;
+    expect(typed.format).toBe("browser-use-control-query");
+    expect(typed.delta).toBe(true);
+    expect(typed).not.toHaveProperty("dom");
+
+    h.elements = h.elements.filter(
+      (element) => (element as { selector?: string }).selector !== "#copy",
+    );
+    const pressed = (await operatePressTool.handler(
+      { session_id: started.session_id, key: "Tab" },
+      null,
+    )) as ActionResult;
+    expect(pressed.format).toBe("browser-use-control-query");
+    expect(pressed.delta).toBe(true);
+    expect(pressed.removed).toEqual([copyRef]);
+    expect(pressed).not.toHaveProperty("dom");
+
+    const scrolled = (await operateScrollTool.handler(
+      { session_id: started.session_id, direction: "bottom" },
+      null,
+    )) as ActionResult;
+    expect(scrolled.format).toBe("browser-use-control-query");
+    expect(scrolled.delta).toBe(true);
+    expect(scrolled).not.toHaveProperty("dom");
+
+    const selected = (await operateSelectTool.handler(
+      { session_id: started.session_id, ref: selectRef, values: ["us-east"] },
+      null,
+    )) as ActionResult;
+    expect(selected.format).toBe("browser-use-control-query");
+    expect(selected.delta).toBe(true);
+    expect(selected).not.toHaveProperty("dom");
+
+    const selectedMany = (await operateSelectTool.handler(
+      { session_id: started.session_id, selections: { [selectRef]: "us-west" } },
+      null,
+    )) as ActionResult & { fields?: unknown[]; observation?: unknown };
+    expect(selectedMany.format).toBe("browser-use-control-query");
+    expect(selectedMany.delta).toBe(true);
+    expect(selectedMany.fields).toEqual([expect.objectContaining({ status: "selected" })]);
+    expect(selectedMany).not.toHaveProperty("observation");
   });
 
   it("selects one option, several fields, and the phone country through operate_select", async () => {
