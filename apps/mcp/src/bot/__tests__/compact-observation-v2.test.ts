@@ -540,16 +540,6 @@ describe("compact observation v2", () => {
       expect(safeBlockersV2(root)).toEqual([]);
     });
 
-    it("stops reporting the challenge when the cf-turnstile wrapper reports success", () => {
-      const root = hostPage([
-        node("wrapper", {
-          attributes: { class: "cf-turnstile", "data-state": "success" },
-          children: [challengeIframe("frame")],
-        }),
-      ]);
-      expect(safeBlockersV2(root)).toEqual([]);
-    });
-
     it("keeps unrelated host success blocked until a real token arrives", () => {
       const root = hostPage([
         node("form", {
@@ -572,42 +562,52 @@ describe("compact observation v2", () => {
       expect(safeBlockersV2(root)).toEqual([]);
     });
 
-    it.each(["token", "success text", "wrapper state"])(
-      "keeps a shared challenge ancestor blocked when only one widget has %s",
-      (signal) => {
+    it.each(["element", "shadow root"])(
+      "associates nested %s widgets with isolated Turnstile hosts",
+      (layout) => {
+        const firstResponse = responseInput("response-a", "");
         const secondResponse = responseInput("response-b", "");
+        const wrapper = (id: string, response: BrowserUseNode): BrowserUseNode =>
+          node(`wrapper-${id}`, {
+            attributes: { class: "cf-turnstile" },
+            children: [
+              node(`inner-${id}`, {
+                ...(layout === "shadow root"
+                  ? { nodeType: 11, nodeName: "#document-fragment", shadowType: "closed" }
+                  : {}),
+                children: [challengeIframe(`frame-${id}`)],
+              }),
+              response,
+            ],
+          });
         const root = hostPage([
           node("section", {
             attributes: { class: "captcha-section" },
-            children: [
-              node("wrapper-a", {
-                attributes: {
-                  class: "cf-turnstile",
-                  ...(signal === "wrapper state" ? { "data-state": "success" } : {}),
-                },
-                children: [
-                  challengeIframe("frame-a", signal === "success text" ? "Success!" : undefined),
-                  responseInput("response-a", signal === "token" ? "0.token123" : ""),
-                ],
-              }),
-              node("wrapper-b", {
-                attributes: { class: "cf-turnstile" },
-                children: [challengeIframe("frame-b"), secondResponse],
-              }),
-            ],
+            children: [wrapper("a", firstResponse), wrapper("b", secondResponse)],
           }),
         ]);
-        expect(safeBlockersV2(root)).toEqual([
-          {
-            kind: "challenge",
-            text: "Widget containing a Cloudflare security challenge",
-            target: "unavailable",
-          },
-        ]);
+        expect(safeBlockersV2(root)).toHaveLength(1);
+        firstResponse.attributes.value = "0.token123";
+        expect(safeBlockersV2(root)).toHaveLength(1);
         secondResponse.attributes.value = "0.token456";
         expect(safeBlockersV2(root)).toEqual([]);
+        firstResponse.attributes.value = "";
+        expect(safeBlockersV2(root)).toHaveLength(1);
       },
     );
+
+    it("requires a token even when the host and iframe display success", () => {
+      const response = responseInput("response", "");
+      const root = hostPage([
+        node("wrapper", {
+          attributes: { class: "cf-turnstile", "data-state": "success" },
+          children: [challengeIframe("frame", "Success!"), response],
+        }),
+      ]);
+      expect(safeBlockersV2(root)).toHaveLength(1);
+      response.attributes.value = "0.token123";
+      expect(safeBlockersV2(root)).toEqual([]);
+    });
 
     it("does not associate a shared sibling token with multiple iframe widgets", () => {
       const root = hostPage([

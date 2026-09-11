@@ -965,15 +965,8 @@ const CHALLENGE_SIGNAL_RE =
 const CHALLENGE_MARKER_RE = /(?:captcha|turnstile|challenges?\.cloudflare\.com|cf[-_]challenge)/i;
 const VALIDATION_SIGNAL_RE =
   /\b(?:error|failed|invalid|required|incorrect|missing|must|cannot|can't|couldn't|not valid|not found|please (?:complete|enter|select|choose|provide)|try again)\b/i;
-// A solved Turnstile widget is observable without entering the cross-origin
-// iframe: the host page's hidden response input carries a non-empty token, or
-// the `.cf-turnstile` wrapper flips `data-state="success"`. A collapsed widget
-// iframe is already excluded by the visibility filter. Without these signals a
-// solved challenge kept reporting the identical `blocked: true` blocker.
 const TURNSTILE_RESPONSE_NAME_RE = /^(?:cf-turnstile-response|cf-chl-widget-\S+_response)$/;
 const TURNSTILE_WIDGET_ID_RE = /^cf-chl-widget-\S+_response$/;
-const CHALLENGE_SUCCESS_RE =
-  /^(?:success(?:fully)?|verification (?:complete|successful)|challenge complete)[.!]?$/i;
 
 function nodeTagV2(node: BrowserUseNode): string {
   return node.nodeType === 1 ? node.nodeName.toLowerCase() : "";
@@ -1113,10 +1106,7 @@ export function safeBlockersV2(
     const isResponseInput =
       nodeTagV2(node) === "input" &&
       (TURNSTILE_RESPONSE_NAME_RE.test(name) || TURNSTILE_WIDGET_ID_RE.test(id));
-    const isSuccessWrapper =
-      (node.attributes.class ?? "").split(/\s+/).includes("cf-turnstile") &&
-      (node.attributes["data-state"] ?? "").toLowerCase() === "success";
-    if ((isResponseInput && (node.attributes.value ?? "").trim() !== "") || isSuccessWrapper) {
+    if (isResponseInput && (node.attributes.value ?? "").trim() !== "") {
       solvedChallengeSignals.add(node);
     }
   }
@@ -1145,23 +1135,26 @@ export function safeBlockersV2(
   ];
   const solvedWidgets = new Set(
     widgets.filter((widget) => {
-      if (visibleFor.get(widget) !== true) return true;
-      const parent = parentFor.get(widget);
-      const boundary =
-        challengeFrames.includes(widget) &&
-        parent?.nodeType === 1 &&
-        widgets.filter((candidate) => withinSubtree(candidate, parent)).length === 1
-          ? parent
-          : widget;
-      return (
-        nodes.some(
-          (node) =>
-            visibleFor.get(node) === true &&
-            withinSubtree(node, widget) &&
-            CHALLENGE_SUCCESS_RE.test(blockerTextV2(node) ?? ""),
-        ) ||
-        [...solvedChallengeSignals].some((signal) => withinSubtree(signal, boundary))
-      );
+      const isFrame = challengeFrames.includes(widget);
+      if (isFrame && visibleFor.get(widget) !== true) return true;
+      let boundary = widget;
+      if (isFrame) {
+        let ancestor = parentFor.get(widget);
+        while (ancestor !== undefined && ancestor.nodeType !== 9) {
+          if (["iframe", "frame"].includes(nodeTagV2(ancestor))) break;
+          const host = ancestor;
+          if (widgets.filter((candidate) => withinSubtree(candidate, host)).length !== 1) break;
+          if (ancestor.nodeType === 1) {
+            if (boundary === widget) boundary = ancestor;
+            if ((ancestor.attributes.class ?? "").split(/\s+/).includes("cf-turnstile")) {
+              boundary = ancestor;
+              break;
+            }
+          }
+          ancestor = parentFor.get(ancestor);
+        }
+      }
+      return [...solvedChallengeSignals].some((signal) => withinSubtree(signal, boundary));
     }),
   );
   const blockers: SafeBlockerV2[] = [];
