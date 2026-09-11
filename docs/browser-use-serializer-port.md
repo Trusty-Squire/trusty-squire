@@ -57,7 +57,8 @@ Visible verification instructions and structurally identified validation errors
 appear in `semantic.blockers`, with `semantic.blocked: true` independent of `stage`.
 A solved Turnstile widget no longer blocks when its associated hidden response
 input (`cf-turnstile-response` / `cf-chl-widget-*_response`) carries a non-empty
-token or its iframe is no longer visible. Completion is associated with each
+token or capture confirms its iframe is no longer rendered. Viewport exclusion
+alone never counts as completion. Completion is associated with each
 widget before shared challenge containers are collapsed: every contained widget
 must be solved. Token association reaches the nearest unambiguous `.cf-turnstile`
 host through nested elements and shadow roots without crossing a multi-widget

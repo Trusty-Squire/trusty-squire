@@ -1059,8 +1059,13 @@ export function safeBlockersV2(
   visit(root, root, undefined, true);
 
   const challengeCandidates = nodes.filter((node) => {
-    if (visibleFor.get(node) !== true) return false;
     const tag = nodeTagV2(node);
+    if (
+      visibleFor.get(node) !== true &&
+      !(["iframe", "frame"].includes(tag) && node.rendered === true)
+    ) {
+      return false;
+    }
     const identity = [
       tag,
       node.attributes.id,
@@ -1136,7 +1141,7 @@ export function safeBlockersV2(
   const solvedWidgets = new Set(
     widgets.filter((widget) => {
       const isFrame = challengeFrames.includes(widget);
-      if (isFrame && visibleFor.get(widget) !== true) return true;
+      if (isFrame && widget.rendered === false) return true;
       let boundary = widget;
       if (isFrame) {
         let ancestor = parentFor.get(widget);
@@ -1163,7 +1168,7 @@ export function safeBlockersV2(
     const boundaryNodes: BrowserUseNode[] = [];
     const controls = new Set<BrowserUseNode>();
     const collectControls = (node: BrowserUseNode): void => {
-      if (visibleFor.get(node) === true) {
+      if (visibleFor.get(node) === true || node === challengeRoot) {
         boundaryNodes.push(node);
         if (blockerControlV2(node)) controls.add(node);
       }

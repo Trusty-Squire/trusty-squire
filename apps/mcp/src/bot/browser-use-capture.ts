@@ -587,6 +587,7 @@ export async function captureBrowserUseDOM(
         value: raw.nodeValue,
         attributes: a,
         visible,
+        rendered: l === undefined ? undefined : rendered,
         snapshot: l?.bounds !== null,
         bounds: l?.bounds ?? null,
         cursor: l?.styles.cursor ?? null,

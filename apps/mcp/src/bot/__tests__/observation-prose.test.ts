@@ -1895,6 +1895,41 @@ describe("interleaved observation DOM", () => {
       await page.close();
     }
   });
+  it.each(["cf-turnstile", "plain-wrapper"])(
+    "keeps offscreen Turnstile frames blocked inside %s until collapse or a token",
+    async (wrapperClass) => {
+      const page = await browser.newPage();
+      try {
+        await page.setViewportSize({ width: 800, height: 600 });
+        await page.setContent(`
+          <div class="${wrapperClass}">
+            <div style="height:1200px"></div>
+            <iframe title="Widget containing a Cloudflare security challenge"
+              style="width:300px;height:80px;border:0"></iframe>
+            <input type="hidden" name="cf-turnstile-response" value="">
+          </div>
+        `);
+        const observe = async () => safeBlockersV2((await captureThroughController(page)).root);
+        expect(await observe()).toHaveLength(1);
+        await page.locator("input").evaluate((input) => {
+          (input as HTMLInputElement).value = "0.fixture-token";
+        });
+        expect(await observe()).toEqual([]);
+        await page.locator("input").evaluate((input) => {
+          (input as HTMLInputElement).value = "";
+        });
+        expect(await observe()).toHaveLength(1);
+        for (const style of ["height:0", "display:none", "visibility:hidden"]) {
+          await page.locator("iframe").evaluate((frame, css) => {
+            frame.setAttribute("style", `width:300px;height:80px;border:0;${css}`);
+          }, style);
+          expect(await observe()).toEqual([]);
+        }
+      } finally {
+        await page.close();
+      }
+    },
+  );
   it("attaches a blocker ref only when the challenge control is grounded", async () => {
     const page = await browser.newPage();
     try {

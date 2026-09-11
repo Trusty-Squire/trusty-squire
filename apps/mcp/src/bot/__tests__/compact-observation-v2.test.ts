@@ -623,9 +623,30 @@ describe("compact observation v2", () => {
       expect(safeBlockersV2(root)).toHaveLength(1);
     });
 
+    it.each([true, undefined])(
+      "does not infer completion from viewport exclusion with rendered=%s",
+      (rendered) => {
+        const frame = challengeIframe("frame");
+        frame.visible = false;
+        frame.rendered = rendered;
+        frame.bounds = { x: 0, y: 2000, width: 300, height: 80 };
+        const response = responseInput("response", "");
+        const root = hostPage([
+          node("wrapper", {
+            attributes: { class: "cf-turnstile" },
+            children: [frame, response],
+          }),
+        ]);
+        expect(safeBlockersV2(root)).toHaveLength(1);
+        response.attributes.value = "0.token123";
+        expect(safeBlockersV2(root)).toEqual([]);
+      },
+    );
+
     it("omits a collapsed iframe inside a challenge wrapper", () => {
       const frame = challengeIframe("frame");
       frame.visible = false;
+      frame.rendered = false;
       const root = hostPage([
         node("wrapper", {
           attributes: { class: "cf-turnstile" },
