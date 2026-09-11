@@ -8826,7 +8826,14 @@ function captureSourceTargets(page: Page, source: CaptureSource) {
       });
 }
 
-async function readCaptureValue(handle: ElementHandle<Node>): Promise<string> {
+interface CaptureSourceResolution {
+  candidate_count: number;
+  value?: string;
+  resolved_source?: { tag: string; role?: string; name?: string; selector?: string };
+  resolved_from?: "post_action" | "pre_action_only";
+}
+
+async function readCaptureElement(handle: ElementHandle<Node>) {
   return await handle.evaluate((node) => {
     if (!node.isConnected || node.ownerDocument !== document)
       throw new Error("capture source changed");
@@ -8836,7 +8843,44 @@ async function readCaptureValue(handle: ElementHandle<Node>): Promise<string> {
         : node instanceof HTMLElement
           ? node.innerText
           : "";
-    return value.length <= 8192 ? value.trim() : "";
+    let resolved_source: CaptureSourceResolution["resolved_source"];
+    if (node instanceof Element) {
+      const tag = node.localName;
+      const role =
+        node.getAttribute("role") ||
+        (node instanceof HTMLTextAreaElement ||
+        (node instanceof HTMLInputElement && ["text", "email", "url", "tel"].includes(node.type))
+          ? "textbox"
+          : tag === "code"
+            ? "code"
+            : undefined);
+      const root = node.getRootNode();
+      const labelledBy = (node.getAttribute("aria-labelledby") ?? "")
+        .split(/\s+/)
+        .map((id) =>
+          root instanceof Document || root instanceof ShadowRoot
+            ? root.getElementById(id)?.textContent ?? ""
+            : "",
+        )
+        .join(" ")
+        .trim();
+      const labels =
+        node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
+          ? Array.from(node.labels ?? [])
+              .map((label) => label.textContent ?? "")
+              .join(" ")
+              .trim()
+          : "";
+      const name =
+        labelledBy || node.getAttribute("aria-label")?.trim() || labels ||
+        node.getAttribute("title")?.trim();
+      resolved_source = {
+        tag,
+        ...(role ? { role } : {}),
+        ...(name ? { name } : { selector: node.id ? `${tag}#${CSS.escape(node.id)}` : tag }),
+      };
+    }
+    return { value: value.length <= 8192 ? value.trim() : "", resolved_source };
   });
 }
 
@@ -8846,12 +8890,16 @@ async function readCaptureValue(handle: ElementHandle<Node>): Promise<string> {
 async function resolveCaptureSourceOnce(
   page: Page,
   source: CaptureSource,
-): Promise<{ candidate_count: number; value?: string }> {
+): Promise<CaptureSourceResolution> {
   const handles = await captureSourceTargets(page, source).elementHandles();
   try {
     if (handles.length !== 1) return { candidate_count: handles.length };
-    const value = await readCaptureValue(handles[0]!);
-    return { candidate_count: 1, ...(value.length > 0 ? { value } : {}) };
+    const { value, resolved_source } = await readCaptureElement(handles[0]!);
+    return {
+      candidate_count: 1,
+      ...(value.length > 0 ? { value } : {}),
+      ...(resolved_source ? { resolved_source } : {}),
+    };
   } finally {
     await Promise.all(handles.map((handle) => handle.dispose().catch(() => undefined)));
   }
@@ -8881,7 +8929,7 @@ export async function probeCaptureSource(
   }
   const [handle] = handles;
   try {
-    const value = await readCaptureValue(handle!);
+    const { value } = await readCaptureElement(handle!);
     return { candidate_count: 1, handle: handle!, ...(value.length > 0 ? { value } : {}) };
   } catch (error) {
     await handle!.dispose().catch(() => undefined);
@@ -8915,17 +8963,21 @@ async function resolveChangedPostActionSource(
   page: Page,
   source: CaptureSource,
   pre: CaptureSourceProbe,
-): Promise<{ candidate_count: number; value?: string } | null> {
+): Promise<CaptureSourceResolution | null> {
   const handles = await captureSourceTargets(page, source).elementHandles();
   try {
     if (handles.length === 1) {
-      const value = await readCaptureValue(handles[0]!);
+      const { value, resolved_source } = await readCaptureElement(handles[0]!);
       const unchanged =
         pre.candidate_count === 1 &&
         (await sameDomElement(handles[0]!, pre.handle)) &&
         (pre.value ?? "") === value;
       if (unchanged) return null;
-      return { candidate_count: 1, ...(value.length > 0 ? { value } : {}) };
+      return {
+      candidate_count: 1,
+      ...(value.length > 0 ? { value } : {}),
+      ...(resolved_source ? { resolved_source } : {}),
+    };
     }
     // Same non-unique (or still-empty) resolution as before the click — keep
     // waiting; the mutation may still be rendering.
@@ -8940,11 +8992,7 @@ async function resolvePostActionCaptureSource(
   page: Page,
   source: CaptureSource,
   pre: CaptureSourceProbe,
-): Promise<{
-  candidate_count: number;
-  value?: string;
-  resolved_from: "post_action" | "pre_action_only";
-}> {
+): Promise<CaptureSourceResolution> {
   const deadline = Date.now() + CAPTURE_MUTATION_RENDER_BUDGET_MS;
   for (;;) {
     const changed = await resolveChangedPostActionSource(page, source, pre);
@@ -8964,11 +9012,7 @@ export async function captureCredentialSource(
   sessionId: string,
   source: CaptureSource,
   afterAction?: { pre?: CaptureSourceProbe | undefined },
-): Promise<{
-  candidate_count: number;
-  value?: string;
-  resolved_from?: "post_action" | "pre_action_only";
-}> {
+): Promise<CaptureSourceResolution> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error("unknown provision session");
   const page = operationPageForSession(session);
@@ -8978,7 +9022,7 @@ export async function captureCredentialSource(
     // click's mutation has had its render window.
     await settleAfterStateChange(session.browser, page);
     return afterAction.pre === undefined
-      ? { ...(await resolveCaptureSourceOnce(page, source)), resolved_from: "post_action" as const }
+      ? { candidate_count: 0, resolved_from: "pre_action_only" }
       : await resolvePostActionCaptureSource(page, source, afterAction.pre);
   }
   return await resolveCaptureSourceOnce(page, source);

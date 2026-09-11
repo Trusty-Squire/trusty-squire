@@ -27,7 +27,7 @@ it("captures only one visible source in the explicit container without clicking 
     name: "API key",
     container: { role: "dialog", name: "Created key" },
   });
-  expect(captured).toEqual({ candidate_count: 1, value: "fresh-fixture-value" });
+  expect(captured).toMatchObject({ candidate_count: 1, value: "fresh-fixture-value" });
   expect(await page.locator("body").getAttribute("data-clicked")).toBeNull();
   expect(await captureCredentialSource("fixture", { role: "textbox", name: "API key" })).toEqual({
     candidate_count: 2,
@@ -87,7 +87,7 @@ it("captures the settled plain-text copy field reported on Neon", async () => {
       selector,
       container: { role: "dialog" },
     }),
-  ).toEqual({ candidate_count: 1, value });
+  ).toMatchObject({ candidate_count: 1, value });
   expect(await page.locator("body").getAttribute("data-copied")).toBeNull();
 
   // One-variable counterfactual: only the value-bearing element becomes an
@@ -97,7 +97,7 @@ it("captures the settled plain-text copy field reported on Neon", async () => {
     input.value = node.textContent!;
     node.replaceWith(input);
   });
-  expect(await captureCredentialSource("fixture", { role: "textbox" })).toEqual({
+  expect(await captureCredentialSource("fixture", { role: "textbox" })).toMatchObject({
     candidate_count: 1,
     value,
   });
@@ -108,7 +108,7 @@ it("keeps explicit plain-text sources scoped, visible, and unambiguous", async (
     <section role="dialog"><div class="copy-value" hidden>hidden-fixture</div>
     <div class="copy-value">inside-fixture</div></section>`);
   const source = { selector: ".copy-value", container: { role: "dialog" as const } };
-  expect(await captureCredentialSource("fixture", source)).toEqual({
+  expect(await captureCredentialSource("fixture", source)).toMatchObject({
     candidate_count: 1,
     value: "inside-fixture",
   });
@@ -145,6 +145,7 @@ it("captures the key textbox that only renders after the click's mutation settle
     expect(await captureCredentialSource("fixture", source, { pre })).toEqual({
       candidate_count: 1,
       value: "gsk_fixture_created-key-value",
+      resolved_source: { tag: "input", role: "textbox", name: "API key" },
       resolved_from: "post_action",
     });
   } finally {
@@ -179,6 +180,7 @@ it("still captures when the click reveals a new value in the same element", asyn
     expect(await captureCredentialSource("fixture", source, { pre })).toEqual({
       candidate_count: 1,
       value: "gsk_fixture_revealed",
+      resolved_source: { tag: "input", role: "textbox", name: "API key" },
       resolved_from: "post_action",
     });
   } finally {
@@ -205,4 +207,42 @@ it("never vaults the pre-click textbox when the dialog adds a second candidate",
   } finally {
     await pre.handle?.dispose();
   }
+});
+
+it("leaves capture unresolved when a detached source prevented the pre-action probe", async () => {
+  await page.setContent('<input aria-label="Display name" value="My key display name">');
+  const source = { role: "textbox" as const };
+  const locator = page.getByRole("textbox");
+  const originalHandles = locator.elementHandles.bind(locator);
+  vi.spyOn(locator, "elementHandles").mockImplementation(async () => {
+    const handles = await originalHandles();
+    await page.locator("input").evaluate((node) => node.replaceWith(node.cloneNode(true)));
+    return handles;
+  });
+  const lookup = vi.spyOn(page, "getByRole").mockReturnValue(locator);
+  try {
+    await expect(probeCaptureSource("fixture", source)).rejects.toThrow();
+  } finally {
+    lookup.mockRestore();
+  }
+  expect(await captureCredentialSource("fixture", source, {})).toEqual({
+    candidate_count: 0,
+    resolved_from: "pre_action_only",
+  });
+  expect(await captureCredentialSource("fixture", source)).toMatchObject({
+    candidate_count: 1,
+    value: "My key display name",
+  });
+});
+
+it.each([
+  '<span id="key-label">API key</span><input aria-labelledby="key-label">',
+  '<label for="key">API key</label><input id="key">',
+])("names the pinned source from its label", async (html) => {
+  await page.setContent(html);
+  await page.locator("input").fill("fixture-value");
+  expect(await captureCredentialSource("fixture", { role: "textbox" })).toMatchObject({
+    value: "fixture-value",
+    resolved_source: { tag: "input", role: "textbox", name: "API key" },
+  });
 });

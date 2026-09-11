@@ -690,7 +690,7 @@ async function captureIntoVault(
       execution: "completed",
       stored: true,
       stored_credential: stored,
-      resolved_source: describeCaptureSource(capture.source),
+      resolved_source: extracted.resolved_source ?? describeCaptureSource(capture.source),
     };
   } catch {
     // Errors may carry echoed provider values. Capture returns fixed metadata;

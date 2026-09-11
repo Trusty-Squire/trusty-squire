@@ -13,6 +13,7 @@ vi.mock("../bot/provision-session.js", async (original) => ({
   withProvisionSessionCall: async (_id: string, call: () => Promise<unknown>) => await call(),
   act: state.action,
   captureCredentialSource: state.capture,
+  extractCredentials: async () => ({ credentials: { api_key: "fixture-secret" } }),
   observedHostsForSession: () => ["example.test"],
 }));
 import { buildServer } from "../server.js";
@@ -86,6 +87,19 @@ it("keeps ordinary actions usable while a capture is unresolved, fencing only re
     });
     expect(wrong.isError).toBe(true);
     expect(state.capture).toHaveBeenCalledOnce();
+    const newStore = await client.callTool({
+      name: "operate_extract",
+      arguments: { session_id: "session", store: capture.store },
+    });
+    expect(newStore.isError).toBe(true);
+    expect(storeCredential).toHaveBeenCalledOnce();
+    const read = await client.callTool({
+      name: "operate_extract",
+      arguments: { session_id: "session" },
+    });
+    expect(read.isError).not.toBe(true);
+    expect(read.structuredContent).toMatchObject({ credentials: { api_key: "fixture-secret" } });
+    expect(storeCredential).toHaveBeenCalledOnce();
     const recovered = await client.callTool({
       name: "operate_extract",
       arguments: { session_id: "session", capture: { ...capture, write_id } },

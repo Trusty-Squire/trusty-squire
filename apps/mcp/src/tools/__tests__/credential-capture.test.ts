@@ -220,6 +220,13 @@ describe("explicit mutation capture", () => {
       resolved_source: { role: "textbox", name: "API key", container: { role: "dialog" } },
     });
   });
+  it("uses the pinned element receipt instead of the input locator", async () => {
+    const resolved_source = { tag: "input", role: "textbox", name: "Created API key" };
+    state.capture.mockResolvedValue({ candidate_count: 1, value: secret, resolved_source });
+    const store = vi.fn().mockResolvedValue(stored);
+    expect(await click(api(store))).toMatchObject({ stored: true, resolved_source });
+    expect(store).toHaveBeenCalledOnce();
+  });
   it("treats a capture that only resolves as before the action as unresolved", async () => {
     state.capture.mockResolvedValueOnce({
       candidate_count: 1,

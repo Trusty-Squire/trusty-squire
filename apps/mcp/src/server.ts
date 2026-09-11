@@ -349,7 +349,12 @@ export async function buildServer(
           // click/type/observe actions proceed while the write_id retry stays
           // available. Only a NEW vaulting attempt (a repeated key creation)
           // and a credentials finish stay fenced.
-          if (capture === undefined && tool.name !== "operate_finish") return;
+          if (
+            capture === undefined &&
+            !(tool.name === "operate_extract" && parsed.data.store !== undefined) &&
+            tool.name !== "operate_finish"
+          )
+            return;
           throw new BrokerRefusal(
             "outcome_unknown",
             "Capture storage is unresolved; use operate_extract with the original capture.write_id. Do not repeat creation.",
