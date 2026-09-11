@@ -211,11 +211,21 @@ describe("screenshot-bound native pointer dispatch", () => {
           if (change === "remove") {
             await evidence("overlay-captured.png", Buffer.from(shot.base64, "base64"));
             await evidence("overlay-removed.png", await f.page.screenshot());
-            await evidence("overlay-refusal.json", JSON.stringify({
-              request: point(shot, 174, 244),
-              error: await result.catch((error) => ({ code: error.code, dispatch: error.dispatch })),
-              observedClicks: await f.page.evaluate("window.clicks"),
-            }, null, 2));
+            await evidence(
+              "overlay-refusal.json",
+              JSON.stringify(
+                {
+                  request: point(shot, 174, 244),
+                  error: await result.catch((error) => ({
+                    code: error.code,
+                    dispatch: error.dispatch,
+                  })),
+                  observedClicks: await f.page.evaluate("window.clicks"),
+                },
+                null,
+                2,
+              ),
+            );
           }
         }
       } finally {
@@ -279,7 +289,10 @@ describe("screenshot-bound native pointer dispatch", () => {
         if (scale === 1) {
           await evidence("closed-shadow-captured.png", Buffer.from(shot.base64, "base64"));
           await evidence("closed-shadow-clicked.png", await f.page.screenshot());
-          await evidence("native-click-events.json", JSON.stringify(await f.frame.evaluate("window.events"), null, 2));
+          await evidence(
+            "native-click-events.json",
+            JSON.stringify(await f.frame.evaluate("window.events"), null, 2),
+          );
         }
         expect(authorize).toHaveBeenCalledWith(
           expect.objectContaining({ frameOrigin: "http://child.test", mainFrame: false }),
@@ -714,7 +727,14 @@ describe("native screenshot/click tool contract on an isolated session", () => {
           screenshot_click: { dispatch: "not_dispatched" },
         });
         expect(await f.frame.evaluate("window.events")).toEqual([{ trusted: true, checked: true }]);
-        await evidence(`tool-${mode}.json`, JSON.stringify({ result, replay, events: await f.frame.evaluate("window.events") }, null, 2));
+        await evidence(
+          `tool-${mode}.json`,
+          JSON.stringify(
+            { result, replay, events: await f.frame.evaluate("window.events") },
+            null,
+            2,
+          ),
+        );
       } finally {
         vi.restoreAllMocks();
         await finishProvisionSession(started.session_id);
