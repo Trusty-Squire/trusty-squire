@@ -1550,6 +1550,22 @@ function sameCompactV2Intent(left: SafeControlV2, right: SafeControlV2): boolean
   );
 }
 
+/** Wire-visible equality for the action response's changed-control delta. */
+function sameCompactV2Control(left: SafeControlV2, right: SafeControlV2): boolean {
+  return (
+    left.ref === right.ref &&
+    left.role === right.role &&
+    left.state === right.state &&
+    left.visibility === right.visibility &&
+    left.action === right.action &&
+    left.field === right.field &&
+    left.label === right.label &&
+    left.choice === right.choice &&
+    left.frame === right.frame &&
+    left.match === right.match
+  );
+}
+
 /**
  * Authorize an agent-supplied target against the observed skeleton. Two forms:
  * a `@e:` handle (the physical node anchor) or a `@label` alias, which resolves
@@ -4626,6 +4642,8 @@ function compactV2Observation(
   startMetadata?: CompactV2StartMetadata,
   sourcePage?: OAuthCompletionEvidence["page"],
   outputFormat: "compact" | "full" = "full",
+  compactActionDelta = false,
+  compactMapEmitted = true,
 ): Observation {
   rememberCompactV2SourcePage(session, sourcePage);
   const elements = capture.elements;
@@ -4694,12 +4712,27 @@ function compactV2Observation(
     byRef: safe.byRef,
     expiresAt: Date.now() + 5 * 60_000,
   };
-  const controlSnapshot = retainCompactV2PagingSnapshot(
+  const canCompactActionDelta =
+    outputFormat === "compact" &&
+    compactActionDelta &&
+    sameDocument &&
+    previous.compactMapEmitted === true;
+  const currentRefs = new Set(safe.rows.map((row) => row.ref));
+  const compactRows = canCompactActionDelta
+    ? safe.rows.filter((row) => {
+        const prior = previous.byRef.get(row.ref);
+        return prior === undefined || !sameCompactV2Control(prior, row);
+      })
+    : safe.rows;
+  const compactRemoved = canCompactActionDelta
+    ? [...previous.byRef.keys()].filter((ref) => !currentRefs.has(ref))
+    : [];
+  let controlSnapshot = retainCompactV2PagingSnapshot(
     session,
     session.compactV2Index,
     compactV2ControlCursorScope(session),
     pageUrl,
-    safe.rows,
+    compactRows,
   );
   const hintSnapshot =
     session.compactV2HintPages.length > 1
@@ -4727,34 +4760,57 @@ function compactV2Observation(
   };
   session.prevObserve = null;
   if (outputFormat === "compact") {
-    const page = encodeV2QueryPage({
-      sessionId: session.id,
-      stage,
-      pageUrl,
-      semantics,
-      rows: safe.rows,
-      cursorFor: (next) => compactV2Cursor(session, controlSnapshot, next),
-      ...(startMetadata === undefined
-        ? {}
-        : {
-            startMetadata: {
-              ...(startMetadata.hintPages?.[0] === undefined
-                ? {}
-                : { hint: startMetadata.hintPages[0] }),
-              ...(startMetadata.userEmail === undefined
-                ? {}
-                : { userEmail: startMetadata.userEmail }),
-              ...(session.compactV2HintPages.length <= 1
-                ? {}
-                : {
-                    hintOverflow: {
-                      remaining: session.compactV2HintPages.length - 1,
-                      next_cursor: compactV2Cursor(session, hintSnapshot!, 1),
-                    },
-                  }),
-            },
-          }),
-    });
+    const encodePage = (delta: boolean) =>
+      encodeV2QueryPage({
+        sessionId: session.id,
+        stage,
+        pageUrl,
+        semantics,
+        rows: delta ? compactRows : safe.rows,
+        ...(delta ? { delta: true as const, removed: compactRemoved } : {}),
+        cursorFor: (next) => compactV2Cursor(session, controlSnapshot, next),
+        ...(startMetadata === undefined
+          ? {}
+          : {
+              startMetadata: {
+                ...(startMetadata.hintPages?.[0] === undefined
+                  ? {}
+                  : { hint: startMetadata.hintPages[0] }),
+                ...(startMetadata.userEmail === undefined
+                  ? {}
+                  : { userEmail: startMetadata.userEmail }),
+                ...(session.compactV2HintPages.length <= 1
+                  ? {}
+                  : {
+                      hintOverflow: {
+                        remaining: session.compactV2HintPages.length - 1,
+                        next_cursor: compactV2Cursor(session, hintSnapshot!, 1),
+                      },
+                    }),
+              },
+            }),
+      });
+    let page;
+    try {
+      page = encodePage(canCompactActionDelta);
+    } catch (error) {
+      if (
+        !canCompactActionDelta ||
+        !(error instanceof Error) ||
+        error.message !== "compact-v2 budget metadata exceeded"
+      )
+        throw error;
+      controlSnapshot = retainCompactV2PagingSnapshot(
+        session,
+        session.compactV2Index,
+        compactV2ControlCursorScope(session),
+        pageUrl,
+        safe.rows,
+      );
+      page = encodePage(false);
+    }
+    if (compactMapEmitted && page.payload.overflow === undefined)
+      session.compactV2Previous.compactMapEmitted = true;
     return page.payload as unknown as Observation;
   }
   const removed = sameDocument
@@ -4893,6 +4949,8 @@ async function observeQueryOwned(
     undefined,
     sourcePage,
     "compact",
+    false,
+    false,
   );
   const index = session.compactV2Index;
   if (index === null) throw new Error("stale_cursor");
@@ -4969,6 +5027,8 @@ async function observeSession(
   sourcePage?: OAuthCompletionEvidence["page"],
   preserveSourceBinding = false,
   outputFormat: "compact" | "full" = "full",
+  compactActionDelta = false,
+  compactMapEmitted = true,
 ): Promise<Observation> {
   if (sourcePage === undefined) {
     const hadOAuthCompletionSource =
@@ -5049,6 +5109,8 @@ async function observeSession(
         startMetadata,
         sourcePage,
         outputFormat,
+        compactActionDelta,
+        compactMapEmitted,
       );
     }
     if (v2Mode === "shadow")
@@ -5475,6 +5537,8 @@ export async function act(
   action: ProvisionAction,
   detail: ObserveDetail = "compact",
   cartIdentity?: CartIdentityContext,
+  outputFormat: "compact" | "full" = "full",
+  compactMapEmitted = true,
 ): Promise<Observation> {
   const session = sessionForCall(sessionId);
   const capturedOperationPage =
@@ -5517,6 +5581,8 @@ export async function act(
           () => {
             screenshotDispatched = true;
           },
+          outputFormat,
+          compactMapEmitted,
         );
       return (action.kind === "click" ||
         action.kind === "js_click" ||
@@ -5587,6 +5653,8 @@ async function executeAct(
   operationPage?: Page,
   preparedOAuthDispatch = false,
   onScreenshotDispatched?: () => void,
+  outputFormat: "compact" | "full" = "full",
+  compactMapEmitted = true,
 ): Promise<InternalActResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
@@ -6443,6 +6511,9 @@ async function executeAct(
             undefined,
             actionObservationPage,
             true,
+            outputFormat,
+            outputFormat === "compact",
+            compactMapEmitted,
           );
   return {
     ...(actionPageAfter === undefined ? {} : { operationPage: actionPageAfter }),
@@ -6471,6 +6542,7 @@ export interface FormSelectManyFieldResult {
 export async function formSelectMany(
   sessionId: string,
   selections: Record<string, string>,
+  outputFormat: "compact" | "full" = "full",
 ): Promise<{ session_id: string; fields: FormSelectManyFieldResult[]; observation: Observation }> {
   const fields: FormSelectManyFieldResult[] = [];
   const session = sessionForCall(sessionId);
@@ -6561,7 +6633,15 @@ export async function formSelectMany(
   return {
     session_id: sessionId,
     fields,
-    observation: await observeSession(session, "compact", undefined, operationPage),
+    observation: await observeSession(
+      session,
+      "compact",
+      undefined,
+      operationPage,
+      false,
+      outputFormat,
+      outputFormat === "compact",
+    ),
   };
 }
 

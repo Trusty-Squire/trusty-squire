@@ -60,13 +60,42 @@ Current implementation and wire contract:
 
 The full DOM is already loaded in the operator's browser. The observation is a **projection** of it, not a fetch.
 
-**Compactness invariant (hard requirement, captain-mandated).** The default
-`operate_start` and `operate_observe` payloads MUST stay compact and bounded,
+**Compactness invariant (hard requirement, captain-mandated).** The
+`operate_start`, `operate_observe`, and ordinary click/type/select/press/scroll
+observation payloads MUST stay compact and bounded by default,
 regardless of page size. A huge page yields a bounded control-map page, not a
 huge payload. `format:"full"` is an explicit escape hatch when the agent needs
 the verbatim DOM.
 
-Concretely, `operate_start` and `operate_observe` default to `format:"compact"`: the existing paged `browser-use-control-query` map of all actionable controls, with each `[ref, role, facts?]` row carrying only the identity and state needed to act. `overflow.next_cursor` continues the map under the existing observation-v2 wire budget. Non-control nodes are absent by construction; this is a size/shape choice, never screening or redaction. `format:"full"` explicitly selects the unchanged, verbatim `browser-use-dom` tree when arbitrary page text, raw attributes, or layout context is needed.
+Concretely, `operate_start`, `operate_observe`, and the ordinary click/type/select/press/scroll
+actions default to `format:"compact"`: the existing paged `browser-use-control-query` map of
+actionable controls, with each `[ref, role, facts?]` row carrying only the identity and state
+needed to act. An action can return `delta:true`, changed/new rows in `safe_table`, and
+departed stable refs in `removed` only while its same-document comparison map has been
+fully delivered to the caller. A fresh, unfiltered observe returns the current map;
+`overflow.next_cursor` continues either map under the existing observation-v2 wire budget.
+For an initial action response without `delta:true`, replace the prior map;
+cursor pages extend the map or delta started by that response.
+
+Full-format observations, filtered queries, paginated responses, and observations
+discarded by compound actions or capture invalidate delta eligibility. This includes
+the fill before `operate_type(submit:true)`, internal multi-select refreshes, and
+every capture-enabled verb whose observation is replaced with vault metadata. The
+next compact action returns the current map, paginated if necessary. Paging does
+not itself restore delta eligibility; a complete map or eligible delta must fit in
+one delivered response. If removal metadata alone exceeds the byte budget, the
+action falls back to the current paginated map without `delta` or `removed`.
+These delivery and budget cases are covered by the flat operator verb regressions
+in `apps/mcp/src/bot/__tests__/operate-session-flow.test.ts`.
+
+Click, type, press, scroll, and single-control select return the observation directly.
+`operate_select(selections)` preserves `{ session_id, fields, observation }`, including
+partial field results; `format` chooses the format inside `observation`. Capture
+continues to return its vault result rather than an action observation.
+
+Non-control nodes are absent by construction; this is a size/shape choice, never
+screening or redaction. `format:"full"` explicitly selects the unchanged, verbatim
+`browser-use-dom` tree when arbitrary page text, raw attributes, or layout context is needed.
 
 Because the source of truth (loaded DOM) never leaves the browser, rendering
 either shape is an in-memory read; the compact map remains bounded and the full

@@ -195,6 +195,8 @@ export interface SafeObservationBaselineV2 {
   stage: SafeStageV2;
   semantics: SafePageSemanticsV2;
   byRef: Map<string, SafeControlV2>;
+  /** A complete compact control map was actually returned for this document. */
+  compactMapEmitted?: true;
   /** Last emitted canonical tree and its rendered stable identities. */
   dom?: string;
   renderedRefs?: string[];
@@ -1866,6 +1868,10 @@ export function encodeV2QueryPage(args: {
   pageUrl?: string;
   semantics?: SafePageSemanticsV2;
   rows: readonly SafeControlV2[];
+  /** Same-document action response containing only changed/new control rows. */
+  delta?: true;
+  /** Stable refs present in the preceding control map but absent now. */
+  removed?: string[];
   cursorFor: (offset: number) => string;
   offset?: number;
   startMetadata?: {
@@ -1890,6 +1896,8 @@ export function encodeV2QueryPage(args: {
     ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
       ? {}
       : { semantic: args.semantics }),
+    ...(args.delta === true ? { delta: true } : {}),
+    ...(args.removed === undefined || args.removed.length === 0 ? {} : { removed: args.removed }),
   };
   const pageWith = (
     table: readonly WireControlV2[],

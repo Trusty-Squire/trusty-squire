@@ -70,6 +70,7 @@ describe("flat operator workflow routing", () => {
       1,
       "session-select",
       legacyInput.selections,
+      "compact",
     );
   });
 

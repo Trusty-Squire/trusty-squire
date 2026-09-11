@@ -24,6 +24,7 @@ import type * as GoogleLoginModule from "../google-login.js";
 import type * as ProfileModule from "../profile.js";
 
 const h = vi.hoisted(() => ({
+  captureValues: [] as string[],
   providers: ["google"] as string[] | null,
   oauthStatus: "already_valid" as string,
   oauthLoginCalls: [] as string[],
@@ -332,8 +333,18 @@ vi.mock("../browser.js", async (importOriginal) => ({
     currentUrl(): string {
       return this.detached ? this.detachedUrl : h.currentUrl;
     }
-    activePage(): { isClosed: () => boolean; url: () => string } {
-      return { isClosed: () => false, url: () => this.currentUrl() };
+    activePage() {
+      return {
+        isClosed: () => false,
+        url: () => this.currentUrl(),
+        getByRole: () => ({
+          elementHandles: async () =>
+            h.captureValues.map((value) => ({
+              evaluate: async () => value,
+              dispose: async () => {},
+            })),
+        }),
+      };
     }
     mainDocumentIdentity(): string {
       return String(h.mainDocumentEpoch);
@@ -1171,6 +1182,7 @@ function elem(partial: Record<string, unknown>): unknown {
 }
 
 beforeEach(() => {
+  h.captureValues = [];
   compactV2ModeBeforeTest = process.env.TRUSTY_SQUIRE_OBSERVE_V2;
   process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "off";
   process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
@@ -10850,11 +10862,289 @@ describe("flat operator verbs", () => {
       dispatchStatus: "not_dispatched",
       message: "overlay intercepts pointer events",
     };
-    await expect(
-      operateClickTool.handler({ session_id: started.session_id, ref: "@continue" }, null),
-    ).resolves.toMatchObject({ format: "browser-use-dom" });
+    const fallback = (await operateClickTool.handler(
+      { session_id: started.session_id, ref: "@continue" },
+      null,
+    )) as Record<string, unknown>;
+    expect(fallback).toMatchObject({
+      format: "browser-use-control-query",
+      safe_table: [expect.any(Array)],
+    });
+    expect(fallback).not.toHaveProperty("delta");
     expect(h.clickCalls).toBe(0);
     expect(h.jsClickCalls).toBe(1);
+  });
+
+  it("returns the compact control map after an action by default; full DOM only on request", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        role: "textbox",
+        selector: "#api-key",
+        name: "api-key",
+        ariaLabel: "API key",
+        value: "••••••••",
+      }),
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+      elem({ tag: "select", role: "select", labelText: "Region", selector: "#region" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    const baseline = await observe(started.session_id, "compact");
+    expect(baseline.format).toBe("browser-use-control-query");
+    type ActionResult = {
+      format?: string;
+      safe_table?: unknown;
+      dom?: unknown;
+      delta?: boolean;
+      removed?: string[];
+    };
+    const refsOf = (observation: { safe_table?: unknown }): Set<string> =>
+      new Set(
+        ((observation.safe_table as unknown as Array<[string, string]> | undefined) ?? []).map(
+          (row) => row[0]!,
+        ),
+      );
+    const baselineRefs = refsOf(baseline);
+    expect(baselineRefs.size).toBe(3);
+    const refForRole = (role: string): string =>
+      ((baseline.safe_table as unknown as Array<[string, string]>) ?? []).find(
+        (row) => row[1] === role,
+      )?.[0]!;
+    const buttonRef = refForRole("b");
+    const keyRef = refForRole("t");
+    const selectRef = refForRole("s");
+    expect(buttonRef).toBeDefined();
+    expect(keyRef).toBeDefined();
+    expect(selectRef).toBeDefined();
+
+    // Default action returns: the same browser-use-control-query shape as
+    // observe, with only changed/new refs. The raw value that appeared after
+    // the reveal click never enters that compact response.
+    h.elements = [
+      elem({
+        tag: "input",
+        role: "textbox",
+        selector: "#api-key",
+        name: "api-key",
+        ariaLabel: "API key",
+        value: "sk-test-revealed",
+      }),
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+      elem({ tag: "select", role: "select", labelText: "Region", selector: "#region" }),
+      elem({ tag: "button", role: "button", visibleText: "Copy", selector: "#copy" }),
+    ];
+    const clicked = (await operateClickTool.handler(
+      { session_id: started.session_id, ref: buttonRef },
+      null,
+    )) as ActionResult;
+    expect(clicked.format).toBe("browser-use-control-query");
+    expect(clicked.delta).toBe(true);
+    expect(clicked).not.toHaveProperty("dom");
+    expect(JSON.stringify(clicked)).not.toContain("sk-test-revealed");
+    expect(refsOf(clicked).size).toBe(1);
+    const [copyRef] = refsOf(clicked);
+    expect(copyRef).toBeDefined();
+
+    const afterClick = await observe(started.session_id, "compact");
+    const afterClickRefs = refsOf(afterClick);
+    expect(afterClickRefs.size).toBe(4);
+    expect([...refsOf(clicked)].every((ref) => afterClickRefs.has(ref))).toBe(true);
+    expect([...baselineRefs].every((ref) => afterClickRefs.has(ref))).toBe(true);
+
+    // Opt-in verbatim returns the unredacted DOM tree, including raw values.
+    h.elements[0] = elem({
+      tag: "input",
+      role: "textbox",
+      selector: "#api-key",
+      name: "api-key",
+      ariaLabel: "API key",
+      value: "sk-test-revealed-again",
+    });
+    const full = (await operateClickTool.handler(
+      { session_id: started.session_id, ref: buttonRef, format: "full" },
+      null,
+    )) as ActionResult;
+    expect(full.format).toBe("browser-use-dom");
+    expect(full.dom).toContain("sk-test-revealed-again");
+
+    const typed = (await operateTypeTool.handler(
+      { session_id: started.session_id, ref: keyRef, text: "hello" },
+      null,
+    )) as ActionResult;
+    expect(typed.format).toBe("browser-use-control-query");
+    expect(typed).not.toHaveProperty("delta");
+    expect(typed).not.toHaveProperty("dom");
+
+    h.elements = h.elements.filter(
+      (element) => (element as { selector?: string }).selector !== "#copy",
+    );
+    const pressed = (await operatePressTool.handler(
+      { session_id: started.session_id, key: "Tab" },
+      null,
+    )) as ActionResult;
+    expect(pressed.format).toBe("browser-use-control-query");
+    expect(pressed.delta).toBe(true);
+    expect(pressed.removed).toEqual([copyRef]);
+    expect(pressed).not.toHaveProperty("dom");
+
+    const scrolled = (await operateScrollTool.handler(
+      { session_id: started.session_id, direction: "bottom" },
+      null,
+    )) as ActionResult;
+    expect(scrolled.format).toBe("browser-use-control-query");
+    expect(scrolled.delta).toBe(true);
+    expect(scrolled).not.toHaveProperty("dom");
+
+    const selected = (await operateSelectTool.handler(
+      { session_id: started.session_id, ref: selectRef, values: ["us-east"] },
+      null,
+    )) as ActionResult;
+    expect(selected.format).toBe("browser-use-control-query");
+    expect(selected.delta).toBe(true);
+    expect(selected).not.toHaveProperty("dom");
+
+    const selectedMany = (await operateSelectTool.handler(
+      { session_id: started.session_id, selections: { [selectRef]: "us-west" } },
+      null,
+    )) as { fields?: unknown[]; observation: ActionResult };
+    expect(selectedMany.observation.format).toBe("browser-use-control-query");
+    expect(selectedMany.observation).not.toHaveProperty("delta");
+    expect(refsOf(selectedMany.observation).size).toBe(3);
+    expect(selectedMany.fields).toEqual([expect.objectContaining({ status: "selected" })]);
+    const fullMany = (await operateSelectTool.handler(
+      { session_id: started.session_id, selections: { [selectRef]: "us-west" }, format: "full" },
+      null,
+    )) as { observation: ActionResult };
+    expect(fullMany.observation.format).toBe("browser-use-dom");
+  });
+
+  it.each([
+    ["click", operateClickTool, { ref: "@continue" }],
+    ["type", operateTypeTool, { ref: "@name", text: "Ada" }],
+    ["press", operatePressTool, { key: "Tab" }],
+    ["select", operateSelectTool, { ref: "@region", values: ["US"] }],
+    ["select many", operateSelectTool, { selections: { "@region": "US" } }],
+  ] as const)("resends controls discarded by %s capture", async (_name, tool, args) => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+      elem({ tag: "input", role: "textbox", ariaLabel: "Name", selector: "#name" }),
+      elem({ tag: "select", role: "select", labelText: "Region", selector: "#region" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    const storeCredential = vi.fn().mockResolvedValue({ reference: "vault://acct/captured" });
+    const api = { storeCredential } as unknown as ApiClient;
+    for (const outcome of ["stored", "ambiguous", "unresolved"] as const) {
+      await observe(started.session_id, "compact");
+      h.elements.push(
+        elem({ tag: "button", role: "button", visibleText: outcome, selector: `#${outcome}` }),
+      );
+      h.captureValues = outcome === "ambiguous" ? [] : ["captured-secret"];
+      if (outcome === "unresolved") storeCredential.mockRejectedValueOnce(new Error("offline"));
+      const captured = await tool.handler(
+        tool.inputSchema.parse({
+          session_id: started.session_id,
+          ...args,
+          capture: { store: { service: "example" }, source: { role: "textbox", name: "API key" } },
+        }) as never,
+        api,
+      );
+      expect(captured).toMatchObject({ closed: false, stored: outcome === "stored" });
+      if (outcome !== "stored")
+        expect(captured).toHaveProperty(
+          "error",
+          outcome === "ambiguous" ? "capture_ambiguous" : "capture_unresolved",
+        );
+      expect(captured).not.toHaveProperty("safe_table");
+      expect(captured).not.toHaveProperty("observation");
+      const next = await operateScrollTool.handler(
+        { session_id: started.session_id, direction: "bottom" },
+        null,
+      );
+      expect(next).not.toHaveProperty("delta");
+      expect((next as { safe_table: unknown[] }).safe_table).toHaveLength(h.elements.length);
+    }
+    expect(storeCredential).toHaveBeenCalledTimes(2);
+  });
+
+  it("resends controls after discarded fill observations and filtered queries", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [elem({ tag: "input", role: "textbox", ariaLabel: "Name", selector: "#name" })];
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    await observe(started.session_id, "compact");
+    h.elements.push(
+      elem({ tag: "button", role: "button", visibleText: "Revealed", selector: "#revealed" }),
+    );
+    const submitted = await operateTypeTool.handler(
+      { session_id: started.session_id, ref: "@name", text: "Ada", submit: true },
+      null,
+    );
+    expect(submitted).toMatchObject({ format: "browser-use-control-query" });
+    expect(submitted).not.toHaveProperty("delta");
+    expect((submitted as { safe_table: unknown[] }).safe_table).toHaveLength(2);
+    h.elements.push(
+      elem({ tag: "button", role: "button", visibleText: "Hidden from query", selector: "#other" }),
+    );
+    const filtered = await observeQuery(started.session_id, "Name");
+    expect(filtered.safe_table).toHaveLength(1);
+    const pressed = await operatePressTool.handler(
+      { session_id: started.session_id, key: "Tab" },
+      null,
+    );
+    expect(pressed).not.toHaveProperty("delta");
+    expect((pressed as { safe_table: unknown[] }).safe_table).toHaveLength(3);
+  });
+
+  it("falls back to a paginated complete map when removals exceed the delta budget", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [];
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    await observe(started.session_id, "compact");
+    for (let batch = 0; batch < 30; batch += 1) {
+      h.elements.push(
+        ...Array.from({ length: 20 }, (_, offset) => {
+          const index = batch * 20 + offset;
+          return elem({
+            index,
+            tag: "button",
+            role: "button",
+            visibleText: `Item ${index}`,
+            selector: `#item-${index}`,
+          });
+        }),
+      );
+      const added = await operatePressTool.handler(
+        { session_id: started.session_id, key: "Tab" },
+        null,
+      );
+      expect(added).toMatchObject({ delta: true });
+      expect(added).not.toHaveProperty("overflow");
+    }
+    h.elements = h.elements.slice(500);
+    let page = (await operatePressTool.handler(
+      { session_id: started.session_id, key: "Tab" },
+      null,
+    )) as {
+      safe_table: Array<[string, ...unknown[]]>;
+      overflow?: { next_cursor: string };
+    };
+    expect(page).not.toHaveProperty("delta");
+    expect(page).not.toHaveProperty("removed");
+    expect(page).toHaveProperty("overflow");
+    const refs = new Set<string>();
+    for (;;) {
+      expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(4096);
+      for (const row of page.safe_table) refs.add(row[0]);
+      if (!page.overflow) break;
+      page = (await observeQuery(
+        started.session_id,
+        "",
+        undefined,
+        page.overflow.next_cursor,
+      )) as typeof page;
+    }
+    expect(refs.size).toBe(100);
   });
 
   it("selects one option, several fields, and the phone country through operate_select", async () => {
