@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { createHmac, randomBytes } from "node:crypto";
 import type { InteractiveElement } from "./browser.js";
+import { browserUseBoundedContextText, type BrowserUseNode } from "./browser-use-serializer.js";
 
 export const OBSERVE_V2_MAX_WIRE_BYTES = 4_096;
 export const OBSERVE_V2_MAX_TOKENS = 1_024;
@@ -36,9 +37,22 @@ export function compactV2DegradeMetadata(
     if (compactV2PayloadWithinBudget(candidate)) return candidate;
   }
   if ("semantic" in candidate) {
-    const rest = { ...candidate };
-    delete rest.semantic;
-    candidate = rest;
+    const semantic = candidate.semantic;
+    if (
+      typeof semantic === "object" &&
+      semantic !== null &&
+      Array.isArray((semantic as { blockers?: unknown }).blockers) &&
+      (semantic as { blockers: unknown[] }).blockers.length > 0
+    ) {
+      candidate = {
+        ...candidate,
+        semantic: { blockers: (semantic as { blockers: unknown[] }).blockers },
+      };
+    } else {
+      const rest = { ...candidate };
+      delete rest.semantic;
+      candidate = rest;
+    }
     if (compactV2PayloadWithinBudget(candidate)) return candidate;
   }
   if ("hint" in candidate || "user_email" in candidate || "hint_overflow" in candidate) {
@@ -46,6 +60,12 @@ export function compactV2DegradeMetadata(
     delete rest.hint;
     delete rest.user_email;
     delete rest.hint_overflow;
+    candidate = rest;
+    if (compactV2PayloadWithinBudget(candidate)) return candidate;
+  }
+  if ("semantic" in candidate) {
+    const rest = { ...candidate };
+    delete rest.semantic;
     candidate = rest;
     if (compactV2PayloadWithinBudget(candidate)) return candidate;
   }
@@ -125,6 +145,16 @@ export interface ObservationSemanticSourceV2 {
 export interface SafePageSemanticsV2 {
   title?: string;
   headings?: string[];
+  blockers?: SafeBlockerV2[];
+}
+
+export interface SafeBlockerV2 {
+  kind: "challenge" | "validation";
+  text: string;
+  ref?: string;
+  target?: "unavailable";
+  focus?: "focused" | "focusable";
+  keyboard?: "space" | "tab_space";
 }
 
 /**
@@ -917,6 +947,248 @@ export function safePageSemanticsV2(source: ObservationSemanticSourceV2): SafePa
     ...(title === undefined ? {} : { title }),
     ...(headings.length === 0 ? {} : { headings }),
   };
+}
+
+const BLOCKER_TEXT_MAX_CHARS = 160;
+const BLOCKER_MAX_ITEMS = 3;
+const CHALLENGE_SIGNAL_RE =
+  /\b(?:captcha|turnstile|verification challenge|security challenge|verify (?:that )?you are human|human verification|not a robot)\b/i;
+const CHALLENGE_MARKER_RE = /(?:captcha|turnstile|challenges?\.cloudflare\.com|cf[-_]challenge)/i;
+const VALIDATION_SIGNAL_RE =
+  /\b(?:error|failed|invalid|required|incorrect|missing|must|cannot|can't|couldn't|not valid|please (?:complete|enter|select|choose|provide)|try again)\b/i;
+
+function nodeTagV2(node: BrowserUseNode): string {
+  return node.nodeType === 1 ? node.nodeName.toLowerCase() : "";
+}
+
+function axBooleanV2(node: BrowserUseNode, name: string): boolean {
+  return node.axProperties.some((property) => property.name === name && property.value === true);
+}
+
+function boundedBlockerTextV2(value: string | null | undefined): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  const normalized = value.normalize("NFKC").replace(/\s+/g, " ").trim();
+  if (normalized.length === 0) return undefined;
+  const characters = Array.from(normalized);
+  return characters.length <= BLOCKER_TEXT_MAX_CHARS
+    ? normalized
+    : `${characters.slice(0, BLOCKER_TEXT_MAX_CHARS - 1).join("")}…`;
+}
+
+function blockerTextV2(node: BrowserUseNode): string | undefined {
+  const candidates = [
+    node.attributes["aria-label"],
+    node.attributes.ax_name,
+    node.attributes.title,
+    browserUseBoundedContextText(node, BLOCKER_TEXT_MAX_CHARS),
+    node.contentDocument === null
+      ? null
+      : browserUseBoundedContextText(node.contentDocument, BLOCKER_TEXT_MAX_CHARS),
+  ];
+  return candidates
+    .map((candidate) => boundedBlockerTextV2(candidate))
+    .find((candidate) => candidate !== undefined);
+}
+
+function blockerControlV2(node: BrowserUseNode): boolean {
+  const tag = nodeTagV2(node);
+  const role = (node.attributes.role ?? node.axRole ?? "").toLowerCase();
+  const type = (node.attributes.type ?? "").toLowerCase();
+  return (
+    role === "checkbox" ||
+    role === "button" ||
+    tag === "button" ||
+    (tag === "input" && ["button", "checkbox", "submit"].includes(type))
+  );
+}
+
+function descendantsV2(node: BrowserUseNode): BrowserUseNode[] {
+  return [...node.children, ...(node.contentDocument === null ? [] : [node.contentDocument])];
+}
+
+/**
+ * Extract only task-blocking semantics from the canonical capture already used
+ * by the full DOM serializer. This is deliberately structural: explicit
+ * alert/invalid relationships and challenge-labelled boundaries qualify;
+ * ordinary page prose does not.
+ */
+export function safeBlockersV2(
+  root: BrowserUseNode,
+  refForNode: (node: BrowserUseNode) => string | undefined = () => undefined,
+): SafeBlockerV2[] {
+  const nodes: BrowserUseNode[] = [];
+  const parentFor = new Map<BrowserUseNode, BrowserUseNode>();
+  const visibleFor = new Map<BrowserUseNode, boolean>();
+  const scopeFor = new Map<BrowserUseNode, BrowserUseNode>();
+  const idsByScope = new Map<BrowserUseNode, Map<string, BrowserUseNode>>();
+  const visit = (
+    node: BrowserUseNode,
+    enclosingScope: BrowserUseNode,
+    parent: BrowserUseNode | undefined,
+    ancestorsVisible: boolean,
+  ): void => {
+    const scope = [9, 11].includes(node.nodeType) ? node : enclosingScope;
+    const visible = ancestorsVisible && ([9, 11].includes(node.nodeType) ? true : node.visible);
+    nodes.push(node);
+    if (parent !== undefined) parentFor.set(node, parent);
+    visibleFor.set(node, visible);
+    scopeFor.set(node, scope);
+    let ids = idsByScope.get(scope);
+    if (ids === undefined) {
+      ids = new Map();
+      idsByScope.set(scope, ids);
+    }
+    const id = node.attributes.id?.trim();
+    if (id) ids.set(id, node);
+    descendantsV2(node).forEach((child) => visit(child, scope, node, visible));
+  };
+  visit(root, root, undefined, true);
+
+  const challengeCandidates = nodes.filter((node) => {
+    if (visibleFor.get(node) !== true) return false;
+    const tag = nodeTagV2(node);
+    const identity = [
+      tag,
+      node.attributes.id,
+      node.attributes.class,
+      node.attributes.title,
+      node.attributes["aria-label"],
+      node.attributes.ax_name,
+      node.attributes.src,
+    ]
+      .filter((value): value is string => typeof value === "string")
+      .join(" ");
+    if (CHALLENGE_MARKER_RE.test(identity)) return true;
+    if (node.nodeType === 3) {
+      const text = blockerTextV2(node) ?? "";
+      return CHALLENGE_SIGNAL_RE.test(text) && VALIDATION_SIGNAL_RE.test(text);
+    }
+    if (
+      !["iframe", "frame", "label"].includes(tag) &&
+      (node.attributes.role ?? node.axRole ?? "").toLowerCase() !== "alert" &&
+      !blockerControlV2(node)
+    ) {
+      return false;
+    }
+    return CHALLENGE_SIGNAL_RE.test(blockerTextV2(node) ?? "");
+  });
+  const challengeCandidateSet = new Set(challengeCandidates);
+  const challengeRoots = challengeCandidates.filter((node) => {
+    let parent = parentFor.get(node);
+    while (parent !== undefined) {
+      if (challengeCandidateSet.has(parent)) return false;
+      parent = parentFor.get(parent);
+    }
+    return true;
+  });
+
+  const blockers: SafeBlockerV2[] = [];
+  for (const challengeRoot of challengeRoots) {
+    if (blockers.length >= BLOCKER_MAX_ITEMS) break;
+    const boundaryNodes: BrowserUseNode[] = [];
+    const controls = new Set<BrowserUseNode>();
+    const collectControls = (node: BrowserUseNode): void => {
+      if (visibleFor.get(node) !== true) return;
+      boundaryNodes.push(node);
+      if (blockerControlV2(node)) controls.add(node);
+      descendantsV2(node).forEach(collectControls);
+    };
+    collectControls(challengeRoot);
+    const namedChallengeControls = [...controls].filter((node) =>
+      CHALLENGE_SIGNAL_RE.test(blockerTextV2(node) ?? ""),
+    );
+    const checkboxControls = [...controls].filter((node) => {
+      const role = (node.attributes.role ?? node.axRole ?? "").toLowerCase();
+      return (
+        role === "checkbox" || (nodeTagV2(node) === "input" && node.attributes.type === "checkbox")
+      );
+    });
+    const challengeControls =
+      checkboxControls.length > 0 ? checkboxControls : namedChallengeControls;
+    const grounded = challengeControls.find((node) => refForNode(node) !== undefined);
+    const focusControl =
+      grounded ??
+      challengeControls.find((node) => axBooleanV2(node, "focused")) ??
+      challengeControls.find((node) => axBooleanV2(node, "focusable"));
+    const focused = focusControl !== undefined && axBooleanV2(focusControl, "focused");
+    const focusable = focusControl !== undefined && axBooleanV2(focusControl, "focusable");
+    const challengeTexts = boundaryNodes
+      .map(blockerTextV2)
+      .filter((value): value is string => value !== undefined && CHALLENGE_SIGNAL_RE.test(value));
+    const labelText = boundaryNodes
+      .filter((node) => nodeTagV2(node) === "label")
+      .map(blockerTextV2)
+      .find((value) => value !== undefined && CHALLENGE_SIGNAL_RE.test(value));
+    const message = challengeTexts.find((value) => VALIDATION_SIGNAL_RE.test(value));
+    const controlText =
+      (focusControl === undefined ? undefined : blockerTextV2(focusControl)) ??
+      challengeControls.map(blockerTextV2).find((value) => value !== undefined);
+    const text =
+      message ?? controlText ?? labelText ?? challengeTexts[0] ?? "Verification challenge";
+    const ref = grounded === undefined ? undefined : refForNode(grounded);
+    blockers.push({
+      kind: "challenge",
+      text,
+      ...(ref === undefined ? { target: "unavailable" as const } : { ref }),
+      ...(focused
+        ? { focus: "focused" as const, keyboard: "space" as const }
+        : focusable
+          ? { focus: "focusable" as const, keyboard: "tab_space" as const }
+          : {}),
+    });
+  }
+
+  const validationNodes = new Set<BrowserUseNode>();
+  for (const node of nodes) {
+    const role = (node.attributes.role ?? node.axRole ?? "").toLowerCase();
+    const validationMarker = [node.attributes.id, node.attributes.class]
+      .filter((value): value is string => typeof value === "string")
+      .some((value) => /(?:^|[-_:])(error|invalid|validation|feedback)(?:$|[-_:])/i.test(value));
+    if (
+      visibleFor.get(node) === true &&
+      (["alert", "alertdialog", "status"].includes(role) ||
+        node.attributes["aria-live"] === "assertive" ||
+        validationMarker)
+    ) {
+      const text = blockerTextV2(node);
+      if (
+        text !== undefined &&
+        VALIDATION_SIGNAL_RE.test(text) &&
+        !CHALLENGE_SIGNAL_RE.test(text)
+      ) {
+        validationNodes.add(node);
+      }
+    }
+    const invalid = [node.attributes["aria-invalid"], node.attributes.invalid].some(
+      (value) => value?.toLowerCase() === "true",
+    );
+    if (!invalid || visibleFor.get(node) !== true) continue;
+    const ids = idsByScope.get(scopeFor.get(node)!);
+    for (const [relation, explicitError] of [
+      [node.attributes["aria-errormessage"], true],
+      [node.attributes["aria-describedby"], false],
+    ] as const) {
+      for (const id of relation?.trim().split(/\s+/) ?? []) {
+        const related = ids?.get(id);
+        const relatedText = related === undefined ? undefined : blockerTextV2(related);
+        if (
+          related !== undefined &&
+          visibleFor.get(related) === true &&
+          relatedText !== undefined &&
+          (explicitError || VALIDATION_SIGNAL_RE.test(relatedText))
+        ) {
+          validationNodes.add(related);
+        }
+      }
+    }
+  }
+  for (const node of validationNodes) {
+    if (blockers.length >= BLOCKER_MAX_ITEMS) break;
+    const text = blockerTextV2(node);
+    if (text === undefined || blockers.some((blocker) => blocker.text === text)) continue;
+    blockers.push({ kind: "validation", text });
+  }
+  return blockers;
 }
 
 const INTENTS: ReadonlyArray<[SafeIntentV2, RegExp]> = [

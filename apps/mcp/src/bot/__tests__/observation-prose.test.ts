@@ -11,6 +11,9 @@ import { serializeBrowserUseDOM, type BrowserUseNode } from "../browser-use-seri
 import {
   buildSafeControlsV2,
   controlMatchesPrivateQueryV2,
+  encodeV2QueryPage,
+  safeBlockersV2,
+  safePageSemanticsV2,
   StableObservationRefs,
 } from "../compact-observation-v2.js";
 let browser: Browser;
@@ -1740,6 +1743,224 @@ describe("interleaved observation DOM", () => {
       expect(
         await page.evaluate(() => (window as unknown as { clicked: string[] }).clicked),
       ).toEqual(["outside", "open"]);
+    } finally {
+      await page.close();
+    }
+  });
+  it("keeps a closed-shadow challenge and validation error actionable or explicit in compact mode", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`
+        <title>Fixture login</title><h1>Sign in</h1>
+        <button id="oauth">Continue with Google</button>
+        <label>Email <input id="email" type="email" aria-invalid="true" aria-errormessage="email-error"></label>
+        <label>Team <input id="team" aria-invalid="true" aria-describedby="team-help"></label>
+        <button id="continue" disabled>Continue</button>
+        <p>Please complete the verification challenge.</p>
+        <p id="email-error">Please enter a valid work email address.</p>
+        <p id="team-help">Use the name shown in your workspace settings.</p>
+        <p role="alert">Welcome back to the signup page.</p>
+        <section aria-label="Legal information">
+          ${"<p>Ordinary legal and product copy remains available in full mode without entering compact blocker semantics.</p>".repeat(12)}
+        </section>
+        <iframe id="challenge" sandbox="allow-scripts" title="Widget containing a Cloudflare security challenge"
+          style="width:300px;height:80px"></iframe>
+      `);
+      const frame = await (await page.locator("#challenge").elementHandle())!.contentFrame();
+      await frame!.setContent(
+        '<x-challenge></x-challenge><p id="email-error">Frame helper copy.</p>',
+      );
+      await frame!.locator("x-challenge").evaluate((host) => {
+        host.attachShadow({ mode: "closed" }).innerHTML =
+          '<label><input id="verify" type="checkbox"> Verify you are human</label>';
+      });
+
+      const controller = new BrowserController({ humanize: false });
+      (controller as unknown as { page: Page }).page = page;
+      const capture = await controller.extractBrowserUseObservation();
+      const handles = new Map(
+        capture.elements.map((element) => [
+          element,
+          `@e:${String(element.index).padStart(22, "x")}`,
+        ]),
+      );
+      const safe = buildSafeControlsV2({
+        elements: capture.elements,
+        legacyRefs: handles,
+        handles,
+        pageOrigin: new URL(page.url()).origin,
+        pageUrl: page.url(),
+        canonical: true,
+      });
+      const targetable = new Set(safe.rows.map((row) => row.ref));
+      const blockers = safeBlockersV2(capture.root, (node) => {
+        const element = capture.nodeElements.get(node.id);
+        const ref = element === undefined ? undefined : handles.get(element);
+        return ref !== undefined && targetable.has(ref) ? ref : undefined;
+      });
+      const compact = encodeV2QueryPage({
+        sessionId: "fixture",
+        stage: "auth",
+        pageUrl: page.url(),
+        semantics: {
+          ...safePageSemanticsV2(await controller.extractObservationSemantics()),
+          blockers,
+        },
+        rows: safe.rows,
+        cursorFor: () => "cursor",
+      }).payload;
+      const full = serializeBrowserUseDOM(capture.root, {
+        ref: (node) => {
+          const element = capture.nodeElements.get(node.id);
+          return element
+            ? handles.get(element)!
+            : { ref: `@e:unbound_${node.id}`, targetable: false };
+        },
+      }).dom;
+      const compactJson = JSON.stringify(compact);
+
+      expect(full).toContain("Please complete the verification challenge.");
+      expect(full).toContain("Verify you are human");
+      expect(compactJson).toContain("Please complete the verification challenge.");
+      expect(compactJson).toContain("Please enter a valid work email address.");
+      expect(compactJson).not.toContain("Welcome back to the signup page.");
+      expect(compactJson).not.toContain("Ordinary legal and product copy");
+      expect(compactJson).not.toContain("workspace settings");
+      expect(compactJson).not.toContain("Frame helper copy");
+      expect(blockers).toEqual([
+        {
+          kind: "challenge",
+          text: "Please complete the verification challenge.",
+          target: "unavailable",
+        },
+        expect.objectContaining({
+          kind: "challenge",
+          text: "Verify you are human",
+          target: "unavailable",
+          focus: "focusable",
+          keyboard: "tab_space",
+        }),
+        { kind: "validation", text: "Please enter a valid work email address." },
+      ]);
+      for (let index = 0; index < 4; index += 1) await page.keyboard.press("Tab");
+      const focusedCapture = await controller.extractBrowserUseObservation();
+      expect(
+        safeBlockersV2(focusedCapture.root).find((blocker) => blocker.focus === "focused"),
+      ).toEqual(
+        expect.objectContaining({
+          kind: "challenge",
+          text: "Verify you are human",
+          focus: "focused",
+          keyboard: "space",
+        }),
+      );
+      expect(safe.rows.filter((row) => row.role === "checkbox")).toEqual([]);
+      expect(safe.rows.map((row) => row.label)).toEqual(
+        expect.arrayContaining(["@continue-with-google", "@email", "@continue"]),
+      );
+      const compactChars = compactJson.length;
+      const fullChars = JSON.stringify({ dom: full }).length;
+      expect(compactChars).toBeLessThan(fullChars);
+      expect(1 - compactChars / fullChars).toBeGreaterThan(0.2);
+    } finally {
+      await page.close();
+    }
+  });
+  it("attaches a blocker ref only when the challenge control is grounded", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(
+        '<label><input id="verify" type="checkbox"> Verify you are human</label><button id="continue">Continue</button>',
+      );
+      const capture = await captureThroughController(page);
+      const handles = new Map(
+        capture.elements.map((element) => [
+          element,
+          `@e:${String(element.index).padStart(22, "x")}`,
+        ]),
+      );
+      const safe = buildSafeControlsV2({
+        elements: capture.elements,
+        legacyRefs: handles,
+        handles,
+        pageOrigin: new URL(page.url()).origin,
+        pageUrl: page.url(),
+        canonical: true,
+      });
+      const targetable = new Set(safe.rows.map((row) => row.ref));
+      const blockers = safeBlockersV2(capture.root, (node) => {
+        const element = capture.nodeElements.get(node.id);
+        const ref = element === undefined ? undefined : handles.get(element);
+        return ref !== undefined && targetable.has(ref) ? ref : undefined;
+      });
+      const checkbox = safe.rows.find((row) => row.role === "checkbox")!;
+
+      expect(blockers).toEqual([
+        expect.objectContaining({
+          kind: "challenge",
+          text: "Verify you are human",
+          ref: checkbox.ref,
+        }),
+      ]);
+      expect(blockers[0]).not.toHaveProperty("target");
+      expect(safe.rows.map((row) => row.label)).toEqual(
+        expect.arrayContaining(["@verify-you-are-human", "@continue"]),
+      );
+
+      await page.setContent(`
+        <title>Ordinary signup</title><h1>Create account</h1>
+        <label>Email <input id="ordinary-email" type="email"></label>
+        <button id="ordinary-continue">Continue</button>
+        ${Array.from(
+          { length: 12 },
+          (_, index) =>
+            `<p>Ordinary product explanation ${index}: account setup details remain in full mode.</p>`,
+        ).join("")}
+      `);
+      const ordinaryCapture = await captureThroughController(page);
+      const ordinaryHandles = new Map(
+        ordinaryCapture.elements.map((element) => [
+          element,
+          `@e:${String(element.index).padStart(22, "o")}`,
+        ]),
+      );
+      const ordinarySafe = buildSafeControlsV2({
+        elements: ordinaryCapture.elements,
+        legacyRefs: ordinaryHandles,
+        handles: ordinaryHandles,
+        pageOrigin: new URL(page.url()).origin,
+        pageUrl: page.url(),
+        canonical: true,
+      });
+      const ordinaryBlockers = safeBlockersV2(ordinaryCapture.root);
+      const ordinaryCompact = encodeV2QueryPage({
+        sessionId: "ordinary-fixture",
+        stage: "auth",
+        pageUrl: page.url(),
+        semantics: {
+          ...safePageSemanticsV2(
+            await page.evaluate(() => ({
+              title: document.title,
+              headings: Array.from(document.querySelectorAll("h1,h2"), (heading) =>
+                (heading.textContent ?? "").trim(),
+              ),
+            })),
+          ),
+          ...(ordinaryBlockers.length === 0 ? {} : { blockers: ordinaryBlockers }),
+        },
+        rows: ordinarySafe.rows,
+        cursorFor: () => "cursor",
+      }).payload;
+      const ordinaryFull = serializeBrowserUseDOM(ordinaryCapture.root, {
+        ref: (node) => ordinaryHandles.get(ordinaryCapture.nodeElements.get(node.id)!) ?? node.id,
+      }).dom;
+      const ordinaryCompactChars = JSON.stringify(ordinaryCompact).length;
+      const ordinaryFullChars = JSON.stringify({ dom: ordinaryFull }).length;
+      expect(ordinaryBlockers).toEqual([]);
+      expect(ordinarySafe.rows.map((row) => row.label)).toEqual(
+        expect.arrayContaining(["@email", "@continue"]),
+      );
+      expect(1 - ordinaryCompactChars / ordinaryFullChars).toBeGreaterThan(0.5);
     } finally {
       await page.close();
     }

@@ -1,5 +1,6 @@
 import { withOperatorRequestContext } from "../request-cancellation.js";
 import type { BrowserUseCapture } from "../browser-use-capture.js";
+import type { BrowserUseNode } from "../browser-use-serializer.js";
 import type { InteractiveElement } from "../browser.js";
 import { mockBrowserUseCapture } from "./browser-use-test-capture.js";
 // Functional tests for the operator-surface session state machine — the
@@ -10179,6 +10180,107 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
 });
 
 describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", () => {
+  it("surfaces an unbound challenge through compact start and query without minting a ref", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const elements = [
+      elem({ index: 0, tag: "button", visibleText: "Continue with Google", selector: "#oauth" }),
+      elem({ index: 1, tag: "input", type: "email", labelText: "Email", selector: "#email" }),
+      elem({
+        index: 2,
+        tag: "button",
+        visibleText: "Continue",
+        selector: "#continue",
+        disabled: true,
+      }),
+    ] as InteractiveElement[];
+    const capture = mockBrowserUseCapture(elements);
+    const template = capture.root.children[0]!;
+    const node = (id: string, overrides: Partial<BrowserUseNode>): BrowserUseNode => ({
+      ...template,
+      id,
+      attributes: {},
+      children: [],
+      contentDocument: null,
+      ...overrides,
+    });
+    const text = (id: string, value: string): BrowserUseNode =>
+      node(id, { nodeType: 3, nodeName: "#text", value });
+    const checkbox = node("challenge-checkbox", {
+      nodeName: "INPUT",
+      attributes: { type: "checkbox" },
+      axRole: "checkbox",
+      axProperties: [{ name: "focusable", value: true }],
+    });
+    const challengeLabel = node("challenge-label", {
+      nodeName: "LABEL",
+      children: [checkbox, text("challenge-label-text", "Verify you are human")],
+    });
+    const shadow = node("challenge-shadow", {
+      nodeType: 11,
+      nodeName: "#document-fragment",
+      shadowType: "closed",
+      children: [challengeLabel],
+    });
+    const frameDocument = node("challenge-document", {
+      nodeType: 9,
+      nodeName: "#document",
+      children: [shadow],
+    });
+    capture.root.children.unshift(
+      node("challenge-alert", {
+        nodeName: "P",
+        attributes: { role: "alert" },
+        axRole: "alert",
+        children: [text("challenge-alert-text", "Please complete the verification challenge.")],
+      }),
+      node("challenge-frame", {
+        nodeName: "IFRAME",
+        attributes: { title: "Widget containing a Cloudflare security challenge" },
+        contentDocument: frameDocument,
+      }),
+    );
+    h.elements = capture.elements;
+    h.captureOverride = capture;
+    h.observationSemantics = { title: "Fixture login", headings: ["Sign in"] };
+
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      format: "compact",
+    });
+    const startPayload = started as unknown as {
+      semantic: { blockers: Array<Record<string, unknown>> };
+      safe_table: Array<[string, string, string?]>;
+    };
+    expect(startPayload.semantic.blockers).toEqual([
+      {
+        kind: "challenge",
+        text: "Please complete the verification challenge.",
+        target: "unavailable",
+      },
+      {
+        kind: "challenge",
+        text: "Verify you are human",
+        target: "unavailable",
+        focus: "focusable",
+        keyboard: "tab_space",
+      },
+    ]);
+    expect(startPayload.safe_table.map((row) => row[2])).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("@continue-with-google"),
+        expect.stringContaining("@email"),
+        expect.stringContaining("@continue"),
+      ]),
+    );
+    const query = (await observeQuery(started.session_id, "verification")) as {
+      semantic: { blockers: Array<Record<string, unknown>> };
+      safe_table: unknown[];
+    };
+    expect(query.safe_table).toEqual([]);
+    expect(query.semantic.blockers).toEqual(startPayload.semantic.blockers);
+    expect(JSON.stringify(query)).not.toContain("@e:challenge");
+  });
+
   // Mirrors the live Xata signup/login failure: a long marketing page with many
   // decorative/nav controls, the primary CTA and form controls below a large
   // content block (out of the viewport), a custom Region dropdown, a free-text

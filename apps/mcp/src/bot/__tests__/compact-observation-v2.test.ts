@@ -12,6 +12,7 @@ import {
   controlMatchesPrivateQueryV2,
   disambiguateDuplicateLabelsV2,
   encodeV2QueryPage,
+  safeBlockersV2,
   safePageSemanticsV2,
   safeDescriptionV2,
   safeOriginV2,
@@ -19,6 +20,7 @@ import {
   safeStageV2,
 } from "../compact-observation-v2.js";
 import type { InteractiveElement } from "../browser.js";
+import type { BrowserUseNode } from "../browser-use-serializer.js";
 
 // Credential-shaped test fixtures are assembled at runtime from harmless
 // fragments so no complete vendor-prefixed token literal appears in this
@@ -313,6 +315,132 @@ describe("compact observation v2", () => {
     expect(Buffer.byteLength(JSON.stringify(page.payload), "utf8")).toBeLessThanOrEqual(
       OBSERVE_V2_MAX_WIRE_BYTES,
     );
+  });
+
+  it("drops title and headings before bounded blocker semantics under wire pressure", () => {
+    const denseHint = "!".repeat(OBSERVE_V2_MAX_WIRE_BYTES + 64);
+    const blockers = [
+      {
+        kind: "challenge" as const,
+        text: "Please complete the verification challenge.",
+        target: "unavailable" as const,
+      },
+    ];
+    const page = encodeV2QueryPage({
+      sessionId: "session",
+      stage: "auth",
+      rows: [],
+      cursorFor: (offset) => `cursor-${offset}`,
+      semantics: { title: "Fixture login", headings: ["Sign in"], blockers },
+      startMetadata: { hint: denseHint },
+    });
+
+    expect(page.payload.hint).toBeUndefined();
+    expect(page.payload.semantic).toEqual({ blockers });
+    expect(Buffer.byteLength(JSON.stringify(page.payload), "utf8")).toBeLessThanOrEqual(
+      OBSERVE_V2_MAX_WIRE_BYTES,
+    );
+  });
+
+  it("keeps refs and focus within each visible challenge boundary", () => {
+    const node = (id: string, overrides: Partial<BrowserUseNode>): BrowserUseNode => ({
+      id,
+      nodeType: 1,
+      nodeName: "DIV",
+      value: "",
+      attributes: {},
+      visible: true,
+      snapshot: true,
+      bounds: null,
+      cursor: null,
+      scrollable: false,
+      showScroll: false,
+      scrollText: "",
+      clickListener: false,
+      axRole: null,
+      axProperties: [],
+      axChildIds: null,
+      shadowType: null,
+      hiddenElements: [],
+      hiddenContent: false,
+      children: [],
+      contentDocument: null,
+      ...overrides,
+    });
+    const text = (id: string, value: string): BrowserUseNode =>
+      node(id, { nodeType: 3, nodeName: "#text", value });
+    const checkboxA = node("checkbox-a", {
+      nodeName: "INPUT",
+      attributes: { type: "checkbox", "aria-label": "Verify you are human for account A" },
+      axRole: "checkbox",
+      axProperties: [{ name: "focusable", value: true }],
+    });
+    const checkboxB = node("checkbox-b", {
+      nodeName: "INPUT",
+      attributes: { type: "checkbox", "aria-label": "Verify you are human for account B" },
+      axRole: "checkbox",
+      axProperties: [
+        { name: "focusable", value: true },
+        { name: "focused", value: true },
+      ],
+    });
+    const hiddenCheckbox = node("checkbox-complete", {
+      nodeName: "INPUT",
+      attributes: { type: "checkbox", "aria-label": "Verify you are human — Success" },
+      axRole: "checkbox",
+      axProperties: [{ name: "focused", value: true }],
+    });
+    const frameDocument = (id: string, checkbox: BrowserUseNode): BrowserUseNode =>
+      node(id, {
+        nodeType: 9,
+        nodeName: "#document",
+        children: [
+          node(`${id}-label`, {
+            nodeName: "LABEL",
+            children: [checkbox, text(`${id}-text`, checkbox.attributes["aria-label"]!)],
+          }),
+        ],
+      });
+    const root = node("root", {
+      nodeType: 9,
+      nodeName: "#document",
+      children: [
+        node("challenge-a", {
+          nodeName: "LABEL",
+          children: [checkboxA, text("challenge-a-text", "Verify you are human for account A")],
+        }),
+        node("challenge-b", {
+          nodeName: "IFRAME",
+          attributes: { title: "Widget containing a Cloudflare security challenge" },
+          contentDocument: frameDocument("frame-b", checkboxB),
+        }),
+        node("challenge-complete", {
+          nodeName: "IFRAME",
+          visible: false,
+          attributes: { title: "Completed Turnstile verification challenge" },
+          contentDocument: frameDocument("frame-complete", hiddenCheckbox),
+        }),
+      ],
+    });
+
+    expect(
+      safeBlockersV2(root, (candidate) => (candidate === checkboxA ? "@e:challenge-a" : undefined)),
+    ).toEqual([
+      {
+        kind: "challenge",
+        text: "Verify you are human for account A",
+        ref: "@e:challenge-a",
+        focus: "focusable",
+        keyboard: "tab_space",
+      },
+      {
+        kind: "challenge",
+        text: "Verify you are human for account B",
+        target: "unavailable",
+        focus: "focused",
+        keyboard: "space",
+      },
+    ]);
   });
 
   it("shrinks a URL that exceeds the wire budget before packing so the first page keeps multiple rows", () => {
