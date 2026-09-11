@@ -1681,8 +1681,16 @@ it("admits ordinary actions only while the caller has solely completed capture u
     await journal.record("session", "create", "unknown", detail);
     expect(await broker.canContinueAfterCapture(principal, params)).toBe(false);
     await journal.record("session", "create", "observed_result", detail);
-    for (const acknowledged of [false, true]) {
-      if (acknowledged) await journal.acknowledge(identity.forwarderId!, "create");
+    for (const transition of ["observed", "recovered", "acknowledged", "recovered_again"]) {
+      if (transition === "acknowledged") {
+        expect(await journal.acknowledge(identity.forwarderId!, "create")).toBe(true);
+      } else if (transition === "recovered" || transition === "recovered_again") {
+        const completed = await journal.completedOutcome(identity.forwarderId!, "create");
+        expect(completed?.outcome).toEqual(detail.outcome);
+        if (completed === undefined) throw new Error("capture outcome unavailable");
+        await journal.recordRecovery(identity.forwarderId!, completed);
+        expect(await journal.completedOutcome(identity.forwarderId!, "create")).toEqual(completed);
+      }
       expect(await journal.hasOutstanding(undefined, identity.forwarderId!)).toBe(true);
       for (const name of [
         "operate_click",
@@ -1739,6 +1747,10 @@ it("admits ordinary actions only while the caller has solely completed capture u
         operation: "operate_click",
         outcome: { status: "unknown", reason: "execution_error" },
       });
+      const completed = await journal.completedOutcome(identity.forwarderId!, "other");
+      if (completed === undefined) throw new Error("mutation outcome unavailable");
+      await journal.recordRecovery(identity.forwarderId!, completed);
+      expect(await broker.canContinueAfterCapture(principal, params)).toBe(false);
       await journal.acknowledge(identity.forwarderId!, "other");
       expect(await broker.canContinueAfterCapture(principal, params)).toBe(false);
       await journal.record(sessionId, "other", "settled", {
