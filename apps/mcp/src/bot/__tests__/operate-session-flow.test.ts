@@ -24,6 +24,7 @@ import type * as GoogleLoginModule from "../google-login.js";
 import type * as ProfileModule from "../profile.js";
 
 const h = vi.hoisted(() => ({
+  captureValues: [] as string[],
   providers: ["google"] as string[] | null,
   oauthStatus: "already_valid" as string,
   oauthLoginCalls: [] as string[],
@@ -332,8 +333,18 @@ vi.mock("../browser.js", async (importOriginal) => ({
     currentUrl(): string {
       return this.detached ? this.detachedUrl : h.currentUrl;
     }
-    activePage(): { isClosed: () => boolean; url: () => string } {
-      return { isClosed: () => false, url: () => this.currentUrl() };
+    activePage() {
+      return {
+        isClosed: () => false,
+        url: () => this.currentUrl(),
+        getByRole: () => ({
+          elementHandles: async () =>
+            h.captureValues.map((value) => ({
+              evaluate: async () => value,
+              dispose: async () => {},
+            })),
+        }),
+      };
     }
     mainDocumentIdentity(): string {
       return String(h.mainDocumentEpoch);
@@ -1171,6 +1182,7 @@ function elem(partial: Record<string, unknown>): unknown {
 }
 
 beforeEach(() => {
+  h.captureValues = [];
   compactV2ModeBeforeTest = process.env.TRUSTY_SQUIRE_OBSERVE_V2;
   process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "off";
   process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
@@ -11005,6 +11017,55 @@ describe("flat operator verbs", () => {
       null,
     )) as { observation: ActionResult };
     expect(fullMany.observation.format).toBe("browser-use-dom");
+  });
+
+  it.each([
+    ["click", operateClickTool, { ref: "@continue" }],
+    ["type", operateTypeTool, { ref: "@name", text: "Ada" }],
+    ["press", operatePressTool, { key: "Tab" }],
+    ["select", operateSelectTool, { ref: "@region", values: ["US"] }],
+    ["select many", operateSelectTool, { selections: { "@region": "US" } }],
+  ] as const)("resends controls discarded by %s capture", async (_name, tool, args) => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+      elem({ tag: "input", role: "textbox", ariaLabel: "Name", selector: "#name" }),
+      elem({ tag: "select", role: "select", labelText: "Region", selector: "#region" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    const storeCredential = vi.fn().mockResolvedValue({ reference: "vault://acct/captured" });
+    const api = { storeCredential } as unknown as ApiClient;
+    for (const outcome of ["stored", "ambiguous", "unresolved"] as const) {
+      await observe(started.session_id, "compact");
+      h.elements.push(
+        elem({ tag: "button", role: "button", visibleText: outcome, selector: `#${outcome}` }),
+      );
+      h.captureValues = outcome === "ambiguous" ? [] : ["captured-secret"];
+      if (outcome === "unresolved") storeCredential.mockRejectedValueOnce(new Error("offline"));
+      const captured = await tool.handler(
+        tool.inputSchema.parse({
+          session_id: started.session_id,
+          ...args,
+          capture: { store: { service: "example" }, source: { role: "textbox", name: "API key" } },
+        }) as never,
+        api,
+      );
+      expect(captured).toMatchObject({ closed: false, stored: outcome === "stored" });
+      if (outcome !== "stored")
+        expect(captured).toHaveProperty(
+          "error",
+          outcome === "ambiguous" ? "capture_ambiguous" : "capture_unresolved",
+        );
+      expect(captured).not.toHaveProperty("safe_table");
+      expect(captured).not.toHaveProperty("observation");
+      const next = await operateScrollTool.handler(
+        { session_id: started.session_id, direction: "bottom" },
+        null,
+      );
+      expect(next).not.toHaveProperty("delta");
+      expect((next as { safe_table: unknown[] }).safe_table).toHaveLength(h.elements.length);
+    }
+    expect(storeCredential).toHaveBeenCalledTimes(2);
   });
 
   it("resends controls after discarded fill observations and filtered queries", async () => {

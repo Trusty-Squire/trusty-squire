@@ -2094,6 +2094,9 @@ for (const tool of OPERATE_TOOLS) {
           };
       } catch {
         actionResult = undefined;
+      } finally {
+        const baseline = sessionForCall(args.session_id)?.compactV2Previous;
+        if (baseline) delete baseline.compactMapEmitted;
       }
       const notDispatched = operatorMutationDispatchPhase() === "prepared";
       if (notDispatched)
