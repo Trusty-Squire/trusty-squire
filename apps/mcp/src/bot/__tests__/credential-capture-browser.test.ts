@@ -161,12 +161,9 @@ it("walks an id-less textbox when the role engine misses", async () => {
 
 it.each([
   '[role=dialog] input',
-  '[role=dialog] > section > input',
-  '[role=dialog] section label + input',
-  '[role=dialog] section label ~ input',
-  '[data-caption="a > b, c"] input:not([type="password"])',
-  '.missing, [role=dialog] input',
-])("walks cross-shadow combinators for %s when the CSS engine misses", async (selector) => {
+  '[role=dialog] section input',
+  '[data-caption="a > b, c"] input',
+])("walks cross-shadow descendants for %s when the CSS engine misses", async (selector) => {
   await page.setContent('<div role="dialog" data-caption="a > b, c" id="host"></div>');
   await page.locator("#host").evaluate((host) => {
     const shadow = host.attachShadow({ mode: "open" });
@@ -562,4 +559,32 @@ it("does not assign a textbox role to generic editable notes", async () => {
   await page.locator("[contenteditable]").evaluate((node) => node.setAttribute("role", "textbox"));
   expect(await captureCredentialSource("fixture", { role: "textbox" }))
     .toEqual({ candidate_count: 1, value: "private-notes-fixture" });
+});
+
+it.each([false, true])("keeps datalist inputs out of textbox captures with key present %s", async (withKey) => {
+  await page.setContent('<div id="host"></div>');
+  await page.locator("#host").evaluate((host, includeKey) => {
+    host.attachShadow({ mode: "open" }).innerHTML =
+      '<input list="services" value="autocomplete-fixture"><datalist id="services"><option value="Service"></datalist>' +
+      (includeKey ? '<input value="new-key-fixture">' : '');
+  }, withKey);
+  const result = await captureCredentialSource("fixture", { role: "textbox" });
+  expect(result).toEqual(withKey
+    ? { candidate_count: 1, value: "new-key-fixture" }
+    : { candidate_count: 0, found: [{ role: "combobox", name: null }] });
+});
+
+it.each([false, true])("preserves scoped child selectors with direct input present %s", async (direct) => {
+  await page.setContent('<section role="dialog"><section><input value="nested-old-fixture"></section>' +
+    (direct ? '<input value="direct-new-fixture">' : '') + '</section>');
+  const result = await captureCredentialSource("fixture", {
+    selector: ":scope > input",
+    container: { role: "dialog" },
+  });
+  if (direct) expect(result).toEqual({ candidate_count: 1, value: "direct-new-fixture" });
+  else {
+    expect(result.candidate_count).toBe(0);
+    expect(result.value).toBeUndefined();
+    expect(result.found).toBeDefined();
+  }
 });

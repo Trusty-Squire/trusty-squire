@@ -8888,6 +8888,8 @@ async function shadowPiercingCapture(
       if (explicit) return explicit;
       if (el instanceof HTMLInputElement) {
         const t = (el.getAttribute("type") ?? "text").toLowerCase();
+        if (["text", "search", "tel", "url", "email"].includes(t) && el.list !== null)
+          return "combobox";
         if (t === "search") return "searchbox";
         if (t === "text" || t === "tel" || t === "url" || t === "email")
           return "textbox";
@@ -8986,66 +8988,38 @@ async function shadowPiercingCapture(
         const root = el.getRootNode();
         return el.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
       };
-      const matchesSelector = (el: Element, selector: string): boolean => {
-        selector = selector.trim();
-        const separators: { index: number; token: string }[] = [];
-        let depth = 0;
-        let quote = "";
-        for (let i = 0; i < selector.length; i++) {
-          const char = selector[i]!;
-          if (char === "\\") {
-            const escape = selector.slice(i + 1).match(/^[0-9a-fA-F]{1,6}\s?/);
-            i += escape ? escape[0].length : 1;
-            continue;
-          }
-          if (quote) {
-            if (char === quote) quote = "";
-            continue;
-          }
-          if (char === '"' || char === "'") {
-            quote = char;
-            continue;
-          }
-          if (char === "[" || char === "(") depth++;
-          else if (char === "]" || char === ")") depth--;
-          else if (depth === 0 && /[\s,>+~]/.test(char))
-            separators.push({ index: i, token: char });
+      const compound = /(?:[a-zA-Z_][\w-]*|\*|[.#][\w-]+|\[[\w-]+(?:[~|^$*]?=(?:"[^"\\]*"|'[^'\\]*'|[\w-]+))?\])+/y;
+      const selector = spec.selector.trim();
+      const parts: string[] = [];
+      let offset = 0;
+      while (offset < selector.length) {
+        compound.lastIndex = offset;
+        const part = compound.exec(selector);
+        if (part === null) return resolve([]);
+        parts.push(part[0]);
+        offset = compound.lastIndex;
+        if (offset === selector.length) break;
+        const space = selector.slice(offset).match(/^\s+/);
+        if (space === null) return resolve([]);
+        offset += space[0].length;
+      }
+      if (parts.length === 0) return resolve([]);
+      const matchesSelector = (el: Element): boolean => {
+        if (!el.matches(parts[parts.length - 1]!)) return false;
+        let ancestor = parentOf(el);
+        for (let i = parts.length - 2; i >= 0; i--) {
+          while (ancestor !== null && !ancestor.matches(parts[i]!))
+            ancestor = parentOf(ancestor);
+          if (ancestor === null) return false;
+          ancestor = parentOf(ancestor);
         }
-        const comma = separators.find((part) => part.token === ",");
-        if (comma)
-          return (
-            matchesSelector(el, selector.slice(0, comma.index)) ||
-            matchesSelector(el, selector.slice(comma.index + 1))
-          );
-        const split = separators.reverse().find((part) => {
-          if (!/\s/.test(part.token)) return true;
-          const left = selector.slice(0, part.index).trim();
-          const right = selector.slice(part.index + 1).trim();
-          return left && right && !/[>+~]$/.test(left) && !/^[>+~]/.test(right);
-        });
-        if (!split) return el.matches(selector);
-        const left = selector.slice(0, split.index).trim();
-        const right = selector.slice(split.index + 1).trim();
-        if (!el.matches(right)) return false;
-        if (split.token === "+")
-          return el.previousElementSibling !== null &&
-            matchesSelector(el.previousElementSibling, left);
-        if (split.token === "~") {
-          for (let sibling = el.previousElementSibling; sibling; sibling = sibling.previousElementSibling)
-            if (matchesSelector(sibling, left)) return true;
-          return false;
-        }
-        for (let parent = parentOf(el); parent; parent = parentOf(parent)) {
-          if (matchesSelector(parent, left)) return true;
-          if (split.token === ">") break;
-        }
-        return false;
+        return true;
       };
       let visible: Element[] = [];
       try {
         document.querySelector(spec.selector);
         visible = elements.filter(
-          (el) => isVisible(el) && inScope(el) && matchesSelector(el, spec.selector),
+          (el) => isVisible(el) && inScope(el) && matchesSelector(el),
         );
       } catch {
         return resolve([]);
