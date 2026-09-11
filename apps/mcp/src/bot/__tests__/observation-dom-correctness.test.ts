@@ -190,3 +190,34 @@ it.each([
     await page.close();
   }
 });
+
+it("keeps visible fixed-shell blockers without restoring hidden descendant evidence", async () => {
+  const page = await browser.newPage();
+  try {
+    await page.setContent(`<!doctype html>
+      <style>body { margin:0 } #shell { position:fixed; inset:0 }</style>
+      <main id="shell">
+        <p>Performing security verification</p>
+        <p role="alert">The External Account was not found</p>
+        <div style="opacity:0"><p role="alert">Hidden opacity error</p><p>Performing security verification opacity</p></div>
+        <div style="display:none"><p role="alert">Hidden display error</p></div>
+        <div style="visibility:hidden"><p role="alert">Hidden visibility error</p></div>
+        <div style="height:0;overflow:hidden"><p role="alert">Hidden clipped error</p></div>
+        <iframe style="display:none" srcdoc='<p role="alert">Hidden frame error</p>'></iframe>
+      </main>`);
+    expect(
+      await page.locator("body").evaluate((element) => element.getBoundingClientRect().height),
+    ).toBe(0);
+    const result = await observe(page);
+    expect(result.blockers).toEqual([
+      { kind: "challenge", text: "Performing security verification", target: "unavailable" },
+      { kind: "validation", text: "The External Account was not found" },
+    ]);
+    await page
+      .locator("#shell")
+      .evaluate((element) => ((element as HTMLElement).style.opacity = "0"));
+    expect((await observe(page)).blockers).toEqual([]);
+  } finally {
+    await page.close();
+  }
+});

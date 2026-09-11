@@ -1029,10 +1029,11 @@ export function safeBlockersV2(
     node: BrowserUseNode,
     enclosingScope: BrowserUseNode,
     parent: BrowserUseNode | undefined,
-    ancestorsVisible: boolean,
+    enclosingFrameVisible: boolean,
   ): void => {
     const scope = [9, 11].includes(node.nodeType) ? node : enclosingScope;
-    const visible = ancestorsVisible && ([9, 11].includes(node.nodeType) ? true : node.visible);
+    const visible =
+      enclosingFrameVisible && ([9, 11].includes(node.nodeType) ? true : node.visible);
     nodes.push(node);
     if (parent !== undefined) parentFor.set(node, parent);
     visibleFor.set(node, visible);
@@ -1044,7 +1045,9 @@ export function safeBlockersV2(
     }
     const id = node.attributes.id?.trim();
     if (id) ids.set(id, node);
-    descendantsV2(node).forEach((child) => visit(child, scope, node, visible));
+    const descendantsVisible =
+      enclosingFrameVisible && (!["iframe", "frame"].includes(nodeTagV2(node)) || visible);
+    descendantsV2(node).forEach((child) => visit(child, scope, node, descendantsVisible));
   };
   visit(root, root, undefined, true);
 
@@ -1095,9 +1098,10 @@ export function safeBlockersV2(
     const boundaryNodes: BrowserUseNode[] = [];
     const controls = new Set<BrowserUseNode>();
     const collectControls = (node: BrowserUseNode): void => {
-      if (visibleFor.get(node) !== true) return;
-      boundaryNodes.push(node);
-      if (blockerControlV2(node)) controls.add(node);
+      if (visibleFor.get(node) === true) {
+        boundaryNodes.push(node);
+        if (blockerControlV2(node)) controls.add(node);
+      }
       descendantsV2(node).forEach(collectControls);
     };
     collectControls(challengeRoot);

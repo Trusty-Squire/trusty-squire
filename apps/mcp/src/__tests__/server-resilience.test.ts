@@ -15,6 +15,8 @@ import { createServerCallAdmission } from "../server.js";
 import { describe, expect, it, vi } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv-provider.js";
+import { provisionObserveTool } from "../tools/provision-drive.js";
 import { brokerRecoveryRequested, buildServer } from "../server.js";
 import type { ApiClient } from "../api-client.js";
 import type { BrowserController } from "../bot/browser.js";
@@ -476,3 +478,30 @@ for (const [name, args, budget] of [
       await server.close();
     }
   });
+
+it("publishes literal role constraints matching the observe runtime validator", async () => {
+  const client = await connectedClient();
+  try {
+    const listed = await client.listTools();
+    const tool = listed.tools.find((candidate) => candidate.name === "operate_observe")!;
+    const validate = new AjvJsonSchemaValidator().getValidator(tool.inputSchema);
+    for (const [role, accepted] of [
+      ["slider", true],
+      ["generic", true],
+      ["button", true],
+      ["custom-role", true],
+      ["a".repeat(64), true],
+      ["", false],
+      ["a".repeat(65), false],
+      ["Slider", false],
+      ["generic role", false],
+      ["1button", false],
+    ] as const) {
+      const args = { session_id: "fixture", role };
+      expect(validate(args).valid, role).toBe(accepted);
+      expect(provisionObserveTool.inputSchema.safeParse(args).success, role).toBe(accepted);
+    }
+  } finally {
+    await client.close();
+  }
+});

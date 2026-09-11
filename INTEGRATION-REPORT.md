@@ -126,3 +126,30 @@ installation and workspace schema builds,
 exited 0: `Test Files 2 passed (2); Tests 106 passed (106)` in 151.89s.
 This was the single focused verification run after both fixes; no full repository
 test/lint suite or downstream pipeline phase was run here.
+
+
+## Follow-up review fixes (R3/R4)
+
+The published `operate_observe` tools/list schema now accepts the same bounded
+literal-role strings as its runtime validator. An in-memory MCP SDK client
+retrieves that schema and validates accepted and rejected roles with the SDK's
+JSON Schema validator, comparing runtime validation for the same inputs.
+
+Blocker traversal now uses each node's captured visibility instead of inheriting
+an ordinary ancestor's empty layout box; hidden frame boundaries remain enforced.
+An isolated browser fixture exercises a fixed-position shell inside a zero-height
+body, visible verification and validation evidence, and opacity-, display-,
+visibility-, overflow-, and frame-hidden evidence. R1/R2 remain in place.
+These changes use no live provider, shared profile, credential, OAuth/payment
+boundary, or screenshot component changes. Native acceptance remains outstanding.
+
+R3/R4 tool evidence, 2026-09-11:
+
+- Focused Vitest run at 13:06:21: server-resilience (15), compact-observation-v2
+  (89), and observation-prose (45) all passed. The DOM file had nine passes and
+  one fixture setup failure: quirks mode gave body height 720 instead of zero.
+- Added the fixture's standards-mode doctype; no production change followed that
+  failure. Reran only observation-dom-correctness at 13:06:41: `Test Files 1 passed
+  (1); Tests 10 passed (10)`, exit 0, 1.89s. Its zero-height assertion and visible/
+  hidden blocker assertions passed. All 159 selected tests now have passing
+  evidence, across those runs; this does not claim a full pipeline pass.
