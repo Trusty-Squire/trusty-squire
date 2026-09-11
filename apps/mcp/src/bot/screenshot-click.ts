@@ -17,11 +17,44 @@ export interface ScreenshotBinding {
   coordinate_space: "image_pixels";
 }
 type Rect = { x: number; y: number; width: number; height: number };
+type Surface = { key: string; bounds: number[]; styles: string[]; order: number };
+type Occlusion = { surfaces: Surface[]; parents: Map<string, string> };
+
+function occlusionIdentity(evidence: Occlusion, nodeKey: string): string {
+  const regions: unknown[] = [];
+  let key: string | undefined = nodeKey;
+  while (key !== undefined) {
+    const target = evidence.surfaces.find((surface) => surface.key === key);
+    if (!target) throw new ScreenshotClickError("stale_screenshot", "not_dispatched");
+    const frame = key.slice(0, key.lastIndexOf(":"));
+    const [x, y, width, height] = target.bounds as [number, number, number, number];
+    regions.push(
+      evidence.surfaces
+        .filter((surface) => surface.key.startsWith(`${frame}:`))
+        .map((surface) => {
+          const [sx, sy, sw, sh] = surface.bounds as [number, number, number, number];
+          const left = Math.max(x, sx),
+            top = Math.max(y, sy);
+          const right = Math.min(x + width, sx + sw),
+            bottom = Math.min(y + height, sy + sh);
+          return { surface, intersection: [left, top, right, bottom] };
+        })
+        .filter(({ intersection: [left, top, right, bottom] }) => right! > left! && bottom! > top!)
+        .sort((a, b) => a.surface.order - b.surface.order)
+        .map(({ surface, intersection }) => [surface.key, intersection, surface.styles]),
+    );
+    key = evidence.parents.get(frame);
+  }
+  return JSON.stringify(regions);
+}
+
 type FrameSecurity = (frame: Frame) => Promise<{ origin: string; opaque: boolean }>;
 type Binding = {
   frameSecurity: FrameSecurity;
   public: ScreenshotBinding;
   state: string;
+  beforeOcclusion: Occlusion;
+  afterOcclusion: Occlusion;
   beforeNodes: Map<string, string>;
   afterNodes: Map<string, string>;
   rect: Rect;
@@ -56,7 +89,19 @@ function jpegSize(base64: string): { width: number; height: number } {
 async function geometry(page: Page, cdp: CDPSession) {
   const metrics = await cdp.send("Page.getLayoutMetrics");
   const tree = await cdp.send("Page.getFrameTree");
-  const snapshot = await cdp.send("DOMSnapshot.captureSnapshot", { computedStyles: [] });
+  const snapshot = await cdp.send("DOMSnapshot.captureSnapshot", {
+    computedStyles: [
+      "pointer-events",
+      "visibility",
+      "opacity",
+      "clip-path",
+      "overflow-x",
+      "overflow-y",
+      "border-radius",
+    ],
+    includePaintOrder: true,
+  });
+  const occlusion: Occlusion = { surfaces: [], parents: new Map() };
   // Compare the chosen physical node, not every ancestor/text line on the page.
   // Chromium can shift an inline label baseline by one pixel during cropped
   // capture while the checkbox's identity, attributes and hit area stay exact.
@@ -105,6 +150,24 @@ async function geometry(page: Page, cdp: CDPSession) {
       const id = doc.nodes.backendNodeId?.[i];
       const nameIndex = doc.nodes.nodeName?.[i];
       if (id === undefined || nameIndex === undefined) continue;
+      if (doc.nodes.nodeType?.[i] === 1) {
+        const bounds = doc.layout.bounds[j];
+        const order = doc.layout.paintOrders?.[j];
+        if (!bounds || bounds.length !== 4 || order === undefined)
+          throw new Error("screenshot_target_unavailable");
+        const key = `${snapshot.strings[doc.frameId]}:${id}`;
+        occlusion.surfaces.push({
+          key,
+          bounds,
+          order,
+          styles: (doc.layout.styles[j] ?? []).map((value) => snapshot.strings[value] ?? ""),
+        });
+        const childIndex = doc.nodes.contentDocumentIndex?.index.indexOf(i) ?? -1;
+        if (childIndex >= 0) {
+          const child = snapshot.documents[doc.nodes.contentDocumentIndex!.value[childIndex]!];
+          if (child) occlusion.parents.set(snapshot.strings[child.frameId]!, key);
+        }
+      }
       let control = i;
       while (!controls[control] && (doc.nodes.parentIndex[control] ?? -1) >= 0)
         control = doc.nodes.parentIndex[control]!;
@@ -140,6 +203,7 @@ async function geometry(page: Page, cdp: CDPSession) {
     state: JSON.stringify({ tree, viewport, layout: metrics.cssLayoutViewport, boxes }),
     viewport,
     nodes,
+    occlusion,
   };
 }
 
@@ -166,6 +230,8 @@ export async function captureBoundScreenshot(
       frameSecurity,
       public: publicBinding,
       state: after.state,
+      beforeOcclusion: before.occlusion,
+      afterOcclusion: after.occlusion,
       beforeNodes: before.nodes,
       afterNodes: after.nodes,
       rect: result.rect,
@@ -315,9 +381,13 @@ export async function clickScreenshot(
     await markOperatorMutationDispatchAttempted();
     const final = await geometry(page, cdp);
     const originalNode = binding.beforeNodes.get(target.nodeKey);
+    const originalOcclusion = occlusionIdentity(binding.beforeOcclusion, target.nodeKey);
     if (
       binding.expires < Date.now() ||
       final.state !== binding.state ||
+      originalOcclusion !== occlusionIdentity(binding.afterOcclusion, target.nodeKey) ||
+      originalOcclusion !== occlusionIdentity(current.occlusion, target.nodeKey) ||
+      originalOcclusion !== occlusionIdentity(final.occlusion, target.nodeKey) ||
       originalNode === undefined ||
       originalNode !== binding.afterNodes.get(target.nodeKey) ||
       originalNode !== current.nodes.get(target.nodeKey) ||

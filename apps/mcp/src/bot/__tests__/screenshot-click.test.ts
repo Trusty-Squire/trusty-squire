@@ -161,6 +161,52 @@ describe("screenshot-bound native pointer dispatch", () => {
     }
   });
 
+  it.each(["remove", "hide", "move", "unrelated"] as const)(
+    "preserves captured occlusion identity when an overlay changes: %s",
+    async (change) => {
+      const f = await fixture();
+      try {
+        await f.page.evaluate(() => {
+          document.body.innerHTML =
+            '<button id="under" style="position:absolute;left:150px;top:220px;width:160px;height:60px">Underlying action</button><button id="overlay" style="position:absolute;left:150px;top:220px;width:160px;height:60px;z-index:2">Overlay action</button><p id="unrelated">Waiting</p>';
+          (window as unknown as { clicks: string[] }).clicks = [];
+          document.querySelectorAll("button").forEach(
+            (button) =>
+              (button.onclick = () => {
+                (window as unknown as { clicks: string[] }).clicks.push(button.id);
+              }),
+          );
+        });
+        const shot = await f.controller.captureOperatorScreenshot();
+        await f.page.evaluate((change) => {
+          const overlay = document.querySelector<HTMLElement>("#overlay")!;
+          if (change === "remove") overlay.remove();
+          if (change === "hide") overlay.style.visibility = "hidden";
+          if (change === "move") overlay.style.left = "350px";
+          if (change === "unrelated") document.querySelector("#unrelated")!.textContent = "Ready";
+        }, change);
+        const mouse = vi.spyOn(f.page.mouse, "click");
+        const authorize = vi.fn();
+        const result = clickScreenshot(f.page, point(shot, 174, 244), authorize);
+        if (change === "unrelated") {
+          await expect(result).resolves.toBe("dispatched");
+          expect(await f.page.evaluate("window.clicks")).toEqual(["overlay"]);
+        } else {
+          await expect(result).rejects.toMatchObject({
+            code: "stale_screenshot",
+            dispatch: "not_dispatched",
+          });
+          expect(mouse).not.toHaveBeenCalled();
+          expect(authorize).not.toHaveBeenCalled();
+          expect(await f.page.evaluate("window.clicks")).toEqual([]);
+        }
+      } finally {
+        vi.restoreAllMocks();
+        await f.close();
+      }
+    },
+  );
+
   it("cancels during final geometry before authorization or input", async () => {
     const f = await fixture();
     try {
