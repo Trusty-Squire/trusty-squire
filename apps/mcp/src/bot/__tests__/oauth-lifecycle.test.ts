@@ -89,6 +89,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
     ["pending", "same-tab"],
     ["callback", "popup"],
     ["pending", "popup"],
+    ["denied", "same-tab"],
+    ["denied", "popup"],
   ])(
     "preserves %s evidence when the initiating click rejects after %s navigation",
     async (destination, mode) => {
@@ -96,6 +98,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const product = await context.newPage();
       const productUrl = "https://outcomes.test/login";
       const callback = "https://outcomes.test/dashboard";
+      const destinationUrl =
+        destination === "denied"
+          ? `${callback}?error=access_denied&error_description=The+user+denied+access`
+          : callback;
       const provider = `https://accounts.google.com/pending?redirect_uri=${encodeURIComponent(callback)}`;
       await context.route("**/*", (route) =>
         route.fulfill({
@@ -104,8 +110,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
             route.request().url() === productUrl
               ? `<button id="oauth" onclick='${mode === "popup" ? `window.open(${JSON.stringify(provider)})` : `location.href=${JSON.stringify(provider)}`}'>Continue with Google</button>`
               : route.request().url().startsWith("https://accounts.google.com/")
-                ? destination === "callback"
-                  ? `<script>location.href=${JSON.stringify(callback)}</script>`
+                ? destination !== "pending"
+                  ? `<script>location.href=${JSON.stringify(destinationUrl)}</script>`
                   : '<main>Google consent pending</main><p>Performing security verification</p><div style="opacity:0"><button>Hidden consent action</button></div>'
                 : "<main>Personal / Default Project</main><button>Usage</button>",
         }),
@@ -118,7 +124,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         const popup = mode === "popup" ? product.waitForEvent("popup") : null;
         await originalClick(...args);
         const target = popup === null ? product : await popup;
-        await target.waitForURL(destination === "callback" ? callback : provider);
+        await target.waitForURL(destination === "pending" ? provider : destinationUrl);
         // Fault injection at the driver return boundary, AFTER a real click and
         // real routed navigation. The provider itself never contacts the network.
         throw new Error("page click: Timeout 15000ms exceeded after navigation");
@@ -132,9 +138,18 @@ describe("BrowserController OAuth popup lifecycle", () => {
         sessionId = started.session_id;
         const ref = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
         expect(ref).toBeDefined();
-        const result = await withOperatorRequestContext(new AbortController().signal, () =>
+        const outcome = withOperatorRequestContext(new AbortController().signal, () =>
           operateLoginTool.handler({ session_id: sessionId!, provider: "google", ref: ref! }, null),
         );
+        if (destination === "denied") {
+          await expect(outcome).rejects.toThrow(/error=access_denied \(The user denied access\)/);
+          expect(click).toHaveBeenCalledTimes(1);
+          expect(controller.oauthTransitionStatus()).toBeNull();
+          expect(product.isClosed()).toBe(false);
+          await expect(observe(sessionId)).resolves.toMatchObject({ session_id: sessionId });
+          return;
+        }
+        const result = await outcome;
         expect(result).toMatchObject({
           session_id: sessionId,
           url: destination === "callback" ? callback : provider,

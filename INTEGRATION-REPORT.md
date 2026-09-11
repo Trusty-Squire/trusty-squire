@@ -153,3 +153,25 @@ R3/R4 tool evidence, 2026-09-11:
   (1); Tests 10 passed (10)`, exit 0, 1.89s. Its zero-height assertion and visible/
   hidden blocker assertions passed. All 159 selected tests now have passing
   evidence, across those runs; this does not claim a full pipeline pass.
+
+
+## Callback denial review fix (R5)
+
+Confirmed that a driver exception after the initiating click bypassed the normal
+OAuth denial scan. The lifecycle now records denial evidence from navigation to
+this attempt's expected callback and promotes that concrete denial at the shared
+error boundary before uncertainty handling. The normal scan shares the denial
+formatter. A denial clears pending ownership through existing teardown; no OAuth
+replay or success inference is added.
+
+The routed click-then-error fixture now includes same-tab and popup callbacks
+carrying `error=access_denied`, asserting the provider's denial message, one click,
+cleared OAuth ownership, and a still-observable session. Prior pending/completed
+regressions remain. No live provider or shared profile was accessed.
+
+R5 focused verification, 2026-09-11 at 13:11:10: selected the click-then-error,
+existing denial, unrelated navigation, and pre-existing error-query cases in
+`oauth-lifecycle.test.ts` using Vitest's test-name filter. Tool output:
+`Test Files 1 passed (1); Tests 10 passed | 89 skipped (99)`, exit 0, 24.78s.
+The 89 skips are selection-only. Both new denial regressions passed alongside
+pending/completed recovery cases. No full test/lint or downstream phase ran here.
