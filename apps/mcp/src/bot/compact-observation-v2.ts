@@ -158,11 +158,8 @@ export interface SafeBlockerV2 {
   target?: "unavailable";
   focus?: "focused" | "focusable";
   keyboard?: "space" | "tab_space";
-  // Present only when the observation's request-scope denials include
-  // challenge-related hosts (Clerk bot protection, Cloudflare Turnstile,
-  // hCaptcha, reCAPTCHA): the on-page challenge cannot complete inside the
-  // session scope, so restarting the session with those hosts allowed is the
-  // remedy — clicking the widget again can never succeed.
+  // Attribution requires document ownership, not just a matching denied host;
+  // see docs/browser-use-serializer-port.md's blocker diagnostic contract.
   cause?: "scope";
   cause_hosts?: string[];
 }

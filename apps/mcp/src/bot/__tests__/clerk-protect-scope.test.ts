@@ -65,7 +65,10 @@ async function clerkProtectCheckFixture(): Promise<Harness> {
   const context = await browser.newContext();
   await context.route("**/*", async (route) => {
     const url = route.request().url();
-    if (url.startsWith("https://accounts.service.test/") || url.startsWith("https://accounts.other.test/")) {
+    if (
+      url.startsWith("https://accounts.service.test/") ||
+      url.startsWith("https://accounts.other.test/")
+    ) {
       await route.fulfill({
         contentType: "text/html",
         body: PROTECT_CHECK_HTML,
@@ -122,28 +125,40 @@ describe("Clerk bot-protection hosts are part of the authorized sign-in scope", 
 
   it("does not grant protection hosts to an unauthorized Clerk iframe", async () => {
     const { controller, page } = await clerkProtectCheckFixture();
-    await page.evaluate(() => new Promise<void>((resolve) => {
-      const frame = document.createElement("iframe");
-      frame.onload = () => resolve();
-      frame.src = "https://accounts.other.test/sign-in/protect-check";
-      document.body.append(frame);
-    }));
-    const frame = page.frames().find((candidate) => candidate.url().includes("accounts.other.test"))!;
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          const frame = document.createElement("iframe");
+          frame.onload = () => resolve();
+          frame.src = "https://accounts.other.test/sign-in/protect-check";
+          document.body.append(frame);
+        }),
+    );
+    const frame = page
+      .frames()
+      .find((candidate) => candidate.url().includes("accounts.other.test"))!;
     expect(await frame.evaluate("window.__protectPosts.then(String)")).toBe(
       "rejected,rejected,fulfilled",
     );
-    expect(controller.takeHostScopeDenials().map((denial) => denial.hostname).sort()).toEqual([
-      "1-8fd91a2f-p.client.protect.clerk.com",
-      "specter.protect.clerk.com",
-    ]);
+    expect(
+      controller
+        .takeHostScopeDenials()
+        .map((denial) => denial.hostname)
+        .sort(),
+    ).toEqual(["1-8fd91a2f-p.client.protect.clerk.com", "specter.protect.clerk.com"]);
   });
 
   it("does not infer a Frontend API allowance when sibling scope excludes it", async () => {
     const { controller, page } = await clerkProtectCheckFixture();
-    await controller.setHostScopeAllowedHosts(() => ["accounts.service.test"], () => []);
-    expect(await page.evaluate(
-      "fetch('https://clerk.service.test/v1/client').then(() => 'escaped', () => 'blocked')",
-    )).toBe("blocked");
+    await controller.setHostScopeAllowedHosts(
+      () => ["accounts.service.test"],
+      () => [],
+    );
+    expect(
+      await page.evaluate(
+        "fetch('https://clerk.service.test/v1/client').then(() => 'escaped', () => 'blocked')",
+      ),
+    ).toBe("blocked");
   });
 
   it("extends only a Clerk-backed accounts document with protection hosts", () => {
@@ -151,53 +166,69 @@ describe("Clerk bot-protection hosts are part of the authorized sign-in scope", 
       "*.client.protect.clerk.com",
       "specter.protect.clerk.com",
     ]);
-    expect(clerkChallengeScopeForDocument("https://accounts.service.test/sign-in", false)).toEqual([]);
+    expect(clerkChallengeScopeForDocument("https://accounts.service.test/sign-in", false)).toEqual(
+      [],
+    );
     expect(clerkChallengeScopeForDocument("https://app.service.test/sign-in", true)).toEqual([]);
   });
 
   it("does not match caller-declared wildcards as exact allowed hosts", () => {
-    expect(requestHostInScope("https://child.example.test/api", ["*.example.test"], [])).toBe(false);
+    expect(requestHostInScope("https://child.example.test/api", ["*.example.test"], [])).toBe(
+      false,
+    );
   });
-
 });
 
 describe("challenge scope diagnostics across observation formats", () => {
-  it.each(["compact", "full"] as const)("preserves the blocker diagnostic in %s observations", async (format) => {
-    browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext();
-    await context.route("**/*", (route) => route.fulfill({
-      contentType: "text/html",
-      body: '<!doctype html><div id="captcha">Verification failed. Verify you are human.</div>',
-    }));
-    const page = await context.newPage();
-    const controller = BrowserController.fromHarnessPage(page);
-    await controller.setHostScopeAllowedHosts(() => ["accounts.service.test"]);
-    const started = await startHarnessProvisionSession({
-      browser: controller,
-      serviceUrl: "https://accounts.service.test/sign-in",
-      observationFormat: "browser-use-dom",
-    });
-    try {
-      expect(await page.evaluate(
-        "fetch('https://specter.protect.clerk.com/verify').then(() => 'allowed', () => 'blocked')",
-      )).toBe("blocked");
-      const result = await observe(started.session_id, format);
-      expect(result.format).toBe(format === "full" ? "browser-use-dom" : "browser-use-control-query");
-      expect(result.semantic?.blockers).toEqual([
-        expect.objectContaining({
-          kind: "challenge",
-          cause: "scope",
-          cause_hosts: ["specter.protect.clerk.com"],
+  it.each(["compact", "full"] as const)(
+    "preserves the blocker diagnostic in %s observations",
+    async (format) => {
+      browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext();
+      await context.route("**/*", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: '<!doctype html><div id="captcha">Verification failed. Verify you are human.</div>',
         }),
-      ]);
-      expect(result).toMatchObject({ scope_denials: [expect.objectContaining({
-        hostname: "specter.protect.clerk.com",
-      })] });
-      expect(controller.takeHostScopeDenials()).toEqual([]);
-    } finally {
-      await finishProvisionSession(started.session_id);
-    }
-  });
+      );
+      const page = await context.newPage();
+      const controller = BrowserController.fromHarnessPage(page);
+      await controller.setHostScopeAllowedHosts(() => ["accounts.service.test"]);
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: "https://accounts.service.test/sign-in",
+        observationFormat: "browser-use-dom",
+      });
+      try {
+        expect(
+          await page.evaluate(
+            "fetch('https://specter.protect.clerk.com/verify').then(() => 'allowed', () => 'blocked')",
+          ),
+        ).toBe("blocked");
+        const result = await observe(started.session_id, format);
+        expect(result.format).toBe(
+          format === "full" ? "browser-use-dom" : "browser-use-control-query",
+        );
+        expect(result.semantic?.blockers).toEqual([
+          expect.objectContaining({
+            kind: "challenge",
+            cause: "scope",
+            cause_hosts: ["specter.protect.clerk.com"],
+          }),
+        ]);
+        expect(result).toMatchObject({
+          scope_denials: [
+            expect.objectContaining({
+              hostname: "specter.protect.clerk.com",
+            }),
+          ],
+        });
+        expect(controller.takeHostScopeDenials()).toEqual([]);
+      } finally {
+        await finishProvisionSession(started.session_id);
+      }
+    },
+  );
 });
 
 describe("annotateChallengeBlockersWithScope", () => {
@@ -222,10 +253,14 @@ describe("annotateChallengeBlockersWithScope", () => {
         blockers: [challengeBlocker("Verification didn't complete. Try again.")],
       },
     };
-    const annotated = annotateChallengeBlockersWithScope(result, [
-      clerkDenial("1-8fd91a2f-p.client.protect.clerk.com"),
-      clerkDenial("specter.protect.clerk.com"),
-    ], () => "d");
+    const annotated = annotateChallengeBlockersWithScope(
+      result,
+      [
+        clerkDenial("1-8fd91a2f-p.client.protect.clerk.com"),
+        clerkDenial("specter.protect.clerk.com"),
+      ],
+      () => "d",
+    );
     expect(annotated.semantic.blockers).toEqual([
       {
         kind: "challenge",
@@ -246,9 +281,11 @@ describe("annotateChallengeBlockersWithScope", () => {
   });
 
   it("leaves unowned and ambiguous challenges unchanged", () => {
-    const result = { semantic: { blockers: [
-      challengeBlocker("Verify you are human"), challengeBlocker("Security check"),
-    ] } };
+    const result = {
+      semantic: {
+        blockers: [challengeBlocker("Verify you are human"), challengeBlocker("Security check")],
+      },
+    };
     const denials = [clerkDenial("specter.protect.clerk.com")];
     expect(annotateChallengeBlockersWithScope(result, denials)).toBe(result);
     expect(annotateChallengeBlockersWithScope(result, denials, () => "d")).toBe(result);
@@ -258,9 +295,10 @@ describe("annotateChallengeBlockersWithScope", () => {
     const main = challengeBlocker("Verify you are human");
     const iframe = challengeBlocker("Security check");
     const result = { semantic: { blockers: [main, iframe] } };
-    const annotated = annotateChallengeBlockersWithScope(result,
+    const annotated = annotateChallengeBlockersWithScope(
+      result,
       [clerkDenial("specter.protect.clerk.com")],
-      (blocker) => blocker === main ? "d" : undefined,
+      (blocker) => (blocker === main ? "d" : undefined),
     );
     expect(annotated.semantic.blockers[0]).toMatchObject({ cause: "scope" });
     expect(annotated.semantic.blockers[1]).toBe(iframe);

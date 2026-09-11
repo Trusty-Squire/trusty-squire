@@ -2480,12 +2480,8 @@ function withHostScopeDenials<T extends object>(session: Session, result: T): T 
   } as T;
 }
 
-// Challenge-related hosts whose denial means an on-page challenge cannot
-// complete inside the session scope. Clerk's bot protection posts its
-// Turnstile result from per-client random subdomains of
-// *.client.protect.clerk.com plus specter.protect.clerk.com; the rest are the
-// familiar captcha families. Mirrors the challenge allowances in
-// requestHostInScope's HOST_SCOPE_ALWAYS_ALLOW_HOSTS.
+// Diagnostic classification only, not an allowance list. A host match still
+// requires unambiguous document ownership before it can explain a blocker.
 const CHALLENGE_SCOPE_HOST_RE =
   /(?:^|\.)protect\.clerk\.com$|(?:^|\.)challenges\.cloudflare\.com$|(?:^|\.)hcaptcha\.com$|(?:^|\.)recaptcha\.net$/iu;
 
@@ -2513,15 +2509,17 @@ export function annotateChallengeBlockersWithScope<T extends object>(
     const documentId = documentForBlocker(blocker);
     if (documentId === undefined) return blocker;
     if (
-      blockers.filter((candidate) =>
-        candidate.kind === "challenge" && documentForBlocker(candidate) === documentId,
+      blockers.filter(
+        (candidate) =>
+          candidate.kind === "challenge" && documentForBlocker(candidate) === documentId,
       ).length !== 1
-    ) return blocker;
+    )
+      return blocker;
     const deniedHosts = [
       ...new Set(
         denials
-          .filter((denial) =>
-            denial.owner.document_id === documentId && denial.owner.frame === "main",
+          .filter(
+            (denial) => denial.owner.document_id === documentId && denial.owner.frame === "main",
           )
           .map((denial) => denial.hostname)
           .filter((hostname) => CHALLENGE_SCOPE_HOST_RE.test(hostname)),

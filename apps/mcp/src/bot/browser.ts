@@ -1415,8 +1415,8 @@ const HOST_SCOPE_ALWAYS_ALLOW_HOSTS: readonly string[] = [
 
 // A Clerk account portal can host its own Turnstile wrapper. Its verification
 // result is posted from per-client random subdomains, so a fixed exact-host
-// allow-set cannot cover it. These hosts are added only for an accounts.*
-// document that actually loaded Clerk assets; see clerkChallengeScopeForDocument.
+// allow-set cannot cover it. effectiveHostScopeForFrame must authorize the
+// document against base scope before consulting clerkChallengeScopeForDocument.
 const CLERK_CHALLENGE_SCOPE_HOSTS: readonly string[] = [
   "*.client.protect.clerk.com",
   "specter.protect.clerk.com",
@@ -3021,9 +3021,12 @@ export class BrowserController {
     scope: { allowedHosts: readonly string[]; siblingDomainHosts: readonly string[] },
   ): Promise<{ allowedHosts: readonly string[]; siblingDomainHosts: readonly string[] }> {
     const documentUrl = frame.url();
-    if (!requestHostInScope(documentUrl, scope.allowedHosts, scope.siblingDomainHosts)) return scope;
+    if (!requestHostInScope(documentUrl, scope.allowedHosts, scope.siblingDomainHosts))
+      return scope;
     const requestHost = new URL(requestUrl).hostname.toLowerCase();
-    if (!CLERK_CHALLENGE_SCOPE_HOSTS.some((allowed) => hostMatchesScopeHost(requestHost, allowed))) {
+    if (
+      !CLERK_CHALLENGE_SCOPE_HOSTS.some((allowed) => hostMatchesScopeHost(requestHost, allowed))
+    ) {
       return scope;
     }
     const hasClerkAsset = await frame

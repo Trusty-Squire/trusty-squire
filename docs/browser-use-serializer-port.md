@@ -59,6 +59,18 @@ This reports observed evidence and adds no action or payment gate. Missing evide
 is not proof the page is unblocked. Startup can precede a late-rendering error;
 use a fresh observation to distinguish timing from extraction loss.
 
+Challenge blockers may include `cause: "scope"` and sorted, distinct
+`cause_hosts` when challenge-host denials belong to the current main document
+and it has exactly one identified challenge. Child-frame denials, prior-document
+denials, and ambiguous or unowned challenges do not receive this causal label;
+the separate `scope_denials` diagnostic remains available. Annotation happens
+before format serialization: compact observations and query results retain it
+in `semantic.blockers`; full observations include `semantic.blocked` and the
+blocker list when a scope cause is present, even when `dom_unchanged` is true.
+See [session scope](operator-tool-surface.md#scope-is-declared-at-session-start)
+for host allowances and recovery guidance, and `clerk-protect-scope.test.ts`
+for the document-correlation and format regressions.
+
 Every DOM observation includes `more_above` and `more_below`. The existing scroll
 action remains reachable. A below-fold control can be found with
 `operate_observe(query=...)`, then scrolled into view or targeted by its returned ref.
