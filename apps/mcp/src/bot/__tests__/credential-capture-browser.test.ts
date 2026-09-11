@@ -420,3 +420,86 @@ it.each([
     resolved_source: { tag: "input", role: "textbox", name: "API key" },
   });
 });
+
+it("counts shadow candidates even when the selector engine returns one light-DOM match", async () => {
+  await page.setContent('<section role="dialog"><input id="light" value="light-fixture"><div id="host"></div></section>');
+  await page.locator("#host").evaluate((host) => {
+    host.attachShadow({ mode: "open" }).innerHTML = '<input value="shadow-fixture">';
+  });
+  const locator = page.locator("#light");
+  const handles = await locator.elementHandles();
+  const disposal = vi.spyOn(handles[0]!, "dispose");
+  vi.spyOn(locator, "elementHandles").mockResolvedValue(handles);
+  vi.spyOn(locator, "filter").mockReturnValue(locator);
+  const lookup = vi.spyOn(page, "locator").mockReturnValue(locator);
+  try {
+    expect(await captureCredentialSource("fixture", { selector: "[role=dialog] input" }))
+      .toEqual({ candidate_count: 2 });
+    expect(disposal).toHaveBeenCalledOnce();
+  } finally {
+    lookup.mockRestore();
+  }
+});
+
+it.each(["for", "aria-labelledby"])("resolves %s names within the source's owning root", async (association) => {
+  await page.setContent('<label id="name" for="key">Old key</label><div id="host"></div>');
+  await page.locator("#host").evaluate((host, kind) => {
+    host.attachShadow({ mode: "open" }).innerHTML =
+      '<label id="name" for="key">New key</label><input id="key" ' +
+      (kind === "aria-labelledby" ? 'aria-labelledby="name" ' : '') +
+      'value="new-key-fixture">';
+  }, association);
+  const locator = page.getByRole("textbox");
+  vi.spyOn(locator, "elementHandles").mockResolvedValue([]);
+  const lookup = vi.spyOn(page, "getByRole").mockReturnValue(locator);
+  try {
+    const miss = await captureCredentialSource("fixture", { role: "textbox", name: "Old key" });
+    expect(miss).toEqual({
+      candidate_count: 0,
+      found: [{ role: "textbox", name: "New key" }],
+    });
+    expect(await captureCredentialSource("fixture", { role: "textbox", name: "New key" }))
+      .toEqual({ candidate_count: 1, value: "new-key-fixture" });
+  } finally {
+    lookup.mockRestore();
+  }
+});
+
+it.each([0, 1, 2])("counts %s sources across two matching containers", async (count) => {
+  await page.setContent('<section role="dialog" aria-label="First">First</section><section role="dialog" aria-label="Second">Second</section>');
+  await page.locator("section").evaluateAll((sections, inputCount) => {
+    for (let i = 0; i < inputCount; i++)
+      sections[i]!.innerHTML = '<input value="key-fixture">';
+  }, count);
+  const locator = page.getByRole("dialog");
+  vi.spyOn(locator, "elementHandles").mockResolvedValue([]);
+  vi.spyOn(locator, "getByRole").mockReturnValue(locator);
+  const lookup = vi.spyOn(page, "getByRole").mockReturnValue(locator);
+  try {
+    const result = await captureCredentialSource("fixture", {
+      role: "textbox",
+      container: { role: "dialog" },
+    });
+    expect(result.candidate_count).toBe(count);
+    if (count === 0) expect(result.found).toEqual([
+      { role: "dialog", name: "First" },
+      { role: "dialog", name: "Second" },
+    ]);
+    if (count === 1) expect(result.value).toBe("key-fixture");
+    if (count === 2) expect(result.value).toBeUndefined();
+  } finally {
+    lookup.mockRestore();
+  }
+});
+
+it("never captures a searchbox as a textbox", async () => {
+  await page.setContent('<div id="host"></div>');
+  await page.locator("#host").evaluate((host) => {
+    host.attachShadow({ mode: "open" }).innerHTML =
+      '<input type="search" aria-label="Find keys" value="search-query-fixture">';
+  });
+  expect(await captureCredentialSource("fixture", { role: "textbox" })).toEqual({
+    candidate_count: 0,
+    found: [{ role: "searchbox", name: "Find keys" }],
+  });
+});

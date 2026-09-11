@@ -38,7 +38,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { Buffer } from "node:buffer";
 import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Page } from "playwright";
+import type { ElementHandle, Page } from "playwright";
 import {
   BrowserClickDispatchError,
   CHECKOUT_SUBMIT_LABEL_RE,
@@ -8816,21 +8816,16 @@ export interface CaptureFoundCandidate {
   name: string | null;
 }
 
-// In-page shadow-piercing capture walk. Playwright's locator engines pierce
-// OPEN shadow roots for a bare engine ("css=input", getByRole) but a descendant
-// combinator cannot cross the shadow boundary ("[role=dialog] input" misses a
-// dialog-hosted shadow input), and embeds can defeat the engines in other ways
-// (Groq's id-less key input inside an open shadow root — eleven capture retries
-// all failed in the 2026-09-11 native run). When the locator engines resolve
-// nothing, walk the DOM explicitly through every open shadow root (native
-// shadowRoot getter, so page scripts cannot hide it), scoped to the requested
-// container, and read the single match. One evaluate = one atomic
-// select-and-read; no retarget window.
 async function shadowPiercingCapture(
   page: Page,
   source: CaptureSource,
+  handles: ElementHandle<HTMLElement | SVGElement>[],
 ): Promise<{ candidate_count: number; value?: string; found?: CaptureFoundCandidate[] }> {
-  return await page.evaluate((spec) => {
+  return await page.evaluate(({ source: spec, nodes }) => {
+    for (const node of nodes) {
+      if (!node.isConnected || node.ownerDocument !== document)
+        throw new Error("capture source changed");
+    }
     const nativeShadowGet = Object.getOwnPropertyDescriptor(Element.prototype, "shadowRoot")?.get;
     const shadowRootOf = (el: Element): ShadowRoot | null => {
       try {
@@ -8863,11 +8858,12 @@ async function shadowPiercingCapture(
     walk(document);
 
     const accessibleName = (el: Element): string => {
+      const root = el.getRootNode() as Document | ShadowRoot;
       const labelledby = el.getAttribute("aria-labelledby");
       if (labelledby) {
         const text = labelledby
           .split(/\s+/)
-          .map((id) => document.getElementById(id)?.textContent ?? "")
+          .map((id) => root.getElementById(id)?.textContent ?? "")
           .join(" ")
           .trim();
         if (text) return text;
@@ -8875,20 +8871,11 @@ async function shadowPiercingCapture(
       const label = (el.getAttribute("aria-label") ?? "").trim();
       if (label) return label;
       if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-        if (el.id) {
-          const forLabel = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
-          const text = (forLabel?.textContent ?? "").trim();
-          if (text) return text;
-        }
-        let anc: Element | null = el.parentElement;
-        while (anc !== null) {
-          if (anc.tagName === "LABEL") {
-            const text = (anc.textContent ?? "").trim();
-            if (text) return text;
-            break;
-          }
-          anc = anc.parentElement;
-        }
+        const text = Array.from(el.labels ?? [])
+          .map((label) => label.textContent ?? "")
+          .join(" ")
+          .trim();
+        if (text) return text;
       }
       const title = (el.getAttribute("title") ?? "").trim();
       if (title) return title;
@@ -8900,7 +8887,8 @@ async function shadowPiercingCapture(
       if (explicit) return explicit;
       if (el instanceof HTMLInputElement) {
         const t = (el.getAttribute("type") ?? "text").toLowerCase();
-        if (t === "text" || t === "search" || t === "tel" || t === "url" || t === "email")
+        if (t === "search") return "searchbox";
+        if (t === "text" || t === "tel" || t === "url" || t === "email")
           return "textbox";
         if (t === "number") return "spinbutton";
         if (t === "checkbox") return "checkbox";
@@ -8952,12 +8940,8 @@ async function shadowPiercingCapture(
             (containerSpec.name === undefined || accessibleName(el) === containerSpec.name),
         )
       : [];
-    if (containerSpec && containers.length > 1)
-      return { candidate_count: containers.length };
-    // A demanded container that renders zero or several matches fails closed:
-    // nothing inside it is scoped, so nothing is captured.
-    const containerEl =
-      containerSpec && containers.length === 1 ? (containers[0] as Element | null) : null;
+    const inScope = (el: Element): boolean =>
+      containerSpec === null || containers.some((container) => within(el, container));
 
     const foundReport = (): CaptureFoundCandidate[] => {
       const out: CaptureFoundCandidate[] = [];
@@ -8976,8 +8960,17 @@ async function shadowPiercingCapture(
     };
     // A demanded container that never rendered scopes nothing: refuse rather
     // than let the walk resolve a match outside the requested container.
-    if (containerSpec && containerEl === null)
+    if (containerSpec && containers.length === 0)
       return { candidate_count: 0, found: foundReport() };
+
+    const resolve = (matches: Element[]) => {
+      const candidates = Array.from(new Set([...nodes, ...matches]))
+        .filter((el) => isVisible(el) && inScope(el));
+      if (candidates.length === 0) return { candidate_count: 0, found: foundReport() };
+      if (candidates.length > 1) return { candidate_count: candidates.length };
+      const value = readValue(candidates[0]!);
+      return { candidate_count: 1, ...(value.length > 0 ? { value } : {}) };
+    };
 
     if ("selector" in spec) {
       const parentOf = (el: Element): Element | null => {
@@ -9043,26 +9036,22 @@ async function shadowPiercingCapture(
       try {
         document.querySelector(spec.selector);
         visible = elements.filter(
-          (el) => isVisible(el) && within(el, containerEl) && matchesSelector(el, spec.selector),
+          (el) => isVisible(el) && inScope(el) && matchesSelector(el, spec.selector),
         );
       } catch {
-        return { candidate_count: 0, found: foundReport() };
+        return resolve([]);
       }
-      if (visible.length === 1) return { candidate_count: 1, value: readValue(visible[0]!) };
-      if (visible.length > 1) return { candidate_count: visible.length };
-      return { candidate_count: 0, found: foundReport() };
+      return resolve(visible);
     }
 
     const role = spec.role;
     let candidates = elements.filter(
-      (el) => isVisible(el) && within(el, containerEl) && ariaRole(el) === role,
+      (el) => isVisible(el) && inScope(el) && ariaRole(el) === role,
     );
     if (spec.name !== undefined)
       candidates = candidates.filter((el) => accessibleName(el) === spec.name);
-    if (candidates.length === 1) return { candidate_count: 1, value: readValue(candidates[0]!) };
-    if (candidates.length > 1) return { candidate_count: candidates.length };
-    return { candidate_count: 0, found: foundReport() };
-  }, source);
+    return resolve(candidates);
+  }, { source, nodes: handles });
 }
 
 /** Explicit capture reads one named source without revealing other controls or
@@ -9104,22 +9093,7 @@ export async function captureCredentialSource(
     handles = [];
   }
   try {
-    if (handles.length === 1) {
-      const value = await handles[0]!.evaluate((node) => {
-        if (!node.isConnected || node.ownerDocument !== document)
-          throw new Error("capture source changed");
-        const value =
-          node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
-            ? node.value
-            : node instanceof HTMLElement
-              ? node.innerText
-              : "";
-        return value.length <= 8192 ? value.trim() : "";
-      });
-      return { candidate_count: 1, ...(value.length > 0 ? { value } : {}) };
-    }
-    if (handles.length > 1) return { candidate_count: handles.length };
-    return await shadowPiercingCapture(page, source);
+    return await shadowPiercingCapture(page, source, handles);
   } finally {
     await Promise.all(handles.map((handle) => handle.dispose().catch(() => undefined)));
   }
