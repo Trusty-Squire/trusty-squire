@@ -1,6 +1,7 @@
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { BrowserController } from "../browser.js";
+import { fixtureEvidence } from "./fixture-evidence.js";
 import { serializeBrowserUseDOM } from "../browser-use-serializer.js";
 import {
   buildSafeControlsV2,
@@ -105,6 +106,11 @@ it("retains rendered verification instructions and distinguishes a late error fr
     await page.locator("#error").evaluate((e) => e.removeAttribute("hidden"));
     await page.locator("#error").waitFor({ state: "visible" });
     const settled = await observe(page);
+    await fixtureEvidence(
+      "visible-verification-and-error",
+      { dom: settled.full, wire: settled.wire, blockers: settled.blockers },
+      page,
+    );
     expect(settled.full).toContain("The External Account was not found");
     expect(settled.blockers).toContainEqual({
       kind: "validation",
@@ -179,6 +185,11 @@ it.each([
     const result = await observe(page);
     expect(result.rows.some((row) => row.label === "@signup-action")).toBe(rendered);
     expect(result.full.includes("Signup action")).toBe(rendered);
+    await fixtureEvidence(
+      `containing-block-${position}-${rendered ? "visible" : "clipped"}`,
+      { rendered, dom: result.full, wire: result.wire },
+      page,
+    );
     if (rendered) {
       expect(result.rows.find((row) => row.label === "@signup-action")?.visibility).toBe(
         "viewport",
@@ -213,6 +224,11 @@ it("keeps visible fixed-shell blockers without restoring hidden descendant evide
       { kind: "challenge", text: "Performing security verification", target: "unavailable" },
       { kind: "validation", text: "The External Account was not found" },
     ]);
+    await fixtureEvidence(
+      "fixed-shell-blockers",
+      { dom: result.full, wire: result.wire, blockers: result.blockers },
+      page,
+    );
     await page
       .locator("#shell")
       .evaluate((element) => ((element as HTMLElement).style.opacity = "0"));

@@ -184,8 +184,13 @@ job without exposing plaintext to the agent.
   cancellation: return attempt-owned completion evidence when available, otherwise
   `oauth: {state: "in_progress", completion: "unknown", next_action: "operate_observe"}`
   with the retained `session_id` and observe-before-action guidance. A timeout
-  alone proves neither failure nor a human challenge. Explicit provider denials
-  and proven pre-dispatch failures retain their failure semantics. Native OAuth
+  alone proves neither failure nor a human challenge. An attempt-owned popup
+  opened before the initiating click rejects stays the observation target and
+  retains OAuth ownership; closing it restores the viable product page. Concrete
+  attempt-owned callback denials take precedence over interrupted-click uncertainty;
+  they and proven pre-dispatch failures retain their failure semantics. See the
+  routed click-then-error regression in
+  `apps/mcp/src/bot/__tests__/oauth-lifecycle.test.ts`. Native OAuth
   errors retain `error.session_id`; ordinary errors direct observation, while
   unsettled cancellation keeps its existing wait/finish guidance. Never replay
   OAuth automatically after an uncertain result.

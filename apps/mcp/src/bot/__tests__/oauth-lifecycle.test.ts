@@ -42,6 +42,7 @@ import { ProvenPreDispatchMutationError } from "../mutation-dispatch-evidence.js
 
 import { withOperatorRequestContext } from "../request-cancellation.js";
 import { operateLoginTool } from "../../tools/provision-drive.js";
+import { fixtureEvidence } from "./fixture-evidence.js";
 
 const PRODUCT_URL = `data:text/html,${encodeURIComponent(`
   <!doctype html>
@@ -142,7 +143,16 @@ describe("BrowserController OAuth popup lifecycle", () => {
           operateLoginTool.handler({ session_id: sessionId!, provider: "google", ref: ref! }, null),
         );
         if (destination === "denied") {
-          await expect(outcome).rejects.toThrow(/error=access_denied \(The user denied access\)/);
+          const failure = await outcome.catch((error: Error) => error);
+          expect(failure).toBeInstanceOf(Error);
+          expect((failure as Error).message).toMatch(
+            /error=access_denied \(The user denied access\)/,
+          );
+          await fixtureEvidence(`oauth-denied-${mode}`, {
+            error: (failure as Error).message,
+            initiatingClicks: click.mock.calls.length,
+            ownership: controller.oauthTransitionStatus(),
+          });
           expect(click).toHaveBeenCalledTimes(1);
           expect(controller.oauthTransitionStatus()).toBeNull();
           expect(product.isClosed()).toBe(false);
@@ -150,6 +160,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
           return;
         }
         const result = await outcome;
+        await fixtureEvidence(`oauth-${destination}-${mode}`, result);
         expect(result).toMatchObject({
           session_id: sessionId,
           url: destination === "callback" ? callback : provider,
@@ -163,6 +174,11 @@ describe("BrowserController OAuth popup lifecycle", () => {
         await expect(observe(sessionId)).resolves.toMatchObject({ session_id: sessionId });
         if (destination === "pending") {
           const refreshed = await observe(sessionId, "compact");
+          await fixtureEvidence(
+            `oauth-pending-${mode}-observation`,
+            refreshed,
+            context.pages().find((page) => page.url() === provider),
+          );
           expect(refreshed).toMatchObject({
             session_id: sessionId,
             semantic: {

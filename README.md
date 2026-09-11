@@ -414,8 +414,10 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   the session. A consent screen or a 2FA/verification challenge is usually still
   showing, so re-observe and drive it; the session stays open and usable. A
   denial the provider actually reported (an OAuth `error=` code on the return
-  URL) is the one case that fails the action, with that code in the message. If
-  an observation races the transition, it reports `oauth.state: "in_progress"`
+  URL) fails the action, with that code in the message. For interrupted clicks,
+  retained popups, and pre-dispatch failures, follow the
+  [OAuth error and recovery contract](docs/operator-tool-surface.md#using-the-rest-of-the-surface).
+  If an observation races the transition, it reports `oauth.state: "in_progress"`
   and directs the host to observe again.
 - Observed card controls are marked `payment_field` and
   `interaction: "vaulted_card_only"`, with `operate_pay { phase: "fill_card" }`

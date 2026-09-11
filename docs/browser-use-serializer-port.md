@@ -86,9 +86,14 @@ but successful observation.
 
 Viewport visibility is computed before tree simplification and containment.
 Live capture uses each frame's actual viewport, ancestor opacity, positive layout
-area and overflow clipping. Transparent or fully collapsed contents do not become
-visible controls merely because a descendant has opacity 1. Offscreen controls in
-a scrollable document remain queryable; compact rows mark them `v=offscreen`.
+area and overflow clipping that respects fixed/absolute containing blocks. A
+viewport-fixed control can escape an ordinary overflow wrapper; a transformed
+containing block can still clip it. Transparent or fully clipped contents do not
+become visible controls merely because a descendant has opacity 1. An ordinary
+ancestor's empty layout box does not suppress visible descendant blockers (for
+example, a fixed app shell inside a zero-height body); hidden frame boundaries
+still suppress their contents. Offscreen controls in a scrollable document remain
+queryable; compact rows mark them `v=offscreen`.
 Frame coordinate translation stays separate from same-document overflow clipping.
 Hidden file inputs retain the existing upload exception. The canonical fixture
 serializer's fallback for missing geometry is unchanged.

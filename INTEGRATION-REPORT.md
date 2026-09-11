@@ -190,3 +190,24 @@ The same command at 13:24:54 exited 0: `Test Files 1 passed (1); Tests 1 passed 
 production code, live provider sessions, shared profiles, or screenshot component
 changed. No transient untracked artifacts remained. This is focused fixture
 evidence; the outer executor owns remaining pipeline validation and delivery.
+
+## Test-phase fixture evidence
+
+On 2026-09-11 at 13:37, targeted Vitest selections passed: 20 tests across
+observation-dom-correctness, oauth-lifecycle, session-characterization, and
+server-resilience, plus 10 operate-session-flow tests. Selection-only skips were
+123 and 327 respectively. Both commands exited 0. The configured install,
+Prisma generation, package builds, and baseline tests had already passed in the
+outer executor; this phase did not repeat the full suite.
+
+Added opt-in `MCP_FIXTURE_EVIDENCE_DIR` capture to the isolated DOM and routed
+OAuth fixtures. PNGs show rendered fixed-position controls, visible verification
+and validation blockers, and pending OAuth pages. JSON captures preserve actual
+observation output, pending/callback results, and callback denials with exactly
+one initiating click and cleared ownership. Evidence resides only under
+`/home/lunchbox/.no-mistakes/evidence/01M28P82G83Y1QWHJFS9KSHG6K`.
+The fixed-shell and fixed-control screenshots were visually inspected against
+the captured outputs. R1–R5 and the schema characterization passed these focused
+checks. These remain fixture-only evidence; Firstmate's native acceptance is
+separate. No live providers, shared profiles, production changes, screenshot
+targeting integration, or downstream pipeline actions were involved.
