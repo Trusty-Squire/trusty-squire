@@ -11051,7 +11051,7 @@ describe("flat operator verbs", () => {
       const before = '<input aria-label="API key" value="pre-action-value">';
       const after =
         outcome === "ambiguous"
-          ? '<p>No key available</p>'
+          ? "<p>No key available</p>"
           : '<input aria-label="API key" value="captured-secret">';
       await page.setContent(_name === "click" ? before : after);
       h.captureClick =
