@@ -588,3 +588,50 @@ it.each([false, true])("preserves scoped child selectors with direct input prese
     expect(result.found).toBeDefined();
   }
 });
+
+
+it.each(["light", "shadow"])("never follows a selector chain above its dialog into %s DOM", async (kind) => {
+  await page.setContent('<div class="created-key"><section role="dialog"><div id="host"></div></section></div>');
+  await page.locator("#host").evaluate((host, tree) => {
+    const root = tree === "shadow" ? host.attachShadow({ mode: "open" }) : host;
+    root.innerHTML = '<input value="outside-chain-fixture">';
+  }, kind);
+  expect(await captureCredentialSource("fixture", {
+    selector: ".created-key input",
+    container: { role: "dialog" },
+  })).toMatchObject({ candidate_count: 0, found: expect.any(Array) });
+});
+
+it.each([
+  { tree: "light", selector: "[role=dialog] input", count: 0 },
+  { tree: "shadow", selector: "[role=dialog] input", count: 1 },
+  { tree: "shadow", selector: "[role=dialog] section input", count: 1 },
+  { tree: "shadow", selector: ".created-key input", count: 0 },
+  { tree: "shadow", selector: "input", count: 1 },
+])("limits fallback chains to their container and shadow boundary: $tree $selector", async ({ tree, selector, count }) => {
+  await page.setContent('<section role="dialog"><div id="host"></div></section>');
+  await page.locator("#host").evaluate((host, kind) => {
+    const root = kind === "shadow" ? host.attachShadow({ mode: "open" }) : host;
+    root.innerHTML = '<section class="created-key"><input value="shadow-chain-fixture"></section>';
+  }, tree);
+  const dialog = page.getByRole("dialog");
+  const target = dialog.locator(selector);
+  vi.spyOn(target, "elementHandles").mockResolvedValue([]);
+  vi.spyOn(target, "filter").mockReturnValue(target);
+  vi.spyOn(dialog, "locator").mockReturnValue(target);
+  const lookup = vi.spyOn(page, "getByRole").mockReturnValue(dialog);
+  try {
+    const result = await captureCredentialSource("fixture", {
+      selector,
+      container: { role: "dialog" },
+    });
+    expect(result.candidate_count).toBe(count);
+    if (count === 1) expect(result.value).toBe("shadow-chain-fixture");
+    else {
+      expect(result.value).toBeUndefined();
+      expect(result.found).toBeDefined();
+    }
+  } finally {
+    lookup.mockRestore();
+  }
+});

@@ -9004,16 +9004,27 @@ async function shadowPiercingCapture(
         offset += space[0].length;
       }
       if (parts.length === 0) return resolve([]);
+      const anchors = parts.length > 1
+        ? (containerSpec === null ? elements : containers).filter((el) => el.matches(parts[0]!))
+        : [];
       const matchesSelector = (el: Element): boolean => {
         if (!el.matches(parts[parts.length - 1]!)) return false;
-        let ancestor = parentOf(el);
-        for (let i = parts.length - 2; i >= 0; i--) {
-          while (ancestor !== null && !ancestor.matches(parts[i]!))
-            ancestor = parentOf(ancestor);
-          if (ancestor === null) return false;
-          ancestor = parentOf(ancestor);
-        }
-        return true;
+        if (parts.length === 1) return el.getRootNode() instanceof ShadowRoot;
+        return anchors.some((anchor) => {
+          if (el === anchor || !within(el, anchor)) return false;
+          let current: Element | null = el;
+          let remaining = parts.length - 2;
+          let crossedShadow = false;
+          while (current !== null && current !== anchor) {
+            if (current.parentElement === null && current.getRootNode() instanceof ShadowRoot)
+              crossedShadow = true;
+            current = parentOf(current);
+            if (current === anchor) return crossedShadow && remaining === 0;
+            if (current !== null && remaining > 0 && current.matches(parts[remaining]!))
+              remaining--;
+          }
+          return false;
+        });
       };
       let visible: Element[] = [];
       try {
