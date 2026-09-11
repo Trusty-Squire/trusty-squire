@@ -13918,6 +13918,16 @@ export class BrowserController {
     let expectedReturnChain: readonly string[] | null = null;
     let pendingOnProvider = false;
     let lastTransientUrl = productUrl;
+    let observedCallbackDenial: OAuthFailedError | null = null;
+    const denialError = (url: string): OAuthFailedError | null => {
+      const denial = oauthErrorFromReturnUrl(url);
+      if (denial === null) return null;
+      return oauthFailedError(
+        `OAuth returned to ${safeOrigin(url)} with error=${denial.error}` +
+          (denial.description === null ? "" : ` (${denial.description})`) +
+          ".",
+      );
+    };
     let observedReturn: { page: Page; url: string } | null = null;
     let observedProductContinuation: { page: Page; url: string } | null = null;
     let onTransientNavigation: ((frame: Frame) => void) | null = null;
@@ -14013,6 +14023,7 @@ export class BrowserController {
       const url = frame.url();
       const priorReturn = observedReturn;
       captureExpectedReturnUrl(url);
+      if (matchesExpectedReturn(url)) observedCallbackDenial ??= denialError(url);
       if (matchesExpectedReturn(url) && oauthErrorFromReturnUrl(url) === null) {
         observedReturn = { page, url };
         return;
@@ -14163,7 +14174,13 @@ export class BrowserController {
         try {
           if (dispatchAuthorizedClick === undefined) {
             actionStarted = true;
-            await this.click(selector);
+            // Direct native login has no broker-prepared handle. Record the
+            // same dispatch boundary while retaining ordinary click semantics.
+            await this.clickWithDispatchTracking(
+              { kind: "selector", selector, method: "click" },
+              undefined,
+              () => this.click(selector),
+            );
           } else {
             await dispatchAuthorizedClick(async (handle, confirmTarget) => {
               await this.withModalInertNeutralized(selector, async () => {
@@ -14271,7 +14288,11 @@ export class BrowserController {
             });
           }
         } catch (error) {
-          if (!product.isClosed()) throw error;
+          if (!product.isClosed()) {
+            providerPage = popupCapture.page;
+            pendingOnProvider = providerPage !== null || productNavigated;
+            throw error;
+          }
         }
         providerPage = await Promise.race([
           popupPromise,
@@ -14405,13 +14426,8 @@ export class BrowserController {
           : []),
       ];
       for (const observedUrl of observedUrls) {
-        const denial = oauthErrorFromReturnUrl(observedUrl);
-        if (denial === null) continue;
-        throw oauthFailedError(
-          `OAuth returned to ${safeOrigin(observedUrl)} with error=${denial.error}` +
-            (denial.description === null ? "" : ` (${denial.description})`) +
-            ".",
-        );
+        const denial = observedCallbackDenial ?? denialError(observedUrl);
+        if (denial !== null) throw denial;
       }
       const completion = settled === null ? await completionEvidence() : { page: settled };
       if (completion === null) {
@@ -14440,15 +14456,36 @@ export class BrowserController {
           );
         }
       }
+    } catch (error) {
+      if (observedCallbackDenial !== null) {
+        pendingOnProvider = false;
+        throw observedCallbackDenial;
+      }
+      throw error;
     } finally {
       product.off("framenavigated", onProductNavigation);
       context.off("request", onContextRequest);
       if (onTransientNavigation !== null) {
         (providerPage ?? product).off("framenavigated", onTransientNavigation);
       }
+      if (popupCapture.page !== null && popupCapture.onNavigation !== null) {
+        popupCapture.page.off("framenavigated", popupCapture.onNavigation);
+      }
       const retainedProvider = providerPage ?? product;
       const providerStillShowing = pendingOnProvider && !retainedProvider.isClosed();
       if (providerStillShowing) {
+        if (this.oauthProviderPage !== retainedProvider) {
+          const durableProduct = providerPage === null ? recovery : product;
+          this.oauthProductPage = durableProduct;
+          this.oauthProviderPage = retainedProvider;
+          this.oauthProviderPageClosed = false;
+          this.restoreProductPageWhenOAuthPageCloses(retainedProvider, durableProduct);
+          if (this.activeOAuthAttempt !== null) {
+            this.activeOAuthAttempt.providerPage = retainedProvider;
+            this.activeOAuthAttempt.providerDocumentId =
+              this.mainDocumentIdentity(retainedProvider);
+          }
+        }
         this.page = retainedProvider;
       } else {
         this.activeOAuthAttempt = null;
@@ -14476,7 +14513,12 @@ export class BrowserController {
           await providerPage.close().catch(() => undefined);
         }
       }
-      if (recovery !== null && recovery !== this.page && !recovery.isClosed()) {
+      if (
+        recovery !== null &&
+        recovery !== this.page &&
+        !(providerStillShowing && recovery === this.oauthProductPage) &&
+        !recovery.isClosed()
+      ) {
         await recovery.close().catch(() => undefined);
       }
       if (this.page !== null && !this.page.isClosed()) {

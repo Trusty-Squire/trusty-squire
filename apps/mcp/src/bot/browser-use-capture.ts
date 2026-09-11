@@ -50,6 +50,16 @@ const STYLES = [
   "cursor",
   "pointer-events",
   "position",
+  "transform",
+  "translate",
+  "rotate",
+  "scale",
+  "perspective",
+  "filter",
+  "backdrop-filter",
+  "contain",
+  "will-change",
+  "content-visibility",
   "background-color",
 ];
 const iframeHintContextMaxChars = 40;
@@ -80,6 +90,8 @@ export async function captureBrowserUseDOM(
 ): Promise<BrowserUseCapture> {
   const nodeElements = new Map<string, InteractiveElement>();
   const opaqueFrames = new Map<Frame, boolean>();
+  const renderedNodes = new Map<string, boolean>();
+  const frameViews = new Map<Frame, { width: number; height: number; x: number; y: number }>();
   const viewMetadata = new Map<
     string,
     {
@@ -298,7 +310,7 @@ export async function captureBrowserUseDOM(
         // backend identities without guessing from tag names or accessible names.
         const selectors = candidates.map((e) => e.selector);
         const objects = await client.send("Runtime.evaluate", {
-          expression: `(() => { const roots=[document],getShadowRoot=Object.getOwnPropertyDescriptor(Element.prototype,'shadowRoot')?.get; for(let i=0;i<roots.length;i++) for(const e of roots[i].querySelectorAll('*')) { const shadowRoot=getShadowRoot?.call(e); if(shadowRoot) roots.push(shadowRoot); } const found=${JSON.stringify(selectors)}.map(s => { const p=s.split(' >> nth='); const matches=roots.flatMap(r=>{try{return [...r.querySelectorAll(p[0])]}catch{return []}}); return matches[Number(p[1]||0)] || null; }); const formOwners=roots.flatMap(r=>[...r.querySelectorAll('[form]')]).flatMap(e=>[e,e.form||null]); return Object.assign(found,{baseURI:document.baseURI,baseTarget:document.querySelector('base[target]')?.getAttribute('target'),formOwners}); })()`,
+          expression: `(() => { const roots=[document],getShadowRoot=Object.getOwnPropertyDescriptor(Element.prototype,'shadowRoot')?.get; for(let i=0;i<roots.length;i++) for(const e of roots[i].querySelectorAll('*')) { const shadowRoot=getShadowRoot?.call(e); if(shadowRoot) roots.push(shadowRoot); } const found=${JSON.stringify(selectors)}.map(s => { const p=s.split(' >> nth='); const matches=roots.flatMap(r=>{try{return [...r.querySelectorAll(p[0])]}catch{return []}}); return matches[Number(p[1]||0)] || null; }); const formOwners=roots.flatMap(r=>[...r.querySelectorAll('[form]')]).flatMap(e=>[e,e.form||null]); return Object.assign(found,{viewport:JSON.stringify({width:innerWidth,height:innerHeight,x:scrollX,y:scrollY}),baseURI:document.baseURI,baseTarget:document.querySelector('base[target]')?.getAttribute('target'),formOwners}); })()`,
           contextId: context.executionContextId,
           objectGroup: "ts-observation",
         });
@@ -307,6 +319,8 @@ export async function captureBrowserUseDOM(
             objectId: objects.result.objectId,
             ownProperties: true,
           });
+          const viewport = props.result.find((p) => p.name === "viewport")?.value?.value;
+          if (typeof viewport === "string") frameViews.set(frame, JSON.parse(viewport));
           const baseUri = props.result.find((p) => p.name === "baseURI")?.value?.value;
           baseUris.set(frame, typeof baseUri === "string" ? baseUri : frame.url());
           const baseTarget = props.result.find((p) => p.name === "baseTarget")?.value?.value;
@@ -457,19 +471,70 @@ export async function captureBrowserUseDOM(
         else delete a.checked;
       }
       const id = prefix + raw.backendNodeId;
-      let visible =
+      let rendered =
         !!l?.bounds &&
+        l.bounds.width > 0 &&
+        l.bounds.height > 0 &&
         l.styles.display !== "none" &&
         l.styles.visibility !== "hidden" &&
-        !(Number(l.styles.opacity ?? "1") <= 0);
+        l.styles.visibility !== "collapse" &&
+        !(Number(l.styles.opacity ?? "1") <= 0) &&
+        !parents.some((p) => Number(p.layout.styles.opacity ?? "1") <= 0);
+      let visible = rendered;
+      const view = frame === null ? undefined : frameViews.get(frame);
+      if (view && l?.bounds) {
+        const b = l.bounds;
+        visible &&=
+          b.x - view.x < view.width &&
+          b.x + b.width > view.x &&
+          b.y - view.y < view.height &&
+          b.y + b.height > view.y;
+      }
       const chain = [...parents];
-      if ((t === "html" || t === "iframe" || t === "frame") && l) chain.push({ raw, layout: l });
+      if (l) chain.push({ raw, layout: l });
       if (l?.bounds) {
         let x = l.bounds.x,
           y = l.bounds.y;
+        let positioned = l.styles.position;
         for (const p of [...chain].reverse()) {
           if (p.raw === raw) continue;
+          const styles = p.layout.styles;
+          const establishesContainingBlock =
+            [
+              "transform",
+              "translate",
+              "rotate",
+              "scale",
+              "perspective",
+              "filter",
+              "backdrop-filter",
+            ].some((key) => styles[key] !== undefined && styles[key] !== "none") ||
+            /(?:layout|paint|strict|content)/.test(styles.contain ?? "") ||
+            /(?:transform|translate|rotate|scale|perspective|filter|contain)/.test(
+              styles["will-change"] ?? "",
+            ) ||
+            styles["content-visibility"] === "auto";
+          const escapes =
+            (positioned === "fixed" && !establishesContainingBlock) ||
+            (positioned === "absolute" &&
+              !establishesContainingBlock &&
+              styles.position === "static");
+          const b = p.layout.bounds;
+          if (!escapes && b && !["IFRAME", "FRAME"].includes(p.raw.nodeName)) {
+            for (const axis of ["x", "y"] as const) {
+              const overflow = p.layout.styles[`overflow-${axis}`] ?? p.layout.styles.overflow;
+              const start = axis === "x" ? x : y;
+              const size = axis === "x" ? "width" : "height";
+              const outside = start >= b[axis] + b[size] || start + l.bounds[size] <= b[axis];
+              if (outside && ["hidden", "clip", "auto", "scroll"].includes(overflow ?? "")) {
+                visible = false;
+                if (["hidden", "clip"].includes(overflow!)) rendered = false;
+              }
+            }
+          }
+          if (!escapes) positioned = styles.position;
           if (["IFRAME", "FRAME"].includes(p.raw.nodeName) && p.layout.bounds) {
+            positioned = styles.position;
             x += p.layout.bounds.x;
             y += p.layout.bounds.y;
           }
@@ -490,6 +555,7 @@ export async function captureBrowserUseDOM(
           }
         }
       }
+      renderedNodes.set(id, rendered);
       const overflow = l?.styles ?? {};
       const scrollable =
         raw.isScrollable === true ||
@@ -720,6 +786,7 @@ export async function captureBrowserUseDOM(
       const layout = viewMetadata.get(n.id)?.layout;
       return (
         n.nodeType === 1 &&
+        renderedNodes.get(n.id) === true &&
         layout?.bounds !== null &&
         layout?.bounds !== undefined &&
         layout.bounds.width > 1 &&
@@ -907,7 +974,7 @@ export async function captureBrowserUseDOM(
             (bound !== undefined && ["IFRAME", "FRAME"].includes(n.nodeName))));
       n.actionOwned = ownsAction;
       let el = bound;
-      if (el && !ownsAction) el = undefined;
+      if (el && (!ownsAction || renderedNodes.get(n.id) !== true)) el = undefined;
       // Playwright selectors cannot enter closed shadow roots. Preserve their
       // nodes for display, but do not manufacture an unusable action binding.
       if (
@@ -926,7 +993,10 @@ export async function captureBrowserUseDOM(
             l.styles.display !== "none" &&
             l.styles.visibility !== "hidden" &&
             !(Number(l.styles.opacity ?? "1") <= 0);
-        if (cssVisible || (n.nodeName === "INPUT" && n.attributes.type === "file")) {
+        if (
+          (cssVisible && renderedNodes.get(n.id) === true) ||
+          (n.nodeName === "INPUT" && n.attributes.type === "file")
+        ) {
           const a = n.attributes,
             t = n.nodeName.toLowerCase(),
             selector = selectorsById.get(n.id)!;
@@ -944,7 +1014,7 @@ export async function captureBrowserUseDOM(
               (proxyTarget === undefined
                 ? (a.role ??
                   n.axRole ??
-                  (["a", "button", "input", "select", "textarea"].includes(t) ? null : "button"))
+                  (["a", "button", "input", "select", "textarea"].includes(t) ? null : "generic"))
                 : (proxyTarget.attributes.type ?? "button")),
             labelText: null,
             visibleText: rawText(n).trim() || null,
@@ -1015,6 +1085,7 @@ export async function captureBrowserUseDOM(
         }
       }
       if (el) {
+        el.inViewport = n.visible;
         const semanticNode = proxyTarget ?? n;
         if (proxyTarget !== undefined) {
           el.type = proxyTarget.attributes.type ?? null;

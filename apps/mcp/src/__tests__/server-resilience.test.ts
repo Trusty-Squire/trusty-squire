@@ -15,6 +15,9 @@ import { createServerCallAdmission } from "../server.js";
 import { describe, expect, it, vi } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv-provider.js";
+import type { JsonSchemaType } from "@modelcontextprotocol/sdk/validation/types.js";
+import { provisionObserveTool } from "../tools/provision-drive.js";
 import { brokerRecoveryRequested, buildServer } from "../server.js";
 import type { ApiClient } from "../api-client.js";
 import type { BrowserController } from "../bot/browser.js";
@@ -76,6 +79,41 @@ it("accepts only the exact explicit stale-ref pre-dispatch recovery metadata", (
 });
 
 describe("operate_* bad input is a per-call error, never a server failure", () => {
+  it.each([
+    ["operator_session_busy: retained lease", "session_busy"],
+    ["operator_execution_unsettled", "outcome_unknown"],
+  ])("retains OAuth session identity when cancellation surfaces %s", async (message, code) => {
+    const forwarder = {
+      invoke: vi.fn(async () => {
+        throw new Error(message);
+      }),
+    } as unknown as OperatorForwarder;
+    const api = { setRequestingAgent: vi.fn() } as unknown as ApiClient;
+    const server = await buildServer(api, undefined, undefined, undefined, forwarder);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: "login-cancellation-test", version: "1" });
+    await client.connect(clientTransport);
+    try {
+      const result = await client.callTool({
+        name: "operate_login",
+        arguments: {
+          session_id: "retained-login-session",
+          provider: "google",
+          ref: "@login",
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(resultText(result)).error).toMatchObject({
+        code,
+        session_id: "retained-login-session",
+        message: expect.stringMatching(/Do not (replay|repeat)/),
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
   it("returns recoverable startup custody as a valid MCP error result", async () => {
     const forwarder = {
       invoke: vi.fn(async () => {
@@ -137,6 +175,20 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
           session_id: started.session_id,
           ref: 2,
         },
+      });
+      const login = await client.callTool({
+        name: "operate_login",
+        arguments: {
+          session_id: started.session_id,
+          provider: "google",
+          ref: "Missing OAuth button",
+        },
+      });
+      expect(login.isError).toBe(true);
+      expect(JSON.parse(resultText(login)).error).toMatchObject({
+        session_id: started.session_id,
+        next_action: "operate_observe",
+        guidance: expect.stringMatching(/do not repeat OAuth blindly/),
       });
       const unknown = await client.callTool({ name: "operate_not_real", arguments: {} });
       const observed = await client.callTool({
@@ -427,3 +479,32 @@ for (const [name, args, budget] of [
       await server.close();
     }
   });
+
+it("publishes literal role constraints matching the observe runtime validator", async () => {
+  const client = await connectedClient();
+  try {
+    const listed = await client.listTools();
+    const tool = listed.tools.find((candidate) => candidate.name === "operate_observe")!;
+    // The SDK's wire schema permits explicit undefined on optional properties;
+    // its validator's JSON Schema type does not. AJV checks the received schema.
+    const validate = new AjvJsonSchemaValidator().getValidator(tool.inputSchema as JsonSchemaType);
+    for (const [role, accepted] of [
+      ["slider", true],
+      ["generic", true],
+      ["button", true],
+      ["custom-role", true],
+      ["a".repeat(64), true],
+      ["", false],
+      ["a".repeat(65), false],
+      ["Slider", false],
+      ["generic role", false],
+      ["1button", false],
+    ] as const) {
+      const args = { session_id: "fixture", role };
+      expect(validate(args).valid, role).toBe(accepted);
+      expect(provisionObserveTool.inputSchema.safeParse(args).success, role).toBe(accepted);
+    }
+  } finally {
+    await client.close();
+  }
+});

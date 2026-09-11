@@ -18,7 +18,7 @@ import { mockBrowserUseCapture } from "./browser-use-test-capture.js";
 //   - credential egress seed excludes mid_session task scope
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { constants, publicEncrypt } from "node:crypto";
-import { BrowserClickDispatchError } from "../browser.js";
+import { BrowserClickDispatchError, OAuthFailedError } from "../browser.js";
 import type * as BrowserModule from "../browser.js";
 import type * as GoogleLoginModule from "../google-login.js";
 import type * as ProfileModule from "../profile.js";
@@ -3769,6 +3769,85 @@ describe("operate session — OAuth lifecycle", () => {
     expect(result.guidance).not.toMatch(/human|challenge/i);
     expect(result.oauth).not.toHaveProperty("challenge");
     expect(h.oauthLoginCalls).toHaveLength(1);
+    await finishProvisionSession(started.session_id);
+  });
+
+  it.each([false, true])(
+    "retains unknown OAuth progress for a browser timeout distinct from cancellation (cancelled=%s)",
+    async (cancelled) => {
+      h.visibleText = "Continue with Google";
+      h.elements = [
+        elem({
+          visibleText: "Continue with Google",
+          labelText: "Continue with Google",
+          role: "button",
+          selector: "#google-oauth",
+        }),
+      ];
+      const controller = new AbortController();
+      h.oauthResultUrl = "https://app.example.com/dashboard";
+      h.oauthLoginError = new Error("page click: Timeout 15000ms exceeded after navigation");
+      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+      let release!: () => void;
+      h.oauthLoginGates.set(
+        0,
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+      );
+      const login = withOperatorRequestContext(controller.signal, () =>
+        operateLoginTool.handler(
+          { session_id: started.session_id, provider: "google", ref: "Continue with Google" },
+          null,
+        ),
+      );
+      await expect.poll(() => h.oauthDispatchCalls).toBe(1);
+      if (cancelled) controller.abort(new Error("Operator work budget expired"));
+      release();
+      const result = await login;
+      expect(result).toMatchObject({
+        session_id: started.session_id,
+        oauth: {
+          state: "in_progress",
+          completion: "unknown",
+          next_action: "operate_observe",
+        },
+        guidance: expect.stringMatching(/do not repeat/i),
+      });
+      expect(h.oauthLoginCalls).toHaveLength(1);
+      await expect(observe(started.session_id)).resolves.toMatchObject({
+        session_id: started.session_id,
+      });
+      await finishProvisionSession(started.session_id);
+    },
+  );
+
+  it.each([
+    new BrowserClickDispatchError("not_dispatched", new Error("target detached before click")),
+    new OAuthFailedError("OAuth returned error=access_denied"),
+  ])("preserves conclusive OAuth failures despite a dispatch-attempt marker: %s", async (error) => {
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    h.oauthLoginError = error;
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+    await expect(
+      withOperatorRequestContext(new AbortController().signal, () =>
+        operateLoginTool.handler(
+          { session_id: started.session_id, provider: "google", ref: "Continue with Google" },
+          null,
+        ),
+      ),
+    ).rejects.toBe(error);
+    await expect(observe(started.session_id)).resolves.toMatchObject({
+      session_id: started.session_id,
+    });
     await finishProvisionSession(started.session_id);
   });
 
@@ -10369,6 +10448,7 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
       semantic: { blockers: Array<Record<string, unknown>> };
       safe_table: Array<[string, string, string?]>;
     };
+    expect(startPayload.semantic).toHaveProperty("blocked", true);
     expect(startPayload.semantic.blockers).toEqual([
       {
         kind: "challenge",

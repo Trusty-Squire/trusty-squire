@@ -50,6 +50,15 @@ retain their existing semantics. Query operates on the full document inventory, 
 the viewport, and retains its existing paged search-result format and aliases.
 Query results are not a second DOM observation serializer.
 
+Compact roles retain the existing short codes for common controls. Other captured
+roles are emitted literally (for example `slider` or `generic` for a listener
+container), never defaulted to `button`; role queries accept these literal roles.
+Visible verification instructions and structurally identified validation errors
+appear in `semantic.blockers`, with `semantic.blocked: true` independent of `stage`.
+This reports observed evidence and adds no action or payment gate. Missing evidence
+is not proof the page is unblocked. Startup can precede a late-rendering error;
+use a fresh observation to distinguish timing from extraction loss.
+
 Every DOM observation includes `more_above` and `more_below`. The existing scroll
 action remains reachable. A below-fold control can be found with
 `operate_observe(query=...)`, then scrolled into view or targeted by its returned ref.
@@ -75,9 +84,19 @@ but successful observation.
 
 ## Filters and follow-up
 
-Viewport visibility is computed before tree simplification and containment. A
-node without layout metrics defaults to rendered so absent geometry cannot hide
-possibly actionable content.
+Viewport visibility is computed before tree simplification and containment.
+Live capture uses each frame's actual viewport, ancestor opacity, positive layout
+area and overflow clipping that respects fixed/absolute containing blocks. A
+viewport-fixed control can escape an ordinary overflow wrapper; a transformed
+containing block can still clip it. Transparent or fully clipped contents do not
+become visible controls merely because a descendant has opacity 1. An ordinary
+ancestor's empty layout box does not suppress visible descendant blockers (for
+example, a fixed app shell inside a zero-height body); hidden frame boundaries
+still suppress their contents. Offscreen controls in a scrollable document remain
+queryable; compact rows mark them `v=offscreen`.
+Frame coordinate translation stays separate from same-document overflow clipping.
+Hidden file inputs retain the existing upload exception. The canonical fixture
+serializer's fallback for missing geometry is unchanged.
 The containment threshold is exactly 0.99; text, form fields/labels, nested
 propagating controls, explicit onclick handlers, meaningful aria-labels and
 interactive roles retain canonical carve-outs.
@@ -160,6 +179,9 @@ or quarantined. Unrelated behavior and payment suites remain required.
 - `browser-use-serializer.test.ts` compares the seven generated captures in canonical
   mode, allowing only identity substitution. `observation-byte-efficiency.test.ts`
   covers the local differences.
+- `observation-dom-correctness.test.ts` compares rendered hidden/visible, collapsed/scrollable,
+  generic/slider, duplicate-link and settled-error fixtures with both projections.
+  These local fixtures do not establish live-provider CSS or timing.
 - `observation-prose.test.ts` now exercises the replacement through real Chrome,
   including hierarchy, containment, verbatim page content, frame bindings and below-fold reachability.
 - `operate-session-flow.test.ts` covers whole-document query, scroll reachability,

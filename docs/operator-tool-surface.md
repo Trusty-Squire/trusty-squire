@@ -180,7 +180,20 @@ job without exposing plaintext to the agent.
   the real profile. A chooser, challenge, return with uncertain authentication,
   or other human step is an honest pending result; stop automation and observe
   the owned session rather than treating a page title or same-origin URL as
-  success.
+  success. A browser error after dispatch follows the same contract as request
+  cancellation: return attempt-owned completion evidence when available, otherwise
+  `oauth: {state: "in_progress", completion: "unknown", next_action: "operate_observe"}`
+  with the retained `session_id` and observe-before-action guidance. A timeout
+  alone proves neither failure nor a human challenge. An attempt-owned popup
+  opened before the initiating click rejects stays the observation target and
+  retains OAuth ownership; closing it restores the viable product page. Concrete
+  attempt-owned callback denials take precedence over interrupted-click uncertainty;
+  they and proven pre-dispatch failures retain their failure semantics. See the
+  routed click-then-error regression in
+  `apps/mcp/src/bot/__tests__/oauth-lifecycle.test.ts`. Native OAuth
+  errors retain `error.session_id`; ordinary errors direct observation, while
+  unsettled cancellation keeps its existing wait/finish guidance. Never replay
+  OAuth automatically after an uncertain result.
 - `operate_type` accepts exactly one of literal `text` or a protected `slot`.
   Use `operate_fill_credential` for login slots; it does not expose vault values.
 - `operate_extract`, `use_credential`, and `grant_app_access` preserve the

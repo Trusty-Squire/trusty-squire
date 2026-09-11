@@ -249,17 +249,9 @@ describe("characterization: registered operator tool surface", () => {
         cursor: { type: "string" },
         role: {
           type: "string",
-          enum: [
-            "button",
-            "link",
-            "textbox",
-            "select",
-            "checkbox",
-            "radio",
-            "tab",
-            "menuitem",
-            "file",
-          ],
+          minLength: 1,
+          maxLength: 64,
+          pattern: "^[a-z][a-z0-9-]*$",
         },
       },
     });

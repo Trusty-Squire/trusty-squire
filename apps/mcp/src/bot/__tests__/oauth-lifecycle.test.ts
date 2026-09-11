@@ -40,6 +40,10 @@ import type { OperatorRecipe } from "../operator-recipe.js";
 import { sessionForCall } from "../session/lifecycle.js";
 import { ProvenPreDispatchMutationError } from "../mutation-dispatch-evidence.js";
 
+import { withOperatorRequestContext } from "../request-cancellation.js";
+import { operateLoginTool } from "../../tools/provision-drive.js";
+import { fixtureEvidence } from "./fixture-evidence.js";
+
 const PRODUCT_URL = `data:text/html,${encodeURIComponent(`
   <!doctype html>
   <main id="state">Signed out</main>
@@ -80,6 +84,135 @@ describe("BrowserController OAuth popup lifecycle", () => {
   afterAll(async () => {
     await browser?.close();
   });
+
+  it.each([
+    ["callback", "same-tab"],
+    ["pending", "same-tab"],
+    ["callback", "popup"],
+    ["pending", "popup"],
+    ["denied", "same-tab"],
+    ["denied", "popup"],
+  ])(
+    "preserves %s evidence when the initiating click rejects after %s navigation",
+    async (destination, mode) => {
+      const context = await browser.newContext();
+      const product = await context.newPage();
+      const productUrl = "https://outcomes.test/login";
+      const callback = "https://outcomes.test/dashboard";
+      const destinationUrl =
+        destination === "denied"
+          ? `${callback}?error=access_denied&error_description=The+user+denied+access`
+          : callback;
+      const provider = `https://accounts.google.com/pending?redirect_uri=${encodeURIComponent(callback)}`;
+      await context.route("**/*", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body:
+            route.request().url() === productUrl
+              ? `<button id="oauth" onclick='${mode === "popup" ? `window.open(${JSON.stringify(provider)})` : `location.href=${JSON.stringify(provider)}`}'>Continue with Google</button>`
+              : route.request().url().startsWith("https://accounts.google.com/")
+                ? destination !== "pending"
+                  ? `<script>location.href=${JSON.stringify(destinationUrl)}</script>`
+                  : '<main>Google consent pending</main><p>Performing security verification</p><div style="opacity:0"><button>Hidden consent action</button></div>'
+                : "<main>Personal / Default Project</main><button>Usage</button>",
+        }),
+      );
+      await product.goto(productUrl);
+      const controller = BrowserController.fromHarnessPage(product);
+      let sessionId: string | undefined;
+      const originalClick = controller.click.bind(controller);
+      const click = vi.spyOn(controller, "click").mockImplementation(async (...args) => {
+        const popup = mode === "popup" ? product.waitForEvent("popup") : null;
+        await originalClick(...args);
+        const target = popup === null ? product : await popup;
+        await target.waitForURL(destination === "pending" ? provider : destinationUrl);
+        // Fault injection at the driver return boundary, AFTER a real click and
+        // real routed navigation. The provider itself never contacts the network.
+        throw new Error("page click: Timeout 15000ms exceeded after navigation");
+      });
+      try {
+        const started = await startHarnessProvisionSession({
+          browser: controller,
+          serviceUrl: productUrl,
+          observationFormat: "browser-use-dom",
+        });
+        sessionId = started.session_id;
+        const ref = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
+        expect(ref).toBeDefined();
+        const outcome = withOperatorRequestContext(new AbortController().signal, () =>
+          operateLoginTool.handler({ session_id: sessionId!, provider: "google", ref: ref! }, null),
+        );
+        if (destination === "denied") {
+          const failure = await outcome.catch((error: Error) => error);
+          expect(failure).toBeInstanceOf(Error);
+          expect((failure as Error).message).toMatch(
+            /error=access_denied \(The user denied access\)/,
+          );
+          await fixtureEvidence(`oauth-denied-${mode}`, {
+            error: (failure as Error).message,
+            initiatingClicks: click.mock.calls.length,
+            ownership: controller.oauthTransitionStatus(),
+          });
+          expect(click).toHaveBeenCalledTimes(1);
+          expect(controller.oauthTransitionStatus()).toBeNull();
+          expect(product.isClosed()).toBe(false);
+          await expect(observe(sessionId)).resolves.toMatchObject({ session_id: sessionId });
+          return;
+        }
+        const result = await outcome;
+        await fixtureEvidence(`oauth-${destination}-${mode}`, result);
+        expect(result).toMatchObject({
+          session_id: sessionId,
+          url: destination === "callback" ? callback : provider,
+        });
+        if (destination === "pending")
+          expect(result).toMatchObject({
+            oauth: { state: "in_progress", completion: "unknown", next_action: "operate_observe" },
+          });
+        else expect(result).not.toHaveProperty("oauth.completion", "unknown");
+        expect(click).toHaveBeenCalledTimes(1);
+        await expect(observe(sessionId)).resolves.toMatchObject({ session_id: sessionId });
+        if (destination === "pending") {
+          const refreshed = await observe(sessionId, "compact");
+          await fixtureEvidence(
+            `oauth-pending-${mode}-observation`,
+            refreshed,
+            context.pages().find((page) => page.url() === provider),
+          );
+          expect(refreshed).toMatchObject({
+            session_id: sessionId,
+            semantic: {
+              blocked: true,
+              blockers: expect.arrayContaining([
+                expect.objectContaining({ text: "Performing security verification" }),
+              ]),
+            },
+          });
+          expect(JSON.stringify(refreshed)).not.toContain("hidden-consent-action");
+          expect(click).toHaveBeenCalledTimes(1);
+          expect(controller.currentUrl()).toBe(provider);
+          await expect(controller.loginWithOAuth("#oauth", 100)).rejects.toBeInstanceOf(
+            OAuthAwaitingHumanError,
+          );
+          expect(click).toHaveBeenCalledTimes(1);
+          if (mode === "popup") {
+            expect(controller.oauthTransitionStatus()).toMatchObject({
+              productUrl,
+              productPageViable: true,
+              providerPageClosed: false,
+            });
+            const popup = context.pages().find((page) => page.url() === provider)!;
+            await popup.close();
+            expect(controller.currentUrl()).toBe(productUrl);
+          }
+        }
+      } finally {
+        click.mockRestore();
+        if (sessionId !== undefined) await finishProvisionSession(sessionId);
+        await context.close();
+      }
+    },
+  );
 
   it("returns relying-party required information without treating its Continue as provider consent", async () => {
     const context = await browser.newContext();

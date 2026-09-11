@@ -356,10 +356,11 @@ const CONTROL_QUERY_CONTRACT =
   "(button, link, textbox, select, checkbox, radio, tab, menuitem, and file), including off-viewport controls; " +
   "non-control markup and arbitrary page text are absent by construction, not redacted. Query or role filters this same map. " +
   "Its `safe_table` is a paged control map: each row is `[ref,role,facts?]`; role is " +
-  "b=button, l=link, t=textbox, s=select, c=checkbox, r=radio, tb=tab, m=menuitem, or f=file. " +
+  "b=button, l=link, t=textbox, s=select, c=checkbox, r=radio, tb=tab, m=menuitem, or f=file; other roles are literal (e.g. slider or generic for a listener container). " +
   "facts is a `|`-joined `@label` alias followed by present s=state (c=checked, u=unchecked, d=disabled, r=required), " +
-  "a=action, f=field, q=choice-position/total, and x=s same-origin or x=x cross-origin frame; absent x means main frame. " +
+  "v=offscreen when outside the viewport, a=action, f=field, q=choice-position/total, and x=s same-origin or x=x cross-origin frame; absent x means main frame. " +
   "Query matches include m=n (exact name), m=r (exact role), m=t (local text), or m=c (explicit form/fieldset/dialog context), ranked in that order. " +
+  "semantic.blocked=true and semantic.blockers report visible verification instructions or validation errors independently of stage; stage=browse does not mean unblocked. " +
   "Cursors page an immutable snapshot and require the same query and role; document changes invalidate them. A cursorless query captures fresh controls and semantics. " +
   "Use overflow.next_cursor to page safe_table. A cursor from hint_overflow returns `hint` and pages with hint_overflow.next_cursor. ";
 
@@ -417,7 +418,11 @@ const observeSchema = z.object({
   query: z.string().max(160).optional(),
   cursor: z.string().max(1024).optional(),
   role: z
-    .enum(["button", "link", "textbox", "select", "checkbox", "radio", "tab", "menuitem", "file"])
+    .string()
+    .min(1)
+    .max(64)
+    .regex(/^[a-z][a-z0-9-]*$/)
+    .describe("Emitted control role, including literal roles such as slider or generic")
     .optional(),
   format: z.enum(["compact", "full"]).optional(),
 });
@@ -441,17 +446,9 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
       cursor: { type: "string" },
       role: {
         type: "string",
-        enum: [
-          "button",
-          "link",
-          "textbox",
-          "select",
-          "checkbox",
-          "radio",
-          "tab",
-          "menuitem",
-          "file",
-        ],
+        minLength: 1,
+        maxLength: 64,
+        pattern: "^[a-z][a-z0-9-]*$",
       },
       format: { type: "string", enum: ["compact", "full"] },
     },
@@ -1456,7 +1453,7 @@ const loginSchema = z.union([
 export const operateLoginTool: Tool<z.infer<typeof loginSchema>> = {
   name: "operate_login",
   description:
-    "Log in with provider + ref using the atomic OAuth flow; awaiting-human state is returned in this call. " +
+    "Log in with provider + ref using the atomic OAuth flow; awaiting-human state is returned in this call. After a dispatched timeout or error, completion may be unknown: retain session_id and call operate_observe before another action; do not repeat OAuth blindly. " +
     "Drive the sealed username/password login lifecycle without exposing raw values. " +
     "action='prepare_signup' seals the user's captured email and a generated password; " +
     "'store_signup' vaults those prepared slots with the same login-host safeguards; " +
