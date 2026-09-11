@@ -1,0 +1,262 @@
+import { randomUUID } from "node:crypto";
+import type { CDPSession, Page } from "playwright";
+import { markOperatorMutationDispatchAttempted } from "./request-cancellation.js";
+
+export interface ScreenshotPoint {
+  screenshot_id: string;
+  x: number;
+  y: number;
+}
+export interface ScreenshotBinding {
+  screenshot_id: string;
+  width: number;
+  height: number;
+  coordinate_space: "image_pixels";
+}
+type Rect = { x: number; y: number; width: number; height: number };
+type Binding = {
+  public: ScreenshotBinding;
+  state: string;
+  beforeNodes: Map<string, string>;
+  afterNodes: Map<string, string>;
+  rect: Rect;
+  expires: number;
+};
+const bindings = new WeakMap<Page, Binding>();
+
+export class ScreenshotClickError extends Error {
+  constructor(
+    readonly code: "stale_screenshot" | "invalid_screenshot_point" | "screenshot_click_uncertain",
+    readonly dispatch: "not_dispatched" | "dispatched" | "unknown",
+  ) {
+    super(code);
+  }
+}
+
+// Decode only JPEG dimensions, in Node. Image bytes never enter page JavaScript.
+function jpegSize(base64: string): { width: number; height: number } {
+  const bytes = Buffer.from(base64, "base64");
+  for (let offset = 2; offset + 8 < bytes.length; ) {
+    if (bytes[offset] !== 0xff) break;
+    const marker = bytes[offset + 1]!;
+    const length = bytes.readUInt16BE(offset + 2);
+    if ([0xc0, 0xc1, 0xc2].includes(marker))
+      return { height: bytes.readUInt16BE(offset + 5), width: bytes.readUInt16BE(offset + 7) };
+    if (length < 2) break;
+    offset += 2 + length;
+  }
+  throw new Error("invalid_screenshot_image");
+}
+
+async function geometry(page: Page, cdp: CDPSession) {
+  const metrics = await cdp.send("Page.getLayoutMetrics");
+  const tree = await cdp.send("Page.getFrameTree");
+  const snapshot = await cdp.send("DOMSnapshot.captureSnapshot", { computedStyles: [] });
+  // Compare the chosen physical node, not every ancestor/text line on the page.
+  // Chromium can shift an inline label baseline by one pixel during cropped
+  // capture while the checkbox's identity, attributes and hit area stay exact.
+  const nodes = new Map<string, string>();
+  for (const doc of snapshot.documents) {
+    for (const [j, i] of doc.layout.nodeIndex.entries()) {
+      const id = doc.nodes.backendNodeId?.[i];
+      const nameIndex = doc.nodes.nodeName?.[i];
+      if (id === undefined || nameIndex === undefined) continue;
+      nodes.set(
+        `${snapshot.strings[doc.frameId]}:${id}`,
+        JSON.stringify({
+          bounds: doc.layout.bounds[j],
+          attributes: doc.nodes.attributes?.[i]?.map((v) => snapshot.strings[v]),
+          name: snapshot.strings[nameIndex],
+          text: snapshot.strings[doc.nodes.nodeValue?.[i] ?? -1],
+        }),
+      );
+    }
+  }
+  const boxes = await Promise.all(
+    page.frames().map(async (frame) => {
+      if (frame === page.mainFrame()) return null;
+      const handle = await frame.frameElement();
+      try {
+        return { url: frame.url(), box: await handle.boundingBox() };
+      } finally {
+        await handle.dispose();
+      }
+    }),
+  );
+  const viewport = metrics.cssVisualViewport;
+  return {
+    state: JSON.stringify({ tree, viewport, layout: metrics.cssLayoutViewport, boxes }),
+    viewport,
+    nodes,
+  };
+}
+
+/** Existing pixel capture stays read-only. A failed binding never prevents the read. */
+export async function captureBoundScreenshot(
+  page: Page,
+  capture: () => Promise<{ base64: string; rect: Rect }>,
+): Promise<{ base64: string; clickBinding?: ScreenshotBinding }> {
+  bindings.delete(page);
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    const before = await geometry(page, cdp).catch(() => null);
+    const result = await capture();
+    const after = await geometry(page, cdp).catch(() => null);
+    if (before === null || after === null || before.state !== after.state)
+      return { base64: result.base64 };
+    const publicBinding: ScreenshotBinding = {
+      screenshot_id: randomUUID(),
+      ...jpegSize(result.base64),
+      coordinate_space: "image_pixels",
+    };
+    bindings.set(page, {
+      public: publicBinding,
+      state: after.state,
+      beforeNodes: before.nodes,
+      afterNodes: after.nodes,
+      rect: result.rect,
+      expires: Date.now() + 60_000,
+    });
+    return { base64: result.base64, clickBinding: publicBinding };
+  } finally {
+    await cdp.detach().catch(() => undefined);
+  }
+}
+
+export interface ScreenshotClickTarget {
+  nodeKey: string;
+  labels: string[];
+  frameUrl: string;
+  frameOrigin: string;
+  mainFrame: boolean;
+}
+
+// CDP can resolve a closed-shadow node without manufacturing a CSS selector.
+// Reading the hit node's nearest control supplies the SAME existing action/payment
+// predicates used by DOM targeting; only the dispatch itself uses image coordinates.
+async function hitTarget(
+  page: Page,
+  cdp: CDPSession,
+  x: number,
+  y: number,
+): Promise<ScreenshotClickTarget> {
+  const hit = await cdp.send("DOM.getNodeForLocation", {
+    x: Math.round(x),
+    y: Math.round(y),
+    includeUserAgentShadowDOM: true,
+  });
+  let nodeSession = cdp;
+  let owned: CDPSession | undefined;
+  try {
+    // A cross-process iframe's backend node belongs to its own CDP session.
+    const root = await cdp.send("Page.getFrameTree");
+    if (hit.frameId !== root.frameTree.frame.id) {
+      for (const candidate of page.frames()) {
+        if (candidate === page.mainFrame()) continue;
+        const session = await page
+          .context()
+          .newCDPSession(candidate)
+          .catch(() => null);
+        if (session === null) continue; // Same-process frame shares the page session.
+        const candidateTree = await session.send("Page.getFrameTree");
+        if (candidateTree.frameTree.frame.id === hit.frameId) {
+          nodeSession = session;
+          owned = session;
+          break;
+        }
+        await session.detach();
+      }
+    }
+    const node = await nodeSession.send("DOM.resolveNode", { backendNodeId: hit.backendNodeId });
+    if (!node.object.objectId) throw new Error("screenshot_target_unavailable");
+    try {
+      const result = await nodeSession.send("Runtime.callFunctionOn", {
+        objectId: node.object.objectId,
+        functionDeclaration: `function() {
+          let el = this.nodeType === 1 ? this : this.parentElement;
+          for (let p = el; p; p = p.parentElement || (p.getRootNode() instanceof ShadowRoot ? p.getRootNode().host : null)) {
+            if (p.matches('button,a,input,select,textarea,label,[role="button"],[role="checkbox"],[role="radio"]')) { el = p; break; }
+          }
+          return { labels: [el.innerText, el.getAttribute('aria-label'), el.getAttribute('title'), el.getAttribute('alt'), el.getAttribute('action-type'), el.getAttribute('name'), el.id, el.getAttribute('value'), ...Array.from(el.labels || [], l => l.innerText)].filter(x => typeof x === 'string'), frameUrl: location.href, frameOrigin: location.origin };
+        }`,
+        returnByValue: true,
+      });
+      if (result.exceptionDetails || !result.result.value)
+        throw new Error("screenshot_target_unavailable");
+      return {
+        ...result.result.value,
+        nodeKey: `${hit.frameId}:${hit.backendNodeId}`,
+        mainFrame: hit.frameId === root.frameTree.frame.id,
+      } as ScreenshotClickTarget;
+    } finally {
+      await nodeSession
+        .send("Runtime.releaseObject", { objectId: node.object.objectId })
+        .catch(() => undefined);
+    }
+  } finally {
+    await owned?.detach().catch(() => undefined);
+  }
+}
+
+export async function clickScreenshot(
+  page: Page,
+  point: ScreenshotPoint,
+  authorize: (target: ScreenshotClickTarget) => void,
+): Promise<"dispatched"> {
+  const binding = bindings.get(page);
+  if (
+    !binding ||
+    binding.public.screenshot_id !== point.screenshot_id ||
+    binding.expires < Date.now()
+  )
+    throw new ScreenshotClickError("stale_screenshot", "not_dispatched");
+  // Consume synchronously before any await: concurrent callers, dispatch failures,
+  // and lost responses cannot replay this image's click.
+  bindings.delete(page);
+  const { width, height } = binding.public;
+  if (
+    ![point.x, point.y].every(Number.isFinite) ||
+    point.x < 0 ||
+    point.y < 0 ||
+    point.x >= width ||
+    point.y >= height
+  )
+    throw new ScreenshotClickError("invalid_screenshot_point", "not_dispatched");
+  const cdp = await page.context().newCDPSession(page);
+  let attempted = false;
+  try {
+    const current = await geometry(page, cdp);
+    if (current.state !== binding.state)
+      throw new ScreenshotClickError("stale_screenshot", "not_dispatched");
+    const x = Math.round(
+      binding.rect.x + (point.x * binding.rect.width) / width - current.viewport.pageX,
+    );
+    const y = Math.round(
+      binding.rect.y + (point.y * binding.rect.height) / height - current.viewport.pageY,
+    );
+    if (x < 0 || y < 0 || x >= current.viewport.clientWidth || y >= current.viewport.clientHeight)
+      throw new ScreenshotClickError("invalid_screenshot_point", "not_dispatched");
+    const target = await hitTarget(page, cdp, x, y);
+    await markOperatorMutationDispatchAttempted();
+    const final = await geometry(page, cdp);
+    const originalNode = binding.beforeNodes.get(target.nodeKey);
+    if (
+      binding.expires < Date.now() ||
+      final.state !== binding.state ||
+      originalNode === undefined ||
+      originalNode !== binding.afterNodes.get(target.nodeKey) ||
+      originalNode !== current.nodes.get(target.nodeKey) ||
+      originalNode !== final.nodes.get(target.nodeKey)
+    )
+      throw new ScreenshotClickError("stale_screenshot", "not_dispatched");
+    authorize(target);
+    attempted = true;
+    await page.mouse.click(x, y);
+    return "dispatched";
+  } catch (error) {
+    if (attempted) throw new ScreenshotClickError("screenshot_click_uncertain", "unknown");
+    throw error;
+  } finally {
+    await cdp.detach().catch(() => undefined);
+  }
+}

@@ -1,3 +1,9 @@
+import {
+  clickScreenshot,
+  ScreenshotClickError,
+  type ScreenshotBinding,
+  type ScreenshotPoint,
+} from "./screenshot-click.js";
 import type { GoogleHumanChallenge } from "./google-auth-state.js";
 import type { CaptureSource } from "./credential-capture.js";
 import {
@@ -441,7 +447,7 @@ export interface AccessibilitySnapshot {
 }
 
 export type ProvisionAction =
-  | { kind: "click"; target: string }
+  | { kind: "click"; target: string; screenshot?: ScreenshotPoint }
   // JS-dispatched click (el.click()) — use when a plain click on a custom
   // React card/widget didn't register its onClick (the stochastic radio-card
   // stall). Same target resolution; different dispatch.
@@ -1281,6 +1287,7 @@ export class TargetStaleError extends Error {
 }
 
 class CompactV2StaleRefError extends Error {}
+class CompactV2UnresolvedLabelError extends Error {}
 class ProvisionTargetNotAllowedError extends Error {}
 class ProvisionTargetMissingError extends Error {}
 class CompactV2ActionFailureError extends Error {}
@@ -1552,6 +1559,7 @@ function sameCompactV2Intent(left: SafeControlV2, right: SafeControlV2): boolean
 function compactV2AuthorizationForTarget(
   session: Session,
   target: string,
+  distinguishUnresolvedLabel = false,
 ): CompactV2TargetAuthorization {
   const index = session.compactV2Index;
   if (index === null) throwCompactV2StaleRef();
@@ -1562,7 +1570,15 @@ function compactV2AuthorizationForTarget(
   const row = isCompactV2Label(target)
     ? resolveCompactV2Label(index.rows, target)
     : index.rows.find((candidate) => candidate.ref === target);
-  if (row === undefined) throwCompactV2StaleRef();
+  if (row === undefined) {
+    if (
+      distinguishUnresolvedLabel &&
+      isCompactV2Label(target) &&
+      !compactV2RefAllocator(session).hasLabel(target)
+    )
+      throw new CompactV2UnresolvedLabelError("target_unresolved");
+    throwCompactV2StaleRef();
+  }
   const legacy = compactV2LegacyRefForHandle(session.compactV2Refs, row.ref);
   if (legacy === null) throwCompactV2StaleRef();
   return { legacyRef: legacy, row };
@@ -2464,6 +2480,7 @@ export interface ScreenshotCapture {
   url: string;
   frame_url: string | null;
   frame_count: number;
+  click_binding?: ScreenshotBinding;
   image: { mime_type: string; data_base64: string };
 }
 
@@ -2482,6 +2499,7 @@ export async function captureScreenshot(
     url: page?.url() ?? session.browser.currentUrl(),
     frame_url: captured.frameUrl,
     frame_count: captured.frameCount,
+    ...(captured.clickBinding ? { click_binding: captured.clickBinding } : {}),
     image: { mime_type: "image/jpeg", data_base64: captured.base64 },
   };
 }
@@ -5380,6 +5398,7 @@ export async function act(
   const session = sessionForCall(sessionId);
   const capturedOperationPage =
     session === undefined ? undefined : operationPageForSession(session);
+  let screenshotDispatched = false;
   const oauthProvider =
     action.kind === "oauth_login" || action.kind === "oauth_click" ? action.provider : undefined;
   try {
@@ -5414,6 +5433,9 @@ export async function act(
           deadline,
           capturedOperationPage,
           preparedOAuthDispatch,
+          () => {
+            screenshotDispatched = true;
+          },
         );
       return (action.kind === "click" ||
         action.kind === "js_click" ||
@@ -5429,6 +5451,11 @@ export async function act(
         : await execute(undefined);
     return result.observation;
   } catch (error) {
+    if (action.kind === "click" && action.screenshot) {
+      if (error instanceof ScreenshotClickError) throw error;
+      if (screenshotDispatched)
+        throw new ScreenshotClickError("screenshot_click_uncertain", "dispatched");
+    }
     if (session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")) {
       const progress = oauthErrorAfterDispatchAttempt(session, error);
       if (progress !== null) return progress;
@@ -5478,6 +5505,7 @@ async function executeAct(
   oauthDeadline?: OAuthActionDeadline,
   operationPage?: Page,
   preparedOAuthDispatch = false,
+  onScreenshotDispatched?: () => void,
 ): Promise<InternalActResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
@@ -5513,10 +5541,14 @@ async function executeAct(
   let resolutionTarget: string | undefined;
   let auditTarget: string | undefined;
   let compactV2Authorization = internalAuthorization;
-  if ("target" in action) {
+  if ("target" in action && !(action.kind === "click" && action.screenshot)) {
     if (session.compactV2Active && !internalAccess) {
       try {
-        compactV2Authorization ??= compactV2AuthorizationForTarget(session, action.target);
+        compactV2Authorization ??= compactV2AuthorizationForTarget(
+          session,
+          action.target,
+          action.kind === "click",
+        );
         resolutionTarget = compactV2Authorization.legacyRef;
         auditTarget = action.target;
       } catch (error) {
@@ -5534,6 +5566,8 @@ async function executeAct(
     }
   }
   if (compactV2ActionPage?.isClosed()) {
+    if (action.kind === "click" && action.screenshot)
+      throw new ScreenshotClickError("stale_screenshot", "not_dispatched");
     if (!("target" in action)) throw new Error("action source page is closed");
     if (session.compactV2Active) throwCompactV2StaleRef();
     throw new TargetStaleError({
@@ -5786,6 +5820,41 @@ async function executeAct(
       case "upload":
       case "oauth_click": {
         const pageText = await browser.extractVisibleText(compactV2ActionPage);
+        if (action.kind === "click" && action.screenshot) {
+          if (!compactV2ActionPage)
+            throw new ScreenshotClickError("stale_screenshot", "not_dispatched");
+          await runClickWithPlaceOrderGuard(session, async (shouldTrack) => {
+            const dispatched = await clickScreenshot(
+              compactV2ActionPage,
+              action.screenshot!,
+              (target) => {
+                const blocked = shouldBlockUnsafeProvisionAction(
+                  pageText,
+                  { kind: "click", target: target.labels.join(" ") },
+                  { redactTarget: true },
+                );
+                if (blocked !== null) throw new Error(blocked);
+                if (!target.mainFrame)
+                  assertFrameTargetAllowed(
+                    session,
+                    {
+                      framePath: "screenshot",
+                      frameUrl: target.frameUrl,
+                      frameOrigin: target.frameOrigin,
+                    },
+                    "click",
+                    compactV2ActionPage,
+                  );
+                shouldTrack(target.labels);
+                session.usedLocatorFallback = true; // Dispatched image points cannot be replayed.
+              },
+            );
+            onScreenshotDispatched?.();
+            return dispatched;
+          });
+          await settleAfterStateChange(browser, compactV2ActionPage);
+          break;
+        }
         const blockReason = shouldBlockUnsafeProvisionAction(pageText, action);
         if (blockReason !== null) throw new Error(blockReason);
         // Locator-form target (`text=…` / `css=…`): the host is pointing at a
@@ -6421,6 +6490,8 @@ function compactV2ActionFailureReason(error: unknown, kind: ProvisionAction["kin
   // for any caller of this reason-mapper that doesn't go through that path.
   if (error instanceof OAuthAwaitingHumanError) return "awaiting_human";
   if (error instanceof OAuthFailedError) return error.message;
+  if (error instanceof CompactV2UnresolvedLabelError) return "target_unresolved";
+  if (error instanceof ScreenshotClickError) return error.code;
   if (error instanceof CompactV2StaleRefError) return "stale_ref";
   if (error instanceof TargetStaleError) return "reobserve_required";
   if (error instanceof ProvisionTargetNotAllowedError) {

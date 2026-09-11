@@ -1,0 +1,436 @@
+import { chromium, type Browser } from "playwright";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { BrowserController } from "../browser.js";
+import { clickScreenshot, type ScreenshotPoint } from "../screenshot-click.js";
+import {
+  startHarnessProvisionSession,
+  finishProvisionSession,
+  captureScreenshot,
+} from "../provision-session.js";
+import { paymentSession } from "../session/lifecycle.js";
+import { operateClickTool } from "../../tools/provision-drive.js";
+import {
+  operatorMutationDispatchPhase,
+  withOperatorRequestContext,
+} from "../request-cancellation.js";
+
+let browser: Browser;
+beforeAll(async () => {
+  browser = await chromium.launch({ headless: true });
+});
+afterAll(async () => {
+  await browser.close();
+});
+async function fixture(scale = 1, closedFrame = false, fixtureBrowser = browser) {
+  const context = await fixtureBrowser.newContext({
+    viewport: { width: 800, height: 600 },
+    deviceScaleFactor: scale,
+  });
+  const page = await context.newPage();
+  await page.route("http://**/*", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: route.request().url().includes("child.test")
+        ? `<div id="host"></div><script>const s=document.querySelector('#host').attachShadow({mode:'closed'});s.innerHTML='<label><input type="checkbox" style="width:24px;height:24px">Verify you are human</label>';window.events=[];s.querySelector('input').addEventListener('click',e=>window.events.push({trusted:e.isTrusted,checked:e.target.checked}));</script>`
+        : '<style>body{margin:0;height:1600px}iframe{position:absolute;left:150px;top:220px;width:300px;height:100px;border:0}</style><iframe src="http://child.test/frame"></iframe>',
+    }),
+  );
+  await page.goto("http://parent.test/");
+  if (closedFrame) {
+    const frameNavigation = page.waitForEvent("framenavigated", {
+      predicate: (frame) => frame.url().includes("child.test"),
+    });
+    await page.evaluate(() => {
+      document.querySelector("iframe")!.remove();
+      const host = document.createElement("div");
+      document.body.append(host);
+      host.attachShadow({ mode: "closed" }).innerHTML =
+        '<iframe style="position:absolute;left:150px;top:220px;width:300px;height:100px;border:0" src="http://child.test/frame"></iframe>';
+    });
+    await frameNavigation;
+  }
+  const frame = page.frames().find((f) => f.url().includes("child.test"))!;
+  await frame.waitForSelector("#host");
+  const controller = BrowserController.fromHarnessPage(page);
+  return {
+    page,
+    get frame() {
+      return page.frames().find((f) => f.url().includes("child.test"))!;
+    },
+    controller,
+    close: () => context.close(),
+  };
+}
+function point(
+  shot: Awaited<ReturnType<BrowserController["captureOperatorScreenshot"]>>,
+  x: number,
+  y: number,
+) {
+  expect(shot.clickBinding).toBeDefined();
+  return { screenshot_id: shot.clickBinding!.screenshot_id, x, y };
+}
+
+describe("screenshot-bound native pointer dispatch", () => {
+  it.each([1, 2])(
+    "clicks a closed-shadow cross-origin framed checkbox at DPR %s",
+    async (scale) => {
+      const f = await fixture(scale);
+      try {
+        const shot = await f.controller.captureOperatorScreenshot();
+        const authorize = vi.fn();
+        const p = point(
+          shot,
+          (174 * shot.clickBinding!.width) / 800,
+          (244 * shot.clickBinding!.height) / 600,
+        );
+        await withOperatorRequestContext(new AbortController().signal, async () => {
+          expect(await clickScreenshot(f.page, p, authorize)).toBe("dispatched");
+          expect(operatorMutationDispatchPhase()).toBe("dispatch_attempted");
+        });
+        expect(await f.frame.evaluate("window.events")).toEqual([{ trusted: true, checked: true }]);
+        expect(authorize).toHaveBeenCalledWith(
+          expect.objectContaining({ frameOrigin: "http://child.test", mainFrame: false }),
+        );
+        await expect(clickScreenshot(f.page, p, authorize)).rejects.toMatchObject({
+          code: "stale_screenshot",
+          dispatch: "not_dispatched",
+        });
+      } finally {
+        await f.close();
+      }
+    },
+  );
+  it("dispatches through an iframe owned by a closed shadow root", async () => {
+    const f = await fixture(1, true);
+    try {
+      const shot = await f.controller.captureOperatorScreenshot();
+      await clickScreenshot(f.page, point(shot, 174, 244), () => {});
+      expect(await f.frame.evaluate("window.events")).toEqual([{ trusted: true, checked: true }]);
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("dispatches into a frame with its own CDP renderer session", async () => {
+    const isolatedBrowser = await chromium.launch({ headless: true, args: ["--site-per-process"] });
+    const f = await fixture(1, false, isolatedBrowser);
+    try {
+      const frameSession = await f.page.context().newCDPSession(f.frame);
+      const tree = await frameSession.send("Page.getFrameTree");
+      expect(tree.frameTree.frame.url).toBe("http://child.test/frame");
+      const shot = await f.controller.captureOperatorScreenshot();
+      await clickScreenshot(f.page, point(shot, 174, 244), () => {});
+      expect(await f.frame.evaluate("window.events")).toEqual([{ trusted: true, checked: true }]);
+      await frameSession.detach();
+    } finally {
+      await f.close();
+      await isolatedBrowser.close();
+    }
+  });
+
+  it("transforms a zoomed visual viewport to native CSS pointer coordinates", async () => {
+    const f = await fixture();
+    try {
+      const cdp = await f.page.context().newCDPSession(f.page);
+      await cdp.send("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
+      const shot = await f.controller.captureOperatorScreenshot();
+      await clickScreenshot(f.page, point(shot, 348, 488), () => {});
+      expect(await f.frame.evaluate("window.events")).toEqual([{ trusted: true, checked: true }]);
+      await cdp.detach();
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("transforms frame-cropped pixels after page scroll", async () => {
+    const f = await fixture(2);
+    try {
+      await f.page.evaluate(async () => {
+        scrollTo(0, 100);
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      });
+      const shot = await f.controller.captureOperatorScreenshot({ frameUrlContains: "child.test" });
+      await clickScreenshot(
+        f.page,
+        point(shot, (24 * shot.clickBinding!.width) / 300, (24 * shot.clickBinding!.height) / 100),
+        () => {},
+      );
+      expect(await f.frame.evaluate("window.events")).toEqual([{ trusted: true, checked: true }]);
+    } finally {
+      await f.close();
+    }
+  });
+  it("transforms full-page pixels to the current viewport", async () => {
+    const f = await fixture();
+    try {
+      await f.page.evaluate(async () => {
+        scrollTo(0, 100);
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      });
+      const shot = await f.controller.captureOperatorScreenshot({ fullPage: true });
+      await clickScreenshot(f.page, point(shot, 174, 244), () => {});
+      expect(await f.frame.evaluate("window.events")).toEqual([{ trusted: true, checked: true }]);
+    } finally {
+      await f.close();
+    }
+  });
+  it.each(["viewport", "navigation", "frame-navigation", "scroll", "frame-move"] as const)(
+    "rejects %s changes without input dispatch",
+    async (change) => {
+      const f = await fixture();
+      try {
+        const shot = await f.controller.captureOperatorScreenshot();
+        if (change === "viewport") await f.page.setViewportSize({ width: 900, height: 600 });
+        if (change === "navigation") await f.page.reload();
+        if (change === "frame-navigation") await f.frame.goto("http://child.test/other");
+        if (change === "scroll") await f.page.evaluate(() => scrollTo(0, 20));
+        if (change === "frame-move")
+          await f.page.locator("iframe").evaluate((el) => {
+            el.style.left = "200px";
+          });
+        const mouse = vi.spyOn(f.page.mouse, "click");
+        await expect(
+          clickScreenshot(f.page, point(shot, 174, 244), () => {}),
+        ).rejects.toMatchObject({ code: "stale_screenshot", dispatch: "not_dispatched" });
+        expect(mouse).not.toHaveBeenCalled();
+      } finally {
+        await f.close();
+      }
+    },
+  );
+  it("consumes an uncertain dispatched click and refuses replay", async () => {
+    const f = await fixture();
+    try {
+      const shot = await f.controller.captureOperatorScreenshot();
+      const original = f.page.mouse.click.bind(f.page.mouse);
+      const mouse = vi.spyOn(f.page.mouse, "click").mockImplementation(async (x, y) => {
+        await original(x, y);
+        throw new Error("transport lost after dispatch");
+      });
+      const p = point(shot, 174, 244);
+      await expect(clickScreenshot(f.page, p, () => {})).rejects.toMatchObject({
+        code: "screenshot_click_uncertain",
+        dispatch: "unknown",
+      });
+      await expect(clickScreenshot(f.page, p, () => {})).rejects.toMatchObject({
+        code: "stale_screenshot",
+        dispatch: "not_dispatched",
+      });
+      expect(mouse).toHaveBeenCalledTimes(1);
+      expect(await f.frame.evaluate("window.events")).toEqual([{ trusted: true, checked: true }]);
+    } finally {
+      await f.close();
+    }
+  });
+  it("keeps authorization before dispatch and consumes concurrent/rejected attempts", async () => {
+    const f = await fixture();
+    try {
+      const shot = await f.controller.captureOperatorScreenshot();
+      const p = point(shot, 174, 244);
+      const mouse = vi.spyOn(f.page.mouse, "click");
+      await expect(
+        clickScreenshot(f.page, p, () => {
+          throw new Error("existing payment guard");
+        }),
+      ).rejects.toThrow("existing payment guard");
+      await expect(clickScreenshot(f.page, p, () => {})).rejects.toMatchObject({
+        code: "stale_screenshot",
+      });
+      expect(mouse).not.toHaveBeenCalled();
+    } finally {
+      await f.close();
+    }
+  });
+
+  it.each(["move", "replace"] as const)(
+    "rejects actual target %s despite stable frame geometry",
+    async (change) => {
+      const f = await fixture();
+      try {
+        const shot = await f.controller.captureOperatorScreenshot();
+        await f.frame.evaluate((change) => {
+          const host = document.querySelector("#host")!;
+          if (change === "move") host.setAttribute("style", "padding-left:5px");
+          else
+            host.outerHTML =
+              '<div id="host"><input type="checkbox" style="width:24px;height:24px"></div>';
+        }, change);
+        const mouse = vi.spyOn(f.page.mouse, "click");
+        await expect(
+          clickScreenshot(f.page, point(shot, 174, 244), () => {}),
+        ).rejects.toMatchObject({ code: "stale_screenshot" });
+        expect(mouse).not.toHaveBeenCalled();
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  it("rejects competing clicks, superseded images and out-of-image points", async () => {
+    const f = await fixture();
+    try {
+      const first = await f.controller.captureOperatorScreenshot();
+      const second = await f.controller.captureOperatorScreenshot();
+      await expect(clickScreenshot(f.page, point(first, 174, 244), () => {})).rejects.toMatchObject(
+        { code: "stale_screenshot" },
+      );
+      const p = point(second, 174, 244);
+      const results = await Promise.allSettled([
+        clickScreenshot(f.page, p, () => {}),
+        clickScreenshot(f.page, p, () => {}),
+      ]);
+      expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      expect(await f.frame.evaluate("window.events")).toHaveLength(1);
+      const third = await f.controller.captureOperatorScreenshot();
+      await expect(clickScreenshot(f.page, point(third, 900, 244), () => {})).rejects.toMatchObject(
+        { code: "invalid_screenshot_point", dispatch: "not_dispatched" },
+      );
+    } finally {
+      await f.close();
+    }
+  });
+});
+
+describe("native screenshot/click tool contract on an isolated session", () => {
+  it("exposes exclusive ref/image schemas and finite original-image coordinates", () => {
+    const screenshot = { screenshot_id: "12345678-1234-4234-8234-123456789abc", x: 1, y: 2 };
+    expect(operateClickTool.inputSchema.safeParse({ session_id: "s", screenshot }).success).toBe(
+      true,
+    );
+    for (const args of [
+      { session_id: "s" },
+      { session_id: "s", ref: "@label", screenshot },
+      { session_id: "s", screenshot: { ...screenshot, x: Infinity } },
+    ])
+      expect(operateClickTool.inputSchema.safeParse(args).success).toBe(false);
+    expect(operateClickTool.jsonInputSchema.oneOf).toHaveLength(2);
+  });
+
+  it.each(["success", "transport", "observation"] as const)(
+    "reports %s accurately and does not replay the screenshot",
+    async (mode) => {
+      const f = await fixture();
+      const started = await startHarnessProvisionSession({
+        browser: f.controller,
+        serviceUrl: "http://parent.test/",
+        extraAllowedHosts: ["child.test"],
+        observationFormat: "browser-use-dom",
+      });
+      try {
+        const shot = await captureScreenshot(started.session_id);
+        expect(shot.click_binding).toBeDefined();
+        const screenshot: ScreenshotPoint = {
+          screenshot_id: shot.click_binding!.screenshot_id,
+          x: 174,
+          y: 244,
+        };
+        const mouse = f.page.mouse.click.bind(f.page.mouse);
+        if (mode !== "success")
+          vi.spyOn(f.page.mouse, "click").mockImplementation(async (x, y) => {
+            await mouse(x, y);
+            if (mode === "transport") throw new Error("lost acknowledgement");
+            vi.spyOn(f.controller, "extractBrowserUseObservation").mockRejectedValue(
+              new Error("observation unavailable after dispatch"),
+            );
+          });
+        const result = await operateClickTool.handler(
+          { session_id: started.session_id, screenshot },
+          null,
+        );
+        expect(result).toMatchObject({
+          screenshot_click: {
+            dispatch: mode === "transport" ? "unknown" : "dispatched",
+            outcome: "unknown",
+            retry_policy: "observe_before_new_action",
+          },
+        });
+        const replay = await operateClickTool.handler(
+          { session_id: started.session_id, screenshot },
+          null,
+        );
+        expect(replay).toMatchObject({
+          status: "stale_screenshot",
+          screenshot_click: { dispatch: "not_dispatched" },
+        });
+        expect(await f.frame.evaluate("window.events")).toEqual([{ trusted: true, checked: true }]);
+      } finally {
+        vi.restoreAllMocks();
+        await finishProvisionSession(started.session_id);
+        await f.close();
+      }
+    },
+  );
+
+  it.each(["scope", "payment"] as const)(
+    "preserves the existing %s refusal for coordinate clicks",
+    async (guard) => {
+      const f = await fixture();
+      const started = await startHarnessProvisionSession({
+        browser: f.controller,
+        serviceUrl: "http://parent.test/",
+        observationFormat: "browser-use-dom",
+      });
+      const session = paymentSession(started.session_id);
+      try {
+        if (guard === "payment") {
+          await f.page.evaluate(() => {
+            document.body.innerHTML =
+              '<button style="position:absolute;left:150px;top:220px;width:100px;height:60px">Place order</button>';
+            (window as unknown as { clicks: number }).clicks = 0;
+            document.querySelector("button")!.onclick = () => {
+              (window as unknown as { clicks: number }).clicks++;
+            };
+          });
+          session.placeOrderApproval = {
+            approvalId: "synthetic",
+            merchant: "parent.test",
+            amountCents: 100,
+            currency: "USD",
+            cardRef: "synthetic",
+            last4: "1234",
+          };
+          session.placeOrderAttempted = true;
+        }
+        const shot = await captureScreenshot(started.session_id);
+        const mouse = vi.spyOn(f.page.mouse, "click");
+        const screenshot = { screenshot_id: shot.click_binding!.screenshot_id, x: 174, y: 244 };
+        await expect(
+          operateClickTool.handler({ session_id: started.session_id, screenshot }, null),
+        ).rejects.toThrow(guard === "scope" ? "target_not_allowed" : "action_failed");
+        expect(mouse).not.toHaveBeenCalled();
+        expect(
+          await operateClickTool.handler({ session_id: started.session_id, screenshot }, null),
+        ).toMatchObject({ status: "stale_screenshot" });
+      } finally {
+        session.placeOrderApproval = null;
+        vi.restoreAllMocks();
+        await finishProvisionSession(started.session_id);
+        await f.close();
+      }
+    },
+  );
+
+  it("distinguishes an unresolved screenshot-derived label from an expired physical ref", async () => {
+    const f = await fixture();
+    const started = await startHarnessProvisionSession({
+      browser: f.controller,
+      serviceUrl: "http://parent.test/",
+      observationFormat: "browser-use-dom",
+    });
+    try {
+      await expect(
+        operateClickTool.handler(
+          { session_id: started.session_id, ref: "@verify-you-are-human" },
+          null,
+        ),
+      ).rejects.toThrow("target_unresolved");
+      await expect(
+        operateClickTool.handler({ session_id: started.session_id, ref: "@e:expired" }, null),
+      ).rejects.toThrow("stale_ref");
+      expect(await f.frame.evaluate("window.events")).toEqual([]);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await f.close();
+    }
+  });
+});

@@ -253,6 +253,11 @@ export class StableObservationRefs {
     return handles;
   }
 
+  /** Distinguish an unknown label from a retired alias in this document. */
+  hasLabel(label: string): boolean {
+    return this.aliasOwners.has(label);
+  }
+
   /** Compatibility spelling of one capability; never reassign an old alias. */
   label(ref: string, preferred: string | undefined): string | undefined {
     const existing = this.aliases.get(ref);

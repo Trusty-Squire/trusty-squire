@@ -1,3 +1,4 @@
+import { captureBoundScreenshot, type ScreenshotBinding } from "./screenshot-click.js";
 import { captureBrowserUseDOM, type BrowserUseCapture } from "./browser-use-capture.js";
 // Browser automation wrapper for universal signup bot
 // Provides simple interface for AI agent to control browser.
@@ -7848,6 +7849,7 @@ export class BrowserController {
     base64: string;
     frameUrl: string | null;
     frameCount: number;
+    clickBinding?: ScreenshotBinding;
   }> {
     return await this.screenshotForOperator(opts, page);
   }
@@ -7863,6 +7865,7 @@ export class BrowserController {
     base64: string;
     frameUrl: string | null;
     frameCount: number;
+    clickBinding?: ScreenshotBinding;
   }> {
     if (!page) throw new Error("Browser not started");
     const targetFrame = this.resolveOperatorScreenshotFrame(opts, page);
@@ -7870,53 +7873,71 @@ export class BrowserController {
     try {
       // caret:"initial" is not needed here — the CDP capture never runs
       // Playwright's caret-hiding pass, so element styles stay untouched.
-      let base64: string;
-      if (targetFrame !== null && targetFrame !== page.mainFrame()) {
-        const handle = await targetFrame.frameElement();
-        try {
-          const box = await handle.boundingBox();
-          if (box === null) throw new Error("screenshot_frame_not_visible");
-          const scroll = await page.evaluate(() => ({ x: window.scrollX, y: window.scrollY }));
+      const captured = await captureBoundScreenshot(page, async () => {
+        let base64: string;
+        const metrics = await cdp.send("Page.getLayoutMetrics");
+        const viewport = metrics.cssVisualViewport;
+        let rect = {
+          x: viewport.pageX,
+          y: viewport.pageY,
+          width: viewport.clientWidth,
+          height: viewport.clientHeight,
+        };
+        if (targetFrame !== null && targetFrame !== page.mainFrame()) {
+          const handle = await targetFrame.frameElement();
+          try {
+            const box = await handle.boundingBox();
+            if (box === null) throw new Error("screenshot_frame_not_visible");
+            const scroll = await page.evaluate(() => ({ x: window.scrollX, y: window.scrollY }));
+            rect = {
+              x: box.x + scroll.x,
+              y: box.y + scroll.y,
+              width: box.width,
+              height: box.height,
+            };
+            const result = await cdp.send("Page.captureScreenshot", {
+              format: "jpeg",
+              quality: 80,
+              fromSurface: true,
+              captureBeyondViewport: true,
+              clip: {
+                x: box.x + scroll.x,
+                y: box.y + scroll.y,
+                width: box.width,
+                height: box.height,
+                scale: 1,
+              },
+            });
+            base64 = result.data;
+          } finally {
+            await handle.dispose().catch(() => undefined);
+          }
+        } else if (opts.fullPage === true) {
+          const size = await page.evaluate(() => ({
+            width: document.documentElement.scrollWidth,
+            height: document.documentElement.scrollHeight,
+          }));
+          rect = { x: 0, y: 0, width: size.width, height: size.height };
           const result = await cdp.send("Page.captureScreenshot", {
             format: "jpeg",
             quality: 80,
             fromSurface: true,
             captureBeyondViewport: true,
-            clip: {
-              x: box.x + scroll.x,
-              y: box.y + scroll.y,
-              width: box.width,
-              height: box.height,
-              scale: 1,
-            },
+            clip: { x: 0, y: 0, width: size.width, height: size.height, scale: 1 },
           });
           base64 = result.data;
-        } finally {
-          await handle.dispose().catch(() => undefined);
+        } else {
+          const result = await cdp.send("Page.captureScreenshot", {
+            format: "jpeg",
+            quality: 80,
+            fromSurface: true,
+          });
+          base64 = result.data;
         }
-      } else if (opts.fullPage === true) {
-        const size = await page.evaluate(() => ({
-          width: document.documentElement.scrollWidth,
-          height: document.documentElement.scrollHeight,
-        }));
-        const result = await cdp.send("Page.captureScreenshot", {
-          format: "jpeg",
-          quality: 80,
-          fromSurface: true,
-          captureBeyondViewport: true,
-          clip: { x: 0, y: 0, width: size.width, height: size.height, scale: 1 },
-        });
-        base64 = result.data;
-      } else {
-        const result = await cdp.send("Page.captureScreenshot", {
-          format: "jpeg",
-          quality: 80,
-          fromSurface: true,
-        });
-        base64 = result.data;
-      }
+        return { base64, rect };
+      });
       return {
-        base64,
+        ...captured,
         frameUrl: targetFrame?.url() ?? null,
         frameCount: page.frames().length,
       };
