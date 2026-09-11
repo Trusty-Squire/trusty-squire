@@ -5532,20 +5532,29 @@ describe("Compact V2 action-map boundary", () => {
     expect(observation.url).toBe("https://app.example.com/protected/home");
   });
 
-  it("does not report navigated when the click settles on the same document", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
-    h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
-    const started = await startHarnessProvisionSession({
-      browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
-      serviceUrl: "https://app.example.com/dashboard",
-    });
-    const observation = await act(started.session_id, {
-      kind: "click",
-      target: domRefs(started)[0]!,
-    });
-    expect(observation).not.toHaveProperty("navigated");
-  });
+  it.each([false, true])(
+    "does not report navigated for a same-document click with pathname change=%s",
+    async (changePath) => {
+      process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+      h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
+      const started = await startHarnessProvisionSession({
+        browser: new BrowserController(),
+        observationFormat: "browser-use-dom",
+        serviceUrl: "https://app.example.com/dashboard",
+      });
+      const ref = domRefs(started)[0]!;
+      h.clickHook = () => {
+        if (changePath) h.currentUrl = "https://app.example.com/settings";
+      };
+      const observation = await act(started.session_id, { kind: "click", target: ref });
+      expect(observation).not.toHaveProperty("navigated");
+      if (changePath) {
+        expect(observation.url).toBe("https://app.example.com/settings");
+        expect(domRefs(observation)).not.toContain(ref);
+        expect(observation).not.toHaveProperty("dom_unchanged");
+      }
+    },
+  );
 
   it("re-emits the DOM when the URL changes without a document change", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";

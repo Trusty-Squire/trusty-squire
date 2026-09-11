@@ -125,6 +125,47 @@ describe("interleaved observation DOM", () => {
     }
   });
 
+  it("preserves synthesized listener refs across dialog remounts", async () => {
+    const page = await browser.newPage();
+    try {
+      const refs = new StableObservationRefs();
+      const mount = async (dialog: boolean) => {
+        await page.evaluate((withDialog) => {
+          document.body.innerHTML = '<nav aria-label="Main"><span>Docs</span></nav>' +
+            (withDialog ? '<div role="dialog" aria-label="Create key"><span>Docs</span></div>' : '');
+          for (const control of document.querySelectorAll("span")) {
+            control.addEventListener("click", () => control.setAttribute("data-clicked", "yes"));
+          }
+        }, dialog);
+      };
+      await mount(false);
+      const before = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const original = before.elements.find((el) => el.tag === "span")!;
+      expect(original.screenPath).toBeTruthy();
+      const held = refs.actions("doc", before.elements).get(original)!;
+      expect(held).toBeTruthy();
+      await mount(true);
+      const after = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const recreated = after.elements.find((el) => el.screenPath === original.screenPath)!;
+      expect(recreated.observationIdentity).not.toBe(original.observationIdentity);
+      const handles = refs.actions("doc", after.elements);
+      expect(handles.get(recreated)).toBe(held);
+      const added = after.elements.find((el) => el.tag === "span" && el !== recreated)!;
+      expect(handles.get(added)).toBeTruthy();
+      expect(handles.get(added)).not.toBe(held);
+      const rendered = serializeBrowserUseDOM(after.root, {
+        ref: (node) => handles.get(after.nodeElements.get(node.id)!)!,
+        previous: new Set([held]),
+      });
+      expect(rendered.dom.split("\n").find((line) => line.includes(held))).not.toContain("*");
+      expect(rendered.dom.split("\n").find((line) => line.includes(handles.get(added)!))).toContain("*");
+      await page.locator(recreated.selector).click();
+      expect(await page.locator("nav span").getAttribute("data-clicked")).toBe("yes");
+    } finally {
+      await page.close();
+    }
+  });
+
   it("finds a standard listener after ordinary visible content", async () => {
     const page = await browser.newPage();
     try {

@@ -19,6 +19,7 @@ interface FrameTree {
   childFrames?: FrameTree[];
 }
 import type { InteractiveElement } from "./browser.js";
+import { isFrameworkRandomDomId } from "./element-fingerprint.js";
 import {
   browserUseBoundedContextText,
   browserUseDynamicsSignature,
@@ -900,6 +901,22 @@ export async function captureBrowserUseDOM(
       }
       return null;
     };
+    const syntheticScreenPath = (n: BrowserUseNode): string => {
+      const path: unknown[] = [];
+      let current: BrowserUseNode | undefined = n;
+      while (current && current.nodeType !== 9) {
+        const id = current.attributes.id;
+        path.push([
+          current.nodeName,
+          current.shadowType,
+          id && !isFrameworkRandomDomId(id) ? id : null,
+          current.attributes.role,
+          current.attributes["aria-label"],
+        ]);
+        current = parentByNode.get(current);
+      }
+      return JSON.stringify(path.reverse());
+    };
     const iconLabel = (n: BrowserUseNode): string | null => {
       const find = (node: BrowserUseNode): string | null => {
         const value = node.attributes.alt ?? node.attributes.title ?? node.attributes["aria-label"];
@@ -1032,6 +1049,7 @@ export async function captureBrowserUseDOM(
             frameOrigin: frame === page.mainFrame() ? null : new URL(frame.url()).origin,
             frameUrl: frame === page.mainFrame() ? null : frame.url(),
             framePath: path,
+            screenPath: syntheticScreenPath(n),
           };
         }
       }

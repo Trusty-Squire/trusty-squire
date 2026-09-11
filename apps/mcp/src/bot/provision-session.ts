@@ -5761,7 +5761,7 @@ async function executeAct(
   // honestly whether the document changed while the action was settling.
   let docBeforeAction: string | undefined;
   try {
-    docBeforeAction = compactV2EpochDoc(session, compactV2ActionPage);
+    docBeforeAction = browser.mainDocumentIdentity(compactV2ActionPage);
   } catch {
     docBeforeAction = undefined;
   }
@@ -6540,7 +6540,7 @@ async function executeAct(
           );
   const actionDocAfter = (() => {
     try {
-      return compactV2EpochDoc(session, actionObservationPage);
+      return browser.mainDocumentIdentity(actionObservationPage);
     } catch {
       return undefined;
     }

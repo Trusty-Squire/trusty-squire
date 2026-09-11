@@ -70,7 +70,10 @@ fail-closed and mints a fresh ref:
 5. the combined match is unique among both retired anchors and live controls.
 
 A new dialog sharing a control's name cannot change this match by changing the
-inventory's fingerprint tier. Compact queries retain the last full DOM's URL,
+inventory's fingerprint tier. CDP-synthesized controls receive a location path
+at capture time from their DOM ancestry, shadow boundaries, stable authored IDs,
+roles and explicit labels. The path excludes sibling ordinals and backend node
+IDs; indistinguishable matches still cannot adopt. Compact queries retain the last full DOM's URL,
 dynamics and rendered refs together until another full observation is emitted.
 
 **Change hashing beyond the DOM string (2026-09-08).** The canonical DOM string
@@ -84,7 +87,9 @@ bounds and child tag digest; plus the live frame URL set) and the page URL into
 the per-round baseline. A change in any of them — even with a byte-identical
 DOM string — forces a full DOM re-emission (`dom_unchanged` never lies), and a
 changed main document during an action's settle window marks the returned
-observation `navigated:true`.
+observation `navigated:true`. This flag compares `mainDocumentIdentity` before
+and after the action. A `history.pushState` pathname change does not set it;
+the separate URL-scoped observation epoch still invalidates refs on route changes.
 
 Current implementation and wire contract:
 [Canonical DOM serialization](browser-use-serializer-port.md#identity-deltas-and-query).
