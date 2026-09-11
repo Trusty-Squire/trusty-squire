@@ -18,13 +18,15 @@ import { mockBrowserUseCapture } from "./browser-use-test-capture.js";
 //   - credential egress seed excludes mid_session task scope
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { constants, publicEncrypt } from "node:crypto";
+import { chromium, type Page } from "playwright";
 import { BrowserClickDispatchError, OAuthFailedError } from "../browser.js";
 import type * as BrowserModule from "../browser.js";
 import type * as GoogleLoginModule from "../google-login.js";
 import type * as ProfileModule from "../profile.js";
 
 const h = vi.hoisted(() => ({
-  captureValues: [] as string[],
+  capturePage: null as Page | null,
+  captureClick: null as (() => Promise<void>) | null,
   providers: ["google"] as string[] | null,
   oauthStatus: "already_valid" as string,
   oauthLoginCalls: [] as string[],
@@ -334,16 +336,10 @@ vi.mock("../browser.js", async (importOriginal) => ({
       return this.detached ? this.detachedUrl : h.currentUrl;
     }
     activePage() {
+      if (h.capturePage !== null) return h.capturePage;
       return {
         isClosed: () => false,
         url: () => this.currentUrl(),
-        getByRole: () => ({
-          elementHandles: async () =>
-            h.captureValues.map((value) => ({
-              evaluate: async () => value,
-              dispose: async () => {},
-            })),
-        }),
       };
     }
     mainDocumentIdentity(): string {
@@ -593,6 +589,7 @@ vi.mock("../browser.js", async (importOriginal) => ({
     }
     async click(selector?: string): Promise<void> {
       h.clickCalls += 1;
+      await h.captureClick?.();
       if (selector !== undefined) {
         const element = (h.elements as Array<Record<string, unknown>>).find(
           (candidate) => candidate.selector === selector,
@@ -1182,7 +1179,8 @@ function elem(partial: Record<string, unknown>): unknown {
 }
 
 beforeEach(() => {
-  h.captureValues = [];
+  h.capturePage = null;
+  h.captureClick = null;
   compactV2ModeBeforeTest = process.env.TRUSTY_SQUIRE_OBSERVE_V2;
   process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "off";
   process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
@@ -3163,6 +3161,7 @@ describe("verified recipe recording", () => {
   });
 });
 afterEach(async () => {
+  await h.capturePage?.context().browser()?.close();
   vi.useRealTimers();
   // An unproven close deliberately retains the real-profile lease in the
   // runtime. The mock has no process to prove dead, so restore its normal
@@ -11033,20 +11032,41 @@ describe("flat operator verbs", () => {
       elem({ tag: "select", role: "select", labelText: "Region", selector: "#region" }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
+    const page = await browser.newPage();
+    h.capturePage = page;
     const storeCredential = vi.fn().mockResolvedValue({ reference: "vault://acct/captured" });
     const api = { storeCredential } as unknown as ApiClient;
-    for (const outcome of ["stored", "ambiguous", "unresolved"] as const) {
+    const outcomes =
+      _name === "click"
+        ? (["stored", "ambiguous", "unresolved", "unchanged"] as const)
+        : (["stored", "ambiguous", "unresolved"] as const);
+    for (const outcome of outcomes) {
       await observe(started.session_id, "compact");
       h.elements.push(
         elem({ tag: "button", role: "button", visibleText: outcome, selector: `#${outcome}` }),
       );
-      h.captureValues = outcome === "ambiguous" ? [] : ["captured-secret"];
+      // Exercise real pinned handles and descriptors. Click capture must see
+      // a changed document; the unchanged case must never reach vault storage.
+      const before = '<input aria-label="API key" value="pre-action-value">';
+      const after =
+        outcome === "ambiguous"
+          ? '<p>No key available</p>'
+          : '<input aria-label="API key" value="captured-secret">';
+      await page.setContent(_name === "click" ? before : after);
+      h.captureClick =
+        outcome === "unchanged"
+          ? null
+          : async () => {
+              await page.setContent(after);
+            };
+      const writesBefore = storeCredential.mock.calls.length;
       if (outcome === "unresolved") storeCredential.mockRejectedValueOnce(new Error("offline"));
       const captured = await tool.handler(
         tool.inputSchema.parse({
           session_id: started.session_id,
           ...args,
-          capture: { store: { service: "example" }, source: { role: "textbox", name: "API key" } },
+          capture: { store: { service: "example" }, source: { role: "textbox" } },
         }) as never,
         api,
       );
@@ -11054,8 +11074,27 @@ describe("flat operator verbs", () => {
       if (outcome !== "stored")
         expect(captured).toHaveProperty(
           "error",
-          outcome === "ambiguous" ? "capture_ambiguous" : "capture_unresolved",
+          outcome === "ambiguous"
+            ? "capture_ambiguous"
+            : outcome === "unchanged"
+              ? "capture_pre_action_only"
+              : "capture_unresolved",
         );
+      if (outcome === "stored") {
+        expect(captured).toHaveProperty("resolved_source", {
+          tag: "input",
+          role: "textbox",
+          name: "API key",
+        });
+      }
+      if (outcome === "stored" || outcome === "unresolved") {
+        expect(storeCredential).toHaveBeenCalledTimes(writesBefore + 1);
+        expect(storeCredential).toHaveBeenLastCalledWith(
+          expect.objectContaining({ value: "captured-secret" }),
+        );
+      } else {
+        expect(storeCredential).toHaveBeenCalledTimes(writesBefore);
+      }
       expect(captured).not.toHaveProperty("safe_table");
       expect(captured).not.toHaveProperty("observation");
       const next = await operateScrollTool.handler(
