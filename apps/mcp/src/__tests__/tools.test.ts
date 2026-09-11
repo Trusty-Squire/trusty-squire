@@ -447,6 +447,100 @@ describe("list_credentials", () => {
     expect(listCredentials).toHaveBeenCalledOnce();
   });
 
+  it("filters by service case-insensitively (string) and skips null-service rows", async () => {
+    const listCredentials = vi.fn().mockResolvedValue({
+      credentials: [
+        { reference: "vault://acct/exa", service: "Exa", label: "default" },
+        { reference: "vault://acct/groq", service: "groq", label: "default" },
+        { reference: "vault://acct/misc", service: null, label: "misc" },
+      ],
+    });
+    const api = makeMockApi({ listCredentials } as unknown as ApiClient);
+    const parsed = listCredentialsTool.inputSchema.parse({ service: "EXA" });
+    const res = (await listCredentialsTool.handler(parsed, api)) as {
+      credentials: { reference: string }[];
+    };
+    expect(res.credentials).toEqual([
+      { reference: "vault://acct/exa", service: "Exa", label: "default" },
+    ]);
+  });
+
+  it("filters by an array of services (any match, case-insensitive)", async () => {
+    const listCredentials = vi.fn().mockResolvedValue({
+      credentials: [
+        { reference: "vault://acct/exa", service: "Exa", label: "default" },
+        { reference: "vault://acct/groq", service: "groq", label: "default" },
+        { reference: "vault://acct/other", service: "Resend", label: "default" },
+      ],
+    });
+    const api = makeMockApi({ listCredentials } as unknown as ApiClient);
+    const parsed = listCredentialsTool.inputSchema.parse({ service: ["GROQ", "exa"] });
+    const res = (await listCredentialsTool.handler(parsed, api)) as {
+      credentials: { reference: string }[];
+    };
+    expect(res.credentials.map((c) => c.reference)).toEqual([
+      "vault://acct/exa",
+      "vault://acct/groq",
+    ]);
+  });
+
+  it("filters by label case-insensitively and combines with the service filter", async () => {
+    const listCredentials = vi.fn().mockResolvedValue({
+      credentials: [
+        { reference: "vault://acct/exa-1", service: "Exa", label: "Primary" },
+        { reference: "vault://acct/exa-2", service: "Exa", label: "secondary" },
+        { reference: "vault://acct/groq-1", service: "Groq", label: "Primary" },
+      ],
+    });
+    const api = makeMockApi({ listCredentials } as unknown as ApiClient);
+    const parsed = listCredentialsTool.inputSchema.parse({ service: "exa", label: "primary" });
+    const res = (await listCredentialsTool.handler(parsed, api)) as {
+      credentials: { reference: string }[];
+    };
+    expect(res.credentials.map((c) => c.reference)).toEqual(["vault://acct/exa-1"]);
+  });
+
+  it("fields=summary returns only the compact summary projection", async () => {
+    const listCredentials = vi.fn().mockResolvedValue({
+      credentials: [
+        {
+          id: "c1",
+          reference: "vault://acct/c1",
+          service: "Exa",
+          label: "default",
+          field_names: ["api_key"],
+          key_name: "EXA_API_KEY",
+          type: "api_key",
+          allowed_hosts: ["api.exa.ai"],
+          auth_strategy: "api_key",
+          signin_url: null,
+          login_hosts: [],
+          created_at: "2026-09-11T00:00:00.000Z",
+          last_retrieved_at: null,
+          retrieval_count: 0,
+        },
+      ],
+    });
+    const api = makeMockApi({ listCredentials } as unknown as ApiClient);
+    const parsed = listCredentialsTool.inputSchema.parse({ fields: "summary" });
+    const res = (await listCredentialsTool.handler(parsed, api)) as {
+      credentials: Record<string, unknown>[];
+    };
+    expect(res.credentials).toHaveLength(1);
+    // Exactly the summary shape — no key_name, type, auth_strategy, ids, etc.
+    expect(Object.keys(res.credentials[0]!).sort()).toEqual([
+      "allowed_hosts",
+      "created_at",
+      "field_names",
+      "label",
+      "reference",
+      "service",
+      "stale",
+    ]);
+    // stale is a boolean even when the API omits the field.
+    expect(res.credentials[0]!.stale).toBe(false);
+  });
+
   it("requires an active session", async () => {
     await expect(listCredentialsTool.handler({}, null)).rejects.toThrow(/Trusty Squire session/);
   });

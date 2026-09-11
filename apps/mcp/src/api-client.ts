@@ -100,6 +100,8 @@ export interface VaultCredentialSummary {
   created_at: string;
   last_retrieved_at: string | null;
   retrieval_count: number;
+  // Rotation-age nudge from the API (true when past the rotation-stale age).
+  stale?: boolean;
 }
 
 export interface CredentialMutationApproval {
