@@ -8820,9 +8820,10 @@ async function shadowPiercingCapture(
   page: Page,
   source: CaptureSource,
   handles: ElementHandle<HTMLElement | SVGElement>[],
+  containerHandles: ElementHandle<HTMLElement | SVGElement>[],
 ): Promise<{ candidate_count: number; value?: string; found?: CaptureFoundCandidate[] }> {
-  return await page.evaluate(({ source: spec, nodes }) => {
-    for (const node of nodes) {
+  return await page.evaluate(({ source: spec, nodes, scopeNodes }) => {
+    for (const node of [...nodes, ...scopeNodes]) {
       if (!node.isConnected || node.ownerDocument !== document)
         throw new Error("capture source changed");
     }
@@ -8900,8 +8901,6 @@ async function shadowPiercingCapture(
       if (el instanceof HTMLSelectElement) return "combobox";
       if (el instanceof HTMLDialogElement && el.open) return "dialog";
       if (el.tagName === "CODE") return "code";
-      const editable = el.getAttribute("contenteditable");
-      if (editable === "" || editable === "true" || editable === "plaintext-only") return "textbox";
       const name = accessibleName(el);
       if (el.tagName === "SECTION" && name) return "region";
       if (el.tagName === "FORM" && name) return "form";
@@ -8921,6 +8920,16 @@ async function shadowPiercingCapture(
       return false;
     };
 
+    const isAriaIncluded = (el: Element): boolean => {
+      for (let current: Element | null = el; current;) {
+        if (current.getAttribute("aria-hidden") === "true") return false;
+        const root = current.getRootNode();
+        current = current.assignedSlot ?? current.parentElement ??
+          (root instanceof ShadowRoot ? root.host : null);
+      }
+      return true;
+    };
+
     const readValue = (node: Element): string => {
       const value =
         node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
@@ -8932,10 +8941,11 @@ async function shadowPiercingCapture(
     };
 
     const containerSpec = spec.container ?? null;
-    const containers = containerSpec
+    const containers = scopeNodes.length > 0 ? scopeNodes : containerSpec
       ? elements.filter(
           (el) =>
             isVisible(el) &&
+            isAriaIncluded(el) &&
             ariaRole(el) === containerSpec.role &&
             (containerSpec.name === undefined || accessibleName(el) === containerSpec.name),
         )
@@ -8960,12 +8970,11 @@ async function shadowPiercingCapture(
     };
     // A demanded container that never rendered scopes nothing: refuse rather
     // than let the walk resolve a match outside the requested container.
-    if (containerSpec && containers.length === 0)
+    if (containerSpec && containers.length === 0 && nodes.length === 0)
       return { candidate_count: 0, found: foundReport() };
 
     const resolve = (matches: Element[]) => {
-      const candidates = Array.from(new Set([...nodes, ...matches]))
-        .filter((el) => isVisible(el) && inScope(el));
+      const candidates = Array.from(new Set([...nodes, ...matches]));
       if (candidates.length === 0) return { candidate_count: 0, found: foundReport() };
       if (candidates.length > 1) return { candidate_count: candidates.length };
       const value = readValue(candidates[0]!);
@@ -9046,12 +9055,12 @@ async function shadowPiercingCapture(
 
     const role = spec.role;
     let candidates = elements.filter(
-      (el) => isVisible(el) && inScope(el) && ariaRole(el) === role,
+      (el) => isVisible(el) && isAriaIncluded(el) && inScope(el) && ariaRole(el) === role,
     );
     if (spec.name !== undefined)
       candidates = candidates.filter((el) => accessibleName(el) === spec.name);
     return resolve(candidates);
-  }, { source, nodes: handles });
+  }, { source, nodes: handles, scopeNodes: containerHandles });
 }
 
 /** Explicit capture reads one named source without revealing other controls or
@@ -9070,16 +9079,17 @@ export async function captureCredentialSource(
   if (page === undefined) throw new Error("capture page unavailable");
   const container =
     source.container === undefined
-      ? page
+      ? undefined
       : page.getByRole(source.container.role, {
           ...(source.container.name !== undefined
             ? { name: source.container.name, exact: true }
             : {}),
         });
+  const scope = container ?? page;
   const targets =
     "selector" in source
-      ? container.locator(`css=${source.selector}`).filter({ visible: true })
-      : container.getByRole(source.role, {
+      ? scope.locator(`css=${source.selector}`).filter({ visible: true })
+      : scope.getByRole(source.role, {
           ...(source.name !== undefined ? { name: source.name, exact: true } : {}),
         });
   // Pin the selected element in its current document. A new document must not
@@ -9092,10 +9102,15 @@ export async function captureCredentialSource(
     // shadow-piercing walk below still gets its chance to resolve the source.
     handles = [];
   }
+  let containerHandles: typeof handles = [];
   try {
-    return await shadowPiercingCapture(page, source, handles);
+    if (container !== undefined)
+      containerHandles = await container.elementHandles().catch(() => []);
+    return await shadowPiercingCapture(page, source, handles, containerHandles);
   } finally {
-    await Promise.all(handles.map((handle) => handle.dispose().catch(() => undefined)));
+    await Promise.all([...handles, ...containerHandles].map(
+      (handle) => handle.dispose().catch(() => undefined),
+    ));
   }
 }
 

@@ -503,3 +503,63 @@ it("never captures a searchbox as a textbox", async () => {
     found: [{ role: "searchbox", name: "Find keys" }],
   });
 });
+
+
+it.each([false, true])("preserves normalized container matches with shadow competitor %s", async (competing) => {
+  await page.setContent('<section role="dialog" aria-labelledby="heading"><h2 id="heading">Created\n key</h2><input id="light" value="new-fixture"><div id="host"></div></section>');
+  if (competing) {
+    await page.locator("#host").evaluate((host) => {
+      host.attachShadow({ mode: "open" }).innerHTML = '<input value="competing-fixture">';
+    });
+  }
+  const dialog = page.getByRole("dialog", { name: "Created key", exact: true });
+  const target = page.locator("#light");
+  vi.spyOn(target, "filter").mockReturnValue(target);
+  vi.spyOn(dialog, "locator").mockReturnValue(target);
+  const lookup = vi.spyOn(page, "getByRole").mockReturnValue(dialog);
+  try {
+    expect(await captureCredentialSource("fixture", {
+      selector: "[role=dialog] input",
+      container: { role: "dialog", name: "Created key" },
+    })).toEqual(competing
+      ? { candidate_count: 2 }
+      : { candidate_count: 1, value: "new-fixture" });
+  } finally {
+    lookup.mockRestore();
+  }
+});
+
+it.each(["element", "ancestor", "shadow-host"])("excludes a background textbox hidden by its %s", async (kind) => {
+  await page.setContent('<div id="background"></div><section role="dialog"><input value="new-fixture"></section>');
+  await page.locator("#background").evaluate((background, hiddenBy) => {
+    if (hiddenBy === "shadow-host") {
+      background.setAttribute("aria-hidden", "true");
+      background.attachShadow({ mode: "open" }).innerHTML = '<input value="old-fixture">';
+    } else {
+      background.innerHTML = '<input value="old-fixture">';
+      (hiddenBy === "element" ? background.firstElementChild! : background)
+        .setAttribute("aria-hidden", "true");
+    }
+  }, kind);
+  expect(await captureCredentialSource("fixture", { role: "textbox" }))
+    .toEqual({ candidate_count: 1, value: "new-fixture" });
+});
+
+it.each(["textbox", "selector"])("excludes an ARIA-hidden container for %s capture", async (kind) => {
+  await page.setContent('<div aria-hidden="true"><section role="dialog"><input value="hidden-fixture"></section></div>');
+  const result = await captureCredentialSource("fixture", {
+    ...(kind === "textbox" ? { role: "textbox" as const } : { selector: "input" }),
+    container: { role: "dialog" },
+  });
+  expect(result.candidate_count).toBe(0);
+  expect(result.value).toBeUndefined();
+});
+
+it("does not assign a textbox role to generic editable notes", async () => {
+  await page.setContent('<div contenteditable="true">private-notes-fixture</div>');
+  expect(await captureCredentialSource("fixture", { role: "textbox" }))
+    .toEqual({ candidate_count: 0, found: [] });
+  await page.locator("[contenteditable]").evaluate((node) => node.setAttribute("role", "textbox"));
+  expect(await captureCredentialSource("fixture", { role: "textbox" }))
+    .toEqual({ candidate_count: 1, value: "private-notes-fixture" });
+});
