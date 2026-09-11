@@ -14163,7 +14163,13 @@ export class BrowserController {
         try {
           if (dispatchAuthorizedClick === undefined) {
             actionStarted = true;
-            await this.click(selector);
+            // Direct native login has no broker-prepared handle. Record the
+            // same dispatch boundary while retaining ordinary click semantics.
+            await this.clickWithDispatchTracking(
+              { kind: "selector", selector, method: "click" },
+              undefined,
+              () => this.click(selector),
+            );
           } else {
             await dispatchAuthorizedClick(async (handle, confirmTarget) => {
               await this.withModalInertNeutralized(selector, async () => {

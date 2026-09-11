@@ -428,6 +428,12 @@ export async function buildServer(
       return toolResultContent(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      const loginSession =
+        tool.name === "operate_login" &&
+        "provider" in parsed.data &&
+        typeof parsed.data.session_id === "string"
+          ? { session_id: parsed.data.session_id }
+          : undefined;
       const serverUnavailable =
         /unknown provision session|requires one active operate_start browser session/i.test(
           message,
@@ -436,11 +442,13 @@ export async function buildServer(
         return errorContent(
           "session_busy",
           "Cancelled work retains this session; wait for settlement or use finish. Do not replay mutations.",
+          loginSession,
         );
       if (message === "operator_execution_unsettled")
         return errorContent(
           "outcome_unknown",
           "Cancelled work has not settled; retain the session and use finish. Do not repeat a mutation.",
+          loginSession,
         );
       const malformedAction = /^operate_act kind=.* requires /i.test(message);
       const retryableRead = tool.name === "operate_observe" || tool.name === "operate_screenshot";
@@ -448,7 +456,10 @@ export async function buildServer(
         ? errorContent(
             retryableRead ? "server_unavailable" : "unknown_session",
             `${message}. ${retryableRead ? "Retry once." : "Do not replay mutations."} Never kill or restart the shared operator process; it serves every lane/home. Recover a same-lineage receipt if available; absence of a live session is not closure proof.`,
-            { retry: { max_attempts: retryableRead ? 1 : 0, mutation: "do_not_replay" } },
+            {
+              ...loginSession,
+              retry: { max_attempts: retryableRead ? 1 : 0, mutation: "do_not_replay" },
+            },
           )
         : errorContent(
             err instanceof BrokerRefusal
@@ -457,7 +468,16 @@ export async function buildServer(
                 ? "invalid_arguments"
                 : "tool_execution_failed",
             message,
-            err instanceof ForwardedResultError ? err.detail : undefined,
+            err instanceof ForwardedResultError
+              ? err.detail
+              : loginSession === undefined
+                ? undefined
+                : {
+                    ...loginSession,
+                    next_action: "operate_observe",
+                    guidance:
+                      "Inspect the retained session before deciding the next action; do not repeat OAuth blindly.",
+                  },
           );
     } finally {
       if (budgetTimer !== undefined) clearTimeout(budgetTimer);

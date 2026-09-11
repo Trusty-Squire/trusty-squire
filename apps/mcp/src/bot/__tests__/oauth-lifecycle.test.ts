@@ -40,6 +40,9 @@ import type { OperatorRecipe } from "../operator-recipe.js";
 import { sessionForCall } from "../session/lifecycle.js";
 import { ProvenPreDispatchMutationError } from "../mutation-dispatch-evidence.js";
 
+import { withOperatorRequestContext } from "../request-cancellation.js";
+import { operateLoginTool } from "../../tools/provision-drive.js";
+
 const PRODUCT_URL = `data:text/html,${encodeURIComponent(`
   <!doctype html>
   <main id="state">Signed out</main>
@@ -80,6 +83,69 @@ describe("BrowserController OAuth popup lifecycle", () => {
   afterAll(async () => {
     await browser?.close();
   });
+
+  it.each(["callback", "pending"])(
+    "preserves %s evidence when the initiating click rejects after navigation",
+    async (destination) => {
+      const context = await browser.newContext();
+      const product = await context.newPage();
+      const productUrl = "https://outcomes.test/login";
+      const callback = "https://outcomes.test/dashboard";
+      const provider = `https://accounts.google.com/pending?redirect_uri=${encodeURIComponent(callback)}`;
+      await context.route("**/*", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body:
+            route.request().url() === productUrl
+              ? `<button id="oauth" onclick='location.href=${JSON.stringify(provider)}'>Continue with Google</button>`
+              : route.request().url().startsWith("https://accounts.google.com/")
+                ? destination === "callback"
+                  ? `<script>location.href=${JSON.stringify(callback)}</script>`
+                  : "<main>Google consent pending</main>"
+                : "<main>Personal / Default Project</main><button>Usage</button>",
+        }),
+      );
+      await product.goto(productUrl);
+      const controller = BrowserController.fromHarnessPage(product);
+      let sessionId: string | undefined;
+      const originalClick = controller.click.bind(controller);
+      const click = vi.spyOn(controller, "click").mockImplementation(async (...args) => {
+        await originalClick(...args);
+        await product.waitForURL(destination === "callback" ? callback : provider);
+        // Fault injection at the driver return boundary, AFTER a real click and
+        // real routed navigation. The provider itself never contacts the network.
+        throw new Error("page click: Timeout 15000ms exceeded after navigation");
+      });
+      try {
+        const started = await startHarnessProvisionSession({
+          browser: controller,
+          serviceUrl: productUrl,
+          observationFormat: "browser-use-dom",
+        });
+        sessionId = started.session_id;
+        const ref = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
+        expect(ref).toBeDefined();
+        const result = await withOperatorRequestContext(new AbortController().signal, () =>
+          operateLoginTool.handler({ session_id: sessionId!, provider: "google", ref: ref! }, null),
+        );
+        expect(result).toMatchObject({
+          session_id: sessionId,
+          url: destination === "callback" ? callback : provider,
+        });
+        if (destination === "pending")
+          expect(result).toMatchObject({
+            oauth: { state: "in_progress", completion: "unknown", next_action: "operate_observe" },
+          });
+        else expect(result).not.toHaveProperty("oauth.completion", "unknown");
+        expect(click).toHaveBeenCalledTimes(1);
+        await expect(observe(sessionId)).resolves.toMatchObject({ session_id: sessionId });
+      } finally {
+        click.mockRestore();
+        if (sessionId !== undefined) await finishProvisionSession(sessionId);
+        await context.close();
+      }
+    },
+  );
 
   it("returns relying-party required information without treating its Continue as provider consent", async () => {
     const context = await browser.newContext();

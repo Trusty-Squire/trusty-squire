@@ -1456,7 +1456,7 @@ const loginSchema = z.union([
 export const operateLoginTool: Tool<z.infer<typeof loginSchema>> = {
   name: "operate_login",
   description:
-    "Log in with provider + ref using the atomic OAuth flow; awaiting-human state is returned in this call. " +
+    "Log in with provider + ref using the atomic OAuth flow; awaiting-human state is returned in this call. After a dispatched timeout or error, completion may be unknown: retain session_id and call operate_observe before another action; do not repeat OAuth blindly. " +
     "Drive the sealed username/password login lifecycle without exposing raw values. " +
     "action='prepare_signup' seals the user's captured email and a generated password; " +
     "'store_signup' vaults those prepared slots with the same login-host safeguards; " +

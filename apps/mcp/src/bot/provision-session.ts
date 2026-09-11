@@ -791,17 +791,27 @@ async function withOAuthActionBoundary(
       try {
         return await withinOAuthActionDeadline(run(deadline), deadline);
       } catch (error) {
-        if (error instanceof OAuthAwaitingHumanError && error.phase !== "not_attempted") {
-          const completion = await deadline.completionCheck?.();
+        const uncertain = oauthErrorAfterDispatchAttempt(session, error);
+        if (
+          uncertain !== null ||
+          (error instanceof OAuthAwaitingHumanError && error.phase !== "not_attempted")
+        ) {
+          // Browser timeout/navigation errors need the same evidence check as
+          // request cancellation. A failed read cannot erase dispatched uncertainty.
+          const completion = await deadline.completionCheck?.().catch(() => null);
           if (completion !== undefined && completion !== null) {
             return {
               observation: completion.terminal
                 ? terminalOAuthCompletionObservation(session, completion.url!)
-                : await observeSession(session, "compact", undefined, completion.page),
+                : await observeSession(session, "compact", undefined, completion.page).catch(() => {
+                    if (uncertain !== null) return uncertain;
+                    throw error;
+                  }),
               outcome: {},
             };
           }
         }
+        if (uncertain !== null) return { observation: uncertain, outcome: {} };
         throw error;
       }
     },
@@ -5247,15 +5257,14 @@ function oauthAwaitingHumanObservation(
   );
 }
 
-function oauthRequestEndedAfterDispatchAttempt(
-  session: Session,
-  error: unknown,
-): Observation | null {
-  const signal = currentOperatorRequestSignal();
+function oauthErrorAfterDispatchAttempt(session: Session, error: unknown): Observation | null {
   if (
-    signal?.aborted !== true ||
     operatorMutationDispatchPhase() !== "dispatch_attempted" ||
-    signal.reason !== error
+    error instanceof ProvenPreDispatchMutationError ||
+    clickDispatchStatusForError(error) === "not_dispatched" ||
+    error instanceof OAuthFailedError ||
+    error instanceof OAuthAwaitingHumanError ||
+    error instanceof OAuthOnboardingRequiredError
   ) {
     return null;
   }
@@ -5263,7 +5272,7 @@ function oauthRequestEndedAfterDispatchAttempt(
   invalidateCompactV2Snapshot(session);
   const url = session.browser.currentUrl();
   const guidance =
-    "OAuth progress is unconfirmed because the request ended after dispatch was attempted. " +
+    "OAuth progress is unconfirmed because an error interrupted the action after dispatch was attempted. " +
     "Call operate_observe before deciding the next action; do not repeat the OAuth action.";
   const oauth: NonNullable<Observation["oauth"]> = {
     state: "in_progress",
@@ -5340,7 +5349,7 @@ async function actInternally(
       : await execute(undefined);
   } catch (error) {
     if (session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")) {
-      const progress = oauthRequestEndedAfterDispatchAttempt(session, error);
+      const progress = oauthErrorAfterDispatchAttempt(session, error);
       if (progress !== null) return { observation: progress, outcome: {} };
     }
     // Fix C: an OAuth wait timing out is honest uncertainty, not a failure —
@@ -5421,7 +5430,7 @@ export async function act(
     return result.observation;
   } catch (error) {
     if (session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")) {
-      const progress = oauthRequestEndedAfterDispatchAttempt(session, error);
+      const progress = oauthErrorAfterDispatchAttempt(session, error);
       if (progress !== null) return progress;
     }
     // Fix C: an OAuth wait timing out is honest uncertainty, not a failure —
