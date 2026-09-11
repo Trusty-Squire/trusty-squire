@@ -81,10 +81,10 @@ describe("interleaved observation DOM", () => {
       expect(labelFor("preferences")).toBe("@設定");
       expect(labelFor("empty-volume")).toBe("@master-volume");
       expect(labelFor("volume")).toMatch(/^@master-volume(?:-\d+)?$/);
-      expect(labelFor("structural-floor")).toMatch(/^@button-\d+$/);
+      expect(labelFor("structural-floor")).toMatch(/^@slider-\d+$/);
       expect(labelFor("dialog-floor")).toBe("@add-payment-method-button");
       expect(labelFor("shadow-volume")).toBe("@shadow-volume");
-      expect(labelFor("shadow-floor")).toBe("@shadow-volume-controls-button");
+      expect(labelFor("shadow-floor")).toBe("@shadow-volume-controls-slider");
       expect(labelFor("shadow-email")).toBe("@shadow-work-email");
       expect(labelFor("shadow-associated")).toBe("@shadow-email");
       expect(labelFor("image-search")).toBe("@search");

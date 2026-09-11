@@ -10448,6 +10448,7 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
       semantic: { blockers: Array<Record<string, unknown>> };
       safe_table: Array<[string, string, string?]>;
     };
+    expect(startPayload.semantic).toHaveProperty("blocked", true);
     expect(startPayload.semantic.blockers).toEqual([
       {
         kind: "challenge",

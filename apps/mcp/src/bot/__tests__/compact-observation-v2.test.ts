@@ -336,7 +336,7 @@ describe("compact observation v2", () => {
     });
 
     expect(page.payload.hint).toBeUndefined();
-    expect(page.payload.semantic).toEqual({ blockers });
+    expect(page.payload.semantic).toEqual({ blocked: true, blockers });
     expect(Buffer.byteLength(JSON.stringify(page.payload), "utf8")).toBeLessThanOrEqual(
       OBSERVE_V2_MAX_WIRE_BYTES,
     );
@@ -917,7 +917,7 @@ describe("compact observation v2", () => {
         canonical: true,
       });
 
-      expect(safe.rows).toEqual([expect.objectContaining({ role: "button", label: "@button-1" })]);
+      expect(safe.rows).toEqual([expect.objectContaining({ role: "slider", label: "@slider-1" })]);
     });
   });
 

@@ -43,6 +43,7 @@ export const REQUIRED_BEHAVIOR_FILES = [
   "src/bot/__tests__/multisession-tab-family.test.ts",
   "src/bot/__tests__/new-tab-adoption.test.ts",
   "src/bot/__tests__/oauth-lifecycle.test.ts",
+  "src/bot/__tests__/observation-dom-correctness.test.ts",
   "src/bot/__tests__/observe-delta.test.ts",
   "src/bot/__tests__/observe-jp-mojibake.test.ts",
   "src/bot/__tests__/operate-session-flow.test.ts",

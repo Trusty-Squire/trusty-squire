@@ -4572,7 +4572,7 @@ function compactV2Observation(
   });
   const semantics = {
     ...safePageSemanticsV2(semanticSource),
-    ...(blockers.length === 0 ? {} : { blockers }),
+    ...(blockers.length === 0 ? {} : { blockers, blocked: true as const }),
   };
   const rendered = serializeBrowserUseDOM(capture.root, {
     ref: (node) => {

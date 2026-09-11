@@ -46,7 +46,7 @@ export function compactV2DegradeMetadata(
     ) {
       candidate = {
         ...candidate,
-        semantic: { blockers: (semantic as { blockers: unknown[] }).blockers },
+        semantic: { blocked: true, blockers: (semantic as { blockers: unknown[] }).blockers },
       };
     } else {
       const rest = { ...candidate };
@@ -81,7 +81,8 @@ export type SafeRoleV2 =
   | "radio"
   | "tab"
   | "menuitem"
-  | "file";
+  | "file"
+  | (string & {});
 export type SafeIntentV2 =
   | "search"
   | "close"
@@ -146,6 +147,8 @@ export interface SafePageSemanticsV2 {
   title?: string;
   headings?: string[];
   blockers?: SafeBlockerV2[];
+  /** Observed blocker evidence; independent of inferred page stage. */
+  blocked?: true;
 }
 
 export interface SafeBlockerV2 {
@@ -433,6 +436,7 @@ function wireControl(row: SafeControlV2): WireControlV2 {
   };
   const facts = [
     row.label,
+    ...(row.visibility === "near" ? ["v=offscreen"] : []),
     ...(row.state === undefined ? [] : [`s=${row.state}`]),
     ...(row.action === undefined ? [] : [`a=${row.action}`]),
     ...(row.field === undefined ? [] : [`f=${row.field}`]),
@@ -443,8 +447,8 @@ function wireControl(row: SafeControlV2): WireControlV2 {
       : [`m=${{ name: "n", role: "r", text: "t", context: "c" }[row.match]}`]),
   ].filter((value): value is string => value !== undefined);
   return facts.length === 0
-    ? [row.ref, role[row.role]]
-    : [row.ref, role[row.role], facts.join("|")];
+    ? [row.ref, Object.hasOwn(role, row.role) ? role[row.role]! : row.role]
+    : [row.ref, Object.hasOwn(role, row.role) ? role[row.role]! : row.role, facts.join("|")];
 }
 
 const SAFE_DESCRIPTION_MAX_CHARS = 40;
@@ -952,10 +956,10 @@ export function safePageSemanticsV2(source: ObservationSemanticSourceV2): SafePa
 const BLOCKER_TEXT_MAX_CHARS = 160;
 const BLOCKER_MAX_ITEMS = 3;
 const CHALLENGE_SIGNAL_RE =
-  /\b(?:captcha|turnstile|verification challenge|security challenge|verify (?:that )?you are human|human verification|not a robot)\b/i;
+  /\b(?:captcha|turnstile|verification challenge|security challenge|security verification|verify (?:that )?you are human|human verification|not a robot)\b/i;
 const CHALLENGE_MARKER_RE = /(?:captcha|turnstile|challenges?\.cloudflare\.com|cf[-_]challenge)/i;
 const VALIDATION_SIGNAL_RE =
-  /\b(?:error|failed|invalid|required|incorrect|missing|must|cannot|can't|couldn't|not valid|please (?:complete|enter|select|choose|provide)|try again)\b/i;
+  /\b(?:error|failed|invalid|required|incorrect|missing|must|cannot|can't|couldn't|not valid|not found|please (?:complete|enter|select|choose|provide)|try again)\b/i;
 
 function nodeTagV2(node: BrowserUseNode): string {
   return node.nodeType === 1 ? node.nodeName.toLowerCase() : "";
@@ -1061,7 +1065,10 @@ export function safeBlockersV2(
     if (CHALLENGE_MARKER_RE.test(identity)) return true;
     if (node.nodeType === 3) {
       const text = blockerTextV2(node) ?? "";
-      return CHALLENGE_SIGNAL_RE.test(text) && VALIDATION_SIGNAL_RE.test(text);
+      return (
+        CHALLENGE_SIGNAL_RE.test(text) &&
+        (VALIDATION_SIGNAL_RE.test(text) || /\bperforming security verification\b/i.test(text))
+      );
     }
     if (
       !["iframe", "frame", "label"].includes(tag) &&
@@ -1450,7 +1457,7 @@ function roleOf(el: InteractiveElement): SafeRoleV2 | null {
   if (el.tag === "button" || role === "button") {
     return "button";
   }
-  return null;
+  return role || null;
 }
 
 function stateOf(el: InteractiveElement): string | undefined {
@@ -1714,7 +1721,7 @@ export function buildSafeControlsV2(args: {
     args.elements.some((element) => hasExplicitPaymentFieldSignal(element));
   for (const el of args.elements) {
     if (el.visible !== true || (!args.canonical && el.topmost === false)) continue;
-    const role = roleOf(el) ?? (args.canonical ? "button" : null);
+    const role = roleOf(el) ?? (args.canonical ? el.role || "generic" : null);
     const legacy = args.legacyRefs.get(el);
     const ref = args.handles.get(el);
     if (role === null || legacy === undefined || ref === undefined) continue;
