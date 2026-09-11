@@ -2475,7 +2475,7 @@ function withHostScopeDenials<T extends object>(session: Session, result: T): T 
   const denials = session.browser.takeHostScopeDenials?.() ?? [];
   if (denials.length === 0) return result;
   return {
-    ...annotateChallengeBlockersWithScope(result, denials),
+    ...result,
     scope_denials: denials,
   } as T;
 }
@@ -4660,10 +4660,15 @@ function compactV2Observation(
       if (mainDocumentNodes.has(root)) challengeDocuments.set(blocker, documentId);
     },
   );
-  const semantics = {
-    ...safePageSemanticsV2(semanticSource),
-    ...(blockers.length === 0 ? {} : { blockers, blocked: true as const }),
-  };
+  const { semantic: semantics } = annotateChallengeBlockersWithScope(
+    {
+      semantic: {
+        ...safePageSemanticsV2(semanticSource),
+        ...(blockers.length === 0 ? {} : { blockers, blocked: true as const }),
+      },
+    },
+    session.browser.peekHostScopeDenials?.() ?? [],
+  );
   const rendered = serializeBrowserUseDOM(capture.root, {
     ref: (node) => {
       const element = capture.nodeElements.get(node.id);
@@ -4762,6 +4767,9 @@ function compactV2Observation(
     session_id: session.id,
     url: pageUrl,
     stage,
+    ...(semantics.blockers?.some((blocker) => blocker.cause === "scope")
+      ? { semantic: { blocked: true as const, blockers: semantics.blockers } }
+      : {}),
     ...(sameFullDocument ? { delta: true } : {}),
     ...(changed ? { dom } : { dom_unchanged: true as const }),
     ...(removed.length ? { removed } : {}),
@@ -4858,7 +4866,10 @@ async function observeQueryOwned(
       sessionId: session.id,
       stage: snapshot.stage,
       pageUrl: snapshot.pageUrl,
-      semantics: snapshot.semantics,
+      semantics: annotateChallengeBlockersWithScope(
+        { semantic: snapshot.semantics },
+        session.browser.peekHostScopeDenials?.() ?? [],
+      ).semantic,
       rows: snapshot.rows,
       offset: parsed.offset,
       cursorFor: (next) => compactV2Cursor(session, snapshot, next),

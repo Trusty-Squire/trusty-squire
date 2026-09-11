@@ -3001,11 +3001,16 @@ export class BrowserController {
     });
   }
 
-  takeHostScopeDenials(): HostScopeDenialDiagnostic[] {
-    const diagnostics = [...this.hostScopeDenials.values()].map((entry) => ({
+  peekHostScopeDenials(): HostScopeDenialDiagnostic[] {
+    return [...this.hostScopeDenials.values()].map((entry) => ({
       ...entry,
+      owner: { ...entry.owner },
       remedy: { ...entry.remedy },
     }));
+  }
+
+  takeHostScopeDenials(): HostScopeDenialDiagnostic[] {
+    const diagnostics = this.peekHostScopeDenials();
     this.hostScopeDenials.clear();
     return diagnostics;
   }
