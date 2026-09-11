@@ -1701,6 +1701,60 @@ describe("persistent action anchor allocator", () => {
     expect(dialogRef).toMatch(/^@e:[A-Za-z0-9_-]{22}$/);
     expect(dialogRef).not.toBe(original);
   });
+  it("keeps refs across inventory-dependent name-to-region tier changes", () => {
+    const refs = new StableObservationRefs();
+    const first = element({
+      visibleText: "Continue",
+      container: "main:page",
+      screenPath: "main:page > button:continue",
+      observationIdentity: "page:loader:1",
+      observationIntent: "continue",
+    });
+    const original = refs.actions("doc", [first]).get(first)!;
+    const recreated = { ...first, observationIdentity: "page:loader:2" };
+    const dialog = {
+      ...first,
+      container: "dialog:confirmation",
+      screenPath: "dialog:confirmation > button:continue",
+      observationIdentity: "page:loader:3",
+    };
+    const updated = refs.actions("doc", [dialog, recreated]);
+    expect(updated.get(recreated)).toBe(original);
+    expect(updated.get(dialog)).not.toBe(original);
+  });
+
+  it.each(["other:loader:2", "page:reloaded:2"])(
+    "does not adopt a ref across frame documents: %s",
+    (identity) => {
+      const refs = new StableObservationRefs();
+      const first = element({
+        visibleText: "Continue",
+        screenPath: "form:main > button:continue",
+        observationIdentity: "page:loader:1",
+        observationIntent: "continue",
+      });
+      const original = refs.actions("doc", [first]).get(first)!;
+      const replacement = { ...first, observationIdentity: identity };
+      expect(refs.actions("doc", [replacement]).get(replacement)).not.toBe(original);
+    },
+  );
+
+  it.each(["retired", "live"])("refuses ambiguous %s adoption matches", (side) => {
+    const refs = new StableObservationRefs();
+    const control = (id: number) => element({
+      visibleText: "Continue",
+      screenPath: "form:main > button:continue",
+      observationIdentity: `page:loader:${id}`,
+      observationIntent: "continue",
+    });
+    const before = side === "retired" ? [control(1), control(2), control(3)] : [control(1)];
+    const original = new Set(refs.actions("doc", before).values());
+    const after = side === "live" ? [control(4), control(5)] : [control(4)];
+    const updated = refs.actions("doc", after);
+    expect(new Set(updated.values()).size).toBe(after.length);
+    for (const ref of updated.values()) expect(original.has(ref)).toBe(false);
+  });
+
   it("mints a fresh ref when a re-created node's meaning changed with its identity", () => {
     const refs = new StableObservationRefs();
     const control = (identity: string, name: string, intent: string) =>

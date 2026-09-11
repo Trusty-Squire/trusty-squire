@@ -62,13 +62,16 @@ disappears and a new identity appears in the same round, the new element ADOPTS
 the retired ref only when ALL of the following hold; anything else stays
 fail-closed and mints a fresh ref:
 
-1. its durable fingerprint (`elementFingerprints`, tiers 1–3: authored DOM id /
-   semantic role+tag+name / containing region) matches the retired anchor — the
-   last-resort ordinal tier is positional and never adopts;
-2. its material action intent is byte-identical to the retired anchor's; and
-3. its `screenPath` (accessible location path) is present and identical on both
-   sides — so a same-named control that merely REPLACED the old one, or an
-   element whose location is unknown, never inherits the retired capability.
+1. its inventory-independent fingerprint (authored DOM id or semantic
+   role+tag+name, evaluated for that element alone) matches the retired anchor;
+2. its material action intent is byte-identical to the retired anchor's;
+3. its `screenPath` is present and identical on both sides;
+4. its frame namespace and document loader match the retired anchor's; and
+5. the combined match is unique among both retired anchors and live controls.
+
+A new dialog sharing a control's name cannot change this match by changing the
+inventory's fingerprint tier. Compact queries retain the last full DOM's URL,
+dynamics and rendered refs together until another full observation is emitted.
 
 **Change hashing beyond the DOM string (2026-09-08).** The canonical DOM string
 does not render iframe `src` or element geometry, so a closed-shadow challenge

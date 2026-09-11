@@ -4762,14 +4762,16 @@ function compactV2Observation(
     stage,
     semantics,
     byRef: new Map(safe.rows.map((row) => [row.ref, row])),
-    url: pageUrl,
-    dynamics: capture.dynamics,
     ...(outputFormat === "full"
-      ? { dom, renderedRefs: rendered.refs }
-      : {
-          ...(previous?.dom === undefined ? {} : { dom: previous.dom }),
-          ...(previous?.renderedRefs === undefined ? {} : { renderedRefs: previous.renderedRefs }),
-        }),
+      ? { dom, renderedRefs: rendered.refs, url: pageUrl, dynamics: capture.dynamics }
+      : sameFullDocument
+        ? {
+            dom: previous.dom,
+            renderedRefs: previous.renderedRefs,
+            url: previous.url,
+            dynamics: previous.dynamics,
+          }
+        : {}),
   };
   session.prevObserve = null;
   if (outputFormat === "compact") {

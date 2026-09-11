@@ -5589,7 +5589,10 @@ describe("Compact V2 action-map boundary", () => {
     // The dialog opens: the nav element is re-created (new backend node) and a
     // dialog control is added. Neither the nav ref nor its `*` marker may churn.
     const after = mockBrowserUseCapture(
-      [navLink("page:loader:202"), elem({ tag: "button", role: "button", visibleText: "Create API key", selector: "#create-key", observationIdentity: "page:loader:900" }) as InteractiveElement],
+      [
+        navLink("page:loader:202"),
+        { ...navLink("page:loader:900"), selector: "#dialog-docs", container: "dialog:create-api-key", screenPath: "dialog:create-api-key > link:docs" },
+      ],
       [],
     );
     h.elements = after.elements;
@@ -5662,10 +5665,13 @@ describe("Compact V2 action-map boundary", () => {
     // byte-identical, but the challenge frame moved — exactly the Groq/Cartesia
     // failure mode. dom_unchanged must not lie.
     h.captureOverride = withChallenge(64);
+    const query = await observeQuery(started.session_id, "Verify");
+    expect(query).not.toHaveProperty("dom");
     const swapped = await observe(started.session_id);
     expect(swapped).toMatchObject({ delta: true });
     expect(swapped).not.toHaveProperty("dom_unchanged");
     expect(swapped.dom).toContain("IFRAME");
+    expect(await observe(started.session_id)).toMatchObject({ dom_unchanged: true });
   });
 
   it("surfaces a failed DOM capture instead of silently emitting an empty observation", async () => {
