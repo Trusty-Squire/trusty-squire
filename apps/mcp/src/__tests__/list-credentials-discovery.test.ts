@@ -45,8 +45,13 @@ it("discovers Exa, Groq and Cartesia through MCP without returning the 68-record
   try {
     await server.connect(serverTransport);
     await client.connect(clientTransport);
-    const advertised = (await client.listTools()).tools.find((tool) => tool.name === "list_credentials")!;
-    expect(Object.keys(advertised.inputSchema.properties ?? {}).sort()).toEqual(["fields", "service"]);
+    const advertised = (await client.listTools()).tools.find(
+      (tool) => tool.name === "list_credentials",
+    )!;
+    expect(Object.keys(advertised.inputSchema.properties ?? {}).sort()).toEqual([
+      "fields",
+      "service",
+    ]);
     transcript.push({ method: "tools/list", tool: advertised });
     const call = async (args: Record<string, unknown>) => {
       const response = await client.callTool({ name: "list_credentials", arguments: args });
@@ -60,13 +65,21 @@ it("discovers Exa, Groq and Cartesia through MCP without returning the 68-record
     const full = parse(await call({}));
     expect(full.credentials).toEqual(credentials);
     const compact = parse(await call({ service: ["EXA", "groq", "Cartesia"], fields: "summary" }));
-    expect(compact.credentials).toEqual(credentials.slice(0, 3).map((row) => ({
-      reference: row.reference, service: row.service, label: row.label,
-      field_names: row.field_names, allowed_hosts: row.allowed_hosts,
-      created_at: row.created_at, stale: row.stale,
-    })));
+    expect(compact.credentials).toEqual(
+      credentials.slice(0, 3).map((row) => ({
+        reference: row.reference,
+        service: row.service,
+        label: row.label,
+        field_names: row.field_names,
+        allowed_hosts: row.allowed_hosts,
+        created_at: row.created_at,
+        stale: row.stale,
+      })),
+    );
     expect(parse(await call({ service: "exa" })).credentials).toEqual([credentials[0]]);
-    expect(parse(await call({ service: "missing", fields: "summary" }))).toEqual({ credentials: [] });
+    expect(parse(await call({ service: "missing", fields: "summary" }))).toEqual({
+      credentials: [],
+    });
     expect((await call({ service: [] })).isError).toBe(true);
     expect((await call({ fields: "full" })).isError).toBe(true);
     expect(requests).toEqual(Array(4).fill("GET /v1/vault/credentials"));
@@ -74,14 +87,27 @@ it("discovers Exa, Groq and Cartesia through MCP without returning the 68-record
     const compactBytes = Buffer.byteLength(JSON.stringify(compact));
     expect(compactBytes).toBeLessThan(fullBytes / 10);
     if (process.env.LIST_CREDENTIALS_EVIDENCE) {
-      await writeFile(process.env.LIST_CREDENTIALS_EVIDENCE, JSON.stringify({
-        environment: "Real MCP server, SDK client and ApiClient; local HTTP fixture with 68 synthetic metadata records. No production vault access.",
-        fullBytes, compactBytes, httpRequests: requests, transcript,
-      }, null, 2) + "\n");
+      await writeFile(
+        process.env.LIST_CREDENTIALS_EVIDENCE,
+        JSON.stringify(
+          {
+            environment:
+              "Real MCP server, SDK client and ApiClient; local HTTP fixture with 68 synthetic metadata records. No production vault access.",
+            fullBytes,
+            compactBytes,
+            httpRequests: requests,
+            transcript,
+          },
+          null,
+          2,
+        ) + "\n",
+      );
     }
   } finally {
     await client.close();
     await server.close();
-    await new Promise<void>((resolve, reject) => fixture.close((error) => error ? reject(error) : resolve()));
+    await new Promise<void>((resolve, reject) =>
+      fixture.close((error) => (error ? reject(error) : resolve())),
+    );
   }
 });
