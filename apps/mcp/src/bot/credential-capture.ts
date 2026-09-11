@@ -25,9 +25,8 @@ export const captureSourceSchema = z.union([
 ]);
 export type CaptureSource = z.infer<typeof captureSourceSchema>;
 
-/** Receipt naming the element a stored capture actually resolved against
- * (role/name, or a CSS selector) so the caller can tell which source the
- * vaulted value came from. */
+/** Describe the requested source as a fallback when the pinned element's
+ * descriptor is unavailable. This does not inspect the resolved element. */
 export function describeCaptureSource(source: CaptureSource): {
   role?: string;
   name?: string;

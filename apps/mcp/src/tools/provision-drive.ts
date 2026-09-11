@@ -2141,8 +2141,7 @@ for (const tool of OPERATE_TOOLS) {
       } finally {
         const baseline = sessionForCall(args.session_id)?.compactV2Previous;
         if (baseline) delete baseline.compactMapEmitted;
-        if (preProbe?.handle !== undefined)
-          await preProbe.handle.dispose().catch(() => undefined);
+        if (preProbe?.handle !== undefined) await preProbe.handle.dispose().catch(() => undefined);
       }
       const notDispatched = operatorMutationDispatchPhase() === "prepared";
       if (notDispatched)

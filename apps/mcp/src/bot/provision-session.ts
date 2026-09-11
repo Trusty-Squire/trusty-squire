@@ -8859,7 +8859,7 @@ async function readCaptureElement(handle: ElementHandle<Node>) {
         .split(/\s+/)
         .map((id) =>
           root instanceof Document || root instanceof ShadowRoot
-            ? root.getElementById(id)?.textContent ?? ""
+            ? (root.getElementById(id)?.textContent ?? "")
             : "",
         )
         .join(" ")
@@ -8872,7 +8872,9 @@ async function readCaptureElement(handle: ElementHandle<Node>) {
               .trim()
           : "";
       const name =
-        labelledBy || node.getAttribute("aria-label")?.trim() || labels ||
+        labelledBy ||
+        node.getAttribute("aria-label")?.trim() ||
+        labels ||
         node.getAttribute("title")?.trim();
       resolved_source = {
         tag,
@@ -8974,10 +8976,10 @@ async function resolveChangedPostActionSource(
         (pre.value ?? "") === value;
       if (unchanged) return null;
       return {
-      candidate_count: 1,
-      ...(value.length > 0 ? { value } : {}),
-      ...(resolved_source ? { resolved_source } : {}),
-    };
+        candidate_count: 1,
+        ...(value.length > 0 ? { value } : {}),
+        ...(resolved_source ? { resolved_source } : {}),
+      };
     }
     // Same non-unique (or still-empty) resolution as before the click — keep
     // waiting; the mutation may still be rendering.
