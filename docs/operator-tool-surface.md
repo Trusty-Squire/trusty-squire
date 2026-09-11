@@ -235,9 +235,10 @@ Pending capture storage permits unrelated plain actions and reads, including
 `capture` or `store`. A new vaulting attempt (including top-level
 `operate_extract.store`) and `operate_finish(outcome="credentials")` remain
 fenced; extraction with the original `capture.write_id` remains available.
-This exception does not relax other unresolved-mutation guards. The broker
-currently applies it only to observed or delivery-acknowledged capture results,
-not its `recovered` journal phase.
+This exception does not relax other unresolved-mutation guards. Broker recovery
+records are audit-only and preserve the capture's prior admission state, including
+across delivery acknowledgement. See the recovery-transition coverage in
+`apps/mcp/src/bot/__tests__/broker-operator.test.ts`.
 
 For the Neon success dialog structure observed on 2026-09-10 (a LABEL named
 `API token`, followed by a nested plain-DIV value and a Copy button), the

@@ -2083,7 +2083,7 @@ for (const tool of OPERATE_TOOLS) {
   if (properties !== null && typeof properties === "object")
     Object.assign(properties, { capture: captureJson });
   tool.description +=
-    " Optional capture:{store,source:{role,name?,container?}|{selector,container?}} vaults exactly one revealed source and returns metadata only; the source is resolved against the document AFTER the action's mutation settles, and a stored result names the resolved element in resolved_source. Use a value-free CSS selector for a plain-text copy field without a textbox/code role. If storage is unresolved, retry operate_extract with capture.write_id; never repeat creation. An unresolved capture does not block unrelated actions — only a new vaulting attempt is fenced.";
+    " Optional capture:{store,source:{role,name?,container?}|{selector,container?}} vaults exactly one revealed source and returns metadata only; the source is resolved against the document AFTER the action's mutation settles, and a stored result names the resolved element in resolved_source. Use a value-free CSS selector for a plain-text copy field without a textbox/code role. If storage is unresolved, retry operate_extract with capture.write_id; never repeat creation. An unresolved capture does not block unrelated actions — only a new vaulting attempt and a credentials finish stay fenced.";
   tool.jsonOutputSchema = captureOutputSchema;
   const handler = tool.handler;
   tool.handler = async (args, api, context) => {

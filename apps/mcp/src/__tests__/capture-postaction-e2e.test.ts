@@ -31,13 +31,22 @@ it("captures a created key through MCP and recovers an unchanged source without 
   const writes: unknown[] = [];
   const storeCredential = vi.fn(async (input) => {
     writes.push(input);
-    return { reference: "vault://fixture/key", service: "Groq fixture", label: "fresh",
-      field_names: ["value"], allowed_hosts: ["groq-fixture.test"],
-      created_at: "2026-09-11T00:00:00Z", updated: false };
+    return {
+      reference: "vault://fixture/key",
+      service: "Groq fixture",
+      label: "fresh",
+      field_names: ["value"],
+      allowed_hosts: ["groq-fixture.test"],
+      created_at: "2026-09-11T00:00:00Z",
+      updated: false,
+    };
   });
   const server = await buildServer(
     { setRequestingAgent: vi.fn(), storeCredential } as unknown as ApiClient,
-    undefined, undefined, undefined, undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
     { journal: new DispatchJournal(join(root, "journal.jsonl")), lineage: () => "fixture" },
   );
   const [transport, peer] = InMemoryTransport.createLinkedPair();
@@ -46,7 +55,10 @@ it("captures a created key through MCP and recovers an unchanged source without 
   await client.connect(transport);
   const transcript: unknown[] = [];
   const evidence = process.env.CAPTURE_TEST_EVIDENCE_DIR;
-  const capture = { store: { service: "Groq fixture", label: "fresh" }, source: { role: "textbox" } };
+  const capture = {
+    store: { service: "Groq fixture", label: "fresh" },
+    source: { role: "textbox" },
+  };
   const call = async (name: string, args: Record<string, unknown>) => {
     const result = await client.callTool({ name, arguments: { session_id: "fixture", ...args } });
     transcript.push({ name, arguments: args, response: result });
@@ -65,15 +77,26 @@ it("captures a created key through MCP and recovers an unchanged source without 
     if (evidence) await page.screenshot({ path: join(evidence, "before-create.png") });
     const created = await call("operate_click", { ref: "@create", capture });
     expect(created.isError).not.toBe(true);
-    expect(storeCredential).toHaveBeenLastCalledWith(expect.objectContaining({ value: "gsk_fixture_created" }));
-    expect(created.structuredContent).toMatchObject({ stored: true,
-      resolved_source: { tag: "input", role: "textbox", name: "API key" } });
+    expect(storeCredential).toHaveBeenLastCalledWith(
+      expect.objectContaining({ value: "gsk_fixture_created" }),
+    );
+    expect(created.structuredContent).toMatchObject({
+      stored: true,
+      resolved_source: { tag: "input", role: "textbox", name: "API key" },
+    });
     expect(JSON.stringify(created)).not.toContain("gsk_fixture_created");
     if (evidence) await page.screenshot({ path: join(evidence, "after-create.png") });
 
-    await page.setContent(`<h1>Unchanged creation result</h1><label>Display name <input value="My key display name"></label><button onclick="document.body.dataset.clicks = String(Number(document.body.dataset.clicks || 0) + 1)">Create key</button>`);
+    await page.setContent(
+      `<h1>Unchanged creation result</h1><label>Display name <input value="My key display name"></label><button onclick="document.body.dataset.clicks = String(Number(document.body.dataset.clicks || 0) + 1)">Create key</button>`,
+    );
     const unresolved = await call("operate_click", { ref: "@create", capture });
-    expect(unresolved.structuredContent).toMatchObject({ stored: false, storage: "unknown", error: "capture_pre_action_only", retry: "extract_only" });
+    expect(unresolved.structuredContent).toMatchObject({
+      stored: false,
+      storage: "unknown",
+      error: "capture_pre_action_only",
+      retry: "extract_only",
+    });
     expect(JSON.stringify(unresolved)).not.toContain("My key display name");
     expect(storeCredential).toHaveBeenCalledTimes(1);
     const write_id = (unresolved.structuredContent as Record<string, unknown>).write_id;
@@ -82,18 +105,38 @@ it("captures a created key through MCP and recovers an unchanged source without 
     expect(await page.locator("body").getAttribute("data-clicks")).toBe("2");
     expect((await call("operate_click", { ref: "@create", capture })).isError).toBe(true);
     expect((await call("operate_extract", { store: capture.store })).isError).toBe(true);
-    expect((await call("operate_finish", { outcome: "credentials", store: capture.store })).isError).toBe(true);
+    expect(
+      (await call("operate_finish", { outcome: "credentials", store: capture.store })).isError,
+    ).toBe(true);
     expect(storeCredential).toHaveBeenCalledTimes(1);
-    await page.setContent('<h1>Delayed result ready for extraction</h1><label>API key <input value="gsk_fixture_recovered"></label>');
+    await page.setContent(
+      '<h1>Delayed result ready for extraction</h1><label>API key <input value="gsk_fixture_recovered"></label>',
+    );
     const recovered = await call("operate_extract", { capture: { ...capture, write_id } });
-    expect(recovered.structuredContent).toMatchObject({ stored: true, write_id,
-      resolved_source: { tag: "input", role: "textbox", name: "API key" } });
-    expect(storeCredential).toHaveBeenLastCalledWith(expect.objectContaining({ value: "gsk_fixture_recovered", write_id }));
+    expect(recovered.structuredContent).toMatchObject({
+      stored: true,
+      write_id,
+      resolved_source: { tag: "input", role: "textbox", name: "API key" },
+    });
+    expect(storeCredential).toHaveBeenLastCalledWith(
+      expect.objectContaining({ value: "gsk_fixture_recovered", write_id }),
+    );
     expect(state.action).toHaveBeenCalledTimes(3);
-    if (evidence) await writeFile(join(evidence, "mcp-capture-transcript.json"), JSON.stringify({
-      scope: "MCP client/server with real Chromium capture; action adapter clicks the fixture button; vault API is an in-memory test double. All values are synthetic.",
-      transcript, vaultRequests: writes, dispatchedClicks: state.action.mock.calls.length,
-    }, null, 2));
+    if (evidence)
+      await writeFile(
+        join(evidence, "mcp-capture-transcript.json"),
+        JSON.stringify(
+          {
+            scope:
+              "MCP client/server with real Chromium capture; action adapter clicks the fixture button; vault API is an in-memory test double. All values are synthetic.",
+            transcript,
+            vaultRequests: writes,
+            dispatchedClicks: state.action.mock.calls.length,
+          },
+          null,
+          2,
+        ),
+      );
   } finally {
     await client.close();
     await server.close();
