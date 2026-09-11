@@ -322,6 +322,92 @@ describe("interleaved observation DOM", () => {
     }
   });
 
+  it("preserves form submitter and checkbox proxy refs when a dialog remounts their owners", async () => {
+    const page = await browser.newPage();
+    const refs = new StableObservationRefs();
+    const read = async () => {
+      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const handles = refs.actions("doc", capture.elements);
+      const controls = new Map(capture.elements.map((el) => [el.id, el]));
+      return { capture, handles, controls };
+    };
+    try {
+      await page.setContent(`
+        <style>
+          input[type=checkbox] { position:absolute; opacity:0; width:1px; height:1px }
+          label { display:block; width:160px; height:32px }
+        </style>
+        <main>
+          <form id="settings" action="https://merchant.example/save" method="post">
+            <button id="submit">Save</button>
+          </form>
+          <label id="proxy" for="choice">Enable API keys</label>
+          <input id="choice" type="checkbox" name="enabled">
+        </main>
+      `);
+      const before = await read();
+      expect(before.controls.get("proxy")).toMatchObject({ role: "checkbox" });
+      await page.locator("main").evaluate((main) => {
+        main.replaceWith(main.cloneNode(true));
+        document.body.insertAdjacentHTML("beforeend",
+          '<div role="dialog" aria-label="Create key"><button id="create" type="button">Create key</button></div>');
+      });
+      const after = await read();
+      for (const id of ["submit", "proxy"]) {
+        const old = before.controls.get(id)!;
+        const fresh = after.controls.get(id)!;
+        expect(before.handles.get(old)).toBeTruthy();
+        expect(fresh.observationIdentity).not.toBe(old.observationIdentity);
+        expect(fresh.observationOwnership).not.toBe(old.observationOwnership);
+        expect(fresh.observationIntent).toBe(old.observationIntent);
+        expect(fresh.screenPath).toBe(old.screenPath);
+        expect(after.handles.get(fresh)).toBe(before.handles.get(old));
+      }
+      const prior = new Set(before.handles.values());
+      const rendered = serializeBrowserUseDOM(after.capture.root, {
+        ref: (node) => after.handles.get(after.capture.nodeElements.get(node.id)!)!,
+        previous: prior,
+      });
+      expect([...prior].filter((ref) => !rendered.refs.includes(ref))).toEqual([]);
+      for (const ref of prior) {
+        expect(rendered.dom.split("\n").find((line) => line.includes(ref))).not.toContain("*");
+      }
+      const added = after.handles.get(after.controls.get("create")!)!;
+      expect(added).toBeTruthy();
+      expect(rendered.dom.split("\n").find((line) => line.includes(added))).toContain("*");
+      await page.locator(after.controls.get("proxy")!.selector).click();
+      expect(await page.locator("#choice").isChecked()).toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it.each(["form", "checkbox"])("retires a persisting control when its %s owner is replaced", async (kind) => {
+    const page = await browser.newPage();
+    const refs = new StableObservationRefs();
+    const read = async () => {
+      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const el = capture.elements.find((candidate) => candidate.id === "held")!;
+      return { el, ref: refs.actions("doc", capture.elements).get(el)! };
+    };
+    try {
+      await page.setContent(kind === "form"
+        ? '<form id="owner" action="https://merchant.example/save"></form><button id="held" form="owner">Save</button>'
+        : '<input id="owner" type="checkbox" style="position:absolute;opacity:0;width:1px;height:1px"><label id="held" for="owner" style="display:block;width:160px;height:32px">Enable API keys</label>');
+      const before = await read();
+      expect(before.ref).toBeTruthy();
+      await page.locator("#owner").evaluate((owner) => owner.replaceWith(owner.cloneNode(true)));
+      const after = await read();
+      expect(after.el.observationIdentity).toBe(before.el.observationIdentity);
+      expect(after.el.observationIntent).toBe(before.el.observationIntent);
+      expect(after.el.observationOwnership).not.toBe(before.el.observationOwnership);
+      expect(after.ref).toBeTruthy();
+      expect(after.ref).not.toBe(before.ref);
+    } finally {
+      await page.close();
+    }
+  });
+
   it("retires a held anchor when its form changes destination", async () => {
     const page = await browser.newPage();
     const refs = new StableObservationRefs();

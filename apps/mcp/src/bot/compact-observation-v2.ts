@@ -220,7 +220,7 @@ export class StableObservationRefs {
   private identities = new Map<string, string>();
   private anchors = new Map<
     string,
-    { intent: string; ref: string; adoptionKey: string | undefined }
+    { intent: string; ownership: string | undefined; ref: string; adoptionKey: string | undefined }
   >();
   private aliases = new Map<string, string>();
   private aliasOwners = new Map<string, string>();
@@ -278,13 +278,18 @@ export class StableObservationRefs {
       }
       let anchor = this.anchors.get(identity);
       const key = keys.get(el);
-      if (anchor === undefined || anchor.intent !== el.observationIntent) {
+      if (
+        anchor === undefined ||
+        anchor.intent !== el.observationIntent ||
+        anchor.ownership !== el.observationOwnership
+      ) {
         const recovered =
           anchor === undefined && key !== undefined && keyCounts.get(key) === 1
             ? retired.get(key)
             : undefined;
         anchor = {
           intent: el.observationIntent,
+          ownership: el.observationOwnership,
           ref: recovered ?? this.get(document, `action:${randomBytes(32).toString("base64url")}`),
           adoptionKey: key,
         };

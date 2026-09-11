@@ -69,6 +69,11 @@ fail-closed and mints a fresh ref:
 4. its frame namespace and document loader match the retired anchor's; and
 5. the combined match is unique among both retired anchors and live controls.
 
+Form submitters and checkbox label proxies record durable owner location and
+submission semantics in their intent. Physical owner IDs are captured separately:
+a persisting node whose owner changes retires its ref, while an unchanged control
+remounted with its form or checkbox can adopt within the same frame document.
+
 A new dialog sharing a control's name cannot change this match by changing the
 inventory's fingerprint tier. CDP-synthesized controls receive a location path
 at capture time from their DOM ancestry, shadow boundaries, stable authored IDs,

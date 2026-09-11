@@ -654,6 +654,7 @@ export async function captureBrowserUseDOM(
     };
     const root = build(dom.root, [], null, "", owningFrame);
     type FormIntent = {
+      identity: string;
       action: string | null;
       enctype: string;
       method: string;
@@ -709,7 +710,10 @@ export async function captureBrowserUseDOM(
         target,
         enctype,
         noValidate,
-        signature: JSON.stringify([n.id, action, method, target, enctype, noValidate]),
+        identity: n.id,
+        signature: JSON.stringify([
+          syntheticScreenPath(n), n.attributes.name, action, method, target, enctype, noValidate,
+        ]),
       };
     };
     const isSubmitter = (n: BrowserUseNode): boolean => {
@@ -750,7 +754,6 @@ export async function captureBrowserUseDOM(
       n.children.forEach(collectForms);
       if (n.contentDocument) collectForms(n.contentDocument);
     };
-    collectForms(root);
     type LabelScope = {
       nodeByDomId: Map<string, BrowserUseNode>;
       labelsFor: Map<string, BrowserUseNode[]>;
@@ -917,6 +920,7 @@ export async function captureBrowserUseDOM(
       }
       return JSON.stringify(path.reverse());
     };
+    collectForms(root);
     const iconLabel = (n: BrowserUseNode): string | null => {
       const find = (node: BrowserUseNode): string | null => {
         const value = node.attributes.alt ?? node.attributes.title ?? node.attributes["aria-label"];
@@ -1070,12 +1074,17 @@ export async function captureBrowserUseDOM(
         el.observationIdentity = `${frameIdentity(frame)}:${documentLoaders.get(frame)}:${raw.backendNodeId}`;
         // Include destinations and form ownership even when the visible name
         // stays the same. State/value and surrounding text are not identity.
+        el.observationOwnership = JSON.stringify([
+          proxyTarget === undefined ? null : rawById.get(proxyTarget.id)?.backendNodeId,
+          owners.map((owner) => owner.identity),
+        ]);
         el.observationIntent = JSON.stringify([
           ...(proxyTarget === undefined
             ? []
             : [
                 "label-proxy",
-                rawById.get(proxyTarget.id)?.backendNodeId,
+                syntheticScreenPath(proxyTarget),
+                proxyTarget.attributes.role,
                 proxyTarget.attributes.type,
                 proxyTarget.attributes.name,
               ]),
@@ -1104,6 +1113,7 @@ export async function captureBrowserUseDOM(
         if (submitter && n.attributes.form !== undefined && !formOwners.has(raw.backendNodeId)) {
           delete el.observationIdentity;
           delete el.observationIntent;
+          delete el.observationOwnership;
         }
       }
       if (el) {
