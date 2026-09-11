@@ -1128,6 +1128,42 @@ export function safeBlockersV2(
     }
     return false;
   };
+  const challengeFrames = nodes.filter(
+    (node) =>
+      ["iframe", "frame"].includes(nodeTagV2(node)) &&
+      CHALLENGE_MARKER_RE.test(
+        [node.attributes.src, node.attributes.title, node.attributes.id].join(" "),
+      ),
+  );
+  const widgets = [
+    ...challengeFrames,
+    ...nodes.filter(
+      (node) =>
+        (node.attributes.class ?? "").split(/\s+/).includes("cf-turnstile") &&
+        !challengeFrames.some((frame) => withinSubtree(frame, node)),
+    ),
+  ];
+  const solvedWidgets = new Set(
+    widgets.filter((widget) => {
+      if (visibleFor.get(widget) !== true) return true;
+      const parent = parentFor.get(widget);
+      const boundary =
+        challengeFrames.includes(widget) &&
+        parent?.nodeType === 1 &&
+        widgets.filter((candidate) => withinSubtree(candidate, parent)).length === 1
+          ? parent
+          : widget;
+      return (
+        nodes.some(
+          (node) =>
+            visibleFor.get(node) === true &&
+            withinSubtree(node, widget) &&
+            CHALLENGE_SUCCESS_RE.test(blockerTextV2(node) ?? ""),
+        ) ||
+        [...solvedChallengeSignals].some((signal) => withinSubtree(signal, boundary))
+      );
+    }),
+  );
   const blockers: SafeBlockerV2[] = [];
   for (const challengeRoot of challengeRoots) {
     if (blockers.length >= BLOCKER_MAX_ITEMS) break;
@@ -1141,27 +1177,13 @@ export function safeBlockersV2(
       descendantsV2(node).forEach(collectControls);
     };
     collectControls(challengeRoot);
-    // Turnstile renders its hidden response and host-page success text beside
-    // the iframe. Expand only to an element parent that contains this one
-    // challenge root; a shared multi-widget parent cannot safely associate a
-    // solved signal with either widget.
-    const rootParent = parentFor.get(challengeRoot);
-    const solutionBoundary =
-      ["iframe", "frame"].includes(nodeTagV2(challengeRoot)) &&
-      rootParent?.nodeType === 1 &&
-      challengeRoots.filter((root) => withinSubtree(root, rootParent)).length === 1
-        ? rootParent
-        : challengeRoot;
-    const solutionNodes: BrowserUseNode[] = [];
-    const collectSolutionNodes = (node: BrowserUseNode): void => {
-      if (visibleFor.get(node) === true) solutionNodes.push(node);
-      descendantsV2(node).forEach(collectSolutionNodes);
-    };
-    collectSolutionNodes(solutionBoundary);
-    const challengeSolved =
-      solutionNodes.some((node) => CHALLENGE_SUCCESS_RE.test(blockerTextV2(node) ?? "")) ||
-      [...solvedChallengeSignals].some((signal) => withinSubtree(signal, solutionBoundary));
-    if (challengeSolved) continue;
+    const containedWidgets = widgets.filter((widget) => withinSubtree(widget, challengeRoot));
+    if (
+      containedWidgets.length > 0 &&
+      containedWidgets.every((widget) => solvedWidgets.has(widget))
+    ) {
+      continue;
+    }
     const namedChallengeControls = [...controls].filter((node) =>
       CHALLENGE_SIGNAL_RE.test(blockerTextV2(node) ?? ""),
     );

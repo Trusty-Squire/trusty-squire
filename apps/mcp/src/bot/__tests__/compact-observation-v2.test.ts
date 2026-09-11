@@ -550,7 +550,7 @@ describe("compact observation v2", () => {
       expect(safeBlockersV2(root)).toEqual([]);
     });
 
-    it("stops reporting the challenge when its host wrapper shows success", () => {
+    it("keeps unrelated host success blocked until a real token arrives", () => {
       const root = hostPage([
         node("form", {
           nodeName: "FORM",
@@ -559,6 +559,77 @@ describe("compact observation v2", () => {
             text("success", "Success!"),
             responseInput("response", ""),
           ],
+        }),
+      ]);
+      expect(safeBlockersV2(root)).toEqual([
+        {
+          kind: "challenge",
+          text: "Widget containing a Cloudflare security challenge",
+          target: "unavailable",
+        },
+      ]);
+      root.children[0].children[2].attributes.value = "0.token123";
+      expect(safeBlockersV2(root)).toEqual([]);
+    });
+
+    it.each(["token", "success text", "wrapper state"])(
+      "keeps a shared challenge ancestor blocked when only one widget has %s",
+      (signal) => {
+        const secondResponse = responseInput("response-b", "");
+        const root = hostPage([
+          node("section", {
+            attributes: { class: "captcha-section" },
+            children: [
+              node("wrapper-a", {
+                attributes: {
+                  class: "cf-turnstile",
+                  ...(signal === "wrapper state" ? { "data-state": "success" } : {}),
+                },
+                children: [
+                  challengeIframe("frame-a", signal === "success text" ? "Success!" : undefined),
+                  responseInput("response-a", signal === "token" ? "0.token123" : ""),
+                ],
+              }),
+              node("wrapper-b", {
+                attributes: { class: "cf-turnstile" },
+                children: [challengeIframe("frame-b"), secondResponse],
+              }),
+            ],
+          }),
+        ]);
+        expect(safeBlockersV2(root)).toEqual([
+          {
+            kind: "challenge",
+            text: "Widget containing a Cloudflare security challenge",
+            target: "unavailable",
+          },
+        ]);
+        secondResponse.attributes.value = "0.token456";
+        expect(safeBlockersV2(root)).toEqual([]);
+      },
+    );
+
+    it("does not associate a shared sibling token with multiple iframe widgets", () => {
+      const root = hostPage([
+        node("section", {
+          attributes: { class: "captcha-section" },
+          children: [
+            challengeIframe("frame-a"),
+            challengeIframe("frame-b"),
+            responseInput("response", "0.token123"),
+          ],
+        }),
+      ]);
+      expect(safeBlockersV2(root)).toHaveLength(1);
+    });
+
+    it("omits a collapsed iframe inside a challenge wrapper", () => {
+      const frame = challengeIframe("frame");
+      frame.visible = false;
+      const root = hostPage([
+        node("wrapper", {
+          attributes: { class: "cf-turnstile" },
+          children: [frame, responseInput("response", "")],
         }),
       ]);
       expect(safeBlockersV2(root)).toEqual([]);

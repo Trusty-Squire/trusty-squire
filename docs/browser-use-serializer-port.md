@@ -59,6 +59,10 @@ A solved Turnstile widget no longer blocks: when its hidden response input
 (`cf-turnstile-response` / `cf-chl-widget-*_response`) carries a non-empty token,
 its `.cf-turnstile` wrapper reports `data-state="success"`, or the widget boundary
 itself renders success text, the challenge is omitted from `semantic.blockers`.
+Completion is associated with each widget before shared challenge containers are
+collapsed: every contained widget must be solved or hidden. A host wrapper can
+associate a token with its sole widget, but unrelated host success text does not
+clear a challenge.
 This reports observed evidence and adds no action or payment gate. Missing evidence
 is not proof the page is unblocked. Startup can precede a late-rendering error;
 use a fresh observation to distinguish timing from extraction loss.
