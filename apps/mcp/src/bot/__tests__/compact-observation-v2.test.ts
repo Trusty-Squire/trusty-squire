@@ -443,6 +443,148 @@ describe("compact observation v2", () => {
     ]);
   });
 
+  describe("solved Turnstile challenge", () => {
+    const node = (id: string, overrides: Partial<BrowserUseNode>): BrowserUseNode => ({
+      id,
+      nodeType: 1,
+      nodeName: "DIV",
+      value: "",
+      attributes: {},
+      visible: true,
+      snapshot: true,
+      bounds: null,
+      cursor: null,
+      scrollable: false,
+      showScroll: false,
+      scrollText: "",
+      clickListener: false,
+      axRole: null,
+      axProperties: [],
+      axChildIds: null,
+      shadowType: null,
+      hiddenElements: [],
+      hiddenContent: false,
+      children: [],
+      contentDocument: null,
+      ...overrides,
+    });
+    const text = (id: string, value: string): BrowserUseNode =>
+      node(id, { nodeType: 3, nodeName: "#text", value });
+    const challengeIframe = (id: string, innerText?: string): BrowserUseNode =>
+      node(id, {
+        nodeName: "IFRAME",
+        attributes: {
+          title: "Widget containing a Cloudflare security challenge",
+          src: "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile",
+        },
+        contentDocument:
+          innerText === undefined
+            ? null
+            : node(`${id}-doc`, {
+                nodeType: 9,
+                nodeName: "#document",
+                children: [text(`${id}-t`, innerText)],
+              }),
+      });
+    const responseInput = (id: string, token: string): BrowserUseNode =>
+      node(id, {
+        nodeName: "INPUT",
+        attributes: { type: "hidden", name: "cf-turnstile-response", value: token },
+      });
+    const hostPage = (children: BrowserUseNode[]): BrowserUseNode =>
+      node("root", { nodeType: 9, nodeName: "#document", children });
+
+    it("keeps reporting an unsolved widget with an empty response token", () => {
+      const root = hostPage([
+        node("wrapper", {
+          attributes: { class: "cf-turnstile" },
+          children: [challengeIframe("frame"), responseInput("response", "")],
+        }),
+      ]);
+      expect(safeBlockersV2(root)).toEqual([
+        {
+          kind: "challenge",
+          text: "Widget containing a Cloudflare security challenge",
+          target: "unavailable",
+        },
+      ]);
+    });
+
+    it("stops reporting the challenge once the response token is populated", () => {
+      const root = hostPage([
+        node("wrapper", {
+          attributes: { class: "cf-turnstile" },
+          children: [challengeIframe("frame"), responseInput("response", "0.token123")],
+        }),
+      ]);
+      expect(safeBlockersV2(root)).toEqual([]);
+    });
+
+    it("stops reporting the challenge for a cf-chl-widget response token sibling", () => {
+      const root = hostPage([
+        node("form", {
+          nodeName: "FORM",
+          children: [
+            challengeIframe("frame"),
+            node("response", {
+              nodeName: "INPUT",
+              attributes: {
+                type: "hidden",
+                name: "cf-chl-widget-abc123_response",
+                value: "0.token123",
+              },
+            }),
+          ],
+        }),
+      ]);
+      expect(safeBlockersV2(root)).toEqual([]);
+    });
+
+    it("stops reporting the challenge when the cf-turnstile wrapper reports success", () => {
+      const root = hostPage([
+        node("wrapper", {
+          attributes: { class: "cf-turnstile", "data-state": "success" },
+          children: [challengeIframe("frame")],
+        }),
+      ]);
+      expect(safeBlockersV2(root)).toEqual([]);
+    });
+
+    it("stops reporting the challenge when its host wrapper shows success", () => {
+      const root = hostPage([
+        node("form", {
+          nodeName: "FORM",
+          children: [
+            challengeIframe("frame"),
+            text("success", "Success!"),
+            responseInput("response", ""),
+          ],
+        }),
+      ]);
+      expect(safeBlockersV2(root)).toEqual([]);
+    });
+
+    it("never lets one solved widget clear a different unsolved widget", () => {
+      const root = hostPage([
+        node("wrapper-a", {
+          attributes: { class: "cf-turnstile" },
+          children: [challengeIframe("frame-a"), responseInput("response-a", "0.token123")],
+        }),
+        node("wrapper-b", {
+          attributes: { class: "cf-turnstile" },
+          children: [challengeIframe("frame-b"), responseInput("response-b", "")],
+        }),
+      ]);
+      expect(safeBlockersV2(root)).toEqual([
+        {
+          kind: "challenge",
+          text: "Widget containing a Cloudflare security challenge",
+          target: "unavailable",
+        },
+      ]);
+    });
+  });
+
   it("shrinks a URL that exceeds the wire budget before packing so the first page keeps multiple rows", () => {
     const dense = Array.from({ length: 40 }, (_, index) =>
       element({

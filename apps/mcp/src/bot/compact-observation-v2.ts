@@ -965,6 +965,15 @@ const CHALLENGE_SIGNAL_RE =
 const CHALLENGE_MARKER_RE = /(?:captcha|turnstile|challenges?\.cloudflare\.com|cf[-_]challenge)/i;
 const VALIDATION_SIGNAL_RE =
   /\b(?:error|failed|invalid|required|incorrect|missing|must|cannot|can't|couldn't|not valid|not found|please (?:complete|enter|select|choose|provide)|try again)\b/i;
+// A solved Turnstile widget is observable without entering the cross-origin
+// iframe: the host page's hidden response input carries a non-empty token, or
+// the `.cf-turnstile` wrapper flips `data-state="success"`. A collapsed widget
+// iframe is already excluded by the visibility filter. Without these signals a
+// solved challenge kept reporting the identical `blocked: true` blocker.
+const TURNSTILE_RESPONSE_NAME_RE = /^(?:cf-turnstile-response|cf-chl-widget-\S+_response)$/;
+const TURNSTILE_WIDGET_ID_RE = /^cf-chl-widget-\S+_response$/;
+const CHALLENGE_SUCCESS_RE =
+  /^(?:success(?:fully)?|verification (?:complete|successful)|challenge complete)[.!]?$/i;
 
 function nodeTagV2(node: BrowserUseNode): string {
   return node.nodeType === 1 ? node.nodeName.toLowerCase() : "";
@@ -1097,6 +1106,28 @@ export function safeBlockersV2(
     return true;
   });
 
+  const solvedChallengeSignals = new Set<BrowserUseNode>();
+  for (const node of nodes) {
+    const name = (node.attributes.name ?? "").trim().toLowerCase();
+    const id = (node.attributes.id ?? "").trim().toLowerCase();
+    const isResponseInput =
+      nodeTagV2(node) === "input" &&
+      (TURNSTILE_RESPONSE_NAME_RE.test(name) || TURNSTILE_WIDGET_ID_RE.test(id));
+    const isSuccessWrapper =
+      (node.attributes.class ?? "").split(/\s+/).includes("cf-turnstile") &&
+      (node.attributes["data-state"] ?? "").toLowerCase() === "success";
+    if ((isResponseInput && (node.attributes.value ?? "").trim() !== "") || isSuccessWrapper) {
+      solvedChallengeSignals.add(node);
+    }
+  }
+  const withinSubtree = (node: BrowserUseNode, ancestor: BrowserUseNode): boolean => {
+    let current: BrowserUseNode | undefined = node;
+    while (current !== undefined) {
+      if (current === ancestor) return true;
+      current = parentFor.get(current);
+    }
+    return false;
+  };
   const blockers: SafeBlockerV2[] = [];
   for (const challengeRoot of challengeRoots) {
     if (blockers.length >= BLOCKER_MAX_ITEMS) break;
@@ -1110,6 +1141,27 @@ export function safeBlockersV2(
       descendantsV2(node).forEach(collectControls);
     };
     collectControls(challengeRoot);
+    // Turnstile renders its hidden response and host-page success text beside
+    // the iframe. Expand only to an element parent that contains this one
+    // challenge root; a shared multi-widget parent cannot safely associate a
+    // solved signal with either widget.
+    const rootParent = parentFor.get(challengeRoot);
+    const solutionBoundary =
+      ["iframe", "frame"].includes(nodeTagV2(challengeRoot)) &&
+      rootParent?.nodeType === 1 &&
+      challengeRoots.filter((root) => withinSubtree(root, rootParent)).length === 1
+        ? rootParent
+        : challengeRoot;
+    const solutionNodes: BrowserUseNode[] = [];
+    const collectSolutionNodes = (node: BrowserUseNode): void => {
+      if (visibleFor.get(node) === true) solutionNodes.push(node);
+      descendantsV2(node).forEach(collectSolutionNodes);
+    };
+    collectSolutionNodes(solutionBoundary);
+    const challengeSolved =
+      solutionNodes.some((node) => CHALLENGE_SUCCESS_RE.test(blockerTextV2(node) ?? "")) ||
+      [...solvedChallengeSignals].some((signal) => withinSubtree(signal, solutionBoundary));
+    if (challengeSolved) continue;
     const namedChallengeControls = [...controls].filter((node) =>
       CHALLENGE_SIGNAL_RE.test(blockerTextV2(node) ?? ""),
     );

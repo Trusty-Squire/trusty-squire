@@ -1866,6 +1866,35 @@ describe("interleaved observation DOM", () => {
       await page.close();
     }
   });
+  it("clears a Turnstile blocker when the captured hidden response becomes non-empty", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(`
+        <div class="turnstile-slot">
+          <iframe title="Widget containing a Cloudflare security challenge"
+            style="width:300px;height:80px"></iframe>
+          <input type="hidden" name="cf-turnstile-response" value="">
+        </div>
+      `);
+
+      const unsolved = await captureThroughController(page);
+      expect(safeBlockersV2(unsolved.root)).toEqual([
+        {
+          kind: "challenge",
+          text: "Widget containing a Cloudflare security challenge",
+          target: "unavailable",
+        },
+      ]);
+
+      await page.locator('[name="cf-turnstile-response"]').evaluate((input) => {
+        (input as HTMLInputElement).value = "0.fixture-token";
+      });
+      const solved = await captureThroughController(page);
+      expect(safeBlockersV2(solved.root)).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  });
   it("attaches a blocker ref only when the challenge control is grounded", async () => {
     const page = await browser.newPage();
     try {
