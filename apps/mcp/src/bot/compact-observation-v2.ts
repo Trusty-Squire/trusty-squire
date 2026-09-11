@@ -1126,9 +1126,9 @@ export function safeBlockersV2(
   const challengeFrames = nodes.filter(
     (node) =>
       ["iframe", "frame"].includes(nodeTagV2(node)) &&
-      CHALLENGE_MARKER_RE.test(
+      (CHALLENGE_MARKER_RE.test(
         [node.attributes.src, node.attributes.title, node.attributes.id].join(" "),
-      ),
+      ) || CHALLENGE_SIGNAL_RE.test(node.attributes.title ?? "")),
   );
   const widgets = [
     ...challengeFrames,
