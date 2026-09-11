@@ -23,6 +23,7 @@ import { parse as parseToml } from "smol-toml";
 import { parse as parseYaml } from "yaml";
 import type * as BotModule from "../bot/index.js";
 import type * as GoogleLoginModule from "../bot/google-login.js";
+import type * as LoginStateModule from "../bot/login-state.js";
 import type * as ProfileModule from "../bot/profile.js";
 
 // Module-level mocks for the install pipeline's external collaborators.
@@ -71,6 +72,19 @@ vi.mock("../bot/google-login.js", async (importOriginal) => {
     // housekeeper harvest holding the profile lock) it blocks ~15s + retries
     // and times the suite out. An e2e must not launch a real browser — stub it.
     detectActiveProviderSessions: vi.fn(async () => ["google"] as const),
+    openInstallConfirmInBotChrome: vi.fn(async (options) => {
+      await options.pollUntilClaimed(true);
+      return { status: "claimed" as const };
+    }),
+  };
+});
+
+vi.mock("../bot/login-state.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof LoginStateModule>();
+  return {
+    ...actual,
+    clearBrowserProfile: vi.fn(),
+    clearProviderCookies: vi.fn(async () => true),
   };
 });
 
@@ -88,14 +102,20 @@ vi.mock("../bot/profile.js", async (importOriginal) => {
 // Imported after the vi.mock calls so connect() sees the mocks. The
 // install/cli.ts module pulls in api-client + bot at top level, so
 // this ordering is load-bearing.
-import { detectActiveProviderSessions } from "../bot/google-login.js";
+import {
+  detectActiveProviderSessions,
+  openInstallConfirmInBotChrome,
+} from "../bot/google-login.js";
+import { clearBrowserProfile, clearProviderCookies } from "../bot/login-state.js";
+import { withProfileOperationGuard } from "../bot/profile.js";
+import { installPoll } from "../api-client.js";
 import { connect, resolveServerLaunch } from "../install/cli.js";
 import { AGENTS } from "../install/agents.js";
 import { openSessionStorage } from "../session.js";
 import { VERSION } from "../version.js";
 import { nativeLaunchSpecFromInstalledConfig } from "../../scripts/native-launch-diagnostics.mjs";
 
-const TARGETS = ["claude-code", "codex", "goose", "cursor", "opencode"] as const;
+const TARGETS = ["claude-code", "codex", "goose", "cursor", "hermes", "opencode"] as const;
 
 let originalHome: string | undefined;
 let originalXdg: string | undefined;
@@ -134,6 +154,11 @@ async function readSquireConfig(target: (typeof TARGETS)[number]): Promise<Parse
       const squire = asRecord(asRecord(root.extensions, "goose extensions").squire, "squire");
       return { command: squire.cmd, args: squire.args, env: squire.envs };
     }
+    case "hermes": {
+      const root = asRecord(parseYaml(raw), "hermes config");
+      const squire = asRecord(asRecord(root.mcp_servers, "hermes mcp_servers").squire, "squire");
+      return { command: squire.command, args: squire.args, env: squire.env };
+    }
     case "opencode": {
       const root = asRecord(parseJsonc(raw), "opencode config");
       const squire = asRecord(asRecord(root.mcp, "opencode mcp").squire, "squire");
@@ -149,6 +174,7 @@ function expectSquireConfig(
   target: (typeof TARGETS)[number],
   registryEnabled: boolean,
   accountId = "acct_test",
+  profileDir = process.env.TRUSTY_SQUIRE_PROFILE_DIR,
 ): void {
   const launch = resolveServerLaunch();
   expect(config.command).toBe(launch.command);
@@ -167,6 +193,7 @@ function expectSquireConfig(
   expect(env).toMatchObject({
     TRUSTY_SQUIRE_AGENT_IDENTITY: target,
     TRUSTY_SQUIRE_ACCOUNT_ID: accountId,
+    TRUSTY_SQUIRE_PROFILE_DIR: profileDir,
   });
   if (registryEnabled) {
     expect(env).toMatchObject({ TRUSTY_SQUIRE_REGISTRY_URL: "https://registry.trustysquire.ai" });
@@ -327,6 +354,180 @@ describe("connect --target=<agent> writes a valid config", () => {
       expect((await (await openSessionStorage()).read())?.account_id).toBe("acct_other");
     } finally {
       vaultFetch.mockRestore();
+    }
+  });
+
+  it("reconnects Hermes in its recorded profile from lock through browser and success probe", async () => {
+    const hermesProfile = path.join(tmpHome, "profiles", "hermes");
+    const codexProfile = path.join(tmpHome, "profiles", "codex");
+    await AGENTS.hermes.writeConfig({
+      command: "node",
+      args: ["old-hermes", "server"],
+      env: {
+        TRUSTY_SQUIRE_AGENT_IDENTITY: "hermes",
+        TRUSTY_SQUIRE_ACCOUNT_ID: "acct_test",
+        TRUSTY_SQUIRE_PROFILE_DIR: hermesProfile,
+        HERMES_UNRELATED_ENV: "keep-me",
+        SECRET_FIXTURE_ENV: "must-not-be-logged",
+      },
+    });
+    await AGENTS.codex.writeConfig({
+      command: "node",
+      args: ["old-codex", "server"],
+      env: {
+        TRUSTY_SQUIRE_AGENT_IDENTITY: "codex",
+        TRUSTY_SQUIRE_ACCOUNT_ID: "acct_codex",
+        TRUSTY_SQUIRE_PROFILE_DIR: codexProfile,
+      },
+    });
+    const previous = {
+      profile: process.env.TRUSTY_SQUIRE_PROFILE_DIR,
+      account: process.env.TRUSTY_SQUIRE_ACCOUNT_ID,
+      identity: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY,
+    };
+    delete process.env.TRUSTY_SQUIRE_PROFILE_DIR;
+    delete process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
+    delete process.env.TRUSTY_SQUIRE_AGENT_IDENTITY;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await connect({
+        command: "connect",
+        target: "hermes",
+        apiBase: "https://test.invalid",
+        skipBrowser: false,
+        forceRelogin: true,
+        forceReloginProvider: "google",
+        noRegistry: false,
+        noInteractive: true,
+      });
+
+      expect(clearProviderCookies).toHaveBeenCalledWith(hermesProfile, "google");
+      expect(clearBrowserProfile).not.toHaveBeenCalled();
+      expect(openInstallConfirmInBotChrome).toHaveBeenCalledWith(
+        expect.objectContaining({ profileDir: hermesProfile }),
+      );
+      expect(detectActiveProviderSessions).toHaveBeenLastCalledWith(hermesProfile);
+      expect(withProfileOperationGuard).toHaveBeenCalledWith(hermesProfile, expect.any(Function));
+      const config = await readSquireConfig("hermes");
+      expect(config.env).toMatchObject({
+        TRUSTY_SQUIRE_AGENT_IDENTITY: "hermes",
+        TRUSTY_SQUIRE_ACCOUNT_ID: "acct_test",
+        TRUSTY_SQUIRE_PROFILE_DIR: hermesProfile,
+        HERMES_UNRELATED_ENV: "keep-me",
+        SECRET_FIXTURE_ENV: "must-not-be-logged",
+      });
+      expect(`${warn.mock.calls.flat()} ${error.mock.calls.flat()}`).not.toContain(
+        "must-not-be-logged",
+      );
+    } finally {
+      warn.mockRestore();
+      error.mockRestore();
+      if (previous.profile === undefined) delete process.env.TRUSTY_SQUIRE_PROFILE_DIR;
+      else process.env.TRUSTY_SQUIRE_PROFILE_DIR = previous.profile;
+      if (previous.account === undefined) delete process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
+      else process.env.TRUSTY_SQUIRE_ACCOUNT_ID = previous.account;
+      if (previous.identity === undefined) delete process.env.TRUSTY_SQUIRE_AGENT_IDENTITY;
+      else process.env.TRUSTY_SQUIRE_AGENT_IDENTITY = previous.identity;
+    }
+  });
+
+  it("keeps bare force-relogin as an intentional account-switch path", async () => {
+    const hermesProfile = path.join(tmpHome, "profiles", "hermes-switch");
+    await AGENTS.hermes.writeConfig({
+      command: "node",
+      args: ["old", "server"],
+      env: {
+        TRUSTY_SQUIRE_AGENT_IDENTITY: "hermes",
+        TRUSTY_SQUIRE_ACCOUNT_ID: "acct_old",
+        TRUSTY_SQUIRE_PROFILE_DIR: hermesProfile,
+      },
+    });
+    vi.mocked(installPoll).mockResolvedValueOnce({
+      status: "claimed",
+      agent_session_token: "ts_agent_new",
+      account_id: "acct_new",
+    });
+    const previousProfile = process.env.TRUSTY_SQUIRE_PROFILE_DIR;
+    const previousAccount = process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
+    delete process.env.TRUSTY_SQUIRE_PROFILE_DIR;
+    delete process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
+    try {
+      await connect({
+        command: "connect",
+        target: "hermes",
+        apiBase: "https://test.invalid",
+        skipBrowser: false,
+        forceRelogin: true,
+        noRegistry: false,
+        noInteractive: true,
+      });
+      expect(clearBrowserProfile).toHaveBeenCalledWith(hermesProfile);
+      expectSquireConfig(
+        await readSquireConfig("hermes"),
+        "hermes",
+        true,
+        "acct_new",
+        hermesProfile,
+      );
+    } finally {
+      if (previousProfile === undefined) delete process.env.TRUSTY_SQUIRE_PROFILE_DIR;
+      else process.env.TRUSTY_SQUIRE_PROFILE_DIR = previousProfile;
+      if (previousAccount === undefined) delete process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
+      else process.env.TRUSTY_SQUIRE_ACCOUNT_ID = previousAccount;
+    }
+  });
+
+  it("refuses a scoped provider refresh that returns a different account", async () => {
+    const hermesProfile = path.join(tmpHome, "profiles", "hermes-scoped");
+    await AGENTS.hermes.writeConfig({
+      command: "node",
+      args: ["old", "server"],
+      env: {
+        TRUSTY_SQUIRE_AGENT_IDENTITY: "hermes",
+        TRUSTY_SQUIRE_ACCOUNT_ID: "acct_scoped_original",
+        TRUSTY_SQUIRE_PROFILE_DIR: hermesProfile,
+      },
+    });
+    vi.mocked(installPoll).mockResolvedValueOnce({
+      status: "claimed",
+      agent_session_token: "ts_agent_unexpected",
+      account_id: "acct_scoped_unexpected",
+    });
+    const previousProfile = process.env.TRUSTY_SQUIRE_PROFILE_DIR;
+    const previousAccount = process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
+    delete process.env.TRUSTY_SQUIRE_PROFILE_DIR;
+    delete process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exit = vi.spyOn(process, "exit").mockImplementation((code) => {
+      throw new Error(`exit:${code}`);
+    });
+    try {
+      await expect(
+        connect({
+          command: "connect",
+          target: "hermes",
+          apiBase: "https://test.invalid",
+          skipBrowser: false,
+          forceRelogin: true,
+          forceReloginProvider: "google",
+          noRegistry: false,
+          noInteractive: true,
+        }),
+      ).rejects.toThrow("exit:1");
+      const config = await readSquireConfig("hermes");
+      expect(config.env).toMatchObject({
+        TRUSTY_SQUIRE_ACCOUNT_ID: "acct_scoped_original",
+        TRUSTY_SQUIRE_PROFILE_DIR: hermesProfile,
+      });
+      expect(String(error.mock.calls.flat())).not.toContain("acct_scoped_unexpected");
+    } finally {
+      exit.mockRestore();
+      error.mockRestore();
+      if (previousProfile === undefined) delete process.env.TRUSTY_SQUIRE_PROFILE_DIR;
+      else process.env.TRUSTY_SQUIRE_PROFILE_DIR = previousProfile;
+      if (previousAccount === undefined) delete process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
+      else process.env.TRUSTY_SQUIRE_ACCOUNT_ID = previousAccount;
     }
   });
 });

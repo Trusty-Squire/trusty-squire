@@ -48,6 +48,7 @@ import {
   AGENTS,
   detectInstalledAgents,
   writeClaudeCodePermissions,
+  type AgentDefinition,
   type AgentTarget,
 } from "./agents.js";
 import { detectAsn, type AsnInfo } from "../bot/index.js";
@@ -466,11 +467,30 @@ async function settings(args: Argv): Promise<void> {
 }
 
 async function connect(args: Argv): Promise<void> {
+  const { target, agent, wantInteractive } = await prepareConnect(args);
+  const context = await resolveConnectTargetContext(target, agent);
+  const canonicalProfileDir = profilePathIdentity(context.profileDir);
   try {
-    await withBrokerMaintenance(
+    await withConnectTargetEnvironment(
+      {
+        profileDir: canonicalProfileDir,
+        ...(context.accountId !== undefined ? { accountId: context.accountId } : {}),
+        agentIdentity: context.agentIdentity,
+      },
       async () =>
-        await withConnectProfileGuard(CHROME_PROFILE_DIR, (profileDir) =>
-          connectWithProfileGuard(args, profileDir),
+        await withBrokerMaintenance(
+          async () =>
+            await withConnectProfileGuard(canonicalProfileDir, (profileDir) =>
+              connectWithProfileGuard(
+                args,
+                target,
+                agent,
+                profileDir,
+                context.accountId,
+                context.agentIdentity,
+                wantInteractive,
+              ),
+            ),
         ),
     );
   } catch (err) {
@@ -482,18 +502,9 @@ async function connect(args: Argv): Promise<void> {
   }
 }
 
-export async function withConnectProfileGuard<T>(
-  profileDir: string,
-  operation: (canonicalProfileDir: string) => Promise<T>,
-): Promise<T> {
-  const canonicalProfileDir = profilePathIdentity(profileDir);
-  return await withProfileOperationGuard(canonicalProfileDir, () => operation(canonicalProfileDir));
-}
-
-async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<void> {
-  // Interactive picker (clack). Walks the user through agent + advanced setup
-  // before the browser install ceremony fires. The picker fills in args so the
-  // rest of this function is unchanged.
+async function prepareConnect(
+  args: Argv,
+): Promise<{ target: AgentTarget; agent: AgentDefinition; wantInteractive: boolean }> {
   const wantInteractive =
     !args.noInteractive &&
     shouldRunInteractive({
@@ -502,11 +513,6 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
       forceRelogin: args.forceRelogin,
     });
   if (wantInteractive) {
-    // The bot's Chrome profile may already have provider cookies from
-    // 0.8.2 — picker no longer asks about OAuth providers. The
-    // install wizard rendered in the bot's Chrome handles the
-    // Google + (optional) GitHub flow directly; the CLI just
-    // surfaces agent + advanced.
     const picker = await runInteractiveSetup({
       ...(args.target !== undefined ? { initialTarget: args.target } : {}),
       initialRegistryEnabled: !args.noRegistry,
@@ -522,9 +528,99 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
     ui.heading("Trusty Squire");
     ui.hint("Setting up this machine.");
   }
-
   const target = await resolveTarget(args.target);
-  const agent = AGENTS[target];
+  return { target, agent: AGENTS[target], wantInteractive };
+}
+
+export interface ConnectTargetContext {
+  profileDir: string;
+  accountId?: string;
+  agentIdentity: string;
+}
+
+function contextValue(
+  source: Record<string, string | undefined>,
+  key: string,
+  label: string,
+): string | undefined {
+  const raw = source[key];
+  if (raw === undefined) return undefined;
+  const value = raw.trim();
+  if (value.length === 0) throw new Error(`${label} has an empty ${key}`);
+  return value;
+}
+
+/**
+ * Resolve reconnect custody before any profile lock, broker maintenance, or
+ * browser work. Explicit process env wins over the target's recorded launch
+ * env; the recorded env wins over first-connect defaults.
+ */
+export async function resolveConnectTargetContext(
+  target: AgentTarget,
+  agent: AgentDefinition = AGENTS[target],
+  callerEnv: NodeJS.ProcessEnv = process.env,
+): Promise<ConnectTargetContext> {
+  const configured = (await agent.readConfigEnv()) ?? {};
+  const profileDir =
+    contextValue(callerEnv, "TRUSTY_SQUIRE_PROFILE_DIR", "caller environment") ??
+    contextValue(configured, "TRUSTY_SQUIRE_PROFILE_DIR", `${agent.display_name} config`) ??
+    CHROME_PROFILE_DIR;
+  const accountId =
+    contextValue(callerEnv, "TRUSTY_SQUIRE_ACCOUNT_ID", "caller environment") ??
+    contextValue(configured, "TRUSTY_SQUIRE_ACCOUNT_ID", `${agent.display_name} config`);
+  const agentIdentity =
+    contextValue(callerEnv, "TRUSTY_SQUIRE_AGENT_IDENTITY", "caller environment") ??
+    contextValue(configured, "TRUSTY_SQUIRE_AGENT_IDENTITY", `${agent.display_name} config`) ??
+    target;
+  return {
+    profileDir,
+    ...(accountId !== undefined ? { accountId } : {}),
+    agentIdentity,
+  };
+}
+
+async function withConnectTargetEnvironment<T>(
+  context: ConnectTargetContext,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const keys = [
+    "TRUSTY_SQUIRE_PROFILE_DIR",
+    "TRUSTY_SQUIRE_ACCOUNT_ID",
+    "TRUSTY_SQUIRE_AGENT_IDENTITY",
+  ] as const;
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  process.env.TRUSTY_SQUIRE_PROFILE_DIR = context.profileDir;
+  process.env.TRUSTY_SQUIRE_AGENT_IDENTITY = context.agentIdentity;
+  if (context.accountId === undefined) delete process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
+  else process.env.TRUSTY_SQUIRE_ACCOUNT_ID = context.accountId;
+  try {
+    return await operation();
+  } finally {
+    for (const key of keys) {
+      const value = previous[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+export async function withConnectProfileGuard<T>(
+  profileDir: string,
+  operation: (canonicalProfileDir: string) => Promise<T>,
+): Promise<T> {
+  const canonicalProfileDir = profilePathIdentity(profileDir);
+  return await withProfileOperationGuard(canonicalProfileDir, () => operation(canonicalProfileDir));
+}
+
+async function connectWithProfileGuard(
+  args: Argv,
+  target: AgentTarget,
+  agent: AgentDefinition,
+  profileDir: string,
+  accountId: string | undefined,
+  agentIdentity: string,
+  wantInteractive: boolean,
+): Promise<void> {
 
   // Preflight: an existing install is "connected" only when BOTH the
   // account-bound plumbing still works and the bot profile has a confirmed
@@ -532,13 +628,20 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
   // it cannot act as the user at third-party sites, so it must not skip the
   // browser confirm. Pass --force-relogin to bypass (e.g. to switch Google).
   if (!args.forceRelogin) {
-    const preflight = await checkAlreadyProvisioned();
+    const preflight = await checkAlreadyProvisioned(profileDir, accountId);
     if (preflight.kind !== "ceremony") {
       ui.divider();
-      await hydrateArgsFromStoredPreferences(args);
-      await ensureConsentRecorded(consentFromArgs(args), args.advancedConfigured === true);
+      await hydrateArgsFromStoredPreferences(args, accountId);
+      await ensureConsentRecorded(
+        consentFromArgs(args),
+        args.advancedConfigured === true,
+        accountId,
+      );
       if (preflight.kind === "unverified") {
-        await writeAgentConfig(target, agent, args, preflight.session);
+        await writeAgentConfig(target, agent, args, preflight.session, {
+          profileDir,
+          agentIdentity,
+        });
         await maybeStoreTwoCaptchaKey(args, preflight.session);
         ui.warn(preflightUnverifiedMessage(preflight.detail));
         ui.hint(
@@ -549,7 +652,7 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
       }
       // Backfill connected_providers from the bot-side marker on
       // pre-rc.5 sessions, so the preflight cache is current.
-      for (const p of preflight.providers) await recordConnectedProvider(p);
+      for (const p of preflight.providers) await recordConnectedProvider(p, accountId);
       // Connect session validation: we short-circuited because Google is
       // valid + bound, but if the bot's GitHub session validated DEAD, proactively
       // offer to reconnect it — a dead GitHub session is exactly why people re-run
@@ -559,7 +662,10 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
       const reconnectGithub =
         !preflight.providers.includes("github") && (await offerGithubReloginIfDead(args));
       if (!reconnectGithub) {
-        await writeAgentConfig(target, agent, args, preflight.session);
+        await writeAgentConfig(target, agent, args, preflight.session, {
+          profileDir,
+          agentIdentity,
+        });
         await maybeStoreTwoCaptchaKey(args, preflight.session);
         ui.success(
           `Already connected (${preflight.providers.join(" + ")}). ` +
@@ -649,11 +755,24 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
   };
   const session = await runInstallClaim(args.apiBase, target, baseSession, args.skipBrowser, {
     applyServerPrefs: !wantInteractive,
+    profileDir,
   });
   if (session === null) {
     ui.fail(
       `Install didn't complete — browser confirm never finished. ` +
         `Try again: ${ui.code("npx @trusty-squire/mcp connect")}`,
+    );
+    process.exit(1);
+  }
+  if (
+    args.forceReloginProvider !== undefined &&
+    accountId !== undefined &&
+    session.account_id !== accountId
+  ) {
+    ui.fail(
+      `The scoped ${args.forceReloginProvider} refresh returned a different Trusty Squire account. ` +
+        `Refusing to replace ${agent.display_name}'s account binding; use bare --force-relogin ` +
+        `only when you intend to switch accounts.`,
     );
     process.exit(1);
   }
@@ -677,7 +796,7 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
       fail: () => "Provider session check failed",
       // validate=true: confirm each session is LIVE (not just cookie-present),
       // so a dead-but-present GitHub session isn't shown as connected.
-      task: () => detectActiveProviderSessions(),
+      task: () => detectActiveProviderSessions(profileDir),
     });
   } catch (err) {
     console.error(
@@ -691,7 +810,7 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
 
   // Config + key land either way: the session is real and re-running connect
   // must be able to pick up from here. Only the SUCCESS claim is gated.
-  await writeAgentConfig(target, agent, args, session);
+  await writeAgentConfig(target, agent, args, session, { profileDir, agentIdentity });
   await maybeStoreTwoCaptchaKey(args, session);
 
   const complete = decideConnectComplete(providers, args.forceReloginProvider);
@@ -715,10 +834,13 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
   }
 }
 
-async function hydrateArgsFromStoredPreferences(args: Argv): Promise<void> {
+async function hydrateArgsFromStoredPreferences(
+  args: Argv,
+  accountId?: string,
+): Promise<void> {
   if (args.advancedConfigured === true) return;
   try {
-    const session = await (await openSessionStorage()).read();
+    const session = await (await openSessionStorage()).read(accountId);
     if (session === null) return;
     args.noRegistry = session.consent_skillify_telemetry !== true;
     args.consentOperatorInboxOtp = session.consent_operator_inbox_otp !== false;
@@ -917,10 +1039,13 @@ type CheckedConnectPreflight =
   | { kind: "provisioned"; providers: OAuthProviderId[]; session: SessionData }
   | { kind: "unverified"; detail: string; session: SessionData };
 
-async function checkAlreadyProvisioned(): Promise<CheckedConnectPreflight> {
+async function checkAlreadyProvisioned(
+  profileDir: string,
+  accountId?: string,
+): Promise<CheckedConnectPreflight> {
   try {
     const storage = await openSessionStorage();
-    const session = await storage.read();
+    const session = await storage.read(accountId);
     // Need the token present before we can validate it; an incomplete
     // session is decided (→ null) without an API round-trip.
     if (
@@ -948,8 +1073,8 @@ async function checkAlreadyProvisioned(): Promise<CheckedConnectPreflight> {
     // provider session. Refresh config with an explicit unverified warning.
     let providers: OAuthProviderId[] | null;
     try {
-      providers = await detectActiveProviderSessions();
-      await syncConnectedProviders(providers);
+      providers = await detectActiveProviderSessions(profileDir);
+      await syncConnectedProviders(providers, accountId);
     } catch (err) {
       const preflight = decideConnectPreflight(session, stillValid, null);
       if (preflight.kind === "unverified") {
@@ -993,10 +1118,13 @@ async function offerGithubReloginIfDead(args: Argv): Promise<boolean> {
   return true;
 }
 
-async function syncConnectedProviders(providers: OAuthProviderId[]): Promise<void> {
+async function syncConnectedProviders(
+  providers: OAuthProviderId[],
+  accountId?: string,
+): Promise<void> {
   try {
     const storage = await openSessionStorage();
-    const session = await storage.read();
+    const session = await storage.read(accountId);
     if (session === null) return;
     await storage.write({
       ...session,
@@ -1013,10 +1141,10 @@ async function syncConnectedProviders(providers: OAuthProviderId[]): Promise<voi
 // Called after a successful live provider probe so the install preflight on the
 // next run can read both providers from the session file without loading a
 // profile-dir marker.
-async function recordConnectedProvider(provider: OAuthProviderId): Promise<void> {
+async function recordConnectedProvider(provider: OAuthProviderId, accountId?: string): Promise<void> {
   try {
     const storage = await openSessionStorage();
-    const session = await storage.read();
+    const session = await storage.read(accountId);
     if (session === null) return;
     const current = new Set(session.connected_providers ?? []);
     if (current.has(provider)) return;
@@ -1042,10 +1170,14 @@ function consentFromArgs(args: Argv): InstallConsent {
   };
 }
 
-async function ensureConsentRecorded(consent: InstallConsent, overwrite: boolean): Promise<void> {
+async function ensureConsentRecorded(
+  consent: InstallConsent,
+  overwrite: boolean,
+  accountId?: string,
+): Promise<void> {
   try {
     const storage = await openSessionStorage();
-    const session = await storage.read();
+    const session = await storage.read(accountId);
     if (session === null) return;
     if (
       !overwrite &&
@@ -1073,14 +1205,18 @@ async function writeAgentConfig(
   agent: (typeof AGENTS)[AgentTarget],
   args: Argv,
   session: SessionData,
+  context?: Pick<ConnectTargetContext, "profileDir" | "agentIdentity">,
 ): Promise<void> {
   // Tokens themselves are NOT in the env — the MCP server reads them
   // from the account's 0600 JSON session file, which keeps them out of
   // any child-process listing or shell history.
   const launch = resolveServerLaunch();
   const env: Record<string, string> = {
-    TRUSTY_SQUIRE_AGENT_IDENTITY: target,
+    TRUSTY_SQUIRE_AGENT_IDENTITY: context?.agentIdentity ?? target,
   };
+  if (context !== undefined) {
+    env.TRUSTY_SQUIRE_PROFILE_DIR = context.profileDir;
+  }
   // Which account this host agent's server serves. Sessions are stored one per
   // account, so pinning it here is what keeps an ALREADY-RUNNING server on the
   // account it was launched for after someone connects a different one: the old
@@ -1147,6 +1283,7 @@ async function runInstallClaim(
     // so baseSession is authoritative — applying stale server prefs there silently
     // discarded a fresh inbox-read preference.
     applyServerPrefs: boolean;
+    profileDir: string;
   },
 ): Promise<SessionData | null> {
   console.warn(`Connecting this machine to your account…`);
@@ -1227,6 +1364,7 @@ async function runInstallClaim(
     confirmUrl: initiate.confirm_url,
     pollUntilClaimed: pollOnce,
     heartbeatMessage: () => claimHeartbeatMessage(state.value !== null),
+    profileDir: options.profileDir,
   });
 
   // rc.33 — surface the underlying error instead of letting the outer

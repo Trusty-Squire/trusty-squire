@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parse as jsoncParse } from "jsonc-parser";
-import { parse as yamlParse } from "yaml";
+import { parse as yamlParse, stringify as yamlStringify } from "yaml";
 import { parse as tomlParse, stringify as tomlStringify } from "smol-toml";
 import { AGENTS } from "../install/agents.js";
 
@@ -627,5 +627,83 @@ describe("opencode JSONC writer", () => {
     await fs.writeFile(path.join(binDir, "opencode"), "must not execute", { mode: 0o755 });
     process.env.PATH = binDir;
     expect(await AGENTS.opencode.detect()).toBe(true);
+  });
+});
+
+describe("agent config environment readers", () => {
+  for (const [target, agent] of Object.entries(AGENTS)) {
+    it(`reads the effective ${target} Squire environment`, async () => {
+      await agent.writeConfig({
+        command: "node",
+        args: ["dist/bin.js", "server"],
+        env: {
+          TRUSTY_SQUIRE_AGENT_IDENTITY: target,
+          TRUSTY_SQUIRE_ACCOUNT_ID: `acct_${target.replaceAll("-", "_")}`,
+          TRUSTY_SQUIRE_PROFILE_DIR: path.join(tmpHome, "profiles", target),
+          UNRELATED_FIXTURE_ENV: "preserved",
+        },
+      });
+
+      expect(await agent.readConfigEnv()).toMatchObject({
+        TRUSTY_SQUIRE_AGENT_IDENTITY: target,
+        TRUSTY_SQUIRE_ACCOUNT_ID: `acct_${target.replaceAll("-", "_")}`,
+        TRUSTY_SQUIRE_PROFILE_DIR: path.join(tmpHome, "profiles", target),
+        UNRELATED_FIXTURE_ENV: "preserved",
+      });
+    });
+  }
+
+  it("returns null for a first connect with no target config", async () => {
+    expect(await AGENTS.hermes.readConfigEnv()).toBeNull();
+  });
+
+  it("fails closed on malformed Hermes YAML without echoing config contents", async () => {
+    const filePath = AGENTS.hermes.config_path();
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, "mcp_servers: [secret-fixture-value\n", "utf8");
+
+    const error = await AGENTS.hermes.readConfigEnv().catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toContain("Cannot read agent config");
+    expect(String(error)).not.toContain("secret-fixture-value");
+    expect((error as Error & { cause?: unknown }).cause).toBeUndefined();
+  });
+
+  it("distinguishes an absent Hermes env from a malformed env shape", async () => {
+    const filePath = AGENTS.hermes.config_path();
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, yamlStringify({ mcp_servers: { squire: { command: "node" } } }));
+    expect(await AGENTS.hermes.readConfigEnv()).toBeNull();
+
+    await fs.writeFile(
+      filePath,
+      yamlStringify({ mcp_servers: { squire: { env: "secret-malformed-env" } } }),
+    );
+    const error = await AGENTS.hermes.readConfigEnv().catch((caught: unknown) => caught);
+    expect(String(error)).toContain("squire env must be an object");
+    expect(String(error)).not.toContain("secret-malformed-env");
+  });
+
+  it("fails closed on a non-string routing value without echoing it", async () => {
+    const filePath = AGENTS.hermes.config_path();
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(
+      filePath,
+      yamlStringify({
+        mcp_servers: { squire: { env: { TRUSTY_SQUIRE_ACCOUNT_ID: 123456789 } } },
+      }),
+    );
+    const error = await AGENTS.hermes.readConfigEnv().catch((caught: unknown) => caught);
+    expect(String(error)).toContain("TRUSTY_SQUIRE_ACCOUNT_ID must be a string");
+    expect(String(error)).not.toContain("123456789");
+  });
+
+  it("fails closed when a supported config container has the wrong shape", async () => {
+    const filePath = AGENTS.codex.config_path();
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, "mcp_servers = \"not-a-table\"\n", "utf8");
+    await expect(AGENTS.codex.readConfigEnv()).rejects.toThrow(
+      "mcp_servers must be an object",
+    );
   });
 });
