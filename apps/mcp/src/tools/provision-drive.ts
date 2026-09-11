@@ -333,8 +333,20 @@ const startSchema = z.object({
   // Multi-app operate tasks declare every host they span up front (GCP Console
   // + Firebase + the user's app). Alias of extra_allowed_hosts; both seed
   // source "start". A single-service signup passes neither.
-  allowed_hosts: z.array(z.string().min(1).max(120)).max(20).optional(),
-  extra_allowed_hosts: z.array(z.string().min(1).max(120)).max(10).optional(),
+  allowed_hosts: z
+    .array(z.string().min(1).max(120))
+    .max(20)
+    .optional()
+    .describe(
+      "Extra startup hosts; bare hostnames or wildcard subdomain patterns such as *.api.example.test.",
+    ),
+  extra_allowed_hosts: z
+    .array(z.string().min(1).max(120))
+    .max(10)
+    .optional()
+    .describe(
+      "Alias of allowed_hosts; accepts bare hostnames or wildcard subdomain patterns such as *.api.example.test.",
+    ),
   // Operate tasks that act AS the user (drive a gated app on an existing
   // account) set this so start fails closed to a connect hand-back if no live
   // Google session exists — rather than driving into a mid-task login wall.
@@ -393,8 +405,18 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
         description:
           "Optional per-session HTTP/HTTPS proxy URL with or without credentials, or unauthenticated SOCKS5 URL. HTTP/HTTPS passwords require a non-empty username; authenticated SOCKS5 is unsupported by the browser engine. Sensitive and launch-only; never returned or saved.",
       },
-      allowed_hosts: { type: "array", items: { type: "string" } },
-      extra_allowed_hosts: { type: "array", items: { type: "string" } },
+      allowed_hosts: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "Extra startup hosts; bare hostnames or wildcard subdomain patterns such as *.api.example.test.",
+      },
+      extra_allowed_hosts: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "Alias of allowed_hosts; accepts bare hostnames or wildcard subdomain patterns such as *.api.example.test.",
+      },
     },
   },
   async handler(args, api) {

@@ -2472,7 +2472,61 @@ async function observeOwned(sessionId: string, format?: "compact" | "full"): Pro
 
 function withHostScopeDenials<T extends object>(session: Session, result: T): T {
   const denials = session.browser.takeHostScopeDenials?.() ?? [];
-  return denials.length === 0 ? result : ({ ...result, scope_denials: denials } as T);
+  if (denials.length === 0) return result;
+  return {
+    ...annotateChallengeBlockersWithScope(result, denials),
+    scope_denials: denials,
+  } as T;
+}
+
+// Challenge-related hosts whose denial means an on-page challenge cannot
+// complete inside the session scope. Clerk's bot protection posts its
+// Turnstile result from per-client random subdomains of
+// *.client.protect.clerk.com plus specter.protect.clerk.com; the rest are the
+// familiar captcha families. Mirrors the challenge allowances in
+// requestHostInScope's HOST_SCOPE_ALWAYS_ALLOW_HOSTS.
+const CHALLENGE_SCOPE_HOST_RE =
+  /(?:^|\.)protect\.clerk\.com$|(?:^|\.)challenges\.cloudflare\.com$|(?:^|\.)hcaptcha\.com$|(?:^|\.)recaptcha\.net$/iu;
+
+/**
+ * Surface denied challenge hosts ON the challenge blocker itself (`cause:
+ * "scope"` with the exact hostnames) instead of leaving the host agent to
+ * correlate a `semantic.blockers` challenge with a separate `scope_denials`
+ * list. Pure: returns the input untouched (same reference) when there is
+ * nothing to annotate.
+ */
+export function annotateChallengeBlockersWithScope<T extends object>(
+  result: T,
+  denials: readonly HostScopeDenialDiagnostic[],
+): T {
+  const deniedHosts = [
+    ...new Set(
+      denials
+        .map((denial) => denial.hostname)
+        .filter((hostname) => CHALLENGE_SCOPE_HOST_RE.test(hostname)),
+    ),
+  ].sort();
+  if (deniedHosts.length === 0) return result;
+  let annotated = false;
+  const next = { ...result } as Record<string, unknown>;
+  // Query pages carry `semantic`; the Observation interface names the same
+  // shape `semantics`. Annotate whichever is present.
+  for (const key of ["semantic", "semantics"] as const) {
+    const semantics = next[key] as SafePageSemanticsV2 | undefined;
+    const blockers = semantics?.blockers;
+    if (!Array.isArray(blockers)) continue;
+    if (!blockers.some((blocker) => blocker.kind === "challenge")) continue;
+    next[key] = {
+      ...semantics,
+      blockers: blockers.map((blocker) =>
+        blocker.kind === "challenge" && blocker.cause === undefined
+          ? { ...blocker, cause: "scope" as const, cause_hosts: deniedHosts }
+          : blocker,
+      ),
+    };
+    annotated = true;
+  }
+  return annotated ? (next as T) : result;
 }
 
 export interface ScreenshotCapture {

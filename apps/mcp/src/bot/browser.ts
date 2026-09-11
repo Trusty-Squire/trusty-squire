@@ -1413,6 +1413,44 @@ const HOST_SCOPE_ALWAYS_ALLOW_HOSTS: readonly string[] = [
   "js.stripe.com",
 ];
 
+// A Clerk account portal can host its own Turnstile wrapper. Its verification
+// result is posted from per-client random subdomains, so a fixed exact-host
+// allow-set cannot cover it. These hosts are added only for an accounts.*
+// document that actually loaded Clerk assets; see clerkChallengeScopeForDocument.
+const CLERK_CHALLENGE_SCOPE_HOSTS: readonly string[] = [
+  "*.client.protect.clerk.com",
+  "specter.protect.clerk.com",
+];
+
+/**
+ * Scope the Clerk support endpoints only when the currently authorized
+ * accounts.<service> document demonstrably runs Clerk. `clerk.<service>` is
+ * the customary custom Frontend API endpoint; the protect endpoints complete
+ * Clerk's Turnstile wrapper.
+ */
+export function clerkChallengeScopeForDocument(
+  documentUrl: string,
+  hasClerkAsset: boolean,
+): readonly string[] {
+  if (!hasClerkAsset) return [];
+  let hostname: string;
+  try {
+    hostname = new URL(documentUrl).hostname.toLowerCase();
+  } catch {
+    return [];
+  }
+  if (!hostname.startsWith("accounts.")) return [];
+  const serviceHost = hostname.slice("accounts.".length);
+  if (!serviceHost.includes(".")) return [];
+  return [...CLERK_CHALLENGE_SCOPE_HOSTS, `clerk.${serviceHost}`];
+}
+
+function hostMatchesScopeHost(host: string, allowedHost: string): boolean {
+  const allowed = allowedHost.trim().toLowerCase();
+  if (allowed.startsWith("*.")) return host.endsWith(`.${allowed.slice(2)}`);
+  return host === allowed;
+}
+
 // Whether a request URL's host is inside the operator's egress scope. In-scope
 // when it matches an allowed host, shares the SAME registrable
 // domain (eTLD+1) as an already-trusted host (the merchant's own API siblings —
@@ -1433,7 +1471,7 @@ export function requestHostInScope(
   }
   const host = parsedUrl.hostname.toLowerCase();
   const bySuffix = (suffix: string): boolean => host === suffix || host.endsWith(`.${suffix}`);
-  if (allowedHosts.some((allowed) => host === allowed.toLowerCase())) return true;
+  if (allowedHosts.some((allowed) => hostMatchesScopeHost(host, allowed))) return true;
   if (siblingDomainHosts.some((allowed) => isSameRecipeDomain(host, allowed))) return true;
   if (HOST_SCOPE_AUTH_HOSTS.some(bySuffix)) return true;
   if (HOST_SCOPE_ALWAYS_ALLOW_HOSTS.some(bySuffix)) return true;
@@ -2978,6 +3016,27 @@ export class BrowserController {
     return diagnostics;
   }
 
+  private async effectiveHostScopeForFrame(
+    frame: Frame,
+    scope: { allowedHosts: readonly string[]; siblingDomainHosts: readonly string[] },
+  ): Promise<{ allowedHosts: readonly string[]; siblingDomainHosts: readonly string[] }> {
+    // This check runs only for an XHR/fetch about to be scope-judged. The
+    // document has already loaded at that point; query the inert DOM metadata
+    // rather than trusting a URL pattern alone to grant Clerk-owned endpoints.
+    const hasClerkAsset = await frame
+      .evaluate(() =>
+        Array.from(document.querySelectorAll("script[src],link[href]")).some((element) => {
+          const source = element.getAttribute("src") ?? element.getAttribute("href") ?? "";
+          return /(?:^|[./@_-])clerk(?:[./@_-]|$)/iu.test(source);
+        }),
+      )
+      .catch(() => false);
+    const clerkHosts = clerkChallengeScopeForDocument(frame.url(), hasClerkAsset);
+    return clerkHosts.length === 0
+      ? scope
+      : { ...scope, allowedHosts: [...scope.allowedHosts, ...clerkHosts] };
+  }
+
   /** One routing authority for the broker context. Clients never install routes. */
   async enableBrokerRouting(): Promise<void> {
     const context = this.context;
@@ -3019,7 +3078,11 @@ export class BrowserController {
           await route.abort("failed");
           return;
         }
-        const scope = owner.hostScopeAllowedHostsProvider?.();
+        const baseScope = owner.hostScopeAllowedHostsProvider?.();
+        const scope =
+          baseScope === undefined
+            ? undefined
+            : await owner.effectiveHostScopeForFrame(frame, baseScope);
         if (
           scope === undefined ||
           isFailFastScopeAbort(
@@ -3131,14 +3194,18 @@ export class BrowserController {
         }
         const url = route.request().url();
         const type = route.request().resourceType();
-        const scope = this.hostScopeAllowedHostsProvider?.() ?? null;
+        const baseScope = this.hostScopeAllowedHostsProvider?.() ?? null;
+        let frame: Frame | null = null;
+        try {
+          frame = route.request().frame();
+        } catch {}
+        const scope =
+          baseScope === null || frame === null
+            ? baseScope
+            : await this.effectiveHostScopeForFrame(frame, baseScope);
         if (
           isFailFastScopeAbort(url, type, scope?.allowedHosts ?? null, scope?.siblingDomainHosts)
         ) {
-          let frame: Frame | null = null;
-          try {
-            frame = route.request().frame();
-          } catch {}
           if (frame !== null && this.ownedPages.has(frame.page())) {
             this.recordHostScopeDenial(frame, url, type);
           }
