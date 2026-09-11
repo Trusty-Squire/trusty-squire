@@ -21,6 +21,7 @@ interface FrameTree {
 import type { InteractiveElement } from "./browser.js";
 import {
   browserUseBoundedContextText,
+  browserUseDynamicsSignature,
   browserUseInteractive,
   browserUseLocalContextContainer,
   browserUseOrderedHeadingContext,
@@ -78,6 +79,8 @@ export interface BrowserUseCapture {
   nodeElements: Map<string, InteractiveElement>;
   moreAbove: boolean;
   moreBelow: boolean;
+  /** Closed-shadow/iframe/frame-set structural signature (delta change hash). */
+  dynamics: string;
 }
 const rect = (v: number[] | undefined): DOMBounds | null =>
   v && v.length >= 4 ? { x: v[0]!, y: v[1]!, width: v[2]!, height: v[3]! } : null;
@@ -1234,12 +1237,21 @@ export async function captureBrowserUseDOM(
       above: window.scrollY > 0,
       below: document.documentElement.scrollHeight - window.innerHeight - window.scrollY > 0,
     }));
+    const frameUrls = page
+      .frames()
+      .map((frame) => frame.url())
+      .sort();
+    const dynamics = [
+      browserUseDynamicsSignature(root),
+      `frames\u001f${frameUrls.join("\u001f")}`,
+    ].join("\u0000");
     return {
       root,
       elements,
       nodeElements,
       moreAbove: moreAbove || scroll.above,
       moreBelow: moreBelow || scroll.below,
+      dynamics,
     };
   } finally {
     await Promise.all(sessions.map((s) => s.detach().catch(() => undefined)));

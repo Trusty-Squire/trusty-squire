@@ -3,7 +3,7 @@ import {
   withOperatorRequestContext,
 } from "../request-cancellation.js";
 import type { BrowserUseCapture } from "../browser-use-capture.js";
-import type { BrowserUseNode } from "../browser-use-serializer.js";
+import { browserUseDynamicsSignature, type BrowserUseNode } from "../browser-use-serializer.js";
 import type { InteractiveElement } from "../browser.js";
 import type { GoogleHumanChallenge } from "../google-auth-state.js";
 import { mockBrowserUseCapture } from "./browser-use-test-capture.js";
@@ -57,6 +57,7 @@ const h = vi.hoisted(() => ({
   phoneCountry: null as string | null,
   clearElementsOnClick: false,
   clickValueMutation: null as { selector: string; value: string } | null,
+  clickHook: null as (() => void) | null,
   clickPhoneCountryMutation: null as string | null,
   trackedClickFailure: null as null | {
     dispatchStatus: "not_dispatched" | "dispatched" | "unknown";
@@ -604,6 +605,7 @@ vi.mock("../browser.js", async (importOriginal) => ({
           element.ariaChecked = element.ariaChecked !== true;
         }
       }
+      if (h.clickHook !== null) h.clickHook();
       if (h.clickValueMutation !== null) {
         for (const element of h.elements as Array<Record<string, unknown>>) {
           if (element.selector === h.clickValueMutation.selector) {
@@ -1213,6 +1215,7 @@ beforeEach(() => {
   h.phoneCountry = null;
   h.clearElementsOnClick = false;
   h.clickValueMutation = null;
+  h.clickHook = null;
   h.clickPhoneCountryMutation = null;
   h.trackedClickFailure = null;
   h.autocompleteSuggestions = [];
@@ -5503,6 +5506,166 @@ describe("Compact V2 action-map boundary", () => {
     const stillBlank = await observe(started.session_id);
     expect(stillBlank).toMatchObject({ delta: true, dom_unchanged: true });
     expect(stillBlank).not.toHaveProperty("dom");
+  });
+
+  it("reports navigated:true when the document changed while a click was settling", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "I am not a robot", selector: "#challenge" }),
+    ];
+    const started = await startHarnessProvisionSession({
+      browser: new BrowserController(),
+      observationFormat: "browser-use-dom",
+      serviceUrl: "https://app.example.com/protect",
+    });
+    // A Turnstile-style protect check: the click lands, the challenge frame
+    // swaps, and the page navigates before the settle observation is taken.
+    h.clickHook = () => {
+      h.currentUrl = "https://app.example.com/protected/home";
+      h.mainDocumentEpoch += 1;
+    };
+    const observation = await act(started.session_id, {
+      kind: "click",
+      target: domRefs(started)[0]!,
+    });
+    expect(observation.navigated).toBe(true);
+    expect(observation.url).toBe("https://app.example.com/protected/home");
+  });
+
+  it("does not report navigated when the click settles on the same document", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
+    const started = await startHarnessProvisionSession({
+      browser: new BrowserController(),
+      observationFormat: "browser-use-dom",
+      serviceUrl: "https://app.example.com/dashboard",
+    });
+    const observation = await act(started.session_id, {
+      kind: "click",
+      target: domRefs(started)[0]!,
+    });
+    expect(observation).not.toHaveProperty("navigated");
+  });
+
+  it("re-emits the DOM when the URL changes without a document change", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [elem({ visibleText: "Continue", selector: "#continue" })];
+    const started = await startHarnessProvisionSession({
+      browser: new BrowserController(),
+      observationFormat: "browser-use-dom",
+      serviceUrl: "https://app.example.com/protect?attempt=1",
+    });
+    const unchanged = await observe(started.session_id);
+    expect(unchanged).toMatchObject({ delta: true, dom_unchanged: true });
+    // Same-document query-token updates (protect checks, OAuth handoffs) must
+    // still surface: the host needs to see the new URL even though the DOM
+    // string is byte-identical.
+    h.currentUrl = "https://app.example.com/protect?attempt=2";
+    const moved = await observe(started.session_id);
+    expect(moved).toMatchObject({ delta: true, url: "https://app.example.com/protect?attempt=2" });
+    expect(moved).not.toHaveProperty("dom_unchanged");
+  });
+
+  it("keeps refs stable when a dialog mount re-creates unchanged elements and reports only the dialog controls", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const navLink = (identity: string) =>
+      elem({
+        tag: "a",
+        role: "link",
+        visibleText: "Docs",
+        selector: "#docs",
+        screenPath: "nav:main > link:docs",
+        observationIdentity: identity,
+      }) as InteractiveElement;
+    const before = mockBrowserUseCapture([navLink("page:loader:101")], []);
+    h.elements = before.elements;
+    h.captureOverride = before;
+    const started = await startHarnessProvisionSession({
+      browser: new BrowserController(),
+      observationFormat: "browser-use-dom",
+      serviceUrl: "https://app.example.com/dashboard",
+    });
+    const navRef = domRefs(started)[0]!;
+    // The dialog opens: the nav element is re-created (new backend node) and a
+    // dialog control is added. Neither the nav ref nor its `*` marker may churn.
+    const after = mockBrowserUseCapture(
+      [navLink("page:loader:202"), elem({ tag: "button", role: "button", visibleText: "Create API key", selector: "#create-key", observationIdentity: "page:loader:900" }) as InteractiveElement],
+      [],
+    );
+    h.elements = after.elements;
+    h.captureOverride = after;
+    const updated = await observe(started.session_id);
+    expect(updated.removed ?? []).toEqual([]);
+    expect(domRefs(updated)).toHaveLength(2);
+    expect(domRefs(updated)).toContain(navRef);
+    const navLine = updated.dom!.split("\n").find((line) => line.includes(navRef))!;
+    expect(navLine).not.toContain("*");
+    const dialogRef = domRefs(updated).find((ref) => ref !== navRef)!;
+    const dialogLine = updated.dom!.split("\n").find((line) => line.includes(dialogRef))!;
+    expect(dialogLine).toContain("*");
+  });
+
+  it("re-emits the DOM when a closed-shadow iframe changes without a text change", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const elements = [
+      elem({ tag: "button", role: "button", visibleText: "Verify", selector: "#verify" }),
+    ] as InteractiveElement[];
+    const template = mockBrowserUseCapture(elements, []).root;
+    const node = (id: string, overrides: Partial<BrowserUseNode>): BrowserUseNode => ({
+      ...template,
+      id,
+      attributes: {},
+      children: [],
+      contentDocument: null,
+      ...overrides,
+    });
+    const withChallenge = (frameHeight: number): BrowserUseCapture => {
+      const capture = mockBrowserUseCapture(elements, []);
+      capture.root.children.push(
+        node("challenge-host", {
+          nodeName: "DIV",
+          bounds: { x: 0, y: 0, width: 300, height: frameHeight },
+          children: [
+            node("challenge-shadow", {
+              nodeType: 11,
+              nodeName: "#document-fragment",
+              shadowType: "closed",
+              children: [
+                node("challenge-frame", {
+                  nodeName: "IFRAME",
+                  attributes: { src: "https://challenges.example.com/turnstile" },
+                  bounds: { x: 0, y: 0, width: 300, height: frameHeight },
+                }),
+              ],
+            }),
+          ],
+        }),
+      );
+      // The mock derives dynamics at capture time; the real capture recomputes
+      // it inside captureBrowserUseDOM. Mirror that here after mutating the tree.
+      capture.dynamics = browserUseDynamicsSignature(capture.root);
+      return capture;
+    };
+    const initial = withChallenge(60);
+    h.elements = initial.elements;
+    h.captureOverride = initial;
+    const started = await startHarnessProvisionSession({
+      browser: new BrowserController(),
+      observationFormat: "browser-use-dom",
+      serviceUrl: "https://app.example.com/protect",
+    });
+    expect(started.dom).toContain("Closed Shadow");
+    expect(started.dom).toContain("IFRAME");
+    const unchanged = await observe(started.session_id);
+    expect(unchanged).toMatchObject({ delta: true, dom_unchanged: true });
+    // Geometry-only swap inside the closed shadow: the canonical DOM string is
+    // byte-identical, but the challenge frame moved — exactly the Groq/Cartesia
+    // failure mode. dom_unchanged must not lie.
+    h.captureOverride = withChallenge(64);
+    const swapped = await observe(started.session_id);
+    expect(swapped).toMatchObject({ delta: true });
+    expect(swapped).not.toHaveProperty("dom_unchanged");
+    expect(swapped.dom).toContain("IFRAME");
   });
 
   it("surfaces a failed DOM capture instead of silently emitting an empty observation", async () => {

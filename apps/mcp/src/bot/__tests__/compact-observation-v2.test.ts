@@ -1669,4 +1669,56 @@ describe("persistent action anchor allocator", () => {
     expect(refs.label(returned, "@continue")).toBe("@continue-3");
     expect(refs.actions("next-doc", [held]).get(held)).not.toBe(returned);
   });
+  it("keeps a ref stable when a dialog mount re-creates the node with unchanged meaning", () => {
+    // Portal/dialog mounts re-render the underlying page (new backend nodes),
+    // while the element the user sees is unchanged. The durable fingerprint
+    // (tag/role/name) plus unchanged intent must resurrect the same ref
+    // instead of churning every pre-existing control into `removed`/`*`.
+    const refs = new StableObservationRefs();
+    const navLink = (identity: string) =>
+      ({
+        tag: "a",
+        role: "link",
+        visibleText: "Docs",
+        screenPath: "nav:main > link:docs",
+        observationIdentity: identity,
+        observationIntent: JSON.stringify(["A", "link", "Docs"]),
+      }) as InteractiveElement;
+    const first = navLink("page:loader:101");
+    const original = refs.actions("doc", [first]).get(first)!;
+    const recreated = navLink("page:loader:202");
+    const dialogButton = {
+      tag: "button",
+      role: "button",
+      visibleText: "Create API key",
+      screenPath: "dialog:create-api-key > button:create",
+      observationIdentity: "page:loader:900",
+      observationIntent: JSON.stringify(["BUTTON", "button", "Create API key"]),
+    } as InteractiveElement;
+    const second = refs.actions("doc", [recreated, dialogButton]);
+    expect(second.get(recreated)).toBe(original);
+    const dialogRef = second.get(dialogButton)!;
+    expect(dialogRef).toMatch(/^@e:[A-Za-z0-9_-]{22}$/);
+    expect(dialogRef).not.toBe(original);
+  });
+  it("mints a fresh ref when a re-created node's meaning changed with its identity", () => {
+    const refs = new StableObservationRefs();
+    const control = (identity: string, name: string, intent: string) =>
+      ({
+        tag: "button",
+        role: "button",
+        visibleText: name,
+        screenPath: `form:main > button:${name.toLowerCase()}`,
+        observationIdentity: identity,
+        observationIntent: intent,
+      }) as InteractiveElement;
+    const first = control("page:loader:1", "Start", JSON.stringify(["BUTTON", "button", "Start"]));
+    const original = refs.actions("doc", [first]).get(first)!;
+    const replaced = control(
+      "page:loader:2",
+      "Cancel",
+      JSON.stringify(["BUTTON", "button", "Cancel"]),
+    );
+    expect(refs.actions("doc", [replaced]).get(replaced)).not.toBe(original);
+  });
 });

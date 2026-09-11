@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { createHmac, randomBytes } from "node:crypto";
 import type { InteractiveElement } from "./browser.js";
 import { browserUseBoundedContextText, type BrowserUseNode } from "./browser-use-serializer.js";
+import { elementFingerprints } from "./element-fingerprint.js";
 
 export const OBSERVE_V2_MAX_WIRE_BYTES = 4_096;
 export const OBSERVE_V2_MAX_TOKENS = 1_024;
@@ -200,6 +201,13 @@ export interface SafeObservationBaselineV2 {
   /** Last emitted canonical tree and its rendered stable identities. */
   dom?: string;
   renderedRefs?: string[];
+  /** Page URL at the last emission; a change forces dom re-emission. */
+  url?: string;
+  /**
+   * Closed-shadow/iframe/frame-set signature at the last emission; a change
+   * forces dom re-emission even when the rendered text is byte-identical.
+   */
+  dynamics?: string;
 }
 
 export const COMPACT_V2_HANDLE_LENGTH = 22;
@@ -210,7 +218,10 @@ export class StableObservationRefs {
   private generation = 0;
   private refs = new Map<string, string>();
   private identities = new Map<string, string>();
-  private anchors = new Map<string, { intent: string; ref: string }>();
+  private anchors = new Map<
+    string,
+    { intent: string; ref: string; fingerprint: string | undefined; screenPath: string | null }
+  >();
   private aliases = new Map<string, string>();
   private aliasOwners = new Map<string, string>();
   private reset(document: string): void {
@@ -231,9 +242,36 @@ export class StableObservationRefs {
   ): Map<InteractiveElement, string> {
     this.reset(document);
     const present = new Set(elements.map((el) => el.observationIdentity));
-    for (const identity of this.anchors.keys()) {
-      if (!present.has(identity)) this.anchors.delete(identity);
+    // A benign re-render (e.g. a dialog/portal mounting) can re-create a node
+    // and change its physical identity while the element's durable identity —
+    // tag, role, name, containing region — is unchanged. Remember the anchors
+    // retired THIS round by durable fingerprint so such elements keep their
+    // ref instead of churning (docs/observation-model.md §4.1). Adoption also
+    // requires the accessible location path (`screenPath`) to be present and
+    // unchanged on both sides: a same-named control that merely replaced the
+    // old one — or appears where the path is unknown — must stay fail-closed
+    // and never inherit the retired capability. Tier-1-3 fingerprints only:
+    // the last-resort ordinal is positional and must never silently re-bind a
+    // ref onto a different element.
+    const retired = new Map<
+      string,
+      { intent: string; ref: string; screenPath: string | null }
+    >();
+    for (const [identity, anchor] of this.anchors) {
+      if (present.has(identity)) continue;
+      this.anchors.delete(identity);
+      if (anchor.fingerprint !== undefined) {
+        if (retired.has(anchor.fingerprint)) retired.delete(anchor.fingerprint);
+        else retired.set(anchor.fingerprint, anchor);
+      }
     }
+    const fingerprints = elementFingerprints(elements);
+    const durable = (el: InteractiveElement): string | undefined => {
+      const fingerprint = fingerprints.get(el);
+      return fingerprint !== undefined && /^(?:id|name|region)\u001f/.test(fingerprint)
+        ? fingerprint
+        : undefined;
+    };
     const counts = new Map<string, number>();
     for (const el of elements) {
       if (el.observationIdentity)
@@ -247,12 +285,40 @@ export class StableObservationRefs {
         continue;
       }
       let anchor = this.anchors.get(identity);
-      if (!anchor || anchor.intent !== el.observationIntent) {
+      if (anchor === undefined) {
+        // Node identity changed this round: adopt a retired anchor only when
+        // the durable fingerprint AND the action intent are both unchanged —
+        // the element was re-created in place by a benign re-render, not
+        // replaced. Anything else mints a fresh ref.
+        const fingerprint = durable(el);
+        const recovered = fingerprint === undefined ? undefined : retired.get(fingerprint);
+        const screenPath = el.screenPath ?? null;
+        anchor =
+          recovered !== undefined &&
+          recovered.intent === el.observationIntent &&
+          recovered.screenPath !== null &&
+          recovered.screenPath === screenPath
+            ? { intent: recovered.intent, ref: recovered.ref, fingerprint, screenPath }
+            : {
+                intent: el.observationIntent,
+                ref: this.get(document, `action:${randomBytes(32).toString("base64url")}`),
+                fingerprint,
+                screenPath,
+              };
+        this.anchors.set(identity, anchor);
+      } else if (anchor.intent !== el.observationIntent) {
+        // Materially changed action in place: mint a fresh ref so the host's
+        // existing handle fails to resolve rather than aliasing the new action.
         anchor = {
           intent: el.observationIntent,
           ref: this.get(document, `action:${randomBytes(32).toString("base64url")}`),
+          fingerprint: durable(el),
+          screenPath: el.screenPath ?? null,
         };
         this.anchors.set(identity, anchor);
+      } else {
+        // Keep the adoption signal current while the node persists.
+        anchor.screenPath = el.screenPath ?? null;
       }
       handles.set(el, anchor.ref);
     }
