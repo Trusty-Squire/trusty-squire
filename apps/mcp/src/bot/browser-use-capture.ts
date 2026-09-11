@@ -19,8 +19,10 @@ interface FrameTree {
   childFrames?: FrameTree[];
 }
 import type { InteractiveElement } from "./browser.js";
+import { isFrameworkRandomDomId } from "./element-fingerprint.js";
 import {
   browserUseBoundedContextText,
+  browserUseDynamicsSignature,
   browserUseInteractive,
   browserUseLocalContextContainer,
   browserUseOrderedHeadingContext,
@@ -78,6 +80,8 @@ export interface BrowserUseCapture {
   nodeElements: Map<string, InteractiveElement>;
   moreAbove: boolean;
   moreBelow: boolean;
+  /** Closed-shadow/iframe/frame-set structural signature (delta change hash). */
+  dynamics: string;
 }
 const rect = (v: number[] | undefined): DOMBounds | null =>
   v && v.length >= 4 ? { x: v[0]!, y: v[1]!, width: v[2]!, height: v[3]! } : null;
@@ -650,6 +654,7 @@ export async function captureBrowserUseDOM(
     };
     const root = build(dom.root, [], null, "", owningFrame);
     type FormIntent = {
+      identity: string;
       action: string | null;
       enctype: string;
       method: string;
@@ -705,7 +710,16 @@ export async function captureBrowserUseDOM(
         target,
         enctype,
         noValidate,
-        signature: JSON.stringify([n.id, action, method, target, enctype, noValidate]),
+        identity: n.id,
+        signature: JSON.stringify([
+          syntheticScreenPath(n),
+          n.attributes.name,
+          action,
+          method,
+          target,
+          enctype,
+          noValidate,
+        ]),
       };
     };
     const isSubmitter = (n: BrowserUseNode): boolean => {
@@ -746,7 +760,6 @@ export async function captureBrowserUseDOM(
       n.children.forEach(collectForms);
       if (n.contentDocument) collectForms(n.contentDocument);
     };
-    collectForms(root);
     type LabelScope = {
       nodeByDomId: Map<string, BrowserUseNode>;
       labelsFor: Map<string, BrowserUseNode[]>;
@@ -897,6 +910,23 @@ export async function captureBrowserUseDOM(
       }
       return null;
     };
+    const syntheticScreenPath = (n: BrowserUseNode): string => {
+      const path: unknown[] = [];
+      let current: BrowserUseNode | undefined = n;
+      while (current && current.nodeType !== 9) {
+        const id = current.attributes.id;
+        path.push([
+          current.nodeName,
+          current.shadowType,
+          id && !isFrameworkRandomDomId(id) ? id : null,
+          current.attributes.role,
+          current.attributes["aria-label"],
+        ]);
+        current = parentByNode.get(current);
+      }
+      return JSON.stringify(path.reverse());
+    };
+    collectForms(root);
     const iconLabel = (n: BrowserUseNode): string | null => {
       const find = (node: BrowserUseNode): string | null => {
         const value = node.attributes.alt ?? node.attributes.title ?? node.attributes["aria-label"];
@@ -1029,6 +1059,7 @@ export async function captureBrowserUseDOM(
             frameOrigin: frame === page.mainFrame() ? null : new URL(frame.url()).origin,
             frameUrl: frame === page.mainFrame() ? null : frame.url(),
             framePath: path,
+            screenPath: syntheticScreenPath(n),
           };
         }
       }
@@ -1049,12 +1080,17 @@ export async function captureBrowserUseDOM(
         el.observationIdentity = `${frameIdentity(frame)}:${documentLoaders.get(frame)}:${raw.backendNodeId}`;
         // Include destinations and form ownership even when the visible name
         // stays the same. State/value and surrounding text are not identity.
+        el.observationOwnership = JSON.stringify([
+          proxyTarget === undefined ? null : rawById.get(proxyTarget.id)?.backendNodeId,
+          owners.map((owner) => owner.identity),
+        ]);
         el.observationIntent = JSON.stringify([
           ...(proxyTarget === undefined
             ? []
             : [
                 "label-proxy",
-                rawById.get(proxyTarget.id)?.backendNodeId,
+                syntheticScreenPath(proxyTarget),
+                proxyTarget.attributes.role,
                 proxyTarget.attributes.type,
                 proxyTarget.attributes.name,
               ]),
@@ -1083,6 +1119,7 @@ export async function captureBrowserUseDOM(
         if (submitter && n.attributes.form !== undefined && !formOwners.has(raw.backendNodeId)) {
           delete el.observationIdentity;
           delete el.observationIntent;
+          delete el.observationOwnership;
         }
       }
       if (el) {
@@ -1234,12 +1271,21 @@ export async function captureBrowserUseDOM(
       above: window.scrollY > 0,
       below: document.documentElement.scrollHeight - window.innerHeight - window.scrollY > 0,
     }));
+    const frameUrls = page
+      .frames()
+      .map((frame) => frame.url())
+      .sort();
+    const dynamics = [
+      browserUseDynamicsSignature(root),
+      `frames\u001f${frameUrls.join("\u001f")}`,
+    ].join("\u0000");
     return {
       root,
       elements,
       nodeElements,
       moreAbove: moreAbove || scroll.above,
       moreBelow: moreBelow || scroll.below,
+      dynamics,
     };
   } finally {
     await Promise.all(sessions.map((s) => s.detach().catch(() => undefined)));

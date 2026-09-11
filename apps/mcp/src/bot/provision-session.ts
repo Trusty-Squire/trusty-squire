@@ -348,6 +348,12 @@ export interface Observation {
   delta?: boolean;
   unchanged?: number;
   removed?: string[];
+  // True only on act/act-style returns when the browser's main document
+  // changed between the action's dispatch and the post-settle capture (a real
+  // navigation happened while the action was settling). The observation's
+  // `url` already names the new location; the host must not assume refs from
+  // before the action still resolve (docs/observation-model.md §4.1).
+  navigated?: true;
   // V1-only: set on a DELTA emit when the (normalized, same-cap) page text is
   // identical to the previous observation's — the `text` field is then emitted
   // EMPTY and the host reuses the prior text (recoverable in full from
@@ -4701,7 +4707,12 @@ function compactV2Observation(
   // Emit canonical names and text verbatim, preserving whitespace, line order
   // and indentation; no prose extraction or byte-budget pruning.
   const dom = rendered.dom;
-  const changed = !sameFullDocument || previous.dom !== dom;
+  // A changed URL, frame set, or closed-shadow/iframe structure is a real
+  // change even when the rendered text is byte-identical: the observation the
+  // host already holds describes a page that no longer exists.
+  const structurallyChanged =
+    previous !== null && (previous.dynamics !== capture.dynamics || previous.url !== pageUrl);
+  const changed = !sameFullDocument || previous.dom !== dom || structurallyChanged;
   const epoch = { doc: epochDoc, rev: changed ? generation : previous.epoch.rev };
   session.compactV2Active = true;
   session.compactV2Index = {
@@ -4752,11 +4763,15 @@ function compactV2Observation(
     semantics,
     byRef: new Map(safe.rows.map((row) => [row.ref, row])),
     ...(outputFormat === "full"
-      ? { dom, renderedRefs: rendered.refs }
-      : {
-          ...(previous?.dom === undefined ? {} : { dom: previous.dom }),
-          ...(previous?.renderedRefs === undefined ? {} : { renderedRefs: previous.renderedRefs }),
-        }),
+      ? { dom, renderedRefs: rendered.refs, url: pageUrl, dynamics: capture.dynamics }
+      : sameFullDocument
+        ? {
+            dom: previous.dom,
+            renderedRefs: previous.renderedRefs,
+            url: previous.url,
+            dynamics: previous.dynamics,
+          }
+        : {}),
   };
   session.prevObserve = null;
   if (outputFormat === "compact") {
@@ -5742,6 +5757,14 @@ async function executeAct(
   // click that redirected turned round 0's URL into the post-login dashboard,
   // corrupting the skill's entry_url and the login step).
   const urlBeforeAction = compactV2ActionPage?.url() ?? browser.currentUrl();
+  // Document identity BEFORE the action dispatches, so the return can report
+  // honestly whether the document changed while the action was settling.
+  let docBeforeAction: string | undefined;
+  try {
+    docBeforeAction = browser.mainDocumentIdentity(compactV2ActionPage);
+  } catch {
+    docBeforeAction = undefined;
+  }
 
   // Defense-in-depth for the confused-deputy guard: if an ORGANIC redirect (not
   // gated by hostAllowed) has landed the operator browser on Squire's own
@@ -6515,13 +6538,27 @@ async function executeAct(
             outputFormat === "compact",
             compactMapEmitted,
           );
+  const actionDocAfter = (() => {
+    try {
+      return browser.mainDocumentIdentity(actionObservationPage);
+    } catch {
+      return undefined;
+    }
+  })();
+  const navigatedDuringSettle =
+    docBeforeAction !== undefined &&
+    actionDocAfter !== undefined &&
+    docBeforeAction !== actionDocAfter;
+  const observationWithNavigation = navigatedDuringSettle
+    ? ({ ...observation, navigated: true } as typeof observation)
+    : observation;
   return {
     ...(actionPageAfter === undefined ? {} : { operationPage: actionPageAfter }),
     observation: withHostScopeDenials(
       session,
-      completedAction.kind === "select" && observation.format !== "browser-use-dom"
-        ? { ...observation, selected_option: completedAction.text }
-        : observation,
+      completedAction.kind === "select" && observationWithNavigation.format !== "browser-use-dom"
+        ? { ...observationWithNavigation, selected_option: completedAction.text }
+        : observationWithNavigation,
     ),
     outcome: {
       ...(completedAction.kind === "select" ? { selectedOption: completedAction.text } : {}),

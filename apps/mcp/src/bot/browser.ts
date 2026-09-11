@@ -16141,6 +16141,8 @@ export interface InteractiveElement {
   observationIdentity?: string;
   /** Full material intent captured with that node, excluding transient state. */
   observationIntent?: string;
+  /** Physical owner evidence for live checks; excluded from durable re-render intent. */
+  observationOwnership?: string;
   index: number;
   tag: string;
   type: string | null;

@@ -47,11 +47,59 @@ The through-line: the layer is tuned for **payload size** and **secret-safety**,
   sibling ordinal or selector supplies compact-v2 identity.
 - **Ref = 132-bit opaque capability**, generated under a session secret for that
   node and its material intent. Removal or changed intent retires it; identical
-  replacement markup never inherits it.
+  replacement markup never inherits it — with ONE bounded exception for benign
+  re-renders, below.
 - **Label = compatibility spelling of the same anchor**, allocated once per ref
   and reserved until document reset. It never re-resolves by semantic similarity.
 - **Every act checks the observed map and live anchor.** Document/frame guards,
   intent checks, payment gates and the state-evidence gate remain fail closed.
+
+**Benign re-render adoption (2026-09-08).** A dialog/portal mounting re-renders
+the underlying page and re-creates its nodes (new CDP backend node ids), which
+used to churn every pre-existing ref into `removed` + `*` re-issuance even though
+nothing about those controls changed. When an element's physical identity
+disappears and a new identity appears in the same round, the new element ADOPTS
+the retired ref only when ALL of the following hold; anything else stays
+fail-closed and mints a fresh ref:
+
+1. its inventory-independent fingerprint (authored DOM id or semantic
+   role+tag+name, evaluated for that element alone) matches the retired anchor;
+2. its material action intent is byte-identical to the retired anchor's;
+3. its `screenPath` is present and identical on both sides;
+4. its frame namespace and document loader match the retired anchor's; and
+5. the combined match is unique among both retired anchors and live controls.
+
+Form submitters and checkbox label proxies record durable owner location and
+submission semantics in their intent. Physical owner IDs are captured separately:
+a persisting node whose owner changes retires its ref, while an unchanged control
+remounted with its form or checkbox can adopt within the same frame document.
+
+A new dialog sharing a control's name cannot change this match by changing the
+inventory's fingerprint tier. CDP-synthesized controls receive a location path
+at capture time from their DOM ancestry, shadow boundaries, stable authored IDs,
+roles and explicit labels. The path excludes sibling ordinals and backend node
+IDs; indistinguishable matches still cannot adopt. Aliases remain bound to the
+adopted capability. See the dialog-remount and owner-replacement regressions in
+`observation-prose.test.ts` and the adoption guard cases in
+`compact-observation-v2.test.ts`.
+
+Within the same document epoch, compact queries retain the last full DOM's URL,
+dynamics and rendered refs together until another full observation is emitted.
+
+**Change hashing beyond the DOM string (2026-09-08).** The canonical DOM string
+does not render iframe `src` or element geometry, so a closed-shadow challenge
+widget swapping its iframe (Groq Turnstile, Cartesia protect-check) used to
+serialize byte-identically and report `dom_unchanged:true` through a real
+content swap. `compactV2Observation` therefore also hashes a dynamics signature
+(`browserUseDynamicsSignature`: every iframe/frame node's tag, `src`, rounded
+bounds and shallow content-document digest; every shadow root's type, host
+bounds and child tag digest; plus the live frame URL set) and the page URL into
+the last full-emission baseline. A change in any of them — even with a byte-identical
+DOM string — forces DOM re-emission on the next full observation, and a
+changed main document during an action's settle window marks the returned
+observation `navigated:true`. This flag compares `mainDocumentIdentity` before
+and after the action. A `history.pushState` pathname change does not set it;
+the separate URL-scoped observation epoch still invalidates refs on route changes.
 
 Current implementation and wire contract:
 [Canonical DOM serialization](browser-use-serializer-port.md#identity-deltas-and-query).
@@ -316,9 +364,8 @@ The legacy non-compact interface retains its structural fingerprints.
 
 ### Physical continuity
 
-A framework replacing a node with identical markup must obtain a new ref.
-This is deliberate fail-closed behavior; node replacement is not continuity.
-Unrelated siblings do not change the surviving node's identity.
+For physical continuity and guarded benign re-render adoption, see
+[§4.1](#41-opaque-durable-identity--descriptive-label-decided-option-a).
 
 ### Phase 2 — redaction shipped, then removed entirely (2026-09-05)
 

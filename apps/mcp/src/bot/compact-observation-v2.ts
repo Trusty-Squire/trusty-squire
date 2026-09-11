@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { createHmac, randomBytes } from "node:crypto";
 import type { InteractiveElement } from "./browser.js";
 import { browserUseBoundedContextText, type BrowserUseNode } from "./browser-use-serializer.js";
+import { elementFingerprints } from "./element-fingerprint.js";
 
 export const OBSERVE_V2_MAX_WIRE_BYTES = 4_096;
 export const OBSERVE_V2_MAX_TOKENS = 1_024;
@@ -200,6 +201,13 @@ export interface SafeObservationBaselineV2 {
   /** Last emitted canonical tree and its rendered stable identities. */
   dom?: string;
   renderedRefs?: string[];
+  /** Page URL at the last full emission; a change forces dom re-emission. */
+  url?: string;
+  /**
+   * Closed-shadow/iframe/frame-set signature at the last full emission; a change
+   * forces dom re-emission even when the rendered text is byte-identical.
+   */
+  dynamics?: string;
 }
 
 export const COMPACT_V2_HANDLE_LENGTH = 22;
@@ -210,7 +218,10 @@ export class StableObservationRefs {
   private generation = 0;
   private refs = new Map<string, string>();
   private identities = new Map<string, string>();
-  private anchors = new Map<string, { intent: string; ref: string }>();
+  private anchors = new Map<
+    string,
+    { intent: string; ownership: string | undefined; ref: string; adoptionKey: string | undefined }
+  >();
   private aliases = new Map<string, string>();
   private aliasOwners = new Map<string, string>();
   private reset(document: string): void {
@@ -231,11 +242,30 @@ export class StableObservationRefs {
   ): Map<InteractiveElement, string> {
     this.reset(document);
     const present = new Set(elements.map((el) => el.observationIdentity));
-    for (const identity of this.anchors.keys()) {
-      if (!present.has(identity)) this.anchors.delete(identity);
+    const adoptionKey = (el: InteractiveElement): string | undefined => {
+      const documentIdentity = el.observationIdentity?.match(/^([^:]+:[^:]+):[^:]+$/)?.[1];
+      if (!documentIdentity || !el.screenPath || el.observationIntent === undefined) return;
+      return JSON.stringify([
+        documentIdentity,
+        elementFingerprints([el]).get(el),
+        el.observationIntent,
+        el.screenPath,
+      ]);
+    };
+    const retired = new Map<string, string | null>();
+    for (const [identity, anchor] of this.anchors) {
+      if (present.has(identity)) continue;
+      this.anchors.delete(identity);
+      if (anchor.adoptionKey !== undefined) {
+        retired.set(anchor.adoptionKey, retired.has(anchor.adoptionKey) ? null : anchor.ref);
+      }
     }
+    const keys = new Map(elements.map((el) => [el, adoptionKey(el)]));
+    const keyCounts = new Map<string, number>();
     const counts = new Map<string, number>();
     for (const el of elements) {
+      const key = keys.get(el);
+      if (key !== undefined) keyCounts.set(key, (keyCounts.get(key) ?? 0) + 1);
       if (el.observationIdentity)
         counts.set(el.observationIdentity, (counts.get(el.observationIdentity) ?? 0) + 1);
     }
@@ -247,12 +277,25 @@ export class StableObservationRefs {
         continue;
       }
       let anchor = this.anchors.get(identity);
-      if (!anchor || anchor.intent !== el.observationIntent) {
+      const key = keys.get(el);
+      if (
+        anchor === undefined ||
+        anchor.intent !== el.observationIntent ||
+        anchor.ownership !== el.observationOwnership
+      ) {
+        const recovered =
+          anchor === undefined && key !== undefined && keyCounts.get(key) === 1
+            ? retired.get(key)
+            : undefined;
         anchor = {
           intent: el.observationIntent,
-          ref: this.get(document, `action:${randomBytes(32).toString("base64url")}`),
+          ownership: el.observationOwnership,
+          ref: recovered ?? this.get(document, `action:${randomBytes(32).toString("base64url")}`),
+          adoptionKey: key,
         };
         this.anchors.set(identity, anchor);
+      } else {
+        anchor.adoptionKey = key;
       }
       handles.set(el, anchor.ref);
     }

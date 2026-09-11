@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   serializeBrowserUseDOM,
   browserUseContained,
+  browserUseDynamicsSignature,
   type BrowserUseNode,
 } from "../browser-use-serializer.js";
 const fixtures = fileURLToPath(new URL("../../../../../fixtures/browser-use/", import.meta.url));
@@ -107,5 +108,97 @@ describe("canonical browser-use 0.13.10 fixture oracle", () => {
     // capped iframe hint verbatim, including its truncation marker.
     expect(serializeBrowserUseDOM(iframe, { canonical: true }).dom).toContain(expected);
     expect(serializeBrowserUseDOM(iframe).dom).toContain(expected);
+  });
+});
+
+describe("browserUseDynamicsSignature", () => {
+  const node = (overrides: Partial<BrowserUseNode>): BrowserUseNode => ({
+    id: "n",
+    nodeType: 1,
+    nodeName: "DIV",
+    value: "",
+    attributes: {},
+    visible: true,
+    snapshot: true,
+    bounds: null,
+    cursor: null,
+    scrollable: false,
+    showScroll: false,
+    scrollText: "",
+    clickListener: false,
+    axRole: null,
+    axProperties: [],
+    axChildIds: null,
+    shadowType: null,
+    hiddenElements: [],
+    hiddenContent: false,
+    children: [],
+    contentDocument: null,
+    ...overrides,
+  });
+  const shadowHost = (child: BrowserUseNode, height = 60): BrowserUseNode =>
+    node({
+      nodeName: "DIV",
+      bounds: { x: 0, y: 0, width: 300, height },
+      children: [
+        node({
+          nodeType: 11,
+          nodeName: "#shadow-root",
+          shadowType: "closed",
+          children: [child],
+        }),
+      ],
+    });
+  const turnstileFrame = (overrides: Partial<BrowserUseNode> = {}): BrowserUseNode =>
+    node({
+      nodeName: "IFRAME",
+      attributes: { src: "https://challenges.example.com/turnstile/v0/api.js#widget" },
+      bounds: { x: 0, y: 0, width: 300, height: 60 },
+      ...overrides,
+    });
+
+  it("is stable for an unchanged closed-shadow widget tree", () => {
+    expect(browserUseDynamicsSignature(shadowHost(turnstileFrame()))).toBe(
+      browserUseDynamicsSignature(shadowHost(turnstileFrame())),
+    );
+  });
+
+  it("changes when a closed-shadow iframe is replaced by another control", () => {
+    const swapped = shadowHost(
+      node({
+        nodeName: "BUTTON",
+        bounds: { x: 0, y: 0, width: 300, height: 60 },
+      }),
+    );
+    expect(browserUseDynamicsSignature(shadowHost(turnstileFrame()))).not.toBe(
+      browserUseDynamicsSignature(swapped),
+    );
+  });
+
+  it("changes on iframe src and geometry even though the canonical DOM string does not render them", () => {
+    const before = shadowHost(turnstileFrame());
+    const rehashed = shadowHost(
+      turnstileFrame({
+        attributes: { src: "https://challenges.example.com/turnstile/v0/api.js#token" },
+        bounds: { x: 0, y: 0, width: 300, height: 64 },
+      }),
+    );
+    // This is the Groq/Cartesia failure mode: the widget swap serializes to the
+    // same canonical DOM string, so only the dynamics signature can catch it.
+    expect(serializeBrowserUseDOM(before).dom).toBe(serializeBrowserUseDOM(rehashed).dom);
+    expect(browserUseDynamicsSignature(before)).not.toBe(browserUseDynamicsSignature(rehashed));
+  });
+
+  it("changes when the shadow host itself moves or grows", () => {
+    expect(browserUseDynamicsSignature(shadowHost(turnstileFrame(), 60))).not.toBe(
+      browserUseDynamicsSignature(shadowHost(turnstileFrame(), 96)),
+    );
+  });
+
+  it("ignores benign content inside an open, unframed subtree", () => {
+    const text = (value: string) => node({ nodeType: 3, nodeName: "#text", value });
+    expect(browserUseDynamicsSignature(node({ children: [text("attempt=1")] }))).toBe(
+      browserUseDynamicsSignature(node({ children: [text("attempt=2")] })),
+    );
   });
 });

@@ -63,6 +63,54 @@ interface Simplified {
   codeActions?: boolean;
   verbatim?: boolean;
 }
+/**
+ * Structural signature of the parts of the tree the canonical DOM string does
+ * not render: iframe/frame presence, src and geometry, and every shadow root
+ * (open AND closed) with its host geometry and immediate child tags. A challenge
+ * widget that swaps its closed-shadow contents or replaces an iframe while the
+ * surrounding text stays byte-identical must never be reported as unchanged
+ * (docs/observation-model.md §4.1). Pure; bounded by the tree's own size.
+ */
+export function browserUseDynamicsSignature(root: BrowserUseNode): string {
+  const parts: string[] = [];
+  const geo = (b: DOMBounds | null): string =>
+    b
+      ? `${Math.round(b.x)},${Math.round(b.y)},${Math.round(b.width)},${Math.round(b.height)}`
+      : "none";
+  const digest = (node: BrowserUseNode, depth: number): string => {
+    const tags: string[] = [];
+    const walk = (n: BrowserUseNode, d: number): void => {
+      if (d < 0) return;
+      for (const child of n.children) {
+        if (child.nodeType === 1) tags.push(child.nodeName.toLowerCase());
+        walk(child, d - 1);
+      }
+    };
+    walk(node, depth);
+    return tags.sort().join(",") || "leaf";
+  };
+  const visit = (node: BrowserUseNode, hostBounds: DOMBounds | null): void => {
+    const t = node.nodeName.toLowerCase();
+    if (node.nodeType === 1 && (t === "iframe" || t === "frame")) {
+      parts.push(
+        `frame\u001f${t}\u001f${node.attributes.src ?? ""}\u001f${geo(node.bounds)}\u001f${
+          node.contentDocument === null ? "nodoc" : digest(node.contentDocument, 1)
+        }`,
+      );
+    }
+    if (node.nodeType === 11 && node.shadowType !== null) {
+      parts.push(
+        `shadow\u001f${node.shadowType.toLowerCase()}\u001f${geo(hostBounds ?? node.bounds)}\u001f${digest(node, 1)}`,
+      );
+    }
+    const childHost = node.bounds ?? hostBounds;
+    for (const child of node.children) visit(child, childHost);
+    if (node.contentDocument !== null) visit(node.contentDocument, node.bounds);
+  };
+  visit(root, null);
+  return parts.sort().join("\u0000") || "empty";
+}
+
 export const DEFAULT_CONTAINMENT_THRESHOLD = 0.99;
 const DISABLED = new Set(["style", "script", "head", "meta", "link", "title"]);
 const SVG = new Set([

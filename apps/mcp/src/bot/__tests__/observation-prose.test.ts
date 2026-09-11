@@ -31,6 +31,57 @@ afterAll(async () => {
   await browser?.close();
 });
 describe("interleaved observation DOM", () => {
+  it("captures a coordinate-click closed-shadow iframe replacement in real Chromium", async () => {
+    const page = await browser.newPage();
+    const evidence = process.env.OBSERVATION_TEST_EVIDENCE_DIR;
+    try {
+      await page.setContent('<h1>Protect check fixture</h1><div id="challenge"></div>');
+      await page.locator("#challenge").evaluate((host) => {
+        const shadow = host.attachShadow({ mode: "closed" });
+        const frame = document.createElement("iframe");
+        frame.title = "Verification challenge";
+        frame.srcdoc = '<button style="width:280px;height:50px">Verify human</button>';
+        shadow.append(frame);
+        frame.addEventListener("load", () => {
+          frame.contentDocument!.querySelector("button")!.addEventListener("click", () => {
+            shadow.innerHTML = '<button style="width:280px;height:50px">Submit</button>';
+          });
+        });
+      });
+      await expect.poll(() => page.frames().length).toBe(2);
+      await page.frames()[1]!.locator("button").waitFor();
+      const before = await captureThroughController(page);
+      const beforeDom = serializeBrowserUseDOM(before.root).dom;
+      expect(beforeDom).toContain("<iframe");
+      if (evidence) await page.screenshot({ path: `${evidence}/challenge-before.png` });
+      const bounds = await page.frames()[1]!.locator("button").boundingBox();
+      expect(bounds).not.toBeNull();
+      await page.mouse.click(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2);
+      await expect.poll(() => page.frames().length).toBe(1);
+      const after = await captureThroughController(page);
+      const afterDom = serializeBrowserUseDOM(after.root).dom;
+      expect(afterDom).toContain("Submit");
+      expect(afterDom).not.toContain("<iframe");
+      expect(after.dynamics).not.toBe(before.dynamics);
+      if (evidence) {
+        await page.screenshot({ path: `${evidence}/challenge-after.png` });
+        writeFileSync(
+          `${evidence}/chromium-challenge.json`,
+          JSON.stringify(
+            {
+              fixture: "Real Chromium, closed shadow root, coordinate click",
+              before: { dom: beforeDom, dynamics: before.dynamics },
+              after: { dom: afterDom, dynamics: after.dynamics },
+            },
+            null,
+            2,
+          ),
+        );
+      }
+    } finally {
+      await page.close();
+    }
+  });
   it("derives compact control labels from browser-use DOM associations", async () => {
     const page = await browser.newPage();
     try {
@@ -120,6 +171,52 @@ describe("interleaved observation DOM", () => {
       expect(listener).toMatchObject({ tag: "span" });
       await page.locator(listener.selector).click();
       expect(await page.locator("#listener").getAttribute("data-clicked")).toBe("yes");
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("preserves synthesized listener refs across dialog remounts", async () => {
+    const page = await browser.newPage();
+    try {
+      const refs = new StableObservationRefs();
+      const mount = async (dialog: boolean) => {
+        await page.evaluate((withDialog) => {
+          document.body.innerHTML =
+            '<nav aria-label="Main"><span>Docs</span></nav>' +
+            (withDialog
+              ? '<div role="dialog" aria-label="Create key"><span>Docs</span></div>'
+              : "");
+          document.querySelectorAll("span").forEach((control) => {
+            control.addEventListener("click", () => control.setAttribute("data-clicked", "yes"));
+          });
+        }, dialog);
+      };
+      await mount(false);
+      const before = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const original = before.elements.find((el) => el.tag === "span")!;
+      expect(original.screenPath).toBeTruthy();
+      const held = refs.actions("doc", before.elements).get(original)!;
+      expect(held).toBeTruthy();
+      await mount(true);
+      const after = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const recreated = after.elements.find((el) => el.screenPath === original.screenPath)!;
+      expect(recreated.observationIdentity).not.toBe(original.observationIdentity);
+      const handles = refs.actions("doc", after.elements);
+      expect(handles.get(recreated)).toBe(held);
+      const added = after.elements.find((el) => el.tag === "span" && el !== recreated)!;
+      expect(handles.get(added)).toBeTruthy();
+      expect(handles.get(added)).not.toBe(held);
+      const rendered = serializeBrowserUseDOM(after.root, {
+        ref: (node) => handles.get(after.nodeElements.get(node.id)!)!,
+        previous: new Set([held]),
+      });
+      expect(rendered.dom.split("\n").find((line) => line.includes(held))).not.toContain("*");
+      expect(rendered.dom.split("\n").find((line) => line.includes(handles.get(added)!))).toContain(
+        "*",
+      );
+      await page.locator(recreated.selector).click();
+      expect(await page.locator("nav span").getAttribute("data-clicked")).toBe("yes");
     } finally {
       await page.close();
     }
@@ -234,7 +331,7 @@ describe("interleaved observation DOM", () => {
     }
   });
 
-  it("binds persistent capabilities to physical nodes across fresh CDP captures", async () => {
+  it("preserves persistent capabilities through benign re-renders across fresh CDP captures", async () => {
     const page = await browser.newPage();
     const refs = new StableObservationRefs();
     const read = async () => {
@@ -248,6 +345,7 @@ describe("interleaved observation DOM", () => {
       const held = first.capture.elements.find((el) => el.id === "held")!;
       const ref = first.handles.get(held)!;
       expect(ref).toMatch(/^@e:[A-Za-z0-9_-]{22}$/);
+      const alias = refs.label(ref, "@continue");
       await page.locator("main").evaluate((main) => {
         main.querySelector("p")!.textContent = "Unrelated content changed";
         const sibling = document.createElement("button");
@@ -259,27 +357,159 @@ describe("interleaved observation DOM", () => {
       expect(same.observationIdentity).toBe(held.observationIdentity);
       expect(same.observationIntent).toBe(held.observationIntent);
       expect(second.handles.get(same)).toBe(ref);
+      const sibling = second.capture.elements.find((el) => el !== same && el.tag === "button")!;
+      expect(second.handles.get(sibling)).not.toBe(ref);
+      expect(refs.label(second.handles.get(sibling)!, "@continue")).not.toBe(alias);
       await page.locator("#held").evaluate((el) => el.replaceWith(el.cloneNode(true)));
       const third = await read();
       const replacement = third.capture.elements.find((el) => el.id === "held")!;
       expect(replacement.observationIdentity).not.toBe(held.observationIdentity);
-      expect([...third.handles.values()]).not.toContain(ref);
+      // §4.1 of docs/observation-model.md permits benign re-render adoption:
+      // unchanged durable identity, intent and screenPath in the same document.
+      expect(third.handles.get(replacement)).toBe(ref);
       const replacementRef = third.handles.get(replacement)!;
+      expect(refs.label(replacementRef, "@continue")).toBe(alias);
+      const resolved = [...third.handles].find(([, handle]) => handle === ref)![0];
+      expect(await page.locator(resolved.selector).getAttribute("id")).toBe("held");
       await page.locator("#held").evaluate((el) => {
         el.textContent = "Delete account";
       });
       const fourth = await read();
       expect([...fourth.handles.values()]).not.toContain(replacementRef);
+      const changed = fourth.capture.elements.find((el) => el.id === "held")!;
+      const changedRef = fourth.handles.get(changed)!;
+      expect(changedRef).toMatch(/^@e:[A-Za-z0-9_-]{22}$/);
       await page.locator("#held").evaluate((el) => {
         el.textContent = "Continue";
       });
-      expect([...(await read()).handles.values()]).not.toContain(replacementRef);
+      const fifth = await read();
+      // Restoring text changes intent on the same physical node, so it cannot
+      // adopt a retired ref from a node that disappeared in this capture.
+      expect([...fifth.handles.values()]).not.toContain(replacementRef);
+      expect([...fifth.handles.values()]).not.toContain(changedRef);
+      const restored = fifth.capture.elements.find((el) => el.id === "held")!;
+      const restoredRef = fifth.handles.get(restored)!;
       await page.locator("#held").evaluate((el) => el.remove());
-      expect((await read()).capture.elements.some((el) => el.id === "held")).toBe(false);
+      const removed = await read();
+      expect(removed.capture.elements.some((el) => el.id === "held")).toBe(false);
+      expect([...removed.handles.values()]).not.toContain(restoredRef);
     } finally {
       await page.close();
     }
   });
+
+  it("preserves form submitter and checkbox proxy refs when a dialog remounts their owners", async () => {
+    const page = await browser.newPage();
+    const refs = new StableObservationRefs();
+    const read = async () => {
+      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const handles = refs.actions("doc", capture.elements);
+      const controls = new Map(capture.elements.map((el) => [el.id, el]));
+      return { capture, handles, controls };
+    };
+    try {
+      await page.setContent(`
+        <style>
+          input[type=checkbox] { position:absolute; opacity:0; width:1px; height:1px }
+          label { display:block; width:160px; height:32px }
+        </style>
+        <main>
+          <form id="settings" action="https://merchant.example/save" method="post">
+            <button id="submit">Save</button>
+          </form>
+          <label id="proxy" for="choice">Enable API keys</label>
+          <input id="choice" type="checkbox" name="enabled">
+        </main>
+      `);
+      const before = await read();
+      expect(before.controls.get("proxy")).toMatchObject({ role: "checkbox" });
+      const evidence = process.env.OBSERVATION_TEST_EVIDENCE_DIR;
+      if (evidence) await page.screenshot({ path: `${evidence}/dialog-before.png` });
+      await page.locator("main").evaluate((main) => {
+        main.replaceWith(main.cloneNode(true));
+        document.body.insertAdjacentHTML(
+          "beforeend",
+          '<div role="dialog" aria-label="Create key"><button id="create" type="button">Create key</button></div>',
+        );
+      });
+      const after = await read();
+      for (const id of ["submit", "proxy"]) {
+        const old = before.controls.get(id)!;
+        const fresh = after.controls.get(id)!;
+        expect(before.handles.get(old)).toBeTruthy();
+        expect(fresh.observationIdentity).not.toBe(old.observationIdentity);
+        expect(fresh.observationOwnership).not.toBe(old.observationOwnership);
+        expect(fresh.observationIntent).toBe(old.observationIntent);
+        expect(fresh.screenPath).toBe(old.screenPath);
+        expect(after.handles.get(fresh)).toBe(before.handles.get(old));
+      }
+      const prior = new Set(before.handles.values());
+      const rendered = serializeBrowserUseDOM(after.capture.root, {
+        ref: (node) => after.handles.get(after.capture.nodeElements.get(node.id)!)!,
+        previous: prior,
+      });
+      expect([...prior].filter((ref) => !rendered.refs.includes(ref))).toEqual([]);
+      for (const ref of prior) {
+        expect(rendered.dom.split("\n").find((line) => line.includes(ref))).not.toContain("*");
+      }
+      const added = after.handles.get(after.controls.get("create")!)!;
+      expect(added).toBeTruthy();
+      expect(rendered.dom.split("\n").find((line) => line.includes(added))).toContain("*");
+      if (evidence) {
+        await page.screenshot({ path: `${evidence}/dialog-after.png` });
+        writeFileSync(
+          `${evidence}/chromium-dialog.json`,
+          JSON.stringify(
+            {
+              fixture: "Real Chromium: form and checkbox remount when dialog opens",
+              before: serializeBrowserUseDOM(before.capture.root, {
+                ref: (node) => before.handles.get(before.capture.nodeElements.get(node.id)!)!,
+              }).dom,
+              after: rendered.dom,
+              removed: [...prior].filter((ref) => !rendered.refs.includes(ref)),
+            },
+            null,
+            2,
+          ),
+        );
+      }
+      await page.locator(after.controls.get("proxy")!.selector).click();
+      expect(await page.locator("#choice").isChecked()).toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it.each(["form", "checkbox"])(
+    "retires a persisting control when its %s owner is replaced",
+    async (kind) => {
+      const page = await browser.newPage();
+      const refs = new StableObservationRefs();
+      const read = async () => {
+        const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+        const el = capture.elements.find((candidate) => candidate.id === "held")!;
+        return { el, ref: refs.actions("doc", capture.elements).get(el)! };
+      };
+      try {
+        await page.setContent(
+          kind === "form"
+            ? '<form id="owner" action="https://merchant.example/save"></form><button id="held" form="owner">Save</button>'
+            : '<input id="owner" type="checkbox" style="position:absolute;opacity:0;width:1px;height:1px"><label id="held" for="owner" style="display:block;width:160px;height:32px">Enable API keys</label>',
+        );
+        const before = await read();
+        expect(before.ref).toBeTruthy();
+        await page.locator("#owner").evaluate((owner) => owner.replaceWith(owner.cloneNode(true)));
+        const after = await read();
+        expect(after.el.observationIdentity).toBe(before.el.observationIdentity);
+        expect(after.el.observationIntent).toBe(before.el.observationIntent);
+        expect(after.el.observationOwnership).not.toBe(before.el.observationOwnership);
+        expect(after.ref).toBeTruthy();
+        expect(after.ref).not.toBe(before.ref);
+      } finally {
+        await page.close();
+      }
+    },
+  );
 
   it("retires a held anchor when its form changes destination", async () => {
     const page = await browser.newPage();

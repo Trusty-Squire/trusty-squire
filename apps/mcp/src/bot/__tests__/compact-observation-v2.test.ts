@@ -545,11 +545,7 @@ describe("compact observation v2", () => {
       const root = hostPage([
         node("form", {
           nodeName: "FORM",
-          children: [
-            challengeIframe("frame"),
-            text("success", "Success!"),
-            response,
-          ],
+          children: [challengeIframe("frame"), text("success", "Success!"), response],
         }),
       ]);
       expect(safeBlockersV2(root)).toEqual([
@@ -1668,5 +1664,112 @@ describe("persistent action anchor allocator", () => {
     expect(returned).not.toBe(restored);
     expect(refs.label(returned, "@continue")).toBe("@continue-3");
     expect(refs.actions("next-doc", [held]).get(held)).not.toBe(returned);
+  });
+  it("keeps a ref stable when a dialog mount re-creates the node with unchanged meaning", () => {
+    // Portal/dialog mounts re-render the underlying page (new backend nodes),
+    // while the element the user sees is unchanged. The durable fingerprint
+    // (tag/role/name) plus unchanged intent must resurrect the same ref
+    // instead of churning every pre-existing control into `removed`/`*`.
+    const refs = new StableObservationRefs();
+    const navLink = (identity: string) =>
+      ({
+        tag: "a",
+        role: "link",
+        visibleText: "Docs",
+        screenPath: "nav:main > link:docs",
+        observationIdentity: identity,
+        observationIntent: JSON.stringify(["A", "link", "Docs"]),
+      }) as InteractiveElement;
+    const first = navLink("page:loader:101");
+    const original = refs.actions("doc", [first]).get(first)!;
+    const recreated = navLink("page:loader:202");
+    const dialogButton = {
+      tag: "button",
+      role: "button",
+      visibleText: "Create API key",
+      screenPath: "dialog:create-api-key > button:create",
+      observationIdentity: "page:loader:900",
+      observationIntent: JSON.stringify(["BUTTON", "button", "Create API key"]),
+    } as InteractiveElement;
+    const second = refs.actions("doc", [recreated, dialogButton]);
+    expect(second.get(recreated)).toBe(original);
+    const dialogRef = second.get(dialogButton)!;
+    expect(dialogRef).toMatch(/^@e:[A-Za-z0-9_-]{22}$/);
+    expect(dialogRef).not.toBe(original);
+  });
+  it("keeps refs across inventory-dependent name-to-region tier changes", () => {
+    const refs = new StableObservationRefs();
+    const first = element({
+      visibleText: "Continue",
+      container: "main:page",
+      screenPath: "main:page > button:continue",
+      observationIdentity: "page:loader:1",
+      observationIntent: "continue",
+    });
+    const original = refs.actions("doc", [first]).get(first)!;
+    const recreated = { ...first, observationIdentity: "page:loader:2" };
+    const dialog = {
+      ...first,
+      container: "dialog:confirmation",
+      screenPath: "dialog:confirmation > button:continue",
+      observationIdentity: "page:loader:3",
+    };
+    const updated = refs.actions("doc", [dialog, recreated]);
+    expect(updated.get(recreated)).toBe(original);
+    expect(updated.get(dialog)).not.toBe(original);
+  });
+
+  it.each(["other:loader:2", "page:reloaded:2"])(
+    "does not adopt a ref across frame documents: %s",
+    (identity) => {
+      const refs = new StableObservationRefs();
+      const first = element({
+        visibleText: "Continue",
+        screenPath: "form:main > button:continue",
+        observationIdentity: "page:loader:1",
+        observationIntent: "continue",
+      });
+      const original = refs.actions("doc", [first]).get(first)!;
+      const replacement = { ...first, observationIdentity: identity };
+      expect(refs.actions("doc", [replacement]).get(replacement)).not.toBe(original);
+    },
+  );
+
+  it.each(["retired", "live"])("refuses ambiguous %s adoption matches", (side) => {
+    const refs = new StableObservationRefs();
+    const control = (id: number) =>
+      element({
+        visibleText: "Continue",
+        screenPath: "form:main > button:continue",
+        observationIdentity: `page:loader:${id}`,
+        observationIntent: "continue",
+      });
+    const before = side === "retired" ? [control(1), control(2), control(3)] : [control(1)];
+    const original = new Set(refs.actions("doc", before).values());
+    const after = side === "live" ? [control(4), control(5)] : [control(4)];
+    const updated = refs.actions("doc", after);
+    expect(new Set(updated.values()).size).toBe(after.length);
+    for (const ref of updated.values()) expect(original.has(ref)).toBe(false);
+  });
+
+  it("mints a fresh ref when a re-created node's meaning changed with its identity", () => {
+    const refs = new StableObservationRefs();
+    const control = (identity: string, name: string, intent: string) =>
+      ({
+        tag: "button",
+        role: "button",
+        visibleText: name,
+        screenPath: `form:main > button:${name.toLowerCase()}`,
+        observationIdentity: identity,
+        observationIntent: intent,
+      }) as InteractiveElement;
+    const first = control("page:loader:1", "Start", JSON.stringify(["BUTTON", "button", "Start"]));
+    const original = refs.actions("doc", [first]).get(first)!;
+    const replaced = control(
+      "page:loader:2",
+      "Cancel",
+      JSON.stringify(["BUTTON", "button", "Cancel"]),
+    );
+    expect(refs.actions("doc", [replaced]).get(replaced)).not.toBe(original);
   });
 });

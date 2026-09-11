@@ -1,7 +1,7 @@
 import { elementFingerprints } from "../element-fingerprint.js";
 import type { InteractiveElement } from "../browser.js";
 import type { BrowserUseCapture } from "../browser-use-capture.js";
-import type { BrowserUseNode } from "../browser-use-serializer.js";
+import { browserUseDynamicsSignature, type BrowserUseNode } from "../browser-use-serializer.js";
 /** State-machine double only; real CDP behavior is covered by observation-prose.test. */
 export function mockBrowserUseCapture(
   elements: InteractiveElement[],
@@ -81,14 +81,16 @@ export function mockBrowserUseCapture(
     nodeElements.set(n.id, el);
     return n;
   });
+  const root = node("root", {
+    nodeName: "HTML",
+    children: [...text.map((value, i) => node(`prose${i}`, { nodeType: 3, value })), ...children],
+  });
   return {
-    root: node("root", {
-      nodeName: "HTML",
-      children: [...text.map((value, i) => node(`prose${i}`, { nodeType: 3, value })), ...children],
-    }),
+    root,
     elements,
     nodeElements,
     moreAbove: false,
     moreBelow: elements.some((e) => !e.inViewport),
+    dynamics: browserUseDynamicsSignature(root),
   };
 }
