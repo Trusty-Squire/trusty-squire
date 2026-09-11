@@ -5823,37 +5823,43 @@ async function executeAct(
         if (action.kind === "click" && action.screenshot) {
           if (!compactV2ActionPage)
             throw new ScreenshotClickError("stale_screenshot", "not_dispatched");
-          await runClickWithPlaceOrderGuard(session, async (shouldTrack) => {
-            const dispatched = await clickScreenshot(
-              compactV2ActionPage,
-              action.screenshot!,
-              (target) => {
-                const blocked = shouldBlockUnsafeProvisionAction(
-                  pageText,
-                  { kind: "click", target: target.labels.join(" ") },
-                  { redactTarget: true },
+          actionPageAfter =
+            (await adoptTabOpenedByClick(session, browser, async () => {
+              await runClickWithPlaceOrderGuard(session, async (shouldTrack) => {
+                const dispatched = await clickScreenshot(
+                  compactV2ActionPage,
+                  action.screenshot!,
+                  (target) => {
+                    const blocked = shouldBlockUnsafeProvisionAction(
+                      pageText,
+                      { kind: "click", target: target.labels.join(" ") },
+                      { redactTarget: true },
+                    );
+                    if (blocked !== null) throw new Error(blocked);
+                    if (!target.mainFrame)
+                      assertFrameTargetAllowed(
+                        session,
+                        {
+                          framePath: "screenshot",
+                          frameUrl: target.frameUrl,
+                          frameOrigin: target.frameOrigin,
+                          frameOpaque: target.frameOpaque,
+                        },
+                        "click",
+                        compactV2ActionPage,
+                      );
+                    shouldTrack(target.labels);
+                    session.usedLocatorFallback = true; // Dispatched image points cannot be replayed.
+                  },
                 );
-                if (blocked !== null) throw new Error(blocked);
-                if (!target.mainFrame)
-                  assertFrameTargetAllowed(
-                    session,
-                    {
-                      framePath: "screenshot",
-                      frameUrl: target.frameUrl,
-                      frameOrigin: target.frameOrigin,
-                      frameOpaque: target.frameOpaque,
-                    },
-                    "click",
-                    compactV2ActionPage,
-                  );
-                shouldTrack(target.labels);
-                session.usedLocatorFallback = true; // Dispatched image points cannot be replayed.
-              },
-            );
-            onScreenshotDispatched?.();
-            return dispatched;
-          });
+                onScreenshotDispatched?.();
+                return dispatched;
+              });
+            })) ?? actionPageAfter;
           await settleAfterStateChange(browser, compactV2ActionPage);
+          if (browser.isActivePage(compactV2ActionPage)) {
+            actionPageAfter = (await adoptOpenedTab(session, browser, 0)) ?? actionPageAfter;
+          }
           break;
         }
         const blockReason = shouldBlockUnsafeProvisionAction(pageText, action);

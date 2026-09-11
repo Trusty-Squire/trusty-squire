@@ -512,6 +512,78 @@ describe("native screenshot/click tool contract on an isolated session", () => {
     },
   );
 
+  it.each(["success", "uncertain", "payment"] as const)(
+    "handles a closed-shadow popup link with %s dispatch",
+    async (mode) => {
+      const f = await fixture();
+      await f.page.context().route("http://parent.test/destination", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: "<main>Popup destination</main>",
+        }),
+      );
+      const started = await startHarnessProvisionSession({
+        browser: f.controller,
+        serviceUrl: "http://parent.test/",
+        observationFormat: "browser-use-dom",
+      });
+      const session = paymentSession(started.session_id);
+      try {
+        await f.page.evaluate(() => {
+          document.body.innerHTML = '<main>Original page</main><div id="popup-host"></div>';
+          document.querySelector("#popup-host")!.attachShadow({ mode: "closed" }).innerHTML =
+            '<a href="http://parent.test/destination" target="_blank" style="position:absolute;left:150px;top:220px;width:150px;height:60px;display:block">Open destination</a>';
+        });
+        if (mode === "payment") session.paymentFieldSealActive = true;
+        const shot = await captureScreenshot(started.session_id);
+        const originalClick = f.page.mouse.click.bind(f.page.mouse);
+        const mouse = vi.spyOn(f.page.mouse, "click").mockImplementation(async (x, y) => {
+          await originalClick(x, y);
+          if (mode === "uncertain") throw new Error("acknowledgement lost after popup dispatch");
+        });
+        const opened = f.page.waitForEvent("popup");
+        const result = await operateClickTool.handler(
+          {
+            session_id: started.session_id,
+            screenshot: { screenshot_id: shot.click_binding!.screenshot_id, x: 174, y: 244 },
+          },
+          null,
+        );
+        const popup = await opened;
+        await popup.waitForLoadState("domcontentloaded");
+        expect(popup.url()).toBe("http://parent.test/destination");
+        expect(f.page.isClosed()).toBe(false);
+        expect(mouse).toHaveBeenCalledOnce();
+        expect(result).toMatchObject({
+          screenshot_click: {
+            dispatch: mode === "uncertain" ? "unknown" : "dispatched",
+            outcome: "unknown",
+            retry_policy: "observe_before_new_action",
+          },
+        });
+        await popup.locator("main").evaluate((el) => {
+          el.textContent = "Popup destination ready";
+        });
+        const after = await observe(started.session_id, "full");
+        if (mode === "payment") {
+          expect(f.controller.activePage()).toBe(f.page);
+          expect(after.url).toBe("http://parent.test/");
+          expect(after.dom).toContain("Original page");
+        } else {
+          expect(f.controller.activePage()).toBe(popup);
+          expect(after.url).toBe("http://parent.test/destination");
+          expect(after.dom).toContain("Popup destination ready");
+          if (mode === "success") expect(result).toMatchObject({ url: popup.url() });
+        }
+      } finally {
+        session.paymentFieldSealActive = false;
+        vi.restoreAllMocks();
+        await finishProvisionSession(started.session_id);
+        await f.close();
+      }
+    },
+  );
+
   it("exposes exclusive ref/image schemas and finite original-image coordinates", () => {
     const screenshot = { screenshot_id: "12345678-1234-4234-8234-123456789abc", x: 1, y: 2 };
     expect(operateClickTool.inputSchema.safeParse({ session_id: "s", screenshot }).success).toBe(
