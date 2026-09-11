@@ -87,11 +87,13 @@ export class OperatorForwarder {
     args: Record<string, unknown>,
     capability: TabCapability | undefined,
     recovery: BrokerRecoveryRequest,
+    requestId?: string,
   ): Promise<{ requestId: string; result: unknown; capability?: TabCapability } | undefined> {
     const reply = (await client.call("recover", {
       name,
       args,
       ...(capability === undefined ? {} : { capability }),
+      ...(requestId === undefined ? {} : { requestId }),
       ...(recovery.preDispatchFailure === undefined
         ? {}
         : { preDispatchFailure: recovery.preDispatchFailure }),
@@ -170,9 +172,9 @@ export class OperatorForwarder {
         : undefined;
       checkCancelled();
       if (recovered !== undefined) {
-        await client.acknowledge(recovered.requestId);
         if (recovered.capability !== undefined)
           this.sessions.set(recovered.capability.sessionId, recovered.capability);
+        await client.acknowledge(recovered.requestId);
         if (
           name === "operate_finish" &&
           id !== undefined &&
@@ -235,22 +237,30 @@ export class OperatorForwarder {
             ? returnedSessionId === replyCapability.sessionId
             : refusedStart);
         if (!validStartResult) {
-          const recovered = await this.recover(client, name, args, undefined, {
-            recover: true,
-          }).catch(() => undefined);
+          const recovered = await this.recover(
+            client,
+            name,
+            args,
+            undefined,
+            {
+              recover: true,
+            },
+            idempotencyKey,
+          ).catch(() => undefined);
           const recoveredResult = isRecord(recovered?.result) ? recovered.result : undefined;
           const recoveredSessionId = recoveredResult?.session_id;
           const recoveredCapability = recovered?.capability;
           if (
             recovered !== undefined &&
+            recovered.requestId === idempotencyKey &&
             recoveredCapability !== undefined &&
             typeof recoveredSessionId === "string" &&
             recoveredSessionId === recoveredCapability.sessionId &&
             (replyCapability === undefined ||
               recoveredCapability.sessionId === replyCapability.sessionId)
           ) {
-            await client.acknowledge(recovered.requestId);
             this.sessions.set(recoveredCapability.sessionId, recoveredCapability);
+            await client.acknowledge(recovered.requestId);
             return recoveredResult;
           }
           if (replyCapability !== undefined) {
