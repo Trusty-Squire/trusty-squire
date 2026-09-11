@@ -309,7 +309,7 @@ describe("broker dispatch custody", () => {
         close: async () => true,
         orphan: async () => undefined,
       }));
-      await journal.record(capability.sessionId, "forwarder:old-process:request", "outcome", {
+      const startOutcome = {
         forwarderId,
         start: true,
         operation: "operate_start",
@@ -319,13 +319,43 @@ describe("broker dispatch custody", () => {
           )
           .digest("hex"),
         outcome: { status: "completed" },
+      } as const;
+      await journal.record(
+        capability.sessionId,
+        "forwarder:old-process:request",
+        "outcome",
+        startOutcome,
+      );
+      await journal.record(
+        capability.sessionId,
+        "forwarder:current-process:request",
+        "outcome",
+        startOutcome,
+      );
+      await expect(
+        broker.recover(principal, {
+          name: "operate_start",
+          args,
+          requestId: "forwarder:current-process:request",
+        }),
+      ).resolves.toMatchObject({
+        requestId: "forwarder:current-process:request",
+        capability,
       });
+      await expect(
+        broker.recover(principal, {
+          name: "operate_start",
+          args,
+          requestId: "forwarder:missing-process:request",
+        }),
+      ).resolves.toBeNull();
       await expect(
         broker.recover(principal, {
           name: "operate_start",
           args,
         }),
       ).resolves.toMatchObject({
+        requestId: "forwarder:current-process:request",
         capability,
         result: { session_id: capability.sessionId, broker: { targetId: "target" } },
       });

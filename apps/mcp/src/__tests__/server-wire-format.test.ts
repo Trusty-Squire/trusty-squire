@@ -13,4 +13,8 @@ describe("browser-use DOM wire encoding", () => {
     }
     expect(compactToolResultText({ ok: true })).toContain("\n");
   });
+
+  it("refuses an absent result before it can become an invalid MCP text block", () => {
+    expect(() => compactToolResultText(undefined)).toThrow("no JSON-serializable result");
+  });
 });

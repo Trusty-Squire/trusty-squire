@@ -49,6 +49,7 @@ const callSchema = z
   })
   .strict();
 const recoverySchema = callSchema.extend({
+  requestId: z.string().min(1).optional(),
   preDispatchFailure: z
     .object({
       requestId: z.string().min(1),
@@ -763,7 +764,12 @@ export class OperatorBroker implements BrokerTransportPort {
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
     const explicitFailure = input.preDispatchFailure;
     const sessionId = typeof args.session_id === "string" ? args.session_id : undefined;
-    const inputHash = this.inputHash(principal, { name: tool.name, args });
+    const inputHash = this.inputHash(
+      principal,
+      sessionId !== undefined
+        ? { name: tool.name, args }
+        : { name: tool.name, args, capability: input.capability },
+    );
     const authorization = this.legacyPreDispatchAuthorization;
     const completed =
       explicitFailure !== undefined &&
@@ -775,23 +781,24 @@ export class OperatorBroker implements BrokerTransportPort {
       args.provider === "google" &&
       args.ref === "reconciliation-only:no-dispatch"
         ? await this.journal?.reconcileExplicitPreDispatchFailure(authorization, explicitFailure)
-        : await this.journal?.recoveryOutcome(
-            journalForwarderId(principal),
-            sessionId !== undefined
-              ? {
-                  operation: tool.name,
-                  sessionId,
-                  inputHash,
-                }
-              : {
-                  operation: tool.name,
-                  inputHash: this.inputHash(principal, {
-                    name: tool.name,
-                    args,
-                    capability: input.capability,
-                  }),
-                },
-          );
+        : input.requestId !== undefined
+          ? await this.journal?.completedOutcome(journalForwarderId(principal), input.requestId, {
+              operation: tool.name,
+              inputHash,
+            })
+          : await this.journal?.recoveryOutcome(
+              journalForwarderId(principal),
+              sessionId !== undefined
+                ? {
+                    operation: tool.name,
+                    sessionId,
+                    inputHash,
+                  }
+                : {
+                    operation: tool.name,
+                    inputHash,
+                  },
+            );
     if (completed === undefined) return null;
     if (completed.alreadySettled !== true)
       await this.journal?.recordRecovery(journalForwarderId(principal), completed);

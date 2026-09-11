@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
-import { OperatorForwarder } from "../broker/forwarder.js";
+import { ForwardedResultError, OperatorForwarder } from "../broker/forwarder.js";
 import { listenBroker } from "../broker/transport.js";
 import type { BrokerClient } from "../broker/transport.js";
 import type { SessionGuard } from "../../session-guard.js";
@@ -11,6 +11,220 @@ import { ProvenPreDispatchMutationError } from "../mutation-dispatch-evidence.js
 const credential = (character: string) => character.repeat(43);
 
 describe("MCP broker forwarding", () => {
+  it("recovers a valid session result when the first broker reply omits it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-forward-start-shape-"));
+    const path = join(root, "b.sock");
+    const capability = {
+      cellId: "cell",
+      browserEpoch: "epoch",
+      sessionId: "recoverable-session",
+      targetId: "target",
+      leaseGeneration: "one",
+    };
+    const broker = await listenBroker(path, {
+      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
+      call: async (_principal, method, params) => {
+        if (method === "reclaim") return { capabilities: [] };
+        if (method === "acknowledge") return {};
+        if (method === "recover") {
+          expect(params.requestId).toEqual(expect.any(String));
+          return {
+            requestId: params.requestId,
+            capability,
+            result: { session_id: capability.sessionId, broker: { targetId: "target" } },
+          };
+        }
+        if (params.name === "operate_start") return { capability };
+        throw new Error(`Unexpected ${method}`);
+      },
+      disconnect: async () => undefined,
+    });
+    const guard: SessionGuard = {
+      bind: async () => ({
+        account_id: "account",
+        agent_session_token: "test",
+        api_base_url: "http://unused.test",
+        saved_at: "",
+      }),
+      inspect: async () => ({ problem: null }),
+      boundAccountId: () => "account",
+    };
+    const forwarder = new OperatorForwarder(path, guard, credential("a"));
+    try {
+      await expect(forwarder.invoke("operate_start", {}, "start")).resolves.toEqual({
+        session_id: capability.sessionId,
+        broker: { targetId: "target" },
+      });
+      expect(forwarder.sessionCount()).toBe(1);
+    } finally {
+      await forwarder.close();
+      await broker.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not recover or acknowledge an older identical start as the current malformed reply", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-forward-start-request-"));
+    const path = join(root, "b.sock");
+    const olderCapability = {
+      cellId: "cell",
+      browserEpoch: "epoch",
+      sessionId: "older-session",
+      targetId: "older-target",
+      leaseGeneration: "one",
+    };
+    const acknowledgements: string[] = [];
+    let currentRequestId = "";
+    const broker = await listenBroker(path, {
+      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
+      call: async (_principal, method, params, requestId) => {
+        if (method === "reclaim") return { capabilities: [] };
+        if (method === "acknowledge") {
+          acknowledgements.push(String(params.requestId));
+          return {};
+        }
+        if (method === "recover") {
+          expect(params.requestId).toBe(currentRequestId);
+          return {
+            requestId: "older-unacknowledged-request",
+            capability: olderCapability,
+            result: { session_id: olderCapability.sessionId },
+          };
+        }
+        if (params.name === "operate_start") {
+          currentRequestId = requestId;
+          return {};
+        }
+        throw new Error(`Unexpected ${method}`);
+      },
+      disconnect: async () => undefined,
+    });
+    const guard: SessionGuard = {
+      bind: async () => ({
+        account_id: "account",
+        agent_session_token: "test",
+        api_base_url: "http://unused.test",
+        saved_at: "",
+      }),
+      inspect: async () => ({ problem: null }),
+      boundAccountId: () => "account",
+    };
+    const forwarder = new OperatorForwarder(path, guard, credential("a"));
+    try {
+      await expect(
+        forwarder.invoke("operate_start", { service_url: "https://same.test" }, "current"),
+      ).rejects.toMatchObject({ code: "invalid_broker_result" });
+      expect(currentRequestId).not.toBe("");
+      expect(acknowledgements).not.toContain("older-unacknowledged-request");
+      expect(forwarder.sessionCount()).toBe(0);
+    } finally {
+      await forwarder.close();
+      await broker.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("retains a recovered live capability before acknowledging its result", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-forward-start-ack-"));
+    const path = join(root, "b.sock");
+    const capability = {
+      cellId: "cell",
+      browserEpoch: "epoch",
+      sessionId: "retained-session",
+      targetId: "target",
+      leaseGeneration: "one",
+    };
+    const broker = await listenBroker(path, {
+      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
+      call: async (_principal, method, params) => {
+        if (method === "reclaim") return { capabilities: [] };
+        if (method === "acknowledge") throw new Error("acknowledgement unavailable");
+        if (method === "recover")
+          return {
+            requestId: params.requestId,
+            capability,
+            result: { session_id: capability.sessionId },
+          };
+        if (params.name === "operate_start") return {};
+        throw new Error(`Unexpected ${method}`);
+      },
+      disconnect: async () => undefined,
+    });
+    const guard: SessionGuard = {
+      bind: async () => ({
+        account_id: "account",
+        agent_session_token: "test",
+        api_base_url: "http://unused.test",
+        saved_at: "",
+      }),
+      inspect: async () => ({ problem: null }),
+      boundAccountId: () => "account",
+    };
+    const forwarder = new OperatorForwarder(path, guard, credential("a"));
+    try {
+      await expect(forwarder.invoke("operate_start", {}, "start")).rejects.toThrow(
+        "acknowledgement unavailable",
+      );
+      expect(forwarder.sessionCount()).toBe(1);
+    } finally {
+      await forwarder.close();
+      await broker.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("retains a recoverable session identity when malformed startup recovery is unavailable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-forward-start-custody-"));
+    const path = join(root, "b.sock");
+    const capability = {
+      cellId: "cell",
+      browserEpoch: "epoch",
+      sessionId: "recoverable-session",
+      targetId: "target",
+      leaseGeneration: "one",
+    };
+    const broker = await listenBroker(path, {
+      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
+      call: async (_principal, method, params) => {
+        if (method === "reclaim") return { capabilities: [] };
+        if (method === "recover") return null;
+        if (method === "acknowledge") return {};
+        if (params.name === "operate_start") return { capability, result: null };
+        throw new Error(`Unexpected ${method}`);
+      },
+      disconnect: async () => undefined,
+    });
+    const guard: SessionGuard = {
+      bind: async () => ({
+        account_id: "account",
+        agent_session_token: "test",
+        api_base_url: "http://unused.test",
+        saved_at: "",
+      }),
+      inspect: async () => ({ problem: null }),
+      boundAccountId: () => "account",
+    };
+    const forwarder = new OperatorForwarder(path, guard, credential("a"));
+    try {
+      const error = await forwarder.invoke("operate_start", {}, "start").catch((value) => value);
+      expect(error).toBeInstanceOf(ForwardedResultError);
+      expect(error).toMatchObject({
+        code: "invalid_broker_result",
+        detail: {
+          session_id: capability.sessionId,
+          cleanup: "open",
+          closed: false,
+          recovery: { tool: "operate_finish", session_id: capability.sessionId },
+        },
+      });
+      expect(forwarder.sessionCount()).toBe(1);
+    } finally {
+      await forwarder.close();
+      await broker.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it.each(["connect", "reclaim", "confirm_start", "recover"])(
     "never dispatches when cancelled during %s",
     async (barrier) => {

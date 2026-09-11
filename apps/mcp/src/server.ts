@@ -6,7 +6,11 @@ import type { OperationReceipt } from "./bot/operation-receipt.js";
 import { brokerCommandMutates } from "./bot/broker/operator.js";
 import { DispatchJournal } from "./bot/broker/dispatch-journal.js";
 import { BrokerRefusal } from "./bot/broker/scheduler.js";
-import { OperatorForwarder, type BrokerRecoveryRequest } from "./bot/broker/forwarder.js";
+import {
+  ForwardedResultError,
+  OperatorForwarder,
+  type BrokerRecoveryRequest,
+} from "./bot/broker/forwarder.js";
 // MCP server: reads its account's session from the session file, sets up an ApiClient
 // against the configured API base URL, and exposes the registered tools
 // over stdio.
@@ -453,6 +457,7 @@ export async function buildServer(
                 ? "invalid_arguments"
                 : "tool_execution_failed",
             message,
+            err instanceof ForwardedResultError ? err.detail : undefined,
           );
     } finally {
       if (budgetTimer !== undefined) clearTimeout(budgetTimer);
@@ -509,9 +514,13 @@ export function compactToolResultText(result: unknown): string {
       (result as { format?: unknown }).format as string,
     )
   ) {
-    return JSON.stringify(result);
+    const encoded = JSON.stringify(result);
+    if (encoded === undefined) throw new Error("Tool returned no JSON-serializable result");
+    return encoded;
   }
-  return JSON.stringify(result, null, 2);
+  const encoded = JSON.stringify(result, null, 2);
+  if (encoded === undefined) throw new Error("Tool returned no JSON-serializable result");
+  return encoded;
 }
 
 function errorContent(code: string, message: string, guidance?: Record<string, unknown>) {

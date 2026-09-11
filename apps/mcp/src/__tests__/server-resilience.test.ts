@@ -10,7 +10,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DispatchJournal } from "../bot/broker/dispatch-journal.js";
-import type { OperatorForwarder } from "../bot/broker/forwarder.js";
+import { ForwardedResultError, type OperatorForwarder } from "../bot/broker/forwarder.js";
 import { createServerCallAdmission } from "../server.js";
 import { describe, expect, it, vi } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -76,6 +76,42 @@ it("accepts only the exact explicit stale-ref pre-dispatch recovery metadata", (
 });
 
 describe("operate_* bad input is a per-call error, never a server failure", () => {
+  it("returns recoverable startup custody as a valid MCP error result", async () => {
+    const forwarder = {
+      invoke: vi.fn(async () => {
+        throw new ForwardedResultError("Broker omitted the startup observation", {
+          session_id: "recoverable-session",
+          cleanup: "open",
+          closed: false,
+          recovery: { tool: "operate_finish", session_id: "recoverable-session" },
+        });
+      }),
+    } as unknown as OperatorForwarder;
+    const api = { setRequestingAgent: vi.fn() } as unknown as ApiClient;
+    const server = await buildServer(api, undefined, undefined, undefined, forwarder);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: "startup-result-test", version: "1" });
+    await client.connect(clientTransport);
+    try {
+      const response = await client.callTool({
+        name: "operate_start",
+        arguments: { service_url: "https://fixture.test", format: "compact" },
+      });
+      expect(response.isError).toBe(true);
+      expect(JSON.parse(resultText(response)).error).toEqual({
+        code: "invalid_broker_result",
+        message: "Broker omitted the startup observation",
+        session_id: "recoverable-session",
+        cleanup: "open",
+        closed: false,
+        recovery: { tool: "operate_finish", session_id: "recoverable-session" },
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
   it("preserves the same active in-memory session through malformed and unknown calls", async () => {
     const url = "https://operator-resilience.test/checkout";
     const browser = {
