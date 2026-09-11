@@ -1,7 +1,11 @@
-import { withOperatorRequestContext } from "../request-cancellation.js";
+import {
+  markOperatorMutationDispatchAttempted,
+  withOperatorRequestContext,
+} from "../request-cancellation.js";
 import type { BrowserUseCapture } from "../browser-use-capture.js";
 import type { BrowserUseNode } from "../browser-use-serializer.js";
 import type { InteractiveElement } from "../browser.js";
+import type { GoogleHumanChallenge } from "../google-auth-state.js";
 import { mockBrowserUseCapture } from "./browser-use-test-capture.js";
 // Functional tests for the operator-surface session state machine — the
 // stateful flows the pure-helper unit tests can't reach. The real
@@ -23,6 +27,7 @@ const h = vi.hoisted(() => ({
   providers: ["google"] as string[] | null,
   oauthStatus: "already_valid" as string,
   oauthLoginCalls: [] as string[],
+  oauthDispatchCalls: 0,
   oauthLoginTimeouts: [] as number[],
   oauthHumanHandoffTimeouts: [] as number[],
   oauthLoginError: null as Error | null,
@@ -790,6 +795,8 @@ vi.mock("../browser.js", async (importOriginal) => ({
       if (humanDeadline !== undefined) {
         h.oauthHumanHandoffTimeouts.push(humanDeadline - Date.now());
       }
+      await markOperatorMutationDispatchAttempted();
+      h.oauthDispatchCalls += 1;
       const gate = h.oauthLoginGates.get(this.index);
       if (gate !== undefined) await gate;
       h.currentUrl = h.oauthResultUrl;
@@ -958,7 +965,11 @@ vi.mock("../browser.js", async (importOriginal) => ({
   // throw/catch these against this mocked module.
   OAuthAwaitingHumanError: class extends Error {
     readonly phase: "not_attempted" | "pending";
-    constructor(message: string, phase: "not_attempted" | "pending" = "pending") {
+    constructor(
+      message: string,
+      phase: "not_attempted" | "pending" = "pending",
+      readonly challenge?: GoogleHumanChallenge,
+    ) {
       super(message);
       this.name = "OAuthAwaitingHumanError";
       this.phase = phase;
@@ -1166,6 +1177,7 @@ beforeEach(() => {
   h.providers = ["google"];
   h.oauthStatus = "already_valid";
   h.oauthLoginCalls = [];
+  h.oauthDispatchCalls = 0;
   h.oauthLoginTimeouts = [];
   h.oauthHumanHandoffTimeouts = [];
   h.oauthLoginError = null;
@@ -3693,6 +3705,112 @@ describe("operate session — OAuth lifecycle", () => {
       session_id: started.session_id,
       closed: true,
     });
+  });
+
+  it("reports unknown OAuth progress without claiming a human challenge when the request budget expires after dispatch", async () => {
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    const controller = new AbortController();
+    let dispatched!: () => void;
+    const dispatchObserved = new Promise<void>((resolve) => {
+      dispatched = resolve;
+    });
+    h.oauthLoginGates.set(
+      0,
+      new Promise<void>((resolve) => {
+        controller.signal.addEventListener(
+          "abort",
+          () => {
+            h.oauthLoginError = controller.signal.reason as Error;
+            resolve();
+          },
+          { once: true },
+        );
+      }),
+    );
+    h.oauthResultUrl = "https://accounts.google.com/o/oauth2/v2/auth";
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+
+    const login = withOperatorRequestContext(
+      controller.signal,
+      async () =>
+        await operateLoginTool.handler(
+          { session_id: started.session_id, provider: "google", ref: "Continue with Google" },
+          null,
+        ),
+      async (phase) => {
+        if (phase === "dispatch_attempted") dispatched();
+      },
+    );
+    await dispatchObserved;
+    await expect.poll(() => h.oauthDispatchCalls).toBe(1);
+    const completed = expect(login).resolves.toMatchObject({
+      session_id: started.session_id,
+      url: "https://accounts.google.com/o/oauth2/v2/auth",
+      oauth: {
+        state: "in_progress",
+        completion: "unknown",
+        next_action: "operate_observe",
+      },
+    });
+    controller.abort(new Error("Operator work budget expired"));
+
+    await completed;
+    const result = (await login) as Awaited<ReturnType<typeof act>>;
+    expect(result.guidance).toMatch(/observe/i);
+    expect(result.guidance).toMatch(/do not repeat/i);
+    expect(result.guidance).not.toMatch(/human|challenge/i);
+    expect(result.oauth).not.toHaveProperty("challenge");
+    expect(h.oauthLoginCalls).toHaveLength(1);
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("retains an observed Google number challenge and human guidance", async () => {
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    h.oauthResultUrl = "https://accounts.google.com/signin/challenge/dp/2";
+    h.oauthLoginError = new OAuthAwaitingHumanError(
+      "Google is asking you to tap 28 on your phone.",
+      "pending",
+      {
+        provider: "google",
+        kind: "number_match",
+        attempt_id: "attempt-1",
+        challenge_revision: "revision-1",
+        document_id: "document-1",
+        number: "28",
+        observed_at: "2026-09-10T00:00:00.000Z",
+        expires_at: null,
+      },
+    );
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+
+    const challenged = await act(started.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+    });
+
+    expect(challenged.oauth).toMatchObject({
+      state: "awaiting_human",
+      challenge: { kind: "number_match", number: "28" },
+      next_action: "operate_observe",
+    });
+    expect(challenged.guidance).toMatch(/pending challenge/i);
+    await finishProvisionSession(started.session_id);
   });
 
   it("returns awaiting_human inside the compact-v2 budget even when the live challenge URL is huge", async () => {

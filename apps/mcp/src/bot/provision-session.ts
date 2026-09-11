@@ -2,6 +2,7 @@ import type { GoogleHumanChallenge } from "./google-auth-state.js";
 import type { CaptureSource } from "./credential-capture.js";
 import {
   markOperatorMutationDispatchAttempted,
+  operatorMutationDispatchPhase,
   throwIfOperatorRequestCancelled,
   currentOperatorRequestSignal,
   composeOperatorSignals,
@@ -373,6 +374,11 @@ export interface Observation {
     | {
         state: "in_progress";
         provider_page: "closed_or_detached";
+        next_action: "operate_observe";
+      }
+    | {
+        state: "in_progress";
+        completion: "unknown";
         next_action: "operate_observe";
       }
     // Fix C: an OAuth action timed out without a confirmed origin-return. This
@@ -5241,6 +5247,36 @@ function oauthAwaitingHumanObservation(
   );
 }
 
+function oauthRequestEndedAfterDispatchAttempt(
+  session: Session,
+  error: unknown,
+): Observation | null {
+  const signal = currentOperatorRequestSignal();
+  if (
+    signal?.aborted !== true ||
+    operatorMutationDispatchPhase() !== "dispatch_attempted" ||
+    signal.reason !== error
+  ) {
+    return null;
+  }
+  session.prevObserve = null;
+  invalidateCompactV2Snapshot(session);
+  const url = session.browser.currentUrl();
+  const guidance =
+    "OAuth progress is unconfirmed because the request ended after dispatch was attempted. " +
+    "Call operate_observe before deciding the next action; do not repeat the OAuth action.";
+  const oauth: NonNullable<Observation["oauth"]> = {
+    state: "in_progress",
+    completion: "unknown",
+    next_action: "operate_observe",
+  };
+  return compactV2PublicObservation(
+    session,
+    () => ({ session_id: session.id, url, text: "", guidance, elements: [], oauth }),
+    { stage: "auth", guidance, oauth, url },
+  );
+}
+
 function oauthOnboardingRequiredObservation(
   session: Session,
   error: OAuthOnboardingRequiredError,
@@ -5303,6 +5339,10 @@ async function actInternally(
       ? await withOAuthActionBoundary(session, oauthProvider, execute)
       : await execute(undefined);
   } catch (error) {
+    if (session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")) {
+      const progress = oauthRequestEndedAfterDispatchAttempt(session, error);
+      if (progress !== null) return { observation: progress, outcome: {} };
+    }
     // Fix C: an OAuth wait timing out is honest uncertainty, not a failure —
     // return it as a normal (non-throwing) observation instead of an error.
     if (error instanceof OAuthAwaitingHumanError && session !== undefined) {
@@ -5380,6 +5420,10 @@ export async function act(
         : await execute(undefined);
     return result.observation;
   } catch (error) {
+    if (session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")) {
+      const progress = oauthRequestEndedAfterDispatchAttempt(session, error);
+      if (progress !== null) return progress;
+    }
     // Fix C: an OAuth wait timing out is honest uncertainty, not a failure —
     // return it as a normal (non-throwing) observation instead of an error.
     if (error instanceof OAuthAwaitingHumanError && session !== undefined) {
