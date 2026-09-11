@@ -375,6 +375,11 @@ export interface Observation {
         provider_page: "closed_or_detached";
         next_action: "operate_observe";
       }
+    | {
+        state: "in_progress";
+        completion: "unknown";
+        next_action: "operate_observe";
+      }
     // Fix C: an OAuth action timed out without a confirmed origin-return. This
     // is honest uncertainty, not a failure — a consent screen or 2FA/
     // verification challenge is commonly still showing. `reason` names only
@@ -5244,11 +5249,21 @@ function oauthRequestEndedAfterDispatchAttempt(
   ) {
     return null;
   }
-  return oauthAwaitingHumanObservation(
+  session.prevObserve = null;
+  invalidateCompactV2Snapshot(session);
+  const url = session.browser.currentUrl();
+  const guidance =
+    "OAuth progress is unconfirmed because the request ended after dispatch was attempted. " +
+    "Call operate_observe before deciding the next action; do not repeat the OAuth action.";
+  const oauth: NonNullable<Observation["oauth"]> = {
+    state: "in_progress",
+    completion: "unknown",
+    next_action: "operate_observe",
+  };
+  return compactV2PublicObservation(
     session,
-    new OAuthAwaitingHumanError(
-      "OAuth dispatch was attempted and browser progress may have occurred, but the request ended before completion was confirmed. Call operate_observe on this session before deciding the next action; do not repeat the OAuth action.",
-    ),
+    () => ({ session_id: session.id, url, text: "", guidance, elements: [], oauth }),
+    { stage: "auth", guidance, oauth, url },
   );
 }
 

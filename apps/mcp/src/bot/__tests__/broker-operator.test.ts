@@ -57,6 +57,7 @@ import { DispatchJournal, START_DELIVERY_RETENTION_MS } from "../broker/dispatch
 import { OperatorForwarder } from "../broker/forwarder.js";
 import { forwarderId } from "../broker/lineage.js";
 import { OperatorBroker } from "../broker/operator.js";
+import { BrokerRefusal } from "../broker/scheduler.js";
 import { listenBroker } from "../broker/transport.js";
 import type { BrokerPrincipal, TabCapability } from "../broker/authority.js";
 import { ProvenPreDispatchMutationError } from "../mutation-dispatch-evidence.js";
@@ -1305,7 +1306,14 @@ it("records cancelled navigation before its executor checkpoint as not dispatche
     await started;
     broker.cancel(principal, "navigate");
     release();
-    await work;
+    const cancellation = await work;
+    expect(cancellation).toBeInstanceOf(BrokerRefusal);
+    expect(cancellation).toMatchObject({
+      code: "cancelled",
+      message: expect.stringMatching(
+        /Caller cancelled the request; session_id=.*; operation=operate_navigate; operation_id=navigate; mutation=not_dispatched; recovery=operate_observe_then_retry/,
+      ),
+    });
     expect(dispatch).not.toHaveBeenCalled();
     expect(await journal.completedOutcome(identity.forwarderId!, "navigate")).toMatchObject({
       outcome: { status: "not_dispatched", error: "cancelled" },

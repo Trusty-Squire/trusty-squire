@@ -4,6 +4,7 @@ import {
 } from "../request-cancellation.js";
 import type { BrowserUseCapture } from "../browser-use-capture.js";
 import type { InteractiveElement } from "../browser.js";
+import type { GoogleHumanChallenge } from "../google-auth-state.js";
 import { mockBrowserUseCapture } from "./browser-use-test-capture.js";
 // Functional tests for the operator-surface session state machine — the
 // stateful flows the pure-helper unit tests can't reach. The real
@@ -963,7 +964,11 @@ vi.mock("../browser.js", async (importOriginal) => ({
   // throw/catch these against this mocked module.
   OAuthAwaitingHumanError: class extends Error {
     readonly phase: "not_attempted" | "pending";
-    constructor(message: string, phase: "not_attempted" | "pending" = "pending") {
+    constructor(
+      message: string,
+      phase: "not_attempted" | "pending" = "pending",
+      readonly challenge?: GoogleHumanChallenge,
+    ) {
       super(message);
       this.name = "OAuthAwaitingHumanError";
       this.phase = phase;
@@ -3701,7 +3706,7 @@ describe("operate session — OAuth lifecycle", () => {
     });
   });
 
-  it("returns progress when the request budget expires after OAuth dispatch", async () => {
+  it("reports unknown OAuth progress without claiming a human challenge when the request budget expires after dispatch", async () => {
     h.visibleText = "Continue with Google";
     h.elements = [
       elem({
@@ -3729,7 +3734,7 @@ describe("operate session — OAuth lifecycle", () => {
         );
       }),
     );
-    h.oauthResultUrl = "https://accounts.google.com/consent";
+    h.oauthResultUrl = "https://accounts.google.com/o/oauth2/v2/auth";
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
 
     const login = withOperatorRequestContext(
@@ -3747,16 +3752,63 @@ describe("operate session — OAuth lifecycle", () => {
     await expect.poll(() => h.oauthDispatchCalls).toBe(1);
     const completed = expect(login).resolves.toMatchObject({
       session_id: started.session_id,
-      url: "https://accounts.google.com/consent",
+      url: "https://accounts.google.com/o/oauth2/v2/auth",
       oauth: {
-        state: "awaiting_human",
+        state: "in_progress",
+        completion: "unknown",
         next_action: "operate_observe",
       },
     });
     controller.abort(new Error("Operator work budget expired"));
 
     await completed;
+    const result = (await login) as Awaited<ReturnType<typeof act>>;
+    expect(result.guidance).toMatch(/observe/i);
+    expect(result.guidance).toMatch(/do not repeat/i);
+    expect(result.guidance).not.toMatch(/human|challenge/i);
+    expect(result.oauth).not.toHaveProperty("challenge");
     expect(h.oauthLoginCalls).toHaveLength(1);
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("retains an observed Google number challenge and human guidance", async () => {
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    h.oauthResultUrl = "https://accounts.google.com/signin/challenge/dp/2";
+    h.oauthLoginError = new OAuthAwaitingHumanError(
+      "Google is asking you to tap 28 on your phone.",
+      "pending",
+      {
+        provider: "google",
+        kind: "number_match",
+        attempt_id: "attempt-1",
+        challenge_revision: "revision-1",
+        document_id: "document-1",
+        number: "28",
+        observed_at: "2026-09-10T00:00:00.000Z",
+        expires_at: null,
+      },
+    );
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+
+    const challenged = await act(started.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+    });
+
+    expect(challenged.oauth).toMatchObject({
+      state: "awaiting_human",
+      challenge: { kind: "number_match", number: "28" },
+      next_action: "operate_observe",
+    });
+    expect(challenged.guidance).toMatch(/pending challenge/i);
     await finishProvisionSession(started.session_id);
   });
 
