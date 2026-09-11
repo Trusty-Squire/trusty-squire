@@ -7,8 +7,25 @@
 // the install confirm itself.
 
 import { describe, expect, it, vi } from "vitest";
-import { parseArgs, applyInstallPreferences } from "../install/cli.js";
+import {
+  parseArgs,
+  applyInstallPreferences,
+  resolveConnectTargetContext,
+} from "../install/cli.js";
 import type { SessionData } from "../session.js";
+import type { AgentDefinition } from "../install/agents.js";
+import { CHROME_PROFILE_DIR } from "../bot/profile.js";
+
+function configuredAgent(env: Record<string, string> | null): AgentDefinition {
+  return {
+    target: "hermes",
+    display_name: "Hermes",
+    config_path: () => "/synthetic/hermes.yaml",
+    detect: async () => true,
+    readConfigEnv: async () => env,
+    writeConfig: async () => undefined,
+  };
+}
 
 describe("applyInstallPreferences (fresh interactive consent must win)", () => {
   const base: SessionData = {
@@ -103,6 +120,67 @@ describe("parseArgs --force-relogin", () => {
     const args = parseArgs(["connect", "--force-relogin=github"]);
     expect(args.forceRelogin).toBe(true);
     expect(args.forceReloginProvider).toBe("github");
+  });
+});
+
+describe("resolveConnectTargetContext", () => {
+  it("reuses the selected target's recorded profile, account, and agent identity", async () => {
+    await expect(
+      resolveConnectTargetContext(
+        "hermes",
+        configuredAgent({
+          TRUSTY_SQUIRE_PROFILE_DIR: "/synthetic/profiles/hermes",
+          TRUSTY_SQUIRE_ACCOUNT_ID: "acct_hermes",
+          TRUSTY_SQUIRE_AGENT_IDENTITY: "hermes-runtime",
+        }),
+        {},
+      ),
+    ).resolves.toEqual({
+      profileDir: "/synthetic/profiles/hermes",
+      accountId: "acct_hermes",
+      agentIdentity: "hermes-runtime",
+    });
+  });
+
+  it("gives documented caller env precedence over recorded target context", async () => {
+    await expect(
+      resolveConnectTargetContext(
+        "hermes",
+        configuredAgent({
+          TRUSTY_SQUIRE_PROFILE_DIR: "/synthetic/profiles/hermes",
+          TRUSTY_SQUIRE_ACCOUNT_ID: "acct_hermes",
+          TRUSTY_SQUIRE_AGENT_IDENTITY: "hermes-runtime",
+        }),
+        {
+          TRUSTY_SQUIRE_PROFILE_DIR: "/synthetic/override-profile",
+          TRUSTY_SQUIRE_ACCOUNT_ID: "acct_override",
+          TRUSTY_SQUIRE_AGENT_IDENTITY: "override-runtime",
+        },
+      ),
+    ).resolves.toEqual({
+      profileDir: "/synthetic/override-profile",
+      accountId: "acct_override",
+      agentIdentity: "override-runtime",
+    });
+  });
+
+  it("preserves legacy first-connect defaults when the target has no config", async () => {
+    await expect(resolveConnectTargetContext("hermes", configuredAgent(null), {})).resolves.toEqual({
+      profileDir: CHROME_PROFILE_DIR,
+      agentIdentity: "hermes",
+    });
+  });
+
+  it("fails closed on an invalid configured context without logging its value", async () => {
+    const secret = "secret-fixture-profile";
+    const error = await resolveConnectTargetContext(
+      "hermes",
+      configuredAgent({ TRUSTY_SQUIRE_PROFILE_DIR: `  `, SECRET_FIXTURE: secret }),
+      {},
+    ).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toContain("TRUSTY_SQUIRE_PROFILE_DIR");
+    expect(String(error)).not.toContain(secret);
   });
 });
 

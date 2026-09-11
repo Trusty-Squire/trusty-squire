@@ -66,6 +66,11 @@ export interface AgentDefinition {
   // when --target isn't supplied so the CLI can prompt with the
   // detected options first.
   detect: () => Promise<boolean>;
+  // Read the effective Squire launch environment from this agent's existing
+  // config. Connect uses it to re-enter the same account/profile context that
+  // the target runtime will launch with. Missing config/entry returns null;
+  // malformed config throws so reconnect never falls back to another context.
+  readConfigEnv: () => Promise<Record<string, string> | null>;
   // Idempotent: read current config (if any), merge the squire
   // server entry, write back. Preserves user-customised entries.
   writeConfig: (input: WriteConfigInput) => Promise<void>;
@@ -91,6 +96,112 @@ async function readJsonIfExists(filePath: string): Promise<Record<string, unknow
     if ((err as { code?: string }).code === "ENOENT") return {};
     throw err;
   }
+}
+
+type ConfigParser = (raw: string, filePath: string) => unknown;
+
+function parseJsonConfig(raw: string): unknown {
+  return JSON.parse(raw);
+}
+
+function parseYamlConfig(raw: string): unknown {
+  return yamlParse(raw);
+}
+
+function parseTomlConfig(raw: string): unknown {
+  return tomlParse(raw);
+}
+
+function parseJsoncConfig(raw: string, filePath: string): unknown {
+  const errors: ParseError[] = [];
+  const parsed = parseJsonc(raw, errors, {
+    allowTrailingComma: true,
+    disallowComments: false,
+  });
+  if (errors.length > 0) {
+    const first = errors[0]!;
+    throw new Error(
+      `Cannot read agent config ${filePath}: ${printParseErrorCode(first.error)} at offset ${first.offset}`,
+    );
+  }
+  return parsed;
+}
+
+async function readConfigObject(
+  filePath: string,
+  parser: ConfigParser,
+): Promise<Record<string, unknown> | null> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(filePath, "utf8");
+  } catch (err) {
+    if ((err as { code?: string }).code === "ENOENT") return null;
+    throw err;
+  }
+  let parsed: unknown;
+  try {
+    parsed = parser(raw, filePath);
+  } catch {
+    // Parser diagnostics can quote the offending source line. Config files may
+    // contain credentials, so keep the user-facing error structural only.
+    throw new Error(`Cannot read agent config ${filePath}: invalid syntax`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Cannot read agent config ${filePath}: expected an object`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function stringEnvironment(
+  entry: unknown,
+  field: "env" | "envs" | "environment",
+  filePath: string,
+): Record<string, string> | null {
+  if (entry === undefined) return null;
+  const server = record(entry);
+  if (server === null) {
+    throw new Error(`Cannot read agent config ${filePath}: squire entry must be an object`);
+  }
+  if (server[field] === undefined) return null;
+  const env = record(server[field]);
+  if (env === null) {
+    throw new Error(`Cannot read agent config ${filePath}: squire ${field} must be an object`);
+  }
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (typeof value === "string") {
+      result[key] = value;
+    } else if (
+      key === "TRUSTY_SQUIRE_PROFILE_DIR" ||
+      key === "TRUSTY_SQUIRE_ACCOUNT_ID" ||
+      key === "TRUSTY_SQUIRE_AGENT_IDENTITY"
+    ) {
+      throw new Error(`Cannot read agent config ${filePath}: ${key} must be a string`);
+    }
+  }
+  return result;
+}
+
+async function readMappedServerEnv(
+  filePath: string,
+  parser: ConfigParser,
+  containerKey: string,
+  field: "env" | "envs" | "environment",
+): Promise<Record<string, string> | null> {
+  const data = await readConfigObject(filePath, parser);
+  if (data === null) return null;
+  if (data[containerKey] === undefined) return null;
+  const container = record(data[containerKey]);
+  if (container === null) {
+    throw new Error(`Cannot read agent config ${filePath}: ${containerKey} must be an object`);
+  }
+  return stringEnvironment(container[SERVER_KEY], field, filePath);
 }
 
 async function writeJson(filePath: string, data: unknown): Promise<void> {
@@ -185,6 +296,8 @@ const claudeCode: AgentDefinition = {
   display_name: "Claude Code",
   config_path: () => path.join(home(), ".claude.json"),
   detect: async () => exists(path.join(home(), ".claude")),
+  readConfigEnv: async () =>
+    readMappedServerEnv(claudeCode.config_path(), parseJsonConfig, "mcpServers", "env"),
   writeConfig: async (input) => mergeMcpServersJson(claudeCode.config_path(), input),
 };
 
@@ -229,6 +342,8 @@ const cursor: AgentDefinition = {
   display_name: "Cursor",
   config_path: () => path.join(home(), ".cursor", "mcp.json"),
   detect: async () => exists(path.join(home(), ".cursor")),
+  readConfigEnv: async () =>
+    readMappedServerEnv(cursor.config_path(), parseJsonConfig, "mcpServers", "env"),
   writeConfig: async (input) => mergeMcpServersJson(cursor.config_path(), input),
 };
 
@@ -248,6 +363,8 @@ const goose: AgentDefinition = {
   config_path: () =>
     path.join(process.env.XDG_CONFIG_HOME ?? path.join(home(), ".config"), "goose", "config.yaml"),
   detect: async () => exists(goose.config_path()),
+  readConfigEnv: async () =>
+    readMappedServerEnv(goose.config_path(), parseYamlConfig, "extensions", "envs"),
   writeConfig: async (input) => {
     const filePath = goose.config_path();
     let data: Record<string, unknown> = {};
@@ -314,6 +431,8 @@ const hermes: AgentDefinition = {
   display_name: "Hermes",
   config_path: () => path.join(home(), ".hermes", "config.yaml"),
   detect: async () => exists(path.join(home(), ".hermes")),
+  readConfigEnv: async () =>
+    readMappedServerEnv(hermes.config_path(), parseYamlConfig, "mcp_servers", "env"),
   writeConfig: async (input) => {
     const filePath = hermes.config_path();
     let data: Record<string, unknown> = {};
@@ -370,6 +489,8 @@ const cline: AgentDefinition = {
       "cline_mcp_settings.json",
     ),
   detect: async () => exists(path.join(vscodeGlobalStorage(), "saoudrizwan.claude-dev")),
+  readConfigEnv: async () =>
+    readMappedServerEnv(cline.config_path(), parseJsonConfig, "mcpServers", "env"),
   writeConfig: async (input) => mergeMcpServersJson(cline.config_path(), input),
 };
 
@@ -380,6 +501,20 @@ const continueAgent: AgentDefinition = {
   display_name: "Continue",
   config_path: () => path.join(home(), ".continue", "config.yaml"),
   detect: async () => exists(path.join(home(), ".continue")),
+  readConfigEnv: async () => {
+    const data = await readConfigObject(continueAgent.config_path(), parseYamlConfig);
+    if (data === null || data.mcpServers === undefined) return null;
+    if (!Array.isArray(data.mcpServers)) {
+      throw new Error(
+        `Cannot read agent config ${continueAgent.config_path()}: mcpServers must be an array`,
+      );
+    }
+    return stringEnvironment(
+      data.mcpServers.find((entry) => record(entry)?.name === SERVER_KEY),
+      "env",
+      continueAgent.config_path(),
+    );
+  },
   writeConfig: async (input) => {
     const filePath = continueAgent.config_path();
     let data: Record<string, unknown> = {};
@@ -425,6 +560,8 @@ const codex: AgentDefinition = {
   display_name: "Codex CLI",
   config_path: () => path.join(home(), ".codex", "config.toml"),
   detect: async () => exists(path.join(home(), ".codex")),
+  readConfigEnv: async () =>
+    readMappedServerEnv(codex.config_path(), parseTomlConfig, "mcp_servers", "env"),
   writeConfig: async (input) => {
     const filePath = codex.config_path();
     let data: Record<string, unknown> = {};
@@ -584,6 +721,8 @@ const opencode: AgentDefinition = {
     (await exists(opencodeConfigPath())) ||
     (await exists(opencodeConfigDir())) ||
     executableOnPath("opencode"),
+  readConfigEnv: async () =>
+    readMappedServerEnv(opencode.config_path(), parseJsoncConfig, "mcp", "environment"),
   writeConfig: async (input) => writeOpenCodeConfig(opencode.config_path(), input),
 };
 
