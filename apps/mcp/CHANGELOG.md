@@ -1,5 +1,12 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.14-rc.13 (2026-09-11)
+
+- fix(mcp): reconnect in target profile context (#720)
+- fix(mcp): preserve operate_start result custody (#719)
+- fix(mcp): preserve observed action progress after timeout (#718)
+- fix(mcp): surface compact observation blockers (#717)
+
 ## 1.1.14-rc.12 (2026-09-10)
 
 - Capture plain-text API key fields, including Neon’s revealed-token dialog, directly into the vault with an explicit CSS source. Extraction-only recovery keeps the original write ID and never repeats key creation.
