@@ -1881,7 +1881,9 @@ describe("interleaved observation DOM", () => {
         <script>document.querySelector('#continue').onclick = () => document.querySelector('#result').textContent = 'Sign-in continuation reached';</script>
       `);
       const frame = page.frames()[1];
-      await frame.setContent(`<style>body { font: 18px system-ui; } button { padding: 12px; }</style><button>Verify you are human</button>`);
+      await frame.setContent(
+        `<style>body { font: 18px system-ui; } button { padding: 12px; }</style><button>Verify you are human</button>`,
+      );
       await frame.locator("button").evaluate((button) => {
         button.addEventListener("click", () => {
           (parent.document.querySelector("input") as HTMLInputElement).value = "0.fixture-response";
@@ -1895,9 +1897,15 @@ describe("interleaved observation DOM", () => {
         const capture = await controller.extractBrowserUseObservation();
         const blockers = safeBlockersV2(capture.root);
         const payload = encodeV2QueryPage({
-          sessionId: "turnstile-fixture", stage: "auth", pageUrl: page.url(),
-          semantics: { ...safePageSemanticsV2(await controller.extractObservationSemantics()), blockers },
-          rows: [], cursorFor: () => "cursor",
+          sessionId: "turnstile-fixture",
+          stage: "auth",
+          pageUrl: page.url(),
+          semantics: {
+            ...safePageSemanticsV2(await controller.extractObservationSemantics()),
+            blockers,
+          },
+          rows: [],
+          cursorFor: () => "cursor",
         }).payload;
         observations.push({ stage, payload });
         if (evidenceDir) {
@@ -1915,7 +1923,11 @@ describe("interleaved observation DOM", () => {
       await page.locator("#continue").click();
       expect(await page.locator("#result").textContent()).toBe("Sign-in continuation reached");
       await observe("continued");
-      if (evidenceDir) writeFileSync(join(evidenceDir, "observations.json"), JSON.stringify(observations, null, 2));
+      if (evidenceDir)
+        writeFileSync(
+          join(evidenceDir, "observations.json"),
+          JSON.stringify(observations, null, 2),
+        );
     } finally {
       await page.close();
     }
