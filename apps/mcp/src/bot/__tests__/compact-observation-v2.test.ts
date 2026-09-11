@@ -545,11 +545,7 @@ describe("compact observation v2", () => {
       const root = hostPage([
         node("form", {
           nodeName: "FORM",
-          children: [
-            challengeIframe("frame"),
-            text("success", "Success!"),
-            response,
-          ],
+          children: [challengeIframe("frame"), text("success", "Success!"), response],
         }),
       ]);
       expect(safeBlockersV2(root)).toEqual([

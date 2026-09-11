@@ -364,9 +364,8 @@ The legacy non-compact interface retains its structural fingerprints.
 
 ### Physical continuity
 
-A framework replacing a node with identical markup must obtain a new ref.
-This is deliberate fail-closed behavior; node replacement is not continuity.
-Unrelated siblings do not change the surviving node's identity.
+For physical continuity and guarded benign re-render adoption, see
+[§4.1](#41-opaque-durable-identity--descriptive-label-decided-option-a).
 
 ### Phase 2 — redaction shipped, then removed entirely (2026-09-05)
 
