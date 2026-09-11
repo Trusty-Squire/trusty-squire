@@ -187,9 +187,9 @@ describe("interleaved observation DOM", () => {
             (withDialog
               ? '<div role="dialog" aria-label="Create key"><span>Docs</span></div>'
               : "");
-          for (const control of document.querySelectorAll("span")) {
+          document.querySelectorAll("span").forEach((control) => {
             control.addEventListener("click", () => control.setAttribute("data-clicked", "yes"));
-          }
+          });
         }, dialog);
       };
       await mount(false);
