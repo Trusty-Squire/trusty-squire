@@ -1,5 +1,5 @@
 import { ScreenshotClickError } from "../bot/screenshot-click.js";
-import { captureSourceSchema } from "../bot/credential-capture.js";
+import { captureSourceSchema, describeCaptureSource } from "../bot/credential-capture.js";
 import {
   currentOperatorOperationId,
   markOperatorMutationDispatchAttempted,
@@ -29,6 +29,8 @@ import {
   TargetStaleError,
   extractCredentials,
   captureCredentialSource,
+  probeCaptureSource,
+  type CaptureSourceProbe,
   finishProvisionSession,
   finishProvisionSessionWithPreparation,
   observedHostsForSession,
@@ -622,6 +624,7 @@ async function captureIntoVault(
   sessionId: string,
   capture: z.infer<typeof captureSchema>,
   api: ApiClient,
+  afterAction?: { pre?: CaptureSourceProbe | undefined },
 ) {
   const writeId = capture.write_id!;
   const binding = createHash("sha256")
@@ -642,7 +645,23 @@ async function captureIntoVault(
   };
   try {
     throwIfOperatorRequestCancelled();
-    const extracted = await captureCredentialSource(sessionId, capture.source);
+    const extracted =
+      afterAction === undefined
+        ? await captureCredentialSource(sessionId, capture.source)
+        : await captureCredentialSource(sessionId, capture.source, afterAction);
+    if (extracted.resolved_from === "pre_action_only")
+      // The source still resolves only as it did BEFORE the action — the
+      // mutation has not rendered a changed source. Never store the pre-action
+      // value (the Groq key-dialog failure); leave the write_id recoverable.
+      return {
+        ...base,
+        execution: "completed",
+        stored: false,
+        storage: "unknown",
+        error: "capture_pre_action_only",
+        candidate_count: extracted.candidate_count,
+        retry: "extract_only",
+      };
     if (extracted.candidate_count !== 1 || extracted.value === undefined)
       return {
         ...base,
@@ -666,7 +685,13 @@ async function captureIntoVault(
       storage: "stored",
       reference: stored.reference,
     });
-    return { ...base, execution: "completed", stored: true, stored_credential: stored };
+    return {
+      ...base,
+      execution: "completed",
+      stored: true,
+      stored_credential: stored,
+      resolved_source: describeCaptureSource(capture.source),
+    };
   } catch {
     // Errors may carry echoed provider values. Capture returns fixed metadata;
     // the page stays available for explicit reads and extraction-only recovery.
@@ -2031,6 +2056,11 @@ const captureOutputSchema = {
       properties: { reference: { type: "string" } },
       additionalProperties: true,
     },
+    resolved_source: {
+      type: "object",
+      description: "Names the element the vaulted value was resolved from (role/name or selector).",
+      additionalProperties: true,
+    },
     candidate_count: { type: "integer" },
     action_result: { type: "object", additionalProperties: true },
     retry: { enum: ["extract_only", "action"] },
@@ -2053,7 +2083,7 @@ for (const tool of OPERATE_TOOLS) {
   if (properties !== null && typeof properties === "object")
     Object.assign(properties, { capture: captureJson });
   tool.description +=
-    " Optional capture:{store,source:{role,name?,container?}|{selector,container?}} vaults exactly one revealed source and returns metadata only. Use a value-free CSS selector for a plain-text copy field without a textbox/code role. If storage is unresolved, retry operate_extract with capture.write_id; never repeat creation.";
+    " Optional capture:{store,source:{role,name?,container?}|{selector,container?}} vaults exactly one revealed source and returns metadata only; the source is resolved against the document AFTER the action's mutation settles, and a stored result names the resolved element in resolved_source. Use a value-free CSS selector for a plain-text copy field without a textbox/code role. If storage is unresolved, retry operate_extract with capture.write_id; never repeat creation. An unresolved capture does not block unrelated actions — only a new vaulting attempt is fenced.";
   tool.jsonOutputSchema = captureOutputSchema;
   const handler = tool.handler;
   tool.handler = async (args, api, context) => {
@@ -2075,6 +2105,15 @@ for (const tool of OPERATE_TOOLS) {
     );
     if (tool.name !== "operate_extract") {
       let actionResult: unknown;
+      // A click capture must be judged against the POST-action document. Probe
+      // the source BEFORE the click so the post-action resolution can prove it
+      // is not merely the pre-click element re-read (the Groq key-dialog
+      // failure, where the only pre-click textbox was the display-name input).
+      // A probe failure never blocks the click itself.
+      const preProbe =
+        tool.name === "operate_click"
+          ? await probeCaptureSource(args.session_id, capture.source).catch(() => undefined)
+          : undefined;
       try {
         actionResult = await handler(args, api, context);
         if (
@@ -2085,7 +2124,12 @@ for (const tool of OPERATE_TOOLS) {
           )
         )
           return {
-            ...(await captureIntoVault(args.session_id, capture, api)),
+            ...(await captureIntoVault(
+              args.session_id,
+              capture,
+              api,
+              tool.name === "operate_click" ? { pre: preProbe } : undefined,
+            )),
             ...(actionResult !== null &&
             typeof actionResult === "object" &&
             "screenshot_click" in actionResult
@@ -2097,6 +2141,8 @@ for (const tool of OPERATE_TOOLS) {
       } finally {
         const baseline = sessionForCall(args.session_id)?.compactV2Previous;
         if (baseline) delete baseline.compactMapEmitted;
+        if (preProbe?.handle !== undefined)
+          await preProbe.handle.dispose().catch(() => undefined);
       }
       const notDispatched = operatorMutationDispatchPhase() === "prepared";
       if (notDispatched)

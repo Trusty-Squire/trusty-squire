@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
 import * as lifecycle from "../session/lifecycle.js";
-import { captureCredentialSource } from "../provision-session.js";
+import { captureCredentialSource, probeCaptureSource } from "../provision-session.js";
 import type { Session } from "../session/model.js";
 
 let browser: Browser;
@@ -10,7 +10,7 @@ beforeAll(async () => {
   browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
   page = await browser.newPage();
   vi.spyOn(lifecycle, "sessionForCall").mockReturnValue({
-    browser: { activePage: () => page },
+    browser: { activePage: () => page, waitForInteractiveDom: async () => undefined },
   } as unknown as Session);
 });
 afterAll(async () => {
@@ -122,4 +122,87 @@ it("keeps explicit plain-text sources scoped, visible, and unambiguous", async (
     node.append(other);
   });
   expect(await captureCredentialSource("fixture", source)).toEqual({ candidate_count: 2 });
+});
+
+// Groq key-creation shape: the click's mutation renders the created-key dialog
+// ASYNCHRONOUSLY, so the capture must judge the POST-action document, never
+// re-vault the pre-click textbox.
+it("captures the key textbox that only renders after the click's mutation settles", async () => {
+  await page.setContent(
+    '<input aria-label="Display name" value="My key display name"><button>Create key</button>',
+  );
+  const source = { role: "textbox" as const };
+  const pre = await probeCaptureSource("fixture", source);
+  expect(pre.candidate_count).toBe(1);
+  expect(pre.value).toBe("My key display name");
+  try {
+    await page.evaluate(() =>
+      setTimeout(() => {
+        document.body.innerHTML =
+          '<section role="dialog"><input aria-label="API key" value="gsk_fixture_created-key-value"></section>';
+      }, 400),
+    );
+    expect(await captureCredentialSource("fixture", source, { pre })).toEqual({
+      candidate_count: 1,
+      value: "gsk_fixture_created-key-value",
+      resolved_from: "post_action",
+    });
+  } finally {
+    await pre.handle?.dispose();
+  }
+});
+
+it("treats a capture that still resolves only as before the click as unresolved", async () => {
+  await page.setContent('<input aria-label="Display name" value="My key display name">');
+  const source = { role: "textbox" as const };
+  const pre = await probeCaptureSource("fixture", source);
+  try {
+    const captured = await captureCredentialSource("fixture", source, { pre });
+    expect(captured).toEqual({ candidate_count: 1, resolved_from: "pre_action_only" });
+    expect(captured.value).toBeUndefined();
+  } finally {
+    await pre.handle?.dispose();
+  }
+});
+
+it("still captures when the click reveals a new value in the same element", async () => {
+  await page.setContent('<input aria-label="API key" value="masked-fixture">');
+  const source = { role: "textbox" as const, name: "API key" as const };
+  const pre = await probeCaptureSource("fixture", source);
+  expect(pre.value).toBe("masked-fixture");
+  try {
+    await page.evaluate(() =>
+      setTimeout(() => {
+        (document.querySelector("input") as HTMLInputElement).value = "gsk_fixture_revealed";
+      }, 400),
+    );
+    expect(await captureCredentialSource("fixture", source, { pre })).toEqual({
+      candidate_count: 1,
+      value: "gsk_fixture_revealed",
+      resolved_from: "post_action",
+    });
+  } finally {
+    await pre.handle?.dispose();
+  }
+});
+
+it("never vaults the pre-click textbox when the dialog adds a second candidate", async () => {
+  await page.setContent('<input aria-label="Display name" value="My key display name">');
+  const source = { role: "textbox" as const };
+  const pre = await probeCaptureSource("fixture", source);
+  try {
+    await page.evaluate(() =>
+      setTimeout(() => {
+        const dialog = document.createElement("section");
+        dialog.setAttribute("role", "dialog");
+        dialog.innerHTML = '<input aria-label="API key" value="gsk_fixture_created">';
+        document.body.append(dialog);
+      }, 400),
+    );
+    const captured = await captureCredentialSource("fixture", source, { pre });
+    expect(captured).toEqual({ candidate_count: 2, resolved_from: "post_action" });
+    expect(captured.value).toBeUndefined();
+  } finally {
+    await pre.handle?.dispose();
+  }
 });

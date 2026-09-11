@@ -38,7 +38,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { Buffer } from "node:buffer";
 import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Page } from "playwright";
+import type { ElementHandle, Page } from "playwright";
 import {
   BrowserClickDispatchError,
   CHECKOUT_SUBMIT_LABEL_RE,
@@ -8809,19 +8809,8 @@ export function classifyVouchflowCredentials(text: string): Record<string, strin
 // SAME exported regex policy the bot uses (extractApiKeyFromText +
 // isTruncatedCapture + extraction.ts accumulation). Reuses the substrate —
 // no new credential regexes.
-/** Explicit capture reads one named source without revealing other controls or
- * scanning unrelated page text. Normal extract/observe remain unchanged. */
-export async function captureCredentialSource(
-  sessionId: string,
-  source: CaptureSource,
-): Promise<{
-  candidate_count: number;
-  value?: string;
-}> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error("unknown provision session");
-  const page = operationPageForSession(session);
-  if (page === undefined) throw new Error("capture page unavailable");
+
+function captureSourceTargets(page: Page, source: CaptureSource) {
   const container =
     source.container === undefined
       ? page
@@ -8830,32 +8819,169 @@ export async function captureCredentialSource(
             ? { name: source.container.name, exact: true }
             : {}),
         });
-  const targets =
-    "selector" in source
-      ? container.locator(`css=${source.selector}`).filter({ visible: true })
-      : container.getByRole(source.role, {
-          ...(source.name !== undefined ? { name: source.name, exact: true } : {}),
-        });
-  // Pin the selected element in its current document. A new document must not
-  // satisfy the same locator while capture is in flight.
-  const handles = await targets.elementHandles();
+  return "selector" in source
+    ? container.locator(`css=${source.selector}`).filter({ visible: true })
+    : container.getByRole(source.role, {
+        ...(source.name !== undefined ? { name: source.name, exact: true } : {}),
+      });
+}
+
+async function readCaptureValue(handle: ElementHandle<Node>): Promise<string> {
+  return await handle.evaluate((node) => {
+    if (!node.isConnected || node.ownerDocument !== document)
+      throw new Error("capture source changed");
+    const value =
+      node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
+        ? node.value
+        : node instanceof HTMLElement
+          ? node.innerText
+          : "";
+    return value.length <= 8192 ? value.trim() : "";
+  });
+}
+
+/** Resolve a capture source once against the live document, disposing the
+ * pinned handles. A new document must not satisfy the same locator while
+ * capture is in flight. */
+async function resolveCaptureSourceOnce(
+  page: Page,
+  source: CaptureSource,
+): Promise<{ candidate_count: number; value?: string }> {
+  const handles = await captureSourceTargets(page, source).elementHandles();
   try {
     if (handles.length !== 1) return { candidate_count: handles.length };
-    const value = await handles[0]!.evaluate((node) => {
-      if (!node.isConnected || node.ownerDocument !== document)
-        throw new Error("capture source changed");
-      const value =
-        node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
-          ? node.value
-          : node instanceof HTMLElement
-            ? node.innerText
-            : "";
-      return value.length <= 8192 ? value.trim() : "";
-    });
+    const value = await readCaptureValue(handles[0]!);
     return { candidate_count: 1, ...(value.length > 0 ? { value } : {}) };
   } finally {
     await Promise.all(handles.map((handle) => handle.dispose().catch(() => undefined)));
   }
+}
+
+/** Live pre-action probe of a click capture's source. The single candidate's
+ * handle stays alive so the post-action resolution can prove it is not merely
+ * the pre-click element re-read; the caller must dispose it. */
+export interface CaptureSourceProbe {
+  candidate_count: number;
+  value?: string;
+  handle?: ElementHandle<Node>;
+}
+
+export async function probeCaptureSource(
+  sessionId: string,
+  source: CaptureSource,
+): Promise<CaptureSourceProbe> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error("unknown provision session");
+  const page = operationPageForSession(session);
+  if (page === undefined) throw new Error("capture page unavailable");
+  const handles = await captureSourceTargets(page, source).elementHandles();
+  if (handles.length !== 1) {
+    await Promise.all(handles.map((handle) => handle.dispose().catch(() => undefined)));
+    return { candidate_count: handles.length };
+  }
+  const [handle] = handles;
+  try {
+    const value = await readCaptureValue(handle!);
+    return { candidate_count: 1, handle: handle!, ...(value.length > 0 ? { value } : {}) };
+  } catch (error) {
+    await handle!.dispose().catch(() => undefined);
+    throw error;
+  }
+}
+
+async function sameDomElement(
+  handle: ElementHandle<Node>,
+  preHandle: ElementHandle<Node> | undefined,
+): Promise<boolean> {
+  if (preHandle === undefined) return false;
+  try {
+    return await handle.evaluate((node, other) => node === other, preHandle);
+  } catch {
+    return false; // stale pre-action handle — a different document's element
+  }
+}
+
+// A click capture that re-reads the SAME element with the SAME value the
+// pre-action probe saw proves only the pre-click document — the click's
+// mutation has not rendered yet (the Groq key-dialog failure: the display-name
+// textbox was the only pre-click textbox, and the capture vaulted its value as
+// the key). Poll a bounded window for the mutation to render a changed
+// resolution; if the source still resolves only as it did before the click,
+// report pre_action_only so the caller treats storage as unresolved.
+const CAPTURE_MUTATION_RENDER_BUDGET_MS = 2_000;
+const CAPTURE_MUTATION_RENDER_POLL_MS = 250;
+
+async function resolveChangedPostActionSource(
+  page: Page,
+  source: CaptureSource,
+  pre: CaptureSourceProbe,
+): Promise<{ candidate_count: number; value?: string } | null> {
+  const handles = await captureSourceTargets(page, source).elementHandles();
+  try {
+    if (handles.length === 1) {
+      const value = await readCaptureValue(handles[0]!);
+      const unchanged =
+        pre.candidate_count === 1 &&
+        (await sameDomElement(handles[0]!, pre.handle)) &&
+        (pre.value ?? "") === value;
+      if (unchanged) return null;
+      return { candidate_count: 1, ...(value.length > 0 ? { value } : {}) };
+    }
+    // Same non-unique (or still-empty) resolution as before the click — keep
+    // waiting; the mutation may still be rendering.
+    if (handles.length === pre.candidate_count) return null;
+    return { candidate_count: handles.length };
+  } finally {
+    await Promise.all(handles.map((handle) => handle.dispose().catch(() => undefined)));
+  }
+}
+
+async function resolvePostActionCaptureSource(
+  page: Page,
+  source: CaptureSource,
+  pre: CaptureSourceProbe,
+): Promise<{
+  candidate_count: number;
+  value?: string;
+  resolved_from: "post_action" | "pre_action_only";
+}> {
+  const deadline = Date.now() + CAPTURE_MUTATION_RENDER_BUDGET_MS;
+  for (;;) {
+    const changed = await resolveChangedPostActionSource(page, source, pre);
+    if (changed !== null) return { ...changed, resolved_from: "post_action" };
+    if (Date.now() >= deadline)
+      return { candidate_count: pre.candidate_count, resolved_from: "pre_action_only" };
+    await new Promise((resolve) => setTimeout(resolve, CAPTURE_MUTATION_RENDER_POLL_MS));
+  }
+}
+
+/** Explicit capture reads one named source without revealing other controls or
+ * scanning unrelated page text. Normal extract/observe remain unchanged.
+ * With `afterAction`, the source is judged against the POST-action document:
+ * the click's own settle runs first, and a resolution indistinguishable from
+ * the pre-action probe is reported as `pre_action_only` instead of stored. */
+export async function captureCredentialSource(
+  sessionId: string,
+  source: CaptureSource,
+  afterAction?: { pre?: CaptureSourceProbe | undefined },
+): Promise<{
+  candidate_count: number;
+  value?: string;
+  resolved_from?: "post_action" | "pre_action_only";
+}> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error("unknown provision session");
+  const page = operationPageForSession(session);
+  if (page === undefined) throw new Error("capture page unavailable");
+  if (afterAction !== undefined) {
+    // Same settle the click itself waits on — judge the source only after the
+    // click's mutation has had its render window.
+    await settleAfterStateChange(session.browser, page);
+    return afterAction.pre === undefined
+      ? { ...(await resolveCaptureSourceOnce(page, source)), resolved_from: "post_action" as const }
+      : await resolvePostActionCaptureSource(page, source, afterAction.pre);
+  }
+  return await resolveCaptureSourceOnce(page, source);
 }
 
 export async function extractCredentials(sessionId: string): Promise<ExtractResult> {

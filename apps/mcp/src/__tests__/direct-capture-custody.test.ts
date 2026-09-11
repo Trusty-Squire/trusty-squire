@@ -18,7 +18,7 @@ vi.mock("../bot/provision-session.js", async (original) => ({
 import { buildServer } from "../server.js";
 import { DispatchJournal } from "../bot/broker/dispatch-journal.js";
 
-it("refuses direct mutation replay until original capture storage reconciles", async () => {
+it("keeps ordinary actions usable while a capture is unresolved, fencing only re-creation", async () => {
   const root = await mkdtemp(join(tmpdir(), "direct-capture-"));
   const journal = new DispatchJournal(join(root, "journal.jsonl"));
   state.action.mockImplementation(async () => {
@@ -60,12 +60,20 @@ it("refuses direct mutation replay until original capture storage reconciles", a
     const content = first.structuredContent as Record<string, unknown>;
     expect(typeof content.write_id).toBe("string");
     const write_id = content.write_id;
+    // An unresolved capture must not wedge unrelated actions: a plain click
+    // (no capture) proceeds while the write_id retry stays available.
+    const ordinary = await client.callTool({
+      name: "operate_click",
+      arguments: { session_id: "session", ref: "@other" },
+    });
+    expect(ordinary.isError).not.toBe(true);
+    // Only a NEW vaulting attempt — a repeated key creation — is fenced.
     const repeated = await client.callTool({
       name: "operate_click",
-      arguments: { session_id: "session", ref: "@create" },
+      arguments: { session_id: "session", ref: "@create", capture },
     });
     expect(repeated.isError).toBe(true);
-    expect(state.action).toHaveBeenCalledOnce();
+    expect(state.action).toHaveBeenCalledTimes(2); // first capture click + ordinary click
     const finish = await client.callTool({
       name: "operate_finish",
       arguments: { session_id: "session", outcome: "credentials", store: { service: "Example" } },
@@ -87,14 +95,6 @@ it("refuses direct mutation replay until original capture storage reconciles", a
       write_id,
       write_id,
     ]);
-    expect(
-      (
-        await client.callTool({
-          name: "operate_click",
-          arguments: { session_id: "session", ref: "@other" },
-        })
-      ).isError,
-    ).not.toBe(true);
     expect(state.action).toHaveBeenCalledTimes(2);
   } finally {
     await client.close();
