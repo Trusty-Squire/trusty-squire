@@ -3,7 +3,7 @@ import {
   settleOperatorTerminalReceipt,
   markOperatorMutationDispatchAttempted,
 } from "../request-cancellation.js";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi, type MockInstance } from "vitest";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1637,6 +1637,131 @@ it("refuses credential finish when capture becomes unresolved during call draini
     expect(dispatch).not.toHaveBeenCalled();
   } finally {
     release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("admits ordinary actions only while the caller has solely completed capture uncertainty", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ts-capture-admission-"));
+  let hasCapability: MockInstance<OperatorBroker["authority"]["hasCapability"]> | undefined;
+  try {
+    const journal = new DispatchJournal(join(root, "dispatch.jsonl"));
+    const broker = new OperatorBroker(
+      {
+        accountId: "account",
+        agentSessionToken: "token",
+        apiBaseUrl: "http://unused.test",
+        registryBaseUrl: "http://unused.test",
+      },
+      "cell",
+      journal,
+    );
+    const identity = await broker.authenticate("token", "agent", "c".repeat(43));
+    if (identity === null) throw new Error("authentication failed");
+    const principal = { ...identity, clientId: "client" };
+    const capability = {
+      cellId: "cell",
+      browserEpoch: "epoch",
+      sessionId: "session",
+      targetId: "target",
+      leaseGeneration: "lease",
+    };
+    hasCapability = vi.spyOn(broker.authority, "hasCapability").mockReturnValue(true);
+    const params = { name: "operate_click", capability, args: { session_id: "session" } };
+    const detail = {
+      forwarderId: identity.forwarderId!,
+      operation: "operate_click",
+      outcome: {
+        status: "unknown" as const,
+        reason: "execution_error" as const,
+        capture: { write_id: "capture-1", stored: false, storage: "unknown" as const },
+      },
+    };
+    expect(await broker.canContinueAfterCapture(principal, params)).toBe(false);
+    await journal.record("session", "create", "unknown", detail);
+    expect(await broker.canContinueAfterCapture(principal, params)).toBe(false);
+    await journal.record("session", "create", "observed_result", detail);
+    for (const transition of ["observed", "recovered", "acknowledged", "recovered_again"]) {
+      if (transition === "acknowledged") {
+        expect(await journal.acknowledge(identity.forwarderId!, "create")).toBe(true);
+      } else if (transition === "recovered" || transition === "recovered_again") {
+        const completed = await journal.completedOutcome(identity.forwarderId!, "create");
+        expect(completed?.outcome).toEqual(detail.outcome);
+        if (completed === undefined) throw new Error("capture outcome unavailable");
+        await journal.recordRecovery(identity.forwarderId!, completed);
+        expect(await journal.completedOutcome(identity.forwarderId!, "create")).toEqual(completed);
+      }
+      expect(await journal.hasOutstanding(undefined, identity.forwarderId!)).toBe(true);
+      for (const name of [
+        "operate_click",
+        "operate_type",
+        "operate_select",
+        "operate_press",
+        "operate_observe",
+        "operate_extract",
+      ]) {
+        expect(await broker.canContinueAfterCapture(principal, { ...params, name })).toBe(true);
+      }
+      for (const args of [
+        { session_id: "session", capture: { store: { service: "Example" } } },
+        { session_id: "session", store: { service: "Example" } },
+      ]) {
+        expect(
+          await broker.canContinueAfterCapture(principal, {
+            ...params,
+            name: "operate_extract",
+            args,
+          }),
+        ).toBe(false);
+      }
+      expect(
+        await broker.canContinueAfterCapture(principal, {
+          ...params,
+          name: "operate_finish",
+          args: { session_id: "session", outcome: "credentials" },
+        }),
+      ).toBe(false);
+      expect(
+        await broker.canReconcileCapture(principal, {
+          ...params,
+          name: "operate_extract",
+          args: { session_id: "session", capture: { write_id: "capture-1" } },
+        }),
+      ).toBe(true);
+    }
+    expect(
+      await broker.canContinueAfterCapture({ ...principal, forwarderId: "foreign" }, params),
+    ).toBe(false);
+    expect(
+      await broker.canContinueAfterCapture(principal, {
+        ...params,
+        args: { session_id: "other" },
+      }),
+    ).toBe(false);
+    hasCapability.mockReturnValue(false);
+    expect(await broker.canContinueAfterCapture(principal, params)).toBe(false);
+    hasCapability.mockReturnValue(true);
+    for (const sessionId of ["session", "other-session"]) {
+      await journal.record(sessionId, "other", "unknown", {
+        forwarderId: identity.forwarderId!,
+        operation: "operate_click",
+        outcome: { status: "unknown", reason: "execution_error" },
+      });
+      const completed = await journal.completedOutcome(identity.forwarderId!, "other");
+      if (completed === undefined) throw new Error("mutation outcome unavailable");
+      await journal.recordRecovery(identity.forwarderId!, completed);
+      expect(await broker.canContinueAfterCapture(principal, params)).toBe(false);
+      await journal.acknowledge(identity.forwarderId!, "other");
+      expect(await broker.canContinueAfterCapture(principal, params)).toBe(false);
+      await journal.record(sessionId, "other", "settled", {
+        forwarderId: identity.forwarderId!,
+        outcome: { status: "completed" },
+      });
+    }
+    await journal.record("other-session", "other-capture", "observed_result", detail);
+    expect(await broker.canContinueAfterCapture(principal, params)).toBe(false);
+  } finally {
+    hasCapability?.mockRestore();
     await rm(root, { recursive: true, force: true });
   }
 });

@@ -341,16 +341,24 @@ export async function buildServer(
             directLineage,
             sessionId,
           );
+          if (pending === undefined) return;
           const capture = parsed.data.capture as { write_id?: string } | undefined;
+          if (checkpoint && pending.write_id === operationId) return;
+          if (tool.name === "operate_extract" && capture?.write_id === pending.write_id) return;
+          // An unresolved capture must not wedge the session: ordinary
+          // click/type/observe actions proceed while the write_id retry stays
+          // available. Only a NEW vaulting attempt (a repeated key creation)
+          // and a credentials finish stay fenced.
           if (
-            pending &&
-            !(checkpoint && pending.write_id === operationId) &&
-            !(tool.name === "operate_extract" && capture?.write_id === pending.write_id)
+            capture === undefined &&
+            !(tool.name === "operate_extract" && parsed.data.store !== undefined) &&
+            tool.name !== "operate_finish"
           )
-            throw new BrokerRefusal(
-              "outcome_unknown",
-              "Capture storage is unresolved; use operate_extract with the original capture.write_id. Do not repeat creation.",
-            );
+            return;
+          throw new BrokerRefusal(
+            "outcome_unknown",
+            "Capture storage is unresolved; use operate_extract with the original capture.write_id. Do not repeat creation.",
+          );
         }
       };
       const invokeHandler = async () =>

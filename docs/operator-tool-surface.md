@@ -208,13 +208,37 @@ those roles, use `source: {"selector": "<observed CSS selector>"}` instead of
 the secret value; CSS sources select visible elements only. Either source can
 include an optional named `dialog` or `region` container to limit the selection.
 Capture pins exactly one element and returns vault metadata
-or explicit ambiguity, never the captured value or a screenshot. Default actions
-and reads remain unredacted. On an uncertain storage result, pass the returned
+or explicit ambiguity, never the captured value or a screenshot. A `stored: true`
+result includes `resolved_source`, describing the pinned element used to read the
+value by tag and role/name or selector. If that descriptor is unavailable, the
+receipt falls back to the requested source. Default actions and reads remain
+unredacted.
+
+For `operate_click` with capture, the source is probed before the click and
+resolved again after the click settles. Capture waits a bounded render window
+for a changed resolution. A new element or a changed value in the same element
+can be captured; an unchanged element and value cannot. If the resolution stays
+unchanged, or the pre-click probe failed, capture returns
+`error: "capture_pre_action_only"`, `stored: false`, `storage: "unknown"`, and
+`retry: "extract_only"`, without a value or vault write. Zero or multiple
+candidates never authorize storage. See the post-action and same-element reveal
+fixtures in `apps/mcp/src/bot/__tests__/credential-capture-browser.test.ts`.
+
+On an uncertain storage result, pass the returned
 `write_id` in the same `capture` object to `operate_extract` for extraction-only
 recovery. Never resend the create action. Mutation verbs refuse a supplied
 `capture.write_id`; the vault binds retries to the account, service, label, and
 original value and refuses rotation of an existing credential slot.
 
+Pending capture storage permits unrelated plain actions and reads, including
+`operate_click`, `operate_type`, `operate_observe`, and `operate_extract` without
+`capture` or `store`. A new vaulting attempt (including top-level
+`operate_extract.store`) and `operate_finish(outcome="credentials")` remain
+fenced; extraction with the original `capture.write_id` remains available.
+This exception does not relax other unresolved-mutation guards. Broker recovery
+records are audit-only and preserve the capture's prior admission state, including
+across delivery acknowledgement. See the recovery-transition coverage in
+`apps/mcp/src/bot/__tests__/broker-operator.test.ts`.
 
 For the Neon success dialog structure observed on 2026-09-10 (a LABEL named
 `API token`, followed by a nested plain-DIV value and a Copy button), the
@@ -244,12 +268,11 @@ session and require `cleanup: "closed"` and `closed: true`. Preserve existing
 keys. Closed sessions from earlier diagnostics cannot be recovered by replaying
 their write IDs in a new session.
 
-This adds capture for a known field structure, not general secret-free selector
-discovery. The native capture response supplies counts/metadata, not DOM
-structure; the Neon selector above came from Firstmate's bounded inspection.
-Do not request an unredacted snapshot of a newly revealed key to discover a
-selector. If another page needs a different selector, obtain value-free
-structure evidence before choosing it.
+The resolved-source receipt identifies a captured element; it does not discover
+a selector for an uncaptured field. The Neon selector above came from bounded
+inspection. For another page, inspect its rendered structure and choose a
+selector that does not depend on the secret value. The read policy is owned by
+[the observation model](observation-model.md), §4.5.
 
 `fetch_credential` is the only raw-value path. Its first call returns an
 approval link and no value; only a user’s passkey signature for that exact fetch

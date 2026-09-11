@@ -209,6 +209,45 @@ describe("explicit mutation capture", () => {
     expect(result).toMatchObject({ stored: true, write_id: "create-one" });
     expect(JSON.stringify(result)).not.toContain(secret);
   });
+  it("resolves a click capture post-action and names the stored source", async () => {
+    const store = vi.fn().mockResolvedValue(stored);
+    const result = await click(api(store));
+    // The click path passes the post-action options; the real pre-action probe
+    // has no live session in this fixture and must not break the click.
+    expect(state.capture).toHaveBeenCalledWith("session", capture.source, { pre: undefined });
+    expect(result).toMatchObject({
+      stored: true,
+      resolved_source: { role: "textbox", name: "API key", container: { role: "dialog" } },
+    });
+  });
+  it("uses the pinned element receipt instead of the input locator", async () => {
+    const resolved_source = { tag: "input", role: "textbox", name: "Created API key" };
+    state.capture.mockResolvedValue({ candidate_count: 1, value: secret, resolved_source });
+    const store = vi.fn().mockResolvedValue(stored);
+    expect(await click(api(store))).toMatchObject({ stored: true, resolved_source });
+    expect(store).toHaveBeenCalledOnce();
+  });
+  it("treats a capture that only resolves as before the action as unresolved", async () => {
+    state.capture.mockResolvedValueOnce({
+      candidate_count: 1,
+      value: secret,
+      resolved_from: "pre_action_only",
+    });
+    const store = vi.fn();
+    const result = await click(api(store));
+    expect(result).toMatchObject({
+      stored: false,
+      storage: "unknown",
+      error: "capture_pre_action_only",
+      retry: "extract_only",
+      candidate_count: 1,
+    });
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(store).not.toHaveBeenCalled();
+    // The click itself still ran exactly once — the unresolved capture must
+    // not undo or repeat the action.
+    expect(state.action).toHaveBeenCalledOnce();
+  });
   it("does not capture after a refused action or advertise a replay on mutation inputs", async () => {
     state.action.mockResolvedValue({ status: "stale_ref" });
     const store = vi.fn();

@@ -25,6 +25,30 @@ export const captureSourceSchema = z.union([
 ]);
 export type CaptureSource = z.infer<typeof captureSourceSchema>;
 
+/** Describe the requested source as a fallback when the pinned element's
+ * descriptor is unavailable. This does not inspect the resolved element. */
+export function describeCaptureSource(source: CaptureSource): {
+  role?: string;
+  name?: string;
+  selector?: string;
+  container?: { role: string; name?: string };
+} {
+  const container =
+    source.container === undefined
+      ? undefined
+      : {
+          role: source.container.role,
+          ...(source.container.name !== undefined ? { name: source.container.name } : {}),
+        };
+  if ("selector" in source)
+    return { selector: source.selector, ...(container !== undefined ? { container } : {}) };
+  return {
+    role: source.role,
+    ...(source.name !== undefined ? { name: source.name } : {}),
+    ...(container !== undefined ? { container } : {}),
+  };
+}
+
 export const captureEvidenceSchema = z
   .object({
     write_id: z.string().min(1).max(128),

@@ -239,11 +239,8 @@ its cookies into the harness.
    insufficient. Choose flows without unapproved purchases or destructive
    account changes.
 
-   Credential creation uses core's existing mutation capture grammar:
-   `capture: {store, source: {role, name?, container?}, write_id?}`. If the
-   initial capture returns a `write_id` with an uncertain storage result, the
-   driver may pass that identity only to `operate_extract` for extraction/storage
-   recovery. It must never replay the click/type/select/press or recipe mutation.
+   Credential creation follows the core
+   [capture and extraction-only recovery contract](operator-tool-surface.md#credential-capture-and-retrieval).
    The final `operate_finish` result is validated against core's lifecycle-owned
    additive receipt; the acceptance harness does not persist separate closure
    truth.
