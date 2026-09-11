@@ -6,6 +6,8 @@ import {
   startHarnessProvisionSession,
   finishProvisionSession,
   captureScreenshot,
+  observe,
+  observeQuery,
 } from "../provision-session.js";
 import { paymentSession } from "../session/lifecycle.js";
 import { operateClickTool } from "../../tools/provision-drive.js";
@@ -21,7 +23,12 @@ beforeAll(async () => {
 afterAll(async () => {
   await browser.close();
 });
-async function fixture(scale = 1, closedFrame = false, fixtureBrowser = browser) {
+async function fixture(
+  scale = 1,
+  closedFrame = false,
+  fixtureBrowser = browser,
+  parentMarkup = "",
+) {
   const context = await fixtureBrowser.newContext({
     viewport: { width: 800, height: 600 },
     deviceScaleFactor: scale,
@@ -32,7 +39,8 @@ async function fixture(scale = 1, closedFrame = false, fixtureBrowser = browser)
       contentType: "text/html",
       body: route.request().url().includes("child.test")
         ? `<div id="host"></div><script>const s=document.querySelector('#host').attachShadow({mode:'closed'});s.innerHTML='<label><input type="checkbox" style="width:24px;height:24px">Verify you are human</label>';window.events=[];s.querySelector('input').addEventListener('click',e=>window.events.push({trusted:e.isTrusted,checked:e.target.checked}));</script>`
-        : '<style>body{margin:0;height:1600px}iframe{position:absolute;left:150px;top:220px;width:300px;height:100px;border:0}</style><iframe src="http://child.test/frame"></iframe>',
+        : '<style>body{margin:0;height:1600px}iframe{position:absolute;left:150px;top:220px;width:300px;height:100px;border:0}</style><iframe src="http://child.test/frame"></iframe>' +
+          parentMarkup,
     }),
   );
   await page.goto("http://parent.test/");
@@ -292,6 +300,54 @@ describe("screenshot-bound native pointer dispatch", () => {
 });
 
 describe("native screenshot/click tool contract on an isolated session", () => {
+  it("preserves DOM visibility, literal roles and blocker evidence after an uncertain screenshot click", async () => {
+    const f = await fixture(
+      1,
+      false,
+      browser,
+      '<div style="opacity:0"><label>Password<input type="password"></label><button>Show password</button></div><div role="slider" tabindex="0" aria-label="Volume">Volume</div><p>Performing security verification</p>',
+    );
+    const started = await startHarnessProvisionSession({
+      browser: f.controller,
+      serviceUrl: "http://parent.test/",
+      extraAllowedHosts: ["child.test"],
+      observationFormat: "browser-use-dom",
+    });
+    try {
+      const shot = await captureScreenshot(started.session_id);
+      const original = f.page.mouse.click.bind(f.page.mouse);
+      const mouse = vi.spyOn(f.page.mouse, "click").mockImplementation(async (x, y) => {
+        await original(x, y);
+        throw new Error("lost acknowledgement after actual input");
+      });
+      const result = await operateClickTool.handler(
+        {
+          session_id: started.session_id,
+          screenshot: { screenshot_id: shot.click_binding!.screenshot_id, x: 174, y: 244 },
+        },
+        null,
+      );
+      expect(result).toMatchObject({
+        screenshot_click: { dispatch: "unknown", outcome: "unknown" },
+      });
+      expect(started.dom).not.toContain("Show password");
+      expect(started.dom).toContain("Performing security verification");
+      const after = await observe(started.session_id);
+      // The browser-use response may be a delta containing only the changed checkbox.
+      expect(after.dom).toContain("checked=true");
+      const query = await observeQuery(started.session_id, "");
+      expect(query.semantic).toMatchObject({ blocked: true });
+      expect(JSON.stringify(query.safe_table)).not.toContain("Show password");
+      expect(JSON.stringify(query.safe_table)).toContain("slider");
+      expect(mouse).toHaveBeenCalledTimes(1);
+      expect(await f.frame.evaluate("window.events")).toEqual([{ trusted: true, checked: true }]);
+    } finally {
+      vi.restoreAllMocks();
+      await finishProvisionSession(started.session_id);
+      await f.close();
+    }
+  });
+
   it("exposes exclusive ref/image schemas and finite original-image coordinates", () => {
     const screenshot = { screenshot_id: "12345678-1234-4234-8234-123456789abc", x: 1, y: 2 };
     expect(operateClickTool.inputSchema.safeParse({ session_id: "s", screenshot }).success).toBe(

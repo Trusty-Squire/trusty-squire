@@ -1,5 +1,12 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.14-rc.14 (2026-09-11)
+
+- Click screenshot-visible controls without a usable DOM ref using single-use image coordinates bound to the captured document, viewport, frame and physical target. Report pointer dispatch separately from unknown provider outcomes, and require observation before another attempt after an uncertain result.
+- Preserve native OAuth progress after dispatch errors, including attempt-owned popup recovery and explicit callback denials, with session identity and observe-before-retry guidance.
+- Align DOM observations with rendered ancestor visibility and containing-block clipping; retain literal control roles, offscreen facts and visible verification or account-error evidence, including fixed-position app shells.
+- Keep screenshot targeting and combined observation regressions in the required behavior tier; align published role schemas, description contracts and server-resilience schema typing with the corrected behavior.
+
 ## 1.1.14-rc.13 (2026-09-11)
 
 - Reconnect an existing `connect --target` session in that target's recorded browser profile from the first open through the live provider probe, instead of touching the default profile.
