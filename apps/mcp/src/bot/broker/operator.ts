@@ -886,6 +886,35 @@ export class OperatorBroker implements BrokerTransportPort {
     return receipt === undefined ? undefined : { result: receipt };
   }
 
+  async canContinueAfterCapture(
+    principal: BrokerPrincipal,
+    params: Record<string, unknown>,
+  ): Promise<boolean> {
+    const input = callSchema.safeParse(params);
+    if (!input.success) return false;
+    const { name, args, capability } = input.data;
+    if (
+      capability === undefined ||
+      args.session_id !== capability.sessionId ||
+      name === "operate_start" ||
+      name === "operate_finish" ||
+      args.capture !== undefined ||
+      args.store !== undefined ||
+      this.journal === undefined
+    )
+      return false;
+    try {
+      if (!this.authority.hasCapability(principal, capability)) return false;
+    } catch (error) {
+      if (error instanceof BrokerRefusal) return false;
+      throw error;
+    }
+    return await this.journal.hasOnlyCaptureCustody(
+      capability.sessionId,
+      journalForwarderId(principal),
+    );
+  }
+
   async canReconcileCapture(
     principal: BrokerPrincipal,
     params: Record<string, unknown>,

@@ -275,6 +275,22 @@ export class DispatchJournal {
     );
   }
 
+  async hasOnlyCaptureCustody(sessionId: string, forwarderId: string): Promise<boolean> {
+    const outstanding = [...(await this.states()).values()].filter(
+      (record) => record.forwarderId === forwarderId && phaseHasOutstandingCustody(record),
+    );
+    return (
+      outstanding.length > 0 &&
+      outstanding.every(
+        (record) =>
+          record.sessionId === sessionId &&
+          ["observed_result", "delivery_acknowledged"].includes(record.phase) &&
+          record.outcome?.status === "unknown" &&
+          record.outcome.capture?.storage === "unknown",
+      )
+    );
+  }
+
   async hasPendingStartDelivery(forwarderId: string, sessionId?: string): Promise<boolean> {
     return [...(await this.states()).values()].some(
       (record) =>
