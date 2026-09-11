@@ -69,7 +69,8 @@ export const listCredentialsTool: Tool<z.infer<typeof inputSchema>> = {
     assertApi(api);
     const res = await api.listCredentials();
     const { service, fields } = args;
-    const services = service === undefined ? undefined : Array.isArray(service) ? service : [service];
+    const services =
+      service === undefined ? undefined : Array.isArray(service) ? service : [service];
     const needle = (s: string) => s.trim().toLowerCase();
     const filtered = res.credentials.filter((c) => {
       if (services !== undefined) {

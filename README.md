@@ -464,6 +464,14 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   browser. Malformed calls return normal `invalid_arguments` handling, including a safe resolution
   when `card_ref` and `card_label` conflict.
 - `list_credentials` and `use_credential` find saved credentials and make authenticated API calls without returning raw values.
+  Before provisioning, call `list_credentials` with
+  `{"service":["exa","groq","cartesia"],"fields":"summary"}` to check for
+  existing keys without returning the whole inventory. `service` accepts one
+  string or a nonempty array and matches exact service names after trimming
+  whitespace and ignoring case. `fields: "summary"` selects compact metadata;
+  calling with `{}` preserves the full metadata inventory. Discover the exact
+  projection and inputs through the installed server's `tools/list` description
+  and schema.
 - `fetch_credential` returns a credential's raw value to the agent — the one path that does. It first returns an approval link and no value; you open it and sign with your passkey; the agent resumes with the returned `approval_id` and receives the value once. Denial or expiry releases nothing, and a mutation or payment approval cannot be used here. Reach for it only when the key must land somewhere the agent controls (a GitHub Actions secret, a `.env`) with no server-side injection path — `use_credential` is the right tool for calling an API.
 - `edit_credential` changes only an existing credential's non-secret name,
   `allowed_hosts`, or `login_hosts`; `delete_credential` soft-deletes one. Each
