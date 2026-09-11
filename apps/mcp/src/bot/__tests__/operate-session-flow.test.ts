@@ -11345,8 +11345,7 @@ describe("flat operator verbs", () => {
       } else {
         expect(storeCredential).toHaveBeenCalledTimes(writesBefore);
       }
-      if (outcome === "missing")
-        expect(captured).toMatchObject({ candidate_count: 0, found: [] });
+      if (outcome === "missing") expect(captured).toMatchObject({ candidate_count: 0, found: [] });
       expect(captured).not.toHaveProperty("safe_table");
       expect(captured).not.toHaveProperty("observation");
       const next = await operateScrollTool.handler(
