@@ -60,7 +60,7 @@ async function clerkProtectCheckFixture(): Promise<Harness> {
   const context = await browser.newContext();
   await context.route("**/*", async (route) => {
     const url = route.request().url();
-    if (url.startsWith("https://accounts.service.test/")) {
+    if (url.startsWith("https://accounts.service.test/") || url.startsWith("https://accounts.other.test/")) {
       await route.fulfill({
         contentType: "text/html",
         body: PROTECT_CHECK_HTML,
@@ -68,8 +68,8 @@ async function clerkProtectCheckFixture(): Promise<Harness> {
       return;
     }
     if (
-      url.endsWith(".client.protect.clerk.com") ||
-      url.endsWith(".protect.clerk.com") ||
+      new URL(url).hostname.endsWith(".client.protect.clerk.com") ||
+      new URL(url).hostname.endsWith(".protect.clerk.com") ||
       url.startsWith("https://clerk.service.test/")
     ) {
       await route.fulfill({
@@ -115,40 +115,45 @@ describe("Clerk bot-protection hosts are part of the authorized sign-in scope", 
     });
   });
 
-  it("extends only a Clerk-backed accounts document, including its Frontend API host", () => {
-    const allowedHosts = clerkChallengeScopeForDocument(
-      "https://accounts.service.test/sign-in",
-      true,
+  it("does not grant protection hosts to an unauthorized Clerk iframe", async () => {
+    const { controller, page } = await clerkProtectCheckFixture();
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      const frame = document.createElement("iframe");
+      frame.onload = () => resolve();
+      frame.src = "https://accounts.other.test/sign-in/protect-check";
+      document.body.append(frame);
+    }));
+    const frame = page.frames().find((candidate) => candidate.url().includes("accounts.other.test"))!;
+    expect(await frame.evaluate("window.__protectPosts.then(String)")).toBe(
+      "rejected,rejected,fulfilled",
     );
-    expect(
-      requestHostInScope(
-        "https://1-8fd91a2f-p.client.protect.clerk.com/v1/website/verify",
-        allowedHosts,
-      ),
-    ).toBe(true);
-    expect(
-      requestHostInScope("https://specter.protect.clerk.com/v1/client/preflight", allowedHosts),
-    ).toBe(true);
-    expect(requestHostInScope("https://clerk.service.test/v1/client", allowedHosts)).toBe(true);
-    expect(requestHostInScope("https://tracker.other.test/api", allowedHosts)).toBe(false);
-    expect(clerkChallengeScopeForDocument("https://accounts.service.test/sign-in", false)).toEqual(
-      [],
-    );
+    expect(controller.takeHostScopeDenials().map((denial) => denial.hostname).sort()).toEqual([
+      "1-8fd91a2f-p.client.protect.clerk.com",
+      "specter.protect.clerk.com",
+    ]);
+  });
+
+  it("does not infer a Frontend API allowance when sibling scope excludes it", async () => {
+    const { controller, page } = await clerkProtectCheckFixture();
+    await controller.setHostScopeAllowedHosts(() => ["accounts.service.test"], () => []);
+    expect(await page.evaluate(
+      "fetch('https://clerk.service.test/v1/client').then(() => 'escaped', () => 'blocked')",
+    )).toBe("blocked");
+  });
+
+  it("extends only a Clerk-backed accounts document with protection hosts", () => {
+    expect(clerkChallengeScopeForDocument("https://accounts.service.test/sign-in", true)).toEqual([
+      "*.client.protect.clerk.com",
+      "specter.protect.clerk.com",
+    ]);
+    expect(clerkChallengeScopeForDocument("https://accounts.service.test/sign-in", false)).toEqual([]);
     expect(clerkChallengeScopeForDocument("https://app.service.test/sign-in", true)).toEqual([]);
   });
 
-  it("honors caller-declared wildcard extra_allowed_hosts without widening to the base host", () => {
-    const allowedHosts = ["*.client.protect.clerk.com"];
-    expect(
-      requestHostInScope(
-        "https://1-8fd91a2f-p.client.protect.clerk.com/v1/website/verify",
-        allowedHosts,
-      ),
-    ).toBe(true);
-    expect(
-      requestHostInScope("https://client.protect.clerk.com/v1/website/verify", allowedHosts),
-    ).toBe(false);
+  it("does not match caller-declared wildcards as exact allowed hosts", () => {
+    expect(requestHostInScope("https://child.example.test/api", ["*.example.test"], [])).toBe(false);
   });
+
 });
 
 describe("annotateChallengeBlockersWithScope", () => {

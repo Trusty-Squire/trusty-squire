@@ -99,12 +99,7 @@ fixtures prove pointer mechanics; they do not guarantee Cloudflare clearance.
 
 Startup merchant hosts also authorize matching registrable-domain siblings,
 such as `shop.example.com` and `api.example.com`. Declare other required
-non-provider hosts in `allowed_hosts` or `extra_allowed_hosts` on
-`operate_start`. Entries may be bare hostnames or wildcard hostnames
-(`*.api.example.test`) — only agent-declared `operate_allow_host` calls are
-restricted to bare hostnames; a wildcard entry scopes its subdomains, but not
-the wildcard's base host itself.
-`operate_allow_host`
+non-provider hosts in `allowed_hosts` on `operate_start`. `operate_allow_host`
 can activate a host only inside the declared startup entitlement and existing
 identity-provider allowance; it cannot broaden that entitlement.
 
@@ -117,9 +112,8 @@ identity-provider allowance; it cannot broaden that entitlement.
 
 A small set of challenge-infrastructure hosts is always in scope: the captcha
 families (challenges.cloudflare.com, hCaptcha, reCAPTCHA). When an
-`accounts.<service>` document has actually loaded Clerk assets, its effective
-scope also includes Clerk's Frontend API host (`clerk.<service>`) and
-bot-protection result endpoints (`*.client.protect.clerk.com`,
+`accounts.<service>` document is authorized by the base scope and has loaded
+Clerk assets, its effective scope also includes the bot-protection result endpoints (`*.client.protect.clerk.com`,
 `specter.protect.clerk.com`). Those endpoints are part of that already
 authorized Clerk sign-in, so a Clerk-fronted protect-check needs no extra host
 declaration for its Turnstile to complete.

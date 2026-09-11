@@ -1422,12 +1422,6 @@ const CLERK_CHALLENGE_SCOPE_HOSTS: readonly string[] = [
   "specter.protect.clerk.com",
 ];
 
-/**
- * Scope the Clerk support endpoints only when the currently authorized
- * accounts.<service> document demonstrably runs Clerk. `clerk.<service>` is
- * the customary custom Frontend API endpoint; the protect endpoints complete
- * Clerk's Turnstile wrapper.
- */
 export function clerkChallengeScopeForDocument(
   documentUrl: string,
   hasClerkAsset: boolean,
@@ -1442,7 +1436,7 @@ export function clerkChallengeScopeForDocument(
   if (!hostname.startsWith("accounts.")) return [];
   const serviceHost = hostname.slice("accounts.".length);
   if (!serviceHost.includes(".")) return [];
-  return [...CLERK_CHALLENGE_SCOPE_HOSTS, `clerk.${serviceHost}`];
+  return CLERK_CHALLENGE_SCOPE_HOSTS;
 }
 
 function hostMatchesScopeHost(host: string, allowedHost: string): boolean {
@@ -1471,7 +1465,7 @@ export function requestHostInScope(
   }
   const host = parsedUrl.hostname.toLowerCase();
   const bySuffix = (suffix: string): boolean => host === suffix || host.endsWith(`.${suffix}`);
-  if (allowedHosts.some((allowed) => hostMatchesScopeHost(host, allowed))) return true;
+  if (allowedHosts.some((allowed) => host === allowed.toLowerCase())) return true;
   if (siblingDomainHosts.some((allowed) => isSameRecipeDomain(host, allowed))) return true;
   if (HOST_SCOPE_AUTH_HOSTS.some(bySuffix)) return true;
   if (HOST_SCOPE_ALWAYS_ALLOW_HOSTS.some(bySuffix)) return true;
@@ -3018,11 +3012,15 @@ export class BrowserController {
 
   private async effectiveHostScopeForFrame(
     frame: Frame,
+    requestUrl: string,
     scope: { allowedHosts: readonly string[]; siblingDomainHosts: readonly string[] },
   ): Promise<{ allowedHosts: readonly string[]; siblingDomainHosts: readonly string[] }> {
-    // This check runs only for an XHR/fetch about to be scope-judged. The
-    // document has already loaded at that point; query the inert DOM metadata
-    // rather than trusting a URL pattern alone to grant Clerk-owned endpoints.
+    const documentUrl = frame.url();
+    if (!requestHostInScope(documentUrl, scope.allowedHosts, scope.siblingDomainHosts)) return scope;
+    const requestHost = new URL(requestUrl).hostname.toLowerCase();
+    if (!CLERK_CHALLENGE_SCOPE_HOSTS.some((allowed) => hostMatchesScopeHost(requestHost, allowed))) {
+      return scope;
+    }
     const hasClerkAsset = await frame
       .evaluate(() =>
         Array.from(document.querySelectorAll("script[src],link[href]")).some((element) => {
@@ -3031,10 +3029,10 @@ export class BrowserController {
         }),
       )
       .catch(() => false);
-    const clerkHosts = clerkChallengeScopeForDocument(frame.url(), hasClerkAsset);
-    return clerkHosts.length === 0
+    const clerkHosts = clerkChallengeScopeForDocument(documentUrl, hasClerkAsset);
+    return clerkHosts.length === 0 || frame.url() !== documentUrl
       ? scope
-      : { ...scope, allowedHosts: [...scope.allowedHosts, ...clerkHosts] };
+      : { ...scope, allowedHosts: [...scope.allowedHosts, requestHost] };
   }
 
   /** One routing authority for the broker context. Clients never install routes. */
@@ -3082,7 +3080,7 @@ export class BrowserController {
         const scope =
           baseScope === undefined
             ? undefined
-            : await owner.effectiveHostScopeForFrame(frame, baseScope);
+            : await owner.effectiveHostScopeForFrame(frame, request.url(), baseScope);
         if (
           scope === undefined ||
           isFailFastScopeAbort(
@@ -3202,7 +3200,7 @@ export class BrowserController {
         const scope =
           baseScope === null || frame === null
             ? baseScope
-            : await this.effectiveHostScopeForFrame(frame, baseScope);
+            : await this.effectiveHostScopeForFrame(frame, url, baseScope);
         if (
           isFailFastScopeAbort(url, type, scope?.allowedHosts ?? null, scope?.siblingDomainHosts)
         ) {
