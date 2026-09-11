@@ -170,6 +170,20 @@ describe("explicit mutation capture", () => {
     expect(state.action).toHaveBeenCalledOnce();
     expect(store.mock.calls.map(([input]) => input.write_id)).toEqual(["create-one", "create-one"]);
   });
+  it("reports one unresolved error code, with the found list, for a zero-match capture", async () => {
+    const found = [{ role: "textbox", name: null }];
+    state.capture.mockResolvedValueOnce({ candidate_count: 0, found });
+    const store = vi.fn();
+    expect(await click(api(store))).toMatchObject({
+      stored: false,
+      execution: "completed",
+      error: "capture_unresolved",
+      candidate_count: 0,
+      found,
+      retry: "extract_only",
+    });
+    expect(store).not.toHaveBeenCalled();
+  });
   it("recovers a zero-match textbox capture through an explicit plain-text source", async () => {
     state.capture.mockResolvedValueOnce({ candidate_count: 0 });
     const store = vi.fn().mockResolvedValue(stored);

@@ -207,12 +207,19 @@ those roles, use `source: {"selector": "<observed CSS selector>"}` instead of
 `role`/`name`. Choose the selector from the actual element structure, never from
 the secret value; CSS sources select visible elements only. Either source can
 include an optional named `dialog` or `region` container to limit the selection.
-Capture pins exactly one element and returns vault metadata
-or explicit ambiguity, never the captured value or a screenshot. A `stored: true`
+Capture pins exactly one element and returns vault metadata, an unresolved
+result, or explicit ambiguity, never the captured value or a screenshot. A `stored: true`
 result includes `resolved_source`, describing the pinned element used to read the
 value by tag and role/name or selector. If that descriptor is unavailable, the
 receipt falls back to the requested source. Default actions and reads remain
-unredacted.
+unredacted. Resolution pierces open shadow roots: a bare selector, a role, or a
+container-scoped descendant selector all reach shadow-hosted fields (Groq's
+id-less created-key `<input>` inside an open shadow root, 2026-09-11). When the
+role is `textbox`, an id-less text input whose value looks secret-shaped also
+matches if it is the only textbox in the container/document. Zero matches return
+`capture_unresolved` with a `found` list of the roles and names that DID render
+(never values) so the caller can pick a better source; more than one match
+returns `capture_ambiguous`.
 
 For `operate_click` with capture, the source is probed before the click and
 resolved again after the click settles. Capture waits a bounded render window
@@ -255,8 +262,9 @@ This uses Playwright's CSS text-label matcher and selects leaf DIVs in the
 label's following value group. It does not match on token content or click Copy.
 The native operator can use this documented source directly in atomic capture,
 or in `operate_extract` with the original `capture.write_id`, unchanged store
-service/label, and the same still-open session. Zero or multiple matches remain
-an explicit ambiguity; do not repeat creation. The selector is grounded in the
+service/label, and the same still-open session. Multiple matches remain an
+explicit ambiguity and zero matches an explicit unresolved result; do not
+repeat creation. The selector is grounded in the
 reported structure and synthetic regression, not a live validation of this fix.
 
 For Firstmate's live retest: create one uniquely labelled Neon key with this

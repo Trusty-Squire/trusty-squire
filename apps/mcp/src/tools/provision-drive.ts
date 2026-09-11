@@ -662,15 +662,25 @@ async function captureIntoVault(
         candidate_count: extracted.candidate_count,
         retry: "extract_only",
       };
-    if (extracted.candidate_count !== 1 || extracted.value === undefined)
+    if (extracted.candidate_count !== 1 || extracted.value === undefined) {
+      // ONE code for a miss: capture_unresolved means nothing matched (with a
+      // found list of rendered roles/names — never values — so the caller can
+      // pick a better source). capture_ambiguous is reserved for >1 match.
+      const ambiguous = extracted.candidate_count > 1;
       return {
         ...base,
         execution: "completed",
         stored: false,
-        error: "capture_ambiguous",
+        error: ambiguous ? "capture_ambiguous" : "capture_unresolved",
         candidate_count: extracted.candidate_count,
+        ...(ambiguous
+          ? {}
+          : extracted.found !== undefined && extracted.found.length > 0
+            ? { found: extracted.found }
+            : {}),
         retry: "extract_only",
       };
+    }
     const stored = await persistExtracted(
       sessionId,
       { api_key: extracted.value },
@@ -2062,6 +2072,19 @@ const captureOutputSchema = {
       additionalProperties: true,
     },
     candidate_count: { type: "integer" },
+    found: {
+      type: "array",
+      maxItems: 12,
+      items: {
+        type: "object",
+        required: ["role"],
+        additionalProperties: false,
+        properties: {
+          role: { type: "string" },
+          name: { type: ["string", "null"] },
+        },
+      },
+    },
     action_result: { type: "object", additionalProperties: true },
     retry: { enum: ["extract_only", "action"] },
   },
@@ -2083,7 +2106,7 @@ for (const tool of OPERATE_TOOLS) {
   if (properties !== null && typeof properties === "object")
     Object.assign(properties, { capture: captureJson });
   tool.description +=
-    " Optional capture:{store,source:{role,name?,container?}|{selector,container?}} vaults exactly one revealed source and returns metadata only; the source is resolved against the document AFTER the action's mutation settles, and a stored result names the resolved element in resolved_source. Use a value-free CSS selector for a plain-text copy field without a textbox/code role. If storage is unresolved, retry operate_extract with capture.write_id; never repeat creation. An unresolved capture does not block unrelated actions — only a new vaulting attempt and a credentials finish stay fenced.";
+    " Optional capture:{store,source:{role,name?,container?}|{selector,container?}} vaults exactly one revealed source and returns metadata only; the source is resolved against the document AFTER the action's mutation settles, and a stored result names the resolved element in resolved_source. Use a value-free CSS selector for a plain-text copy field without a textbox/code role. Resolution pierces open shadow roots: a bare selector, a role, or a cross-shadow [container] descendant selector all reach shadow-hosted fields (e.g. Groq's id-less created-key <input> inside an open shadow root); when the role is textbox, an id-less text input whose value looks secret-shaped also matches if it is the only textbox in the container/document. A source matching nothing returns error capture_unresolved with candidate_count 0 and a found list of the roles/names that DID render (never values) — use it to pick the next source; capture_ambiguous is reserved for more than one match. If storage is unresolved, retry operate_extract with capture.write_id; never repeat creation. An unresolved capture does not block unrelated actions — only a new vaulting attempt and a credentials finish stay fenced.";
   tool.jsonOutputSchema = captureOutputSchema;
   const handler = tool.handler;
   tool.handler = async (args, api, context) => {

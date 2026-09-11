@@ -38,7 +38,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { Buffer } from "node:buffer";
 import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { ElementHandle, Page } from "playwright";
+import type { Page } from "playwright";
 import {
   BrowserClickDispatchError,
   CHECKOUT_SUBMIT_LABEL_RE,
@@ -348,12 +348,6 @@ export interface Observation {
   delta?: boolean;
   unchanged?: number;
   removed?: string[];
-  // True only on act/act-style returns when the browser's main document
-  // changed between the action's dispatch and the post-settle capture (a real
-  // navigation happened while the action was settling). The observation's
-  // `url` already names the new location; the host must not assume refs from
-  // before the action still resolve (docs/observation-model.md §4.1).
-  navigated?: true;
   // V1-only: set on a DELTA emit when the (normalized, same-cap) page text is
   // identical to the previous observation's — the `text` field is then emitted
   // EMPTY and the host reuses the prior text (recoverable in full from
@@ -4707,12 +4701,7 @@ function compactV2Observation(
   // Emit canonical names and text verbatim, preserving whitespace, line order
   // and indentation; no prose extraction or byte-budget pruning.
   const dom = rendered.dom;
-  // A changed URL, frame set, or closed-shadow/iframe structure is a real
-  // change even when the rendered text is byte-identical: the observation the
-  // host already holds describes a page that no longer exists.
-  const structurallyChanged =
-    previous !== null && (previous.dynamics !== capture.dynamics || previous.url !== pageUrl);
-  const changed = !sameFullDocument || previous.dom !== dom || structurallyChanged;
+  const changed = !sameFullDocument || previous.dom !== dom;
   const epoch = { doc: epochDoc, rev: changed ? generation : previous.epoch.rev };
   session.compactV2Active = true;
   session.compactV2Index = {
@@ -4763,15 +4752,11 @@ function compactV2Observation(
     semantics,
     byRef: new Map(safe.rows.map((row) => [row.ref, row])),
     ...(outputFormat === "full"
-      ? { dom, renderedRefs: rendered.refs, url: pageUrl, dynamics: capture.dynamics }
-      : sameFullDocument
-        ? {
-            dom: previous.dom,
-            renderedRefs: previous.renderedRefs,
-            url: previous.url,
-            dynamics: previous.dynamics,
-          }
-        : {}),
+      ? { dom, renderedRefs: rendered.refs }
+      : {
+          ...(previous?.dom === undefined ? {} : { dom: previous.dom }),
+          ...(previous?.renderedRefs === undefined ? {} : { renderedRefs: previous.renderedRefs }),
+        }),
   };
   session.prevObserve = null;
   if (outputFormat === "compact") {
@@ -5757,14 +5742,6 @@ async function executeAct(
   // click that redirected turned round 0's URL into the post-login dashboard,
   // corrupting the skill's entry_url and the login step).
   const urlBeforeAction = compactV2ActionPage?.url() ?? browser.currentUrl();
-  // Document identity BEFORE the action dispatches, so the return can report
-  // honestly whether the document changed while the action was settling.
-  let docBeforeAction: string | undefined;
-  try {
-    docBeforeAction = browser.mainDocumentIdentity(compactV2ActionPage);
-  } catch {
-    docBeforeAction = undefined;
-  }
 
   // Defense-in-depth for the confused-deputy guard: if an ORGANIC redirect (not
   // gated by hostAllowed) has landed the operator browser on Squire's own
@@ -6538,27 +6515,13 @@ async function executeAct(
             outputFormat === "compact",
             compactMapEmitted,
           );
-  const actionDocAfter = (() => {
-    try {
-      return browser.mainDocumentIdentity(actionObservationPage);
-    } catch {
-      return undefined;
-    }
-  })();
-  const navigatedDuringSettle =
-    docBeforeAction !== undefined &&
-    actionDocAfter !== undefined &&
-    docBeforeAction !== actionDocAfter;
-  const observationWithNavigation = navigatedDuringSettle
-    ? ({ ...observation, navigated: true } as typeof observation)
-    : observation;
   return {
     ...(actionPageAfter === undefined ? {} : { operationPage: actionPageAfter }),
     observation: withHostScopeDenials(
       session,
-      completedAction.kind === "select" && observationWithNavigation.format !== "browser-use-dom"
-        ? { ...observationWithNavigation, selected_option: completedAction.text }
-        : observationWithNavigation,
+      completedAction.kind === "select" && observation.format !== "browser-use-dom"
+        ? { ...observation, selected_option: completedAction.text }
+        : observation,
     ),
     outcome: {
       ...(completedAction.kind === "select" ? { selectedOption: completedAction.text } : {}),
@@ -8846,8 +8809,243 @@ export function classifyVouchflowCredentials(text: string): Record<string, strin
 // SAME exported regex policy the bot uses (extractApiKeyFromText +
 // isTruncatedCapture + extraction.ts accumulation). Reuses the substrate —
 // no new credential regexes.
+/** What a zero-match capture DID find, so the caller can pick a better source
+ * on the next try: computed roles and accessible names only — never values. */
+export interface CaptureFoundCandidate {
+  role: string;
+  name: string | null;
+}
 
-function captureSourceTargets(page: Page, source: CaptureSource) {
+// In-page shadow-piercing capture walk. Playwright's locator engines pierce
+// OPEN shadow roots for a bare engine ("css=input", getByRole) but a descendant
+// combinator cannot cross the shadow boundary ("[role=dialog] input" misses a
+// dialog-hosted shadow input), and embeds can defeat the engines in other ways
+// (Groq's id-less key input inside an open shadow root — eleven capture retries
+// all failed in the 2026-09-11 native run). When the locator engines resolve
+// nothing, walk the DOM explicitly through every open shadow root (native
+// shadowRoot getter, so page scripts cannot hide it), scoped to the requested
+// container, and read the single match. One evaluate = one atomic
+// select-and-read; no retarget window.
+async function shadowPiercingCapture(
+  page: Page,
+  source: CaptureSource,
+): Promise<{ candidate_count: number; value?: string; found?: CaptureFoundCandidate[] }> {
+  return await page.evaluate((spec) => {
+    const nativeShadowGet = Object.getOwnPropertyDescriptor(Element.prototype, "shadowRoot")?.get;
+    const shadowRootOf = (el: Element): ShadowRoot | null => {
+      try {
+        return nativeShadowGet?.call(el) ?? null;
+      } catch {
+        return null;
+      }
+    };
+
+    const isVisible = (el: Element): boolean => {
+      const r = el.getBoundingClientRect?.();
+      if (!r || r.width <= 0 || r.height <= 0) return false;
+      const s = window.getComputedStyle(el);
+      return (
+        s.display !== "none" && s.visibility !== "hidden" && parseFloat(s.opacity || "1") > 0.01
+      );
+    };
+
+    // Walk the light DOM and every OPEN shadow root. Defensive against
+    // detached/closed custom elements whose shadowRoot reads undefined at
+    // runtime (the #59 redis-cloud crash pattern): skip such nodes.
+    const elements: Element[] = [];
+    const walk = (root: Document | ShadowRoot | null | undefined): void => {
+      if (root == null || typeof root.querySelectorAll !== "function") return;
+      for (const el of Array.from(root.querySelectorAll("*"))) {
+        elements.push(el);
+        walk(shadowRootOf(el));
+      }
+    };
+    walk(document);
+
+    const accessibleName = (el: Element): string => {
+      const labelledby = el.getAttribute("aria-labelledby");
+      if (labelledby) {
+        const text = labelledby
+          .split(/\s+/)
+          .map((id) => document.getElementById(id)?.textContent ?? "")
+          .join(" ")
+          .trim();
+        if (text) return text;
+      }
+      const label = (el.getAttribute("aria-label") ?? "").trim();
+      if (label) return label;
+      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+        if (el.id) {
+          const forLabel = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+          const text = (forLabel?.textContent ?? "").trim();
+          if (text) return text;
+        }
+        let anc: Element | null = el.parentElement;
+        while (anc !== null) {
+          if (anc.tagName === "LABEL") {
+            const text = (anc.textContent ?? "").trim();
+            if (text) return text;
+            break;
+          }
+          anc = anc.parentElement;
+        }
+      }
+      const title = (el.getAttribute("title") ?? "").trim();
+      if (title) return title;
+      return "";
+    };
+
+    const ariaRole = (el: Element): string => {
+      const explicit = el.getAttribute("role");
+      if (explicit) return explicit;
+      if (el instanceof HTMLInputElement) {
+        const t = (el.getAttribute("type") ?? "text").toLowerCase();
+        if (t === "text" || t === "search" || t === "tel" || t === "url" || t === "email")
+          return "textbox";
+        if (t === "number") return "spinbutton";
+        if (t === "checkbox") return "checkbox";
+        if (t === "radio") return "radio";
+        if (t === "range") return "slider";
+        return ""; // password/button/file/hidden/... carry no textbox role
+      }
+      if (el instanceof HTMLTextAreaElement) return "textbox";
+      if (el instanceof HTMLSelectElement) return "combobox";
+      if (el instanceof HTMLDialogElement && el.open) return "dialog";
+      if (el.tagName === "CODE") return "code";
+      const editable = el.getAttribute("contenteditable");
+      if (editable === "" || editable === "true" || editable === "plaintext-only") return "textbox";
+      const name = accessibleName(el);
+      if (el.tagName === "SECTION" && name) return "region";
+      if (el.tagName === "FORM" && name) return "form";
+      return "";
+    };
+
+    // Shadow-inclusive containment: parentElement stops at the shadow
+    // boundary, so climb from each node through its root's host.
+    const within = (node: Element, scopeEl: Element | null): boolean => {
+      if (scopeEl === null) return true;
+      let cur: Element | null = node;
+      while (cur !== null) {
+        if (cur === scopeEl) return true;
+        const root = cur.getRootNode();
+        cur = root instanceof ShadowRoot ? root.host : cur.parentElement;
+      }
+      return false;
+    };
+
+    const readValue = (node: Element): string => {
+      const value =
+        node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
+          ? node.value
+          : node instanceof HTMLElement
+            ? node.innerText
+            : "";
+      return value.length <= 8192 ? value.trim() : "";
+    };
+
+    const containerSpec = spec.container ?? null;
+    const containers = containerSpec
+      ? elements.filter(
+          (el) =>
+            isVisible(el) &&
+            ariaRole(el) === containerSpec.role &&
+            (containerSpec.name === undefined || accessibleName(el) === containerSpec.name),
+        )
+      : [];
+    if (containerSpec && containers.length > 1)
+      return { candidate_count: containers.length };
+    // A demanded container that renders zero or several matches fails closed:
+    // nothing inside it is scoped, so nothing is captured.
+    const containerEl =
+      containerSpec && containers.length === 1 ? (containers[0] as Element | null) : null;
+
+    const foundReport = (): CaptureFoundCandidate[] => {
+      const out: CaptureFoundCandidate[] = [];
+      for (const el of elements) {
+        if (out.length >= 12) break;
+        if (!isVisible(el)) continue;
+        const role = ariaRole(el);
+        const tag = el.tagName;
+        const named =
+          el.getAttribute("aria-label") !== null || el.getAttribute("aria-labelledby") !== null;
+        if (role === "" && !named && tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "CODE")
+          continue;
+        out.push({ role: role || tag.toLowerCase(), name: accessibleName(el) || null });
+      }
+      return out;
+    };
+    // A demanded container that never rendered scopes nothing: refuse rather
+    // than let the walk resolve a match outside the requested container.
+    if (containerSpec && containerEl === null)
+      return { candidate_count: 0, found: foundReport() };
+
+    if ("selector" in spec) {
+      // Per-root queries across the light DOM and every open shadow root:
+      // the union is what document.querySelector alone can never see.
+      const roots: (Document | ShadowRoot)[] = [document];
+      for (const el of elements) {
+        const sr = shadowRootOf(el);
+        if (sr !== null) roots.push(sr);
+      }
+      const matches: Element[] = [];
+      for (const r of roots) {
+        for (const el of Array.from(r.querySelectorAll(spec.selector))) matches.push(el);
+      }
+      const visible = matches.filter((el) => isVisible(el) && within(el, containerEl));
+      if (visible.length === 1) return { candidate_count: 1, value: readValue(visible[0]!) };
+      if (visible.length > 1) return { candidate_count: visible.length };
+      return { candidate_count: 0, found: foundReport() };
+    }
+
+    const role = spec.role;
+    let candidates = elements.filter(
+      (el) => isVisible(el) && within(el, containerEl) && ariaRole(el) === role,
+    );
+    if (spec.name !== undefined)
+      candidates = candidates.filter((el) => accessibleName(el) === spec.name);
+    if (candidates.length === 1) return { candidate_count: 1, value: readValue(candidates[0]!) };
+    if (candidates.length > 1) return { candidate_count: candidates.length };
+    // Zero role matches: the Groq fallback. An id-less input whose value looks
+    // secret-shaped — the created-key input of the 2026-09-11 Groq dialog —
+    // carries no distinguishable attributes (no id, class, or readonly; often
+    // no type at all, and a type=password key mask carries no textbox role in
+    // ARIA). Match it only when it is the only such input in scope, so a page
+    // with several secret-shaped inputs still fails closed as ambiguous. A
+    // name-scoped source never falls back: the caller said WHERE the value is.
+    if (spec.name === undefined) {
+      const secretShaped = /^[A-Za-z0-9][A-Za-z0-9_-]{11,}$/;
+      const idlessSecret = elements.filter(
+        (el) =>
+          el instanceof HTMLInputElement &&
+          !el.id &&
+          (el.getAttribute("type") === null ||
+            ["text", "password"].includes((el.getAttribute("type") ?? "").toLowerCase())) &&
+          isVisible(el) &&
+          within(el, containerEl) &&
+          secretShaped.test(el.value.trim()),
+      );
+      if (idlessSecret.length === 1)
+        return { candidate_count: 1, value: readValue(idlessSecret[0]!) };
+      if (idlessSecret.length > 1) return { candidate_count: idlessSecret.length };
+    }
+    return { candidate_count: 0, found: foundReport() };
+  }, source);
+}
+
+/** Explicit capture reads one named source without revealing other controls or
+ * scanning unrelated page text. Normal extract/observe remain unchanged. */
+export async function captureCredentialSource(
+  sessionId: string,
+  source: CaptureSource,
+): Promise<{
+  candidate_count: number;
+  value?: string;
+  found?: CaptureFoundCandidate[];
+}> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error("unknown provision session");
+  const page = operationPageForSession(session);
+  if (page === undefined) throw new Error("capture page unavailable");
   const container =
     source.container === undefined
       ? page
@@ -8856,215 +9054,42 @@ function captureSourceTargets(page: Page, source: CaptureSource) {
             ? { name: source.container.name, exact: true }
             : {}),
         });
-  return "selector" in source
-    ? container.locator(`css=${source.selector}`).filter({ visible: true })
-    : container.getByRole(source.role, {
-        ...(source.name !== undefined ? { name: source.name, exact: true } : {}),
-      });
-}
-
-interface CaptureSourceResolution {
-  candidate_count: number;
-  value?: string;
-  resolved_source?: { tag: string; role?: string; name?: string; selector?: string };
-  resolved_from?: "post_action" | "pre_action_only";
-}
-
-async function readCaptureElement(handle: ElementHandle<Node>) {
-  return await handle.evaluate((node) => {
-    if (!node.isConnected || node.ownerDocument !== document)
-      throw new Error("capture source changed");
-    const value =
-      node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
-        ? node.value
-        : node instanceof HTMLElement
-          ? node.innerText
-          : "";
-    let resolved_source: CaptureSourceResolution["resolved_source"];
-    if (node instanceof Element) {
-      const tag = node.localName;
-      const role =
-        node.getAttribute("role") ||
-        (node instanceof HTMLTextAreaElement ||
-        (node instanceof HTMLInputElement && ["text", "email", "url", "tel"].includes(node.type))
-          ? "textbox"
-          : tag === "code"
-            ? "code"
-            : undefined);
-      const root = node.getRootNode();
-      const labelledBy = (node.getAttribute("aria-labelledby") ?? "")
-        .split(/\s+/)
-        .map((id) =>
-          root instanceof Document || root instanceof ShadowRoot
-            ? (root.getElementById(id)?.textContent ?? "")
-            : "",
-        )
-        .join(" ")
-        .trim();
-      const labels =
-        node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
-          ? Array.from(node.labels ?? [])
-              .map((label) => label.textContent ?? "")
-              .join(" ")
-              .trim()
-          : "";
-      const name =
-        labelledBy ||
-        node.getAttribute("aria-label")?.trim() ||
-        labels ||
-        node.getAttribute("title")?.trim();
-      resolved_source = {
-        tag,
-        ...(role ? { role } : {}),
-        ...(name ? { name } : { selector: node.id ? `${tag}#${CSS.escape(node.id)}` : tag }),
-      };
-    }
-    return { value: value.length <= 8192 ? value.trim() : "", resolved_source };
-  });
-}
-
-/** Resolve a capture source once against the live document, disposing the
- * pinned handles. A new document must not satisfy the same locator while
- * capture is in flight. */
-async function resolveCaptureSourceOnce(
-  page: Page,
-  source: CaptureSource,
-): Promise<CaptureSourceResolution> {
-  const handles = await captureSourceTargets(page, source).elementHandles();
+  const targets =
+    "selector" in source
+      ? container.locator(`css=${source.selector}`).filter({ visible: true })
+      : container.getByRole(source.role, {
+          ...(source.name !== undefined ? { name: source.name, exact: true } : {}),
+        });
+  // Pin the selected element in its current document. A new document must not
+  // satisfy the same locator while capture is in flight.
+  let handles: Awaited<ReturnType<typeof targets.elementHandles>>;
   try {
-    if (handles.length !== 1) return { candidate_count: handles.length };
-    const { value, resolved_source } = await readCaptureElement(handles[0]!);
-    return {
-      candidate_count: 1,
-      ...(value.length > 0 ? { value } : {}),
-      ...(resolved_source ? { resolved_source } : {}),
-    };
-  } finally {
-    await Promise.all(handles.map((handle) => handle.dispose().catch(() => undefined)));
-  }
-}
-
-/** Live pre-action probe of a click capture's source. The single candidate's
- * handle stays alive so the post-action resolution can prove it is not merely
- * the pre-click element re-read; the caller must dispose it. */
-export interface CaptureSourceProbe {
-  candidate_count: number;
-  value?: string;
-  handle?: ElementHandle<Node>;
-}
-
-export async function probeCaptureSource(
-  sessionId: string,
-  source: CaptureSource,
-): Promise<CaptureSourceProbe> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error("unknown provision session");
-  const page = operationPageForSession(session);
-  if (page === undefined) throw new Error("capture page unavailable");
-  const handles = await captureSourceTargets(page, source).elementHandles();
-  if (handles.length !== 1) {
-    await Promise.all(handles.map((handle) => handle.dispose().catch(() => undefined)));
-    return { candidate_count: handles.length };
-  }
-  const [handle] = handles;
-  try {
-    const { value } = await readCaptureElement(handle!);
-    return { candidate_count: 1, handle: handle!, ...(value.length > 0 ? { value } : {}) };
-  } catch (error) {
-    await handle!.dispose().catch(() => undefined);
-    throw error;
-  }
-}
-
-async function sameDomElement(
-  handle: ElementHandle<Node>,
-  preHandle: ElementHandle<Node> | undefined,
-): Promise<boolean> {
-  if (preHandle === undefined) return false;
-  try {
-    return await handle.evaluate((node, other) => node === other, preHandle);
+    handles = await targets.elementHandles();
   } catch {
-    return false; // stale pre-action handle — a different document's element
+    // A locator-engine failure is a zero-match, not a mystery: the explicit
+    // shadow-piercing walk below still gets its chance to resolve the source.
+    handles = [];
   }
-}
-
-// A click capture that re-reads the SAME element with the SAME value the
-// pre-action probe saw proves only the pre-click document — the click's
-// mutation has not rendered yet (the Groq key-dialog failure: the display-name
-// textbox was the only pre-click textbox, and the capture vaulted its value as
-// the key). Poll a bounded window for the mutation to render a changed
-// resolution; if the source still resolves only as it did before the click,
-// report pre_action_only so the caller treats storage as unresolved.
-const CAPTURE_MUTATION_RENDER_BUDGET_MS = 2_000;
-const CAPTURE_MUTATION_RENDER_POLL_MS = 250;
-
-async function resolveChangedPostActionSource(
-  page: Page,
-  source: CaptureSource,
-  pre: CaptureSourceProbe,
-): Promise<CaptureSourceResolution | null> {
-  const handles = await captureSourceTargets(page, source).elementHandles();
-  try {
-    if (handles.length === 1) {
-      const { value, resolved_source } = await readCaptureElement(handles[0]!);
-      const unchanged =
-        pre.candidate_count === 1 &&
-        (await sameDomElement(handles[0]!, pre.handle)) &&
-        (pre.value ?? "") === value;
-      if (unchanged) return null;
-      return {
-        candidate_count: 1,
-        ...(value.length > 0 ? { value } : {}),
-        ...(resolved_source ? { resolved_source } : {}),
-      };
+  if (handles.length === 1) {
+    try {
+      const value = await handles[0]!.evaluate((node) => {
+        if (!node.isConnected || node.ownerDocument !== document)
+          throw new Error("capture source changed");
+        const value =
+          node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
+            ? node.value
+            : node instanceof HTMLElement
+              ? node.innerText
+              : "";
+        return value.length <= 8192 ? value.trim() : "";
+      });
+      return { candidate_count: 1, ...(value.length > 0 ? { value } : {}) };
+    } finally {
+      await Promise.all(handles.map((handle) => handle.dispose().catch(() => undefined)));
     }
-    // Same non-unique (or still-empty) resolution as before the click — keep
-    // waiting; the mutation may still be rendering.
-    if (handles.length === pre.candidate_count) return null;
-    return { candidate_count: handles.length };
-  } finally {
-    await Promise.all(handles.map((handle) => handle.dispose().catch(() => undefined)));
   }
-}
-
-async function resolvePostActionCaptureSource(
-  page: Page,
-  source: CaptureSource,
-  pre: CaptureSourceProbe,
-): Promise<CaptureSourceResolution> {
-  const deadline = Date.now() + CAPTURE_MUTATION_RENDER_BUDGET_MS;
-  for (;;) {
-    const changed = await resolveChangedPostActionSource(page, source, pre);
-    if (changed !== null) return { ...changed, resolved_from: "post_action" };
-    if (Date.now() >= deadline)
-      return { candidate_count: pre.candidate_count, resolved_from: "pre_action_only" };
-    await new Promise((resolve) => setTimeout(resolve, CAPTURE_MUTATION_RENDER_POLL_MS));
-  }
-}
-
-/** Explicit capture reads one named source without revealing other controls or
- * scanning unrelated page text. Normal extract/observe remain unchanged.
- * With `afterAction`, the source is judged against the POST-action document:
- * the click's own settle runs first, and a resolution indistinguishable from
- * the pre-action probe is reported as `pre_action_only` instead of stored. */
-export async function captureCredentialSource(
-  sessionId: string,
-  source: CaptureSource,
-  afterAction?: { pre?: CaptureSourceProbe | undefined },
-): Promise<CaptureSourceResolution> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error("unknown provision session");
-  const page = operationPageForSession(session);
-  if (page === undefined) throw new Error("capture page unavailable");
-  if (afterAction !== undefined) {
-    // Same settle the click itself waits on — judge the source only after the
-    // click's mutation has had its render window.
-    await settleAfterStateChange(session.browser, page);
-    return afterAction.pre === undefined
-      ? { candidate_count: 0, resolved_from: "pre_action_only" }
-      : await resolvePostActionCaptureSource(page, source, afterAction.pre);
-  }
-  return await resolveCaptureSourceOnce(page, source);
+  if (handles.length > 1) return { candidate_count: handles.length };
+  return await shadowPiercingCapture(page, source);
 }
 
 export async function extractCredentials(sessionId: string): Promise<ExtractResult> {

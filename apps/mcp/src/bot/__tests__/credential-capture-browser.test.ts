@@ -76,10 +76,10 @@ it("captures the settled plain-text copy field reported on Neon", async () => {
   // ancestor. Only the reported label/value grouping is represented; no
   // production classes, IDs, or token content are used to locate the value.
   const selector = 'label:text-is("API token") + div div:not(:has(*))';
-  expect(await captureCredentialSource("fixture", { role: "textbox" })).toEqual({
+  expect(await captureCredentialSource("fixture", { role: "textbox" })).toMatchObject({
     candidate_count: 0,
   });
-  expect(await captureCredentialSource("fixture", { role: "code" })).toEqual({
+  expect(await captureCredentialSource("fixture", { role: "code" })).toMatchObject({
     candidate_count: 0,
   });
   expect(
@@ -100,6 +100,86 @@ it("captures the settled plain-text copy field reported on Neon", async () => {
   expect(await captureCredentialSource("fixture", { role: "textbox" })).toMatchObject({
     candidate_count: 1,
     value,
+  });
+});
+
+it("captures the id-less Groq-style key input inside an open shadow root", async () => {
+  // Exact live shape (2026-09-11 Groq new-key dialog): an <input value=…>
+  // inside an OPEN shadow root with no id, class, type, or readonly attribute.
+  const value = "gsk_fixture_key_value_0123456789";
+  await page.setContent(`<div id="host"></div>
+    <script>
+      document.getElementById('host').attachShadow({ mode: 'open' }).innerHTML =
+        '<input value="${value}">';
+    </script>`);
+  // role textbox: the id-less typeless input is the only textbox on the page.
+  expect(await captureCredentialSource("fixture", { role: "textbox" })).toEqual({
+    candidate_count: 1,
+    value,
+  });
+  // selector "input": pierces the open shadow root.
+  expect(await captureCredentialSource("fixture", { selector: "input" })).toEqual({
+    candidate_count: 1,
+    value,
+  });
+});
+
+it("resolves a secret-shaped shadow input the role engines cannot see via the explicit walk", async () => {
+  // A type=password key mask carries NO textbox role in ARIA, so the locator
+  // engines resolve nothing; the shadow-piercing walk must still find it when
+  // it is the only id-less secret-shaped input in scope.
+  const value = "gsk_fixture_key_value_0123456789";
+  await page.setContent(`<div id="host"></div>
+    <script>
+      document.getElementById('host').attachShadow({ mode: 'open' }).innerHTML =
+        '<input type="password" value="${value}">';
+    </script>`);
+  expect(await captureCredentialSource("fixture", { role: "textbox" })).toEqual({
+    candidate_count: 1,
+    value,
+  });
+});
+
+it("never resolves when several shadow-hosted secret-shaped inputs compete", async () => {
+  const secret = "gsk_fixture_key_value_0123456789";
+  await page.setContent(`<div id="host-a"></div><div id="host-b"></div>
+    <script>
+      document.getElementById('host-a').attachShadow({ mode: 'open' }).innerHTML =
+        '<input value="${secret}">';
+      document.getElementById('host-b').attachShadow({ mode: 'open' }).innerHTML =
+        '<input value="${secret}-2">';
+    </script>`);
+  expect(await captureCredentialSource("fixture", { role: "textbox" })).toEqual({
+    candidate_count: 2,
+  });
+});
+
+it("reports what a zero-match source DID find without exposing values", async () => {
+  await page.setContent(`<dialog open aria-label="Created key">
+    <input aria-label="API key" value="fresh-fixture-value"></dialog>`);
+  const result = await captureCredentialSource("fixture", {
+    role: "textbox",
+    name: "Signed key",
+  });
+  expect(result.candidate_count).toBe(0);
+  expect(result.found).toEqual([
+    { role: "dialog", name: "Created key" },
+    { role: "textbox", name: "API key" },
+  ]);
+  expect(JSON.stringify(result)).not.toContain("fresh-fixture-value");
+});
+
+it("never captures outside a demanded container that did not render", async () => {
+  await page.setContent(`<input aria-label="API key" value="outside-fixture-value">`);
+  expect(
+    await captureCredentialSource("fixture", {
+      role: "textbox",
+      name: "API key",
+      container: { role: "dialog" },
+    }),
+  ).toEqual({
+    candidate_count: 0,
+    found: [{ role: "textbox", name: "API key" }],
   });
 });
 
