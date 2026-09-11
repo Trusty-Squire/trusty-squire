@@ -275,7 +275,7 @@ describe("interleaved observation DOM", () => {
     }
   });
 
-  it("binds persistent capabilities to physical nodes across fresh CDP captures", async () => {
+  it("preserves persistent capabilities through benign re-renders across fresh CDP captures", async () => {
     const page = await browser.newPage();
     const refs = new StableObservationRefs();
     const read = async () => {
@@ -289,6 +289,7 @@ describe("interleaved observation DOM", () => {
       const held = first.capture.elements.find((el) => el.id === "held")!;
       const ref = first.handles.get(held)!;
       expect(ref).toMatch(/^@e:[A-Za-z0-9_-]{22}$/);
+      const alias = refs.label(ref, "@continue");
       await page.locator("main").evaluate((main) => {
         main.querySelector("p")!.textContent = "Unrelated content changed";
         const sibling = document.createElement("button");
@@ -300,23 +301,42 @@ describe("interleaved observation DOM", () => {
       expect(same.observationIdentity).toBe(held.observationIdentity);
       expect(same.observationIntent).toBe(held.observationIntent);
       expect(second.handles.get(same)).toBe(ref);
+      const sibling = second.capture.elements.find((el) => el !== same && el.tag === "button")!;
+      expect(second.handles.get(sibling)).not.toBe(ref);
+      expect(refs.label(second.handles.get(sibling)!, "@continue")).not.toBe(alias);
       await page.locator("#held").evaluate((el) => el.replaceWith(el.cloneNode(true)));
       const third = await read();
       const replacement = third.capture.elements.find((el) => el.id === "held")!;
       expect(replacement.observationIdentity).not.toBe(held.observationIdentity);
-      expect([...third.handles.values()]).not.toContain(ref);
+      // §4.1 of docs/observation-model.md permits benign re-render adoption:
+      // unchanged durable identity, intent and screenPath in the same document.
+      expect(third.handles.get(replacement)).toBe(ref);
       const replacementRef = third.handles.get(replacement)!;
+      expect(refs.label(replacementRef, "@continue")).toBe(alias);
+      const resolved = [...third.handles].find(([, handle]) => handle === ref)![0];
+      expect(await page.locator(resolved.selector).getAttribute("id")).toBe("held");
       await page.locator("#held").evaluate((el) => {
         el.textContent = "Delete account";
       });
       const fourth = await read();
       expect([...fourth.handles.values()]).not.toContain(replacementRef);
+      const changed = fourth.capture.elements.find((el) => el.id === "held")!;
+      const changedRef = fourth.handles.get(changed)!;
+      expect(changedRef).toMatch(/^@e:[A-Za-z0-9_-]{22}$/);
       await page.locator("#held").evaluate((el) => {
         el.textContent = "Continue";
       });
-      expect([...(await read()).handles.values()]).not.toContain(replacementRef);
+      const fifth = await read();
+      // Restoring text changes intent on the same physical node, so it cannot
+      // adopt a retired ref from a node that disappeared in this capture.
+      expect([...fifth.handles.values()]).not.toContain(replacementRef);
+      expect([...fifth.handles.values()]).not.toContain(changedRef);
+      const restored = fifth.capture.elements.find((el) => el.id === "held")!;
+      const restoredRef = fifth.handles.get(restored)!;
       await page.locator("#held").evaluate((el) => el.remove());
-      expect((await read()).capture.elements.some((el) => el.id === "held")).toBe(false);
+      const removed = await read();
+      expect(removed.capture.elements.some((el) => el.id === "held")).toBe(false);
+      expect([...removed.handles.values()]).not.toContain(restoredRef);
     } finally {
       await page.close();
     }
