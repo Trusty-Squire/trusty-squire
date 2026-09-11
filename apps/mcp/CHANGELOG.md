@@ -2,10 +2,10 @@
 
 ## 1.1.14-rc.13 (2026-09-11)
 
-- fix(mcp): reconnect in target profile context (#720)
-- fix(mcp): preserve operate_start result custody (#719)
-- fix(mcp): preserve observed action progress after timeout (#718)
-- fix(mcp): surface compact observation blockers (#717)
+- Reconnect an existing `connect --target` session in that target's recorded browser profile from the first open through the live provider probe, instead of touching the default profile.
+- Recover malformed `operate_start` broker replies from the exact request's durable result, retaining its session capability, or return a bounded custody error instead of undefined MCP content.
+- Preserve browser-action results that finish observing after request cancellation; post-dispatch OAuth expiry now reports uncertain progress without replay, while observed Google number-match challenges remain actionable.
+- Keep visible verification challenges and validation errors in compact observations with boundary-local evidence, authorized blocker refs, and focus or keyboard guidance.
 
 ## 1.1.14-rc.12 (2026-09-10)
 
