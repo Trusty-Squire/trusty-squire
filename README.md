@@ -332,8 +332,9 @@ contract is [observation-model.md](docs/observation-model.md), and the detailed
 full-DOM structure is in
 [browser-use-serializer-port.md](docs/browser-use-serializer-port.md). A browser action can
 require re-observation before a ref is used again. Click, type, select, press,
-and scroll also return a compact changed-control delta by default; pass
-`format:"full"` on that action only when its verbatim DOM is needed. Maintainers can select the
+and scroll also default to compact observations; pass `format:"full"` on that
+action only when its verbatim DOM is needed. See the observation contract above
+for delta handling and response envelopes. Maintainers can select the
 legacy V1 `el_table`/snapshot contract with
 `TRUSTY_SQUIRE_OBSERVE_V2=off`, or exercise the browser-use DOM serializer
 without emitting it with `shadow`; the detailed DOM-tree contract lives in
