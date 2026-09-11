@@ -81,6 +81,7 @@ import {
   recordableTokenV2,
   safeDescriptionV2,
   safeBlockersV2,
+  type SafeBlockerV2,
   safeOriginV2,
   safePageSemanticsV2,
   sealRetainedInteractiveElementsV2,
@@ -2472,7 +2473,63 @@ async function observeOwned(sessionId: string, format?: "compact" | "full"): Pro
 
 function withHostScopeDenials<T extends object>(session: Session, result: T): T {
   const denials = session.browser.takeHostScopeDenials?.() ?? [];
-  return denials.length === 0 ? result : ({ ...result, scope_denials: denials } as T);
+  if (denials.length === 0) return result;
+  return {
+    ...result,
+    scope_denials: denials,
+  } as T;
+}
+
+// Diagnostic classification only, not an allowance list. A host match still
+// requires unambiguous document ownership before it can explain a blocker.
+const CHALLENGE_SCOPE_HOST_RE =
+  /(?:^|\.)protect\.clerk\.com$|(?:^|\.)challenges\.cloudflare\.com$|(?:^|\.)hcaptcha\.com$|(?:^|\.)recaptcha\.net$/iu;
+
+const challengeDocuments = new WeakMap<SafeBlockerV2, string>();
+
+/**
+ * Surface denied challenge hosts ON the challenge blocker itself (`cause:
+ * "scope"` with the exact hostnames) instead of leaving the host agent to
+ * correlate a `semantic.blockers` challenge with a separate `scope_denials`
+ * list. Pure: returns the input untouched (same reference) when there is
+ * nothing to annotate.
+ */
+export function annotateChallengeBlockersWithScope<T extends object>(
+  result: T,
+  denials: readonly HostScopeDenialDiagnostic[],
+  documentForBlocker: (blocker: SafeBlockerV2) => string | undefined = (blocker) =>
+    challengeDocuments.get(blocker),
+): T {
+  const semantic = (result as { semantic?: SafePageSemanticsV2 }).semantic;
+  const blockers = semantic?.blockers;
+  if (!Array.isArray(blockers)) return result;
+  let annotated = false;
+  const nextBlockers = blockers.map((blocker) => {
+    if (blocker.kind !== "challenge" || blocker.cause !== undefined) return blocker;
+    const documentId = documentForBlocker(blocker);
+    if (documentId === undefined) return blocker;
+    if (
+      blockers.filter(
+        (candidate) =>
+          candidate.kind === "challenge" && documentForBlocker(candidate) === documentId,
+      ).length !== 1
+    )
+      return blocker;
+    const deniedHosts = [
+      ...new Set(
+        denials
+          .filter(
+            (denial) => denial.owner.document_id === documentId && denial.owner.frame === "main",
+          )
+          .map((denial) => denial.hostname)
+          .filter((hostname) => CHALLENGE_SCOPE_HOST_RE.test(hostname)),
+      ),
+    ].sort();
+    if (deniedHosts.length === 0) return blocker;
+    annotated = true;
+    return { ...blocker, cause: "scope" as const, cause_hosts: deniedHosts };
+  });
+  return annotated ? { ...result, semantic: { ...semantic, blockers: nextBlockers } } : result;
 }
 
 export interface ScreenshotCapture {
@@ -4583,15 +4640,33 @@ function compactV2Observation(
   const handles = compactV2Handles(session, elements, sourcePage);
   const safe = compactV2LiveControls(session, elements, sourcePage, handles);
   const targetableRefs = new Set(safe.rows.map((row) => row.ref));
-  const blockers = safeBlockersV2(capture.root, (node) => {
-    const element = capture.nodeElements.get(node.id);
-    const ref = element === undefined ? undefined : handles.get(element);
-    return ref !== undefined && targetableRefs.has(ref) ? ref : undefined;
-  });
-  const semantics = {
-    ...safePageSemanticsV2(semanticSource),
-    ...(blockers.length === 0 ? {} : { blockers, blocked: true as const }),
+  const mainDocumentNodes = new Set<BrowserUseCapture["root"]>();
+  const collectMainDocument = (node: BrowserUseCapture["root"]): void => {
+    mainDocumentNodes.add(node);
+    node.children.forEach(collectMainDocument);
   };
+  collectMainDocument(capture.root);
+  const documentId = `${session.browser.mainDocumentIdentity(sourcePage)}:main`;
+  const blockers = safeBlockersV2(
+    capture.root,
+    (node) => {
+      const element = capture.nodeElements.get(node.id);
+      const ref = element === undefined ? undefined : handles.get(element);
+      return ref !== undefined && targetableRefs.has(ref) ? ref : undefined;
+    },
+    (blocker, root) => {
+      if (mainDocumentNodes.has(root)) challengeDocuments.set(blocker, documentId);
+    },
+  );
+  const { semantic: semantics } = annotateChallengeBlockersWithScope(
+    {
+      semantic: {
+        ...safePageSemanticsV2(semanticSource),
+        ...(blockers.length === 0 ? {} : { blockers, blocked: true as const }),
+      },
+    },
+    session.browser.peekHostScopeDenials?.() ?? [],
+  );
   const rendered = serializeBrowserUseDOM(capture.root, {
     ref: (node) => {
       const element = capture.nodeElements.get(node.id);
@@ -4690,6 +4765,9 @@ function compactV2Observation(
     session_id: session.id,
     url: pageUrl,
     stage,
+    ...(semantics.blockers?.some((blocker) => blocker.cause === "scope")
+      ? { semantic: { blocked: true as const, blockers: semantics.blockers } }
+      : {}),
     ...(sameFullDocument ? { delta: true } : {}),
     ...(changed ? { dom } : { dom_unchanged: true as const }),
     ...(removed.length ? { removed } : {}),
@@ -4786,7 +4864,10 @@ async function observeQueryOwned(
       sessionId: session.id,
       stage: snapshot.stage,
       pageUrl: snapshot.pageUrl,
-      semantics: snapshot.semantics,
+      semantics: annotateChallengeBlockersWithScope(
+        { semantic: snapshot.semantics },
+        session.browser.peekHostScopeDenials?.() ?? [],
+      ).semantic,
       rows: snapshot.rows,
       offset: parsed.offset,
       cursorFor: (next) => compactV2Cursor(session, snapshot, next),

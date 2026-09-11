@@ -158,6 +158,10 @@ export interface SafeBlockerV2 {
   target?: "unavailable";
   focus?: "focused" | "focusable";
   keyboard?: "space" | "tab_space";
+  // Attribution requires document ownership, not just a matching denied host;
+  // see docs/browser-use-serializer-port.md's blocker diagnostic contract.
+  cause?: "scope";
+  cause_hosts?: string[];
 }
 
 /**
@@ -1024,6 +1028,7 @@ function descendantsV2(node: BrowserUseNode): BrowserUseNode[] {
 export function safeBlockersV2(
   root: BrowserUseNode,
   refForNode: (node: BrowserUseNode) => string | undefined = () => undefined,
+  onChallenge?: (blocker: SafeBlockerV2, root: BrowserUseNode) => void,
 ): SafeBlockerV2[] {
   const nodes: BrowserUseNode[] = [];
   const parentFor = new Map<BrowserUseNode, BrowserUseNode>();
@@ -1142,7 +1147,7 @@ export function safeBlockersV2(
     const text =
       message ?? controlText ?? labelText ?? challengeTexts[0] ?? "Verification challenge";
     const ref = grounded === undefined ? undefined : refForNode(grounded);
-    blockers.push({
+    const blocker: SafeBlockerV2 = {
       kind: "challenge",
       text,
       ...(ref === undefined ? { target: "unavailable" as const } : { ref }),
@@ -1151,7 +1156,9 @@ export function safeBlockersV2(
         : focusable
           ? { focus: "focusable" as const, keyboard: "tab_space" as const }
           : {}),
-    });
+    };
+    blockers.push(blocker);
+    onChallenge?.(blocker, challengeRoot);
   }
 
   const validationNodes = new Set<BrowserUseNode>();

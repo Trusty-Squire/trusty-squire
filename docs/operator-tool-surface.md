@@ -110,10 +110,24 @@ identity-provider allowance; it cannot broaden that entitlement.
 }
 ```
 
+A small set of challenge-infrastructure hosts is always in scope: the captcha
+families (challenges.cloudflare.com, hCaptcha, reCAPTCHA). When an
+`accounts.<service>` document is authorized by the base scope and has loaded
+Clerk assets, its effective request scope also includes the bot-protection result
+endpoints (`*.client.protect.clerk.com`,
+`specter.protect.clerk.com`). Those endpoints are part of that already
+authorized Clerk sign-in, so a Clerk-fronted protect-check needs no extra host
+declaration for those requests. This exception applies to that document only;
+it does not authorize an out-of-scope embedded Clerk document or arbitrary
+caller-declared wildcard hosts.
+
 If an observation reports a scope denial, treat it as a bounded diagnostic:
 record the owning document/frame, exact hostname, resource type, reason, and
-occurrence range. Do not add a permission or retry against another host. Start a
-new session with the required host declared instead. Diagnostics must not include
+occurrence range. Challenge blockers can identify a scope cause; see the
+[blocker diagnostic contract](browser-use-serializer-port.md#identity-deltas-and-query).
+Retrying a widget does not authorize a denied host. Do not add a permission
+or retry against another host. Start a new session with the required host
+declared instead. Diagnostics must not include
 request bodies or URL query values.
 
 ## Finish with the flat schema

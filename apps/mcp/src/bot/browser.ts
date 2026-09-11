@@ -1413,6 +1413,38 @@ const HOST_SCOPE_ALWAYS_ALLOW_HOSTS: readonly string[] = [
   "js.stripe.com",
 ];
 
+// A Clerk account portal can host its own Turnstile wrapper. Its verification
+// result is posted from per-client random subdomains, so a fixed exact-host
+// allow-set cannot cover it. effectiveHostScopeForFrame must authorize the
+// document against base scope before consulting clerkChallengeScopeForDocument.
+const CLERK_CHALLENGE_SCOPE_HOSTS: readonly string[] = [
+  "*.client.protect.clerk.com",
+  "specter.protect.clerk.com",
+];
+
+export function clerkChallengeScopeForDocument(
+  documentUrl: string,
+  hasClerkAsset: boolean,
+): readonly string[] {
+  if (!hasClerkAsset) return [];
+  let hostname: string;
+  try {
+    hostname = new URL(documentUrl).hostname.toLowerCase();
+  } catch {
+    return [];
+  }
+  if (!hostname.startsWith("accounts.")) return [];
+  const serviceHost = hostname.slice("accounts.".length);
+  if (!serviceHost.includes(".")) return [];
+  return CLERK_CHALLENGE_SCOPE_HOSTS;
+}
+
+function hostMatchesScopeHost(host: string, allowedHost: string): boolean {
+  const allowed = allowedHost.trim().toLowerCase();
+  if (allowed.startsWith("*.")) return host.endsWith(`.${allowed.slice(2)}`);
+  return host === allowed;
+}
+
 // Whether a request URL's host is inside the operator's egress scope. In-scope
 // when it matches an allowed host, shares the SAME registrable
 // domain (eTLD+1) as an already-trusted host (the merchant's own API siblings —
@@ -2969,13 +3001,46 @@ export class BrowserController {
     });
   }
 
-  takeHostScopeDenials(): HostScopeDenialDiagnostic[] {
-    const diagnostics = [...this.hostScopeDenials.values()].map((entry) => ({
+  peekHostScopeDenials(): HostScopeDenialDiagnostic[] {
+    return [...this.hostScopeDenials.values()].map((entry) => ({
       ...entry,
+      owner: { ...entry.owner },
       remedy: { ...entry.remedy },
     }));
+  }
+
+  takeHostScopeDenials(): HostScopeDenialDiagnostic[] {
+    const diagnostics = this.peekHostScopeDenials();
     this.hostScopeDenials.clear();
     return diagnostics;
+  }
+
+  private async effectiveHostScopeForFrame(
+    frame: Frame,
+    requestUrl: string,
+    scope: { allowedHosts: readonly string[]; siblingDomainHosts: readonly string[] },
+  ): Promise<{ allowedHosts: readonly string[]; siblingDomainHosts: readonly string[] }> {
+    const documentUrl = frame.url();
+    if (!requestHostInScope(documentUrl, scope.allowedHosts, scope.siblingDomainHosts))
+      return scope;
+    const requestHost = new URL(requestUrl).hostname.toLowerCase();
+    if (
+      !CLERK_CHALLENGE_SCOPE_HOSTS.some((allowed) => hostMatchesScopeHost(requestHost, allowed))
+    ) {
+      return scope;
+    }
+    const hasClerkAsset = await frame
+      .evaluate(() =>
+        Array.from(document.querySelectorAll("script[src],link[href]")).some((element) => {
+          const source = element.getAttribute("src") ?? element.getAttribute("href") ?? "";
+          return /(?:^|[./@_-])clerk(?:[./@_-]|$)/iu.test(source);
+        }),
+      )
+      .catch(() => false);
+    const clerkHosts = clerkChallengeScopeForDocument(documentUrl, hasClerkAsset);
+    return clerkHosts.length === 0 || frame.url() !== documentUrl
+      ? scope
+      : { ...scope, allowedHosts: [...scope.allowedHosts, requestHost] };
   }
 
   /** One routing authority for the broker context. Clients never install routes. */
@@ -3019,7 +3084,11 @@ export class BrowserController {
           await route.abort("failed");
           return;
         }
-        const scope = owner.hostScopeAllowedHostsProvider?.();
+        const baseScope = owner.hostScopeAllowedHostsProvider?.();
+        const scope =
+          baseScope === undefined
+            ? undefined
+            : await owner.effectiveHostScopeForFrame(frame, request.url(), baseScope);
         if (
           scope === undefined ||
           isFailFastScopeAbort(
@@ -3131,14 +3200,18 @@ export class BrowserController {
         }
         const url = route.request().url();
         const type = route.request().resourceType();
-        const scope = this.hostScopeAllowedHostsProvider?.() ?? null;
+        const baseScope = this.hostScopeAllowedHostsProvider?.() ?? null;
+        let frame: Frame | null = null;
+        try {
+          frame = route.request().frame();
+        } catch {}
+        const scope =
+          baseScope === null || frame === null
+            ? baseScope
+            : await this.effectiveHostScopeForFrame(frame, url, baseScope);
         if (
           isFailFastScopeAbort(url, type, scope?.allowedHosts ?? null, scope?.siblingDomainHosts)
         ) {
-          let frame: Frame | null = null;
-          try {
-            frame = route.request().frame();
-          } catch {}
           if (frame !== null && this.ownedPages.has(frame.page())) {
             this.recordHostScopeDenial(frame, url, type);
           }

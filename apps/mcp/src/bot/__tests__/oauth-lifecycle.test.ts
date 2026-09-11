@@ -3602,7 +3602,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await context.route("https://accounts.google.com/**", (route) =>
       route.fulfill({
         contentType: "text/html",
-        body: `<script>location.href=${JSON.stringify(expectedReturnUrl)}</script>`,
+        body: "<main>Provider sign-in</main>",
       }),
     );
     await context.route("https://console.product.test/**", (route) =>
@@ -3613,12 +3613,33 @@ describe("BrowserController OAuth popup lifecycle", () => {
     );
     await product.goto("https://product.test/login");
     const controller = BrowserController.fromHarnessPage(product);
+    const lifecycle = controller as unknown as {
+      waitForOAuthLifecycle: (...args: unknown[]) => Promise<Page | null>;
+    };
+    const realWait = lifecycle.waitForOAuthLifecycle.bind(controller);
+    const wait = vi
+      .spyOn(lifecycle, "waitForOAuthLifecycle")
+      .mockImplementationOnce(async (...args) => {
+        // Begin the callback only after the controller owns the provider popup.
+        // Then commit the challenge before asking the real evaluator to settle.
+        const popup = context
+          .pages()
+          .find((page) => page.url().startsWith("https://accounts.google.com/"))!;
+        const closed = popup.waitForEvent("close");
+        await popup.evaluate((url) => {
+          location.href = url;
+        }, expectedReturnUrl);
+        await product.waitForURL(challengeUrl, { waitUntil: "domcontentloaded" });
+        await closed;
+        return realWait(...args);
+      });
     try {
       await expect(controller.loginWithOAuth("#oauth", 1_000)).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
       expect(controller.takeOAuthTerminalCompletionUrl()).toBeNull();
     } finally {
+      wait.mockRestore();
       await context.close();
     }
   });
