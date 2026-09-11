@@ -8928,7 +8928,7 @@ async function shadowPiercingCapture(
       while (cur !== null) {
         if (cur === scopeEl) return true;
         const root = cur.getRootNode();
-        cur = root instanceof ShadowRoot ? root.host : cur.parentElement;
+        cur = cur.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
       }
       return false;
     };
@@ -8980,18 +8980,74 @@ async function shadowPiercingCapture(
       return { candidate_count: 0, found: foundReport() };
 
     if ("selector" in spec) {
-      // Per-root queries across the light DOM and every open shadow root:
-      // the union is what document.querySelector alone can never see.
-      const roots: (Document | ShadowRoot)[] = [document];
-      for (const el of elements) {
-        const sr = shadowRootOf(el);
-        if (sr !== null) roots.push(sr);
+      const parentOf = (el: Element): Element | null => {
+        const root = el.getRootNode();
+        return el.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+      };
+      const matchesSelector = (el: Element, selector: string): boolean => {
+        selector = selector.trim();
+        const separators: { index: number; token: string }[] = [];
+        let depth = 0;
+        let quote = "";
+        for (let i = 0; i < selector.length; i++) {
+          const char = selector[i]!;
+          if (char === "\\") {
+            const escape = selector.slice(i + 1).match(/^[0-9a-fA-F]{1,6}\s?/);
+            i += escape ? escape[0].length : 1;
+            continue;
+          }
+          if (quote) {
+            if (char === quote) quote = "";
+            continue;
+          }
+          if (char === '"' || char === "'") {
+            quote = char;
+            continue;
+          }
+          if (char === "[" || char === "(") depth++;
+          else if (char === "]" || char === ")") depth--;
+          else if (depth === 0 && /[\s,>+~]/.test(char))
+            separators.push({ index: i, token: char });
+        }
+        const comma = separators.find((part) => part.token === ",");
+        if (comma)
+          return (
+            matchesSelector(el, selector.slice(0, comma.index)) ||
+            matchesSelector(el, selector.slice(comma.index + 1))
+          );
+        const split = separators.reverse().find((part) => {
+          if (!/\s/.test(part.token)) return true;
+          const left = selector.slice(0, part.index).trim();
+          const right = selector.slice(part.index + 1).trim();
+          return left && right && !/[>+~]$/.test(left) && !/^[>+~]/.test(right);
+        });
+        if (!split) return el.matches(selector);
+        const left = selector.slice(0, split.index).trim();
+        const right = selector.slice(split.index + 1).trim();
+        if (!el.matches(right)) return false;
+        if (split.token === "+")
+          return el.previousElementSibling !== null &&
+            matchesSelector(el.previousElementSibling, left);
+        if (split.token === "~") {
+          for (let sibling = el.previousElementSibling; sibling; sibling = sibling.previousElementSibling)
+            if (matchesSelector(sibling, left)) return true;
+          return false;
+        }
+        for (let parent = parentOf(el); parent; parent = parentOf(parent)) {
+          if (matchesSelector(parent, left)) return true;
+          if (split.token === ">") break;
+        }
+        return false;
+      };
+      let visible: Element[] = [];
+      try {
+        document.querySelector(spec.selector);
+        visible = elements.filter(
+          (el) => isVisible(el) && within(el, containerEl) && matchesSelector(el, spec.selector),
+        );
+      } catch {
+        return { candidate_count: 0, found: foundReport() };
       }
-      const matches: Element[] = [];
-      for (const r of roots) {
-        for (const el of Array.from(r.querySelectorAll(spec.selector))) matches.push(el);
-      }
-      const visible = matches.filter((el) => isVisible(el) && within(el, containerEl));
       if (visible.length === 1) return { candidate_count: 1, value: readValue(visible[0]!) };
       if (visible.length > 1) return { candidate_count: visible.length };
       return { candidate_count: 0, found: foundReport() };
@@ -9005,29 +9061,6 @@ async function shadowPiercingCapture(
       candidates = candidates.filter((el) => accessibleName(el) === spec.name);
     if (candidates.length === 1) return { candidate_count: 1, value: readValue(candidates[0]!) };
     if (candidates.length > 1) return { candidate_count: candidates.length };
-    // Zero role matches: the Groq fallback. An id-less input whose value looks
-    // secret-shaped — the created-key input of the 2026-09-11 Groq dialog —
-    // carries no distinguishable attributes (no id, class, or readonly; often
-    // no type at all, and a type=password key mask carries no textbox role in
-    // ARIA). Match it only when it is the only such input in scope, so a page
-    // with several secret-shaped inputs still fails closed as ambiguous. A
-    // name-scoped source never falls back: the caller said WHERE the value is.
-    if (spec.name === undefined) {
-      const secretShaped = /^[A-Za-z0-9][A-Za-z0-9_-]{11,}$/;
-      const idlessSecret = elements.filter(
-        (el) =>
-          el instanceof HTMLInputElement &&
-          !el.id &&
-          (el.getAttribute("type") === null ||
-            ["text", "password"].includes((el.getAttribute("type") ?? "").toLowerCase())) &&
-          isVisible(el) &&
-          within(el, containerEl) &&
-          secretShaped.test(el.value.trim()),
-      );
-      if (idlessSecret.length === 1)
-        return { candidate_count: 1, value: readValue(idlessSecret[0]!) };
-      if (idlessSecret.length > 1) return { candidate_count: idlessSecret.length };
-    }
     return { candidate_count: 0, found: foundReport() };
   }, source);
 }
@@ -9070,8 +9103,8 @@ export async function captureCredentialSource(
     // shadow-piercing walk below still gets its chance to resolve the source.
     handles = [];
   }
-  if (handles.length === 1) {
-    try {
+  try {
+    if (handles.length === 1) {
       const value = await handles[0]!.evaluate((node) => {
         if (!node.isConnected || node.ownerDocument !== document)
           throw new Error("capture source changed");
@@ -9084,12 +9117,12 @@ export async function captureCredentialSource(
         return value.length <= 8192 ? value.trim() : "";
       });
       return { candidate_count: 1, ...(value.length > 0 ? { value } : {}) };
-    } finally {
-      await Promise.all(handles.map((handle) => handle.dispose().catch(() => undefined)));
     }
+    if (handles.length > 1) return { candidate_count: handles.length };
+    return await shadowPiercingCapture(page, source);
+  } finally {
+    await Promise.all(handles.map((handle) => handle.dispose().catch(() => undefined)));
   }
-  if (handles.length > 1) return { candidate_count: handles.length };
-  return await shadowPiercingCapture(page, source);
 }
 
 export async function extractCredentials(sessionId: string): Promise<ExtractResult> {

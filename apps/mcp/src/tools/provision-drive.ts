@@ -643,12 +643,14 @@ async function captureIntoVault(
     cleanup: "open",
     closed: false,
   };
+  let candidateCount = 0;
   try {
     throwIfOperatorRequestCancelled();
     const extracted =
       afterAction === undefined
         ? await captureCredentialSource(sessionId, capture.source)
         : await captureCredentialSource(sessionId, capture.source, afterAction);
+    candidateCount = extracted.candidate_count;
     if (extracted.resolved_from === "pre_action_only")
       // The source still resolves only as it did BEFORE the action — the
       // mutation has not rendered a changed source. Never store the pre-action
@@ -673,11 +675,7 @@ async function captureIntoVault(
         stored: false,
         error: ambiguous ? "capture_ambiguous" : "capture_unresolved",
         candidate_count: extracted.candidate_count,
-        ...(ambiguous
-          ? {}
-          : extracted.found !== undefined && extracted.found.length > 0
-            ? { found: extracted.found }
-            : {}),
+        ...(ambiguous ? {} : { found: extracted.found ?? [] }),
         retry: "extract_only",
       };
     }
@@ -711,6 +709,8 @@ async function captureIntoVault(
       stored: false,
       storage: "unknown",
       error: "capture_unresolved",
+      candidate_count: candidateCount,
+      found: [],
       retry: "extract_only",
     };
   }

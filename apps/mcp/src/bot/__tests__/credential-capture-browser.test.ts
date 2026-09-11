@@ -124,20 +124,114 @@ it("captures the id-less Groq-style key input inside an open shadow root", async
   });
 });
 
-it("resolves a secret-shaped shadow input the role engines cannot see via the explicit walk", async () => {
-  // A type=password key mask carries NO textbox role in ARIA, so the locator
-  // engines resolve nothing; the shadow-piercing walk must still find it when
-  // it is the only id-less secret-shaped input in scope.
-  const value = "gsk_fixture_key_value_0123456789";
-  await page.setContent(`<div id="host"></div>
-    <script>
-      document.getElementById('host').attachShadow({ mode: 'open' }).innerHTML =
-        '<input type="password" value="${value}">';
-    </script>`);
-  expect(await captureCredentialSource("fixture", { role: "textbox" })).toEqual({
-    candidate_count: 1,
-    value,
+it.each(["text", "password"])("does not substitute a %s input for another role", async (type) => {
+  await page.setContent('<div id="host"></div>');
+  await page.locator("#host").evaluate((host, inputType) => {
+    host.attachShadow({ mode: "open" }).innerHTML =
+      '<input type="' + inputType + '" value="gsk_fixture_key_value_0123456789">';
+  }, type);
+  expect(await captureCredentialSource("fixture", { role: "code" })).toMatchObject({
+    candidate_count: 0,
+    found: [{ role: type === "text" ? "textbox" : "input", name: null }],
   });
+  if (type === "password")
+    expect(await captureCredentialSource("fixture", { role: "textbox" })).toMatchObject({
+      candidate_count: 0,
+    });
+});
+
+it("walks an id-less textbox when the role engine misses", async () => {
+  await page.setContent('<div id="host"></div>');
+  await page.locator("#host").evaluate((host) => {
+    host.attachShadow({ mode: "open" }).innerHTML =
+      '<input value="gsk_fixture_key_value_0123456789">';
+  });
+  const locator = page.getByRole("textbox");
+  vi.spyOn(locator, "elementHandles").mockResolvedValue([]);
+  const lookup = vi.spyOn(page, "getByRole").mockReturnValue(locator);
+  try {
+    expect(await captureCredentialSource("fixture", { role: "textbox" })).toEqual({
+      candidate_count: 1,
+      value: "gsk_fixture_key_value_0123456789",
+    });
+  } finally {
+    lookup.mockRestore();
+  }
+});
+
+it.each([
+  '[role=dialog] input',
+  '[role=dialog] > section > input',
+  '[role=dialog] section label + input',
+  '[role=dialog] section label ~ input',
+  '[data-caption="a > b, c"] input:not([type="password"])',
+  '.missing, [role=dialog] input',
+])("walks cross-shadow combinators for %s when the CSS engine misses", async (selector) => {
+  await page.setContent('<div role="dialog" data-caption="a > b, c" id="host"></div>');
+  await page.locator("#host").evaluate((host) => {
+    const shadow = host.attachShadow({ mode: "open" });
+    shadow.innerHTML = '<section><label>Created key</label><input value="shadow-fixture"></section>';
+  });
+  const locator = page.locator(selector);
+  vi.spyOn(locator, "elementHandles").mockResolvedValue([]);
+  vi.spyOn(locator, "filter").mockReturnValue(locator);
+  const lookup = vi.spyOn(page, "locator").mockReturnValue(locator);
+  try {
+    expect(await captureCredentialSource("fixture", { selector })).toEqual({
+      candidate_count: 1,
+      value: "shadow-fixture",
+    });
+    expect(await captureCredentialSource("fixture", { selector: '[role=region] input' }))
+      .toMatchObject({ candidate_count: 0 });
+  } finally {
+    lookup.mockRestore();
+  }
+});
+
+it("keeps the fallback scoped to a container inside a shadow root", async () => {
+  await page.setContent('<div id="host"></div>');
+  await page.locator("#host").evaluate((host) => {
+    host.attachShadow({ mode: "open" }).innerHTML =
+      '<input value="outside-fixture"><section role="dialog"><div><input value="inside-fixture"></div></section>';
+  });
+  const locator = page.getByRole("dialog");
+  vi.spyOn(locator, "elementHandles").mockResolvedValue([]);
+  vi.spyOn(locator, "getByRole").mockReturnValue(locator);
+  const lookup = vi.spyOn(page, "getByRole").mockReturnValue(locator);
+  try {
+    expect(await captureCredentialSource("fixture", {
+      role: "textbox",
+      container: { role: "dialog" },
+    })).toEqual({ candidate_count: 1, value: "inside-fixture" });
+  } finally {
+    lookup.mockRestore();
+  }
+});
+
+it("preserves diagnostics when a Playwright-only selector matches nothing", async () => {
+  await page.setContent('<input aria-label="API key" value="private-fixture">');
+  expect(await captureCredentialSource("fixture", { selector: 'label:text-is("Missing")' }))
+    .toEqual({ candidate_count: 0, found: [{ role: "textbox", name: "API key" }] });
+  await page.setContent("");
+  expect(await captureCredentialSource("fixture", { selector: 'label:text-is("Missing")' }))
+    .toEqual({ candidate_count: 0, found: [] });
+});
+
+it("disposes every acquired handle after an ambiguous capture", async () => {
+  await page.setContent('<input value="first-fixture"><input value="second-fixture">');
+  const locator = page.getByRole("textbox");
+  const handles = await locator.elementHandles();
+  const disposals = handles.map((handle) => vi.spyOn(handle, "dispose"));
+  vi.spyOn(locator, "elementHandles").mockResolvedValue(handles);
+  const lookup = vi.spyOn(page, "getByRole").mockReturnValue(locator);
+  try {
+    expect(await captureCredentialSource("fixture", { role: "textbox" }))
+      .toEqual({ candidate_count: 2 });
+    for (const dispose of disposals) expect(dispose).toHaveBeenCalledOnce();
+  } finally {
+    lookup.mockRestore();
+    await Promise.all(handles.map((handle) => handle.dispose()));
+  }
 });
 
 it("never resolves when several shadow-hosted secret-shaped inputs compete", async () => {
