@@ -101,7 +101,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
               : route.request().url().startsWith("https://accounts.google.com/")
                 ? destination === "callback"
                   ? `<script>location.href=${JSON.stringify(callback)}</script>`
-                  : "<main>Google consent pending</main>"
+                  : '<main>Google consent pending</main><p>Performing security verification</p><div style="opacity:0"><button>Hidden consent action</button></div>'
                 : "<main>Personal / Default Project</main><button>Usage</button>",
         }),
       );
@@ -139,6 +139,20 @@ describe("BrowserController OAuth popup lifecycle", () => {
         else expect(result).not.toHaveProperty("oauth.completion", "unknown");
         expect(click).toHaveBeenCalledTimes(1);
         await expect(observe(sessionId)).resolves.toMatchObject({ session_id: sessionId });
+        if (destination === "pending") {
+          const refreshed = await observe(sessionId, "compact");
+          expect(refreshed).toMatchObject({
+            session_id: sessionId,
+            semantic: {
+              blocked: true,
+              blockers: expect.arrayContaining([
+                expect.objectContaining({ text: "Performing security verification" }),
+              ]),
+            },
+          });
+          expect(JSON.stringify(refreshed)).not.toContain("hidden-consent-action");
+          expect(click).toHaveBeenCalledTimes(1);
+        }
       } finally {
         click.mockRestore();
         if (sessionId !== undefined) await finishProvisionSession(sessionId);
