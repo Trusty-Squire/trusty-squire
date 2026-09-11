@@ -181,7 +181,7 @@ describe("annotateChallengeBlockersWithScope", () => {
     const annotated = annotateChallengeBlockersWithScope(result, [
       clerkDenial("1-8fd91a2f-p.client.protect.clerk.com"),
       clerkDenial("specter.protect.clerk.com"),
-    ]);
+    ], () => "d");
     expect(annotated.semantic.blockers).toEqual([
       {
         kind: "challenge",
@@ -190,6 +190,36 @@ describe("annotateChallengeBlockersWithScope", () => {
         cause_hosts: ["1-8fd91a2f-p.client.protect.clerk.com", "specter.protect.clerk.com"],
       },
     ]);
+  });
+
+  it.each([
+    { document_id: "iframe-document", frame: "0", hostname: "accounts.other.test" },
+    { document_id: "previous-document", frame: "main", hostname: "accounts.service.test" },
+  ])("ignores denials owned by $document_id", (owner) => {
+    const result = { semantic: { blockers: [challengeBlocker("Verify you are human")] } };
+    const denial = { ...clerkDenial("specter.protect.clerk.com"), owner };
+    expect(annotateChallengeBlockersWithScope(result, [denial], () => "d")).toBe(result);
+  });
+
+  it("leaves unowned and ambiguous challenges unchanged", () => {
+    const result = { semantic: { blockers: [
+      challengeBlocker("Verify you are human"), challengeBlocker("Security check"),
+    ] } };
+    const denials = [clerkDenial("specter.protect.clerk.com")];
+    expect(annotateChallengeBlockersWithScope(result, denials)).toBe(result);
+    expect(annotateChallengeBlockersWithScope(result, denials, () => "d")).toBe(result);
+  });
+
+  it("annotates only the challenge belonging to the denied document", () => {
+    const main = challengeBlocker("Verify you are human");
+    const iframe = challengeBlocker("Security check");
+    const result = { semantic: { blockers: [main, iframe] } };
+    const annotated = annotateChallengeBlockersWithScope(result,
+      [clerkDenial("specter.protect.clerk.com")],
+      (blocker) => blocker === main ? "d" : undefined,
+    );
+    expect(annotated.semantic.blockers[0]).toMatchObject({ cause: "scope" });
+    expect(annotated.semantic.blockers[1]).toBe(iframe);
   });
 
   it("does not annotate validation blockers or non-challenge denials", () => {

@@ -1031,6 +1031,7 @@ function descendantsV2(node: BrowserUseNode): BrowserUseNode[] {
 export function safeBlockersV2(
   root: BrowserUseNode,
   refForNode: (node: BrowserUseNode) => string | undefined = () => undefined,
+  onChallenge?: (blocker: SafeBlockerV2, root: BrowserUseNode) => void,
 ): SafeBlockerV2[] {
   const nodes: BrowserUseNode[] = [];
   const parentFor = new Map<BrowserUseNode, BrowserUseNode>();
@@ -1149,7 +1150,7 @@ export function safeBlockersV2(
     const text =
       message ?? controlText ?? labelText ?? challengeTexts[0] ?? "Verification challenge";
     const ref = grounded === undefined ? undefined : refForNode(grounded);
-    blockers.push({
+    const blocker: SafeBlockerV2 = {
       kind: "challenge",
       text,
       ...(ref === undefined ? { target: "unavailable" as const } : { ref }),
@@ -1158,7 +1159,9 @@ export function safeBlockersV2(
         : focusable
           ? { focus: "focusable" as const, keyboard: "tab_space" as const }
           : {}),
-    });
+    };
+    blockers.push(blocker);
+    onChallenge?.(blocker, challengeRoot);
   }
 
   const validationNodes = new Set<BrowserUseNode>();

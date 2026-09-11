@@ -81,6 +81,7 @@ import {
   recordableTokenV2,
   safeDescriptionV2,
   safeBlockersV2,
+  type SafeBlockerV2,
   safeOriginV2,
   safePageSemanticsV2,
   sealRetainedInteractiveElementsV2,
@@ -2488,6 +2489,8 @@ function withHostScopeDenials<T extends object>(session: Session, result: T): T 
 const CHALLENGE_SCOPE_HOST_RE =
   /(?:^|\.)protect\.clerk\.com$|(?:^|\.)challenges\.cloudflare\.com$|(?:^|\.)hcaptcha\.com$|(?:^|\.)recaptcha\.net$/iu;
 
+const challengeDocuments = new WeakMap<SafeBlockerV2, string>();
+
 /**
  * Surface denied challenge hosts ON the challenge blocker itself (`cause:
  * "scope"` with the exact hostnames) instead of leaving the host agent to
@@ -2498,35 +2501,37 @@ const CHALLENGE_SCOPE_HOST_RE =
 export function annotateChallengeBlockersWithScope<T extends object>(
   result: T,
   denials: readonly HostScopeDenialDiagnostic[],
+  documentForBlocker: (blocker: SafeBlockerV2) => string | undefined = (blocker) =>
+    challengeDocuments.get(blocker),
 ): T {
-  const deniedHosts = [
-    ...new Set(
-      denials
-        .map((denial) => denial.hostname)
-        .filter((hostname) => CHALLENGE_SCOPE_HOST_RE.test(hostname)),
-    ),
-  ].sort();
-  if (deniedHosts.length === 0) return result;
+  const semantic = (result as { semantic?: SafePageSemanticsV2 }).semantic;
+  const blockers = semantic?.blockers;
+  if (!Array.isArray(blockers)) return result;
   let annotated = false;
-  const next = { ...result } as Record<string, unknown>;
-  // Query pages carry `semantic`; the Observation interface names the same
-  // shape `semantics`. Annotate whichever is present.
-  for (const key of ["semantic", "semantics"] as const) {
-    const semantics = next[key] as SafePageSemanticsV2 | undefined;
-    const blockers = semantics?.blockers;
-    if (!Array.isArray(blockers)) continue;
-    if (!blockers.some((blocker) => blocker.kind === "challenge")) continue;
-    next[key] = {
-      ...semantics,
-      blockers: blockers.map((blocker) =>
-        blocker.kind === "challenge" && blocker.cause === undefined
-          ? { ...blocker, cause: "scope" as const, cause_hosts: deniedHosts }
-          : blocker,
+  const nextBlockers = blockers.map((blocker) => {
+    if (blocker.kind !== "challenge" || blocker.cause !== undefined) return blocker;
+    const documentId = documentForBlocker(blocker);
+    if (documentId === undefined) return blocker;
+    if (
+      blockers.filter((candidate) =>
+        candidate.kind === "challenge" && documentForBlocker(candidate) === documentId,
+      ).length !== 1
+    ) return blocker;
+    const deniedHosts = [
+      ...new Set(
+        denials
+          .filter((denial) =>
+            denial.owner.document_id === documentId && denial.owner.frame === "main",
+          )
+          .map((denial) => denial.hostname)
+          .filter((hostname) => CHALLENGE_SCOPE_HOST_RE.test(hostname)),
       ),
-    };
+    ].sort();
+    if (deniedHosts.length === 0) return blocker;
     annotated = true;
-  }
-  return annotated ? (next as T) : result;
+    return { ...blocker, cause: "scope" as const, cause_hosts: deniedHosts };
+  });
+  return annotated ? { ...result, semantic: { ...semantic, blockers: nextBlockers } } : result;
 }
 
 export interface ScreenshotCapture {
@@ -4637,11 +4642,24 @@ function compactV2Observation(
   const handles = compactV2Handles(session, elements, sourcePage);
   const safe = compactV2LiveControls(session, elements, sourcePage, handles);
   const targetableRefs = new Set(safe.rows.map((row) => row.ref));
-  const blockers = safeBlockersV2(capture.root, (node) => {
-    const element = capture.nodeElements.get(node.id);
-    const ref = element === undefined ? undefined : handles.get(element);
-    return ref !== undefined && targetableRefs.has(ref) ? ref : undefined;
-  });
+  const mainDocumentNodes = new Set<BrowserUseCapture["root"]>();
+  const collectMainDocument = (node: BrowserUseCapture["root"]): void => {
+    mainDocumentNodes.add(node);
+    node.children.forEach(collectMainDocument);
+  };
+  collectMainDocument(capture.root);
+  const documentId = `${session.browser.mainDocumentIdentity(sourcePage)}:main`;
+  const blockers = safeBlockersV2(
+    capture.root,
+    (node) => {
+      const element = capture.nodeElements.get(node.id);
+      const ref = element === undefined ? undefined : handles.get(element);
+      return ref !== undefined && targetableRefs.has(ref) ? ref : undefined;
+    },
+    (blocker, root) => {
+      if (mainDocumentNodes.has(root)) challengeDocuments.set(blocker, documentId);
+    },
+  );
   const semantics = {
     ...safePageSemanticsV2(semanticSource),
     ...(blockers.length === 0 ? {} : { blockers, blocked: true as const }),
