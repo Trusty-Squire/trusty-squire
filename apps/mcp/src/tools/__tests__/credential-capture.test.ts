@@ -186,24 +186,28 @@ describe("explicit mutation capture", () => {
     });
     expect(store).not.toHaveBeenCalled();
   });
-  it.each(["empty", "omitted", "exception"])("includes empty diagnostics for %s capture results", async (kind) => {
-    if (kind === "exception") state.capture.mockRejectedValueOnce(new Error(secret));
-    else state.capture.mockResolvedValueOnce({
-      candidate_count: 0,
-      ...(kind === "empty" ? { found: [] } : {}),
-    });
-    const store = vi.fn();
-    const result = await click(api(store));
-    expect(result).toMatchObject({
-      stored: false,
-      error: "capture_unresolved",
-      candidate_count: 0,
-      found: [],
-      retry: "extract_only",
-    });
-    expect(JSON.stringify(result)).not.toContain(secret);
-    expect(store).not.toHaveBeenCalled();
-  });
+  it.each(["empty", "omitted", "exception"])(
+    "includes empty diagnostics for %s capture results",
+    async (kind) => {
+      if (kind === "exception") state.capture.mockRejectedValueOnce(new Error(secret));
+      else
+        state.capture.mockResolvedValueOnce({
+          candidate_count: 0,
+          ...(kind === "empty" ? { found: [] } : {}),
+        });
+      const store = vi.fn();
+      const result = await click(api(store));
+      expect(result).toMatchObject({
+        stored: false,
+        error: "capture_unresolved",
+        candidate_count: 0,
+        found: [],
+        retry: "extract_only",
+      });
+      expect(JSON.stringify(result)).not.toContain(secret);
+      expect(store).not.toHaveBeenCalled();
+    },
+  );
   it("recovers a zero-match textbox capture through an explicit plain-text source", async () => {
     state.capture.mockResolvedValueOnce({ candidate_count: 0 });
     const store = vi.fn().mockResolvedValue(stored);
