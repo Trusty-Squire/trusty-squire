@@ -2025,7 +2025,14 @@ for (const tool of OPERATE_TOOLS) {
             ("status" in actionResult || "needs_user" in actionResult)
           )
         )
-          return await captureIntoVault(args.session_id, capture, api);
+          return {
+            ...(await captureIntoVault(args.session_id, capture, api)),
+            ...(actionResult !== null &&
+            typeof actionResult === "object" &&
+            "screenshot_click" in actionResult
+              ? { screenshot_click: actionResult.screenshot_click }
+              : {}),
+          };
       } catch {
         actionResult = undefined;
       }

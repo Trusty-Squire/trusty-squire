@@ -7873,7 +7873,8 @@ export class BrowserController {
     try {
       // caret:"initial" is not needed here — the CDP capture never runs
       // Playwright's caret-hiding pass, so element styles stay untouched.
-      const captured = await captureBoundScreenshot(page, async () => {
+      const security = (frame: Frame) => this.frameSecurity(frame);
+      const captured = await captureBoundScreenshot(page, security, async () => {
         let base64: string;
         const metrics = await cdp.send("Page.getLayoutMetrics");
         const viewport = metrics.cssVisualViewport;

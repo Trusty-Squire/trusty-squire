@@ -79,6 +79,79 @@ function point(
 }
 
 describe("screenshot-bound native pointer dispatch", () => {
+  it.each(["button", "descendant", "unrelated"] as const)(
+    "binds control text while allowing %s text changes",
+    async (change) => {
+      const f = await fixture();
+      try {
+        await f.page.evaluate(() => {
+          document.body.innerHTML =
+            '<button style="position:absolute;left:150px;top:220px;width:160px;height:60px"><span style="display:block;width:100%;height:100%">Continue</span></button><p>Waiting</p>';
+        });
+        const shot = await f.controller.captureOperatorScreenshot();
+        await f.page.evaluate((change) => {
+          const el = document.querySelector(change === "unrelated" ? "p" : "span")!;
+          el.firstChild!.nodeValue = "Delete account";
+        }, change);
+        const mouse = vi.spyOn(f.page.mouse, "click");
+        const authorize = vi.fn();
+        const result = clickScreenshot(
+          f.page,
+          point(shot, change === "button" ? 152 : 174, 244),
+          authorize,
+        );
+        if (change === "unrelated") {
+          await expect(result).resolves.toBe("dispatched");
+          expect(mouse).toHaveBeenCalledOnce();
+        } else {
+          await expect(result).rejects.toMatchObject({
+            code: "stale_screenshot",
+            dispatch: "not_dispatched",
+          });
+          expect(authorize).not.toHaveBeenCalled();
+          expect(mouse).not.toHaveBeenCalled();
+        }
+      } finally {
+        vi.restoreAllMocks();
+        await f.close();
+      }
+    },
+  );
+
+  it("cancels during final geometry before authorization or input", async () => {
+    const f = await fixture();
+    try {
+      const shot = await f.controller.captureOperatorScreenshot();
+      const controller = new AbortController();
+      const reason = new Error("cancelled during final geometry");
+      const frameElement = f.frame.frameElement.bind(f.frame);
+      vi.spyOn(f.frame, "frameElement").mockImplementation(async () => {
+        const handle = await frameElement();
+        const boundingBox = handle.boundingBox.bind(handle);
+        vi.spyOn(handle, "boundingBox").mockImplementation(async () => {
+          const result = await boundingBox();
+          if (operatorMutationDispatchPhase() === "dispatch_attempted") controller.abort(reason);
+          return result;
+        });
+        return handle;
+      });
+      const mouse = vi.spyOn(f.page.mouse, "click");
+      const authorize = vi.fn();
+      await expect(
+        withOperatorRequestContext(controller.signal, () =>
+          clickScreenshot(f.page, point(shot, 174, 244), authorize),
+        ),
+      ).rejects.toBe(reason);
+      expect(controller.signal.aborted).toBe(true);
+      expect(authorize).not.toHaveBeenCalled();
+      expect(mouse).not.toHaveBeenCalled();
+      expect(await f.frame.evaluate("window.events")).toEqual([]);
+    } finally {
+      vi.restoreAllMocks();
+      await f.close();
+    }
+  });
+
   it.each([1, 2])(
     "clicks a closed-shadow cross-origin framed checkbox at DPR %s",
     async (scale) => {
@@ -347,6 +420,54 @@ describe("native screenshot/click tool contract on an isolated session", () => {
       await f.close();
     }
   });
+
+  it.each([false, true])(
+    "refuses an allowed URL with opaque sandbox origin (inherited=%s)",
+    async (nested) => {
+      const f = await fixture();
+      const started = await startHarnessProvisionSession({
+        browser: f.controller,
+        serviceUrl: "http://parent.test/",
+        extraAllowedHosts: ["child.test"],
+        observationFormat: "browser-use-dom",
+      });
+      try {
+        if (nested)
+          await f.page.route("http://child.test/frame", (route) =>
+            route.fulfill({
+              contentType: "text/html",
+              body: '<iframe src="http://child.test/leaf" style="position:absolute;left:0;top:0;width:300px;height:100px;border:0"></iframe>',
+            }),
+          );
+        await f.page
+          .locator("iframe")
+          .evaluate((el) => el.setAttribute("sandbox", "allow-scripts"));
+        await f.frame.goto("http://child.test/frame");
+        const target = nested
+          ? f.page.frames().find((frame) => frame.url().endsWith("/leaf"))!
+          : f.frame;
+        await target.waitForSelector("#host");
+        expect(await target.evaluate(() => location.origin)).toBe("http://child.test");
+        const shot = await captureScreenshot(started.session_id);
+        const mouse = vi.spyOn(f.page.mouse, "click");
+        await expect(
+          operateClickTool.handler(
+            {
+              session_id: started.session_id,
+              screenshot: { screenshot_id: shot.click_binding!.screenshot_id, x: 174, y: 244 },
+            },
+            null,
+          ),
+        ).rejects.toThrow("target_not_allowed");
+        expect(mouse).not.toHaveBeenCalled();
+        expect(await target.evaluate("window.events")).toEqual([]);
+      } finally {
+        vi.restoreAllMocks();
+        await finishProvisionSession(started.session_id);
+        await f.close();
+      }
+    },
+  );
 
   it("exposes exclusive ref/image schemas and finite original-image coordinates", () => {
     const screenshot = { screenshot_id: "12345678-1234-4234-8234-123456789abc", x: 1, y: 2 };

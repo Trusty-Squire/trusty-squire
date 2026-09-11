@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
-import type { CDPSession, Page } from "playwright";
-import { markOperatorMutationDispatchAttempted } from "./request-cancellation.js";
+import type { CDPSession, Frame, Page } from "playwright";
+import {
+  markOperatorMutationDispatchAttempted,
+  throwIfOperatorRequestCancelled,
+} from "./request-cancellation.js";
 
 export interface ScreenshotPoint {
   screenshot_id: string;
@@ -14,7 +17,9 @@ export interface ScreenshotBinding {
   coordinate_space: "image_pixels";
 }
 type Rect = { x: number; y: number; width: number; height: number };
+type FrameSecurity = (frame: Frame) => Promise<{ origin: string; opaque: boolean }>;
 type Binding = {
+  frameSecurity: FrameSecurity;
   public: ScreenshotBinding;
   state: string;
   beforeNodes: Map<string, string>;
@@ -57,10 +62,30 @@ async function geometry(page: Page, cdp: CDPSession) {
   // capture while the checkbox's identity, attributes and hit area stay exact.
   const nodes = new Map<string, string>();
   for (const doc of snapshot.documents) {
+    if (!doc.nodes.nodeName || !doc.nodes.parentIndex || !doc.nodes.backendNodeId) continue;
+    const texts = new Array<string>(doc.nodes.nodeName.length).fill("");
+    for (const [j, i] of doc.layout.nodeIndex.entries())
+      texts[i] = snapshot.strings[doc.layout.text[j] ?? -1] ?? "";
+    for (let i = texts.length - 1; i >= 0; i--) {
+      const parent = doc.nodes.parentIndex[i];
+      if (parent !== undefined && parent >= 0) texts[parent] = texts[i]! + texts[parent]!;
+    }
+    const controls = doc.nodes.nodeName.map((name, i) => {
+      const attributes = doc.nodes.attributes?.[i]?.map((v) => snapshot.strings[v]) ?? [];
+      const role = attributes.findIndex((value, index) => index % 2 === 0 && value === "role");
+      return (
+        /^(BUTTON|A|INPUT|SELECT|TEXTAREA|LABEL)$/.test(snapshot.strings[name] ?? "") ||
+        (role >= 0 && ["button", "checkbox", "radio"].includes(attributes[role + 1] ?? ""))
+      );
+    });
     for (const [j, i] of doc.layout.nodeIndex.entries()) {
       const id = doc.nodes.backendNodeId?.[i];
       const nameIndex = doc.nodes.nodeName?.[i];
       if (id === undefined || nameIndex === undefined) continue;
+      let control = i;
+      while (!controls[control] && (doc.nodes.parentIndex[control] ?? -1) >= 0)
+        control = doc.nodes.parentIndex[control]!;
+      if (!controls[control]) control = i;
       nodes.set(
         `${snapshot.strings[doc.frameId]}:${id}`,
         JSON.stringify({
@@ -68,6 +93,9 @@ async function geometry(page: Page, cdp: CDPSession) {
           attributes: doc.nodes.attributes?.[i]?.map((v) => snapshot.strings[v]),
           name: snapshot.strings[nameIndex],
           text: snapshot.strings[doc.nodes.nodeValue?.[i] ?? -1],
+          control: doc.nodes.backendNodeId[control],
+          controlText: texts[control]?.replace(/\s+/g, " ").trim(),
+          controlAttributes: doc.nodes.attributes?.[control]?.map((v) => snapshot.strings[v]),
         }),
       );
     }
@@ -94,6 +122,7 @@ async function geometry(page: Page, cdp: CDPSession) {
 /** Existing pixel capture stays read-only. A failed binding never prevents the read. */
 export async function captureBoundScreenshot(
   page: Page,
+  frameSecurity: FrameSecurity,
   capture: () => Promise<{ base64: string; rect: Rect }>,
 ): Promise<{ base64: string; clickBinding?: ScreenshotBinding }> {
   bindings.delete(page);
@@ -110,6 +139,7 @@ export async function captureBoundScreenshot(
       coordinate_space: "image_pixels",
     };
     bindings.set(page, {
+      frameSecurity,
       public: publicBinding,
       state: after.state,
       beforeNodes: before.nodes,
@@ -128,6 +158,7 @@ export interface ScreenshotClickTarget {
   labels: string[];
   frameUrl: string;
   frameOrigin: string;
+  frameOpaque: boolean;
   mainFrame: boolean;
 }
 
@@ -139,6 +170,7 @@ async function hitTarget(
   cdp: CDPSession,
   x: number,
   y: number,
+  frameSecurity: FrameSecurity,
 ): Promise<ScreenshotClickTarget> {
   const hit = await cdp.send("DOM.getNodeForLocation", {
     x: Math.round(x),
@@ -167,6 +199,23 @@ async function hitTarget(
         await session.detach();
       }
     }
+    const findFrame = (tree: typeof root.frameTree, frame: Frame): Frame | undefined => {
+      if (`${tree.frame.url}${tree.frame.urlFragment ?? ""}` !== frame.url()) return undefined;
+      if (tree.frame.id === hit.frameId) return frame;
+      for (const [index, child] of (tree.childFrames ?? []).entries()) {
+        const candidate = frame.childFrames()[index];
+        if (!candidate) continue;
+        const found = findFrame(child, candidate);
+        if (found) return found;
+      }
+      return undefined;
+    };
+    const frame = findFrame(root.frameTree, page.mainFrame());
+    if (!frame) throw new ScreenshotClickError("stale_screenshot", "not_dispatched");
+    const security =
+      frame === page.mainFrame()
+        ? { origin: new URL(frame.url()).origin, opaque: false }
+        : await frameSecurity(frame);
     const node = await nodeSession.send("DOM.resolveNode", { backendNodeId: hit.backendNodeId });
     if (!node.object.objectId) throw new Error("screenshot_target_unavailable");
     try {
@@ -185,6 +234,8 @@ async function hitTarget(
         throw new Error("screenshot_target_unavailable");
       return {
         ...result.result.value,
+        frameOrigin: security.origin,
+        frameOpaque: security.opaque,
         nodeKey: `${hit.frameId}:${hit.backendNodeId}`,
         mainFrame: hit.frameId === root.frameTree.frame.id,
       } as ScreenshotClickTarget;
@@ -236,7 +287,7 @@ export async function clickScreenshot(
     );
     if (x < 0 || y < 0 || x >= current.viewport.clientWidth || y >= current.viewport.clientHeight)
       throw new ScreenshotClickError("invalid_screenshot_point", "not_dispatched");
-    const target = await hitTarget(page, cdp, x, y);
+    const target = await hitTarget(page, cdp, x, y, binding.frameSecurity);
     await markOperatorMutationDispatchAttempted();
     const final = await geometry(page, cdp);
     const originalNode = binding.beforeNodes.get(target.nodeKey);
@@ -249,6 +300,7 @@ export async function clickScreenshot(
       originalNode !== final.nodes.get(target.nodeKey)
     )
       throw new ScreenshotClickError("stale_screenshot", "not_dispatched");
+    throwIfOperatorRequestCancelled();
     authorize(target);
     attempted = true;
     await page.mouse.click(x, y);

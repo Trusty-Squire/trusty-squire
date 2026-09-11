@@ -5841,6 +5841,7 @@ async function executeAct(
                       framePath: "screenshot",
                       frameUrl: target.frameUrl,
                       frameOrigin: target.frameOrigin,
+                      frameOpaque: target.frameOpaque,
                     },
                     "click",
                     compactV2ActionPage,
