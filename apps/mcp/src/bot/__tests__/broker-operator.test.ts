@@ -3,7 +3,7 @@ import {
   settleOperatorTerminalReceipt,
   markOperatorMutationDispatchAttempted,
 } from "../request-cancellation.js";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi, type MockInstance } from "vitest";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1643,7 +1643,7 @@ it("refuses credential finish when capture becomes unresolved during call draini
 
 it("admits ordinary actions only while the caller has solely completed capture uncertainty", async () => {
   const root = await mkdtemp(join(tmpdir(), "ts-capture-admission-"));
-  let hasCapability: ReturnType<typeof vi.spyOn> | undefined;
+  let hasCapability: MockInstance<OperatorBroker["authority"]["hasCapability"]> | undefined;
   try {
     const journal = new DispatchJournal(join(root, "dispatch.jsonl"));
     const broker = new OperatorBroker(
