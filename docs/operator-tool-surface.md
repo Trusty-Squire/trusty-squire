@@ -65,8 +65,11 @@ be clicked from a full-page or frame image; scroll and take a new screenshot.
 The binding belongs to the captured page, expires after 60 seconds, is replaced
 by the next screenshot, and permits one attempt. Navigation, viewport/scroll or
 frame-geometry changes invalidate it. The hit node must retain its physical
-identity, attributes, text and bounds across capture and dispatch preparation.
-Unrelated inline-label reflow does not invalidate an unchanged checkbox. This is
+identity, attributes and bounds, including its control's text and associated
+label text, across capture and dispatch preparation. Overlapping surfaces must
+retain their geometry, relative paint order and hit-affecting styles: removing, hiding or
+moving an overlay cannot authorize a newly exposed control from the old image.
+Unrelated text changes do not invalidate an otherwise unchanged target. This is
 a geometry/identity binding, not proof that every pixel or page animation stayed
 unchanged. If capture cannot establish a binding, the image is still returned
 without `click_binding`; observations and other actions remain usable.
@@ -81,6 +84,11 @@ cannot replay an uncertain click. `stale_screenshot` requires a new screenshot;
 `invalid_screenshot_point` means the point was outside the image/current viewport.
 For ordinary clicks, `target_unresolved` means the label was never issued in this document;
 `stale_ref` remains the response for an expired physical ref or retired alias.
+
+When combined with `capture`, the vault capture result retains the click receipt;
+storage success does not establish the provider outcome. Screenshot clicks also
+use the existing popup adoption rules, so subsequent observations follow an
+adopted tab opened by the click.
 
 Coordinate clicks use the session's existing domain and payment predicates and
 are not promoted into replay recipes. They do not change vault storage,

@@ -312,6 +312,8 @@ frame_index?, frame_url_contains?, full_page?)` is a read-only debugging capture
 (page or one isolated frame, e.g. a cross-origin 3-D Secure/captcha challenge)
 returned as an actual MCP image. It returns the page's real pixels: there is no
 redaction pass and no refusal when the page is showing a secret or a card value.
+For controls visible only in the image, see
+[screenshot-coordinate clicks](docs/operator-tool-surface.md#clicking-a-screenshot-visible-control).
 The maintainer-only `list_extract_failures` → `get_extract_failure`
 DOM-diagnostics pair is excluded from that surface; set
 `TRUSTY_SQUIRE_DIAGNOSTICS=1` in the MCP server environment to opt into the

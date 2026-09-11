@@ -44,11 +44,8 @@ diff against the landed main confirmed:
 - Main's containing-block clipping and fixed-shell blocker fixes are untouched,
   as are the server resilience schema typing fix and release/test configuration.
 
-The screenshot implementation binds one image attempt to the page's captured
-document/frame/viewport state and chosen physical node geometry, then uses native
-pointer dispatch. Dispatched and uncertain receipts never claim provider success.
-The image remains available when geometry cannot produce a binding. The existing
-operator tool-surface document explains coordinates, binding lifetime and limits.
+The current targeting contract, including binding identity and dispatch receipts,
+is owned by the [operator tool-surface document](docs/operator-tool-surface.md#clicking-a-screenshot-visible-control).
 
 ## Integration additions
 

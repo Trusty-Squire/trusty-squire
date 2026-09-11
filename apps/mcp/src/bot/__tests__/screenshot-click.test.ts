@@ -1,4 +1,6 @@
 import { chromium, type Browser } from "playwright";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { BrowserController } from "../browser.js";
 import { clickScreenshot, type ScreenshotPoint } from "../screenshot-click.js";
@@ -17,6 +19,13 @@ import {
 } from "../request-cancellation.js";
 
 let browser: Browser;
+// Opt-in product evidence from isolated fixtures; ordinary test runs write nothing.
+async function evidence(name: string, data: string | Buffer) {
+  const directory = process.env.SCREENSHOT_CLICK_EVIDENCE_DIR;
+  if (!directory) return;
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, name), data);
+}
 beforeAll(async () => {
   browser = await chromium.launch({ headless: true });
 });
@@ -199,6 +208,15 @@ describe("screenshot-bound native pointer dispatch", () => {
           expect(mouse).not.toHaveBeenCalled();
           expect(authorize).not.toHaveBeenCalled();
           expect(await f.page.evaluate("window.clicks")).toEqual([]);
+          if (change === "remove") {
+            await evidence("overlay-captured.png", Buffer.from(shot.base64, "base64"));
+            await evidence("overlay-removed.png", await f.page.screenshot());
+            await evidence("overlay-refusal.json", JSON.stringify({
+              request: point(shot, 174, 244),
+              error: await result.catch((error) => ({ code: error.code, dispatch: error.dispatch })),
+              observedClicks: await f.page.evaluate("window.clicks"),
+            }, null, 2));
+          }
         }
       } finally {
         vi.restoreAllMocks();
@@ -258,6 +276,11 @@ describe("screenshot-bound native pointer dispatch", () => {
           expect(operatorMutationDispatchPhase()).toBe("dispatch_attempted");
         });
         expect(await f.frame.evaluate("window.events")).toEqual([{ trusted: true, checked: true }]);
+        if (scale === 1) {
+          await evidence("closed-shadow-captured.png", Buffer.from(shot.base64, "base64"));
+          await evidence("closed-shadow-clicked.png", await f.page.screenshot());
+          await evidence("native-click-events.json", JSON.stringify(await f.frame.evaluate("window.events"), null, 2));
+        }
         expect(authorize).toHaveBeenCalledWith(
           expect.objectContaining({ frameOrigin: "http://child.test", mainFrame: false }),
         );
@@ -691,6 +714,7 @@ describe("native screenshot/click tool contract on an isolated session", () => {
           screenshot_click: { dispatch: "not_dispatched" },
         });
         expect(await f.frame.evaluate("window.events")).toEqual([{ trusted: true, checked: true }]);
+        await evidence(`tool-${mode}.json`, JSON.stringify({ result, replay, events: await f.frame.evaluate("window.events") }, null, 2));
       } finally {
         vi.restoreAllMocks();
         await finishProvisionSession(started.session_id);

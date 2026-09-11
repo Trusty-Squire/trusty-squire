@@ -109,9 +109,11 @@ actually renders:
   substitutes, or redacts content that its format emits.
 
 - `operate_screenshot` returns the page's real pixels. There is no mask
-  compositing pass, no capture-scoped node scan, no stability re-check, and no
+  compositing pass or content-based capture refusal, and no
   `screenshot_unavailable_sealed_context` refusal — the error code no longer
-  exists.
+  exists. Optional screenshot-click binding is governed by the
+  [operator tool contract](operator-tool-surface.md#clicking-a-screenshot-visible-control);
+  its identity checks do not gate the image read.
 - Observation text, element values, labels, hrefs, test ids, paths, and frame
   origins are verbatim. A password field's value, an operator-injected vault
   value, a filled card number and CVV, a rendered API key, recovery code, TOTP,
