@@ -484,22 +484,6 @@ describe("list_credentials", () => {
     ]);
   });
 
-  it("filters by label case-insensitively and combines with the service filter", async () => {
-    const listCredentials = vi.fn().mockResolvedValue({
-      credentials: [
-        { reference: "vault://acct/exa-1", service: "Exa", label: "Primary" },
-        { reference: "vault://acct/exa-2", service: "Exa", label: "secondary" },
-        { reference: "vault://acct/groq-1", service: "Groq", label: "Primary" },
-      ],
-    });
-    const api = makeMockApi({ listCredentials } as unknown as ApiClient);
-    const parsed = listCredentialsTool.inputSchema.parse({ service: "exa", label: "primary" });
-    const res = (await listCredentialsTool.handler(parsed, api)) as {
-      credentials: { reference: string }[];
-    };
-    expect(res.credentials.map((c) => c.reference)).toEqual(["vault://acct/exa-1"]);
-  });
-
   it("fields=summary returns only the compact summary projection", async () => {
     const listCredentials = vi.fn().mockResolvedValue({
       credentials: [

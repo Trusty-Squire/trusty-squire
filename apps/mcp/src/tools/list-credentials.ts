@@ -10,11 +10,6 @@ const inputSchema = z.object({
     .describe(
       'Filter by service (case-insensitive exact match), e.g. "exa" or ["groq", "cartesia"]',
     ),
-  // Case-insensitive exact match on the credential's label.
-  label: z
-    .string()
-    .optional()
-    .describe("Filter by label (case-insensitive exact match)"),
   // Compact projection for provisioning checks: enough to decide reuse
   // (reference, service, label, field names, hosts, age, staleness)
   // without the full metadata payload.
@@ -43,7 +38,6 @@ BEHAVIOR:
 FILTERS (all optional — with no filter the full metadata list is returned):
 - \`service\`: case-insensitive exact match on the service field;
   pass a string for one service or an array to match any of several
-- \`label\`: case-insensitive exact match on the credential's label
 - \`fields: "summary"\`: return only a compact projection per credential —
   reference, service, label, field_names, allowed_hosts, created_at,
   stale — instead of the full metadata object
@@ -63,10 +57,6 @@ export const listCredentialsTool: Tool<z.infer<typeof inputSchema>> = {
         description: "Filter by service (case-insensitive exact match); string or array of strings",
         oneOf: [{ type: "string" }, { type: "array", items: { type: "string" }, minItems: 1 }],
       },
-      label: {
-        type: "string",
-        description: "Filter by label (case-insensitive exact match)",
-      },
       fields: {
         type: "string",
         enum: ["summary"],
@@ -78,7 +68,7 @@ export const listCredentialsTool: Tool<z.infer<typeof inputSchema>> = {
   async handler(args, api) {
     assertApi(api);
     const res = await api.listCredentials();
-    const { service, label, fields } = args;
+    const { service, fields } = args;
     const services = service === undefined ? undefined : Array.isArray(service) ? service : [service];
     const needle = (s: string) => s.trim().toLowerCase();
     const filtered = res.credentials.filter((c) => {
@@ -86,7 +76,6 @@ export const listCredentialsTool: Tool<z.infer<typeof inputSchema>> = {
         if (c.service === null) return false;
         if (!services.some((s) => needle(s) === needle(c.service as string))) return false;
       }
-      if (label !== undefined && needle(label) !== needle(c.label)) return false;
       return true;
     });
     if (fields === "summary") {
