@@ -16,6 +16,7 @@ import { describe, expect, it, vi } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv-provider.js";
+import type { JsonSchemaType } from "@modelcontextprotocol/sdk/validation/types.js";
 import { provisionObserveTool } from "../tools/provision-drive.js";
 import { brokerRecoveryRequested, buildServer } from "../server.js";
 import type { ApiClient } from "../api-client.js";
@@ -484,7 +485,9 @@ it("publishes literal role constraints matching the observe runtime validator", 
   try {
     const listed = await client.listTools();
     const tool = listed.tools.find((candidate) => candidate.name === "operate_observe")!;
-    const validate = new AjvJsonSchemaValidator().getValidator(tool.inputSchema);
+    // The SDK's wire schema permits explicit undefined on optional properties;
+    // its validator's JSON Schema type does not. AJV checks the received schema.
+    const validate = new AjvJsonSchemaValidator().getValidator(tool.inputSchema as JsonSchemaType);
     for (const [role, accepted] of [
       ["slider", true],
       ["generic", true],
