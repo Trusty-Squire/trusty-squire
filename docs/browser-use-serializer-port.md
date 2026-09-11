@@ -61,8 +61,9 @@ token or capture confirms its iframe is no longer rendered. Viewport exclusion
 alone never counts as completion. Completion is associated with each
 widget before shared challenge containers are collapsed: every contained widget
 must be solved. Token association reaches the nearest unambiguous `.cf-turnstile`
-host through nested elements and shadow roots without crossing a multi-widget
-container or document boundary. Success text and host state attributes do not
+host through nested elements and shadow roots, falling back to the nearest
+unambiguous parent element when no such host exists, without crossing a
+multi-widget container or document boundary. Success text and host state attributes do not
 clear a challenge.
 This reports observed evidence and adds no action or payment gate. Missing evidence
 is not proof the page is unblocked. Startup can precede a late-rendering error;

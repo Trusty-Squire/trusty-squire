@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 // The former separate-prose-channel tests now exercise its replacement through
@@ -1862,6 +1863,59 @@ describe("interleaved observation DOM", () => {
       const fullChars = JSON.stringify({ dom: full }).length;
       expect(compactChars).toBeLessThan(fullChars);
       expect(1 - compactChars / fullChars).toBeGreaterThan(0.2);
+    } finally {
+      await page.close();
+    }
+  });
+  it("observes Turnstile completion after a coordinate click and permits sign-in continuation", async () => {
+    const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
+    const evidenceDir = process.env.TURNSTILE_TEST_EVIDENCE_DIR;
+    const observations: unknown[] = [];
+    try {
+      await page.setContent(`
+        <style>body { font: 18px system-ui; padding: 48px; } iframe { width: 320px; height: 90px; } button { padding: 12px; margin-top: 20px; }</style>
+        <h1>Sign-in regression fixture</h1><p>Local simulated Turnstile widget</p>
+        <div class="cf-turnstile"><div><iframe title="Widget containing a Cloudflare security challenge"></iframe></div>
+          <input type="hidden" name="cf-turnstile-response" value=""></div>
+        <button id="continue" disabled>Continue with Google</button><p id="result"></p>
+        <script>document.querySelector('#continue').onclick = () => document.querySelector('#result').textContent = 'Sign-in continuation reached';</script>
+      `);
+      const frame = page.frames()[1];
+      await frame.setContent(`<style>body { font: 18px system-ui; } button { padding: 12px; }</style><button>Verify you are human</button>`);
+      await frame.locator("button").evaluate((button) => {
+        button.addEventListener("click", () => {
+          (parent.document.querySelector("input") as HTMLInputElement).value = "0.fixture-response";
+          (parent.document.querySelector("#continue") as HTMLButtonElement).disabled = false;
+          button.textContent = "Success!";
+        });
+      });
+      const observe = async (stage: string) => {
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+        const capture = await controller.extractBrowserUseObservation();
+        const blockers = safeBlockersV2(capture.root);
+        const payload = encodeV2QueryPage({
+          sessionId: "turnstile-fixture", stage: "auth", pageUrl: page.url(),
+          semantics: { ...safePageSemanticsV2(await controller.extractObservationSemantics()), blockers },
+          rows: [], cursorFor: () => "cursor",
+        }).payload;
+        observations.push({ stage, payload });
+        if (evidenceDir) {
+          mkdirSync(evidenceDir, { recursive: true });
+          await page.screenshot({ path: join(evidenceDir, `${stage}.png`) });
+        }
+        return blockers;
+      };
+      expect(await observe("before-click")).toHaveLength(1);
+      const bounds = await frame.locator("button").boundingBox();
+      expect(bounds).not.toBeNull();
+      await page.mouse.click(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2);
+      expect(await frame.locator("button").textContent()).toBe("Success!");
+      expect(await observe("after-click")).toEqual([]);
+      await page.locator("#continue").click();
+      expect(await page.locator("#result").textContent()).toBe("Sign-in continuation reached");
+      await observe("continued");
+      if (evidenceDir) writeFileSync(join(evidenceDir, "observations.json"), JSON.stringify(observations, null, 2));
     } finally {
       await page.close();
     }
