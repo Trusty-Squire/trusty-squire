@@ -1559,6 +1559,7 @@ async function runAction(
   sessionId: string,
   action: ProvisionAction,
   outputFormat: "compact" | "full" = "full",
+  compactMapEmitted = true,
 ) {
   if (action.kind === "type") {
     const reason = manualCardEntryBlockReason(action.text);
@@ -1571,7 +1572,7 @@ async function runAction(
       };
   }
   try {
-    return await act(sessionId, action, "compact", undefined, outputFormat);
+    return await act(sessionId, action, "compact", undefined, outputFormat, compactMapEmitted);
   } catch (error) {
     if (error instanceof TargetStaleError) return error.result;
     throw error;
@@ -1741,6 +1742,7 @@ export const operateTypeTool: Tool<z.infer<typeof typeSchema>> = {
           : { kind: "type" as const, text: args.text! }),
       },
       args.format ?? "compact",
+      args.submit !== true,
     );
     if (
       args.submit !== true ||
@@ -1817,12 +1819,7 @@ export const operateSelectTool: Tool<z.infer<typeof selectSchema>> = {
   },
   async handler(args) {
     if (args.selections !== undefined) {
-      const result = await formSelectMany(
-        args.session_id,
-        args.selections,
-        args.format ?? "compact",
-      );
-      return { ...result.observation, fields: result.fields };
+      return await formSelectMany(args.session_id, args.selections, args.format ?? "compact");
     }
     if (args.country !== undefined)
       return await runAction(

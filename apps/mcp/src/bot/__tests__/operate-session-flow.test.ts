@@ -6744,8 +6744,7 @@ describe("operate session — sealed credential transfer", () => {
         },
       }),
       null,
-    )) as Awaited<ReturnType<typeof formSelectMany>>["observation"] &
-      Pick<Awaited<ReturnType<typeof formSelectMany>>, "fields">;
+    )) as Awaited<ReturnType<typeof formSelectMany>>;
 
     expect(h.selected).toEqual([
       { selector: "#variant", matcher: "Blue" },
@@ -6761,7 +6760,7 @@ describe("operate session — sealed credential transfer", () => {
       { label: "Size", option: "Large", status: "selected", selected_option: "Large" },
       { label: "Color", option: "Red", status: "failed" },
     ]);
-    expect(result.session_id).toBe(started.session_id);
+    expect(result.observation.session_id).toBe(started.session_id);
     expect(h.extractInteractiveElementsCalls).toBe(7);
   });
 
@@ -10962,7 +10961,7 @@ describe("flat operator verbs", () => {
       null,
     )) as ActionResult;
     expect(typed.format).toBe("browser-use-control-query");
-    expect(typed.delta).toBe(true);
+    expect(typed).not.toHaveProperty("delta");
     expect(typed).not.toHaveProperty("dom");
 
     h.elements = h.elements.filter(
@@ -10996,11 +10995,95 @@ describe("flat operator verbs", () => {
     const selectedMany = (await operateSelectTool.handler(
       { session_id: started.session_id, selections: { [selectRef]: "us-west" } },
       null,
-    )) as ActionResult & { fields?: unknown[]; observation?: unknown };
-    expect(selectedMany.format).toBe("browser-use-control-query");
-    expect(selectedMany.delta).toBe(true);
+    )) as { fields?: unknown[]; observation: ActionResult };
+    expect(selectedMany.observation.format).toBe("browser-use-control-query");
+    expect(selectedMany.observation).not.toHaveProperty("delta");
+    expect(refsOf(selectedMany.observation).size).toBe(3);
     expect(selectedMany.fields).toEqual([expect.objectContaining({ status: "selected" })]);
-    expect(selectedMany).not.toHaveProperty("observation");
+    const fullMany = (await operateSelectTool.handler(
+      { session_id: started.session_id, selections: { [selectRef]: "us-west" }, format: "full" },
+      null,
+    )) as { observation: ActionResult };
+    expect(fullMany.observation.format).toBe("browser-use-dom");
+  });
+
+  it("resends controls after discarded fill observations and filtered queries", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [elem({ tag: "input", role: "textbox", ariaLabel: "Name", selector: "#name" })];
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    await observe(started.session_id, "compact");
+    h.elements.push(
+      elem({ tag: "button", role: "button", visibleText: "Revealed", selector: "#revealed" }),
+    );
+    const submitted = await operateTypeTool.handler(
+      { session_id: started.session_id, ref: "@name", text: "Ada", submit: true },
+      null,
+    );
+    expect(submitted).toMatchObject({ format: "browser-use-control-query" });
+    expect(submitted).not.toHaveProperty("delta");
+    expect((submitted as { safe_table: unknown[] }).safe_table).toHaveLength(2);
+    h.elements.push(
+      elem({ tag: "button", role: "button", visibleText: "Hidden from query", selector: "#other" }),
+    );
+    const filtered = await observeQuery(started.session_id, "Name");
+    expect(filtered.safe_table).toHaveLength(1);
+    const pressed = await operatePressTool.handler(
+      { session_id: started.session_id, key: "Tab" },
+      null,
+    );
+    expect(pressed).not.toHaveProperty("delta");
+    expect((pressed as { safe_table: unknown[] }).safe_table).toHaveLength(3);
+  });
+
+  it("falls back to a paginated complete map when removals exceed the delta budget", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [];
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    await observe(started.session_id, "compact");
+    for (let batch = 0; batch < 30; batch += 1) {
+      h.elements.push(
+        ...Array.from({ length: 20 }, (_, offset) => {
+          const index = batch * 20 + offset;
+          return elem({
+            index,
+            tag: "button",
+            role: "button",
+            visibleText: `Item ${index}`,
+            selector: `#item-${index}`,
+          });
+        }),
+      );
+      const added = await operatePressTool.handler(
+        { session_id: started.session_id, key: "Tab" },
+        null,
+      );
+      expect(added).toMatchObject({ delta: true });
+      expect(added).not.toHaveProperty("overflow");
+    }
+    h.elements = h.elements.slice(500);
+    let page = (await operatePressTool.handler(
+      { session_id: started.session_id, key: "Tab" },
+      null,
+    )) as {
+      safe_table: Array<[string, ...unknown[]]>;
+      overflow?: { next_cursor: string };
+    };
+    expect(page).not.toHaveProperty("delta");
+    expect(page).not.toHaveProperty("removed");
+    expect(page).toHaveProperty("overflow");
+    const refs = new Set<string>();
+    for (;;) {
+      expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(4096);
+      for (const row of page.safe_table) refs.add(row[0]);
+      if (!page.overflow) break;
+      page = (await observeQuery(
+        started.session_id,
+        "",
+        undefined,
+        page.overflow.next_cursor,
+      )) as typeof page;
+    }
+    expect(refs.size).toBe(100);
   });
 
   it("selects one option, several fields, and the phone country through operate_select", async () => {
