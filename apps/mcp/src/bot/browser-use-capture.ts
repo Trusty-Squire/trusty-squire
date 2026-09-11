@@ -50,6 +50,16 @@ const STYLES = [
   "cursor",
   "pointer-events",
   "position",
+  "transform",
+  "translate",
+  "rotate",
+  "scale",
+  "perspective",
+  "filter",
+  "backdrop-filter",
+  "contain",
+  "will-change",
+  "content-visibility",
   "background-color",
 ];
 const iframeHintContextMaxChars = 40;
@@ -485,12 +495,32 @@ export async function captureBrowserUseDOM(
       if (l?.bounds) {
         let x = l.bounds.x,
           y = l.bounds.y;
+        let positioned = l.styles.position;
         for (const p of [...chain].reverse()) {
           if (p.raw === raw) continue;
-          // Overflow clips visual contents, including zero-height collapsed forms.
-          // Scrollable offscreen controls remain in the document action inventory.
+          const styles = p.layout.styles;
+          const establishesContainingBlock =
+            [
+              "transform",
+              "translate",
+              "rotate",
+              "scale",
+              "perspective",
+              "filter",
+              "backdrop-filter",
+            ].some((key) => styles[key] !== undefined && styles[key] !== "none") ||
+            /(?:layout|paint|strict|content)/.test(styles.contain ?? "") ||
+            /(?:transform|translate|rotate|scale|perspective|filter|contain)/.test(
+              styles["will-change"] ?? "",
+            ) ||
+            styles["content-visibility"] === "auto";
+          const escapes =
+            (positioned === "fixed" && !establishesContainingBlock) ||
+            (positioned === "absolute" &&
+              !establishesContainingBlock &&
+              styles.position === "static");
           const b = p.layout.bounds;
-          if (b && !["IFRAME", "FRAME"].includes(p.raw.nodeName)) {
+          if (!escapes && b && !["IFRAME", "FRAME"].includes(p.raw.nodeName)) {
             for (const axis of ["x", "y"] as const) {
               const overflow = p.layout.styles[`overflow-${axis}`] ?? p.layout.styles.overflow;
               const start = axis === "x" ? x : y;
@@ -502,7 +532,9 @@ export async function captureBrowserUseDOM(
               }
             }
           }
+          if (!escapes) positioned = styles.position;
           if (["IFRAME", "FRAME"].includes(p.raw.nodeName) && p.layout.bounds) {
+            positioned = styles.position;
             x += p.layout.bounds.x;
             y += p.layout.bounds.y;
           }

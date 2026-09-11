@@ -98,3 +98,31 @@ The required memory helper was run. It reported distinct real `AGENTS.md` and
 `CLAUDE.md` files and refused reconciliation. Neither file was changed: existing
 guidance already points to the authoritative operator and observation documents
 updated by the components; repository-wide memory restructuring is outside scope.
+
+
+## No-mistakes review fixes
+
+The review phase in worktree
+`/home/lunchbox/.no-mistakes/worktrees/4ff216715903/01M28P82G83Y1QWHJFS9KSHG6K`
+confirmed both reported defects and fixed them locally:
+
+- Overflow filtering now respects fixed/absolute containing blocks instead of
+  treating every DOM ancestor as a clip. Local browser fixtures compare hit
+  testing, observation action refs, and actual clicks, including transformed
+  and positioned wrappers that really do clip.
+- A click that opens an attempt-owned popup and then rejects retains that popup
+  and OAuth ownership through cleanup. Navigation listeners are removed on the
+  error path, pending same-tab recovery stays alive, duplicate login stays
+  refused, and popup close restores the product. The existing routed lifecycle
+  regression now covers popup and same-tab pending/callback outcomes.
+
+These are isolated fixture regressions, not live native signup acceptance.
+No shared browser/profile, credential, payment, or screenshot-targeting changes
+were included. The outer pipeline still owns subsequent validation and delivery.
+
+Review-phase verification (2026-09-11, start 12:58:51): after locked dependency
+installation and workspace schema builds,
+`pnpm --filter @trusty-squire/mcp exec vitest run src/bot/__tests__/observation-dom-correctness.test.ts src/bot/__tests__/oauth-lifecycle.test.ts`
+exited 0: `Test Files 2 passed (2); Tests 106 passed (106)` in 151.89s.
+This was the single focused verification run after both fixes; no full repository
+test/lint suite or downstream pipeline phase was run here.

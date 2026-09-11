@@ -14277,7 +14277,11 @@ export class BrowserController {
             });
           }
         } catch (error) {
-          if (!product.isClosed()) throw error;
+          if (!product.isClosed()) {
+            providerPage = popupCapture.page;
+            pendingOnProvider = providerPage !== null || productNavigated;
+            throw error;
+          }
         }
         providerPage = await Promise.race([
           popupPromise,
@@ -14452,9 +14456,24 @@ export class BrowserController {
       if (onTransientNavigation !== null) {
         (providerPage ?? product).off("framenavigated", onTransientNavigation);
       }
+      if (popupCapture.page !== null && popupCapture.onNavigation !== null) {
+        popupCapture.page.off("framenavigated", popupCapture.onNavigation);
+      }
       const retainedProvider = providerPage ?? product;
       const providerStillShowing = pendingOnProvider && !retainedProvider.isClosed();
       if (providerStillShowing) {
+        if (this.oauthProviderPage !== retainedProvider) {
+          const durableProduct = providerPage === null ? recovery : product;
+          this.oauthProductPage = durableProduct;
+          this.oauthProviderPage = retainedProvider;
+          this.oauthProviderPageClosed = false;
+          this.restoreProductPageWhenOAuthPageCloses(retainedProvider, durableProduct);
+          if (this.activeOAuthAttempt !== null) {
+            this.activeOAuthAttempt.providerPage = retainedProvider;
+            this.activeOAuthAttempt.providerDocumentId =
+              this.mainDocumentIdentity(retainedProvider);
+          }
+        }
         this.page = retainedProvider;
       } else {
         this.activeOAuthAttempt = null;
@@ -14482,7 +14501,12 @@ export class BrowserController {
           await providerPage.close().catch(() => undefined);
         }
       }
-      if (recovery !== null && recovery !== this.page && !recovery.isClosed()) {
+      if (
+        recovery !== null &&
+        recovery !== this.page &&
+        !(providerStillShowing && recovery === this.oauthProductPage) &&
+        !recovery.isClosed()
+      ) {
         await recovery.close().catch(() => undefined);
       }
       if (this.page !== null && !this.page.isClosed()) {

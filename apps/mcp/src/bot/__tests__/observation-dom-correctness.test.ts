@@ -154,3 +154,39 @@ it("keeps scrollable offscreen controls reachable with the same identity after s
     await page.close();
   }
 });
+
+it.each([
+  ["fixed", "", true],
+  ["fixed", "transform:translateZ(0)", false],
+  ["absolute", "", true],
+  ["absolute", "position:relative", false],
+])("respects %s containing blocks with wrapper %s", async (position, wrapper, rendered) => {
+  const page = await browser.newPage();
+  try {
+    await page.setContent(`
+      <div style="width:100px;height:30px;overflow:hidden;${wrapper}">
+        <div style="position:${position};top:100px;left:200px">
+          <button id="signup" onclick="this.textContent='Signup clicked'">Signup action</button>
+        </div>
+      </div>`);
+    const hit = await page.locator("#signup").evaluate((element) => {
+      const bounds = element.getBoundingClientRect();
+      return element.contains(
+        document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2),
+      );
+    });
+    expect(hit).toBe(rendered);
+    const result = await observe(page);
+    expect(result.rows.some((row) => row.label === "@signup-action")).toBe(rendered);
+    expect(result.full.includes("Signup action")).toBe(rendered);
+    if (rendered) {
+      expect(result.rows.find((row) => row.label === "@signup-action")?.visibility).toBe(
+        "viewport",
+      );
+      await page.locator("#signup").click({ timeout: 1000 });
+      expect(await page.locator("#signup").innerText()).toBe("Signup clicked");
+    }
+  } finally {
+    await page.close();
+  }
+});

@@ -84,9 +84,14 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await browser?.close();
   });
 
-  it.each(["callback", "pending"])(
-    "preserves %s evidence when the initiating click rejects after navigation",
-    async (destination) => {
+  it.each([
+    ["callback", "same-tab"],
+    ["pending", "same-tab"],
+    ["callback", "popup"],
+    ["pending", "popup"],
+  ])(
+    "preserves %s evidence when the initiating click rejects after %s navigation",
+    async (destination, mode) => {
       const context = await browser.newContext();
       const product = await context.newPage();
       const productUrl = "https://outcomes.test/login";
@@ -97,7 +102,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
           contentType: "text/html",
           body:
             route.request().url() === productUrl
-              ? `<button id="oauth" onclick='location.href=${JSON.stringify(provider)}'>Continue with Google</button>`
+              ? `<button id="oauth" onclick='${mode === "popup" ? `window.open(${JSON.stringify(provider)})` : `location.href=${JSON.stringify(provider)}`}'>Continue with Google</button>`
               : route.request().url().startsWith("https://accounts.google.com/")
                 ? destination === "callback"
                   ? `<script>location.href=${JSON.stringify(callback)}</script>`
@@ -110,8 +115,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
       let sessionId: string | undefined;
       const originalClick = controller.click.bind(controller);
       const click = vi.spyOn(controller, "click").mockImplementation(async (...args) => {
+        const popup = mode === "popup" ? product.waitForEvent("popup") : null;
         await originalClick(...args);
-        await product.waitForURL(destination === "callback" ? callback : provider);
+        const target = popup === null ? product : await popup;
+        await target.waitForURL(destination === "callback" ? callback : provider);
         // Fault injection at the driver return boundary, AFTER a real click and
         // real routed navigation. The provider itself never contacts the network.
         throw new Error("page click: Timeout 15000ms exceeded after navigation");
@@ -152,6 +159,21 @@ describe("BrowserController OAuth popup lifecycle", () => {
           });
           expect(JSON.stringify(refreshed)).not.toContain("hidden-consent-action");
           expect(click).toHaveBeenCalledTimes(1);
+          expect(controller.currentUrl()).toBe(provider);
+          await expect(controller.loginWithOAuth("#oauth", 100)).rejects.toBeInstanceOf(
+            OAuthAwaitingHumanError,
+          );
+          expect(click).toHaveBeenCalledTimes(1);
+          if (mode === "popup") {
+            expect(controller.oauthTransitionStatus()).toMatchObject({
+              productUrl,
+              productPageViable: true,
+              providerPageClosed: false,
+            });
+            const popup = context.pages().find((page) => page.url() === provider)!;
+            await popup.close();
+            expect(controller.currentUrl()).toBe(productUrl);
+          }
         }
       } finally {
         click.mockRestore();
