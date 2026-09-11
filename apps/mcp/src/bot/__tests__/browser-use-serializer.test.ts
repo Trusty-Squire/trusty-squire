@@ -197,8 +197,8 @@ describe("browserUseDynamicsSignature", () => {
 
   it("ignores benign content inside an open, unframed subtree", () => {
     const text = (value: string) => node({ nodeType: 3, nodeName: "#text", value });
-    expect(
-      browserUseDynamicsSignature(node({ children: [text("attempt=1")] })),
-    ).toBe(browserUseDynamicsSignature(node({ children: [text("attempt=2")] })));
+    expect(browserUseDynamicsSignature(node({ children: [text("attempt=1")] }))).toBe(
+      browserUseDynamicsSignature(node({ children: [text("attempt=2")] })),
+    );
   });
 });

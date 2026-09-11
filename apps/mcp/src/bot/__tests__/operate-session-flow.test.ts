@@ -5511,7 +5511,12 @@ describe("Compact V2 action-map boundary", () => {
   it("reports navigated:true when the document changed while a click was settling", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
-      elem({ tag: "button", role: "button", visibleText: "I am not a robot", selector: "#challenge" }),
+      elem({
+        tag: "button",
+        role: "button",
+        visibleText: "I am not a robot",
+        selector: "#challenge",
+      }),
     ];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
@@ -5531,9 +5536,18 @@ describe("Compact V2 action-map boundary", () => {
     expect(observation.navigated).toBe(true);
     expect(observation.url).toBe("https://app.example.com/protected/home");
     if (process.env.OBSERVATION_TEST_EVIDENCE_DIR) {
-      writeFileSync(`${process.env.OBSERVATION_TEST_EVIDENCE_DIR}/session-navigation.json`, JSON.stringify({
-        fixture: "Session API with deterministic browser navigation", before: started, after: observation,
-      }, null, 2));
+      writeFileSync(
+        `${process.env.OBSERVATION_TEST_EVIDENCE_DIR}/session-navigation.json`,
+        JSON.stringify(
+          {
+            fixture: "Session API with deterministic browser navigation",
+            before: started,
+            after: observation,
+          },
+          null,
+          2,
+        ),
+      );
     }
   });
 
@@ -5541,7 +5555,9 @@ describe("Compact V2 action-map boundary", () => {
     "does not report navigated for a same-document click with pathname change=%s",
     async (changePath) => {
       process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
-      h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
+      h.elements = [
+        elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+      ];
       const started = await startHarnessProvisionSession({
         browser: new BrowserController(),
         observationFormat: "browser-use-dom",
@@ -5605,7 +5621,12 @@ describe("Compact V2 action-map boundary", () => {
     const after = mockBrowserUseCapture(
       [
         navLink("page:loader:202"),
-        { ...navLink("page:loader:900"), selector: "#dialog-docs", container: "dialog:create-api-key", screenPath: "dialog:create-api-key > link:docs" },
+        {
+          ...navLink("page:loader:900"),
+          selector: "#dialog-docs",
+          container: "dialog:create-api-key",
+          screenPath: "dialog:create-api-key > link:docs",
+        },
       ],
       [],
     );
@@ -5621,9 +5642,18 @@ describe("Compact V2 action-map boundary", () => {
     const dialogLine = updated.dom!.split("\n").find((line) => line.includes(dialogRef))!;
     expect(dialogLine).toContain("*");
     if (process.env.OBSERVATION_TEST_EVIDENCE_DIR) {
-      writeFileSync(`${process.env.OBSERVATION_TEST_EVIDENCE_DIR}/session-dialog.json`, JSON.stringify({
-        fixture: "Session API with deterministic dialog remount", before: started, after: updated,
-      }, null, 2));
+      writeFileSync(
+        `${process.env.OBSERVATION_TEST_EVIDENCE_DIR}/session-dialog.json`,
+        JSON.stringify(
+          {
+            fixture: "Session API with deterministic dialog remount",
+            before: started,
+            after: updated,
+          },
+          null,
+          2,
+        ),
+      );
     }
   });
 
@@ -5691,10 +5721,20 @@ describe("Compact V2 action-map boundary", () => {
     expect(swapped).not.toHaveProperty("dom_unchanged");
     expect(swapped.dom).toContain("IFRAME");
     if (process.env.OBSERVATION_TEST_EVIDENCE_DIR) {
-      writeFileSync(`${process.env.OBSERVATION_TEST_EVIDENCE_DIR}/session-shadow.json`, JSON.stringify({
-        fixture: "Session API with deterministic closed-shadow geometry change",
-        before: started, unchanged, compactQuery: query, after: swapped,
-      }, null, 2));
+      writeFileSync(
+        `${process.env.OBSERVATION_TEST_EVIDENCE_DIR}/session-shadow.json`,
+        JSON.stringify(
+          {
+            fixture: "Session API with deterministic closed-shadow geometry change",
+            before: started,
+            unchanged,
+            compactQuery: query,
+            after: swapped,
+          },
+          null,
+          2,
+        ),
+      );
     }
     expect(await observe(started.session_id)).toMatchObject({ dom_unchanged: true });
   });

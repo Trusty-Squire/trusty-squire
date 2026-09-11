@@ -1741,12 +1741,13 @@ describe("persistent action anchor allocator", () => {
 
   it.each(["retired", "live"])("refuses ambiguous %s adoption matches", (side) => {
     const refs = new StableObservationRefs();
-    const control = (id: number) => element({
-      visibleText: "Continue",
-      screenPath: "form:main > button:continue",
-      observationIdentity: `page:loader:${id}`,
-      observationIntent: "continue",
-    });
+    const control = (id: number) =>
+      element({
+        visibleText: "Continue",
+        screenPath: "form:main > button:continue",
+        observationIdentity: `page:loader:${id}`,
+        observationIntent: "continue",
+      });
     const before = side === "retired" ? [control(1), control(2), control(3)] : [control(1)];
     const original = new Set(refs.actions("doc", before).values());
     const after = side === "live" ? [control(4), control(5)] : [control(4)];
