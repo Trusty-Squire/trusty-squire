@@ -19,6 +19,7 @@ export interface BrowserUseNode {
   value: string;
   attributes: Record<string, string>;
   visible: boolean;
+  rendered?: boolean;
   snapshot: boolean;
   bounds: DOMBounds | null;
   cursor: string | null;

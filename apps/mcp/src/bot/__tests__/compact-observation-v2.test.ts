@@ -443,6 +443,242 @@ describe("compact observation v2", () => {
     ]);
   });
 
+  describe("solved Turnstile challenge", () => {
+    const node = (id: string, overrides: Partial<BrowserUseNode>): BrowserUseNode => ({
+      id,
+      nodeType: 1,
+      nodeName: "DIV",
+      value: "",
+      attributes: {},
+      visible: true,
+      snapshot: true,
+      bounds: null,
+      cursor: null,
+      scrollable: false,
+      showScroll: false,
+      scrollText: "",
+      clickListener: false,
+      axRole: null,
+      axProperties: [],
+      axChildIds: null,
+      shadowType: null,
+      hiddenElements: [],
+      hiddenContent: false,
+      children: [],
+      contentDocument: null,
+      ...overrides,
+    });
+    const text = (id: string, value: string): BrowserUseNode =>
+      node(id, { nodeType: 3, nodeName: "#text", value });
+    const challengeIframe = (id: string, innerText?: string): BrowserUseNode =>
+      node(id, {
+        nodeName: "IFRAME",
+        attributes: {
+          title: "Widget containing a Cloudflare security challenge",
+          src: "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile",
+        },
+        contentDocument:
+          innerText === undefined
+            ? null
+            : node(`${id}-doc`, {
+                nodeType: 9,
+                nodeName: "#document",
+                children: [text(`${id}-t`, innerText)],
+              }),
+      });
+    const responseInput = (id: string, token: string): BrowserUseNode =>
+      node(id, {
+        nodeName: "INPUT",
+        attributes: { type: "hidden", name: "cf-turnstile-response", value: token },
+      });
+    const hostPage = (children: BrowserUseNode[]): BrowserUseNode =>
+      node("root", { nodeType: 9, nodeName: "#document", children });
+
+    it("keeps reporting an unsolved widget with an empty response token", () => {
+      const root = hostPage([
+        node("wrapper", {
+          attributes: { class: "cf-turnstile" },
+          children: [challengeIframe("frame"), responseInput("response", "")],
+        }),
+      ]);
+      expect(safeBlockersV2(root)).toEqual([
+        {
+          kind: "challenge",
+          text: "Widget containing a Cloudflare security challenge",
+          target: "unavailable",
+        },
+      ]);
+    });
+
+    it("stops reporting the challenge once the response token is populated", () => {
+      const root = hostPage([
+        node("wrapper", {
+          attributes: { class: "cf-turnstile" },
+          children: [challengeIframe("frame"), responseInput("response", "0.token123")],
+        }),
+      ]);
+      expect(safeBlockersV2(root)).toEqual([]);
+    });
+
+    it("stops reporting the challenge for a cf-chl-widget response token sibling", () => {
+      const root = hostPage([
+        node("form", {
+          nodeName: "FORM",
+          children: [
+            challengeIframe("frame"),
+            node("response", {
+              nodeName: "INPUT",
+              attributes: {
+                type: "hidden",
+                name: "cf-chl-widget-abc123_response",
+                value: "0.token123",
+              },
+            }),
+          ],
+        }),
+      ]);
+      expect(safeBlockersV2(root)).toEqual([]);
+    });
+
+    it("keeps unrelated host success blocked until a real token arrives", () => {
+      const response = responseInput("response", "");
+      const root = hostPage([
+        node("form", {
+          nodeName: "FORM",
+          children: [
+            challengeIframe("frame"),
+            text("success", "Success!"),
+            response,
+          ],
+        }),
+      ]);
+      expect(safeBlockersV2(root)).toEqual([
+        {
+          kind: "challenge",
+          text: "Widget containing a Cloudflare security challenge",
+          target: "unavailable",
+        },
+      ]);
+      response.attributes.value = "0.token123";
+      expect(safeBlockersV2(root)).toEqual([]);
+    });
+
+    it.each(["element", "shadow root"])(
+      "associates nested %s widgets with isolated Turnstile hosts",
+      (layout) => {
+        const firstResponse = responseInput("response-a", "");
+        const secondResponse = responseInput("response-b", "");
+        const wrapper = (id: string, response: BrowserUseNode): BrowserUseNode =>
+          node(`wrapper-${id}`, {
+            attributes: { class: "cf-turnstile" },
+            children: [
+              node(`inner-${id}`, {
+                ...(layout === "shadow root"
+                  ? { nodeType: 11, nodeName: "#document-fragment", shadowType: "closed" }
+                  : {}),
+                children: [challengeIframe(`frame-${id}`)],
+              }),
+              response,
+            ],
+          });
+        const root = hostPage([
+          node("section", {
+            attributes: { class: "captcha-section" },
+            children: [wrapper("a", firstResponse), wrapper("b", secondResponse)],
+          }),
+        ]);
+        expect(safeBlockersV2(root)).toHaveLength(1);
+        firstResponse.attributes.value = "0.token123";
+        expect(safeBlockersV2(root)).toHaveLength(1);
+        secondResponse.attributes.value = "0.token456";
+        expect(safeBlockersV2(root)).toEqual([]);
+        firstResponse.attributes.value = "";
+        expect(safeBlockersV2(root)).toHaveLength(1);
+      },
+    );
+
+    it("requires a token even when the host and iframe display success", () => {
+      const response = responseInput("response", "");
+      const root = hostPage([
+        node("wrapper", {
+          attributes: { class: "cf-turnstile", "data-state": "success" },
+          children: [challengeIframe("frame", "Success!"), response],
+        }),
+      ]);
+      expect(safeBlockersV2(root)).toHaveLength(1);
+      response.attributes.value = "0.token123";
+      expect(safeBlockersV2(root)).toEqual([]);
+    });
+
+    it("does not associate a shared sibling token with multiple iframe widgets", () => {
+      const root = hostPage([
+        node("section", {
+          attributes: { class: "captcha-section" },
+          children: [
+            challengeIframe("frame-a"),
+            challengeIframe("frame-b"),
+            responseInput("response", "0.token123"),
+          ],
+        }),
+      ]);
+      expect(safeBlockersV2(root)).toHaveLength(1);
+    });
+
+    it.each([true, undefined])(
+      "does not infer completion from viewport exclusion with rendered=%s",
+      (rendered) => {
+        const frame = challengeIframe("frame");
+        frame.visible = false;
+        if (rendered === undefined) delete frame.rendered;
+        else frame.rendered = rendered;
+        frame.bounds = { x: 0, y: 2000, width: 300, height: 80 };
+        const response = responseInput("response", "");
+        const root = hostPage([
+          node("wrapper", {
+            attributes: { class: "cf-turnstile" },
+            children: [frame, response],
+          }),
+        ]);
+        expect(safeBlockersV2(root)).toHaveLength(1);
+        response.attributes.value = "0.token123";
+        expect(safeBlockersV2(root)).toEqual([]);
+      },
+    );
+
+    it("omits a collapsed iframe inside a challenge wrapper", () => {
+      const frame = challengeIframe("frame");
+      frame.visible = false;
+      frame.rendered = false;
+      const root = hostPage([
+        node("wrapper", {
+          attributes: { class: "cf-turnstile" },
+          children: [frame, responseInput("response", "")],
+        }),
+      ]);
+      expect(safeBlockersV2(root)).toEqual([]);
+    });
+
+    it("never lets one solved widget clear a different unsolved widget", () => {
+      const root = hostPage([
+        node("wrapper-a", {
+          attributes: { class: "cf-turnstile" },
+          children: [challengeIframe("frame-a"), responseInput("response-a", "0.token123")],
+        }),
+        node("wrapper-b", {
+          attributes: { class: "cf-turnstile" },
+          children: [challengeIframe("frame-b"), responseInput("response-b", "")],
+        }),
+      ]);
+      expect(safeBlockersV2(root)).toEqual([
+        {
+          kind: "challenge",
+          text: "Widget containing a Cloudflare security challenge",
+          target: "unavailable",
+        },
+      ]);
+    });
+  });
+
   it("shrinks a URL that exceeds the wire budget before packing so the first page keeps multiple rows", () => {
     const dense = Array.from({ length: 40 }, (_, index) =>
       element({

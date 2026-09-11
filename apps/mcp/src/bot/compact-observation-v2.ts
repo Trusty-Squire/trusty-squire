@@ -969,6 +969,8 @@ const CHALLENGE_SIGNAL_RE =
 const CHALLENGE_MARKER_RE = /(?:captcha|turnstile|challenges?\.cloudflare\.com|cf[-_]challenge)/i;
 const VALIDATION_SIGNAL_RE =
   /\b(?:error|failed|invalid|required|incorrect|missing|must|cannot|can't|couldn't|not valid|not found|please (?:complete|enter|select|choose|provide)|try again)\b/i;
+const TURNSTILE_RESPONSE_NAME_RE = /^(?:cf-turnstile-response|cf-chl-widget-\S+_response)$/;
+const TURNSTILE_WIDGET_ID_RE = /^cf-chl-widget-\S+_response$/;
 
 function nodeTagV2(node: BrowserUseNode): string {
   return node.nodeType === 1 ? node.nodeName.toLowerCase() : "";
@@ -1062,8 +1064,13 @@ export function safeBlockersV2(
   visit(root, root, undefined, true);
 
   const challengeCandidates = nodes.filter((node) => {
-    if (visibleFor.get(node) !== true) return false;
     const tag = nodeTagV2(node);
+    if (
+      visibleFor.get(node) !== true &&
+      !(["iframe", "frame"].includes(tag) && node.rendered === true)
+    ) {
+      return false;
+    }
     const identity = [
       tag,
       node.attributes.id,
@@ -1102,19 +1109,85 @@ export function safeBlockersV2(
     return true;
   });
 
+  const solvedChallengeSignals = new Set<BrowserUseNode>();
+  for (const node of nodes) {
+    const name = (node.attributes.name ?? "").trim().toLowerCase();
+    const id = (node.attributes.id ?? "").trim().toLowerCase();
+    const isResponseInput =
+      nodeTagV2(node) === "input" &&
+      (TURNSTILE_RESPONSE_NAME_RE.test(name) || TURNSTILE_WIDGET_ID_RE.test(id));
+    if (isResponseInput && (node.attributes.value ?? "").trim() !== "") {
+      solvedChallengeSignals.add(node);
+    }
+  }
+  const withinSubtree = (node: BrowserUseNode, ancestor: BrowserUseNode): boolean => {
+    let current: BrowserUseNode | undefined = node;
+    while (current !== undefined) {
+      if (current === ancestor) return true;
+      current = parentFor.get(current);
+    }
+    return false;
+  };
+  const challengeFrames = nodes.filter(
+    (node) =>
+      ["iframe", "frame"].includes(nodeTagV2(node)) &&
+      (CHALLENGE_MARKER_RE.test(
+        [node.attributes.src, node.attributes.title, node.attributes.id].join(" "),
+      ) ||
+        CHALLENGE_SIGNAL_RE.test(node.attributes.title ?? "")),
+  );
+  const widgets = [
+    ...challengeFrames,
+    ...nodes.filter(
+      (node) =>
+        (node.attributes.class ?? "").split(/\s+/).includes("cf-turnstile") &&
+        !challengeFrames.some((frame) => withinSubtree(frame, node)),
+    ),
+  ];
+  const solvedWidgets = new Set(
+    widgets.filter((widget) => {
+      const isFrame = challengeFrames.includes(widget);
+      if (isFrame && widget.rendered === false) return true;
+      let boundary = widget;
+      if (isFrame) {
+        let ancestor = parentFor.get(widget);
+        while (ancestor !== undefined && ancestor.nodeType !== 9) {
+          if (["iframe", "frame"].includes(nodeTagV2(ancestor))) break;
+          const host = ancestor;
+          if (widgets.filter((candidate) => withinSubtree(candidate, host)).length !== 1) break;
+          if (ancestor.nodeType === 1) {
+            if (boundary === widget) boundary = ancestor;
+            if ((ancestor.attributes.class ?? "").split(/\s+/).includes("cf-turnstile")) {
+              boundary = ancestor;
+              break;
+            }
+          }
+          ancestor = parentFor.get(ancestor);
+        }
+      }
+      return [...solvedChallengeSignals].some((signal) => withinSubtree(signal, boundary));
+    }),
+  );
   const blockers: SafeBlockerV2[] = [];
   for (const challengeRoot of challengeRoots) {
     if (blockers.length >= BLOCKER_MAX_ITEMS) break;
     const boundaryNodes: BrowserUseNode[] = [];
     const controls = new Set<BrowserUseNode>();
     const collectControls = (node: BrowserUseNode): void => {
-      if (visibleFor.get(node) === true) {
+      if (visibleFor.get(node) === true || node === challengeRoot) {
         boundaryNodes.push(node);
         if (blockerControlV2(node)) controls.add(node);
       }
       descendantsV2(node).forEach(collectControls);
     };
     collectControls(challengeRoot);
+    const containedWidgets = widgets.filter((widget) => withinSubtree(widget, challengeRoot));
+    if (
+      containedWidgets.length > 0 &&
+      containedWidgets.every((widget) => solvedWidgets.has(widget))
+    ) {
+      continue;
+    }
     const namedChallengeControls = [...controls].filter((node) =>
       CHALLENGE_SIGNAL_RE.test(blockerTextV2(node) ?? ""),
     );

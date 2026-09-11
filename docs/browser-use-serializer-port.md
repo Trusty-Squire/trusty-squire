@@ -55,6 +55,16 @@ roles are emitted literally (for example `slider` or `generic` for a listener
 container), never defaulted to `button`; role queries accept these literal roles.
 Visible verification instructions and structurally identified validation errors
 appear in `semantic.blockers`, with `semantic.blocked: true` independent of `stage`.
+A solved Turnstile widget no longer blocks when its associated hidden response
+input (`cf-turnstile-response` / `cf-chl-widget-*_response`) carries a non-empty
+token or capture confirms its iframe is no longer rendered. Viewport exclusion
+alone never counts as completion. Completion is associated with each
+widget before shared challenge containers are collapsed: every contained widget
+must be solved. Token association reaches the nearest unambiguous `.cf-turnstile`
+host through nested elements and shadow roots, falling back to the nearest
+unambiguous parent element when no such host exists, without crossing a
+multi-widget container or document boundary. Success text and host state attributes do not
+clear a challenge.
 This reports observed evidence and adds no action or payment gate. Missing evidence
 is not proof the page is unblocked. Startup can precede a late-rendering error;
 use a fresh observation to distinguish timing from extraction loss.
