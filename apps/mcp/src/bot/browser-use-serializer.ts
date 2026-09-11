@@ -74,7 +74,9 @@ interface Simplified {
 export function browserUseDynamicsSignature(root: BrowserUseNode): string {
   const parts: string[] = [];
   const geo = (b: DOMBounds | null): string =>
-    b ? `${Math.round(b.x)},${Math.round(b.y)},${Math.round(b.width)},${Math.round(b.height)}` : "none";
+    b
+      ? `${Math.round(b.x)},${Math.round(b.y)},${Math.round(b.width)},${Math.round(b.height)}`
+      : "none";
   const digest = (node: BrowserUseNode, depth: number): string => {
     const tags: string[] = [];
     const walk = (n: BrowserUseNode, d: number): void => {

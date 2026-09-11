@@ -712,7 +712,13 @@ export async function captureBrowserUseDOM(
         noValidate,
         identity: n.id,
         signature: JSON.stringify([
-          syntheticScreenPath(n), n.attributes.name, action, method, target, enctype, noValidate,
+          syntheticScreenPath(n),
+          n.attributes.name,
+          action,
+          method,
+          target,
+          enctype,
+          noValidate,
         ]),
       };
     };

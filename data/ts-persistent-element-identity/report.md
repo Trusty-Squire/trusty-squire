@@ -13,21 +13,10 @@ The external capability remains session-secret HMAC output; increase it from
 66 to 132 bits (22 base64url characters). No DOM node ID or private frame identity
 is emitted. Document epochs still invalidate navigation and logical route changes.
 
-A single session allocator owns each anchor: physical node identity, material
-intent signature, random capability and optional descriptive alias. Repeated
-captures reuse that anchor despite inventory order, duplicates, sibling text,
-values, selection or viewport changes. Material intent includes the element's
-own full accessible naming signals, role/type, destination and form binding,
-not a truncated label or inventory ordinal. Observing a material change retires
-the capability; reverting later cannot revive it. Missing nodes are retired.
-A replacement node receives a different capability even with identical markup.
-
-Labels remain a compatibility spelling of the same anchor: assigned once per
-capability, reserved until document reset, and never reassigned to a different
-node. Query and live resolution use the same allocator. Labels do not provide
-an independent semantic fallback. Full DOM serialization and the action map
-share the handle computation from ac3a326d (fingerprint dedup). dom_unchanged
-still compares the serialized DOM, and removed still names departed refs.
+The current anchor, adoption and alias contract is owned by
+[observation-model.md §4.1](../../docs/observation-model.md#41-opaque-durable-identity--descriptive-label-decided-option-a).
+For the DOM delta wire fields, see
+[Canonical DOM serialization](../../docs/browser-use-serializer-port.md#identity-deltas-and-query).
 
 Wire change: the @e: prefix and observation/query shapes stay; opaque suffixes
 increase from 11 to 22 characters. Duplicate label suffixes are now persistent

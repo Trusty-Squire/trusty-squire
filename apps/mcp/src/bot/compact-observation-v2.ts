@@ -201,10 +201,10 @@ export interface SafeObservationBaselineV2 {
   /** Last emitted canonical tree and its rendered stable identities. */
   dom?: string;
   renderedRefs?: string[];
-  /** Page URL at the last emission; a change forces dom re-emission. */
+  /** Page URL at the last full emission; a change forces dom re-emission. */
   url?: string;
   /**
-   * Closed-shadow/iframe/frame-set signature at the last emission; a change
+   * Closed-shadow/iframe/frame-set signature at the last full emission; a change
    * forces dom re-emission even when the rendered text is byte-identical.
    */
   dynamics?: string;

@@ -5530,6 +5530,11 @@ describe("Compact V2 action-map boundary", () => {
     });
     expect(observation.navigated).toBe(true);
     expect(observation.url).toBe("https://app.example.com/protected/home");
+    if (process.env.OBSERVATION_TEST_EVIDENCE_DIR) {
+      writeFileSync(`${process.env.OBSERVATION_TEST_EVIDENCE_DIR}/session-navigation.json`, JSON.stringify({
+        fixture: "Session API with deterministic browser navigation", before: started, after: observation,
+      }, null, 2));
+    }
   });
 
   it.each([false, true])(
@@ -5615,6 +5620,11 @@ describe("Compact V2 action-map boundary", () => {
     const dialogRef = domRefs(updated).find((ref) => ref !== navRef)!;
     const dialogLine = updated.dom!.split("\n").find((line) => line.includes(dialogRef))!;
     expect(dialogLine).toContain("*");
+    if (process.env.OBSERVATION_TEST_EVIDENCE_DIR) {
+      writeFileSync(`${process.env.OBSERVATION_TEST_EVIDENCE_DIR}/session-dialog.json`, JSON.stringify({
+        fixture: "Session API with deterministic dialog remount", before: started, after: updated,
+      }, null, 2));
+    }
   });
 
   it("re-emits the DOM when a closed-shadow iframe changes without a text change", async () => {
@@ -5680,6 +5690,12 @@ describe("Compact V2 action-map boundary", () => {
     expect(swapped).toMatchObject({ delta: true });
     expect(swapped).not.toHaveProperty("dom_unchanged");
     expect(swapped.dom).toContain("IFRAME");
+    if (process.env.OBSERVATION_TEST_EVIDENCE_DIR) {
+      writeFileSync(`${process.env.OBSERVATION_TEST_EVIDENCE_DIR}/session-shadow.json`, JSON.stringify({
+        fixture: "Session API with deterministic closed-shadow geometry change",
+        before: started, unchanged, compactQuery: query, after: swapped,
+      }, null, 2));
+    }
     expect(await observe(started.session_id)).toMatchObject({ dom_unchanged: true });
   });
 

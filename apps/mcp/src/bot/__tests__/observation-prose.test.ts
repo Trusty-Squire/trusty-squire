@@ -31,6 +31,50 @@ afterAll(async () => {
   await browser?.close();
 });
 describe("interleaved observation DOM", () => {
+  it("captures a coordinate-click closed-shadow iframe replacement in real Chromium", async () => {
+    const page = await browser.newPage();
+    const evidence = process.env.OBSERVATION_TEST_EVIDENCE_DIR;
+    try {
+      await page.setContent('<h1>Protect check fixture</h1><div id="challenge"></div>');
+      await page.locator("#challenge").evaluate((host) => {
+        const shadow = host.attachShadow({ mode: "closed" });
+        const frame = document.createElement("iframe");
+        frame.title = "Verification challenge";
+        frame.srcdoc = '<button style="width:280px;height:50px">Verify human</button>';
+        shadow.append(frame);
+        frame.addEventListener("load", () => {
+          frame.contentDocument!.querySelector("button")!.addEventListener("click", () => {
+            shadow.innerHTML = '<button style="width:280px;height:50px">Submit</button>';
+          });
+        });
+      });
+      await expect.poll(() => page.frames().length).toBe(2);
+      await page.frames()[1]!.locator("button").waitFor();
+      const before = await captureThroughController(page);
+      const beforeDom = serializeBrowserUseDOM(before.root).dom;
+      expect(beforeDom).toContain("<iframe");
+      if (evidence) await page.screenshot({ path: `${evidence}/challenge-before.png` });
+      const bounds = await page.frames()[1]!.locator("button").boundingBox();
+      expect(bounds).not.toBeNull();
+      await page.mouse.click(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2);
+      await expect.poll(() => page.frames().length).toBe(1);
+      const after = await captureThroughController(page);
+      const afterDom = serializeBrowserUseDOM(after.root).dom;
+      expect(afterDom).toContain("Submit");
+      expect(afterDom).not.toContain("<iframe");
+      expect(after.dynamics).not.toBe(before.dynamics);
+      if (evidence) {
+        await page.screenshot({ path: `${evidence}/challenge-after.png` });
+        writeFileSync(`${evidence}/chromium-challenge.json`, JSON.stringify({
+          fixture: "Real Chromium, closed shadow root, coordinate click",
+          before: { dom: beforeDom, dynamics: before.dynamics },
+          after: { dom: afterDom, dynamics: after.dynamics },
+        }, null, 2));
+      }
+    } finally {
+      await page.close();
+    }
+  });
   it("derives compact control labels from browser-use DOM associations", async () => {
     const page = await browser.newPage();
     try {
@@ -367,6 +411,8 @@ describe("interleaved observation DOM", () => {
       `);
       const before = await read();
       expect(before.controls.get("proxy")).toMatchObject({ role: "checkbox" });
+      const evidence = process.env.OBSERVATION_TEST_EVIDENCE_DIR;
+      if (evidence) await page.screenshot({ path: `${evidence}/dialog-before.png` });
       await page.locator("main").evaluate((main) => {
         main.replaceWith(main.cloneNode(true));
         document.body.insertAdjacentHTML("beforeend",
@@ -395,6 +441,17 @@ describe("interleaved observation DOM", () => {
       const added = after.handles.get(after.controls.get("create")!)!;
       expect(added).toBeTruthy();
       expect(rendered.dom.split("\n").find((line) => line.includes(added))).toContain("*");
+      if (evidence) {
+        await page.screenshot({ path: `${evidence}/dialog-after.png` });
+        writeFileSync(`${evidence}/chromium-dialog.json`, JSON.stringify({
+          fixture: "Real Chromium: form and checkbox remount when dialog opens",
+          before: serializeBrowserUseDOM(before.capture.root, {
+            ref: (node) => before.handles.get(before.capture.nodeElements.get(node.id)!)!,
+          }).dom,
+          after: rendered.dom,
+          removed: [...prior].filter((ref) => !rendered.refs.includes(ref)),
+        }, null, 2));
+      }
       await page.locator(after.controls.get("proxy")!.selector).click();
       expect(await page.locator("#choice").isChecked()).toBe(true);
     } finally {

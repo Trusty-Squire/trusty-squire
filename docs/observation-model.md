@@ -78,7 +78,12 @@ A new dialog sharing a control's name cannot change this match by changing the
 inventory's fingerprint tier. CDP-synthesized controls receive a location path
 at capture time from their DOM ancestry, shadow boundaries, stable authored IDs,
 roles and explicit labels. The path excludes sibling ordinals and backend node
-IDs; indistinguishable matches still cannot adopt. Compact queries retain the last full DOM's URL,
+IDs; indistinguishable matches still cannot adopt. Aliases remain bound to the
+adopted capability. See the dialog-remount and owner-replacement regressions in
+`observation-prose.test.ts` and the adoption guard cases in
+`compact-observation-v2.test.ts`.
+
+Within the same document epoch, compact queries retain the last full DOM's URL,
 dynamics and rendered refs together until another full observation is emitted.
 
 **Change hashing beyond the DOM string (2026-09-08).** The canonical DOM string
@@ -89,8 +94,8 @@ content swap. `compactV2Observation` therefore also hashes a dynamics signature
 (`browserUseDynamicsSignature`: every iframe/frame node's tag, `src`, rounded
 bounds and shallow content-document digest; every shadow root's type, host
 bounds and child tag digest; plus the live frame URL set) and the page URL into
-the per-round baseline. A change in any of them — even with a byte-identical
-DOM string — forces a full DOM re-emission (`dom_unchanged` never lies), and a
+the last full-emission baseline. A change in any of them — even with a byte-identical
+DOM string — forces DOM re-emission on the next full observation, and a
 changed main document during an action's settle window marks the returned
 observation `navigated:true`. This flag compares `mainDocumentIdentity` before
 and after the action. A `history.pushState` pathname change does not set it;

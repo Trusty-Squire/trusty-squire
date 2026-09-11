@@ -15,14 +15,8 @@ its README for regeneration and drift checks.
 ## Identity, deltas and query
 
 `[@e:<22 base64url characters>]` is a 132-bit session-secret HMAC capability.
-`StableObservationRefs` owns one anchor per physical CDP node, scoped by a private
-random frame namespace, Chrome document loader, and the existing document epoch.
-Unrelated text, sibling insertion/order, values, selection and scrolling preserve
-that anchor. A missing node or changed material intent retires it; restoring the
-old appearance cannot revive a retired capability. Identical replacement markup
-is a different node and cannot inherit a ref. Unbound/duplicate identities fail
-closed. Full CDP accessible names and authored role, destination and form binding
-supply intent checks; inventory-relative inferred labels do not supply identity.
+Anchor lifetime, guarded re-render adoption, durable intent and physical owner
+checks are defined in [the identity contract](observation-model.md#41-opaque-durable-identity--descriptive-label-decided-option-a).
 
 Query labels are compatibility aliases bound once to that same capability. Every
 actionable compact-map row receives a concise alias: Chrome's resolved accessible
@@ -35,7 +29,7 @@ the floor. Aliases preserve page-provided Unicode content after NFKC
 normalization, exclude the compact-map delimiters, and are bounded to 32
 characters. This display-only derivation neither changes private query matching
 nor becomes a second semantic re-resolution path. An alias is reserved through
-document reset and never transferred to a replacement node. The opaque suffix
+document reset and follows the capability through permitted adoption. The opaque suffix
 grew from 11 to 22 characters; the prefix and observation/query field shapes
 remain. The full design and regression map are in
 [data/ts-persistent-element-identity/report.md](../data/ts-persistent-element-identity/report.md).
@@ -45,8 +39,8 @@ A changed view sends its complete `dom` tree;
 the rendered view. An unchanged view emits `dom_unchanged: true` and omits `dom`, retaining the
 consumer's prior view. A newly blank view still emits `dom: ""` with no unchanged
 signal. `unchanged` remains the legacy numeric count; the DOM signal has its
-own name. This is wire clarity only; change detection, revisions and removals
-retain their existing semantics. Query operates on the full document inventory, including controls outside
+own name. Change detection also accounts for URL and captured frame/shadow dynamics;
+see [the change-baseline and navigation contract](observation-model.md#41-opaque-durable-identity--descriptive-label-decided-option-a). Query operates on the full document inventory, including controls outside
 the viewport, and retains its existing paged search-result format and aliases.
 Query results are not a second DOM observation serializer.
 
