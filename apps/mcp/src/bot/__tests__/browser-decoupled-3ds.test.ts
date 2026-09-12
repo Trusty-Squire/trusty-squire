@@ -325,10 +325,10 @@ describe("payment-window browser networking", () => {
         }
         // This click represents the human's issuer interaction, not an operator workaround.
         await page.getByRole("button", { name: "Simulate cardholder confirmation" }).click();
-        const resolution =
-          phase === "single" ? await controller.waitForThreeDsResolution(5_000) : undefined;
-        if (phase === "single") expect(resolution).toBe("succeeded");
         await page.waitForURL(RECEIPT_URL);
+        const resolution = await controller.waitForThreeDsResolution(5_000);
+        expect(resolution).toBe("succeeded");
+        await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("succeeded");
         expect(page.url()).toBe(RECEIPT_URL);
         expect(controller.takeHostScopeDenials()).toEqual([]);
         if (evidence) {

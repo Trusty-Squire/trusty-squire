@@ -10010,6 +10010,9 @@ export class BrowserController {
     if (options.deadline !== undefined && Date.now() >= options.deadline) {
       throw new Error("payment_approval_expired");
     }
+    this.checkoutOutcomeBaseline = await this.captureCheckoutOutcomeBaseline(page).catch(
+      () => undefined,
+    );
     this.paymentNetworkDeadlines.set(page, Date.now() + 20 * 60_000);
     const allowed = page
       .frames()
