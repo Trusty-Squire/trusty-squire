@@ -2922,6 +2922,7 @@ export class BrowserController {
   private checkoutOutcomeBaseline: CheckoutOutcomeBaseline | undefined;
   private paymentInstrumentExpectation: PaymentInstrumentExpectation | undefined;
   private observedPaymentInstrumentMismatch: PaymentInstrumentMismatch | undefined;
+  private readonly paymentNetworkDeadlines = new WeakMap<Page, number>();
   private checkoutSubmitSequence = 0;
   private clickDispatchSequence = 0;
   private readonly oauthConsentAttemptedPhases = new Set<string>();
@@ -3027,6 +3028,11 @@ export class BrowserController {
     requestUrl: string,
     scope: { allowedHosts: readonly string[]; siblingDomainHosts: readonly string[] },
   ): Promise<{ allowedHosts: readonly string[]; siblingDomainHosts: readonly string[] }> {
+    // Merchant and issuer JS can finish native authentication
+    // on this payment page without a curated network-host inventory.
+    if ((this.paymentNetworkDeadlines.get(frame.page()) ?? 0) > Date.now()) {
+      return { ...scope, allowedHosts: [...scope.allowedHosts, new URL(requestUrl).hostname] };
+    }
     const documentUrl = frame.url();
     if (!requestHostInScope(documentUrl, scope.allowedHosts, scope.siblingDomainHosts))
       return scope;
@@ -9919,6 +9925,7 @@ export class BrowserController {
     }[] = [];
     try {
       await this.waitForPanField(10_000, undefined, page);
+      this.paymentNetworkDeadlines.set(page, Date.now() + 20 * 60_000);
       fillFrameSnapshot = await Promise.all(
         page.frames().map(async (frame) => ({
           frame,
@@ -9996,6 +10003,7 @@ export class BrowserController {
     if (options.deadline !== undefined && Date.now() >= options.deadline) {
       throw new Error("payment_approval_expired");
     }
+    this.paymentNetworkDeadlines.set(page, Date.now() + 20 * 60_000);
     const allowed = page
       .frames()
       .filter(
@@ -10217,6 +10225,7 @@ export class BrowserController {
     if (savedCardSelection.outcome === "ambiguous") {
       throw new Error("payment_card_selection_ambiguous");
     }
+    this.paymentNetworkDeadlines.set(page, Date.now() + 20 * 60_000);
     let outcomeBaseline: CheckoutOutcomeBaseline | undefined;
     this.checkoutOutcomeBaseline = undefined;
     let submitted = false;
@@ -10549,6 +10558,7 @@ export class BrowserController {
       const challengeDeadline = Date.now() + 15_000;
       while (Date.now() < challengeDeadline) {
         if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline, page)) {
+          this.paymentNetworkDeadlines.delete(page);
           return { three_ds_required: false, order_confirmed: true };
         }
         const challenge = await this.detectThreeDsChallenge(undefined, page);
@@ -11135,7 +11145,10 @@ export class BrowserController {
       if (mismatchAtEntry === undefined && this.observedPaymentInstrumentMismatch !== undefined) {
         return challengeObserved ? "challenge_pending" : "timeout";
       }
-      if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline, page)) return "succeeded";
+      if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline, page)) {
+        this.paymentNetworkDeadlines.delete(page);
+        return "succeeded";
+      }
       const texts = await Promise.all(
         page
           .frames()
@@ -11145,7 +11158,10 @@ export class BrowserController {
               await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
           ),
       );
-      if (texts.some((text) => failureText.test(text))) return "failed";
+      if (texts.some((text) => failureText.test(text))) {
+        this.paymentNetworkDeadlines.delete(page);
+        return "failed";
+      }
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) return challengeObserved ? "challenge_pending" : "timeout";
       await page.waitForTimeout(Math.min(1_000, remainingMs)).catch(() => undefined);

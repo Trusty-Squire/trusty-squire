@@ -28,8 +28,13 @@
 // exact gap the fix closes).
 import { existsSync } from "node:fs";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { BrowserController, requestHostInScope, isFailFastScopeAbort } from "../browser.js";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  BrowserController,
+  requestHostInScope,
+  isFailFastScopeAbort,
+  recognizedPaymentProviderFrame,
+} from "../browser.js";
 
 // See browser-payment.test.ts's identical guard: the lean mcp-only
 // publish-verify install has no Playwright Chromium binary.
@@ -233,6 +238,85 @@ describe("operation-scoped host allowances", () => {
         await expect(
           page.evaluate(async (url) => await (await fetch(url)).text(), mailUrl),
         ).rejects.toThrow();
+      } finally {
+        await context.close();
+      }
+    },
+  );
+});
+
+describe("payment-window browser networking", () => {
+  it.skipIf(!chromiumAvailable).each([false, true])(
+    "admits issuer requests only within the payment page and window (broker=%s)",
+    async (broker) => {
+      const method = "https://methodurl.vcas.visa.com/method/status";
+      const fingerprint = "https://h.online-metrix.net/fp/status";
+      const issuer = "https://issuer.synthetic.test/status";
+      const { context, page } = await serveFixture({
+        [`${MERCHANT_ORIGIN}/checkout`]: `<form><input autocomplete="cc-number"><input autocomplete="cc-exp"><input autocomplete="cc-csc"><input autocomplete="cc-name"></form>`,
+        [method]: "method complete",
+        [fingerprint]: "fingerprint complete",
+        [issuer]: "issuer complete",
+      });
+      try {
+        await page.goto(`${MERCHANT_ORIGIN}/checkout`);
+        const controller = BrowserController.fromHarnessPage(page);
+        if (broker) await controller.enableBrokerRouting();
+        await controller.setHostScopeAllowedHosts(() => SESSION_ALLOWED_HOSTS);
+        const read = (target: Page, url: string) =>
+          target.evaluate(async (url) => {
+            try {
+              return await (await fetch(url)).text();
+            } catch {
+              return "blocked";
+            }
+          }, url);
+        expect(await read(page, method)).toBe("blocked");
+        controller.takeHostScopeDenials();
+        await controller.fillCheckoutCardFields({
+          pan: "4242424242424242",
+          exp_month: "12",
+          exp_year: "30",
+          cvv: "123",
+          name: "Synthetic Cardholder",
+          billing: { line1: "1 Test Street", city: "Test", postal_code: "10001", country: "US" },
+        });
+        expect(await read(page, method)).toBe("method complete");
+        expect(await read(page, fingerprint)).toBe("fingerprint complete");
+        expect(await read(page, issuer)).toBe("issuer complete");
+        expect(controller.takeHostScopeDenials()).toEqual([]);
+        expect(recognizedPaymentProviderFrame(issuer, page.url())).toBe(false);
+        expect(recognizedPaymentProviderFrame(method, page.url())).toBe(false);
+        await page.evaluate((url) => {
+          const frame = document.createElement("iframe");
+          frame.src = url;
+          document.body.append(frame);
+        }, method);
+        await expect
+          .poll(() => page.frames().find((frame) => frame.url() === method))
+          .toBeDefined();
+        const methodFrame = page.frames().find((frame) => frame.url() === method)!;
+        expect(
+          await methodFrame.evaluate(async (url) => await (await fetch(url)).text(), fingerprint),
+        ).toBe("fingerprint complete");
+        const other = await context.newPage();
+        await other.goto(`${MERCHANT_ORIGIN}/checkout`);
+        expect(await read(other, issuer)).toBe("blocked");
+        // An inconclusive status poll must retain the in-flight allowance.
+        await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("timeout");
+        expect(await read(page, issuer)).toBe("issuer complete");
+        const now = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 21 * 60_000);
+        try {
+          expect(await read(page, issuer)).toBe("blocked");
+        } finally {
+          now.mockRestore();
+        }
+        // A terminal failure removes the allowance even before its deadline.
+        await page.evaluate(() => {
+          document.body.append("Authentication failed");
+        });
+        await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("failed");
+        expect(await read(page, issuer)).toBe("blocked");
       } finally {
         await context.close();
       }
