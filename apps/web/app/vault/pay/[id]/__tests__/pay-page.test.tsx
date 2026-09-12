@@ -290,6 +290,15 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(vouchflow.signPayload).not.toHaveBeenCalled();
   });
 
+  it("shows an initial ceremony error without redirecting the link holder to login", async () => {
+    bound = true;
+    ceremonyUnauthorizedAfterBind = true;
+    render(<PaymentApprovalPage />);
+    await screen.findByText("web_session_required");
+    expect(router.replace).not.toHaveBeenCalled();
+    expect(vouchflow.signPayload).not.toHaveBeenCalled();
+  });
+
   it("lets the human deny and makes the page terminal without a passkey", async () => {
     bound = true;
     render(<PaymentApprovalPage />);
@@ -305,16 +314,15 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(vouchflow.signPayload).not.toHaveBeenCalled();
   });
 
-  it("sends an expired approval session to login before payment authorization", async () => {
+  it("shows approval errors without sending the signer to web login", async () => {
     bound = true;
     api.apiPost.mockRejectedValue(new api.ApiError("web_session_required", 401));
     render(<PaymentApprovalPage />);
 
     await userEvent.setup().click(await screen.findByRole("button", { name: /Approve payment/ }));
 
-    await waitFor(() =>
-      expect(router.replace).toHaveBeenCalledWith("/login?next=/vault/pay/appr_1"),
-    );
+    await screen.findByText("web_session_required");
+    expect(router.replace).not.toHaveBeenCalled();
   });
 
   it("sends an expired approval session to login before denial", async () => {
@@ -392,16 +400,15 @@ describe("pay page — JIT add-card ceremony", () => {
     ).toHaveLength(1);
   });
 
-  it("sends an owner to login when the session expires after card binding", async () => {
+  it("shows ceremony refresh errors without requiring web login", async () => {
     ceremonyUnauthorizedAfterBind = true;
     render(<PaymentApprovalPage />);
     await waitFor(() => expect(screen.getByTestId("card-entry")).toBeTruthy());
 
     await userEvent.setup().click(screen.getByTestId("card-entry"));
 
-    await waitFor(() =>
-      expect(router.replace).toHaveBeenCalledWith("/login?next=/vault/pay/appr_1"),
-    );
+    await screen.findByText("web_session_required");
+    expect(router.replace).not.toHaveBeenCalled();
     expect(api.apiPost).toHaveBeenCalledWith("/v1/pay/approvals/appr_1/bind-card", {
       card_ref: "card_new",
     });

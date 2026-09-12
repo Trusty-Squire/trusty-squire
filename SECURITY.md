@@ -87,7 +87,11 @@ encrypted blob plus optional constrained display metadata (`brand` and
 
 The account-scoped detail API can return that opaque blob to an authenticated
 web or agent session so a trusted client can decrypt it. During a pending
-payment, the owner-authenticated ceremony can also return the bound blob. Its
+payment, the Telegram-link ceremony can also return the bound blob without a web
+session. Approval requires a verified Vouchflow payment assertion, and unlocking
+the blob requires the passkey-derived key. The API binds the signed payment to
+the stored account and card; it does not separately map the assertion signer to
+an account identity. Its
 response also returns the exact server-recorded merchant, checkout origin, amount,
 currency, nonce, item, reason, requesting-agent label, and expiry that the user
 must review and authorize. It includes the approval ID and status, opaque card

@@ -132,31 +132,23 @@ export default function PaymentApprovalPage() {
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        if (err instanceof ApiError && err.status === 401) {
-          redirectToLogin();
-          return;
-        }
         setError(err instanceof Error ? err.message : "Failed to load payment approval.");
       });
     return () => {
       cancelled = true;
     };
-  }, [applyCeremony, fetchCeremony, redirectToLogin]);
+  }, [applyCeremony, fetchCeremony]);
 
   const refreshCeremony = useCallback(async (): Promise<void> => {
     setCardMetadataError(null);
     try {
       applyCeremony(await fetchCeremony());
     } catch (err) {
-      if (err instanceof ApiError && err.status === 401) {
-        redirectToLogin();
-        return;
-      }
       setCardMetadataError(
         err instanceof Error ? err.message : "Failed to load the saved card details.",
       );
     }
-  }, [applyCeremony, fetchCeremony, redirectToLogin]);
+  }, [applyCeremony, fetchCeremony]);
 
   const bindCard = useCallback(
     async (cardId: string, cardMeta?: { label: string; last4: string | null }) => {
@@ -267,10 +259,6 @@ export default function PaymentApprovalPage() {
       setSubmitted(true);
       setNeedsPasskeySetup(false);
     } catch (err) {
-      if (err instanceof ApiError && err.status === 401) {
-        redirectToLogin();
-        return;
-      }
       if (isPaymentPasskeyUnavailable(err)) {
         setNeedsPasskeySetup(true);
         return;
@@ -282,7 +270,7 @@ export default function PaymentApprovalPage() {
       card = undefined;
       setBusy(false);
     }
-  }, [ceremony, id, redirectToLogin]);
+  }, [ceremony, id]);
 
   const denyApproval = useCallback(async () => {
     setBusy(true);
