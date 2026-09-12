@@ -11679,7 +11679,7 @@ export class BrowserController {
       const harvest = (text: string): void => {
         if (text.length === 0 || text.length > 4096) return;
         // Tokenize by whitespace — each token is a separate candidate.
-        text.split(/\s+/).forEach((tok) => {
+        (text.match(/\S+(?:\s+(?:\*{3,}|…))?/g) ?? []).forEach((tok) => {
           if (tok.length < 16 || tok.length > 256) return;
           if (seen.has(tok)) return;
           seen.add(tok);
@@ -11964,11 +11964,11 @@ export class BrowserController {
       //    a skill only matches the labels it asks for.
       const bodyText = document.body?.innerText ?? "";
       const INLINE_PAIR =
-        /\b(team[ _-]id|[A-Za-z][A-Za-z0-9_-]{1,40})\s*[:=]\s*["']?([A-Za-z0-9._*-]{6,256})["']?/gi;
+        /\b(team[ _-]id|[A-Za-z][A-Za-z0-9_-]{1,40})\s*[:=]\s*["']?([A-Za-z0-9._*-]{6,256}(?:\s*(?:\*{3,}|…))?)["']?/gi;
       for (const m of bodyText.matchAll(INLINE_PAIR)) {
         const label = (m[1] ?? "").toLowerCase();
         const value = m[2] ?? "";
-        if (!isCredentialShape(value)) continue;
+        if (!isMaskedShape(value) && !isCredentialShape(value)) continue;
         if (seen.has(value)) continue;
         seen.add(value);
         out.push({ value, label, isMasked: isMaskedShape(value), hasRevealButton: false });

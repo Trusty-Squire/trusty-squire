@@ -7048,6 +7048,8 @@ describe("operate_extract — v1.1.6 credential candidate selection", () => {
       [
         { label: "API Key", value: "re_1234567890abcdefghij****", inline: false },
         { label: "API Key", value: "re_1234567890abcdefghij****", inline: true },
+        { label: "API Key", value: "re_1234567890abcdefghij ****", inline: true },
+        { label: "API Key", value: "re_1234567890abcdefghij…", inline: true },
         { label: "Team ID", value: "exaTeam01J4M8Q7Z2N6P5R3", inline: false },
         { label: "Team ID", value: "exaTeam01J4M8Q7Z2N6P5R3", inline: true },
         { label: "Team ID", value: "re_1234567890abcdefghij", inline: false },
@@ -7079,7 +7081,7 @@ describe("operate_extract — v1.1.6 credential candidate selection", () => {
     const extracted = await extractCredentials(started.session_id);
     expect(extracted.credentials).toEqual(label === "Team ID"
       ? { team_id: value }
-      : { api_key_truncated: value.slice(0, -4) });
+      : { api_key_truncated: "re_1234567890abcdefghij" });
     const storeCredential = vi.fn();
     const api = { storeCredential } as unknown as ApiClient;
     const result = caller === "extract"
