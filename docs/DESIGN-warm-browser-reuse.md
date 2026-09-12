@@ -39,6 +39,30 @@ remain busy. Reconnect never kills a live shared MCP server. Session IDs belong
 to their original server: `operate_finish` on a replacement cannot adopt or
 close an old ID; recovery starts a fresh session after the owner is gone.
 
+### Recovering after reconnect
+
+Automatic reclaim is limited to proven-dead owners. If the previous server is
+still alive, use its existing MCP connection to call `operate_finish` with the
+live session ID. Wait for cleanup to complete, then call `operate_start` on the
+replacement. Finishing releases that session's browser and profile lease; if
+other sessions share the browser, their leases remain until they finish too.
+An `unknown provision session` response from the replacement is not a release
+receipt: route the finish call to the owning connection.
+
+For a superseded server dedicated to the same home, the host can instead close
+that server's MCP transport/stdin through its normal disconnect/stop action.
+The local server shutdown handler drains admitted calls and closes its sessions
+and browsers before exiting. Only stop an instance known to be dedicated to
+that home; never stop a shared server serving other lanes or homes. Do not
+delete `SingletonLock` or manually kill processes to bypass live ownership.
+
+If reconnect leaves the old transport open and its connection is no longer
+addressable, automatic clean shutdown at the host reconnect/ownership boundary
+is follow-up work. This change does not implement live-server takeover; the
+profile stays busy until the owning session is finished or its dedicated server
+is cleanly disconnected. After that release, retry `operate_start`; Linux
+admission can recover any remaining browser recorded to a proven-dead owner.
+
 Raw PID equality is never authority to signal a process. A local browser binding
 records the host, PID, Linux process start time, Trusty Squire launch marker,
 and normalized expected `--user-data-dir`. Cleanup signals only processes whose

@@ -7374,6 +7374,14 @@ describe("operate session — real-profile lifecycle", () => {
     await finishProvisionSession(started.session_id);
     const lease = acquireProfileOperationGuard(profileDir);
     lease.release();
+    const replacement = await startProvisionSession({
+      serviceUrl: "https://app.example.com/two",
+      profileDir,
+    });
+    expect(replacement.session_id).not.toBe(started.session_id);
+    expect(h.startCalls).toBe(2);
+    expect(h.closeCalls).toBe(1);
+    await finishProvisionSession(replacement.session_id);
   });
 
   it("refuses a live profile holder before launching a browser", async () => {
