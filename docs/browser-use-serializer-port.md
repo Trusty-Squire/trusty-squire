@@ -36,8 +36,13 @@ remain. The full design and regression map are in
 
 A changed view sends its complete `dom` tree;
 `delta: true` identifies an existing document, and `removed` names refs that left
-the rendered view. An unchanged view emits `dom_unchanged: true` and omits `dom`, retaining the
-consumer's prior view. A newly blank view still emits `dom: ""` with no unchanged
+the rendered view. An explicit `operate_observe(format:"full")` always returns
+the current `dom`, even when unchanged; `delta: true` can still identify the
+existing document and does not mean the tree is omitted. Implicit full observations
+can emit `dom_unchanged: true` and omit `dom`, retaining the consumer's prior view.
+The repeated explicit and implicit read contract is covered by
+`apps/mcp/src/bot/__tests__/session-characterization.test.ts`.
+A newly blank view still emits `dom: ""` with no unchanged
 signal. `unchanged` remains the legacy numeric count; the DOM signal has its
 own name. Change detection also accounts for URL and captured frame/shadow dynamics;
 see [the change-baseline and navigation contract](observation-model.md#41-opaque-durable-identity--descriptive-label-decided-option-a). Query operates on the full document inventory, including controls outside

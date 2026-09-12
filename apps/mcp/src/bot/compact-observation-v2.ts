@@ -1636,10 +1636,20 @@ function fieldOf(el: InteractiveElement, paymentContext = false): SafeFieldV2 | 
   ) {
     return "payment";
   }
-  if (type === "password" || hasAutocomplete("current-password", "new-password")) {
+  // Native input types outrank conflicting autofill metadata or nearby labels.
+  if (type === "password") return "password";
+  if (type === "email") return "email";
+  if (hasAutocomplete("current-password", "new-password")) {
     return "password";
   }
-  if (type === "email" || hasAutocomplete("email") || /\be-?mail\b/.test(text)) return "email";
+  if (hasAutocomplete("email")) return "email";
+  if (hasAutocomplete("username")) return "username";
+  // JAF uses login_mail_address with type=text and no autocomplete. Its
+  // native name is email evidence, not a postal-address hint from page copy.
+  const name = (el.name ?? "").toLowerCase().replace(/[-_]+/g, " ");
+  if (/\b(?:e ?mail|mail address)\b/.test(name)) return "email";
+  if (/\b(?:password|passwd|pwd)\b/.test(name)) return "password";
+  if (/\be-?mail\b/.test(text)) return "email";
   if (
     type === "tel" ||
     [...autocompleteTokens].some((token) => token === "tel" || token.startsWith("tel-")) ||

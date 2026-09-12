@@ -8445,84 +8445,93 @@ describe("operate session — PR3c username/password login (capture-at-login sou
     );
   });
 
-  it("seal_vault_credential stashes browser-fill fields as slots without returning raw values", async () => {
-    const obs = await startProvisionSession({
-      serviceUrl: "https://app.example.com/login",
-      profileDir,
-    });
-    const captured: {
-      current_host: string;
-      reference?: string;
-      fields: string[];
-      encrypted_response_public_key: string;
-    }[] = [];
-    const api = {
-      browserFillCredential: async (input: {
+  it.each(["login", "username"])(
+    "loads saved %s/password fields into slots without returning raw values",
+    async (loginField) => {
+      const obs = await startProvisionSession({
+        serviceUrl: "https://app.example.com/login",
+        profileDir,
+      });
+      const captured: {
         current_host: string;
         reference?: string;
         fields: string[];
         encrypted_response_public_key: string;
-      }) => {
-        captured.push(input);
-        const encrypt = (value: string) =>
-          publicEncrypt(
-            {
-              key: input.encrypted_response_public_key,
-              padding: constants.RSA_PKCS1_OAEP_PADDING,
-              oaepHash: "sha256",
+      }[] = [];
+      const api = {
+        browserFillCredential: async (input: {
+          current_host: string;
+          reference?: string;
+          fields: string[];
+          encrypted_response_public_key: string;
+        }) => {
+          captured.push(input);
+          const encrypt = (value: string) =>
+            publicEncrypt(
+              {
+                key: input.encrypted_response_public_key,
+                padding: constants.RSA_PKCS1_OAEP_PADDING,
+                oaepHash: "sha256",
+              },
+              Buffer.from(value, "utf8"),
+            ).toString("base64");
+          return {
+            reference: input.reference ?? "vault://acct/login1",
+            encrypted_fields: {
+              [loginField]: encrypt("ada@example.com"),
+              password: encrypt("correct-horse"),
             },
-            Buffer.from(value, "utf8"),
-          ).toString("base64");
-        return {
-          reference: input.reference ?? "vault://acct/login1",
-          encrypted_fields: {
-            login: encrypt("ada@example.com"),
-            password: encrypt("correct-horse"),
-          },
-        };
-      },
-    } as unknown as ApiClient;
+          };
+        },
+      } as unknown as ApiClient;
 
-    const args = {
-      session_id: obs.session_id,
-      reference: "vault://acct/login1",
-      fields: ["login", "password"],
-      slot_prefix: "signin",
-    };
-    const legacy = (await operateFillCredentialTool.handler(args, api)) as {
-      reference: string;
-      slots: Record<string, { slot: string }>;
-    };
-    const consolidated = (await operateLoginTool.handler(
-      { action: "load_saved", ...args },
-      api,
-    )) as typeof legacy;
-    const viaAct = (await operateLoginTool.handler(
-      operateLoginTool.inputSchema.parse({ ...args, action: "load_saved" }),
-      api,
-    )) as typeof legacy;
-
-    expect(consolidated).toEqual(legacy);
-    expect(viaAct).toEqual(legacy);
-    expect(captured).toHaveLength(3);
-    for (const call of captured) {
-      expect(call).toMatchObject({
-        current_host: "https://app.example.com/login",
+      const args = {
+        session_id: obs.session_id,
         reference: "vault://acct/login1",
-        fields: ["login", "password"],
-      });
-      expect(call.encrypted_response_public_key).toContain("BEGIN PUBLIC KEY");
-    }
-    expect(legacy.reference).toBe("vault://acct/login1");
-    expect(legacy.slots.login?.slot).toBe("signin_login");
-    expect(legacy.slots.password?.slot).toBe("signin_password");
-    expect(JSON.stringify({ legacy, consolidated })).not.toContain("ada@example.com");
-    expect(JSON.stringify({ legacy, consolidated })).not.toContain("correct-horse");
+        fields: [loginField, "password"],
+        slot_prefix: "signin",
+      };
+      const legacy = (await operateFillCredentialTool.handler(args, api)) as {
+        reference: string;
+        slots: Record<string, { slot: string }>;
+      };
+      const consolidated = (await operateLoginTool.handler(
+        { action: "load_saved", ...args },
+        api,
+      )) as typeof legacy;
+      const viaAct = (await operateLoginTool.handler(
+        operateLoginTool.inputSchema.parse({ ...args, action: "load_saved" }),
+        api,
+      )) as typeof legacy;
 
-    h.elements = [elem({ visibleText: "Email", selector: "#email" })];
-    await act(obs.session_id, { kind: "type_secret", slot: "signin_login", target: "Email" });
-    expect(h.typed.some((t) => t.selector === "#email" && t.text === "ada@example.com")).toBe(true);
-  });
+      expect(consolidated).toEqual(legacy);
+      expect(viaAct).toEqual(legacy);
+      expect(captured).toHaveLength(3);
+      for (const call of captured) {
+        expect(call).toMatchObject({
+          current_host: "https://app.example.com/login",
+          reference: "vault://acct/login1",
+          fields: [loginField, "password"],
+        });
+        expect(call.encrypted_response_public_key).toContain("BEGIN PUBLIC KEY");
+      }
+      expect(legacy.reference).toBe("vault://acct/login1");
+      expect(legacy.slots[loginField]?.slot).toBe(`signin_${loginField}`);
+      expect(legacy.slots.password?.slot).toBe("signin_password");
+      expect(JSON.stringify({ legacy, consolidated })).not.toContain("ada@example.com");
+      expect(JSON.stringify({ legacy, consolidated })).not.toContain("correct-horse");
+
+      h.elements = [elem({ visibleText: "Email", selector: "#email" })];
+      await act(obs.session_id, {
+        kind: "type_secret",
+        slot: `signin_${loginField}`,
+        target: "Email",
+      });
+      expect(h.typed.some((t) => t.selector === "#email" && t.text === "ada@example.com")).toBe(
+        true,
+      );
+    },
+  );
 });
 
 describe("observation detail ladder (none < compact < full)", () => {
@@ -11698,3 +11707,76 @@ function domRefs(observation: { dom?: string; safe_table?: unknown[] }): string[
     return [row[0]];
   });
 }
+
+it("explicit full reads restore the DOM after unchanged reads and compact actions", async () => {
+  process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+  h.elements = [elem({ id: "email", name: "email", type: "email", selector: "#email" })];
+  h.prose = ["Login form"];
+  const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+  const args = { session_id: started.session_id, format: "full" as const };
+  for (let i = 0; i < 2; i++) {
+    const full = await provisionObserveTool.handler(args, null);
+    expect(full).toHaveProperty("dom", expect.stringContaining("Login form"));
+    expect(full).not.toHaveProperty("dom_unchanged");
+  }
+  const compact = (await provisionObserveTool.handler(
+    { session_id: started.session_id },
+    null,
+  )) as { safe_table: Array<[string, string, string?]> };
+  const ref = compact.safe_table[0]![0];
+  await operateTypeTool.handler(
+    { session_id: started.session_id, ref, text: "example@example.test" },
+    null,
+  );
+  for (const options of [{}, { role: "textbox" }]) {
+    const fresh = await provisionObserveTool.handler(
+      { session_id: started.session_id, ...options },
+      null,
+    );
+    expect(fresh).toHaveProperty(
+      "safe_table",
+      expect.arrayContaining([expect.arrayContaining([ref])]),
+    );
+    expect(fresh).not.toHaveProperty("delta");
+  }
+  expect(await provisionObserveTool.handler(args, null)).toHaveProperty("dom");
+  h.mainDocumentEpoch++;
+  h.currentUrl = "https://app.example.com/dashboard";
+  h.prose = ["Dashboard"];
+  expect(await provisionObserveTool.handler(args, null)).toHaveProperty(
+    "dom",
+    expect.stringContaining("Dashboard"),
+  );
+});
+
+it("missing login slots explain the vault field names and supported fill flow in compact v2", async () => {
+  process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+  h.elements = [
+    elem({ id: "password", name: "password", type: "password", selector: "#password" }),
+  ];
+  const started = await startProvisionSession({
+    serviceUrl: "https://app.example.com/login",
+    format: "compact",
+  });
+  const ref = (started as unknown as { safe_table: Array<[string, string]> }).safe_table[0]![0];
+  await expect(
+    operateTypeTool.handler({ session_id: started.session_id, ref, slot: "password" }, null),
+  ).rejects.toThrow(/operate_fill_credential.*list_credentials.*field_names.*operate_type/);
+  expect(h.typed).toEqual([]);
+});
+
+it("documents the saved-login fields default and both supported naming conventions", () => {
+  const args = { session_id: "test-session", reference: "vault://test/login" };
+  expect(operateFillCredentialTool.inputSchema.parse(args).fields).toEqual(["login", "password"]);
+  expect(operateLoginTool.inputSchema.parse({ ...args, action: "load_saved" })).toHaveProperty(
+    "fields",
+    ["login", "password"],
+  );
+  for (const tool of [operateFillCredentialTool, operateLoginTool]) {
+    const schema = JSON.stringify(tool.jsonInputSchema);
+    expect(schema).toContain("field_names from list_credentials");
+    expect(schema).toContain('"default":["login","password"]');
+    expect(schema).toContain("username");
+    expect(schema).toContain("operate_type");
+  }
+});

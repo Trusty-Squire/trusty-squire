@@ -1773,3 +1773,46 @@ describe("persistent action anchor allocator", () => {
     expect(refs.actions("doc", [replaced]).get(replaced)).not.toBe(original);
   });
 });
+
+it("uses native login semantics for JAF mail-address names and conflicting labels", () => {
+  const inputs = [
+    element({
+      tag: "input",
+      role: "textbox",
+      type: "text",
+      name: "login_mail_address",
+      labelText: "Password",
+    }),
+    element({
+      tag: "input",
+      role: "textbox",
+      type: "password",
+      name: "login_password",
+      labelText: "Email address",
+    }),
+    element({
+      tag: "input",
+      role: "textbox",
+      type: "email",
+      autocomplete: "current-password",
+      labelText: "Password",
+    }),
+    element({
+      tag: "input",
+      role: "textbox",
+      type: "text",
+      autocomplete: "username",
+      labelText: "Street address",
+    }),
+  ];
+  const result = safeControls({
+    elements: inputs,
+    legacyRefs: new Map(inputs.map((el, i) => [el, `@old${i}`])),
+    pageOrigin: "https://translation.jaf.or.jp",
+  });
+  for (const [i, expected] of ["email", "password", "email", "username"].entries()) {
+    expect(
+      result.rows.find((row) => row.ref === `@e:${String(i + 1).padStart(10, "h")}`)?.field,
+    ).toBe(expected);
+  }
+});
