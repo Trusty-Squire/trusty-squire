@@ -965,6 +965,18 @@ describe("isSquireControlPlaneHost (confused-deputy denylist)", () => {
 });
 
 describe("sanitizeExtractedCredentials", () => {
+  it.each([
+    { url: "https://console.neon.tech/app/settings", key: "napi_1234567890abcdefghij1234567890", fields: ["api_key", "api_token"] },
+    { url: "https://cloud.langfuse.com/project/x/settings/api-keys", key: sk("lf-1234567890abcdef1234567890"), fields: ["api_key", "langfuse_secret_key"] },
+    { url: "https://cloud.langfuse.com/project/x/settings/api-keys", key: "pk-lf-1234567890abcdef1234567890", fields: ["langfuse_public_key"] },
+  ])("keeps masked matches out of provider fields at $url ($fields)", ({ url, key, fields }) => {
+    expect(sanitizeExtractedCredentials({}, url, `${key}****`)).toEqual({});
+    expect(sanitizeExtractedCredentials({}, url, `${key} ...`)).toEqual({});
+    expect(sanitizeExtractedCredentials({}, url, `${key}****\n${key}`)).toEqual(
+      Object.fromEntries(fields.map((field) => [field, key])),
+    );
+  });
+
   it("keeps Langfuse one-time keys and drops version/date/noise fields", () => {
     const creds = sanitizeExtractedCredentials(
       {

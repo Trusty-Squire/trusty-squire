@@ -7022,6 +7022,27 @@ describe("operate session — sealed credential transfer", () => {
 });
 
 describe("operate_extract — v1.1.6 credential candidate selection", () => {
+  it.each(
+    (["extract", "finish"] as const).flatMap((caller) => [
+      { caller, url: "https://console.neon.tech/app/settings", keys: ["napi_1234567890abcdefghij1234567890"] },
+      { caller, url: "https://cloud.langfuse.com/project/x/settings/api-keys", keys: [sk("lf-1234567890abcdef1234567890"), "pk-lf-0987654321abcdef0987654321"] },
+    ]),
+  )("$caller never stores masked provider keys at $url", async ({ caller, url, keys }) => {
+    h.labeledCredentialCandidates = keys.map((key) => ({ label: "API Key", value: `${key}****`, isMasked: true }));
+    h.nearCopyCredentialCandidates = keys.map((key) => `${key}****`);
+    h.visibleText = keys.map((key) => `API Key: ${key}****`).join("\n");
+    const started = await startProvisionSession({ serviceUrl: url });
+    expect((await extractCredentials(started.session_id)).credentials).toEqual({ api_key_truncated: keys[0] });
+    const storeCredential = vi.fn();
+    const api = { storeCredential } as unknown as ApiClient;
+    const result = caller === "extract"
+      ? await provisionExtractTool.handler({ session_id: started.session_id, store: { service: "provider" } }, api)
+      : await operateFinishTool.handler({ session_id: started.session_id, outcome: "credentials", store: { service: "provider" } }, api);
+    expect(storeCredential).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ stored_credential: null });
+    expect(result).not.toHaveProperty("auto_promote");
+  });
+
   it.each(["extract", "finish"] as const)("%s never stores a secondary key from two masked rows", async (caller) => {
     const maskedRows = ["re_1234567890abcdefghij****", "re_0987654321abcdefghij****"];
     h.labeledCredentialCandidates = maskedRows.map((value) => ({
@@ -7050,6 +7071,7 @@ describe("operate_extract — v1.1.6 credential candidate selection", () => {
         { label: "API Key", value: "re_1234567890abcdefghij****", inline: true },
         { label: "API Key", value: "re_1234567890abcdefghij ****", inline: true },
         { label: "API Key", value: "re_1234567890abcdefghij…", inline: true },
+        { label: "API Key", value: "re_1234567890abcdefghij ...", inline: true },
         { label: "Team ID", value: "exaTeam01J4M8Q7Z2N6P5R3", inline: false },
         { label: "Team ID", value: "exaTeam01J4M8Q7Z2N6P5R3", inline: true },
         { label: "Team ID", value: "re_1234567890abcdefghij", inline: false },

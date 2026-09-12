@@ -8782,8 +8782,10 @@ export function detectExtractionBlock(pageText: string): string | null {
 }
 
 function firstTokenMatching(haystack: string, re: RegExp): string | null {
-  const match = haystack.match(re);
-  return match?.[0] ?? null;
+  for (const match of haystack.matchAll(new RegExp(re.source, re.flags + "g"))) {
+    if (!isTruncatedCapture(haystack.slice(match.index), match[0])) return match[0];
+  }
+  return null;
 }
 
 export function sanitizeExtractedCredentials(
@@ -8803,6 +8805,9 @@ export function sanitizeExtractedCredentials(
       normalized.api_key = secret;
     }
     if (pub !== null) normalized.langfuse_public_key = pub;
+    if (secret === null && credentials.api_key_truncated !== undefined) {
+      normalized.api_key_truncated = credentials.api_key_truncated;
+    }
     return normalized;
   }
 
@@ -8811,6 +8816,8 @@ export function sanitizeExtractedCredentials(
     if (token !== null) {
       normalized.api_token = token;
       normalized.api_key = token;
+    } else if (credentials.api_key_truncated !== undefined) {
+      normalized.api_key_truncated = credentials.api_key_truncated;
     }
     return normalized;
   }
