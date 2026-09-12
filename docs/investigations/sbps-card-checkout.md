@@ -2,8 +2,11 @@
 
 Status: the CVV fix and the captain-approved payment-window network relaxation
 are implemented. This enables merchant/issuer JavaScript to run native 3DS.
-**SBPS AuthenticateInit completion still requires verification by a real
-human-in-loop payment after deployment.** No real payment completion is claimed.
+**SBPS AuthenticateInit completion remains UNVERIFIED.** The captain deferred
+real-checkout acceptance to a human-in-loop payment with Firstmate after
+deployment. Synthetic testing did not establish that the relaxation resolves
+the AuthenticateInit error. This PR enables native 3DS to run; it does not claim
+to fix the 3DS wall or complete a real payment.
 
 ## Evidence ledger — 2026-09-12
 
@@ -20,7 +23,7 @@ human-in-loop payment after deployment.** No real payment completion is claimed.
 - The synthetic SBPS field `input#securityCode[type=tel][maxlength=4]`, without
   `cc-csc`, failed `fillCheckoutCardFields` with
   `payment_field_not_found:cvv` before the fix. It fills and clears after the
-  fix. Tests also cover name-based fields, underscore spelling, bare security,
+  fix. Tests also cover name-based fields, underscore spelling,
   CSC, and associated English/Japanese labels. Fixture HTML declares UTF-8;
   the initial Japanese-label fixture omitted that declaration, so its initial
   failure is not evidence of a production Japanese-label regression.
@@ -97,7 +100,10 @@ The captain approved the held payment-window relaxation on 2026-09-12 (inbox
   reach its native authentication destinations, including VCAS and Online
   Metrix. Other pages retain their existing host-scope behavior.
 - Retains the allowance through resumable waits, bounded to 20 minutes from
-  payment entry/submission; clears it on a confirmed terminal result.
+  payment entry/submission. Split checkout relies on window expiry; its
+  confirmation reporting does not revoke the allowance. Existing browser
+  submit/wait paths can clear it earlier on their terminal outcomes, but
+  terminal-result revocation is not guaranteed across all payment paths.
 - Preserves PAN destinations, vault egress, session action hosts, one human
   approval per purchase, card sealing, and broker ownership checks.
 
@@ -108,9 +114,15 @@ The original report says it also failed after those hosts were admitted; that
 is evidence against assuming the host fix alone resolves it, but supplies no
 request/response trace that would prove a separate root cause.
 
+The captain explicitly deferred terminal-reporting integration to avoid
+re-blocking in-flight authentication. Follow-up hardening is tracked as
+`ts-payment-window-terminal-revocation` in `TODOS.md`. PR delivery must retain
+the UNVERIFIED status and the deferred real-payment acceptance stated above.
+
 ## Validation
 
-CVV-only validation: `vitest run src/bot/__tests__/browser-payment.test.ts`
+Historical CVV-only validation (before removing the bare `security` alias):
+`vitest run src/bot/__tests__/browser-payment.test.ts`
 reported `253 passed (253)`, including all seven SBPS cases. MCP typecheck,
 ESLint on both changed files, and diff checks passed.
 

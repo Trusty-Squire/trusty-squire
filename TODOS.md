@@ -10,6 +10,17 @@ are isolated at the bottom so the actionable list stays scannable.
 
 ## Operator browser containment follow-up
 
+### ts-payment-window-terminal-revocation [P2 hardening]
+
+Connect confirmed terminal payment reporting to the payment page's network
+allowance across split checkout and other outcome paths. The current split
+checkout allowance expires after its twenty-minute window; confirmation does
+not revoke it. The captain deferred this integration from the SBPS change to
+avoid re-blocking in-flight 3DS. Preserve unresolved and resumable authentication
+waits, bind revocation to the original payment page, and prove that intermediate
+method/challenge states cannot trigger it. See
+`docs/investigations/sbps-card-checkout.md` for the decision and evidence limits.
+
 ### ts-operator-browser-cgroup-containment [P1 infra]
 
 Place every Linux operator Chromium launch in its own cgroup v2/systemd scope

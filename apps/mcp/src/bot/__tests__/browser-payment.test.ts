@@ -6502,7 +6502,6 @@ describe("SBPS security-code fields", () => {
       '<input id="securityCode" type="tel" maxlength="4">',
       '<input name="securityCode" type="tel" maxlength="4">',
       '<input id="security_code" type="tel" maxlength="4">',
-      '<input name="security" type="tel" maxlength="4">',
       '<label for="opaque">Security code</label><input id="opaque" type="tel" maxlength="4">',
       '<label for="opaque">セキュリティコード</label><input id="opaque" type="tel" maxlength="4">',
       '<input id="csc" type="tel" maxlength="4">',

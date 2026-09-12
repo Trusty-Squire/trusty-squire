@@ -940,7 +940,7 @@ const CHECKOUT_CONSERVATIVE_CVV_FIELD_SELECTORS = [
   'input[autocomplete~="cc-csc"]',
   'input[data-ts-jp-card-field="cvv"]',
   ...["name", "id"].flatMap((attribute) =>
-    ["cvv", "cvc", "csc", "securityCode", "security_code", "security-code", "security"].map(
+    ["cvv", "cvc", "csc", "securityCode", "security_code", "security-code"].map(
       (identity) => `input[${attribute}="${identity}" i]`,
     ),
   ),
