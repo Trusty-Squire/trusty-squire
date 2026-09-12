@@ -9705,7 +9705,7 @@ describe("operate_pay tool completion — system-owned approval wait [P0]", () =
     fetch: typeof fetch;
     approvalBodies: Array<Record<string, unknown>>;
     immediateApprovalReads: boolean[];
-    setApproved: () => void;
+    setApproved: (value?: boolean) => void;
   } {
     const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     let approved = false;
@@ -9827,7 +9827,7 @@ describe("operate_pay tool completion — system-owned approval wait [P0]", () =
       fetch: fetchMock,
       approvalBodies,
       immediateApprovalReads,
-      setApproved: () => (approved = true),
+      setApproved: (value = true) => (approved = value),
     };
   }
 
@@ -9954,7 +9954,11 @@ describe("operate_pay tool completion — system-owned approval wait [P0]", () =
         expect(env.approvalBodies).toHaveLength(1);
       } else {
         expect(paymentSession(started.session_id).activePayment).toBeNull();
-        expect(await operatePayTool.handler(args, env.api, { paymentApprovalWaitMs: 0 }))
+        env.setApproved(false);
+        expect(await operatePayTool.handler(args, env.api, {
+          paymentApprovalWaitMs: 0,
+          notifyUser: vi.fn(),
+        }))
           .toMatchObject({ status: "approval_pending" });
         expect(env.approvalBodies).toHaveLength(2);
       }
