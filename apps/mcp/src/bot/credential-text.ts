@@ -64,7 +64,7 @@ export function isTruncatedCapture(sourceText: string, capturedKey: string): boo
   // "sk-or-v1-xxxx ..."). Three OR MORE dots; two dots are ordinary
   // punctuation and would false-positive on e.g. "key value.." in
   // help text.
-  return /^\s*(?:\.{3,}|…)/.test(after);
+  return /^\s*(?:\.{3,}|…|\*{3,})/.test(after);
 }
 
 // Pull an API key out of the *visible* page text.

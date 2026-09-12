@@ -303,6 +303,14 @@ describe("extractApiKeyFromText — OpenRouter / Anthropic / OpenAI prefixes (F1
 });
 
 describe("isTruncatedCapture — F10 truncation detection", () => {
+  it.each(["****", " ***", "…", "..."])("preserves a trailing %s mask after substring extraction", (mask) => {
+    const prefix = "re_1234567890abcdefghij";
+    const source = `API Key: ${prefix}${mask}`;
+    const captured = extractApiKeyFromText(source);
+    expect(captured).toBe(prefix);
+    expect(isTruncatedCapture(source, captured!)).toBe(true);
+  });
+
   it("flags a key directly followed by '...'", () => {
     const text = `Your key: ${sk("or-v1-example000000000000000000000001")}...`;
     // Simulate what the labeled regex would have captured here.

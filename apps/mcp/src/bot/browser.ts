@@ -11747,6 +11747,7 @@ export class BrowserController {
         "auth token",
         "bearer token",
         "personal access token",
+        "team id",
         "client id",
         "client secret",
         "client key",
@@ -11963,14 +11964,14 @@ export class BrowserController {
       //    a skill only matches the labels it asks for.
       const bodyText = document.body?.innerText ?? "";
       const INLINE_PAIR =
-        /\b([A-Za-z][A-Za-z0-9_-]{1,40})\s*[:=]\s*["']?([A-Za-z0-9._-]{6,256})["']?/g;
+        /\b(team[ _-]id|[A-Za-z][A-Za-z0-9_-]{1,40})\s*[:=]\s*["']?([A-Za-z0-9._*-]{6,256})["']?/gi;
       for (const m of bodyText.matchAll(INLINE_PAIR)) {
         const label = (m[1] ?? "").toLowerCase();
         const value = m[2] ?? "";
         if (!isCredentialShape(value)) continue;
         if (seen.has(value)) continue;
         seen.add(value);
-        out.push({ value, label, isMasked: false, hasRevealButton: false });
+        out.push({ value, label, isMasked: isMaskedShape(value), hasRevealButton: false });
       }
 
       // 1. <input> / <textarea> values (visible only).

@@ -7022,6 +7022,53 @@ describe("operate session — sealed credential transfer", () => {
 });
 
 describe("operate_extract — v1.1.6 credential candidate selection", () => {
+  it.each(
+    (["extract", "finish"] as const).flatMap((caller) =>
+      [
+        { label: "API Key", value: "re_1234567890abcdefghij****", inline: false },
+        { label: "API Key", value: "re_1234567890abcdefghij****", inline: true },
+        { label: "Team ID", value: "exaTeam01J4M8Q7Z2N6P5R3", inline: false },
+        { label: "Team ID", value: "exaTeam01J4M8Q7Z2N6P5R3", inline: true },
+        { label: "Team ID", value: "re_1234567890abcdefghij", inline: false },
+      ].map((fixture) => ({ ...fixture, caller })),
+    ),
+  )( "$caller rejects collected $label $value (inline=$inline)", async ({ caller, label, value, inline }) => {
+    const started = await startProvisionSession({ serviceUrl: "https://dashboard.exa.ai/api-keys" });
+    const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
+    const page = await browser.newPage();
+    h.capturePage = page;
+    await page.setContent(`
+      <h1 style="position:absolute;left:0;top:0">API Key</h1>
+      <div style="position:absolute;left:0;top:150px;display:flex;align-items:center;gap:10px">
+        ${inline ? `<span>${label}: ${value}</span>` : `<span>${label}</span><code>${value}</code>`}
+        <button aria-label="Copy: ${value}">Copy</button>
+      </div>
+    `);
+    const { BrowserController } = await vi.importActual<typeof BrowserModule>("../browser.js");
+    const collector = Object.create(BrowserController.prototype) as BrowserModule.BrowserController;
+    h.labeledCredentialCandidates = await collector.extractLabeledCredentialCandidates(page);
+    h.nearCopyCredentialCandidates = await collector.extractCredentialsNearCopyButtons(page);
+    h.visibleText = await page.locator("body").innerText();
+    expect(h.nearCopyCredentialCandidates).toContain(value);
+    expect(h.labeledCredentialCandidates).toContainEqual(expect.objectContaining({
+      value,
+      label: label === "Team ID" ? "team id" : inline ? "key" : "api key",
+      isMasked: label === "API Key",
+    }));
+    const extracted = await extractCredentials(started.session_id);
+    expect(extracted.credentials).toEqual(label === "Team ID"
+      ? { team_id: value }
+      : { api_key_truncated: value.slice(0, -4) });
+    const storeCredential = vi.fn();
+    const api = { storeCredential } as unknown as ApiClient;
+    const result = caller === "extract"
+      ? await provisionExtractTool.handler({ session_id: started.session_id, store: { service: "exa" } }, api)
+      : await operateFinishTool.handler({ session_id: started.session_id, outcome: "credentials", store: { service: "exa" } }, api);
+    expect(storeCredential).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ stored_credential: null });
+    expect(result).not.toHaveProperty("auto_promote");
+  });
+
   it("keeps a masked key as truncated and never promotes a nearby identifier to api_key", async () => {
     const maskedKey = sk("or-v1-992e9e1234567890abcd…");
     const teamId = "exaTeam01J4M8Q7Z2N6P5R3";
