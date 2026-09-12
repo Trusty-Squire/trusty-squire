@@ -810,13 +810,13 @@ export interface WaitForProfileOptions {
 // the semaphore:
 //   - no lock              → free, return immediately
 //   - lock, holder dead    → stale, reclaim it (clearStaleSingletonLock)
-//   - lock, holder alive   → a genuine concurrent run — poll until it
-//                            releases, up to deadlineMs
+//   - lock, holder alive   → try identity-proven dead-owner recovery on Linux;
+//                            otherwise poll for release, up to deadlineMs
 //
 // Returns true once the profile is free to open, or false if a live
 // holder never released within the deadline (caller surfaces ProfileBusyError).
-// Interactive entry points pass a zero deadline and fail immediately; narrow
-// internal probes may opt into a bounded wait.
+// Interactive entry points pass a zero deadline: they await bounded owner
+// recovery but do not poll a remaining live holder. Internal probes may wait.
 export async function waitForProfileFree(
   profileDir: string = CHROME_PROFILE_DIR,
   opts: WaitForProfileOptions = {},
@@ -825,12 +825,27 @@ export async function waitForProfileFree(
   const pollMs = opts.pollMs ?? 1_000;
   const deadline = Date.now() + deadlineMs;
   let warned = false;
+  let triedOwnerRecovery = false;
   for (;;) {
     const holder = readLockHolder(profileDir);
     if (holder === null) return true; // free
     if (holder.stale) {
       removeSingletons(profileDir);
       return true; // reclaimed a dead holder
+    }
+    if (!triedOwnerRecovery && process.platform === "linux" && holder.host === hostname()) {
+      triedOwnerRecovery = true;
+      // A live Chrome PID can belong to a dead MCP owner. The detached
+      // watchdog/startup sweep may not have run yet (or may have died too).
+      // Await the same identity-proven cleanup before declaring the profile
+      // busy. A live/unknown owner or an unrecorded browser is never reclaimed.
+      try {
+        const { sweepOrphanedOwnerProcesses } = await import("./owner-process-reaper.js");
+        await sweepOrphanedOwnerProcesses(undefined, profileDir);
+      } catch {
+        // Recovery uncertainty retains the lock; the normal busy path applies.
+      }
+      continue; // Re-read the lock after cleanup, including a replacement holder.
     }
     // Live holder (or a pid on another host we can't reclaim).
     if (!warned) {
