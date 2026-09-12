@@ -8951,6 +8951,55 @@ describe("pending card-fill charge guard", () => {
     last4: "4242",
   };
 
+  it.each(["act", "confirm", "status"] as const)(
+    "notifies once when a split-checkout ACS first appears during %s",
+    async (detection) => {
+      h.elements = [
+        elem({ tag: "button", type: null, visibleText: "Place order", selector: "#place-order" }),
+      ];
+      h.visibleText = "Checkout";
+      const notifyThreeDs = vi.fn().mockResolvedValue({ sent: true });
+      const api = {
+        auditPayment: vi.fn().mockResolvedValue({ id: "evt_1" }),
+        notifyThreeDs,
+      } as unknown as ApiClient;
+      const started = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/checkout",
+        api,
+      });
+      setActivePendingCardFill(pending);
+      h.waitForThreeDsResult = detection === "act" ? "challenge_pending" : "timeout";
+      await act(started.session_id, { kind: "click", target: "Place order" });
+      expect(notifyThreeDs).toHaveBeenCalledTimes(detection === "act" ? 1 : 0);
+      expect(h.clickCalls).toBe(1);
+      h.waitForThreeDsResult = detection === "status" ? "timeout" : "challenge_pending";
+      await expect(
+        operatePayTool.handler(
+          operatePayTool.inputSchema.parse({
+            session_id: started.session_id,
+            phase: "confirm",
+            item: "Widget",
+            reason: "Synthetic purchase",
+          }),
+          api,
+        ),
+      ).resolves.toMatchObject({ status: "payment_ready_to_place" });
+      expect(notifyThreeDs).toHaveBeenCalledTimes(detection === "status" ? 0 : 1);
+      h.waitForThreeDsResult = "challenge_pending";
+      for (let poll = 0; poll < 3; poll += 1) {
+        await expect(
+          operatePaymentStatusTool.handler(
+            { session_id: started.session_id, wait_seconds: 0 },
+            api,
+          ),
+        ).resolves.toMatchObject({ status: "payment_3ds_pending" });
+      }
+      expect(notifyThreeDs).toHaveBeenCalledTimes(1);
+      expect(notifyThreeDs).toHaveBeenCalledWith(pending.approval_id, "detected_challenge");
+      expect(h.clickCalls).toBe(1);
+    },
+  );
+
   it("tracks pending, confirming, and submit-started states distinctly", async () => {
     await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
     setActivePendingCardFill(pending);
@@ -10340,7 +10389,10 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
     h.waitForThreeDsResult = "timeout";
 
     await expect(
-      operatePaymentStatusTool.handler({}, { auditPayment } as unknown as ApiClient),
+      operatePaymentStatusTool.handler({}, {
+        auditPayment,
+        notifyThreeDs: vi.fn().mockResolvedValue({ sent: true }),
+      } as unknown as ApiClient),
     ).rejects.toThrow("audit unavailable");
     expect(auditPayment).toHaveBeenCalledTimes(1);
     expect(getActivePendingThreeDs()).toEqual(threeDsState);
@@ -10372,12 +10424,14 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
     });
     const firstStatus = operatePaymentStatusTool.handler({}, {
       auditPayment: firstAuditPayment,
+      notifyThreeDs: vi.fn().mockResolvedValue({ sent: true }),
     } as unknown as ApiClient);
     await firstAuditStarted;
 
     const secondAuditPayment = vi.fn().mockResolvedValue({ id: "audit_second" });
     await operatePaymentStatusTool.handler({}, {
       auditPayment: secondAuditPayment,
+      notifyThreeDs: vi.fn().mockResolvedValue({ sent: true }),
     } as unknown as ApiClient);
     expect(getActivePendingThreeDs()).toBeNull();
 

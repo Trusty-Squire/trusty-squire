@@ -333,7 +333,6 @@ export function recognizedPaymentProviderFrame(frameUrl: string, pageUrl: string
 // independent of how long we watch it.
 const THREE_DS_ACS_NETWORK_HOSTS: readonly string[] = [
   "cardinalcommerce.com", // Visa/Mastercard/etc.'s shared ACS/StepUp vendor — the one host requestHostInScope was missing that detectThreeDsChallenge's urlPattern above already names.
-  "emvtds.sps-system.com", // SBPS's captured EMV-TDS front-end; challenge-owned XHR/fetch must survive outside the merchant host scope too.
 ];
 
 // Card fields exist on the page but only inside a frame that is NOT a

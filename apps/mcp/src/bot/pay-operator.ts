@@ -561,7 +561,7 @@ function isPaymentApprovalDeniedError(error: unknown): boolean {
 // unresolved status. Generous — a real cardholder needs to notice, unlock
 // their phone, open the banking app, and approve — but bounded, matching
 // the rest of this file's "wait, but never forever" posture.
-const THREE_DS_RESUME_WINDOW_MS = 20 * 60 * 1000;
+export const THREE_DS_RESUME_WINDOW_MS = 20 * 60 * 1000;
 const PAYMENT_APPROVAL_RESPONSE_RESERVE_MS = 500;
 
 // The cardholder normally sees the website's 3-D Secure challenge and then
