@@ -1101,6 +1101,8 @@ import {
   completeActivePaymentLeaseWithTerminalApproval,
   getActivePendingApproval,
   getTerminalPaymentApproval,
+  clearReportedTerminalPaymentApproval,
+  completeActivePendingApprovalWithTerminalStatus,
   releaseActivePaymentLease,
   markActivePendingCardFillSubmitStarted,
   restoreActivePendingCardFillAfterConfirmThrow,
@@ -9611,6 +9613,26 @@ describe("awaiting-approval payment lease [P0]", () => {
     expect(releaseActivePaymentLease(resumed.lease, true)).toBe(true);
   });
 
+  it("retains unverified cleanup and ambiguous confirmation guards when reporting terminal approval", async () => {
+    await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const claim = claimActivePaymentForOperatePay("fill_card");
+    if (claim.kind !== "lease") throw new Error("expected a fresh lease");
+    const state = { ...approvalState, keypair: { ...approvalState.keypair } };
+    completeActivePaymentLeaseWithTerminalApproval(
+      claim.lease,
+      state,
+      "payment_confirmation_failed",
+    );
+    clearReportedTerminalPaymentApproval(true);
+    expect(getTerminalPaymentApproval()?.terminalStatus).toBe("payment_confirmation_failed");
+    clearActivePendingCardFill(true);
+    const next = claimActivePaymentForOperatePay("fill_card");
+    if (next.kind !== "lease") throw new Error("expected a fresh lease");
+    completeActivePaymentLeaseWithTerminalApproval(next.lease, state, "expired");
+    clearReportedTerminalPaymentApproval(false);
+    expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(/cleanup remains unverified/);
+  });
+
   it("keeps a denial observed by operate_pay terminal under the owned lease", async () => {
     await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
     const terminalState = {
@@ -9827,6 +9849,74 @@ describe("operate_pay tool completion — system-owned approval wait [P0]", () =
     else process.env.VOUCHFLOW_API_BASE = originalVouchflowBase;
     global.fetch = originalFetch;
   });
+
+  it.each([
+    ["expired", false],
+    ["denied", false],
+    ["expired", true],
+    ["denied", true],
+  ] as const)(
+    "reports %s once and mints a fresh fill-card approval (observed by status: %s)",
+    async (terminalStatus, observedByStatus) => {
+      const env = buildPaymentEnv();
+      let terminal = false;
+      let attempts = 0;
+      const create = vi.spyOn(env.api, "createPaymentApproval").mockImplementation(async () => ({
+        id: `appr_retry_${++attempts}`,
+        nonce: `nonce_${attempts}`,
+        agent: "agent",
+        account_binding: "account-binding-kobee",
+        expires_at: new Date(Date.now() + 600_000).toISOString(),
+      }));
+      vi.spyOn(env.api, "getPaymentApproval").mockImplementation(async (id) => ({
+        id,
+        status: terminal && id === "appr_retry_1" ? terminalStatus : "pending",
+        ...CHECKOUT,
+        nonce: "nonce",
+        account_binding: "account-binding-kobee",
+        card_ref: "card_kobee",
+        operator_pubkey: "public",
+        jws: null,
+        sealed_card: null,
+        expires_at: new Date(Date.now() + 600_000).toISOString(),
+      }));
+      const started = await startProvisionSession({
+        serviceUrl: "https://store.kobeejapan.net/checkout",
+      });
+      const browser = await activeProvisionBrowserForPayment();
+      const args = { ...baseArgs, session_id: started.session_id, phase: "fill_card" as const };
+      const context = { paymentApprovalWaitMs: 0, notifyUser: vi.fn() };
+      expect(await operatePayTool.handler(args, env.api, context)).toMatchObject({
+        status: "approval_pending",
+        approval_id: "appr_retry_1",
+      });
+      const oldApproval = getActivePendingApproval()!;
+      terminal = true;
+      if (observedByStatus) {
+        completeActivePendingApprovalWithTerminalStatus(oldApproval, terminalStatus);
+      }
+      expect(await operatePayTool.handler(args, env.api, context)).toMatchObject({
+        status:
+          terminalStatus === "expired" ? "payment_approval_timeout" : "payment_approval_denied",
+      });
+      expect(oldApproval.keypair.privateKey).toBe("");
+      expect(h.filledCards).toEqual([]);
+      expect(await operatePayTool.handler(args, env.api, context)).toMatchObject({
+        status: "approval_pending",
+        approval_id: "appr_retry_2",
+        session_id: started.session_id,
+      });
+      expect(create).toHaveBeenCalledTimes(2);
+      const fresh = getActivePendingApproval()!;
+      expect(fresh.keypair.publicKey).not.toBe(oldApproval.keypair.publicKey);
+      expect(fresh.keypair.privateKey).not.toBe("");
+      expect(fresh).not.toBe(oldApproval);
+      expect(h.filledCards).toEqual([]);
+      expect(paymentSession(started.session_id).activePayment?.status).toBe("awaiting_approval");
+      expect(await activeProvisionBrowserForPayment()).toBe(browser);
+      expect(h.closeCalls).toBe(0);
+    },
+  );
 
   it("detects the phone approval and submits in the same operate_pay call", async () => {
     const env = buildPaymentEnv();

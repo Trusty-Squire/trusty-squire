@@ -5,6 +5,7 @@ import {
   activeProvisionBrowserForPayment,
   claimActivePaymentForOperatePay,
   clearActivePendingCardFill,
+  clearReportedTerminalPaymentApproval,
   clearActivePendingThreeDsIfCurrent,
   completeActivePendingApprovalWithTerminalStatus,
   completeActivePaymentLeaseWithPendingApproval,
@@ -150,8 +151,9 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
     "keeps its original terms and fails closed if a readable live checkout differs. For split " +
     'checkouts, phase="fill_card" fills recognized provider fields without charging; verify the ' +
     'final total and place the order with operate_act, then phase="confirm" closes the approval. ' +
-    "Exactly one human approval is valid per purchase attempt; finish the session before retrying " +
-    "a stuck, denied, expired, or ambiguous attempt.",
+    "Exactly one human approval is valid per purchase attempt. After a denied or expired approval " +
+    "is reported, call operate_pay again for a new approval in the same session. Finish the " +
+    "session before retrying a stuck or ambiguous attempt.",
   inputSchema,
   jsonInputSchema: {
     type: "object",
@@ -208,6 +210,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
       const paymentClaim = claimActivePaymentForOperatePay(phase, session);
       if (paymentClaim.kind === "terminal") {
         const state = paymentClaim.state;
+        clearReportedTerminalPaymentApproval(true, session);
         return paymentResult(session, {
           status:
             paymentClaim.terminalStatus === "denied"
@@ -491,6 +494,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
             paymentClaim.resumeApproval.keypair.privateKey = "";
           }
         }
+        clearReportedTerminalPaymentApproval(paymentFieldsCleared, session);
         return paymentResult(session, result);
       } catch (error) {
         const approvalToRestore =
