@@ -275,6 +275,16 @@ vi.mock("../bot/provision-session.js", async (importOriginal) => {
       state.paymentLease = null;
       state.terminalApproval = { state: approval, terminalStatus };
     },
+    clearReportedTerminalPaymentApproval: (
+      paymentFieldsCleared: boolean,
+      session?: ProvisionSession.Session,
+    ) => {
+      const state = paymentSessionState(session);
+      if (state.terminalApproval === null) return;
+      state.terminalApproval = null;
+      state.paymentSealed = !paymentFieldsCleared;
+      state.paymentSealActive = !paymentFieldsCleared;
+    },
     getActivePendingApproval: (session?: ProvisionSession.Session) =>
       paymentSessionState(session).awaitingApproval,
     getTerminalPaymentApproval: (session?: ProvisionSession.Session) =>
@@ -748,7 +758,7 @@ describe("operate_pay server-owned approval wait [P0] — tool wiring", () => {
     });
   });
 
-  it("keeps an approval terminal when it expires between continuation calls", async () => {
+  it("reports expiry once and permits a fresh approval on the next call", async () => {
     const createPaymentApproval = vi
       .fn()
       .mockResolvedValueOnce({
@@ -811,7 +821,11 @@ describe("operate_pay server-owned approval wait [P0] — tool wiring", () => {
     expect(notifyUser).toHaveBeenCalledOnce();
     expect(expiredState?.keypair.privateKey).toBe("");
     expect(mockAwaitingApproval).toBeNull();
-    expect(mockTerminalApproval).toEqual({ state: expiredState, terminalStatus: "expired" });
+    expect(mockTerminalApproval).toBeNull();
+    const third = await operatePayTool.handler(args, api, { notifyUser, paymentApprovalWaitMs: 0 });
+    expect(third).toMatchObject({ status: "approval_pending", approval_id: "appr_fresh" });
+    expect(createPaymentApproval).toHaveBeenCalledTimes(2);
+    expect(mockAwaitingApproval?.keypair.publicKey).not.toBe(expiredState?.keypair.publicKey);
     expect(mockPaymentLease).toBeNull();
   });
 
@@ -1074,7 +1088,7 @@ describe("operate_pay server-owned approval wait [P0] — tool wiring", () => {
     ["denied", "payment_approval_denied"],
     ["expired", "payment_approval_timeout"],
   ] as const)(
-    "keeps a resumed %s approval terminal instead of minting another approval",
+    "reports a resumed %s approval once before allowing another attempt",
     async (terminalStatus, resultStatus) => {
       const resumeApproval: PendingApprovalWait = {
         approval_id: `appr_${terminalStatus}`,
@@ -1133,7 +1147,7 @@ describe("operate_pay server-owned approval wait [P0] — tool wiring", () => {
       expect(createPaymentApproval).not.toHaveBeenCalled();
       expect(resumeApproval.keypair.privateKey).toBe("");
       expect(mockAwaitingApproval).toBeNull();
-      expect(mockTerminalApproval).toEqual({ state: resumeApproval, terminalStatus });
+      expect(mockTerminalApproval).toBeNull();
       expect(mockPaymentLease).toBeNull();
     },
   );

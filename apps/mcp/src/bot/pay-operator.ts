@@ -1430,7 +1430,11 @@ export async function executeOperatePay(
         await browser.fillCheckoutCardFields(card, { deadline });
       } catch (error) {
         if (error instanceof Error && error.message === "payment_approval_expired") {
-          return expiredApprovalResult();
+          if (error instanceof PaymentCardFillCleanupError) deps.onCardFillCleanupFailed();
+          return {
+            ...expiredApprovalResult(),
+            payment_fields_cleared: !(error instanceof PaymentCardFillCleanupError),
+          };
         }
         const frameOrigin =
           error instanceof UnrecognizedPaymentFrameError
@@ -1563,7 +1567,11 @@ export async function executeOperatePay(
     } catch (error) {
       if (error instanceof Error && error.message === "payment_approval_expired") {
         clearPendingThreeDs();
-        return expiredApprovalResult();
+        if (error instanceof PaymentCardFillCleanupError) deps.onCardFillCleanupFailed();
+        return {
+          ...expiredApprovalResult(),
+          payment_fields_cleared: !(error instanceof PaymentCardFillCleanupError),
+        };
       }
       const outcomeUnknown = error instanceof PaymentSubmitOutcomeUnknownError;
       paymentStatus = outcomeUnknown ? "payment_outcome_unknown" : "payment_checkout_failed";

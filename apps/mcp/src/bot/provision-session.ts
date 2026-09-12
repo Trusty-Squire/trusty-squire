@@ -2744,6 +2744,23 @@ export function getTerminalPaymentApproval(
     : null;
 }
 
+// operate_pay reports a lapsed attempt once, then permits a new human approval.
+// Confirmation failures and unverified field cleanup retain their existing guards.
+export function clearReportedTerminalPaymentApproval(
+  paymentFieldsCleared: boolean,
+  selectedSession?: Session,
+): void {
+  const session = selectedSession ?? activeProvisionSession();
+  const state = session.activePayment;
+  if (
+    state?.status !== "terminal_approval" ||
+    (state.terminalStatus !== "denied" && state.terminalStatus !== "expired")
+  )
+    return;
+  session.activePayment = paymentFieldsCleared ? null : { status: "sealed" };
+  session.paymentFieldSealActive = !paymentFieldsCleared;
+}
+
 export function completeActivePendingApprovalWithTerminalStatus(
   state: PendingApprovalWait,
   terminalStatus: "denied" | "expired",

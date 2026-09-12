@@ -9968,6 +9968,13 @@ export class BrowserController {
       console.error(
         `[payment-cleanup] ${error instanceof Error ? error.message : "payment_fields_not_cleared"}`,
       );
+      if (
+        primary.kind === "error" &&
+        primary.value instanceof Error &&
+        primary.value.message === "payment_approval_expired"
+      ) {
+        primary.value = new PaymentCardFillCleanupError(primary.value);
+      }
     } finally {
       await Promise.all(
         fillFrameSnapshot.map(({ documentElement }) =>

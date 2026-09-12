@@ -4800,6 +4800,57 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "reports failed cleanup when approval expires after card fill",
+    async () => {
+      const pageUrl = "https://shop.example.test/expired-approval-cleanup-failure";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-exp">
+            <input autocomplete="cc-csc">
+            <input autocomplete="cc-name">
+            <button type="button">Pay now</button>
+          </form>
+          <div id="preview"></div>
+          <script>
+            document.querySelector('[autocomplete="cc-number"]').addEventListener("input", (event) => {
+              if (event.target.value !== "") {
+                document.querySelector("#preview").textContent = "Card " + event.target.value;
+              }
+            });
+          </script>`,
+      });
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        const beforeSubmitDispatch = vi.fn(() => {
+          throw new Error("payment_approval_expired");
+        });
+        const onSubmitDispatched = vi.fn();
+        await expect(
+          controller.fillAndSubmitCheckout(CARD, { beforeSubmitDispatch, onSubmitDispatched }),
+        ).rejects.toMatchObject({
+          name: "PaymentCardFillCleanupError",
+          message: "payment_approval_expired",
+          paymentFieldsCleared: false,
+        });
+        expect(beforeSubmitDispatch).toHaveBeenCalled();
+        expect(onSubmitDispatched).not.toHaveBeenCalled();
+        expect(consoleError).toHaveBeenCalledWith("[payment-cleanup] payment_fields_not_cleared");
+        expect(await page.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
+        expect(await page.locator("#preview").innerText()).toContain(CARD.pan);
+      } finally {
+        consoleError.mockRestore();
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "preserves a confirmed payment outcome when card cleanup also fails",
     async () => {
       const pageUrl = "https://shop.example.test/terminal-confirmed-cleanup-failure";
