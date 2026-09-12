@@ -17,6 +17,8 @@ import {
   type VouchMandateVerifier,
 } from "../services/vouch-mandate.js";
 import { authenticatedRequester } from "../services/requesting-agent.js";
+import { VAULT_AUDIT_TYPES } from "@trusty-squire/vault";
+import { requestAuditAttribution } from "../services/vault-audit-attribution.js";
 
 // Web base for the approval link sent to Telegram. Reuses PWA_BASE_URL
 // (the same override server.ts's defaultPwaBaseUrl() reads) if set, else
@@ -337,6 +339,29 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       expiresAt,
     });
 
+    // Await the ledger write before surfacing the approval. This is a request,
+    // not a payment outcome; the existing push below sends its actionable URL.
+    await opts.deps.vaultAuditStore.record({
+      account_id: auth.account_id,
+      type: VAULT_AUDIT_TYPES.paymentApprovalCreated,
+      payload: {
+        reference: `pay://${id}`,
+        requester: "agent",
+        purpose: "payment.approval.create",
+        attribution: requestAuditAttribution(
+          req,
+          "payment.approval.create",
+          "payment.approval.create",
+        ),
+        approval_id: id,
+        merchant: parsed.data.merchant,
+        amount_cents: parsed.data.amount_cents,
+        currency: parsed.data.currency,
+        payment_status: "approval_pending",
+        ...(parsed.data.card_ref !== undefined ? { card_ref: parsed.data.card_ref } : {}),
+      },
+    });
+
     // Push to the user's linked Telegram, if any. Fire-and-forget — a
     // Telegram error must never delay or fail the approval response.
     const account = await opts.deps.accountStore.findAccountById(auth.account_id);
@@ -493,7 +518,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         return;
       }
       const payloadHash = approvalPayloadHash(record);
-      if (status === "pending" && payloadHash === null) {
+      if (status === "pending" && record.cardRef !== null && payloadHash === null) {
         reply.code(409).send({ error: "payment_approval_binding_invalid" });
         return;
       }

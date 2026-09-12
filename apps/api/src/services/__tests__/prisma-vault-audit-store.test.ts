@@ -5,7 +5,7 @@
 // payload) and the rate-limiter query the vault calls 100x/hour.
 // Behaviour at the DB layer is exercised in apps/api integration tests.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { VAULT_AUDIT_TYPES, type VaultAuditEventInput } from "@trusty-squire/vault";
 import type { ApiPrismaClient } from "../api-prisma-client.js";
 import { PrismaVaultAuditStore } from "../prisma-vault-audit-store.js";
@@ -85,6 +85,29 @@ function fakePrisma(): Fake {
 const ACCOUNT = "01HACCOUNTAAAAAAAAAAAAAAAA";
 
 describe("PrismaVaultAuditStore", () => {
+  it("applies payment categories in the database before pagination", async () => {
+    const fake = fakePrisma();
+    const find = vi.spyOn(fake.prisma.vaultAuditEvent, "findMany");
+    const types = [VAULT_AUDIT_TYPES.paymentApprovalCreated, VAULT_AUDIT_TYPES.paymentExecuted];
+    const before = new Date("2026-09-12T00:00:00.000Z");
+    await new PrismaVaultAuditStore(fake.prisma).list(ACCOUNT, {
+      type: types,
+      limit: 1,
+      before,
+      reference: "pay://approval",
+    });
+    expect(find).toHaveBeenCalledWith({
+      where: {
+        account_id: ACCOUNT,
+        type: { in: types },
+        emitted_at: { lt: before },
+        payload: { path: ["reference"], equals: "pay://approval" },
+      },
+      orderBy: { emitted_at: "desc" },
+      take: 1,
+    });
+  });
+
   it("repairs retries through one durable audit identity", async () => {
     const fake = fakePrisma();
     const store = new PrismaVaultAuditStore(fake.prisma);

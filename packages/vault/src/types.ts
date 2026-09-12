@@ -245,6 +245,8 @@ export const VAULT_AUDIT_TYPES = {
   // A stored-card payment event: either operate_pay's outcome report or a
   // caller-placed order attempt. Metadata only — never a PAN.
   paymentExecuted: "vault.payment_executed",
+  // An approval request was persisted; no card release or charge has occurred.
+  paymentApprovalCreated: "vault.payment_approval_created",
   // Egress-grant lifecycle — a standing token that lets a deployed app
   // spend the referenced credential through the injecting proxy.
   grantMinted: "vault.grant_minted",
@@ -277,8 +279,9 @@ export interface VaultAuditListOptions {
   // (emitted_at < before). Pair with the last row's emitted_at to page.
   before?: Date;
   // Optional filters. `type` hits the indexed column; `reference`
-  // narrows to a single credential's history.
-  type?: VaultAuditType;
+  // narrows to a single credential's history. A type array matches any member
+  // before pagination, so category filters cannot discard rows after limiting.
+  type?: VaultAuditType | VaultAuditType[];
   reference?: string;
 }
 

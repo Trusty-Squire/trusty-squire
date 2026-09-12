@@ -55,7 +55,9 @@ export class PrismaVaultAuditStore implements VaultAuditStore {
     const rows = await this.prisma.vaultAuditEvent.findMany({
       where: {
         account_id: accountId,
-        ...(opts.type !== undefined ? { type: opts.type } : {}),
+        ...(opts.type !== undefined
+          ? { type: Array.isArray(opts.type) ? { in: opts.type } : opts.type }
+          : {}),
         ...(opts.before !== undefined ? { emitted_at: { lt: opts.before } } : {}),
         // `reference` lives in the JSON payload; Postgres JSON path filter
         // keeps the single-credential history query in the DB.

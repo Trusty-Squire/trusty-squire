@@ -67,7 +67,8 @@ By default (\`view:"ledger"\`) the response is SHAPED so it is readable:
 - \`summary\` — one human-readable line per rollup / headline.
 
 Escape hatches and filters: \`view:"raw"\` returns the flat unaggregated page
-(the original shape). \`type\` (an event kind), \`reference\` (a single
+(the original shape). \`type\` (an event kind, or \`payment\` for approval requests
+and payment outcomes), \`reference\` (a single
 credential), \`limit\` (rows, default ${DEFAULT_LIMIT}, max 200), \`before\`
 (keyset cursor from \`next_before\`), \`scan\` (raw events read before shaping,
 default ${DEFAULT_SCAN}, max 2000) and \`window_minutes\` (burst gap, default
