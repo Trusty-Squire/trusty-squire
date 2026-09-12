@@ -1467,12 +1467,27 @@ function oauthCompletionSourcePage(session: object): OAuthCompletionEvidence["pa
 }
 
 function operationPageForSession(session: Session): Page | undefined {
-  return (
+  const page =
     oauthCompletionSourcePage(session) ??
     (session.compactV2Active ? compactV2SourcePage(session) : undefined) ??
     session.browser.activePage() ??
-    undefined
-  );
+    undefined;
+  return returnFromClosedPicker(session, page);
+}
+
+function returnFromClosedPicker(session: Session, page: Page | undefined): Page | undefined {
+  if (page === undefined || !page.isClosed() || !newTabAdoptionAllowed(session)) return page;
+  const opener = session.browser.returnFromClosedPopup(page);
+  if (opener === null) return page;
+  // Only post-click perception follows the opener. The dispatched target and
+  // any field verification stay bound to the original popup document.
+  if (oauthCompletionSourcePage(session) !== undefined) {
+    rememberOAuthCompletionSourcePage(session, opener);
+  } else if (session.compactV2Active) {
+    rememberCompactV2SourcePage(session, opener);
+  }
+  invalidateCompactV2Snapshot(session);
+  return opener;
 }
 
 function rememberOAuthCompletionSourcePage(
@@ -6480,6 +6495,9 @@ async function executeAct(
     recordingTransitionFields,
     compactV2ActionPage,
   );
+  if (action.kind === "click" || action.kind === "js_click") {
+    actionPageAfter = returnFromClosedPicker(session, actionPageAfter);
+  }
   // Don't fold inbox-provider steps into the replayable recipe (see
   // INBOX_READ_HOSTS): replay re-reads the code via awaitVerification, and a
   // recorded inbox click would bake the email's subject into a shared recipe.
