@@ -6494,3 +6494,37 @@ describe("3DS detection vs captcha frames", () => {
     15_000,
   );
 });
+
+describe("SBPS security-code fields", () => {
+  it
+    .skipIf(!chromiumAvailable)
+    .each([
+      '<input id="securityCode" type="tel" maxlength="4">',
+      '<input name="securityCode" type="tel" maxlength="4">',
+      '<input id="security_code" type="tel" maxlength="4">',
+      '<input name="security" type="tel" maxlength="4">',
+      '<label for="opaque">Security code</label><input id="opaque" type="tel" maxlength="4">',
+      '<label for="opaque">セキュリティコード</label><input id="opaque" type="tel" maxlength="4">',
+      '<input id="csc" type="tel" maxlength="4">',
+    ])("fills and clears a security code without cc-csc: %s", async (field) => {
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    try {
+      await page.route("https://fep.sps-system.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<meta charset="utf-8"><form><input autocomplete="cc-number"><input autocomplete="cc-exp"><input autocomplete="cc-name">${field}</form>`,
+        }),
+      );
+      await page.goto("https://fep.sps-system.com/card");
+      const controller = BrowserController.fromHarnessPage(page);
+      await controller.fillCheckoutCardFields(APPROVAL_CARD);
+      expect(await page.locator('input[type="tel"]').inputValue()).toBe(APPROVAL_CARD.cvv);
+      expect(await page.locator('input[type="tel"]').getAttribute("autocomplete")).toBeNull();
+      await controller.clearSealedPaymentFields();
+      expect(await page.locator('input[type="tel"]').inputValue()).toBe("");
+    } finally {
+      await browser.close();
+    }
+  });
+});

@@ -939,6 +939,13 @@ const CHECKOUT_COMBINED_EXPIRY_GROUP_SELECTORS = CHECKOUT_COMBINED_EXPIRY_INPUT_
 const CHECKOUT_CONSERVATIVE_CVV_FIELD_SELECTORS = [
   'input[autocomplete~="cc-csc"]',
   'input[data-ts-jp-card-field="cvv"]',
+  ...["name", "id"].flatMap((attribute) =>
+    ["cvv", "cvc", "csc", "securityCode", "security_code", "security-code", "security"].map(
+      (identity) => `input[${attribute}="${identity}" i]`,
+    ),
+  ),
+  'input[aria-label="Security code" i]',
+  'input[aria-label="セキュリティコード"]',
 ]
   .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
   .join(",");
@@ -8774,7 +8781,7 @@ export class BrowserController {
       "ロイヤリティ",
     ];
     const nameLabels = ["カード名義"];
-    const cvvLabels = ["セキュリティコード", "セキュリティーコード"];
+    const cvvLabels = ["セキュリティコード", "セキュリティーコード", "security code"];
     const expiryLabels = ["有効期限"];
     await documentElement.evaluate(
       (root, labels) => {
@@ -8904,7 +8911,8 @@ export class BrowserController {
           excludedLabels: string[] = [],
         ): void => {
           const text = (host.textContent ?? "").trim();
-          if (!fieldLabels.some((label) => text.includes(label))) return;
+          if (!fieldLabels.some((label) => text.toLowerCase().includes(label.toLowerCase())))
+            return;
           if (excludedLabels.some((label) => text.includes(label))) return;
           const inputs = associatedElements(host, "input").filter(isTextInput);
           const [input] = inputs;
