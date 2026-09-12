@@ -1,5 +1,13 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.14-rc.15 (2026-09-12)
+
+- Detect SBPS card-payment CVV fields and, during the captain-approved time-boxed payment window, allow 3DS requests within the relaxed payment-window host scope (#738).
+- Restore full-page and `operate_observe` reads, including saved-login filling guidance (#734).
+- Recover dead-owner browser profile locks after reconnect (#733).
+- Restore opener observations after picker popups close (#732).
+- Restore the v1.1.6 credential-extraction behavior (#731).
+
 ## 1.1.14-rc.14 (2026-09-11)
 
 - Click screenshot-visible controls without a usable DOM ref using single-use image coordinates bound to the captured document, viewport, frame and physical target. Report pointer dispatch separately from unknown provider outcomes, and require observation before another attempt after an uncertain result.
