@@ -92,20 +92,9 @@ not inject `autocomplete`, expose real card values, or change approval logic.
 Existing form ambiguity, non-card exclusions, and sealed-field cleanup remain.
 
 The captain approved the held payment-window relaxation on 2026-09-12 (inbox
-005), following the earlier hold. The implementation:
-
-- Relaxes the existing XHR/fetch request-host check for the exact payment page
-  and its frames after card fill begins or payment submission is entered.
-- Adds no curated ACS/fingerprinting host list. Merchant/issuer JavaScript can
-  reach its native authentication destinations, including VCAS and Online
-  Metrix. Other pages retain their existing host-scope behavior.
-- Retains the allowance through resumable waits, bounded to 20 minutes from
-  payment entry/submission. Split checkout relies on window expiry; its
-  confirmation reporting does not revoke the allowance. Existing browser
-  submit/wait paths can clear it earlier on their terminal outcomes, but
-  terminal-result revocation is not guaranteed across all payment paths.
-- Preserves PAN destinations, vault egress, session action hosts, one human
-  approval per purchase, card sealing, and broker ownership checks.
+005), following the earlier hold. The implemented network allowance and its
+expiry/revocation limits are defined in the
+[operator scope contract](../operator-tool-surface.md#scope-is-declared-at-session-start).
 
 No forced method-result submit, ACS mutation, additional human approval,
 browser workaround, or alternative payment method is added. It remains unknown

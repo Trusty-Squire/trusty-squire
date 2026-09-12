@@ -14,9 +14,9 @@ must remain feature-detected until they are registered.
    account. Do not copy a user’s browser cookies or profile. Do not change a
    user’s configured launch command, clear a shared cache, or restart a shared
    browser as a retry strategy.
-3. Declare every non-provider destination in `allowed_hosts` on
-   `operate_start`. A denied exact host is an observation to record, not a reason
-   to widen the session. Start a new session with the required host declared.
+3. Configure session destinations according to the
+   [scope contract](operator-tool-surface.md#scope-is-declared-at-session-start),
+   including its payment-network exception and scope-denial handling.
 4. Capture the operation, session, request, document, and browser/process
    identities needed to correlate each result. Suppress raw credentials and URL
    query values from the record.

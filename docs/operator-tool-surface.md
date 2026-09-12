@@ -119,7 +119,7 @@ fixtures prove pointer mechanics; they do not guarantee Cloudflare clearance.
 
 Startup merchant hosts also authorize matching registrable-domain siblings,
 such as `shop.example.com` and `api.example.com`. Declare other required
-non-provider hosts in `allowed_hosts` on `operate_start`. `operate_allow_host`
+non-provider action destinations in `allowed_hosts` on `operate_start`. `operate_allow_host`
 can activate a host only inside the declared startup entitlement and existing
 identity-provider allowance; it cannot broaden that entitlement.
 
@@ -140,6 +140,23 @@ authorized Clerk sign-in, so a Clerk-fronted protect-check needs no extra host
 declaration for those requests. This exception applies to that document only;
 it does not authorize an out-of-scope embedded Clerk document or arbitrary
 caller-declared wildcard hosts.
+
+Card checkout has a time-boxed browser-network exception: entering card fill or
+payment submission opens or renews a twenty-minute allowance for the exact
+payment page and its frames. Their XHR/fetch requests may reach any hostname,
+so merchant/issuer JavaScript can perform native 3DS method, fingerprinting,
+and ACS requests without a curated issuer list. The allowance follows that
+page through navigation and resumable waits; it does not extend to other pages
+or broaden operator action hosts, PAN injection destinations, or vault egress.
+Card sealing and the purchase's single human approval remain unchanged.
+
+Split checkout confirmation reporting does not revoke this allowance: it expires
+at the window deadline. Browser submit/wait paths can clear it earlier when they
+recognize terminal outcomes, but revocation is not guaranteed for every payment
+path. Inconclusive waits retain it until expiry. Terminal-reporting integration
+is deferred in `ts-payment-window-terminal-revocation` in [TODOS.md](../TODOS.md).
+This permits native authentication traffic; it is not evidence that any specific
+merchant's 3DS flow completes.
 
 If an observation reports a scope denial, treat it as a bounded diagnostic:
 record the owning document/frame, exact hostname, resource type, reason, and

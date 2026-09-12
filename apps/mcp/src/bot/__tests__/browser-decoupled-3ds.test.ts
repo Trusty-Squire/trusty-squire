@@ -27,6 +27,8 @@
 // merchant-only allowlist a real session would have (no ACS host — the
 // exact gap the fix closes).
 import { existsSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -246,6 +248,97 @@ describe("operation-scoped host allowances", () => {
 });
 
 describe("payment-window browser networking", () => {
+  it.skipIf(!chromiumAvailable)(
+    "natively advances a synthetic securityCode checkout through method, fingerprint, challenge and receipt",
+    async () => {
+      const method = "https://methodurl.vcas.visa.com/method/status";
+      const fingerprint = "https://h.online-metrix.net/fp/status";
+      const checkout = `${MERCHANT_ORIGIN}/checkout`;
+      const { context, page } = await serveFixture({
+        [checkout]: `<meta charset="utf-8"><h1>Synthetic card checkout</h1>
+          <p>Test fixture only — no real payment. Total: ¥6,600</p>
+          <form id="checkout"><label>Card number <input autocomplete="cc-number"></label>
+          <label>Expiry <input autocomplete="cc-exp"></label>
+          <label>Cardholder <input autocomplete="cc-name"></label>
+          <label>セキュリティコード <input id="securityCode" type="tel" maxlength="4"></label>
+          <button>Pay now</button></form><script>
+          document.querySelector('form').onsubmit = async (event) => {
+            event.preventDefault();
+            if (!document.querySelector('#securityCode').value) return;
+            await fetch(${JSON.stringify(method)});
+            await fetch(${JSON.stringify(fingerprint)});
+            location.href = ${JSON.stringify(ACS_CHALLENGE_URL)};
+          };</script>`,
+        [method]: "method complete",
+        [fingerprint]: "fingerprint complete",
+        [ACS_CHALLENGE_URL]: `<meta charset="utf-8"><h1>3D Secure authentication</h1>
+          <p>Synthetic issuer challenge — no real payment</p>
+          <p>Confirm this test purchase in your banking app.</p>
+          <button onclick='location.href=${JSON.stringify(RECEIPT_URL)}'>Simulate cardholder confirmation</button>`,
+        [RECEIPT_URL]:
+          '<meta charset="utf-8"><h1>Thank you for your order.</h1><p>Receipt number: SYNTHETIC-456</p><p>Synthetic fixture only — no charge.</p>',
+      });
+      const responses: { url: string; status: number }[] = [];
+      page.on("response", (response) => {
+        responses.push({ url: response.url(), status: response.status() });
+      });
+      const evidence = process.env.PAYMENT_TEST_EVIDENCE_DIR;
+      try {
+        await page.goto(checkout);
+        if (evidence) {
+          await mkdir(evidence, { recursive: true });
+          await page.screenshot({ path: join(evidence, "synthetic-checkout.png") });
+        }
+        const controller = BrowserController.fromHarnessPage(page);
+        await controller.setHostScopeAllowedHosts(() => SESSION_ALLOWED_HOSTS);
+        const submission = await controller.fillAndSubmitCheckout({
+          pan: "4242424242424242",
+          exp_month: "12",
+          exp_year: "30",
+          cvv: "123",
+          name: "Synthetic Cardholder",
+          billing: { line1: "1 Test Street", city: "Test", postal_code: "10001", country: "US" },
+        });
+        expect(submission).toMatchObject({ three_ds_required: true, order_confirmed: false });
+        expect(page.url()).toBe(ACS_CHALLENGE_URL);
+        expect(responses).toEqual(
+          expect.arrayContaining([
+            { url: method, status: 200 },
+            { url: fingerprint, status: 200 },
+          ]),
+        );
+        if (evidence) await page.screenshot({ path: join(evidence, "synthetic-challenge.png") });
+        // This click represents the human's issuer interaction, not an operator workaround.
+        await page.getByRole("button", { name: "Simulate cardholder confirmation" }).click();
+        const resolution = await controller.waitForThreeDsResolution(5_000);
+        expect(resolution).toBe("succeeded");
+        expect(page.url()).toBe(RECEIPT_URL);
+        expect(controller.takeHostScopeDenials()).toEqual([]);
+        if (evidence) {
+          await page.screenshot({ path: join(evidence, "synthetic-receipt.png") });
+          await writeFile(
+            join(evidence, "synthetic-payment.json"),
+            JSON.stringify(
+              {
+                scope:
+                  "Synthetic BrowserController flow; no vault/approval service or real SBPS backend; no charge",
+                submission,
+                resolution,
+                responses,
+                receipt: await page.locator("body").innerText(),
+              },
+              null,
+              2,
+            ),
+          );
+        }
+      } finally {
+        await context.close();
+      }
+    },
+    20_000,
+  );
+
   it.skipIf(!chromiumAvailable).each([false, true])(
     "admits issuer requests only within the payment page and window (broker=%s)",
     async (broker) => {

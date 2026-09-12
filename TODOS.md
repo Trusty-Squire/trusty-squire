@@ -13,9 +13,9 @@ are isolated at the bottom so the actionable list stays scannable.
 ### ts-payment-window-terminal-revocation [P2 hardening]
 
 Connect confirmed terminal payment reporting to the payment page's network
-allowance across split checkout and other outcome paths. The current split
-checkout allowance expires after its twenty-minute window; confirmation does
-not revoke it. The captain deferred this integration from the SBPS change to
+allowance across split checkout and other outcome paths; see the current
+[scope contract](docs/operator-tool-surface.md#scope-is-declared-at-session-start).
+The captain deferred this integration from the SBPS change to
 avoid re-blocking in-flight 3DS. Preserve unresolved and resumable authentication
 waits, bind revocation to the original payment page, and prove that intermediate
 method/challenge states cannot trigger it. See
