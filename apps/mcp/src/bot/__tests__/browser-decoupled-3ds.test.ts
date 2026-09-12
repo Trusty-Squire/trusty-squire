@@ -205,6 +205,13 @@ describe("requestHostInScope / isFailFastScopeAbort — 3DS ACS network allowlis
     expect(isFailFastScopeAbort(ACS_STATUS_URL, "xhr", SESSION_ALLOWED_HOSTS)).toBe(false);
   });
 
+  it("allows the captured SBPS EMV-TDS host outside the session-configured hosts", () => {
+    const emvTdsUrl = "https://emvtds.sps-system.com/emvtds-fe/status";
+    expect(requestHostInScope(emvTdsUrl, SESSION_ALLOWED_HOSTS)).toBe(true);
+    expect(isFailFastScopeAbort(emvTdsUrl, "fetch", SESSION_ALLOWED_HOSTS)).toBe(false);
+    expect(isFailFastScopeAbort(emvTdsUrl, "xhr", SESSION_ALLOWED_HOSTS)).toBe(false);
+  });
+
   it("still fail-fast-blocks an unrelated out-of-scope host", () => {
     const rogue = "https://exfil.evil.test/collect";
     expect(requestHostInScope(rogue, SESSION_ALLOWED_HOSTS)).toBe(false);

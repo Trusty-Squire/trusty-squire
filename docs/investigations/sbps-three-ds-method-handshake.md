@@ -1,9 +1,11 @@
 # SBPS 3DS2 method handshake investigation
 
-Status: **blocked on a failing reproduction; no production fix identified.**
-The reported SBPS failure is not reproduced by the supplied topology alone.
-Real SBPS AuthenticateInit completion remains unverified and requires a
-post-deploy human-in-loop payment. No release or PR has been made by this lane.
+Status: **the operator-native topology passes; no production step-up fix is
+warranted by current evidence.** The reported SBPS failure is not reproduced by
+the supplied topology alone. Real SBPS AuthenticateInit completion remains
+unverified and requires a post-deploy human-in-loop payment. This diagnostic is
+folded into the SBPS detection and notification delivery so the no-fix decision
+stays executable as regression coverage.
 
 ## Evidence ledger — 2026-09-12
 
@@ -39,6 +41,10 @@ post-deploy human-in-loop payment. No release or PR has been made by this lane.
 - `fm-ensure-agents-md.sh .` refused because AGENTS.md and CLAUDE.md are distinct
   real files. Neither was overwritten. This is the same existing memory-file
   condition documented in `sbps-card-checkout.md`.
+- Fold-in verification on `fm/ts-3ds-detect-notify` reported all 337 tests in
+  `browser-payment.test.ts`, `browser-decoupled-3ds.test.ts`,
+  `pay-operator.test.ts`, and this diagnostic passing. The diagnostic again
+  passed all three drivers without a forced submit.
 
 ## What the evidence establishes
 

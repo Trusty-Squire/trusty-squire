@@ -65,7 +65,10 @@ export interface PaymentBrowser {
   submitFilledCheckout(): Promise<CheckoutSubmitResult>;
   clearSealedPaymentFields(): Promise<void>;
   clearCheckoutCardFields?(): Promise<void>;
-  waitForThreeDsResolution(timeoutMs: number): Promise<ThreeDsResolution>;
+  waitForThreeDsResolution(
+    timeoutMs: number,
+    onThreeDsDetected?: () => void,
+  ): Promise<ThreeDsResolution>;
   paymentInstrumentMismatch?(): PaymentInstrumentMismatch | undefined;
   currentUrl(): string;
 }
@@ -84,7 +87,7 @@ export interface PendingCardFill {
 
 // Post-submit outcome resumability: the card was already released and the
 // charge already submitted — this is NEVER a new authorization, just a
-// pointer to an already-in-flight one. A decoupled/out-of-band (app-push)
+// pointer to an already-in-flight one. A decoupled/out-of-band
 // challenge's real-world completion time routinely exceeds one bounded wait,
 // but missing challenge evidence must remain outcome="unknown" rather than
 // being relabeled as 3-D Secure. `deadline` bounds how long
@@ -560,12 +563,11 @@ function isPaymentApprovalDeniedError(error: unknown): boolean {
 const THREE_DS_RESUME_WINDOW_MS = 20 * 60 * 1000;
 const PAYMENT_APPROVAL_RESPONSE_RESERVE_MS = 500;
 
-// The cardholder approves 3-D Secure via an app-push in their bank app while
-// the browser's checkout JavaScript owns the native challenge handshake. Fires
-// the Telegram nudge WITHOUT awaiting it (a slow/unresolved Telegram call must
-// never delay the 3DS wait loop) while still tracking whether it actually
-// went out, so a timed-out challenge can tell the host whether the captain
-// was nudged or needs a direct check of the bank app.
+// The cardholder normally sees the website's 3-D Secure challenge and then
+// opens their bank app to approve it; the bank does not reliably push that
+// prompt itself. Because the operator's browser is headless, fire the Telegram
+// nudge WITHOUT awaiting it (a slow/unresolved Telegram call must never delay
+// the 3DS wait loop) while still tracking whether it actually went out.
 function trackThreeDsNotification(
   sendPromise: Promise<{ sent: boolean }>,
 ): () => boolean | undefined {
@@ -627,14 +629,6 @@ function threeDsHandoffMessage(
   return submitResult.three_ds_required || submitResult.challenge_url !== undefined
     ? threeDsChallengeMessage(telegramSent)
     : threeDsOutOfBandMessage(telegramSent);
-}
-
-function threeDsNotificationMode(
-  submitResult: CheckoutSubmitResult,
-): "detected_challenge" | "possible_out_of_band" {
-  return submitResult.three_ds_required || submitResult.challenge_url !== undefined
-    ? "detected_challenge"
-    : "possible_out_of_band";
 }
 
 function statusAfterThreeDsResolution(
@@ -1577,11 +1571,20 @@ export async function executeOperatePay(
       paymentStatus = outcomeUnknown ? "payment_outcome_unknown" : "payment_checkout_failed";
       let terminalSubmitOutcome = false;
       if (outcomeUnknown) {
-        const resolution = await browser.waitForThreeDsResolution(0).catch(() => undefined);
+        let challengeNotificationStarted = false;
+        const notifyDetectedChallenge = (): void => {
+          if (challengeNotificationStarted) return;
+          challengeNotificationStarted = true;
+          trackThreeDsNotification(api.notifyThreeDs(approvalId, "detected_challenge"));
+        };
+        const resolution = await browser
+          .waitForThreeDsResolution(0, notifyDetectedChallenge)
+          .catch(() => undefined);
         if (resolution !== undefined) {
           paymentStatus = statusAfterThreeDsResolution(paymentStatus, resolution);
           terminalSubmitOutcome = resolution === "succeeded" || resolution === "failed";
           if (resolution === "challenge_pending") {
+            notifyDetectedChallenge();
             pendingThreeDsHandoff.outcome = "three_ds";
             submitResult.three_ds_required = true;
           }
@@ -1660,23 +1663,27 @@ export async function executeOperatePay(
       threeDsWaitMs > 0
     ) {
       const challengeKnownBeforeWait = pendingThreeDsHandoff.outcome === "three_ds";
-      if (challengeKnownBeforeWait) {
+      let challengeNotificationStarted = false;
+      const notifyDetectedChallenge = (): void => {
+        if (challengeNotificationStarted) return;
+        challengeNotificationStarted = true;
+        pendingThreeDsHandoff.outcome = "three_ds";
+        submitResult.three_ds_required = true;
         getThreeDsTelegramSent = trackThreeDsNotification(
-          api.notifyThreeDs(approvalId, threeDsNotificationMode(submitResult)),
+          api.notifyThreeDs(approvalId, "detected_challenge"),
         );
-      }
-      const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
+      };
+      if (challengeKnownBeforeWait) notifyDetectedChallenge();
+      const resolution = challengeKnownBeforeWait
+        ? await browser.waitForThreeDsResolution(threeDsWaitMs)
+        : await browser.waitForThreeDsResolution(threeDsWaitMs, notifyDetectedChallenge);
       const mismatch = browser.paymentInstrumentMismatch?.();
       if (mismatch !== undefined) submitResult.payment_instrument_mismatch ??= mismatch;
       paymentStatus = statusAfterThreeDsResolution(paymentStatus, resolution);
       if (resolution === "challenge_pending") {
         pendingThreeDsHandoff.outcome = "three_ds";
         submitResult.three_ds_required = true;
-        if (!challengeKnownBeforeWait) {
-          getThreeDsTelegramSent = trackThreeDsNotification(
-            api.notifyThreeDs(approvalId, "detected_challenge"),
-          );
-        }
+        notifyDetectedChallenge();
       }
     }
 

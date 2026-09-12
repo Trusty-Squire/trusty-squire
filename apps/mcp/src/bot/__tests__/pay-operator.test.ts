@@ -71,6 +71,7 @@ async function harness(
   threeDs?: {
     resolution: "succeeded" | "failed" | "challenge_pending" | "timeout";
     waitSeconds?: number;
+    detectDuringWait?: boolean;
     notifyNeverResolves?: boolean;
     notifySent?: boolean;
   },
@@ -102,6 +103,7 @@ async function harness(
   const pendingStates: PendingApprovalWait[] = [];
   const pendingThreeDsStates: PendingThreeDsWait[] = [];
   const pendingAtDispatchCounts: number[] = [];
+  const threeDsTimeline: string[] = [];
   let activePendingThreeDs: PendingThreeDsWait | null = null;
   const nonce = "synthetic-nonce";
   const agent = "synthetic-payment-test-agent";
@@ -258,6 +260,7 @@ async function harness(
       return Response.json({ status: "approved" });
     }
     if (url.endsWith("/v1/pay/approvals/approval_test/notify-3ds") && init?.method === "POST") {
+      threeDsTimeline.push("notification-started");
       notifyCalls.push(url);
       notifyBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       if (threeDs?.notifyNeverResolves === true) {
@@ -305,7 +308,13 @@ async function harness(
               };
         }),
     ),
-    waitForThreeDsResolution: vi.fn().mockResolvedValue(threeDs?.resolution ?? "timeout"),
+    waitForThreeDsResolution: vi.fn(async (_timeoutMs: number, onThreeDsDetected?: () => void) => {
+      threeDsTimeline.push("wait-started");
+      if (threeDs?.detectDuringWait === true) onThreeDsDetected?.();
+      await Promise.resolve();
+      threeDsTimeline.push("wait-finished");
+      return threeDs?.resolution ?? "timeout";
+    }),
     ...(checkoutOptions.paymentInstrumentMismatch !== undefined
       ? { paymentInstrumentMismatch: checkoutOptions.paymentInstrumentMismatch }
       : {}),
@@ -361,6 +370,7 @@ async function harness(
     pendingStates,
     pendingThreeDsStates,
     pendingAtDispatchCounts,
+    threeDsTimeline,
     get activePendingThreeDs() {
       return activePendingThreeDs;
     },
@@ -915,6 +925,25 @@ describe("operate_pay", () => {
     expect(notifyBodies).toEqual([{ mode: "detected_challenge" }]);
   });
 
+  it("starts the Telegram nudge when a decoupled challenge appears during the wait", async () => {
+    const { result, notifyBodies, threeDsTimeline } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      { resolution: "challenge_pending", detectDuringWait: true },
+      {
+        fillAndSubmitCheckout: async () => ({
+          three_ds_required: false,
+          order_confirmed: false,
+        }),
+      },
+    );
+
+    expect(result).toMatchObject({ status: "payment_3ds_required" });
+    expect(notifyBodies).toEqual([{ mode: "detected_challenge" }]);
+    expect(threeDsTimeline).toEqual(["wait-started", "notification-started", "wait-finished"]);
+  });
+
   // Regression coverage for the decoupled/out-of-band 3DS completion gap: a
   // timed-out wait (genuinely still pending — the cardholder may approve
   // just after this call's own bounded wait ends) must leave resumable
@@ -1034,7 +1063,7 @@ describe("operate_pay", () => {
     expect(result).not.toHaveProperty("needs_user");
     expect(notifyCalls).toHaveLength(0);
     expect(notifyBodies).toEqual([]);
-    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
+    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000, expect.any(Function));
   });
 
   it("flags an undelivered Telegram nudge in the timeout hand-off instead of blocking or faking it", async () => {
@@ -1102,12 +1131,30 @@ describe("operate_pay", () => {
       warning: mismatch,
     });
     expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_outcome_unknown" })]);
-    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(0);
+    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(0, expect.any(Function));
     expect(pendingThreeDsStates).toHaveLength(1);
     expect(pendingThreeDsStates[0]).toMatchObject({
       outcome: "unknown",
       payment_instrument_mismatch: mismatch,
     });
+  });
+
+  it("notifies when a dispatched submit error reveals a pending 3DS challenge", async () => {
+    const { result, notifyBodies } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      { resolution: "challenge_pending", detectDuringWait: true },
+      {
+        fillAndSubmitCheckout: async (_card, options) => {
+          options?.onSubmitDispatched?.();
+          throw new PaymentSubmitOutcomeUnknownError();
+        },
+      },
+    );
+
+    expect(result).toMatchObject({ status: "payment_3ds_required" });
+    expect(notifyBodies).toEqual([{ mode: "detected_challenge" }]);
   });
 
   it.each([
