@@ -12,9 +12,12 @@ export async function sendTelegramMessage(
 ): Promise<boolean> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (token === undefined || token.length === 0) return false;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3000);
   try {
     const res = await fetchFn(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
+      signal: controller.signal,
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         chat_id: chatId,
@@ -25,5 +28,7 @@ export async function sendTelegramMessage(
     return res.ok;
   } catch {
     return false;
+  } finally {
+    clearTimeout(timeout);
   }
 }

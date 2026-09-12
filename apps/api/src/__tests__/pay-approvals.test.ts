@@ -373,7 +373,7 @@ describe("payment approval relay", () => {
     });
   });
 
-  it.each(["rejected", "network", "missing-token", "success"])(
+  it.each(["rejected", "network", "missing-token", "stalled", "success"])(
     "reports Telegram delivery %s and records failures",
     async (result) => {
       const account = await deps.accountStore.findAccountByEmail("payer@example.test");
@@ -381,7 +381,15 @@ describe("payment approval relay", () => {
       vi.stubEnv("TELEGRAM_BOT_TOKEN", result === "missing-token" ? "" : "synthetic-token");
       const fetchMock = vi.fn();
       if (result === "network") fetchMock.mockRejectedValue(new Error("network failure"));
-      else fetchMock.mockResolvedValue({ ok: result === "success" });
+      else if (result === "stalled") {
+        fetchMock.mockImplementation((_url: string, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+              once: true,
+            });
+          }),
+        );
+      } else fetchMock.mockResolvedValue({ ok: result === "success" });
       vi.stubGlobal("fetch", fetchMock);
       const response = await server.inject({
         method: "POST",
@@ -398,6 +406,10 @@ describe("payment approval relay", () => {
         },
       });
       expect(response.statusCode).toBe(result === "success" ? 201 : 502);
+      if (result === "stalled") {
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(fetchMock.mock.calls[0]![1].signal.aborted).toBe(true);
+      }
       const audit = await server.inject({
         method: "GET",
         url: "/v1/vault/audit",
