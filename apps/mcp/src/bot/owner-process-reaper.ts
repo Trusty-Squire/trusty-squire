@@ -739,15 +739,26 @@ async function reapManifest(path: string, manifest: OwnerReaperManifest): Promis
   return signalled;
 }
 
-export async function sweepOrphanedOwnerProcesses(rootDir = defaultRootDir()): Promise<number> {
+export async function sweepOrphanedOwnerProcesses(
+  rootDir = defaultRootDir(),
+  profileDir?: string,
+): Promise<number> {
   await new Promise<void>((resolveStart) => setImmediate(resolveStart));
   if (process.platform !== "linux" || !existsSync(rootDir)) return 0;
   let reaped = 0;
+  const profile = profileDir === undefined ? undefined : profilePathIdentity(profileDir);
   for (const entry of readdirSync(rootDir)) {
     if (!entry.endsWith(".json")) continue;
     const path = join(rootDir, entry);
     const read = readManifest(path);
     if (read.state !== "present" || !shouldReapOwner(ownerState(read.manifest))) continue;
+    if (
+      profile !== undefined &&
+      ![...read.manifest.resources, ...read.manifest.launches].some(
+        (entry) => profilePathIdentity(entry.user_data_dir) === profile,
+      )
+    )
+      continue;
     reaped += await reapManifest(path, read.manifest);
   }
   return reaped;

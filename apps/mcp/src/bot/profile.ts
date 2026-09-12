@@ -825,12 +825,27 @@ export async function waitForProfileFree(
   const pollMs = opts.pollMs ?? 1_000;
   const deadline = Date.now() + deadlineMs;
   let warned = false;
+  let triedOwnerRecovery = false;
   for (;;) {
     const holder = readLockHolder(profileDir);
     if (holder === null) return true; // free
     if (holder.stale) {
       removeSingletons(profileDir);
       return true; // reclaimed a dead holder
+    }
+    if (!triedOwnerRecovery && process.platform === "linux" && holder.host === hostname()) {
+      triedOwnerRecovery = true;
+      // A live Chrome PID can belong to a dead MCP owner. The detached
+      // watchdog/startup sweep may not have run yet (or may have died too).
+      // Await the same identity-proven cleanup before declaring the profile
+      // busy. A live/unknown owner or an unrecorded browser is never reclaimed.
+      try {
+        const { sweepOrphanedOwnerProcesses } = await import("./owner-process-reaper.js");
+        await sweepOrphanedOwnerProcesses(undefined, profileDir);
+      } catch {
+        // Recovery uncertainty retains the lock; the normal busy path applies.
+      }
+      continue; // Re-read the lock after cleanup, including a replacement holder.
     }
     // Live holder (or a pid on another host we can't reclaim).
     if (!warned) {

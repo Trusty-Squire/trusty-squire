@@ -28,6 +28,17 @@ The profile lease resolves the recorded holder by host, PID, and process start
 time. A proven-dead or absent holder is reaped and claimed; a live or
 indeterminate holder returns `PROFILE_BUSY_MESSAGE`. There is no TTL.
 
+After an MCP restart or reconnect, call `operate_start` for a new session.
+If the old Chrome still holds `SingletonLock`, admission awaits the Linux
+owner reaper for manifests naming that profile before checking the lock again.
+This also recovers when the detached watchdog has not polled yet or has exited.
+The reaper must prove the recorded MCP owner is dead and the browser's process
+birth identity and profile still match before bounded TERM-to-KILL cleanup.
+Live or indeterminate owners and browsers without a valid ownership manifest
+remain busy. Reconnect never kills a live shared MCP server. Session IDs belong
+to their original server: `operate_finish` on a replacement cannot adopt or
+close an old ID; recovery starts a fresh session after the owner is gone.
+
 Raw PID equality is never authority to signal a process. A local browser binding
 records the host, PID, Linux process start time, Trusty Squire launch marker,
 and normalized expected `--user-data-dir`. Cleanup signals only processes whose

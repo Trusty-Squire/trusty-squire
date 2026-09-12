@@ -1038,8 +1038,19 @@ vi.mock("../profile.js", async (importOriginal) => {
   };
 });
 
-import { chmodSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  symlinkSync,
+  writeFileSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+} from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import canonicalize from "canonicalize";
@@ -1049,7 +1060,12 @@ import { operatePayTool, operatePaymentStatusTool } from "../../tools/operate-pa
 import { ApiClient } from "../../api-client.js";
 import { dispatchOperatorBrowserProcessTermination } from "../operator-browser-watchdog.js";
 import { BrowserController, OAuthAwaitingHumanError } from "../browser.js";
-import { acquireProfileOperationGuard } from "../profile.js";
+import {
+  acquireProfileOperationGuard,
+  processBirthIdentity,
+  profileProcessIdentity,
+  currentProfileHolderPid,
+} from "../profile.js";
 import {
   startProvisionSession,
   startHarnessProvisionSession,
@@ -7248,6 +7264,104 @@ describe("operate session — live-profile precondition gate", () => {
 });
 
 describe("operate session — real-profile lifecycle", () => {
+  it.skipIf(process.platform !== "linux").each(["dead", "live", "unrecorded", "other-profile"])(
+    "reconnect admission recovers only a proven dead owner (%s)",
+    async (ownerState) => {
+      const root = mkdtempSync(join(tmpdir(), "ts-reconnect-"));
+      const profileDir = join(root, "profile");
+      const reapers = join(root, "reapers");
+      mkdirSync(profileDir);
+      mkdirSync(reapers);
+      const oldReaperDir = process.env.TRUSTY_SQUIRE_REAPER_DIR;
+      const oldGrace = process.env.TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS;
+      process.env.TRUSTY_SQUIRE_REAPER_DIR = reapers;
+      process.env.TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS = "30";
+      const owner = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+        stdio: "ignore",
+      });
+      // Real process + exact profile argv + Chrome-shaped lock. Ignore TERM
+      // to exercise bounded KILL escalation without needing a Chrome display.
+      const browser = spawn(
+        process.execPath,
+        [
+          "-e",
+          "process.on('SIGTERM', () => {}); console.log('ready'); setInterval(() => {}, 1000)",
+          "--",
+          `--user-data-dir=${profileDir}`,
+        ],
+        { stdio: ["ignore", "pipe", "ignore"] },
+      );
+      const ownerExited = once(owner, "exit");
+      const browserExited = once(browser, "exit");
+      try {
+        await once(browser.stdout!, "data");
+        const identity = profileProcessIdentity(browser.pid!, profileDir);
+        expect(identity).not.toBeNull();
+        const birth = processBirthIdentity(owner.pid!);
+        expect(birth).not.toBeNull();
+        if (ownerState !== "unrecorded")
+          writeFileSync(
+            join(reapers, "prior.json"),
+            JSON.stringify({
+              version: 5,
+              token: "fixture-owner",
+              owner: birth,
+              resources: [
+                {
+                  ...identity,
+                  user_data_dir: ownerState === "other-profile" ? join(root, "other") : profileDir,
+                },
+              ],
+              launches: [],
+              helpers: [],
+            }),
+          );
+        symlinkSync(`${hostname()}-${browser.pid!}`, join(profileDir, "SingletonLock"));
+        // Replacement admission while the old owner still lives must refuse,
+        // and its process-local registry cannot finish the prior session.
+        await expect(
+          startProvisionSession({ serviceUrl: "https://app.example.com/", profileDir }),
+        ).rejects.toThrow(/another Trusty Squire session/);
+        await expect(finishProvisionSession("prior-server-session")).rejects.toThrow(
+          /unknown provision session/,
+        );
+        expect(browser.exitCode).toBeNull();
+        expect(browser.signalCode).toBeNull();
+        if (ownerState !== "live") {
+          owner.kill("SIGKILL");
+          await ownerExited;
+        }
+        if (ownerState === "dead") {
+          const started = await startProvisionSession({
+            serviceUrl: "https://app.example.com/",
+            profileDir,
+          });
+          expect(started.session_id).toBeTypeOf("string");
+          expect(browser.signalCode).toBe("SIGKILL");
+          expect(currentProfileHolderPid(profileDir)).toBeNull();
+          await finishProvisionSession(started.session_id);
+        } else {
+          await expect(
+            startProvisionSession({ serviceUrl: "https://app.example.com/", profileDir }),
+          ).rejects.toThrow(/another Trusty Squire session/);
+          expect(browser.exitCode).toBeNull();
+          expect(browser.signalCode).toBeNull();
+          expect(currentProfileHolderPid(profileDir)).toBe(browser.pid);
+          expect(h.startCalls).toBe(0);
+        }
+      } finally {
+        owner.kill("SIGKILL");
+        browser.kill("SIGKILL");
+        await Promise.all([ownerExited, browserExited]);
+        if (oldReaperDir === undefined) delete process.env.TRUSTY_SQUIRE_REAPER_DIR;
+        else process.env.TRUSTY_SQUIRE_REAPER_DIR = oldReaperDir;
+        if (oldGrace === undefined) delete process.env.TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS;
+        else process.env.TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS = oldGrace;
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("holds the profile lease for the complete session and releases it on finish", async () => {
     const profileDir = "/tmp/trusty-squire-unit-live-profile-lease";
     const started = await startProvisionSession({
