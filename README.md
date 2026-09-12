@@ -375,6 +375,8 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   Every operator task uses the user's Chrome profile directly. Before it starts,
   the operator checks the live Google My Account identity; if the profile is
   signed out, it returns a clear login handoff before navigating to the service.
+  If a restart or reconnect leaves the browser profile busy, follow the
+  [reconnect recovery guide](docs/DESIGN-warm-browser-reuse.md#recovering-after-reconnect).
   To route only that browser session through a proxy, pass `proxy` to
   `operate_start` as an HTTP or HTTPS URL (credentials are optional), or as an
   unauthenticated SOCKS5 URL. The value is launch-only and sensitive: it is not

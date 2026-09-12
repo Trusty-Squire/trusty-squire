@@ -810,13 +810,13 @@ export interface WaitForProfileOptions {
 // the semaphore:
 //   - no lock              → free, return immediately
 //   - lock, holder dead    → stale, reclaim it (clearStaleSingletonLock)
-//   - lock, holder alive   → a genuine concurrent run — poll until it
-//                            releases, up to deadlineMs
+//   - lock, holder alive   → try identity-proven dead-owner recovery on Linux;
+//                            otherwise poll for release, up to deadlineMs
 //
 // Returns true once the profile is free to open, or false if a live
 // holder never released within the deadline (caller surfaces ProfileBusyError).
-// Interactive entry points pass a zero deadline and fail immediately; narrow
-// internal probes may opt into a bounded wait.
+// Interactive entry points pass a zero deadline: they await bounded owner
+// recovery but do not poll a remaining live holder. Internal probes may wait.
 export async function waitForProfileFree(
   profileDir: string = CHROME_PROFILE_DIR,
   opts: WaitForProfileOptions = {},

@@ -488,8 +488,7 @@ function launchAnchorTrustState(
   // unique ownership token that survives, so a matching chromium command plus a
   // matching profile is definitive. A marker that IS still readable must not
   // positively name a different launch; a missing/erased marker does not.
-  const markerContradicts =
-    markerState.state === "present" && markerState.marker !== launch.marker;
+  const markerContradicts = markerState.state === "present" && markerState.marker !== launch.marker;
   return commandState === "matching" && profileState === "matching" && !markerContradicts
     ? "trusted"
     : "unknown";
