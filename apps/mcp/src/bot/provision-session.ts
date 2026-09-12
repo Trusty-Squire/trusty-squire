@@ -348,6 +348,12 @@ export interface Observation {
   delta?: boolean;
   unchanged?: number;
   removed?: string[];
+  // True only on act/act-style returns when the browser's main document
+  // changed between the action's dispatch and the post-settle capture (a real
+  // navigation happened while the action was settling). The observation's
+  // `url` already names the new location; the host must not assume refs from
+  // before the action still resolve (docs/observation-model.md §4.1).
+  navigated?: true;
   // V1-only: set on a DELTA emit when the (normalized, same-cap) page text is
   // identical to the previous observation's — the `text` field is then emitted
   // EMPTY and the host reuses the prior text (recoverable in full from
@@ -4701,7 +4707,12 @@ function compactV2Observation(
   // Emit canonical names and text verbatim, preserving whitespace, line order
   // and indentation; no prose extraction or byte-budget pruning.
   const dom = rendered.dom;
-  const changed = !sameFullDocument || previous.dom !== dom;
+  // A changed URL, frame set, or closed-shadow/iframe structure is a real
+  // change even when the rendered text is byte-identical: the observation the
+  // host already holds describes a page that no longer exists.
+  const structurallyChanged =
+    previous !== null && (previous.dynamics !== capture.dynamics || previous.url !== pageUrl);
+  const changed = !sameFullDocument || previous.dom !== dom || structurallyChanged;
   const epoch = { doc: epochDoc, rev: changed ? generation : previous.epoch.rev };
   session.compactV2Active = true;
   session.compactV2Index = {
@@ -4752,11 +4763,15 @@ function compactV2Observation(
     semantics,
     byRef: new Map(safe.rows.map((row) => [row.ref, row])),
     ...(outputFormat === "full"
-      ? { dom, renderedRefs: rendered.refs }
-      : {
-          ...(previous?.dom === undefined ? {} : { dom: previous.dom }),
-          ...(previous?.renderedRefs === undefined ? {} : { renderedRefs: previous.renderedRefs }),
-        }),
+      ? { dom, renderedRefs: rendered.refs, url: pageUrl, dynamics: capture.dynamics }
+      : sameFullDocument
+        ? {
+            dom: previous.dom,
+            renderedRefs: previous.renderedRefs,
+            url: previous.url,
+            dynamics: previous.dynamics,
+          }
+        : {}),
   };
   session.prevObserve = null;
   if (outputFormat === "compact") {
@@ -5742,6 +5757,14 @@ async function executeAct(
   // click that redirected turned round 0's URL into the post-login dashboard,
   // corrupting the skill's entry_url and the login step).
   const urlBeforeAction = compactV2ActionPage?.url() ?? browser.currentUrl();
+  // Document identity BEFORE the action dispatches, so the return can report
+  // honestly whether the document changed while the action was settling.
+  let docBeforeAction: string | undefined;
+  try {
+    docBeforeAction = browser.mainDocumentIdentity(compactV2ActionPage);
+  } catch {
+    docBeforeAction = undefined;
+  }
 
   // Defense-in-depth for the confused-deputy guard: if an ORGANIC redirect (not
   // gated by hostAllowed) has landed the operator browser on Squire's own
@@ -6515,13 +6538,27 @@ async function executeAct(
             outputFormat === "compact",
             compactMapEmitted,
           );
+  const actionDocAfter = (() => {
+    try {
+      return browser.mainDocumentIdentity(actionObservationPage);
+    } catch {
+      return undefined;
+    }
+  })();
+  const navigatedDuringSettle =
+    docBeforeAction !== undefined &&
+    actionDocAfter !== undefined &&
+    docBeforeAction !== actionDocAfter;
+  const observationWithNavigation = navigatedDuringSettle
+    ? ({ ...observation, navigated: true } as typeof observation)
+    : observation;
   return {
     ...(actionPageAfter === undefined ? {} : { operationPage: actionPageAfter }),
     observation: withHostScopeDenials(
       session,
-      completedAction.kind === "select" && observation.format !== "browser-use-dom"
-        ? { ...observation, selected_option: completedAction.text }
-        : observation,
+      completedAction.kind === "select" && observationWithNavigation.format !== "browser-use-dom"
+        ? { ...observationWithNavigation, selected_option: completedAction.text }
+        : observationWithNavigation,
     ),
     outcome: {
       ...(completedAction.kind === "select" ? { selectedOption: completedAction.text } : {}),
@@ -9069,56 +9106,270 @@ async function shadowPiercingCapture(
     { source, nodes: handles, scopeNodes: containerHandles },
   );
 }
+function captureSourceContainer(page: Page, source: CaptureSource) {
+  return source.container === undefined
+    ? undefined
+    : page.getByRole(source.container.role, {
+        ...(source.container.name !== undefined
+          ? { name: source.container.name, exact: true }
+          : {}),
+      });
+}
 
-/** Explicit capture reads one source value; zero-match diagnostics expose only
- * rendered roles/names. Normal extract/observe remain unchanged. */
-export async function captureCredentialSource(
-  sessionId: string,
-  source: CaptureSource,
-): Promise<{
+function captureSourceTargets(page: Page, source: CaptureSource) {
+  const container = source.container === undefined ? page : captureSourceContainer(page, source)!;
+  return "selector" in source
+    ? container.locator(`css=${source.selector}`).filter({ visible: true })
+    : container.getByRole(source.role, {
+        ...(source.name !== undefined ? { name: source.name, exact: true } : {}),
+      });
+}
+
+interface CaptureSourceResolution {
   candidate_count: number;
   value?: string;
+  resolved_source?: { tag: string; role?: string; name?: string; selector?: string };
+  resolved_from?: "post_action" | "pre_action_only";
   found?: CaptureFoundCandidate[];
-}> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error("unknown provision session");
-  const page = operationPageForSession(session);
-  if (page === undefined) throw new Error("capture page unavailable");
-  const container =
-    source.container === undefined
-      ? undefined
-      : page.getByRole(source.container.role, {
-          ...(source.container.name !== undefined
-            ? { name: source.container.name, exact: true }
-            : {}),
-        });
-  const scope = container ?? page;
-  const targets =
-    "selector" in source
-      ? scope.locator(`css=${source.selector}`).filter({ visible: true })
-      : scope.getByRole(source.role, {
-          ...(source.name !== undefined ? { name: source.name, exact: true } : {}),
-        });
-  // Pin the selected element in its current document. A new document must not
-  // satisfy the same locator while capture is in flight.
-  let handles: Awaited<ReturnType<typeof targets.elementHandles>>;
+}
+
+async function readCaptureElement(handle: ElementHandle<Node>) {
+  return await handle.evaluate((node) => {
+    if (!node.isConnected || node.ownerDocument !== document)
+      throw new Error("capture source changed");
+    const value =
+      node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
+        ? node.value
+        : node instanceof HTMLElement
+          ? node.innerText
+          : "";
+    let resolved_source: CaptureSourceResolution["resolved_source"];
+    if (node instanceof Element) {
+      const tag = node.localName;
+      const role =
+        node.getAttribute("role") ||
+        (node instanceof HTMLTextAreaElement ||
+        (node instanceof HTMLInputElement && ["text", "email", "url", "tel"].includes(node.type))
+          ? "textbox"
+          : tag === "code"
+            ? "code"
+            : undefined);
+      const root = node.getRootNode();
+      const labelledBy = (node.getAttribute("aria-labelledby") ?? "")
+        .split(/\s+/)
+        .map((id) =>
+          root instanceof Document || root instanceof ShadowRoot
+            ? (root.getElementById(id)?.textContent ?? "")
+            : "",
+        )
+        .join(" ")
+        .trim();
+      const labels =
+        node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
+          ? Array.from(node.labels ?? [])
+              .map((label) => label.textContent ?? "")
+              .join(" ")
+              .trim()
+          : "";
+      const name =
+        labelledBy ||
+        node.getAttribute("aria-label")?.trim() ||
+        labels ||
+        node.getAttribute("title")?.trim();
+      resolved_source = {
+        tag,
+        ...(role ? { role } : {}),
+        ...(name ? { name } : { selector: node.id ? `${tag}#${CSS.escape(node.id)}` : tag }),
+      };
+    }
+    return { value: value.length <= 8192 ? value.trim() : "", resolved_source };
+  });
+}
+
+/** Resolve a capture source once against the live document, disposing the
+ * pinned handles. A new document must not satisfy the same locator while
+ * capture is in flight. */
+async function resolveCaptureSourceOnce(
+  page: Page,
+  source: CaptureSource,
+): Promise<CaptureSourceResolution> {
+  // A locator-engine failure is a zero-match, not a mystery: the explicit
+  // shadow-piercing walk below still gets its chance to resolve the source.
+  const handles = await captureSourceTargets(page, source)
+    .elementHandles()
+    .catch(() => []);
+  const containerHandles =
+    (await captureSourceContainer(page, source)
+      ?.elementHandles()
+      .catch(() => [])) ?? [];
   try {
-    handles = await targets.elementHandles();
-  } catch {
-    // A locator-engine failure is a zero-match, not a mystery: the explicit
-    // shadow-piercing walk below still gets its chance to resolve the source.
-    handles = [];
-  }
-  let containerHandles: typeof handles = [];
-  try {
-    if (container !== undefined)
-      containerHandles = await container.elementHandles().catch(() => []);
-    return await shadowPiercingCapture(page, source, handles, containerHandles);
+    // The reviewed resolver is walk-authoritative: engines can miss
+    // shadow-hosted candidates or pin a stale light-DOM node. Union every
+    // engine result with the explicit walk before requiring exactly one.
+    const rejudged = await shadowPiercingCapture(page, source, handles, containerHandles);
+    if (rejudged.candidate_count !== 1) return { ...rejudged };
+    if (handles.length === 1) {
+      const { value, resolved_source } = await readCaptureElement(handles[0]!);
+      return {
+        candidate_count: 1,
+        ...(value.length > 0 ? { value } : {}),
+        ...(resolved_source ? { resolved_source } : {}),
+      };
+    }
+    return { ...rejudged };
   } finally {
     await Promise.all(
       [...handles, ...containerHandles].map((handle) => handle.dispose().catch(() => undefined)),
     );
   }
+}
+
+/** Live pre-action probe of a click capture's source. The single candidate's
+ * handle stays alive so the post-action resolution can prove it is not merely
+ * the pre-click element re-read; the caller must dispose it. */
+export interface CaptureSourceProbe {
+  candidate_count: number;
+  value?: string;
+  handle?: ElementHandle<Node>;
+}
+
+export async function probeCaptureSource(
+  sessionId: string,
+  source: CaptureSource,
+): Promise<CaptureSourceProbe> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error("unknown provision session");
+  const page = operationPageForSession(session);
+  if (page === undefined) throw new Error("capture page unavailable");
+  const handles = await captureSourceTargets(page, source)
+    .elementHandles()
+    .catch(() => []);
+  const containerHandles =
+    (await captureSourceContainer(page, source)
+      ?.elementHandles()
+      .catch(() => [])) ?? [];
+  const rejudged = await shadowPiercingCapture(page, source, handles, containerHandles);
+  await Promise.all(containerHandles.map((handle) => handle.dispose().catch(() => undefined)));
+  if (rejudged.candidate_count !== 1 || handles.length !== 1) {
+    if (handles.length > 0)
+      await Promise.all(handles.map((handle) => handle.dispose().catch(() => undefined)));
+    // A shadow-only source has no engine-pinned handle; post-action comparison
+    // therefore falls back to the walk's value identity.
+    return { ...rejudged };
+  }
+  const [handle] = handles;
+  try {
+    const { value } = await readCaptureElement(handle!);
+    return { candidate_count: 1, handle: handle!, ...(value.length > 0 ? { value } : {}) };
+  } catch (error) {
+    await handle!.dispose().catch(() => undefined);
+    throw error;
+  }
+}
+
+async function sameDomElement(
+  handle: ElementHandle<Node>,
+  preHandle: ElementHandle<Node> | undefined,
+): Promise<boolean> {
+  if (preHandle === undefined) return false;
+  try {
+    return await handle.evaluate((node, other) => node === other, preHandle);
+  } catch {
+    return false; // stale pre-action handle — a different document's element
+  }
+}
+
+// A click capture that re-reads the SAME element with the SAME value the
+// pre-action probe saw proves only the pre-click document — the click's
+// mutation has not rendered yet (the Groq key-dialog failure: the display-name
+// textbox was the only pre-click textbox, and the capture vaulted its value as
+// the key). Poll a bounded window for the mutation to render a changed
+// resolution; if the source still resolves only as it did before the click,
+// report pre_action_only so the caller treats storage as unresolved.
+const CAPTURE_MUTATION_RENDER_BUDGET_MS = 2_000;
+const CAPTURE_MUTATION_RENDER_POLL_MS = 250;
+
+async function resolveChangedPostActionSource(
+  page: Page,
+  source: CaptureSource,
+  pre: CaptureSourceProbe,
+): Promise<CaptureSourceResolution | null> {
+  const handles = await captureSourceTargets(page, source)
+    .elementHandles()
+    .catch(() => []);
+  const containerHandles =
+    (await captureSourceContainer(page, source)
+      ?.elementHandles()
+      .catch(() => [])) ?? [];
+  try {
+    const walked = await shadowPiercingCapture(page, source, handles, containerHandles);
+    if (walked.candidate_count === 1) {
+      const pinned = handles.length === 1 ? await readCaptureElement(handles[0]!) : undefined;
+      const value = pinned?.value ?? walked.value ?? "";
+      const unchanged =
+        pre.candidate_count === 1 &&
+        // A shadow-walked pre-probe has no live handle: value identity is the
+        // only proof available, and an equal value still proves nothing new.
+        (handles.length === 0 ||
+          pre.handle === undefined ||
+          (handles.length === 1 && (await sameDomElement(handles[0]!, pre.handle)))) &&
+        (pre.value ?? "") === value;
+      if (unchanged) return null;
+      return {
+        candidate_count: 1,
+        ...(value.length > 0 ? { value } : {}),
+        ...(pinned?.resolved_source ? { resolved_source: pinned.resolved_source } : {}),
+      };
+    }
+    // Same non-unique (or still-empty) resolution as before the click — keep
+    // waiting; the mutation may still be rendering.
+    if (walked.candidate_count === pre.candidate_count) return null;
+    return { ...walked };
+  } finally {
+    await Promise.all(
+      [...handles, ...containerHandles].map((handle) => handle.dispose().catch(() => undefined)),
+    );
+  }
+}
+
+async function resolvePostActionCaptureSource(
+  page: Page,
+  source: CaptureSource,
+  pre: CaptureSourceProbe,
+): Promise<CaptureSourceResolution> {
+  const deadline = Date.now() + CAPTURE_MUTATION_RENDER_BUDGET_MS;
+  for (;;) {
+    const changed = await resolveChangedPostActionSource(page, source, pre);
+    if (changed !== null) return { ...changed, resolved_from: "post_action" };
+    if (Date.now() >= deadline)
+      return { candidate_count: pre.candidate_count, resolved_from: "pre_action_only" };
+    await new Promise((resolve) => setTimeout(resolve, CAPTURE_MUTATION_RENDER_POLL_MS));
+  }
+}
+
+/** Explicit capture reads one named source without revealing other controls or
+ * scanning unrelated page text. Normal extract/observe remain unchanged.
+ * With `afterAction`, the source is judged against the POST-action document:
+ * the click's own settle runs first, and a resolution indistinguishable from
+ * the pre-action probe is reported as `pre_action_only` instead of stored. */
+export async function captureCredentialSource(
+  sessionId: string,
+  source: CaptureSource,
+  afterAction?: { pre?: CaptureSourceProbe | undefined },
+): Promise<CaptureSourceResolution> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error("unknown provision session");
+  const page = operationPageForSession(session);
+  if (page === undefined) throw new Error("capture page unavailable");
+  if (afterAction !== undefined) {
+    // Same settle the click itself waits on — judge the source only after the
+    // click's mutation has had its render window.
+    await settleAfterStateChange(session.browser, page);
+    return afterAction.pre === undefined
+      ? { candidate_count: 0, resolved_from: "pre_action_only" }
+      : await resolvePostActionCaptureSource(page, source, afterAction.pre);
+  }
+  return await resolveCaptureSourceOnce(page, source);
 }
 
 export async function extractCredentials(sessionId: string): Promise<ExtractResult> {

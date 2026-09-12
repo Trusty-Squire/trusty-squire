@@ -341,20 +341,6 @@ vi.mock("../browser.js", async (importOriginal) => ({
       return {
         isClosed: () => false,
         url: () => this.currentUrl(),
-        getByRole: () => ({
-          elementHandles: async () =>
-            h.captureValues.map((value) => ({
-              value,
-              dispose: async () => {},
-            })),
-        }),
-        // Model the page-evaluation boundary; DOM resolution is covered by
-        // credential-capture-browser.test.ts with a real browser.
-        evaluate: async (_fn: unknown, { nodes }: { nodes: Array<{ value: string }> }) => ({
-          candidate_count: nodes.length,
-          ...(nodes.length === 1 ? { value: nodes[0]!.value } : {}),
-          ...(nodes.length === 0 ? { found: [] } : {}),
-        }),
       };
     }
     mainDocumentIdentity(): string {

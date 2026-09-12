@@ -114,12 +114,12 @@ it("captures the id-less Groq-style key input inside an open shadow root", async
         '<input value="${value}">';
     </script>`);
   // role textbox: the id-less typeless input is the only textbox on the page.
-  expect(await captureCredentialSource("fixture", { role: "textbox" })).toEqual({
+  expect(await captureCredentialSource("fixture", { role: "textbox" })).toMatchObject({
     candidate_count: 1,
     value,
   });
   // selector "input": pierces the open shadow root.
-  expect(await captureCredentialSource("fixture", { selector: "input" })).toEqual({
+  expect(await captureCredentialSource("fixture", { selector: "input" })).toMatchObject({
     candidate_count: 1,
     value,
   });
@@ -539,7 +539,9 @@ it.each([false, true])(
           selector: "[role=dialog] input",
           container: { role: "dialog", name: "Created key" },
         }),
-      ).toEqual(competing ? { candidate_count: 2 } : { candidate_count: 1, value: "new-fixture" });
+      ).toMatchObject(
+        competing ? { candidate_count: 2 } : { candidate_count: 1, value: "new-fixture" },
+      );
     } finally {
       lookup.mockRestore();
     }
@@ -564,7 +566,7 @@ it.each(["element", "ancestor", "shadow-host"])(
         );
       }
     }, kind);
-    expect(await captureCredentialSource("fixture", { role: "textbox" })).toEqual({
+    expect(await captureCredentialSource("fixture", { role: "textbox" })).toMatchObject({
       candidate_count: 1,
       value: "new-fixture",
     });
@@ -588,12 +590,12 @@ it.each(["textbox", "selector"])(
 
 it("does not assign a textbox role to generic editable notes", async () => {
   await page.setContent('<div contenteditable="true">private-notes-fixture</div>');
-  expect(await captureCredentialSource("fixture", { role: "textbox" })).toEqual({
+  expect(await captureCredentialSource("fixture", { role: "textbox" })).toMatchObject({
     candidate_count: 0,
     found: [],
   });
   await page.locator("[contenteditable]").evaluate((node) => node.setAttribute("role", "textbox"));
-  expect(await captureCredentialSource("fixture", { role: "textbox" })).toEqual({
+  expect(await captureCredentialSource("fixture", { role: "textbox" })).toMatchObject({
     candidate_count: 1,
     value: "private-notes-fixture",
   });
@@ -609,7 +611,7 @@ it.each([false, true])(
         (includeKey ? '<input value="new-key-fixture">' : "");
     }, withKey);
     const result = await captureCredentialSource("fixture", { role: "textbox" });
-    expect(result).toEqual(
+    expect(result).toMatchObject(
       withKey
         ? { candidate_count: 1, value: "new-key-fixture" }
         : { candidate_count: 0, found: [{ role: "combobox", name: null }] },
@@ -629,7 +631,7 @@ it.each([false, true])(
       selector: ":scope > input",
       container: { role: "dialog" },
     });
-    if (direct) expect(result).toEqual({ candidate_count: 1, value: "direct-new-fixture" });
+    if (direct) expect(result).toMatchObject({ candidate_count: 1, value: "direct-new-fixture" });
     else {
       expect(result.candidate_count).toBe(0);
       expect(result.value).toBeUndefined();
