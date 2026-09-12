@@ -11988,6 +11988,7 @@ export class BrowserController {
       document.querySelectorAll("body *").forEach((el) => {
         if (el.tagName === "SCRIPT" || el.tagName === "STYLE") return;
         if (!isVisible(el)) return;
+        if (el.closest('code, pre, kbd, samp, [role="textbox"]') !== null) return;
         let direct = "";
         el.childNodes.forEach((n) => {
           if (n.nodeType === Node.TEXT_NODE) direct += n.textContent ?? "";

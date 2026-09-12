@@ -7073,6 +7073,9 @@ describe("operate_extract — v1.1.6 credential candidate selection", () => {
         { label: "API Key", value: "re_1234567890abcdefghij…", inline: true },
         { label: "API Key", value: "re_1234567890abcdefghij ...", inline: true },
         { label: "API Key", value: "re_1234567890abcdefghij••••", inline: true },
+        { label: "API Key", value: "re_1234567890abcdefghij••••", inline: true, nested: true },
+        { label: "API Key", value: "re_1234567890abcdefghij****", inline: true, nested: true },
+        { label: "API Key", value: "re_1234567890abcdefghij…", inline: true, nested: true },
         { label: "API Key", value: "re_1234567890abcdefghij●", inline: true },
         { label: "API Key", value: "re_1234567890abcdefghij⬤", inline: true },
         { label: "API Key", value: "re_1234567890abcdefghij ••••", inline: true },
@@ -7081,9 +7084,9 @@ describe("operate_extract — v1.1.6 credential candidate selection", () => {
         { label: "Team ID", value: "exaTeam01J4M8Q7Z2N6P5R3", inline: false },
         { label: "Team ID", value: "exaTeam01J4M8Q7Z2N6P5R3", inline: true },
         { label: "Team ID", value: "re_1234567890abcdefghij", inline: false },
-      ].map((fixture) => ({ ...fixture, caller })),
+      ].map((fixture) => ({ nested: false, ...fixture, caller })),
     ),
-  )( "$caller rejects collected $label $value (inline=$inline)", async ({ caller, label, value, inline }) => {
+  )( "$caller rejects collected $label $value (inline=$inline, nested=$nested)", async ({ caller, label, value, inline, nested }) => {
     const started = await startProvisionSession({ serviceUrl: "https://dashboard.exa.ai/api-keys" });
     const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
     const page = await browser.newPage();
@@ -7091,7 +7094,9 @@ describe("operate_extract — v1.1.6 credential candidate selection", () => {
     await page.setContent(`
       <h1 style="position:absolute;left:0;top:0">API Key</h1>
       <div style="position:absolute;left:0;top:150px;display:flex;align-items:center;gap:10px">
-        ${inline ? `<span>${label}: ${value}</span>` : `<span>${label}</span><code>${value}</code>`}
+        ${nested
+          ? `<span>${label}:</span><code><span><span>re_1234567890abcdefghij</span></span><span>${value.slice("re_1234567890abcdefghij".length)}</span></code>`
+          : inline ? `<span>${label}: ${value}</span>` : `<span>${label}</span><code>${value}</code>`}
         <button aria-label="Copy: ${value}">Copy</button>
       </div>
     `);
@@ -7101,6 +7106,9 @@ describe("operate_extract — v1.1.6 credential candidate selection", () => {
     h.nearCopyCredentialCandidates = await collector.extractCredentialsNearCopyButtons(page);
     h.visibleText = await page.locator("body").innerText();
     expect(h.nearCopyCredentialCandidates).toContain(value);
+    if (nested) {
+      expect(h.labeledCredentialCandidates.some((candidate) => candidate.value === "re_1234567890abcdefghij")).toBe(false);
+    }
     expect(h.labeledCredentialCandidates).toContainEqual(expect.objectContaining({
       value,
       label: label === "Team ID" ? "team id" : inline ? "key" : "api key",
