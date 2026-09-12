@@ -7026,11 +7026,11 @@ describe("operate_extract — v1.1.6 credential candidate selection", () => {
     (["extract", "finish"] as const).flatMap((caller) => [
       { caller, url: "https://console.neon.tech/app/settings", keys: ["napi_1234567890abcdefghij1234567890"] },
       { caller, url: "https://cloud.langfuse.com/project/x/settings/api-keys", keys: [sk("lf-1234567890abcdef1234567890"), "pk-lf-0987654321abcdef0987654321"] },
-    ]),
-  )("$caller never stores masked provider keys at $url", async ({ caller, url, keys }) => {
-    h.labeledCredentialCandidates = keys.map((key) => ({ label: "API Key", value: `${key}****`, isMasked: true }));
-    h.nearCopyCredentialCandidates = keys.map((key) => `${key}****`);
-    h.visibleText = keys.map((key) => `API Key: ${key}****`).join("\n");
+    ].flatMap((fixture) => ["****", "••••", "●", " ⬤"].map((mask) => ({ ...fixture, mask })))),
+  )("$caller never stores masked provider keys at $url with $mask", async ({ caller, url, keys, mask }) => {
+    h.labeledCredentialCandidates = keys.map((key) => ({ label: "API Key", value: `${key}${mask}`, isMasked: true }));
+    h.nearCopyCredentialCandidates = keys.map((key) => `${key}${mask}`);
+    h.visibleText = keys.map((key) => `API Key: ${key}${mask}`).join("\n");
     const started = await startProvisionSession({ serviceUrl: url });
     expect((await extractCredentials(started.session_id)).credentials).toEqual({ api_key_truncated: keys[0] });
     const storeCredential = vi.fn();
@@ -7072,6 +7072,12 @@ describe("operate_extract — v1.1.6 credential candidate selection", () => {
         { label: "API Key", value: "re_1234567890abcdefghij ****", inline: true },
         { label: "API Key", value: "re_1234567890abcdefghij…", inline: true },
         { label: "API Key", value: "re_1234567890abcdefghij ...", inline: true },
+        { label: "API Key", value: "re_1234567890abcdefghij••••", inline: true },
+        { label: "API Key", value: "re_1234567890abcdefghij●", inline: true },
+        { label: "API Key", value: "re_1234567890abcdefghij⬤", inline: true },
+        { label: "API Key", value: "re_1234567890abcdefghij ••••", inline: true },
+        { label: "API Key", value: "re_1234567890abcdefghij ●", inline: true },
+        { label: "API Key", value: "re_1234567890abcdefghij ⬤", inline: true },
         { label: "Team ID", value: "exaTeam01J4M8Q7Z2N6P5R3", inline: false },
         { label: "Team ID", value: "exaTeam01J4M8Q7Z2N6P5R3", inline: true },
         { label: "Team ID", value: "re_1234567890abcdefghij", inline: false },

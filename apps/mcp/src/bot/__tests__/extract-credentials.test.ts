@@ -304,17 +304,17 @@ describe("extractApiKeyFromText — OpenRouter / Anthropic / OpenAI prefixes (F1
 });
 
 describe("isTruncatedCapture — F10 truncation detection", () => {
-  it("excludes every masked secondary token while retaining revealed occurrences", () => {
+  it.each(["****", "••••", "●", " ⬤⬤"])("excludes secondary tokens masked with %s while retaining revealed occurrences", (mask) => {
     const first = "re_1234567890abcdefghij";
     const second = "re_0987654321abcdefghij";
-    const maskedRows = `API Key: ${first}****\nAPI Key: ${second}****`;
+    const maskedRows = `API Key: ${first}${mask}\nAPI Key: ${second}${mask}`;
     expect(findCredentialTokens(maskedRows)).toEqual([]);
     expect(findCredentialTokens(`${maskedRows}\nAPI Key: ${second}`)).toEqual([second]);
     expect(findCredentialTokens(`API Key: ${second}\n${maskedRows}`)).toEqual([second]);
     expect(findCredentialTokens(`${first}…\n${second}...`)).toEqual([]);
   });
 
-  it.each(["****", " ***", "…", "..."])("preserves a trailing %s mask after substring extraction", (mask) => {
+  it.each(["****", " ***", "…", "...", "••••", "●", "⬤", " ••••", " ●", " ⬤"])("preserves a trailing %s mask after substring extraction", (mask) => {
     const prefix = "re_1234567890abcdefghij";
     const source = `API Key: ${prefix}${mask}`;
     const captured = extractApiKeyFromText(source);

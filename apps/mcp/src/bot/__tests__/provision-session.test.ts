@@ -970,7 +970,12 @@ describe("sanitizeExtractedCredentials", () => {
     { url: "https://cloud.langfuse.com/project/x/settings/api-keys", key: sk("lf-1234567890abcdef1234567890"), fields: ["api_key", "langfuse_secret_key"] },
     { url: "https://cloud.langfuse.com/project/x/settings/api-keys", key: "pk-lf-1234567890abcdef1234567890", fields: ["langfuse_public_key"] },
   ])("keeps masked matches out of provider fields at $url ($fields)", ({ url, key, fields }) => {
-    expect(sanitizeExtractedCredentials({}, url, `${key}****`)).toEqual({});
+    for (const mask of ["****", "••••", "●", " ⬤"]) {
+      expect(sanitizeExtractedCredentials({}, url, `${key}${mask}`)).toEqual({});
+      expect(sanitizeExtractedCredentials({}, url, `${key}${mask}\n${key}`)).toEqual(
+        Object.fromEntries(fields.map((field) => [field, key])),
+      );
+    }
     expect(sanitizeExtractedCredentials({}, url, `${key} ...`)).toEqual({});
     expect(sanitizeExtractedCredentials({}, url, `${key}****\n${key}`)).toEqual(
       Object.fromEntries(fields.map((field) => [field, key])),
