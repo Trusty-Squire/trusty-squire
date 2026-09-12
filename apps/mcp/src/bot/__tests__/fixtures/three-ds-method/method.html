@@ -1,0 +1,11 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Synthetic issuer method</title></head>
+<body><script>
+// Model asynchronous device collection and a server-issued completion result.
+window.addEventListener('load', () => setTimeout(async () => {
+  const response = await fetch('/fingerprint-complete', { method: 'POST',
+    body: JSON.stringify({ transaction: 'synthetic-transaction',
+      screenWidth: screen.width, language: navigator.language }) });
+  const result = await response.json();
+  parent.postMessage({ type: 'threeDSMethodCompleted', token: result.token }, '__PARENT_ORIGIN__');
+}, 50));
+</script></body></html>

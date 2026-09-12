@@ -1,0 +1,38 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Synthetic SBPS lookup result</title>
+<script>
+// The method document owns the entire transition. The operator must only wait.
+let loaded = false;
+let completion = '';
+let submitted = false;
+function submitWhenReady() {
+  if (!loaded || !completion || submitted) return;
+  submitted = true;
+  document.getElementById('methodCompletion').value = completion;
+  setTimeout(() => document.getElementById('resSumbitButtonId').click(), 25);
+}
+window.addEventListener('message', event => {
+  if (event.origin !== '__METHOD_ORIGIN__' ||
+      event.source !== document.getElementById('methodFrame').contentWindow ||
+      event.data.type !== 'threeDSMethodCompleted') return;
+  completion = event.data.token;
+  submitWhenReady();
+});
+function onMethodPageLoad() {
+  loaded = true;
+  // An empty src is intentional: a native form POST targets the named frame.
+  document.getElementById('fingerprintForm').submit();
+  submitWhenReady();
+}
+</script></head>
+<body onload="onMethodPageLoad()">
+<p>Processing device fingerprint</p>
+<iframe id="methodFrame" name="methodFrame" src="" width="1249" height="837"></iframe>
+<form id="fingerprintForm" method="post" target="methodFrame" action="__METHOD_ORIGIN__/method">
+<input type="hidden" name="threeDSMethodData" value="synthetic-transaction">
+</form>
+<form method="post" action="/FepChargePaymentInfoAuthenticateInit.do">
+<input type="hidden" id="methodCompletion" name="methodCompletion" value="">
+<input type="submit" id="resSumbitButtonId" value="Continue">
+</form>
+</body></html>
