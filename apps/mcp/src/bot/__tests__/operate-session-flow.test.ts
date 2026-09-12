@@ -9893,6 +9893,8 @@ describe("operate_pay tool completion — system-owned approval wait [P0]", () =
         approval_id: "appr_retry_1",
       });
       const oldApproval = getActivePendingApproval()!;
+      expect(paymentSession(started.session_id).paymentFieldSealActive).toBe(true);
+      expect(h.filledCards).toEqual([]);
       terminal = true;
       if (observedByStatus) {
         completeActivePendingApprovalWithTerminalStatus(oldApproval, terminalStatus);
@@ -9902,6 +9904,8 @@ describe("operate_pay tool completion — system-owned approval wait [P0]", () =
           terminalStatus === "expired" ? "payment_approval_timeout" : "payment_approval_denied",
       });
       expect(oldApproval.keypair.privateKey).toBe("");
+      expect(paymentSession(started.session_id).activePayment).toBeNull();
+      expect(paymentSession(started.session_id).paymentFieldSealActive).toBe(false);
       expect(h.filledCards).toEqual([]);
       expect(await operatePayTool.handler(args, env.api, context)).toMatchObject({
         status: "approval_pending",
