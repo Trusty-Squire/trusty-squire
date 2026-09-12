@@ -6542,15 +6542,33 @@ describe("3DS detection vs captcha frames", () => {
 });
 
 describe("SBPS 3DS result classification", () => {
-  it.skipIf(!chromiumAvailable)(
-    "recognizes the captured Japanese authentication failure",
-    async () => {
+  it.skipIf(!chromiumAvailable).each(["本人認証に失敗しました", "3D Secure authentication failed"])(
+    "does not prompt for approval after terminal authentication failure: %s",
+    async (failure) => {
       const browser = await chromium.launch({ headless: true });
       const page = await browser.newPage();
+      const acs = "https://emvtds.sps-system.com/emvtds-fe/authenticate";
+      await page.route("**/*", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<meta charset="utf-8"><p>${failure}</p>`,
+        }),
+      );
       try {
-        await page.setContent("<p>本人認証に失敗しました</p>");
+        await page.goto(acs);
         const controller = BrowserController.fromHarnessPage(page);
-        await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("failed");
+        await expect(
+          (
+            controller as unknown as {
+              detectThreeDsChallenge(): Promise<CheckoutSubmitResult>;
+            }
+          ).detectThreeDsChallenge(),
+        ).resolves.toMatchObject({ three_ds_required: false });
+        const notify = vi.fn();
+        await expect(
+          controller.paymentBrowser(page).waitForThreeDsResolution(0, notify),
+        ).resolves.toBe("failed");
+        expect(notify).not.toHaveBeenCalled();
       } finally {
         await browser.close();
       }

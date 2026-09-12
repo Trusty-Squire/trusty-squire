@@ -11029,6 +11029,21 @@ export class BrowserController {
     };
   }
 
+  private async hasFailedCheckoutAuthentication(page: Page): Promise<boolean> {
+    const failureText =
+      /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)|本人認証に失敗しました/iu;
+    const texts = await Promise.all(
+      page
+        .frames()
+        .filter((frame) => !this.frameWithinCaptcha(frame))
+        .map(
+          async (frame) =>
+            await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
+        ),
+    );
+    return texts.some((text) => failureText.test(text));
+  }
+
   private async detectThreeDsChallenge(
     expectedCard?: Pick<CheckoutCard, "pan" | "issuer" | "issuer_source" | "network" | "label">,
     page: Page | null = this.page,
@@ -11036,6 +11051,9 @@ export class BrowserController {
     if (!page) throw new Error("Browser not started");
     if (expectedCard !== undefined) {
       this.rememberPaymentInstrumentExpectation(expectedCard);
+    }
+    if (await this.hasFailedCheckoutAuthentication(page)) {
+      return { three_ds_required: false, order_confirmed: false };
     }
     // Cross-processor 3DS signals only — never key on a single PSP's internal
     // state. CardinalCommerce backs the ACS/StepUp flow for many processors
@@ -11147,8 +11165,6 @@ export class BrowserController {
     if (!page) throw new Error("Browser not started");
     const outcomeBaseline =
       this.checkoutOutcomeBaseline ?? (await this.captureCheckoutOutcomeBaseline(page));
-    const failureText =
-      /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)|本人認証に失敗しました/iu;
     const deadline = Date.now() + Math.max(timeoutMs, 0);
     const mismatchAtEntry = this.observedPaymentInstrumentMismatch;
     let challengeObserved = false;
@@ -11170,16 +11186,7 @@ export class BrowserController {
         this.paymentNetworkDeadlines.delete(page);
         return "succeeded";
       }
-      const texts = await Promise.all(
-        page
-          .frames()
-          .filter((frame) => !this.frameWithinCaptcha(frame))
-          .map(
-            async (frame) =>
-              await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
-          ),
-      );
-      if (texts.some((text) => failureText.test(text))) {
+      if (await this.hasFailedCheckoutAuthentication(page)) {
         this.paymentNetworkDeadlines.delete(page);
         return "failed";
       }

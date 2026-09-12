@@ -2818,9 +2818,6 @@ export async function observeCallerDrivenPayment(session: Session): Promise<void
     const notify = (): void => markPendingThreeDsChallenge(api, state);
     const resolution = await browser.waitForThreeDsResolution(0, notify);
     if (resolution === "challenge_pending") notify();
-    if (resolution === "succeeded" || resolution === "failed") {
-      clearActivePendingThreeDsIfCurrent(state, session);
-    }
   } catch {}
 }
 

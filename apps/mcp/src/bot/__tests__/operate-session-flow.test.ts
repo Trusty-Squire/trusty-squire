@@ -9000,6 +9000,48 @@ describe("pending card-fill charge guard", () => {
     },
   );
 
+  it.each(["succeeded", "failed"] as const)(
+    "preserves a split-checkout outcome that %s before confirm for status reporting",
+    async (resolution) => {
+      h.elements = [
+        elem({ tag: "button", type: null, visibleText: "Place order", selector: "#place-order" }),
+      ];
+      const auditPayment = vi.fn().mockResolvedValue({ id: "evt_terminal" });
+      const notifyThreeDs = vi.fn().mockResolvedValue({ sent: true });
+      const api = { auditPayment, notifyThreeDs } as unknown as ApiClient;
+      const started = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/checkout",
+        api,
+      });
+      setActivePendingCardFill(pending);
+      h.waitForThreeDsResult = "challenge_pending";
+      await act(started.session_id, { kind: "click", target: "Place order" });
+      h.waitForThreeDsResult = resolution;
+      await operatePayTool.handler(
+        operatePayTool.inputSchema.parse({
+          session_id: started.session_id,
+          phase: "confirm",
+          item: "Widget",
+          reason: "Synthetic purchase",
+        }),
+        api,
+      );
+      expect(auditPayment).toHaveBeenCalledTimes(1);
+      const status = resolution === "succeeded" ? "payment_submitted" : "payment_declined";
+      await expect(
+        operatePaymentStatusTool.handler({ session_id: started.session_id, wait_seconds: 0 }, api),
+      ).resolves.toMatchObject({ status, audit_recorded: true });
+      expect(auditPayment).toHaveBeenLastCalledWith(
+        expect.objectContaining({ status, approval_id: pending.approval_id }),
+      );
+      expect(auditPayment).toHaveBeenCalledTimes(2);
+      await expect(
+        operatePaymentStatusTool.handler({ session_id: started.session_id, wait_seconds: 0 }, api),
+      ).resolves.toMatchObject({ status: "no_pending_payment" });
+      expect(notifyThreeDs).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("tracks pending, confirming, and submit-started states distinctly", async () => {
     await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
     setActivePendingCardFill(pending);
