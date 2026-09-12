@@ -285,7 +285,9 @@ describe("payment-window browser networking", () => {
       page.on("response", (response) => {
         responses.push({ url: response.url(), status: response.status() });
       });
-      const evidence = process.env.PAYMENT_TEST_EVIDENCE_DIR;
+      const evidence = process.env.PAYMENT_TEST_EVIDENCE_DIR
+        ? join(process.env.PAYMENT_TEST_EVIDENCE_DIR, phase)
+        : undefined;
       try {
         await page.goto(checkout);
         if (evidence) {

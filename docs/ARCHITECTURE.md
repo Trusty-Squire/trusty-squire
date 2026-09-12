@@ -258,19 +258,16 @@ agent starts operate_pay in the addressed checkout session
      `vault.payment_executed` event with `payment_place_order_attempted` status,
      bound to the approval, optional mandate, approved amount/currency, merchant,
      and opaque card reference. It records an attempt, never a verified charge outcome
-  -> split confirm makes no browser or provider call: it reads no total, verifies
-     no amount, and submits nothing (it never charges), so it reports the approved
-     merchant/amount/currency back and releases the pending-fill lease into a
-     sealed state — the payment-field marker stays set since the fields were never
-     actually cleared, and the session then refuses further payment operations for its
-     lifetime; there is no same-session refill, only operate_finish + a fresh
-     session recovers a stuck or declined payment
+  -> split confirmation and passive outcome tracking follow the README payment
+     guide ("One prompt"); confirmation releases the pending-fill lease into a
+     sealed state without clearing the filled fields. There is no same-session
+     refill; operate_finish + a fresh session recovers a stuck or declined payment
   -> the addressed session owns and serializes payment entry and confirmation;
      another session cannot observe or resume that approval (the contract lives
      in SECURITY.md)
   -> only the single-page (phase="single") flow still submits and enters the
-     bounded authentication/outcome wait below; the API sends a challenge-specific
-     Telegram nudge only after genuine 3-D Secure evidence appears
+     bounded authentication/outcome wait below; notification behavior for both
+     payment paths is owned by the README payment guide ("One prompt")
   -> the browser completes authentication natively while the operator polls for a new
      merchant terminal route with a substantive order or receipt identity and passively
      compares ACS issuer/network/last-four evidence with the released card. A mismatch

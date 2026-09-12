@@ -1290,6 +1290,20 @@ describe("payment approval relay", () => {
     expect(body.text).toContain("USD 25.99");
     expect(body.text).toContain("bank app");
     expect(body.text).toContain("3-D Secure required");
+    const evidence = process.env.PAYMENT_TEST_EVIDENCE_DIR;
+    if (evidence) {
+      const { mkdir, writeFile } = await import("node:fs/promises");
+      const { join } = await import("node:path");
+      await mkdir(evidence, { recursive: true });
+      await writeFile(
+        join(evidence, "telegram-three-ds.json"),
+        JSON.stringify({
+          scope: "Real API route and Telegram serialization; intercepted delivery, no external message sent",
+          response: response.json(),
+          telegram: body,
+        }, null, 2),
+      );
+    }
   });
 
   it("uses cautious Telegram copy for possible out-of-band authentication", async () => {

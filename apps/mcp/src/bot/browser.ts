@@ -11055,9 +11055,8 @@ export class BrowserController {
     if (await this.hasFailedCheckoutAuthentication(page)) {
       return { three_ds_required: false, order_confirmed: false };
     }
-    // Cross-processor 3DS signals only — never key on a single PSP's internal
-    // state. CardinalCommerce backs the ACS/StepUp flow for many processors
-    // (not just Stripe), so its host is a generic signal, not Stripe-specific.
+    // Challenge URLs are evidence only when their frame is visibly rendered;
+    // hidden method/fingerprint documents must not prompt the cardholder.
     const urlPattern =
       /(?:https?:\/\/(?:[^/]+\.)*cardinalcommerce\.com\/(?:v\d+\/)?cruise\/stepup(?:[/?#]|$)|https?:\/\/hooks\.stripe\.com\/3d_secure|https?:\/\/(?:[^/]+\.)*emvtds(?:[-.][^/]*)?(?:\/|$)|3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/(?:emvtds|emv-?3ds)(?:[-_/]|$)|\/3ds(?:2)?\/|\/acs\/|\/credit3d2\/Fep(?:ChargePaymentInfo|BridgeAuthority)[^/?#]*\.do(?:[?#]|$))/i;
     let challengeFallback: CheckoutSubmitResult | undefined;
