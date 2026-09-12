@@ -685,6 +685,7 @@ async function captureIntoVault(
       api,
       writeId,
     );
+    if (stored === null) throw new Error("capture_unresolved");
     await persistOperatorCaptureEvidence({
       write_id: writeId,
       binding,
@@ -861,7 +862,13 @@ async function persistExtracted(
   store: StoreSpec,
   api: ApiClient,
   writeId?: string,
-): Promise<StoredCredentialMetadata> {
+): Promise<StoredCredentialMetadata | null> {
+  credentials = Object.fromEntries(
+    Object.entries(credentials).filter(([key, value]) => !key.endsWith("_truncated") && !isMaskedDisplay(value)),
+  );
+  if (!Object.entries(credentials).some(
+    ([key, value]) => /(?:^|_)(?:key|token|secret)(?:_\d+)?$/.test(key) && value.trim().length > 0,
+  )) return null;
   const observedHosts = [
     ...new Set([...(store.egress_hosts ?? []), ...observedHostsForSession(sessionId)]),
   ];
@@ -899,7 +906,7 @@ async function persistExtracted(
  * stored extraction must never spread that object back into the MCP response:
  * the host/model receives only non-secret extraction and vault metadata.
  */
-export function storedExtractResult(extracted: ExtractResult, stored: StoredCredentialMetadata) {
+export function storedExtractResult(extracted: ExtractResult, stored: StoredCredentialMetadata | null) {
   return {
     session_id: extracted.session_id,
     url: extracted.url,

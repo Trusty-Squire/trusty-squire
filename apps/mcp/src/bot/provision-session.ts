@@ -8790,6 +8790,7 @@ export function sanitizeExtractedCredentials(
   credentials: Record<string, string>,
   url: string,
   haystack = Object.values(credentials).join("\n"),
+  acceptedNearCopyCredential: string | null = null,
 ): Record<string, string> {
   const host = registrableHost(url) ?? "";
   const normalized: Record<string, string> = {};
@@ -8818,7 +8819,7 @@ export function sanitizeExtractedCredentials(
     const k = normLabelKey(key);
     if (k === "refcode" || k === "referral_code") continue;
     if (isCredentialNoise(value)) continue;
-    if ((k === "key" || k === "api_key") && !looksLikeCredentialValue(value)) continue;
+    if ((k === "key" || k === "api_key") && value !== acceptedNearCopyCredential && !looksLikeCredentialValue(value)) continue;
     if (host === "api.together.ai" && /^key_[A-Za-z0-9]{16,}$/i.test(value.trim())) continue;
     normalized[key] = value;
   }
@@ -9452,16 +9453,14 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     ...resolveExtraction(state),
   };
 
-  // Relaxed near-copy fallback: a PREFIXLESS, SEPARATORLESS key (deepinfra's
-  // `Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz`) that the strict scanners refuse from raw
-  // text but which was harvested from beside a copy/reveal affordance — that
-  // proximity is the disambiguator. Only when nothing better surfaced an api_key
-  // (a labeled or prefixed key always wins), so this can't clobber a real match.
-  if (!("api_key" in credentials)) {
-    const relaxed = pickRelaxedNearCopyCredential(nearCopy);
-    if (relaxed !== null && !Object.values(credentials).includes(relaxed)) {
-      credentials.api_key = relaxed;
-    }
+  const relaxed = pickRelaxedNearCopyCredential(nearCopy);
+  const acceptedNearCopyCredential =
+    relaxed !== null &&
+    !Object.entries(credentials).some(([key, value]) => key !== "api_key" && value === relaxed)
+      ? relaxed
+      : null;
+  if (!("api_key" in credentials) && acceptedNearCopyCredential !== null) {
+    credentials.api_key = acceptedNearCopyCredential;
   }
 
   // Multi-credential: a service may present several keys of the SAME family
@@ -9491,6 +9490,7 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     credentials,
     page?.url() ?? browser.currentUrl(),
     haystack,
+    acceptedNearCopyCredential,
   );
   const found = Object.keys(sanitized).length > 0;
   audit(sessionId, "extract", { found, candidate_count: labeled.length });
