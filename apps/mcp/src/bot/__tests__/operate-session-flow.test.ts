@@ -9955,11 +9955,12 @@ describe("operate_pay tool completion — system-owned approval wait [P0]", () =
       } else {
         expect(paymentSession(started.session_id).activePayment).toBeNull();
         env.setApproved(false);
-        expect(await operatePayTool.handler(args, env.api, {
-          paymentApprovalWaitMs: 0,
-          notifyUser: vi.fn(),
-        }))
-          .toMatchObject({ status: "approval_pending" });
+        expect(
+          await operatePayTool.handler(args, env.api, {
+            paymentApprovalWaitMs: 0,
+            notifyUser: vi.fn(),
+          }),
+        ).toMatchObject({ status: "approval_pending" });
         expect(env.approvalBodies).toHaveLength(2);
       }
       expect(h.filledCards).toHaveLength(1);

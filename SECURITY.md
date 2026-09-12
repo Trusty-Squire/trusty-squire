@@ -225,7 +225,7 @@ merchant, amount, and currency back to the caller and releases the pending-fill
 lease into a sealed state — the payment-field marker stays set, since the operator
 never actually cleared the live fields, and the session then
 refuses further payment operations for its lifetime. There is deliberately no
-same-session path to fill a different card after a fill or a confirm: recovery from
+same-session path to fill a different card after a successful split fill or confirm: recovery from
 a stuck, declined, or abandoned payment is closing the session with `operate_finish`
 and starting a fresh one, not an in-place refill. Every payment entry is still
 claimed before asynchronous work begins, and a pending confirmation is claimed
@@ -259,10 +259,9 @@ server-side wait of up to one minute. If that call returns `approval_pending`, a
 than creating another human authorization. `operate_payment_status` is an optional
 non-charging view before charge and the continuation after an unresolved submitted attempt;
 its bounded waits never verify a mandate or open a card. When either path observes
-denial or expiry, it clears the private operator key and keeps that session's attempt
-terminal. Repeated calls return the same terminal result and cannot automatically mint
-a replacement approval; a new charge attempt requires a fresh session and a fresh
-explicit human approval action. `operate_pay` and `operate_payment_status`
+denial or expiry, it clears the private operator key. The
+[README payment guide](README.md#one-prompt) owns in-session retry and cleanup-failure
+recovery; the lapsed approval never authorizes a new attempt. `operate_pay` and `operate_payment_status`
 resolve `session_id` once at tool entry and return that ID in
 their results and follow-up hints. Omitting the ID is accepted only when exactly one
 process-local session exists; no path selects a newest or arbitrary session. Ordinary finish

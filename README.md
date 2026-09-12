@@ -119,10 +119,16 @@ call resumes the same approval and one-passkey boundary instead of creating a ne
 link. `operate_payment_status` is a non-charging alternative for inspecting the
 pre-charge approval and is the continuation tool for an already-submitted unknown
 or 3-D Secure outcome. Its `wait_seconds` accepts 0-60 (default 0) to bound-wait
-instead of taking an instant peek. Denial or expiry is terminal for that session's
-attempt: repeated calls return the same result and never mint a replacement
-approval. Close the session and start a fresh one before making a genuinely new
-payment attempt.
+instead of taking an instant peek. After `operate_pay` reports
+`payment_approval_denied` or `payment_approval_timeout`, call it again to start a
+new attempt with a new approval and a new human passkey tap in the same live
+session, preserving the checkout page. If `operate_payment_status` observed the
+terminal approval first, the next `operate_pay` reports it before a subsequent
+call starts the new attempt. This applies to both single-page and `fill_card`
+approvals when no card fields were released, or when cleanup verified they were
+cleared. If card fields were filled and cleanup failed, payment operations remain
+blocked; use `operate_finish` and start a fresh session. Stuck or ambiguous
+attempts likewise retain their existing finish-and-restart recovery.
 
 Every payment response includes its `session_id`. Pass that same ID to every
 follow-up payment call. Omitting `session_id` remains compatible only while this

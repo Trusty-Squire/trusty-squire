@@ -226,9 +226,8 @@ agent starts operate_pay in the addressed checkout session
      is implemented as repeated short server waits within one tool call
   -> payment calls resolve the same session once at tool entry and return its
      session_id in their result and every follow-up hint
-  -> observed denial or expiry scrubs the operator private key and keeps that
-     session attempt terminal, so repeated calls cannot mint a replacement
-     approval without a fresh session and explicit human action
+  -> observed denial or expiry scrubs the operator private key; subsequent
+     attempt recovery follows the README payment guide ("One prompt")
   -> the operator verifies the final JWS, opens the card, and confirms the exact
      candidate fingerprint; successful confirmation clears the JWS and ciphertext
   -> single-page add-card attempts to re-read every signed checkout field; a
