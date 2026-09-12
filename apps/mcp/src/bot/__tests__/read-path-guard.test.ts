@@ -115,13 +115,14 @@ const READ_PATH_MODULES = [
 ];
 
 // The two modules that legitimately import a detector, with the EXACT bindings
-// each is allowed. Extraction's whole job is finding a credential on a page, so
-// it may ask what a string looks like; it may not refuse to return one.
-// Anything not listed fails — including a second detector added beside these.
+// each is allowed. Extraction may use credential-shape checks to choose a
+// vaultable value; observation and screenshot reads remain verbatim. Anything
+// not listed fails — including a second detector added beside these.
 const ALLOWED_DETECTOR_IMPORTS: Record<string, Record<string, string[]>> = {
   "bot/provision-session.ts": {
     "./credential-shape.js": [
       "looksLikeCodeIdentifier",
+      "looksLikeCredentialValue",
       "isCredentialNoise",
       "findCredentialTokens",
       "findOtpCredential",

@@ -233,6 +233,7 @@ const h = vi.hoisted(() => ({
     value: string;
     isMasked: boolean;
   }>,
+  nearCopyCredentialCandidates: [] as string[],
   locatorResolveIntents: [] as string[],
   locatorDisposeCalls: 0,
   isPayPalHostedCheckout: false,
@@ -395,7 +396,7 @@ vi.mock("../browser.js", async (importOriginal) => ({
       return [];
     }
     async extractCredentialsNearCopyButtons(): Promise<string[]> {
-      return [];
+      return h.nearCopyCredentialCandidates;
     }
     async readClipboard(): Promise<string> {
       return "";
@@ -1329,6 +1330,7 @@ beforeEach(() => {
   h.locatorTypeCalls = [];
   h.screenshotCalls = [];
   h.labeledCredentialCandidates = [];
+  h.nearCopyCredentialCandidates = [];
   h.locatorResolveIntents = [];
   h.locatorDisposeCalls = 0;
   h.isPayPalHostedCheckout = false;
@@ -7019,54 +7021,46 @@ describe("operate session — sealed credential transfer", () => {
   });
 });
 
-// The BrowserStack failure that motivated removing every seal: the operator
-// clicked "reveal" on the Access Key, the page was plainly displaying it, and
-// extract still answered `candidate_count: 4, blocked_reason: "the secret is
-// still masked/hidden"`. A value the page renders and the agent asked for is
-// returned.
-describe("operate_extract — a revealed on-page credential is returned, never refused", () => {
-  it("returns every labeled candidate the page shows, including mask-glyph ones", async () => {
-    const accessKey = "zXsPq1yABCdefGhijKLm";
+describe("operate_extract — v1.1.6 credential candidate selection", () => {
+  it("keeps a masked key as truncated and never promotes a nearby identifier to api_key", async () => {
+    const maskedKey = sk("or-v1-992e9e1234567890abcd…");
+    const teamId = "exaTeam01J4M8Q7Z2N6P5R3";
     h.labeledCredentialCandidates = [
-      { label: "Username", value: "lunchbox_a1b2c3", isMasked: false },
-      { label: "Access Key", value: accessKey, isMasked: true },
-      { label: "Automate Key", value: "••••••••••••", isMasked: true },
-      { label: "Local Key", value: "qP7rSt2uVwXyZ0aBcDeF", isMasked: false },
+      { label: "API Key", value: maskedKey, isMasked: true },
+      { label: "Team ID", value: teamId, isMasked: false },
     ];
+    h.nearCopyCredentialCandidates = [maskedKey, teamId];
+    h.visibleText = `API Key: ${maskedKey}`;
     const started = await startProvisionSession({
-      serviceUrl: "https://www.browserstack.com/accounts/settings",
+      serviceUrl: "https://dashboard.exa.ai/api-keys",
     });
 
     const extracted = await extractCredentials(started.session_id);
 
-    expect(extracted.candidate_count).toBe(4);
-    expect(extracted.blocked_reason).toBeUndefined();
-    expect(extracted.credentials.access_key).toBe(accessKey);
-    expect(extracted.credentials.local_key).toBe("qP7rSt2uVwXyZ0aBcDeF");
+    expect(extracted.candidate_count).toBe(2);
+    expect(extracted.credentials.api_key).toBeUndefined();
+    expect(extracted.credentials.api_key_truncated).toBe(maskedKey.slice(0, -1));
+    expect(extracted.credentials.api_key_truncated).not.toBe(teamId);
   });
 
-  it("seals the label-matched value into a slot instead of refusing it as masked", async () => {
-    const accessKey = "zXsPq1yABCdefGhijKLm";
+  it("selects the revealed real key when masked and identifier candidates are also present", async () => {
+    const maskedKey = sk("or-v1-992e9e1234567890abcd…");
+    const realKey = sk(`or-v1-${"a1".repeat(32)}`);
     h.labeledCredentialCandidates = [
-      { label: "Access Key", value: accessKey, isMasked: true },
-      { label: "Username", value: "lunchbox_a1b2c3", isMasked: false },
+      { label: "API Key", value: maskedKey, isMasked: true },
+      { label: "Team ID", value: "exaTeam01J4M8Q7Z2N6P5R3", isMasked: false },
+      { label: "API Key", value: realKey, isMasked: false },
     ];
+    h.visibleText = `API Key: ${maskedKey}\nAPI Key: ${realKey}`;
     const started = await startProvisionSession({
-      serviceUrl: "https://www.browserstack.com/accounts/settings",
+      serviceUrl: "https://dashboard.exa.ai/api-keys",
     });
 
-    const result = (await provisionExtractTool.handler(
-      provisionExtractTool.inputSchema.parse({
-        session_id: started.session_id,
-        into_slot: "access_key",
-        secret_label: "Access Key",
-      }),
-      null,
-    )) as Record<string, unknown>;
+    const extracted = await extractCredentials(started.session_id);
 
-    expect(result).toMatchObject({ sealed: true });
-    expect(result.blocked_reason).toBeUndefined();
-    expect((result.slot as { length: number }).length).toBe(accessKey.length);
+    expect(extracted.credentials.api_key).toBe(realKey);
+    expect(extracted.credentials.api_key).not.toBe(maskedKey);
+    expect(extracted.credentials.api_key_truncated).toBeUndefined();
   });
 
   it("still reports when the page genuinely has no candidate value", async () => {
