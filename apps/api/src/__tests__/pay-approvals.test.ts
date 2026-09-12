@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
+import { exportJWK, SignJWT } from "jose";
+import { createVouchMandateVerifier } from "../services/vouch-mandate.js";
 import type { FastifyInstance } from "fastify";
 import { issueAgentSession } from "../auth/agent.js";
 import { issueSession, SESSION_COOKIE_NAME, signSessionJwt } from "../auth/session.js";
@@ -487,78 +489,101 @@ describe("payment approval relay", () => {
     },
   );
 
-  it("binds ceremony and settlement to the owner web account", async () => {
+  it("lets a Telegram-link holder review and submit a verified mandate without a web session", async () => {
     const cardId = await createOwnedCard(webCookie);
     const created = await createApproval(cardId);
-    const ownerCeremony = await server.inject({
+    const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const jwk = await exportJWK(publicKey);
+    vi.stubEnv("VOUCHFLOW_CUSTOMER_ID", "payment-test");
+    await server.close();
+    server = await buildServer({
+      deps,
+      vouchVerifier: createVouchMandateVerifier(async () =>
+        Response.json({ keys: [{ ...jwk, alg: "RS256", use: "sig", kid: "payment-test" }] }),
+      ),
+    });
+    const ceremony = await server.inject({
       method: "GET",
       url: `/v1/pay/approvals/${created.id}/ceremony`,
-      headers: { cookie: webCookie },
     });
-    expect(ownerCeremony.statusCode).toBe(200);
-    const ownerTerms = ownerCeremony.json() as { account_binding: string };
-    const submission = makeSubmission({
-      ...created,
-      account_binding: ownerTerms.account_binding,
+    expect(ceremony.statusCode).toBe(200);
+    expect(ceremony.json()).toMatchObject({
+      account_binding: created.account_binding,
       card_ref: cardId,
+      merchant: "Synthetic Books",
+      amount_cents: 2599,
     });
-    const claims = JSON.parse(
-      Buffer.from(submission.jws.split(".")[1]!, "base64url").toString(),
-    ) as {
-      payload_sha256: string;
-    };
-    expect(ownerCeremony.json()).toMatchObject({
-      approval_payload_sha256: claims.payload_sha256,
-    });
-
-    const foreignCeremony = await server.inject({
-      method: "GET",
-      url: `/v1/pay/approvals/${created.id}/ceremony`,
-      headers: { cookie: otherWebCookie },
-    });
-    expect(foreignCeremony.statusCode).toBe(404);
-    expect(foreignCeremony.json()).toEqual({ error: "payment_approval_not_found" });
-    const foreignApprove = await server.inject({
-      method: "POST",
-      url: `/v1/pay/approvals/${created.id}/approve`,
-      headers: { cookie: otherWebCookie },
-      payload: submission,
-    });
-    expect(foreignApprove.statusCode).toBe(404);
-    expect(foreignApprove.json()).toEqual({ error: "payment_approval_not_found" });
-    const foreignDeny = await server.inject({
-      method: "POST",
-      url: `/v1/pay/approvals/${created.id}/deny`,
-      headers: { cookie: otherWebCookie },
-    });
-    expect(foreignDeny.statusCode).toBe(404);
-    expect(foreignDeny.json()).toEqual({ error: "payment_approval_not_found" });
-
-    for (const headers of [{}, { authorization: `Bearer ${agentToken}` }]) {
-      const ceremony = await server.inject({
-        method: "GET",
-        url: `/v1/pay/approvals/${created.id}/ceremony`,
-        headers,
-      });
-      expect(ceremony.statusCode).toBe(401);
-      const approve = await server.inject({
+    expect(ceremony.json()).not.toHaveProperty("sealed_card");
+    expect(ceremony.json().card).not.toHaveProperty("pan");
+    const assertion = await new SignJWT({
+      context: "purchase",
+      payload_sha256: ceremony.json().approval_payload_sha256,
+      confidence: "high",
+    })
+      .setProtectedHeader({ alg: "RS256", kid: "payment-test" })
+      .setIssuer("https://vouchflow.dev")
+      .setAudience("payment-test")
+      .setIssuedAt()
+      .setExpirationTime("5m")
+      .sign(privateKey);
+    const submission = { jws: assertion, sealed_card: "c2VhbGVkLXN5bnRoZXRpYy1jYXJk" };
+    const submit = (jws: string) =>
+      server.inject({
         method: "POST",
         url: `/v1/pay/approvals/${created.id}/approve`,
-        headers,
-        payload: submission,
+        payload: { ...submission, jws },
       });
-      expect(approve.statusCode).toBe(401);
+    const forged = assertion.split(".");
+    forged[2] = "invalid-signature";
+    expect((await submit(forged.join("."))).statusCode).toBe(403);
+    expect(await deps.pendingPaymentApprovalStore.getById(created.id)).toMatchObject({
+      status: "pending",
+      submissionPhase: null,
+    });
+    expect((await submit(assertion)).statusCode).toBe(202);
+    // The operator relay remains account scoped; the link is not relay authority.
+    for (const headers of [{}, { authorization: `Bearer ${otherAgentToken}` }]) {
+      const read = await server.inject({
+        method: "GET",
+        url: `/v1/pay/approvals/${created.id}?read_submission=1`,
+        headers,
+      });
+      expect([401, 404]).toContain(read.statusCode);
+    }
+    const delivered = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}?read_submission=1`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    expect(delivered.statusCode).toBe(200);
+    expect(delivered.json()).toMatchObject(submission);
+    const confirmed = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: submission,
+    });
+    expect(confirmed.statusCode).toBe(200);
+    expect(confirmed.json()).toEqual({ status: "approved" });
+    expect((await submit(assertion)).statusCode).toBe(409);
+  });
+
+  it("keeps unsigned denial restricted to the owner web session", async () => {
+    const created = await createApproval();
+    for (const headers of [
+      {},
+      { authorization: `Bearer ${agentToken}` },
+      { cookie: otherWebCookie },
+    ]) {
       const deny = await server.inject({
         method: "POST",
         url: `/v1/pay/approvals/${created.id}/deny`,
         headers,
       });
-      expect(deny.statusCode).toBe(401);
+      expect([401, 404]).toContain(deny.statusCode);
     }
-
     expect(await deps.pendingPaymentApprovalStore.getById(created.id)).toMatchObject({
       status: "pending",
-      submissionPhase: null,
     });
   });
 

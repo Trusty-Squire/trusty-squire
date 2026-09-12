@@ -43,9 +43,9 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `POST` | `/v1/pay/approvals` | agent | Create an account-scoped approval: card-less expires in 18 minutes; has-card in 10 minutes |
 | `POST` | `/v1/pay/approvals/:id/notify-3ds` | agent | Send linked Telegram guidance and return `{ sent }`; optional body `mode` is `detected_challenge` (default) or `possible_out_of_band` |
 | `GET` | `/v1/pay/approvals/:id` | web/agent | Read an account-owned approval; agents may read, peek at, or wait up to 15 seconds for its relay candidate with an optional `wait_ms` bound |
-| `GET` | `/v1/pay/approvals/:id/ceremony` | web | Return the canonical purchase display plus opaque PRF/HPKE inputs for a pending approval |
+| `GET` | `/v1/pay/approvals/:id/ceremony` | none (approval link) | Return the canonical purchase display plus opaque PRF/HPKE inputs for a pending approval |
 | `POST` | `/v1/pay/approvals/:id/bind-card` | web | Bind an account-owned card to a card-less pending approval |
-| `POST` | `/v1/pay/approvals/:id/approve` | web | Stage a fingerprinted opaque final candidate; reject retired review-protocol clients |
+| `POST` | `/v1/pay/approvals/:id/approve` | Vouchflow assertion (no web session) | Stage a fingerprinted opaque final candidate; reject retired review-protocol clients |
 | `POST` | `/v1/pay/approvals/:id/deny` | web | Atomically deny an unexpired pending approval and clear every staged candidate |
 | `POST` | `/v1/pay/approvals/:id/confirm` | agent | Confirm the exact operator-verified candidate for the authenticated account |
 | `GET` | `/health` | none | Liveness |
@@ -89,12 +89,13 @@ approval follows the server-enforced seal → bind → approve order. Binding is
 pending-only, write-once, rejects an expired approval, and accepts only an
 `E2ECredential` owned by the same account; an unknown or foreign card returns
 `404`. Approving before a card is bound returns
-`409 { "error": "card_required" }`. The owner-authenticated ceremony response is a
+`409 { "error": "card_required" }`. The ceremony response is a
 disclosure of the exact server-recorded merchant, checkout origin,
 amount, currency, nonce, item, reason, requesting agent, and expiry. It also
 contains the approval id and status, bound card reference, operator public key,
-opaque account binding, approval-payload digest, and encrypted card blob, but no card display
-metadata. The owner web approval page renders those canonical values before one
+opaque account binding, approval-payload digest, and encrypted card blob with its
+non-secret label and last four digits.
+The approval page renders those canonical values before one
 payment-context passkey action signs them, derives the card key, and seals the card
 to the operator. Before card binding, the ceremony remains readable with a null
 card reference, card blob, and approval-payload digest so the page can show the

@@ -506,14 +506,14 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     });
   });
 
+  // Telegram-link review is sessionless. Approval still requires a verified
+  // Vouchflow mandate over the stored account/card/payment binding; the card
+  // blob remains encrypted under its passkey-derived key.
   fastify.get<{ Params: { id: string } }>(
     "/v1/pay/approvals/:id/ceremony",
-    { preHandler: opts.requireWeb },
+    {},
     async (req, reply) => {
-      const record = await opts.deps.pendingPaymentApprovalStore.getByIdForAccount(
-        req.params.id,
-        req.auth!.account_id,
-      );
+      const record = await opts.deps.pendingPaymentApprovalStore.getById(req.params.id);
       if (record === null) {
         reply.code(404).send({ error: "payment_approval_not_found" });
         return;
@@ -614,17 +614,14 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
 
   fastify.post<{ Params: { id: string } }>(
     "/v1/pay/approvals/:id/approve",
-    { preHandler: opts.requireWeb },
+    {},
     async (req, reply) => {
       const parsed = approveBody.safeParse(req.body);
       if (!parsed.success) {
         reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
         return;
       }
-      const record = await opts.deps.pendingPaymentApprovalStore.getByIdForAccount(
-        req.params.id,
-        req.auth!.account_id,
-      );
+      const record = await opts.deps.pendingPaymentApprovalStore.getById(req.params.id);
       if (record === null) {
         reply.code(404).send({ error: "payment_approval_not_found" });
         return;

@@ -87,14 +87,14 @@ encrypted blob plus optional constrained display metadata (`brand` and
 
 The account-scoped detail API can return that opaque blob to an authenticated
 web or agent session so a trusted client can decrypt it. During a pending
-payment, the owner-authenticated ceremony can also return the bound blob. Its
-response also returns the exact server-recorded merchant, checkout origin, amount,
-currency, nonce, item, reason, requesting-agent label, and expiry that the user
-must review and authorize. It includes the approval ID and status, opaque card
-reference, operator public key, opaque account binding, purchase-payload digest,
-encrypted blob, and the bound card's non-secret label and `last4` display metadata
-so the owner can identify the card being released. It does not grant account
-navigation. List responses omit the blob and expose only the record ID, label,
+payment, the Telegram-link ceremony can also return the bound blob without a web
+session. Approval requires a verified Vouchflow payment assertion, and unlocking
+the blob requires the passkey-derived key. The API binds the signed payment to
+the stored account and card; it does not separately map the assertion signer to
+an account identity. The ceremony exposes the canonical purchase details and
+non-secret card display metadata described in the
+[payment approval API contract](apps/api/README.md#endpoints); it does not grant
+account navigation. List responses omit the blob and expose only the record ID, label,
 creation time, and optional plaintext card display metadata: a no-digit network
 name (`brand`) and exactly four digits (`last4`). These fields cannot carry a
 full PAN; legacy rows return `null`. Losing the enrolled passkey makes the card
@@ -112,7 +112,7 @@ fields.
 Before card entry or payment approval, the browser requires a one-time Vouchflow
 passkey enrollment and confirms that the platform authenticator supports the
 WebAuthn PRF extension. A payment approval is short-lived and account-scoped.
-The owner-authenticated approval page displays the canonical purchase values before an
+The approval page displays the canonical purchase values before an
 amount-bound payment ceremony, including the amount used for a split checkout's
 card-fill approval. One explicit **Approve payment** action then signs a payload
 binding the owner account, merchant, checkout origin, amount, currency, single-use nonce,
@@ -121,7 +121,8 @@ requesting-agent label while deriving the card-decryption key. The API uses the
 install's authenticated agent identity when present and otherwise signs
 `unknown-agent`; the client cannot supply the label.
 
-Before submitting that approval, the owner may instead choose **Deny payment**.
+Before submitting that approval, the owner may instead choose **Deny payment**,
+which requires the owning account's web session.
 The API atomically changes only the owner's unexpired `pending` record to `denied`
 and clears every staged JWS and sealed-card candidate. Operator
 confirmation rechecks the terminal state, so no card is released after denial
@@ -129,7 +130,8 @@ has committed.
 
 Just-in-time add-card approvals may be created without a card reference, while
 still binding the operator's ephemeral public key at creation. The API permits
-one card bind only while the approval is pending and unexpired, verifies that
+one card bind, authenticated by the owning account's web session, only while the
+approval is pending and unexpired, verifies that
 the encrypted-card record belongs to the same account, and rejects approval
 until a card is bound. This enforces the seal → bind → approve order on the
 server rather than relying on client convention. On resume, the operator fails
