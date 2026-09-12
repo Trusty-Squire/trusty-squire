@@ -1,12 +1,12 @@
 // credential-text.ts — pull a credential VALUE out of a blob of visible page
-// text, and reject candidates that are truncated displays or password-manager
-// UI noise. These are the browser-free, regex-driven extraction predicates the
+// text, and reject password-manager UI noise. These are the browser-free,
+// regex-driven extraction predicates the
 // provision session + skill replay paths share.
 //
 // Distinct from credential-shape.ts: that module answers "is this string
 // shaped like a credential" (a tight host-side gate); this one answers "given a
 // page of text, WHICH substring is the credential" (service-prefix + labeled
-// regex library) plus the two candidate-rejection helpers replay uses.
+// regex library) plus the candidate-rejection helper replay uses.
 
 // Real API keys / bearer tokens are short (Stripe ~32, JWT ~hundreds
 // but our labeled patterns don't target JWTs). Captcha challenge
@@ -45,28 +45,6 @@ const EMBEDDED_KEY_PREFIXES: readonly string[] = [
   "pk_test_",
 ];
 
-// True when `capturedKey` is followed by a truncation marker (`...`
-// or the Unicode ellipsis `…`) in `sourceText`. That marker is the
-// signal that the visible display masked the full secret — the
-// regex captured everything up to but not including the marker, so
-// the value LOOKS valid but is short. Used by F10's
-// extract-via-Copy-button recovery path; without this check, the
-// bot accepts the truncated value, stores it, and the user discovers
-// the failure only when their next API call returns 401.
-export function isTruncatedCapture(sourceText: string, capturedKey: string): boolean {
-  const idx = sourceText.indexOf(capturedKey);
-  if (idx < 0) return false;
-  const after = sourceText.slice(
-    idx + capturedKey.length,
-    idx + capturedKey.length + 10,
-  );
-  // Whitespace OK between key and ellipsis (some modals render as
-  // "sk-or-v1-xxxx ..."). Three OR MORE dots; two dots are ordinary
-  // punctuation and would false-positive on e.g. "key value.." in
-  // help text.
-  return /^\s*(?:\.{3,}|…)/.test(after);
-}
-
 // Pull an API key out of the *visible* page text.
 //
 // Two strategies, in priority order:
@@ -103,11 +81,9 @@ export function extractApiKeyFromText(text: string): string | null {
     /\brnd_[a-zA-Z0-9]{20,}\b/, // Render
     /\bsntry[su]_[A-Za-z0-9_=\-]{20,}/, // Sentry org/user auth token
     // Neon serverless Postgres. Modal renders `napi_<48-char-alnum>` and
-    // also shows a truncated `napi_xxx…` in the visible text below the
-    // input field. Without the prefix here, the bot saw the truncated
-    // display, isTruncatedCapture rejected the partial value, every
-    // pass returned null, and the planner gave up despite the full key
-    // being in the input field's `value` attribute. rc.14 — surfaced
+    // also shows the value in the visible text below the input field. Without
+    // the prefix here, every pass returned null and the planner gave up despite
+    // the full key being in the input field's `value` attribute. rc.14 — surfaced
     // during the harvester rc.13 pass on Neon.
     /\bnapi_[a-zA-Z0-9]{30,80}\b/, // Neon
     // 0.8.3-rc.1 — typeform personal access tokens. Shape

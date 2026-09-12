@@ -8,15 +8,9 @@
 
 // Keys that the post-signup accumulator stores for housekeeping. They are not
 // extracted credentials and must not count as progress or success.
-export const NON_CREDENTIAL_KEYS = new Set<string>([
-  "api_key_truncated",
-  "password",
-  "email",
-]);
+export const NON_CREDENTIAL_KEYS = new Set<string>(["password", "email"]);
 
-export function credentialFieldNames(
-  creds: Record<string, string | undefined>,
-): string[] {
+export function credentialFieldNames(creds: Record<string, string | undefined>): string[] {
   return Object.entries(creds)
     .filter(([, value]) => value !== undefined && value.length > 0)
     .map(([key]) => key)
@@ -58,10 +52,7 @@ const SECRET_LIKE_SINGLE_FIELDS = new Set<string>([
 const CREDENTIAL_PREFIX_RE =
   /^(?:sk|pk|rk|phx|phc|gh[pousr]?|glpat|xox[baprs]|AIza|AKIA|ASIA|eyJ|ddp|tkn|tok|key|api)[A-Za-z0-9_.+/=-]*$/;
 
-export function isPlausibleCredentialValue(
-  key: string,
-  value: string | undefined,
-): boolean {
+export function isPlausibleCredentialValue(key: string, value: string | undefined): boolean {
   if (value === undefined) return false;
   const v = value.trim();
   if (v.length === 0) return false;
@@ -79,79 +70,33 @@ export function isPlausibleCredentialValue(
   return /[_-]/.test(v) && v.length >= 16;
 }
 
-export function hasSingleCredentialValue(
-  creds: Record<string, string | undefined>,
-): boolean {
+export function hasSingleCredentialValue(creds: Record<string, string | undefined>): boolean {
   return Object.entries(creds).some(
-    ([key, value]) =>
-      SINGLE_CREDENTIAL_FIELDS.has(key) &&
-      isPlausibleCredentialValue(key, value),
+    ([key, value]) => SINGLE_CREDENTIAL_FIELDS.has(key) && isPlausibleCredentialValue(key, value),
   );
 }
 
 // True iff the credentials Record holds at least one extracted value
-// (api_key, username, or any labeled multi-cred field). Excludes metadata and
-// truncated stubs. Used to decide whether an extraction round produced progress.
-export function hasAnyExtractedCredential(
-  creds: Record<string, string | undefined>,
-): boolean {
+// (api_key, username, or any labeled multi-cred field). Excludes metadata. Used
+// to decide whether an extraction round produced progress.
+export function hasAnyExtractedCredential(creds: Record<string, string | undefined>): boolean {
   return credentialFieldNames(creds).length > 0;
 }
 
 // True iff the credentials Record contains a multi-credential bundle: anything
 // beyond the legacy single api_key/username shape. This keeps multi-field
 // services open long enough to collect sibling secrets.
-export function isMultiCredBundle(
-  creds: Record<string, string | undefined>,
-): boolean {
-  return credentialFieldNames(creds).some(
-    (key) => !SINGLE_CREDENTIAL_FIELDS.has(key),
-  );
+export function isMultiCredBundle(creds: Record<string, string | undefined>): boolean {
+  return credentialFieldNames(creds).some((key) => !SINGLE_CREDENTIAL_FIELDS.has(key));
 }
 
 // Final success policy for the signup result. Legacy single-key services can
 // return on api_key; services with no literal api_key need at least two named
 // non-metadata fields so a lone application/project ID does not masquerade as a
 // usable secret.
-export function hasUsableCredentialBundle(
-  creds: Record<string, string | undefined>,
-): boolean {
+export function hasUsableCredentialBundle(creds: Record<string, string | undefined>): boolean {
   if (hasSingleCredentialValue(creds)) return true;
   return credentialFieldNames(creds).length >= 2;
-}
-
-// A terminal planner "done" reason can carry stronger evidence than an earlier
-// regex hit. If the visible page only exposes an identifier while the actual
-// secret is masked/unrecoverable, the earlier candidate is usually a key id,
-// project id, or rotation handle, not a usable credential.
-export function terminalReasonInvalidatesCredentialSuccess(
-  reason: string | null | undefined,
-): boolean {
-  if (reason === null || reason === undefined || reason.trim().length === 0) {
-    return false;
-  }
-  const text = reason.toLowerCase();
-  const namesSecret =
-    /\b(?:api\s*)?(?:key|token|secret)\b/.test(text) ||
-    /\b(?:credential|value)\b/.test(text);
-  if (!namesSecret) return false;
-
-  if (
-    /\bkey\s*id\b/.test(text) &&
-    /\b(?:visible|shown|available)\b/.test(text) &&
-    /\b(?:not\s+the\s+secret|secret\s+(?:is\s+)?(?:masked|hidden|not\s+(?:visible|shown|available|recoverable)))\b/.test(text)
-  ) {
-    return true;
-  }
-
-  if (
-    /\b(?:no|not any|without)\s+(?:option|button|way|ability|path)\s+to\s+(?:reveal|view|show|copy|extract|recover)\b/.test(text) &&
-    /\b(?:masked|hidden|unrecoverable|not\s+(?:recoverable|available|shown|visible)|only\s+to\s+rotate|rotate)\b/.test(text)
-  ) {
-    return true;
-  }
-
-  return /\bonly\s+to\s+rotate\b/.test(text) && /\b(?:masked|hidden|secret)\b/.test(text);
 }
 
 // Phase E — multi-credential planner-prose parser. When a service
@@ -216,6 +161,10 @@ export function extractAllLabeledTokensFromReason(
     org_id: "org_id",
     orgid: "org_id",
     organization_id: "org_id",
+    team_id: "team_id",
+    teamid: "team_id",
+    project_id: "project_id",
+    projectid: "project_id",
     consumer_key: "consumer_key",
     consumer_secret: "consumer_secret",
     access_token_secret: "access_token_secret",
@@ -261,9 +210,7 @@ export function extractAllLabeledTokensFromReason(
   // label='shows' / value='application_id' and consume the real
   // 'application_id' that follows). Longer aliases first so the
   // regex prefers `admin_api_key` over `api_key` at the same start.
-  const labelKeys = Object.keys(LABEL_ALIASES).sort(
-    (a, b) => b.length - a.length,
-  );
+  const labelKeys = Object.keys(LABEL_ALIASES).sort((a, b) => b.length - a.length);
   const labelAlt = labelKeys.map(escapeRegex).join("|");
   // Hyphen + space variants — the LLM sometimes emits `cloud-name`
   // or `Cloud name` instead of `cloud_name`. Replace _ with
@@ -308,11 +255,32 @@ export function extractAllLabeledTokensFromReason(
   // a credential label but are NEVER the credential value itself.
   // Each is a literal lowercase comparison after value-lowercase.
   const PROSE_BLACKLIST = new Set<string>([
-    "hidden", "masked", "shown", "visible", "available", "missing",
-    "unavailable", "redacted", "obscured", "concealed", "secret",
-    "true", "false", "null", "none", "empty", "unset", "undefined",
-    "displayed", "revealed", "asterisks", "bullets", "dots", "stars",
-    "blurred", "encrypted",
+    "hidden",
+    "masked",
+    "shown",
+    "visible",
+    "available",
+    "missing",
+    "unavailable",
+    "redacted",
+    "obscured",
+    "concealed",
+    "secret",
+    "true",
+    "false",
+    "null",
+    "none",
+    "empty",
+    "unset",
+    "undefined",
+    "displayed",
+    "revealed",
+    "asterisks",
+    "bullets",
+    "dots",
+    "stars",
+    "blurred",
+    "encrypted",
   ]);
   const looksCredentialShape = (v: string): boolean => {
     if (v.length >= 16) return true; // long-enough tokens are presumed real
@@ -355,8 +323,8 @@ function escapeRegex(s: string): string {
 // DOM-label phrase → canonical credential key. Shared by
 // extractFromDomProximity (which harvests VALUES) and
 // countPresentedCredentialLabels (which counts how many distinct
-// credentials a page PRESENTS, masked included). Kept in lockstep with
-// the Phase E LABEL_ALIASES vocabulary.
+// credentials a page presents). Kept in lockstep with the Phase E
+// LABEL_ALIASES vocabulary.
 export const DOM_LABEL_TO_KEY: Record<string, string> = {
   "api key": "api_key",
   "api token": "api_key",
@@ -372,6 +340,8 @@ export const DOM_LABEL_TO_KEY: Record<string, string> = {
   "client id": "client_id",
   "client secret": "client_secret",
   "client key": "client_id",
+  "team id": "team_id",
+  "project id": "project_id",
   "cloud name": "cloud_name",
   cloudname: "cloud_name",
   "application id": "application_id",
@@ -393,11 +363,9 @@ export const DOM_LABEL_TO_KEY: Record<string, string> = {
   "app secret": "app_secret",
 };
 
-
 export interface LabeledCredentialCandidate {
   value: string;
   label: string | null;
-  isMasked: boolean;
 }
 
 export interface CredentialRevealResult {
@@ -452,9 +420,7 @@ export interface PostClickCredentialPollResult {
 }
 
 export class CredentialExtractionFlow {
-  hasAnyExtractedCredential(
-    creds: Record<string, string | undefined>,
-  ): boolean {
+  hasAnyExtractedCredential(creds: Record<string, string | undefined>): boolean {
     return hasAnyExtractedCredential(creds);
   }
 
@@ -462,9 +428,7 @@ export class CredentialExtractionFlow {
     return isMultiCredBundle(creds);
   }
 
-  hasUsableCredentialBundle(
-    creds: Record<string, string | undefined>,
-  ): boolean {
+  hasUsableCredentialBundle(creds: Record<string, string | undefined>): boolean {
     return hasUsableCredentialBundle(creds);
   }
 
@@ -484,10 +448,7 @@ export class CredentialExtractionFlow {
     const legacy = await port.extractCredentials();
     mergeFirstWins(credentials, legacy);
 
-    const labeled = extractAllLabeledTokensFromReason(
-      input.reason,
-      verifySource,
-    );
+    const labeled = extractAllLabeledTokensFromReason(input.reason, verifySource);
     const labeledNewKeys = mergeFirstWins(credentials, labeled);
     if (labeledNewKeys.length > 0) {
       const summary = labeledNewKeys
@@ -498,41 +459,36 @@ export class CredentialExtractionFlow {
       );
     }
 
-    const MASKED_HINT =
-      /\b(?:masked|hidden|bullets?|asterisks?|••+|\*{3,}|reveal|unmask)\b/i;
-    if (MASKED_HINT.test(input.reason)) {
-      try {
-        const revealRes = await port.revealMaskedCredentials();
-        steps.push(
-          `${roundLabel}: reveal pass clicked=${revealRes.clicked} diagnostic=[${revealRes.diagnostic.join("; ")}]`,
-        );
-        if (revealRes.clicked > 0) {
-          const labeledAfter = await port.extractFromDomProximity();
-          const afterNewKeys = mergeFirstWins(credentials, labeledAfter);
-          if (afterNewKeys.length > 0) {
-            steps.push(
-              `${roundLabel}: post-reveal DOM-proximity extracted ${afterNewKeys.length} more (${afterNewKeys.join(", ")})`,
-            );
-          } else {
-            const allLabeled = await port.extractLabeledCredentialCandidates();
-            const candSummary = allLabeled
-              .filter((candidate) => !candidate.isMasked)
-              .slice(0, 8)
-              .map(
-                (candidate) =>
-                  `${candidate.value.slice(0, 6)}…(${candidate.value.length}ch)/${candidate.label ?? "no-label"}`,
-              )
-              .join(", ");
-            steps.push(
-              `${roundLabel}: post-reveal had ${allLabeled.length} candidates; visible: ${candSummary}`,
-            );
-          }
+    try {
+      const revealRes = await port.revealMaskedCredentials();
+      steps.push(
+        `${roundLabel}: reveal pass clicked=${revealRes.clicked} diagnostic=[${revealRes.diagnostic.join("; ")}]`,
+      );
+      if (revealRes.clicked > 0) {
+        const labeledAfter = await port.extractFromDomProximity();
+        const afterNewKeys = mergeFirstWins(credentials, labeledAfter);
+        if (afterNewKeys.length > 0) {
+          steps.push(
+            `${roundLabel}: post-reveal DOM-proximity extracted ${afterNewKeys.length} more (${afterNewKeys.join(", ")})`,
+          );
+        } else {
+          const allLabeled = await port.extractLabeledCredentialCandidates();
+          const candSummary = allLabeled
+            .slice(0, 8)
+            .map(
+              (candidate) =>
+                `${candidate.value.slice(0, 6)}…(${candidate.value.length}ch)/${candidate.label ?? "no-label"}`,
+            )
+            .join(", ");
+          steps.push(
+            `${roundLabel}: post-reveal had ${allLabeled.length} candidates; visible: ${candSummary}`,
+          );
         }
-      } catch (err) {
-        steps.push(
-          `${roundLabel}: reveal pass error (${err instanceof Error ? err.message : String(err)})`,
-        );
       }
+    } catch (err) {
+      steps.push(
+        `${roundLabel}: reveal pass error (${err instanceof Error ? err.message : String(err)})`,
+      );
     }
 
     try {
@@ -542,9 +498,7 @@ export class CredentialExtractionFlow {
         const summary = domNewKeys
           .map((key) => summarizeCredential(key, labeledFromDom[key]!))
           .join(", ");
-        steps.push(
-          `${roundLabel}: DOM-proximity surfaced ${domNewKeys.length} more (${summary})`,
-        );
+        steps.push(`${roundLabel}: DOM-proximity surfaced ${domNewKeys.length} more (${summary})`);
       }
     } catch {
       // DOM-proximity is best-effort; a page mid-navigation should not abort
@@ -605,10 +559,7 @@ export class CredentialExtractionFlow {
   }
 }
 
-function mergeFirstWins(
-  target: Record<string, string>,
-  source: Record<string, string>,
-): string[] {
+function mergeFirstWins(target: Record<string, string>, source: Record<string, string>): string[] {
   const newKeys: string[] = [];
   for (const [key, value] of Object.entries(source)) {
     if (target[key] !== undefined) continue;

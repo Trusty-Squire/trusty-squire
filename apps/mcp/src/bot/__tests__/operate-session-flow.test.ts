@@ -18,6 +18,7 @@ import { mockBrowserUseCapture } from "./browser-use-test-capture.js";
 //   - credential egress seed excludes mid_session task scope
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { constants, publicEncrypt } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { chromium, type Page } from "playwright";
 import { BrowserClickDispatchError, OAuthFailedError } from "../browser.js";
 import type * as BrowserModule from "../browser.js";
@@ -231,7 +232,6 @@ const h = vi.hoisted(() => ({
   labeledCredentialCandidates: [] as Array<{
     label: string | null;
     value: string;
-    isMasked: boolean;
   }>,
   nearCopyCredentialCandidates: [] as string[],
   locatorResolveIntents: [] as string[],
@@ -7022,16 +7022,26 @@ describe("operate session — sealed credential transfer", () => {
 });
 
 describe("operate_extract — v1.1.6 credential candidate selection", () => {
-  it.each([false, true])("preserves a contextually accepted DeepInfra key (labeled=%s)", async (labeled) => {
-    const apiKey = "Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz";
-    h.nearCopyCredentialCandidates = [apiKey];
-    h.labeledCredentialCandidates = labeled ? [{ label: "API Key", value: apiKey, isMasked: false }] : [];
-    const started = await startProvisionSession({ serviceUrl: "https://deepinfra.com/dash/api_keys" });
-    expect((await extractCredentials(started.session_id)).credentials.api_key).toBe(apiKey);
-    const storeCredential = vi.fn().mockResolvedValue({ reference: "vault://acct/deepinfra" });
-    await provisionExtractTool.handler({ session_id: started.session_id, store: { service: "deepinfra" } }, { storeCredential } as unknown as ApiClient);
-    expect(storeCredential).toHaveBeenCalledWith(expect.objectContaining({ value: apiKey, type: "api_key" }));
-  });
+  it.each([false, true])(
+    "preserves a contextually accepted DeepInfra key (labeled=%s)",
+    async (labeled) => {
+      const apiKey = "Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz";
+      h.nearCopyCredentialCandidates = [apiKey];
+      h.labeledCredentialCandidates = labeled ? [{ label: "API Key", value: apiKey }] : [];
+      const started = await startProvisionSession({
+        serviceUrl: "https://deepinfra.com/dash/api_keys",
+      });
+      expect((await extractCredentials(started.session_id)).credentials.api_key).toBe(apiKey);
+      const storeCredential = vi.fn().mockResolvedValue({ reference: "vault://acct/deepinfra" });
+      await provisionExtractTool.handler(
+        { session_id: started.session_id, store: { service: "deepinfra" } },
+        { storeCredential } as unknown as ApiClient,
+      );
+      expect(storeCredential).toHaveBeenCalledWith(
+        expect.objectContaining({ value: apiKey, type: "api_key" }),
+      );
+    },
+  );
 
   it("preserves Client Secret and Client ID leaves inside a pre block", async () => {
     const secret = "aBcD1234EfGh5678IjKl9012";
@@ -7050,23 +7060,45 @@ describe("operate_extract — v1.1.6 credential candidate selection", () => {
     const collector = Object.create(BrowserController.prototype) as BrowserModule.BrowserController;
     h.labeledCredentialCandidates = await collector.extractLabeledCredentialCandidates(page);
     h.visibleText = await page.locator("body").innerText();
-    expect(h.labeledCredentialCandidates).toEqual(expect.arrayContaining([
-      expect.objectContaining({ label: "client secret", value: secret, isMasked: false }),
-      expect.objectContaining({ label: "client id", value: clientId, isMasked: false }),
-    ]));
+    expect(h.labeledCredentialCandidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: "client secret", value: secret }),
+        expect.objectContaining({ label: "client id", value: clientId }),
+      ]),
+    );
     expect((await extractCredentials(started.session_id)).credentials).toMatchObject({
       client_secret: secret,
       client_id: clientId,
     });
   });
 
-  it("keeps a masked key as truncated and never promotes a nearby identifier to api_key", async () => {
+  const loadExaFixture = async (maskedKey: string, teamId: string, realKey: string) => {
+    const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
+    const page = await browser.newPage();
+    const fixture = readFileSync(
+      fileURLToPath(new URL("./fixtures/exa-keys-page.html", import.meta.url)),
+      "utf8",
+    )
+      .replaceAll("{{MASKED_KEY}}", maskedKey)
+      .replaceAll("{{TEAM_ID}}", teamId)
+      .replaceAll("{{REAL_KEY}}", realKey);
+    await page.setContent(fixture);
+    return { browser, page };
+  };
+
+  it("captures the presented API-key value verbatim without promoting Team ID", async () => {
     const maskedKey = sk("or-v1-992e9e1234567890abcd…");
     const teamId = "exaTeam01J4M8Q7Z2N6P5R3";
-    h.labeledCredentialCandidates = [
-      { label: "API Key", value: maskedKey, isMasked: true },
-      { label: "Team ID", value: teamId, isMasked: false },
-    ];
+    const { browser, page } = await loadExaFixture(maskedKey, teamId, sk("unused-1234567890"));
+    const { BrowserController } = await vi.importActual<typeof BrowserModule>("../browser.js");
+    const collector = Object.create(BrowserController.prototype) as BrowserModule.BrowserController;
+    h.labeledCredentialCandidates = await collector.extractLabeledCredentialCandidates(page);
+    expect(h.labeledCredentialCandidates).toEqual(
+      expect.arrayContaining([
+        { label: "api key", value: maskedKey },
+        { label: "team id", value: teamId },
+      ]),
+    );
     h.nearCopyCredentialCandidates = [maskedKey, teamId];
     h.visibleText = `API Key: ${maskedKey}`;
     const started = await startProvisionSession({
@@ -7076,20 +7108,29 @@ describe("operate_extract — v1.1.6 credential candidate selection", () => {
     const extracted = await extractCredentials(started.session_id);
 
     expect(extracted.candidate_count).toBe(2);
-    expect(extracted.credentials.api_key).toBeUndefined();
-    expect(extracted.credentials.api_key_truncated).toBe(maskedKey.slice(0, -1));
-    expect(extracted.credentials.api_key_truncated).not.toBe(teamId);
+    expect(extracted.credentials.api_key).toBe(maskedKey);
+    expect(extracted.credentials.team_id).toBe(teamId);
+    expect(extracted.credentials.api_key).not.toBe(teamId);
+    await browser.close();
   });
 
-  it("selects the revealed real key when masked and identifier candidates are also present", async () => {
+  it("selects the real key surfaced by the normal reveal step", async () => {
     const maskedKey = sk("or-v1-992e9e1234567890abcd…");
     const realKey = sk(`or-v1-${"a1".repeat(32)}`);
-    h.labeledCredentialCandidates = [
-      { label: "API Key", value: maskedKey, isMasked: true },
-      { label: "Team ID", value: "exaTeam01J4M8Q7Z2N6P5R3", isMasked: false },
-      { label: "API Key", value: realKey, isMasked: false },
-    ];
-    h.visibleText = `API Key: ${maskedKey}\nAPI Key: ${realKey}`;
+    const teamId = "exaTeam01J4M8Q7Z2N6P5R3";
+    const { browser, page } = await loadExaFixture(maskedKey, teamId, realKey);
+    await page.getByRole("button", { name: "Reveal API Key" }).click();
+    const { BrowserController } = await vi.importActual<typeof BrowserModule>("../browser.js");
+    const collector = Object.create(BrowserController.prototype) as BrowserModule.BrowserController;
+    h.labeledCredentialCandidates = await collector.extractLabeledCredentialCandidates(page);
+    expect(h.labeledCredentialCandidates).toEqual(
+      expect.arrayContaining([
+        { label: "api key", value: realKey },
+        { label: "team id", value: teamId },
+      ]),
+    );
+    h.nearCopyCredentialCandidates = [teamId, realKey];
+    h.visibleText = `Team ID: ${teamId}\nAPI Key: ${realKey}`;
     const started = await startProvisionSession({
       serviceUrl: "https://dashboard.exa.ai/api-keys",
     });
@@ -7097,8 +7138,8 @@ describe("operate_extract — v1.1.6 credential candidate selection", () => {
     const extracted = await extractCredentials(started.session_id);
 
     expect(extracted.credentials.api_key).toBe(realKey);
-    expect(extracted.credentials.api_key).not.toBe(maskedKey);
-    expect(extracted.credentials.api_key_truncated).toBeUndefined();
+    expect(extracted.credentials.api_key).not.toBe(teamId);
+    await browser.close();
   });
 
   it("still reports when the page genuinely has no candidate value", async () => {

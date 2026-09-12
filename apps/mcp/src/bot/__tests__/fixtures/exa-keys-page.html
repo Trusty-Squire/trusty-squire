@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+  <body>
+    <style>
+      .credential-row {
+        display: grid;
+        grid-template-columns: 8rem 24rem 10rem;
+        column-gap: 1rem;
+        margin: 3rem 0;
+      }
+    </style>
+    <section aria-label="API keys">
+      <div class="credential-row">
+        <span>Team ID</span>
+        <code>{{TEAM_ID}}</code>
+        <button type="button">Copy Team ID</button>
+      </div>
+      <div class="credential-row">
+        <span>API Key</span>
+        <code id="api-key">{{MASKED_KEY}}</code>
+        <button
+          type="button"
+          aria-label="Reveal API Key"
+          onclick="document.getElementById('api-key').textContent = '{{REAL_KEY}}'"
+        >
+          Reveal API Key
+        </button>
+      </div>
+    </section>
+  </body>
+</html>

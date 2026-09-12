@@ -11615,13 +11615,9 @@ export class BrowserController {
     });
   }
 
-  // F10 fallback: ALL <input> / <textarea> values, ignoring
-  // visibility and type filters. extractCredentialCandidates
-  // deliberately skips `type=hidden` / `type=password` / invisible
-  // elements (correct for general candidate scanning), but some
-  // API-key modals stash the full key in a hidden input the masked
-  // display reads from — and that needs to be reachable when the
-  // visible extraction comes back truncated.
+  // F10 fallback: ALL <input> / <textarea> values, ignoring visibility and
+  // type filters. Some API-key modals keep the actual value in an input while
+  // presenting a separate display element, so both sources must be collected.
   async extractAllInputValues(page: Page | null = this.page): Promise<string[]> {
     if (!page) throw new Error("Browser not started");
     return await page.evaluate(() => {
@@ -11719,9 +11715,7 @@ export class BrowserController {
   //
   // Returns shape:
   //   { value: "<credential-shape string>",
-  //     label: "<the closest matching label text>" | null,
-  //     isMasked: true if the value looks like a redacted display
-  //               (••••, ****, contains "•" or runs of "*") }
+  //     label: "<the closest matching label text>" | null }
   //
   // The caller maps label
   // text to canonical credential keys using the same vocabulary the
@@ -11730,8 +11724,6 @@ export class BrowserController {
     Array<{
       value: string;
       label: string | null;
-      isMasked: boolean;
-      hasRevealButton: boolean;
     }>
   > {
     if (!page) throw new Error("Browser not started");
@@ -11750,6 +11742,8 @@ export class BrowserController {
         "client id",
         "client secret",
         "client key",
+        "team id",
+        "project id",
         // Cloudinary
         "cloud name",
         "cloudname",
@@ -11813,12 +11807,6 @@ export class BrowserController {
         if (!hasDigit && /^[a-z][a-z_-]*$/i.test(s) && s.length < 16) return false;
         return true;
       };
-      // Inline mirror of credential-shape.ts MASKED_DISPLAY_RE — page.evaluate
-      // code can't import, so keep this regex byte-identical to the canonical.
-      // Any mask glyph: bullet/circle, 3+ asterisks, ellipsis, or 3+ dots. (Was
-      // `[•●⬤]{3,}|\*{4,}`, which MISSED the ellipsis masks GCP/Zilliz/S3 use.)
-      const isMaskedShape = (s: string): boolean => /[•●⬤]|\*{3,}|…|\.{3,}/.test(s);
-
       // Compute element-center coords for proximity matching.
       const centerOf = (el: Element): { x: number; y: number } => {
         const r = el.getBoundingClientRect();
@@ -11856,23 +11844,6 @@ export class BrowserController {
         }
       });
 
-      // Detect reveal buttons (eye / show / unmask icons) — any visible
-      // button or [role=button] / svg whose aria-label / title / text
-      // matches the reveal vocabulary. We only check WHETHER one exists
-      // near a candidate; the clicker (revealMaskedCredentials below)
-      // does the actual click pass.
-      const REVEAL_PATTERN = /\b(?:reveal|show|unmask|view|toggle|copy)\b/i;
-      const revealButtons: Array<{ x: number; y: number; el: Element }> = [];
-      document
-        .querySelectorAll<HTMLElement>('button, [role="button"], a, [aria-label], [title]')
-        .forEach((el) => {
-          if (!isVisible(el)) return;
-          const hay = `${el.textContent ?? ""} ${el.getAttribute("aria-label") ?? ""} ${el.getAttribute("title") ?? ""}`;
-          if (!REVEAL_PATTERN.test(hay)) return;
-          const c = centerOf(el);
-          revealButtons.push({ x: c.x, y: c.y, el });
-        });
-
       // For each candidate, find nearest label by Euclidean distance.
       const findNearestLabel = (x: number, y: number): string | null => {
         let best: { phrase: string; d: number } | null = null;
@@ -11888,29 +11859,15 @@ export class BrowserController {
         }
         return best?.phrase ?? null;
       };
-      const hasNearbyReveal = (x: number, y: number): boolean => {
-        for (const rb of revealButtons) {
-          const dx = rb.x - x;
-          const dy = rb.y - y;
-          // Reveal/copy buttons are usually right next to the value —
-          // 200px is generous.
-          if (Math.sqrt(dx * dx + dy * dy) < 200) return true;
-        }
-        return false;
-      };
-
       const seen = new Set<string>();
       const out: Array<{
         value: string;
         label: string | null;
-        isMasked: boolean;
-        hasRevealButton: boolean;
       }> = [];
       const pushCandidate = (value: string, el: Element): void => {
         const trimmed = value.trim();
         if (trimmed.length === 0) return;
-        const masked = isMaskedShape(trimmed);
-        if (!masked && !isCredentialShape(trimmed)) {
+        if (!isCredentialShape(trimmed)) {
           // 0.8.2-rc.17 — when the whole text-node string has
           // whitespace (Cloudinary's "Cloud name: dlq4xgrca" sits
           // in a SINGLE <div> with the label and value glued
@@ -11934,8 +11891,6 @@ export class BrowserController {
           out.push({
             value: valueToken,
             label,
-            isMasked: false,
-            hasRevealButton: false,
           });
           return;
         }
@@ -11943,12 +11898,9 @@ export class BrowserController {
         seen.add(trimmed);
         const c = centerOf(el);
         const label = findNearestLabel(c.x, c.y);
-        const hasReveal = masked ? hasNearbyReveal(c.x, c.y) : false;
         out.push({
           value: trimmed,
           label,
-          isMasked: masked,
-          hasRevealButton: hasReveal,
         });
       };
 
@@ -11970,7 +11922,7 @@ export class BrowserController {
         if (!isCredentialShape(value)) continue;
         if (seen.has(value)) continue;
         seen.add(value);
-        out.push({ value, label, isMasked: false, hasRevealButton: false });
+        out.push({ value, label });
       }
 
       // 1. <input> / <textarea> values (visible only).

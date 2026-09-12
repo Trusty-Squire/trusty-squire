@@ -70,7 +70,6 @@ import {
   type OperatorVerb,
   type OperatorRecipe,
 } from "../bot/operator-recipe.js";
-import { isMaskedDisplay } from "../bot/credential-shape.js";
 import { renderSkillHint, serviceSlugFromUrl } from "../bot/skill-hint.js";
 import { clientFromEnv, generateProvisionId } from "../skill-registry-client.js";
 import { openSessionStorage } from "../session.js";
@@ -750,20 +749,15 @@ async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
     const values = extracted.credentials;
     const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
     const candidates = Object.entries(values).filter(
-      ([k, v]) => !k.endsWith("_truncated") && typeof v === "string" && v.length >= 8,
+      ([, v]) => typeof v === "string" && v.length >= 8,
     );
-    // A value that still LOOKS masked is never refused — it is simply ranked
-    // last, so a fully revealed sibling wins when the page shows both.
-    const ranked = [
-      ...candidates.filter(([, v]) => !isMaskedDisplay(v)),
-      ...candidates.filter(([, v]) => isMaskedDisplay(v)),
-    ];
     // When the page shows several credentials (Google's client ID + secret),
     // a secret_label picks the right one by field name; otherwise take the
     // first full value. Falling back avoids a hard fail when the label misses.
     const wantKey = args.secret_label !== undefined ? norm(args.secret_label) : null;
-    const matched = wantKey !== null ? ranked.find(([k]) => norm(k).includes(wantKey)) : undefined;
-    const full = (matched ?? ranked[0])?.[1];
+    const matched =
+      wantKey !== null ? candidates.find(([k]) => norm(k).includes(wantKey)) : undefined;
+    const full = (matched ?? candidates[0])?.[1];
     if (typeof full !== "string" || full.length === 0) {
       return {
         session_id: extracted.session_id,
@@ -809,17 +803,15 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
   description:
     "Reveal masked keys and extract credentials from the current page: returns " +
     "{credentials, candidate_count, blocked_reason?}. credentials may include " +
-    "`api_key` (or `api_key_truncated` if only a masked display was reachable) " +
-    "plus named fields for multi-credential services. Pass `store` to immediately " +
+    "`api_key` plus named fields for multi-credential services. Pass `store` to immediately " +
     "save the extracted credential into the Trusty Squire vault with the session's " +
     "observed hosts as allowed_hosts seed; when `store` is used, the response omits " +
     "credential values and returns only vault metadata. If `blocked_reason` is set, " +
     "the page is a login wall / anti-bot interstitial with NO credential present " +
     "(do not treat the empty result as a real key) — drive an interactive login " +
     "or hand back to the user. Call when you have navigated to the keys page. " +
-    "With `into_slot`, a value that still looks masked is ranked behind a fully " +
-    "revealed sibling but never refused; pass " +
-    '`secret_label` (e.g. "client secret") to pick the right one when the page ' +
+    "With `into_slot`, pass " +
+    '`secret_label` (e.g. "client secret") to pick the right value when the page ' +
     "shows several credentials.",
   inputSchema: extractSchema,
   jsonInputSchema: {
