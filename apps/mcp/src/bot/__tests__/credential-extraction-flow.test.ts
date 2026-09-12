@@ -5,6 +5,7 @@ import {
   extractAllLabeledTokensFromReason,
   hasAnyExtractedCredential,
   hasUsableCredentialBundle,
+  terminalReasonInvalidatesCredentialSuccess,
   type PostSignupExtractionRoundPort,
   isMultiCredBundle,
 } from "../credential-extraction-flow.js";
@@ -17,9 +18,10 @@ import {
 const sk = (body: string): string => "sk" + "-" + body;
 
 describe("CredentialExtractionFlow credential policy", () => {
-  it("excludes signup metadata from credential fields", () => {
+  it("excludes signup metadata and truncated stubs from credential fields", () => {
     expect(
       credentialFieldNames({
+        api_key_truncated: sk("123..."),
         email: "user@example.com",
         password: "pw",
       }),
@@ -84,6 +86,22 @@ describe("CredentialExtractionFlow credential policy", () => {
 
   it("rejects a lone non-secret identifier as a usable credential bundle", () => {
     expect(hasUsableCredentialBundle({ application_id: "app-123" })).toBe(false);
+  });
+
+  it("invalidates success when the terminal reason says only a key id is visible", () => {
+    expect(
+      terminalReasonInvalidatesCredentialSuccess(
+        "The API key is masked and there is no option to reveal it, only to rotate it. The Key ID is visible but not the secret.",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not invalidate ordinary partial multi-credential prose", () => {
+    expect(
+      terminalReasonInvalidatesCredentialSuccess(
+        "The page shows cloud_name and api_key, but api_secret is hidden behind asterisks.",
+      ),
+    ).toBe(false);
   });
 
   it("classifies fields beyond api_key/username as multi-credential mode", () => {

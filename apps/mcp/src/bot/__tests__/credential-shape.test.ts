@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  isMaskedDisplay,
   looksLikeCodeIdentifier,
   isCredentialNoise,
   findCredentialTokens,
@@ -14,6 +15,31 @@ import {
 // commit 0b3b160f). The returned values are byte-identical to the old
 // literals; do NOT inline these back into single string literals.
 const sk = (body: string): string => "sk" + "-" + body;
+
+describe("isMaskedDisplay (canonical masked-glyph — unifies the 4 drifted spellings)", () => {
+  it("catches bullet/circle masks (Zilliz/GCP ••••)", () => {
+    expect(isMaskedDisplay("••••")).toBe(true);
+    expect(isMaskedDisplay("GOCSPX-••••3f")).toBe(true);
+    expect(isMaskedDisplay("●●●●●●")).toBe(true);
+  });
+  it("catches asterisk masks (3+, where browser.ts used to require 4+)", () => {
+    expect(isMaskedDisplay("****jB4O")).toBe(true);
+    expect(isMaskedDisplay("sk_***")).toBe(true);
+  });
+  it("catches the ellipsis masks the in-page copy USED to miss (the GCP/Zilliz/S3 fix)", () => {
+    expect(isMaskedDisplay(sk("or-v1-1687…"))).toBe(true);
+    expect(isMaskedDisplay(sk("or-v1-1687..."))).toBe(true);
+  });
+  it("does NOT flag a real unmasked key", () => {
+    expect(isMaskedDisplay("GOCSPX-not-a-real-secret-1234567890")).toBe(false);
+    expect(isMaskedDisplay("re_fake_1234567890abcdef")).toBe(false);
+    expect(isMaskedDisplay("phx_aBcD1234")).toBe(false);
+  });
+  it("does NOT flag a JWT (single dots, not 3+ consecutive)", () => {
+    expect(isMaskedDisplay("eyJabc.eyJdef.sig123")).toBe(false);
+  });
+
+});
 
 describe("looksLikeCodeIdentifier (reject the X-tombstone JS function name leak)", () => {
   it("rejects a dotted member-access token", () => {
@@ -38,9 +64,9 @@ describe("isCredentialNoise (reject non-key page text)", () => {
     expect(isCredentialNoise("https://example.com/x")).toBe(true);
     expect(isCredentialNoise("trusty-squire-dogfood-20260625")).toBe(true);
   });
-  it("does not classify rendered glyph-bearing values as page noise", () => {
-    expect(isCredentialNoise("992e9e****")).toBe(false);
-    expect(isCredentialNoise(sk("or-v1-1687…"))).toBe(false);
+  it("rejects a masked display as a vaultable credential candidate", () => {
+    expect(isCredentialNoise("••••3f")).toBe(true);
+    expect(isCredentialNoise(sk("or-v1-1687…"))).toBe(true);
   });
   it("does NOT reject a real key", () => {
     expect(isCredentialNoise("re_fake_1234567890abcdef")).toBe(false);
@@ -69,10 +95,11 @@ describe("looksLikeCredentialValue (the tight host-side gate, distinct from the 
     expect(looksLikeCredentialValue("123e4567-e89b-12d3-a456-426614174000")).toBe(true);
     expect(looksLikeCredentialValue("vsk_live_aB3kLm9PqRsTuV")).toBe(true);
   });
-  it("rejects short / noise / code-identifier values", () => {
+  it("rejects short / noise / code-identifier / masked", () => {
     expect(looksLikeCredentialValue("short")).toBe(false);
     expect(looksLikeCredentialValue("2026-06-23")).toBe(false);
     expect(looksLikeCredentialValue("loader.tweetTombstone")).toBe(false);
+    expect(looksLikeCredentialValue("GOCSPX-••••3f")).toBe(false);
   });
   it("accepts a long prefixless all-uppercase key (the ScrapingBee case)", () => {
     // 80-char uppercase A-Z0-9, no separator — synthetic, same shape as the real key.

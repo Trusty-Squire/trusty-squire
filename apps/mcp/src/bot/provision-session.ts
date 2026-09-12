@@ -95,7 +95,7 @@ import {
 } from "./compact-observation-v2.js";
 import type { ApiClient, HeightenedAuthNotificationResult } from "../api-client.js";
 import { ProvenPreDispatchMutationError } from "./mutation-dispatch-evidence.js";
-import { extractApiKeyFromText } from "./credential-text.js";
+import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
 import { pickVerificationLink, type VerificationLinkCandidate } from "./email-verification.js";
 import {
   type OperatorRecipe,
@@ -150,6 +150,7 @@ import { serviceSlugFromHost } from "@trusty-squire/skill-schema";
 import type { PostVerifyStep } from "./provision-types.js";
 import {
   looksLikeCodeIdentifier,
+  looksLikeCredentialValue,
   isCredentialNoise,
   findCredentialTokens,
   findOtpCredential,
@@ -162,6 +163,7 @@ import {
   accumulateCandidate,
   hasFullHit,
   resolveExtraction,
+  type CandidateClass,
 } from "./extraction.js";
 
 // Identity-provider + auth-handler hosts a signup legitimately bounces
@@ -8723,10 +8725,12 @@ export async function replayOperatorRecipe(
 export interface ExtractResult {
   session_id: string;
   url: string;
-  // The deliverable: a primary `api_key` plus any labeled/named credentials a
+  // The deliverable: a primary `api_key` (or `api_key_truncated` when only a
+  // masked display was reachable) plus any labeled/named credentials a
   // multi-cred service presents (e.g. cloud_name, api_secret).
   credentials: Record<string, string>;
-  // How many labeled credential candidates the page presented.
+  // How many labeled credential candidates the page presented — diagnostic so
+  // the host can tell "found nothing" from "found masked values it couldn't read".
   candidate_count: number;
   // Set when extraction failed CLOSED: the page is a login wall / anti-bot
   // interstitial with no credential to give (Grok/X tombstone), so the extractor
@@ -8742,12 +8746,10 @@ const normLabelKey = (label: string): string =>
     .toLowerCase()
     .slice(0, 40);
 
-const isIdentifierCredentialKey = (key: string): boolean => key === "id" || key.endsWith("_id");
-
-// Credential-shape predicates (looksLikeCodeIdentifier, isCredentialNoise,
-// findCredentialTokens, looksLikeCredentialToken) live in credential-shape.ts —
-// imported above. detectExtractionBlock stays here: it's page-state detection
-// (a login-wall interstitial), not value-shape.
+// Credential-shape predicates (looksLikeCodeIdentifier, looksLikeCredentialValue,
+// isCredentialNoise, findCredentialTokens, looksLikeCredentialToken) live in
+// credential-shape.ts — imported above. detectExtractionBlock stays here: it's
+// page-state detection (a login-wall interstitial), not value-shape.
 
 // A credentials page that is actually a login wall / anti-bot interstitial has
 // no key to give — every token on it (CSRF cookie, asset hash, guest id) is
@@ -8788,6 +8790,7 @@ export function sanitizeExtractedCredentials(
   credentials: Record<string, string>,
   url: string,
   haystack = Object.values(credentials).join("\n"),
+  acceptedNearCopyCredential: string | null = null,
 ): Record<string, string> {
   const host = registrableHost(url) ?? "";
   const normalized: Record<string, string> = {};
@@ -8816,6 +8819,7 @@ export function sanitizeExtractedCredentials(
     const k = normLabelKey(key);
     if (k === "refcode" || k === "referral_code") continue;
     if (isCredentialNoise(value)) continue;
+    if ((k === "key" || k === "api_key") && value !== acceptedNearCopyCredential && !looksLikeCredentialValue(value)) continue;
     if (host === "api.together.ai" && /^key_[A-Za-z0-9]{16,}$/i.test(value.trim())) continue;
     normalized[key] = value;
   }
@@ -8838,9 +8842,10 @@ export function classifyVouchflowCredentials(text: string): Record<string, strin
   return out;
 }
 
-// Run the normal reveal pass, then classify every on-page string source through
-// the same exported regex policy the bot uses. Reuses the substrate — no new
-// credential regexes.
+// Reveal masked keys, then classify every on-page string source through the
+// SAME exported regex policy the bot uses (extractApiKeyFromText +
+// isTruncatedCapture + extraction.ts accumulation). Reuses the substrate —
+// no new credential regexes.
 /** What a zero-match capture DID find, so the caller can pick a better source
  * on the next try: computed roles and accessible names only — never values. */
 export interface CaptureFoundCandidate {
@@ -9374,7 +9379,7 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   const page = operationPageForSession(session);
   invalidateCompactV2Snapshot(session);
 
-  // Click ordinary reveal/show controls before reading values.
+  // The masked-display trap: click reveal/show toggles before reading.
   await browser.revealMaskedCredentials(page);
 
   const labeled = await browser.extractLabeledCredentialCandidates(page);
@@ -9402,18 +9407,7 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   // it (clipboard-read is granted at context creation).
   const clip = await browser.readClipboard(page).catch(() => "");
 
-  // Values whose page label names an identifier remain named identifier fields;
-  // they are never eligible for promotion to the primary api_key.
-  const identifierValues = new Set(
-    labeled
-      .filter((candidate) => {
-        if (candidate.label === null) return false;
-        return isIdentifierCredentialKey(normLabelKey(candidate.label));
-      })
-      .map((candidate) => candidate.value),
-  );
-
-  // Primary api_key: first eligible hit wins.
+  // Primary api_key: first FULL hit wins; a truncated/masked hit is the fallback.
   let state = initialExtractionState();
   const sources: string[] = [...labeled.map((c) => c.value), ...inputs, ...nearCopy, clip, text];
   const haystack = sources.join("\n");
@@ -9426,39 +9420,42 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     // otherwise win first-full and mask the real token. Skip it so scanning
     // reaches the actual secret further down the source list.
     if (/^[A-Z][A-Z0-9_]{2,}=?$/.test(key.trim())) continue;
-    if (identifierValues.has(key)) continue;
     if (isCredentialNoise(key)) continue;
     // Reject too-short non-secrets (UI noise like "Ctrl+K"). Real API keys are
     // long; a sub-12-char "key" is a false positive, never a credential.
     if (key.trim().length < 12) continue;
     // Reject a code identifier scraped off a page (the X-tombstone false-green).
     if (looksLikeCodeIdentifier(key)) continue;
-    state = accumulateCandidate(state, { kind: "full", value: key });
+    const cls: CandidateClass = isTruncatedCapture(src, key)
+      ? { kind: "truncated", value: key }
+      : { kind: "full", value: key };
+    state = accumulateCandidate(state, cls);
   }
 
-  // Named credentials for multi-cred services. Values are captured verbatim;
-  // labels, rather than value-shape screening, keep identifiers out of api_key.
+  // Named credentials for multi-cred services (skip still-masked values and
+  // env-var NAME displays — "LANGWATCH_API_KEY=" is the SDK-snippet prefix, not
+  // a credential).
   const named: Record<string, string> = {};
   for (const c of labeled) {
-    if (c.label === null) continue;
+    if (c.label === null || c.isMasked) continue;
     if (isCredentialNoise(c.value)) continue;
     if (looksLikeCodeIdentifier(c.value)) continue;
     const k = normLabelKey(c.label);
     if (k.length > 0 && !(k in named)) named[k] = c.value;
   }
 
-  // A DOM-labeled value is the authoritative page value and wins over a regex
-  // substring from the same source, preserving it byte-for-byte.
+  // resolveExtraction (the regex-found primary key) wins over a same-named
+  // labeled candidate, so a "API Key" label carrying the env-var snippet can
+  // never clobber the real `api_key`.
   const credentials: Record<string, string> = {
+    ...named,
     ...classifyVouchflowCredentials(haystack),
     ...resolveExtraction(state),
-    ...named,
   };
 
   const relaxed = pickRelaxedNearCopyCredential(nearCopy);
   const acceptedNearCopyCredential =
     relaxed !== null &&
-    !identifierValues.has(relaxed) &&
     !Object.entries(credentials).some(([key, value]) => key !== "api_key" && value === relaxed)
       ? relaxed
       : null;
@@ -9493,6 +9490,7 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     credentials,
     page?.url() ?? browser.currentUrl(),
     haystack,
+    acceptedNearCopyCredential,
   );
   const found = Object.keys(sanitized).length > 0;
   audit(sessionId, "extract", { found, candidate_count: labeled.length });

@@ -3,9 +3,17 @@
 //   - rejecting captcha challenge tokens (g-recaptcha-response,
 //     cf-turnstile-response) and session tokens that a naive labeled
 //     regex would otherwise surface as credentials.api_key.
+//   - F10: detecting truncated displays (modal shows the masked
+//     prefix + "…" while the full secret lives only on the clipboard).
+//     This is the dominant failure mode for OpenRouter / Anthropic /
+//     OpenAI / Stripe key modals.
 
 import { describe, expect, it } from "vitest";
-import { extractApiKeyFromText, isCredentialNoiseCandidate } from "../credential-text.js";
+import {
+  extractApiKeyFromText,
+  isTruncatedCapture,
+  isCredentialNoiseCandidate,
+} from "../credential-text.js";
 
 // Credential-shaped test fixtures are assembled at runtime from harmless
 // fragments so no complete vendor-prefixed token literal appears in this
@@ -174,6 +182,21 @@ describe("extractApiKeyFromText — prefixed keys", () => {
     const openaiLegacy = sk("") + "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEf";
     expect(extractApiKeyFromText(openaiLegacy)).toBe(openaiLegacy);
   });
+
+  it("rejects the truncated Neon display from visible page text", () => {
+    // The exact failure mode that broke harvester pass 3: visible
+    // text shows `napi_<48 chars>…` with an ellipsis. isTruncatedCapture
+    // catches it; the bot then has to find the full value via the
+    // input-value scan. Verify here that the truncated marker is
+    // detected.
+    const truncated =
+      "Your new key: napi_oks9t4wy562g2efcbqknzio7xl63ush65rdkzib2f5… (click to copy)";
+    const hit = extractApiKeyFromText(truncated);
+    expect(hit).not.toBeNull();
+    if (hit !== null) {
+      expect(isTruncatedCapture(truncated, hit)).toBe(true);
+    }
+  });
 });
 
 describe("extractApiKeyFromText — labeled keys", () => {
@@ -276,6 +299,43 @@ describe("extractApiKeyFromText — OpenRouter / Anthropic / OpenAI prefixes (F1
   it("extracts an OpenAI legacy sk-<48> key", () => {
     const key = sk("") + "a".repeat(48);
     expect(extractApiKeyFromText(key)).toBe(key);
+  });
+});
+
+describe("isTruncatedCapture — F10 truncation detection", () => {
+  it("flags a key directly followed by '...'", () => {
+    const text = `Your key: ${sk("or-v1-example000000000000000000000001")}...`;
+    // Simulate what the labeled regex would have captured here.
+    const captured = sk("or-v1-example000000000000000000000001");
+    expect(isTruncatedCapture(text, captured)).toBe(true);
+  });
+
+  it("flags a key followed by the Unicode ellipsis", () => {
+    const text = sk("or-v1-example000000000000000000000001…");
+    expect(isTruncatedCapture(text, sk("or-v1-example000000000000000000000001"))).toBe(true);
+  });
+
+  it("flags a key with whitespace before the ellipsis", () => {
+    // Some modals render an sk- key with a wide gap before the ellipsis. The detector tolerates
+    // leading whitespace between the captured value and the marker.
+    const text = sk("or-v1-abc123 ...");
+    expect(isTruncatedCapture(text, sk("or-v1-abc123"))).toBe(true);
+  });
+
+  it("does NOT flag a key followed by two dots (ordinary punctuation)", () => {
+    // An or-v1 key followed by ".. and ..." — two trailing dots can appear in
+    // prose. Three or more dots is the marker.
+    const text = `Your key ${sk("or-v1-abc123")}.. configured.`;
+    expect(isTruncatedCapture(text, sk("or-v1-abc123"))).toBe(false);
+  });
+
+  it("does NOT flag a key at end-of-string with no marker", () => {
+    const text = sk("or-v1-abc123");
+    expect(isTruncatedCapture(text, sk("or-v1-abc123"))).toBe(false);
+  });
+
+  it("returns false when the captured key isn't in the source text", () => {
+    expect(isTruncatedCapture("unrelated text", sk("or-v1-abc"))).toBe(false);
   });
 });
 

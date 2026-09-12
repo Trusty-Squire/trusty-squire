@@ -1,12 +1,26 @@
 // credential-shape.ts — the canonical, browser-free, unit-tested predicates for
-// "is this string noise / a credential value". Carved out of
+// "is this string a masked display / noise / a credential value". Carved out of
 // provision-session.ts so the host-side judgments live in ONE place instead of
 // drifting across provision-session, provision-drive, and the op-driver harness.
 //
 // TIERS — deliberately NOT merged: browser.ts's in-page `isCredentialShape` is a
 // LOOSE candidate collector (length ≥6, collect broadly, refine by proximity);
 // the predicates here are the TIGHT final gate (length ≥12, token/JWT/UUID).
-// Those are two correct tiers, not drift.
+// Those are two correct tiers, not drift. The ONE thing genuinely shared is the
+// masked-glyph definition: browser.ts keeps an inline copy of MASKED_DISPLAY_RE's
+// source because `page.evaluate` code can't import — keep the two in sync.
+
+// One canonical masked-display test — the union of the four spellings that had
+// drifted across the codebase (browser.ts `[•●⬤]{3,}|\*{4,}`, provision-session's
+// `…|...`, the driver's `•|***|\.{3,}`). A masked credential display shows mask
+// glyphs where the value should be; treat ANY of them as masked. This is the
+// masked-key trap (Zilliz/S3): UNDER-detecting a mask leaks a `••••`/`sk-…` stub
+// as a false key, while OVER-detecting merely defers to a reveal pass — safe. So
+// the canonical errs permissive (any single mask glyph counts).
+export const MASKED_DISPLAY_RE = /[•●⬤]|\*{3,}|…|\.{3,}/;
+export function isMaskedDisplay(value: string): boolean {
+  return MASKED_DISPLAY_RE.test(value);
+}
 
 const OTP_KEYWORD_RE =
   /(?:code|verification|verify|otp|passcode|one[- ]time)\D{0,40}?(\d{4,8})|(\d{4,8})\D{0,8}?(?:code|verification|verify|otp|passcode)/i;
@@ -49,6 +63,10 @@ export function isCredentialNoise(value: string): boolean {
   // var, and must reach the credential gate. Cap at 39 chars (key gate needs ≥40).
   if (/^[A-Z][A-Z0-9_]{2,38}=?$/.test(v)) return true;
   if (/^key_[A-Za-z0-9]{16,}$/i.test(v)) return true;
+  // A masked/truncated display is not a credential value. Keep this extraction
+  // gate separate from observation: page reads remain verbatim, while the
+  // credential picker must not vault a display stub as a usable secret.
+  if (isMaskedDisplay(v)) return true;
   return false;
 }
 
@@ -120,7 +138,7 @@ export function pickRelaxedNearCopyCredential(nearCopyTokens: readonly string[])
     if (!/^[A-Za-z0-9_\-.]+$/.test(t)) continue;
     // Entropy: a real key carries BOTH letters and digits.
     if (!/[A-Za-z]/.test(t) || !/[0-9]/.test(t)) continue;
-    if (isCredentialNoise(t)) continue; // dates/emails/versions/env-var-names
+    if (isCredentialNoise(t)) continue; // dates/emails/versions/env-var-names/masked
     if (looksLikeCodeIdentifier(t)) continue; // dotted member access
     // A bare UUID is ambiguous (project/request/trace ids litter dashboards) —
     // refuse it even near a copy button.

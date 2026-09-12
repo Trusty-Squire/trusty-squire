@@ -232,6 +232,7 @@ const h = vi.hoisted(() => ({
   labeledCredentialCandidates: [] as Array<{
     label: string | null;
     value: string;
+    isMasked: boolean;
   }>,
   nearCopyCredentialCandidates: [] as string[],
   locatorResolveIntents: [] as string[],
@@ -7027,7 +7028,7 @@ describe("operate_extract — v1.1.6 credential candidate selection", () => {
     async (labeled) => {
       const apiKey = "Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz";
       h.nearCopyCredentialCandidates = [apiKey];
-      h.labeledCredentialCandidates = labeled ? [{ label: "API Key", value: apiKey }] : [];
+      h.labeledCredentialCandidates = labeled ? [{ label: "API Key", value: apiKey, isMasked: false }] : [];
       const started = await startProvisionSession({
         serviceUrl: "https://deepinfra.com/dash/api_keys",
       });
@@ -7086,7 +7087,7 @@ describe("operate_extract — v1.1.6 credential candidate selection", () => {
     return { browser, page };
   };
 
-  it("captures the presented API-key value verbatim without promoting Team ID", async () => {
+  it.each(["extract", "finish"])("keeps masked Exa keys truncated and non-vaultable through %s", async (caller) => {
     const maskedKey = sk("or-v1-992e9e1234567890abcd…");
     const teamId = "exaTeam01J4M8Q7Z2N6P5R3";
     const { browser, page } = await loadExaFixture(maskedKey, teamId, sk("unused-1234567890"));
@@ -7095,8 +7096,8 @@ describe("operate_extract — v1.1.6 credential candidate selection", () => {
     h.labeledCredentialCandidates = await collector.extractLabeledCredentialCandidates(page);
     expect(h.labeledCredentialCandidates).toEqual(
       expect.arrayContaining([
-        { label: "api key", value: maskedKey },
-        { label: "team id", value: teamId },
+        expect.objectContaining({ label: "api key", value: maskedKey, isMasked: true }),
+        expect.objectContaining({ label: "team id", value: teamId, isMasked: false }),
       ]),
     );
     h.nearCopyCredentialCandidates = [maskedKey, teamId];
@@ -7108,10 +7109,36 @@ describe("operate_extract — v1.1.6 credential candidate selection", () => {
     const extracted = await extractCredentials(started.session_id);
 
     expect(extracted.candidate_count).toBe(2);
-    expect(extracted.credentials.api_key).toBe(maskedKey);
+    expect(extracted.credentials.api_key).toBeUndefined();
+    expect(extracted.credentials.api_key_truncated).toBe(maskedKey.slice(0, -1));
     expect(extracted.credentials.team_id).toBe(teamId);
     expect(extracted.credentials.api_key).not.toBe(teamId);
+    const storeCredential = vi.fn();
+    const api = { storeCredential } as unknown as ApiClient;
+    const result = caller === "extract"
+      ? await provisionExtractTool.handler(
+          { session_id: started.session_id, store: { service: "exa" } }, api,
+        )
+      : await operateFinishTool.handler(
+          operateFinishTool.inputSchema.parse({
+            session_id: started.session_id,
+            outcome: "credentials",
+            store: { service: "exa" },
+          }), api,
+        );
+    expect(result).toMatchObject({ stored_credential: null });
+    expect(storeCredential).not.toHaveBeenCalled();
+    expect(h.storageStateWrites).toEqual([]);
     await browser.close();
+  });
+
+  it("lets a recovered key take precedence over its labeled SDK snippet", async () => {
+    const realKey = sk(`or-v1-${"a1".repeat(32)}`);
+    h.labeledCredentialCandidates = [
+      { label: "API Key", value: `LANGWATCH_API_KEY=${realKey}`, isMasked: false },
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://example.com/keys" });
+    expect((await extractCredentials(started.session_id)).credentials.api_key).toBe(realKey);
   });
 
   it("selects the real key surfaced by the normal reveal step", async () => {
@@ -7125,8 +7152,8 @@ describe("operate_extract — v1.1.6 credential candidate selection", () => {
     h.labeledCredentialCandidates = await collector.extractLabeledCredentialCandidates(page);
     expect(h.labeledCredentialCandidates).toEqual(
       expect.arrayContaining([
-        { label: "api key", value: realKey },
-        { label: "team id", value: teamId },
+        expect.objectContaining({ label: "api key", value: realKey, isMasked: false }),
+        expect.objectContaining({ label: "team id", value: teamId, isMasked: false }),
       ]),
     );
     h.nearCopyCredentialCandidates = [teamId, realKey];
