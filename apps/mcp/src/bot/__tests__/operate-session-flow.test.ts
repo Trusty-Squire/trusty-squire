@@ -7219,7 +7219,7 @@ describe("operate_extract — vault-store response", () => {
     expect(result).not.toHaveProperty("credentials");
     expect(JSON.stringify(result)).not.toContain(rawSecret);
     expect(JSON.stringify(result)).not.toContain("also-secret");
-    expect(result.stored_credential.reference).toBe("cred_123");
+    expect(result.stored_credential?.reference).toBe("cred_123");
   });
 
   it("keeps vault-store extraction reachable through operate_extract without returning the secret", async () => {
