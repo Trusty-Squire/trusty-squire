@@ -49,8 +49,6 @@ import {
   type ProvisionAction,
   type ExtractResult,
   manualCardEntryBlockReason,
-  hostAllowed,
-  validateAllowHost,
 } from "../bot/provision-session.js";
 import { signSkillForPublish } from "../skill-cli/signing.js";
 import {
@@ -332,9 +330,7 @@ const startSchema = z.object({
   // Sensitive: may include proxy credentials. It is launch-only and is never
   // retained in the session state, action trail, status, or recipe.
   proxy: proxySchema.optional(),
-  // Multi-app operate tasks declare every host they span up front (GCP Console
-  // + Firebase + the user's app). Alias of extra_allowed_hosts; both seed
-  // source "start". A single-service signup passes neither.
+  // Deprecated compatibility parameters; browser egress is unrestricted.
   allowed_hosts: z.array(z.string().min(1).max(120)).max(20).optional(),
   extra_allowed_hosts: z.array(z.string().min(1).max(120)).max(10).optional(),
   // Operate tasks that act AS the user (drive a gated app on an existing
@@ -378,7 +374,7 @@ const actionFormatJson = { type: "string", enum: [...ACTION_FORMATS] };
 export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   name: "operate_start",
   description:
-    "Begin an interactive website task: opens a scoped browser on the " +
+    "Begin an interactive website task: opens a browser on the " +
     "user's machine at service_url and returns the initial page observation. " +
     CONTROL_QUERY_CONTRACT +
     'Use `format:"full"` only when the verbatim page DOM and text are needed. Nothing is redacted in either format. ' +
@@ -387,7 +383,7 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
     "checkout with operate_click, operate_type, operate_select, operate_navigate, operate_scroll, and operate_login (operate_pay for a purchase), re-read with " +
     "operate_observe, and call operate_extract " +
     "when you reach the credentials. Always operate_finish when done. The " +
-    "browser is domain-scoped to the target + its identity providers. If the " +
+    "browser has unrestricted egress. If the " +
     "registry knows this service, the first observation includes a `hint` — the " +
     "route (login method, where the key lives, how many credentials). Read it and " +
     "drive toward it; fall back to your own judgment if the live page diverges.",
@@ -409,14 +405,12 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   },
   async handler(args, api) {
     const hint = await resolveRouteHint(args.service_url);
-    const extra = [...(args.allowed_hosts ?? []), ...(args.extra_allowed_hosts ?? [])];
     const consentInboxRead = await readInboxConsent();
     return await startProvisionSession({
       serviceUrl: args.service_url,
       format: args.format ?? "compact",
       consentInboxRead,
       ...(args.proxy !== undefined ? { proxyUrl: args.proxy } : {}),
-      ...(extra.length > 0 ? { extraAllowedHosts: extra } : {}),
       ...(hint !== undefined ? { hint } : {}),
       // Thread the api-client so the captcha gate can spend a vaulted 2Captcha key.
       ...(api !== null ? { api } : {}),
@@ -1298,7 +1292,6 @@ export const operateRecipeRunTool: Tool<z.infer<typeof useSchema>> = {
       const started = await startProvisionSession({
         serviceUrl: url,
         consentInboxRead,
-        ...(recipe.allowed_hosts.length > 0 ? { extraAllowedHosts: recipe.allowed_hosts } : {}),
         hint: renderOperatorRecipeHint(recipe),
         ...(api !== null ? { api } : {}),
       });
@@ -1958,7 +1951,7 @@ const allowHostSchema = z.object({ ...sessionShape, host: z.string().min(1).max(
 export const operateAllowHostTool: Tool<z.infer<typeof allowHostSchema>> = {
   name: "operate_allow_host",
   description:
-    "Allow a host only within this session's startup host scope and existing auth-provider allowance. To add an unrelated host, start a new session declaring it in allowed_hosts. Hostname and control-plane checks still apply.",
+    "Compatibility no-op. Browser egress is unrestricted; no host declaration is needed.",
   inputSchema: allowHostSchema,
   jsonInputSchema: {
     type: "object",
@@ -1968,19 +1961,6 @@ export const operateAllowHostTool: Tool<z.infer<typeof allowHostSchema>> = {
   async handler(args) {
     const session = sessionForCall(args.session_id);
     if (session === undefined) throw new Error(`unknown provision session ${args.session_id}`);
-    const checked = validateAllowHost(args.host);
-    // Invalid names still go through the original validation/refusal path.
-    if (
-      !("error" in checked) &&
-      !hostAllowed(
-        `https://${checked.host}`,
-        session.allowedHosts.filter((entry) => entry.source === "start").map((entry) => entry.host),
-      )
-    ) {
-      throw new Error(
-        `target_not_allowed: operate_allow_host rejected "${args.host}": outside this session's startup host scope. Start a new operate_start session declaring "${args.host}" in allowed_hosts.`,
-      );
-    }
     return await runAction(args.session_id, { kind: "allow_host", host: args.host });
   },
 };

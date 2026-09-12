@@ -14,4 +14,4 @@ completion is the install claim and explicit Finish callback, so identity flow
 never reads Chrome's on-disk cookie database.
 
 The serialized OAuth boundary, compact-observation-v2 serializer, vault
-extraction, credential-egress host seeding, and host-scope guards remain.
+extraction and credential-egress host seeding remain. Browser egress is unrestricted.

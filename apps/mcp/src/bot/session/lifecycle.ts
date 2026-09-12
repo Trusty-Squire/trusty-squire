@@ -58,12 +58,7 @@ import {
 import { experimentalMultiSessionEnabled } from "./multisession-flag.js";
 import { createSession } from "./model.js";
 import type { AllowedHostEntry, Session, SessionTerminalTeardownOwner } from "./model.js";
-import {
-  hostStrings,
-  merchantSiblingSeedHosts,
-  registrableHost,
-  requestScopeHostStrings,
-} from "./hosts.js";
+import { hostStrings, registrableHost } from "./hosts.js";
 // Type-only, so no runtime cycle exists: the observation payload and the
 // compact-v2 start metadata are perception's shapes, and perception stays in
 // the facade until its own phase. The two start paths reach the live
@@ -1052,10 +1047,7 @@ export interface StartOptions {
   // The user's real Chrome profile. Operate opens this directory directly.
   profileDir?: string;
   proxyUrl?: string;
-  // Extra hosts to widen domain-scope (e.g. a known custom IdP/mail host).
-  // Seeded with source "start" alongside the service host. A multi-app operate
-  // task declares every app it spans here (GCP + Firebase + the user's app);
-  // the single-service signup case passes none (the one degenerate host).
+  // Deprecated compatibility input; ignored.
   extraAllowedHosts?: readonly string[];
   // Registry route guidance the tool layer resolved (renderSkillHint). Attached
   // to the start observation so the agent reads the map before driving.
@@ -1138,8 +1130,7 @@ export async function startProvisionSession(
   opts: StartOptions,
   ports: SessionStartPorts,
 ): Promise<Observation> {
-  const id =
-    reserveBrokerAdmission([opts.serviceUrl, ...(opts.extraAllowedHosts ?? [])]) ?? randomUUID();
+  const id = reserveBrokerAdmission([opts.serviceUrl]) ?? randomUUID();
   const compactV2Mode = configuredCompactV2Mode();
   const requestedFormat = opts.format ?? (compactV2Mode === "on" ? "full" : "compact");
   let browser: BrowserController;
@@ -1196,12 +1187,8 @@ export async function startProvisionSession(
     throw error;
   }
   const targetHost = registrableHost(opts.serviceUrl);
-  const seedHosts = [
-    ...(targetHost !== null ? [targetHost] : []),
-    ...(opts.extraAllowedHosts ?? []),
-  ];
-  // All start-declared hosts are sourced "start" — auto-widen chains off these,
-  // and credential egress may seed from these (but never from mid_session).
+  const seedHosts = [...(targetHost !== null ? [targetHost] : [])];
+  // The service host seeds credential egress; legacy extra hosts are ignored.
   const allowedHosts: AllowedHostEntry[] = [...new Set(seedHosts)].map((host) => ({
     host,
     source: "start" as const,
@@ -1220,12 +1207,6 @@ export async function startProvisionSession(
   sessions.set(id, session);
   startSessionWatchdog(session);
   try {
-    if (typeof browser.setHostScopeAllowedHosts === "function") {
-      await browser.setHostScopeAllowedHosts(
-        () => requestScopeHostStrings(session),
-        () => merchantSiblingSeedHosts(session),
-      );
-    }
     audit(id, "start", {
       service_url: opts.serviceUrl,
       allowed_hosts: hostStrings(session),
@@ -1287,10 +1268,7 @@ export async function startHarnessProvisionSession(
   const requestedFormat =
     opts.format ?? (opts.observationFormat === "browser-use-dom" ? "full" : "compact");
   const targetHost = registrableHost(opts.serviceUrl);
-  const allowedHosts: AllowedHostEntry[] = [
-    ...(targetHost === null ? [] : [targetHost]),
-    ...(opts.extraAllowedHosts ?? []),
-  ]
+  const allowedHosts: AllowedHostEntry[] = [...(targetHost === null ? [] : [targetHost])]
     .filter((host, index, hosts) => hosts.indexOf(host) === index)
     .map((host) => ({
       host,

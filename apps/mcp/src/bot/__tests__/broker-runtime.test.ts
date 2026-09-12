@@ -16,7 +16,6 @@ vi.mock("../browser.js", () => ({
     close = state.close;
     forceCloseOwnedProcessTree = state.close;
     isConnected = () => state.connected;
-    enableBrokerRouting = async () => undefined;
     static attachSessionPage = state.attach;
   },
 }));

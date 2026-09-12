@@ -568,7 +568,7 @@ and their drains, the watchdog, the bounded close, the single terminal-teardown
 owner, artifact cleanup, and start/finish/shutdown. Its ORDER is the contract —
 drain leases → run finish prep → audit a pending 3DS outcome → close the browser
 → clear artifacts → delete the EXACT session object from the map — so change it
-as one unit, never step by step. The host-scope views over `Session.allowedHosts`
+as one unit, never step by step. The credential-egress metadata views over `Session.allowedHosts`
 sit below it in `session/hosts.ts`. Perception has NOT moved: the two start paths
 reach `observeSession` through the `SessionStartPorts` the facade binds, which is
 what keeps the facade → lifecycle dependency one-way with no runtime import
@@ -659,11 +659,15 @@ post-submit outcome labels in those owners rather than copying them here.
   the main frame or a frame accepted by `recognizedPaymentProviderFrame`,
   preserving split-checkout trust boundaries — `browser.ts`.
 
-### Native 3-D Secure networking
+### Browser egress is unrestricted
 
-The payment-page network allowance is owned by
-[the operator network-scope contract](docs/operator-tool-surface.md#scope-is-declared-at-session-start).
-See `browser-decoupled-3ds.test.ts` for native ACS polling and redirect coverage.
+The operator has no request host allowlist or payment-network exception window.
+Legacy host declarations are ignored; see
+[`docs/operator-tool-surface.md`](docs/operator-tool-surface.md#browser-egress-is-unrestricted).
+`browser-unrestricted-egress.test.ts` covers arbitrary third-party fetch/XHR,
+SDK loading, and 3DS frame traffic. `browser-decoupled-3ds.test.ts` covers ACS
+polling and CRes completion. Payment frame recognition remains a card-fill
+boundary, independent of networking.
 
 ### Positive new-card selection supersedes #572's saved-card refusal
 

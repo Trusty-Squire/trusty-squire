@@ -14,9 +14,8 @@ must remain feature-detected until they are registered.
    account. Do not copy a user’s browser cookies or profile. Do not change a
    user’s configured launch command, clear a shared cache, or restart a shared
    browser as a retry strategy.
-3. Configure session destinations according to the
-   [scope contract](operator-tool-surface.md#scope-is-declared-at-session-start),
-   including its payment-network exception and scope-denial handling.
+3. Browser requests need no host declarations; see the
+   [egress contract](operator-tool-surface.md#browser-egress-is-unrestricted).
 4. Capture the operation, session, request, document, and browser/process
    identities needed to correlate each result. Suppress raw credentials and URL
    query values from the record.

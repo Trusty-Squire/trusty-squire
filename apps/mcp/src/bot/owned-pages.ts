@@ -44,12 +44,6 @@ export class OwnedPages {
     return this.pages.has(page) && !page.isClosed();
   }
 
-  /** True only when a DIFFERENT registry has positively claimed the page. */
-  claimedByAnother(page: Page): boolean {
-    const owner = owners.get(page);
-    return owner !== undefined && owner !== this.owner;
-  }
-
   live(): Page[] {
     return [...this.pages.keys()].filter((page) => this.has(page));
   }

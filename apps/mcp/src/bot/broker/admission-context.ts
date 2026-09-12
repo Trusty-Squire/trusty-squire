@@ -11,7 +11,7 @@ export function withBrokerAdmission<T>(
 ): Promise<T> {
   return context.run(admission, operation);
 }
-/** Recipe lookup can discover additional startup hosts. Reserve them before
+/** Reserve the startup service site before
  * even acquiring a page, so legacy recipe starts cannot bypass site custody. */
 export function reserveBrokerAdmission(hosts: readonly string[]): string | undefined {
   const admission = context.getStore();

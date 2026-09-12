@@ -130,9 +130,7 @@ when this flag is off.
 - **Tab-family isolation.** `BrowserController.attachSatellite(primary, opts)`
   (`browser.ts`) constructs a SECOND `BrowserController` that shares
   `primary`'s `BrowserProcessOwner` (same Chrome process and
-  `BrowserContext`) but gets its OWN `PageDriver`/`OwnedPages`; the only
-  change to those classes is the read-only `claimedByAnother()` accessor
-  `owned-pages.ts` gained for the page-aware host-scope guard.
+  `BrowserContext`) but gets its OWN `PageDriver`/`OwnedPages`.
   `owned-pages.ts`'s existing per-instance `Symbol` ownership (`register()`
   throws if a page already belongs to a different `OwnedPages`) is what
   makes "neither session ever adopts the other's tabs" fall out for free.
@@ -156,19 +154,8 @@ when this flag is off.
   `forceReleaseWarmBrowserPage` call the forcing path runs next performs the
   group's one decrement and, when last, the primary close. (Decrementing
   first discarded the group before anything closed the shared Chrome.)
-- **Host-scope guard under sharing.** With the flag off the guard judges
-  every request unconditionally, exactly as before. Under the flag each
-  session installs its own `installHostScopeGuard` route on the shared
-  context, Playwright runs every context route for every request, and a
-  guard hands a page another session's `OwnedPages` has DEFINITELY claimed
-  on (`route.fallback`) to that session's guard; everything else — an
-  unclaimed page or a frameless service-worker request — it judges itself,
-  fail-closed, so such a request must pass every live session's scope.
-  `closeOwnPagesOnly()` unroutes the finished session's guard. The real
-  residual: Playwright fires the opener's `popup` event only after the
-  popup's first navigation commits, so EVERY popup is unclaimed for that
-  window and its earliest XHR/fetch (an OAuth/consent page's first API call)
-  is aborted unless in scope for every live session.
+- **Networking under sharing.** All tab families, popups, and service workers
+  have unrestricted browser egress. Page ownership still governs actions and teardown.
 - **Known, accepted limitation** (do not try to fix here): two sessions
   against the SAME site under the SAME login share cookies and can collide.
   This flag is for different-site concurrency and the auth spike, not a

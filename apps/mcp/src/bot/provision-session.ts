@@ -27,9 +27,7 @@ import { serializeBrowserUseDOM } from "./browser-use-serializer.js";
 //    substrate's startOAuth/settleAfterOAuth, which already adopt the popup.
 //
 // Design notes:
-//  - domain-scope gates only AGENT-INITIATED `goto`. Organic OAuth redirects
-//    (which bounce through accounts.google.com, *.firebaseapp.com, etc.) are
-//    not navigation the agent chose, so they are never blocked.
+//  - browser egress has no host scope.
 //  - no credential is ever read back to the agent except via the explicit
 //    `finish`/extract path; the vault stays write-only.
 
@@ -48,7 +46,6 @@ import {
   OAuthFailedError,
   OAuthOnboardingRequiredError,
   type BrowserController,
-  type HostScopeDenialDiagnostic,
   type ClickDispatchStatus,
   type CheckoutSummary,
   type FrameTarget,
@@ -82,7 +79,6 @@ import {
   recordableTokenV2,
   safeDescriptionV2,
   safeBlockersV2,
-  type SafeBlockerV2,
   safeOriginV2,
   safePageSemanticsV2,
   sealRetainedInteractiveElementsV2,
@@ -166,16 +162,6 @@ import {
   resolveExtraction,
   type CandidateClass,
 } from "./extraction.js";
-
-// Identity-provider + auth-handler hosts a signup legitimately bounces
-// through. Used to widen domain-scope so an OAuth `goto` (rare) isn't blocked.
-// Organic redirects are already exempt (scope only gates explicit goto).
-const DEFAULT_AUTH_HOSTS: readonly string[] = [
-  "accounts.google.com",
-  "github.com",
-  "login.microsoftonline.com",
-  "appleid.apple.com",
-];
 
 export interface ObservedElement {
   // Stable action handle for this element identity. Prefer this as
@@ -284,9 +270,6 @@ export interface Observation {
   // V1 and Compact V2 start with the live page location. Compact V2 can shorten
   // fixed metadata only when necessary to fit its wire budget.
   url: string;
-  // Bounded, document-attributed request-scope denials. Hostnames only: never
-  // paths, query strings, request bodies, headers, or page-provided secrets.
-  scope_denials?: HostScopeDenialDiagnostic[];
   // Registry route guidance, present ONLY on the first (start) observation when
   // a skill exists for the service. The host agent reads it before driving.
   hint?: string;
@@ -541,12 +524,7 @@ import type {
   RecordedValueSource,
   Session,
 } from "./session/model.js";
-import {
-  egressSeedHosts,
-  hostStrings,
-  registrableHost,
-  serviceLoginRouteHosts,
-} from "./session/hosts.js";
+import { egressSeedHosts, hostStrings, registrableHost } from "./session/hosts.js";
 // Phase 2 — the lifecycle registry transaction moved to session/lifecycle.ts as
 // one unit (registry, real-profile lease, call leases and drains, watchdog,
 // bounded close, terminal owner, artifact cleanup, start/finish/shutdown).
@@ -1675,8 +1653,7 @@ function resolveAuthorizedCompactV2Target(
 // prompt-injected signup page could drive it to the user's vault UI, sign in
 // via that Google session, and read revealed secrets — defeating the
 // write-only model (a confused-deputy exfiltration path, confirmed 2026-07-21).
-// This denylist OVERRIDES the allow-set: no `goto` and no `allow_host` may
-// reach these hosts, regardless of what the agent declares. (Self-hosted
+// Explicit operator actions cannot reach these hosts. (Self-hosted
 // deployments on other domains should extend this list.)
 const SQUIRE_CONTROL_PLANE_HOSTS: readonly string[] = [
   "trustysquire.ai",
@@ -1690,40 +1667,15 @@ export function isSquireControlPlaneHost(host: string): boolean {
   return SQUIRE_CONTROL_PLANE_HOSTS.some((d) => h === d || h.endsWith(`.${d}`));
 }
 
-// Domain-scope check for an agent-initiated goto. Allows the target host, any
-// subdomain of it, exact service-specific login routes, the configured auth
-// hosts, and *.firebaseapp.com / *.web.app auth handlers. Organic redirects
-// are NOT routed through here.
-export function hostAllowed(url: string, allowedHosts: readonly string[]): boolean {
-  let host: string;
+// Preserve the existing control-plane boundary independently of browser egress.
+export function hostAllowed(url: string, _allowedHosts: readonly string[] = []): boolean {
   try {
-    host = new URL(url).hostname.toLowerCase();
+    return !isSquireControlPlaneHost(new URL(url).hostname);
   } catch {
     return false;
   }
-  // Hard denylist first — Squire's own control plane is off-limits even if the
-  // agent widened the allow-set to include it.
-  if (isSquireControlPlaneHost(host)) return false;
-  const ok = (allowed: string): boolean => host === allowed || host.endsWith(`.${allowed}`);
-  if (allowedHosts.some(ok)) return true;
-  if (serviceLoginRouteHosts(allowedHosts).includes(host)) return true;
-  if (DEFAULT_AUTH_HOSTS.some(ok)) return true;
-  if (host.endsWith(".firebaseapp.com") || host.endsWith(".web.app")) return true;
-  return false;
 }
 
-// Frame domain-lock (operator-frame-support) — the ONE non-negotiable of frame
-// support: an action on an element inside a child <iframe> must be checked
-// against THAT frame's own origin, never the top page's, or a rogue/payment
-// iframe embedded on an otherwise in-scope page could be acted on (or typed
-// into) unchecked just because the outer page already passed hostAllowed.
-// `el.frameUrl` is undefined/null for an ordinary main-frame element, so this
-// is a no-op for every pre-existing target. A frame on the page's own
-// registrable domain (the merchant's own checkout iframe — the case this
-// feature exists for) is freely reachable, exactly like main-frame content;
-// anything else goes through the SAME domain-scope check goto/allow_host
-// already use (hostAllowed) — reusing the existing guard, not inventing a
-// new trust classifier.
 type FrameScopedTarget = Pick<
   InteractiveElement,
   "frameOrigin" | "frameUrl" | "framePath" | "frameOpaque"
@@ -1762,9 +1714,7 @@ function assertFrameTargetAllowed(
   page: Page | undefined = undefined,
 ): void {
   if (frameTargetAllowed(session, el, page)) return;
-  // An opaque (null-origin) frame gets its own TERMINAL refusal: the generic
-  // message below suggests allow_host, which can never succeed for a null
-  // origin — a remedy the model would loop on forever.
+  // Preserve the existing opaque-frame targeting refusal.
   if (el.frameOpaque === true || el.frameOrigin === "null") {
     throw new ProvisionTargetNotAllowedError(
       `${kind} refused: the target lives in an opaque (null-origin) frame — a sandboxed ` +
@@ -1774,19 +1724,14 @@ function assertFrameTargetAllowed(
     );
   }
   throw new ProvisionTargetNotAllowedError(
-    `${kind} blocked by domain-scope: the target lives in a cross-domain frame ` +
-      `(${el.frameOrigin ?? el.frameUrl}) outside the allowed hosts ` +
-      `[${hostStrings(session).join(", ")}] + auth providers. ` +
-      `Declare it first with an allow_host action if this task spans it.`,
+    `${kind} refused: invalid or Squire control-plane frame (${el.frameOrigin ?? el.frameUrl})`,
   );
 }
 
 // type_secret is stricter still: a secret may be typed only into the main
 // frame or a frame on the page's OWN registrable domain — never into a
-// cross-domain (e.g. third-party payment) iframe, even one otherwise allowed
-// for navigation/click via hostAllowed's auth-provider carve-outs. A weak
-// model must never be able to type a credential into a rogue or payment
-// iframe just because that host happens to be allow-listed for OAuth.
+// cross-domain (e.g. third-party payment) iframe. Browser egress does not
+// change this credential-injection boundary.
 function assertSecretFrameTargetAllowed(
   session: Session,
   el: FrameScopedTarget,
@@ -1824,74 +1769,6 @@ function assertNoFrameTarget(el: InteractiveElement, kind: string): void {
       `(frame ${el.frameOrigin ?? "unknown"}). Use click/js_click/type/type_secret/select ` +
       `for frame targets.`,
   );
-}
-
-// A two-label public suffix we must never let a single allow_host widen to —
-// adding "co.uk" would green-light every *.co.uk. Small curated set (the ones
-// the operator surface realistically touches); not a full PSL.
-const TWO_LABEL_PUBLIC_SUFFIXES: ReadonlySet<string> = new Set([
-  "co.uk",
-  "org.uk",
-  "gov.uk",
-  "ac.uk",
-  "com.au",
-  "net.au",
-  "org.au",
-  "co.jp",
-  "co.nz",
-  "co.in",
-  "com.br",
-  "co.za",
-  "com.cn",
-  "github.io",
-  "web.app",
-  "firebaseapp.com",
-  "pages.dev",
-  "workers.dev",
-  "vercel.app",
-  "netlify.app",
-  "herokuapp.com",
-]);
-
-// Validate an agent-declared allow_host host. Returns the normalized bare
-// hostname or an error string. Hardened (Codex): reject wildcards, ports,
-// schemes/paths, IDNA/punycode + non-ASCII (lookalike-spoof defense), IPv4/IPv6
-// literals, localhost/private hosts, bare TLDs, and two-label public suffixes.
-// This matters more now that type_secret can enter a secret on these hosts.
-export function validateAllowHost(raw: string): { host: string } | { error: string } {
-  const v = raw.trim().toLowerCase();
-  if (v.length === 0 || v.length > 253) return { error: "host empty or too long" };
-  if (/[/:@?#*\s]/.test(v))
-    return {
-      error: "host must be a bare hostname (no scheme, port, path, wildcard, or whitespace)",
-    };
-  if (/[^a-z0-9.-]/.test(v))
-    return {
-      error: "host has non-ASCII or invalid characters (punycode/unicode spoofing rejected)",
-    };
-  if (v.includes("xn--")) return { error: "punycode (xn--) hosts rejected — homograph-spoof risk" };
-  if (v.startsWith(".") || v.endsWith(".") || v.includes(".."))
-    return { error: "malformed host (leading/trailing/double dot)" };
-  if (v === "localhost" || v.endsWith(".localhost"))
-    return { error: "localhost is not an allowable cross-host" };
-  // IPv4 literal / dotted-quad — reject (egress + transfer must be by name).
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v))
-    return { error: "IP-address hosts are not allowed (declare a hostname)" };
-  // IPv6 would contain ':' — already rejected by the ':' check above.
-  const labels = v.split(".");
-  if (labels.length < 2) return { error: "bare TLD / single-label host not allowed" };
-  if (labels.some((l) => l.length === 0 || l.length > 63))
-    return { error: "invalid host label length" };
-  if (TWO_LABEL_PUBLIC_SUFFIXES.has(v))
-    return { error: `"${v}" is a public suffix — widening to it would allow every subdomain` };
-  // Squire's own control plane is never a legitimate cross-host — refuse to
-  // widen the operator browser into the vault UI / API (confused-deputy guard).
-  if (isSquireControlPlaneHost(v))
-    return {
-      error:
-        "Squire's own control plane (the vault UI / API) is off-limits to the operator browser",
-    };
-  return { host: v };
 }
 
 function visibleModeMarkers(pageText: string): string[] {
@@ -2091,7 +1968,7 @@ export function provisionPerceptionGuidance(pageText: string): string | undefine
       "Not-found page (404): this signup URL is stale — do NOT stop or report a wall. " +
         "Recover the real signup entry: try another path on this host (/register, " +
         "/sign-up, /join, /get-started), or navigate to the site's ROOT domain " +
-        "(allow_host it if needed) and click the 'Sign up' / 'Get started' / 'Register' link.",
+        "and click the 'Sign up' / 'Get started' / 'Register' link.",
     );
   }
 
@@ -2392,9 +2269,7 @@ function baseDomain(host: string): string {
 }
 
 // Webmail hosts awaitVerification drives the browser INTO to read a code/link.
-// They are never declared in a session's allowed_hosts (the goto gate blocks
-// them); the browser only reaches them via awaitVerification's sanctioned
-// internal navigation. Actions taken while parked here must NOT enter the
+// Actions taken while parked here must NOT enter the
 // replayable recipe: (a) replay re-fetches the code via awaitVerification, so a
 // recorded inbox click is dead weight, and (b) the clicked row's visible text
 // carries the email's subject/snippet — baking a user's inbox content into a
@@ -2439,10 +2314,7 @@ function widenAllowedHostsFromUrl(session: Session, url: string): void {
 // the lifecycle module keeps a one-way dependency on this file (types only).
 const sessionStartPorts: SessionStartPorts = {
   observeSession: async (session, format, startMetadata) =>
-    withHostScopeDenials(
-      session,
-      await observeSession(session, format, startMetadata, undefined, false, format),
-    ),
+    await observeSession(session, format, startMetadata, undefined, false, format),
   compactV2StartMetadata: (registryHint, loginHint, userEmail) =>
     compactV2StartMetadata(registryHint, loginHint, userEmail),
 };
@@ -2497,81 +2369,17 @@ async function observeOwned(sessionId: string, format?: "compact" | "full"): Pro
     transition.browserConnected
       ? undefined
       : operationPageForSession(session);
-  return withHostScopeDenials(
+  return await observeSession(
     session,
-    await observeSession(
-      session,
-      requestedFormat,
-      undefined,
-      sourcePage?.isClosed() === true ? undefined : sourcePage,
-      false,
-      requestedFormat,
-      false,
-      true,
-      format === "full",
-    ),
+    requestedFormat,
+    undefined,
+    sourcePage?.isClosed() === true ? undefined : sourcePage,
+    false,
+    requestedFormat,
+    false,
+    true,
+    format === "full",
   );
-}
-
-function withHostScopeDenials<T extends object>(session: Session, result: T): T {
-  const denials = session.browser.takeHostScopeDenials?.() ?? [];
-  if (denials.length === 0) return result;
-  return {
-    ...result,
-    scope_denials: denials,
-  } as T;
-}
-
-// Diagnostic classification only, not an allowance list. A host match still
-// requires unambiguous document ownership before it can explain a blocker.
-const CHALLENGE_SCOPE_HOST_RE =
-  /(?:^|\.)protect\.clerk\.com$|(?:^|\.)challenges\.cloudflare\.com$|(?:^|\.)hcaptcha\.com$|(?:^|\.)recaptcha\.net$/iu;
-
-const challengeDocuments = new WeakMap<SafeBlockerV2, string>();
-
-/**
- * Surface denied challenge hosts ON the challenge blocker itself (`cause:
- * "scope"` with the exact hostnames) instead of leaving the host agent to
- * correlate a `semantic.blockers` challenge with a separate `scope_denials`
- * list. Pure: returns the input untouched (same reference) when there is
- * nothing to annotate.
- */
-export function annotateChallengeBlockersWithScope<T extends object>(
-  result: T,
-  denials: readonly HostScopeDenialDiagnostic[],
-  documentForBlocker: (blocker: SafeBlockerV2) => string | undefined = (blocker) =>
-    challengeDocuments.get(blocker),
-): T {
-  const semantic = (result as { semantic?: SafePageSemanticsV2 }).semantic;
-  const blockers = semantic?.blockers;
-  if (!Array.isArray(blockers)) return result;
-  let annotated = false;
-  const nextBlockers = blockers.map((blocker) => {
-    if (blocker.kind !== "challenge" || blocker.cause !== undefined) return blocker;
-    const documentId = documentForBlocker(blocker);
-    if (documentId === undefined) return blocker;
-    if (
-      blockers.filter(
-        (candidate) =>
-          candidate.kind === "challenge" && documentForBlocker(candidate) === documentId,
-      ).length !== 1
-    )
-      return blocker;
-    const deniedHosts = [
-      ...new Set(
-        denials
-          .filter(
-            (denial) => denial.owner.document_id === documentId && denial.owner.frame === "main",
-          )
-          .map((denial) => denial.hostname)
-          .filter((hostname) => CHALLENGE_SCOPE_HOST_RE.test(hostname)),
-      ),
-    ].sort();
-    if (deniedHosts.length === 0) return blocker;
-    annotated = true;
-    return { ...blocker, cause: "scope" as const, cause_hosts: deniedHosts };
-  });
-  return annotated ? { ...result, semantic: { ...semantic, blockers: nextBlockers } } : result;
 }
 
 export interface ScreenshotCapture {
@@ -4731,33 +4539,15 @@ function compactV2Observation(
   const handles = compactV2Handles(session, elements, sourcePage);
   const safe = compactV2LiveControls(session, elements, sourcePage, handles);
   const targetableRefs = new Set(safe.rows.map((row) => row.ref));
-  const mainDocumentNodes = new Set<BrowserUseCapture["root"]>();
-  const collectMainDocument = (node: BrowserUseCapture["root"]): void => {
-    mainDocumentNodes.add(node);
-    node.children.forEach(collectMainDocument);
+  const blockers = safeBlockersV2(capture.root, (node) => {
+    const element = capture.nodeElements.get(node.id);
+    const ref = element === undefined ? undefined : handles.get(element);
+    return ref !== undefined && targetableRefs.has(ref) ? ref : undefined;
+  });
+  const semantics = {
+    ...safePageSemanticsV2(semanticSource),
+    ...(blockers.length === 0 ? {} : { blockers, blocked: true as const }),
   };
-  collectMainDocument(capture.root);
-  const documentId = `${session.browser.mainDocumentIdentity(sourcePage)}:main`;
-  const blockers = safeBlockersV2(
-    capture.root,
-    (node) => {
-      const element = capture.nodeElements.get(node.id);
-      const ref = element === undefined ? undefined : handles.get(element);
-      return ref !== undefined && targetableRefs.has(ref) ? ref : undefined;
-    },
-    (blocker, root) => {
-      if (mainDocumentNodes.has(root)) challengeDocuments.set(blocker, documentId);
-    },
-  );
-  const { semantic: semantics } = annotateChallengeBlockersWithScope(
-    {
-      semantic: {
-        ...safePageSemanticsV2(semanticSource),
-        ...(blockers.length === 0 ? {} : { blockers, blocked: true as const }),
-      },
-    },
-    session.browser.peekHostScopeDenials?.() ?? [],
-  );
   const rendered = serializeBrowserUseDOM(capture.root, {
     ref: (node) => {
       const element = capture.nodeElements.get(node.id);
@@ -4903,9 +4693,6 @@ function compactV2Observation(
     session_id: session.id,
     url: pageUrl,
     stage,
-    ...(semantics.blockers?.some((blocker) => blocker.cause === "scope")
-      ? { semantic: { blocked: true as const, blockers: semantics.blockers } }
-      : {}),
     ...(sameFullDocument ? { delta: true } : {}),
     ...(changed || forceFullDOM ? { dom } : { dom_unchanged: true as const }),
     ...(removed.length ? { removed } : {}),
@@ -5002,15 +4789,12 @@ async function observeQueryOwned(
       sessionId: session.id,
       stage: snapshot.stage,
       pageUrl: snapshot.pageUrl,
-      semantics: annotateChallengeBlockersWithScope(
-        { semantic: snapshot.semantics },
-        session.browser.peekHostScopeDenials?.() ?? [],
-      ).semantic,
+      semantics: snapshot.semantics,
       rows: snapshot.rows,
       offset: parsed.offset,
       cursorFor: (next) => compactV2Cursor(session, snapshot, next),
     });
-    return withHostScopeDenials(session, page.payload);
+    return page.payload;
   }
 
   // A cursorless query/role is always a fresh observation. Capture action rows
@@ -5071,7 +4855,7 @@ async function observeQueryOwned(
     rows,
     cursorFor: (next) => compactV2Cursor(session, snapshot, next),
   });
-  return withHostScopeDenials(session, page.payload);
+  return page.payload;
 }
 
 function terminalOAuthCompletionObservation(session: Session, url: string): Observation {
@@ -5873,28 +5657,14 @@ async function executeAct(
       case "goto": {
         if (!hostAllowed(action.url, hostStrings(session))) {
           throw new ProvisionTargetNotAllowedError(
-            `goto blocked by domain-scope: ${action.url} is outside the allowed hosts ` +
-              `[${hostStrings(session).join(", ")}] + auth providers. ` +
-              `Declare it first with an allow_host action if this task spans it.`,
+            `goto refused: invalid URL or Squire control-plane destination: ${action.url}`,
           );
         }
         await browser.goto(action.url, compactV2ActionPage);
         break;
       }
       case "allow_host": {
-        const checked = validateAllowHost(action.host);
-        if ("error" in checked) {
-          throw new ProvisionTargetNotAllowedError(
-            `allow_host rejected "${action.host}": ${checked.error}`,
-          );
-        }
-        if (!session.allowedHosts.some((e) => e.host === checked.host)) {
-          session.allowedHosts.push({ host: checked.host, source: "mid_session" });
-          audit(sessionId, "allow_host", {
-            host: checked.host,
-            allowed_hosts: hostStrings(session),
-          });
-        }
+        // Backward-compatible no-op: browser requests have no host scope.
         break;
       }
       case "press": {
@@ -6028,10 +5798,8 @@ async function executeAct(
           );
         }
         resolvedEl = el;
-        // Frame domain-lock (operator-frame-support) — the SAME gate a frame
-        // click/type passes; see frameTargetAllowed. A native <select> is not a
-        // secret field, so the stricter type_secret cross-origin rule does not
-        // apply, but the ordinary domain lock does.
+        // Preserve frame identity/control-plane checks. Secret injection has
+        // its separate cross-origin boundary.
         assertFrameTargetAllowed(session, el, "select", compactV2ActionPage);
         bindCartIdentity(isCartAffectingAction(action, el));
         const selectFrame = frameTargetFor(el);
@@ -6254,7 +6022,7 @@ async function executeAct(
           );
         }
         resolvedEl = el;
-        // Frame domain-lock (operator-frame-support) — see frameTargetAllowed.
+        // Preserve frame identity and control-plane checks; see frameTargetAllowed.
         // A main-frame or same-domain-frame target is unaffected.
         assertFrameTargetAllowed(session, el, action.kind, compactV2ActionPage);
         bindCartIdentity(isCartAffectingAction(action, el));
@@ -6633,12 +6401,10 @@ async function executeAct(
     : observation;
   return {
     ...(actionPageAfter === undefined ? {} : { operationPage: actionPageAfter }),
-    observation: withHostScopeDenials(
-      session,
+    observation:
       completedAction.kind === "select" && observationWithNavigation.format !== "browser-use-dom"
         ? { ...observationWithNavigation, selected_option: completedAction.text }
         : observationWithNavigation,
-    ),
     outcome: {
       ...(completedAction.kind === "select" ? { selectedOption: completedAction.text } : {}),
       ...(checkoutState === undefined ? {} : { checkoutState }),
@@ -6781,8 +6547,7 @@ function compactV2ActionFailureReason(error: unknown, kind: ProvisionAction["kin
   if (error instanceof ProvisionTargetNotAllowedError) {
     // 2026-09-06 dogfood: a bare `target_not_allowed` gave the agent no host,
     // no allowlist, and no remedy — a recoverable step died as a dead end.
-    // The thrown error already names the refused host/URL, the allowed hosts,
-    // and the `allow_host` remedy, so keep the stable leading token callers
+    // Preserve the refusal detail and stable leading token callers
     // match on and append that detail. Machine-readable-first: everything
     // before the first colon is unchanged.
     return `target_not_allowed: ${error.message}`;
@@ -9863,7 +9628,7 @@ export interface VerificationResult {
   // when sealed (the code was stashed into a slot — use type_secret to enter it).
   code: string | null;
   // A verification/confirm link if present, else null. The host decides whether
-  // to goto it (it is within the target's own domain → already domain-scoped).
+  // to navigate to it.
   link: string | null;
   // Set when found=false: the code wasn't auto-retrievable from the inbox. The
   // session is alive — ASK THE USER for the code and type it, don't abandon.
@@ -10095,58 +9860,55 @@ export async function awaitVerification(
   }
 
   const verification = await runDetachedGoogleIdentityOperation(session, async (browser) => {
-    return await browser.withTemporaryHostScopeAllowedHosts(["mail.google.com"], async () => {
-      const query = buildVerificationSearchQuery(opts.sender);
-      const searchUrl = `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
-      const linkCandidatesOf = (
-        els: readonly {
-          href?: string | null;
-          visibleText?: string | null;
-          labelText?: string | null;
-          ariaLabel?: string | null;
-        }[],
-      ): VerificationLinkCandidate[] =>
-        els
-          .filter(
-            (e): e is typeof e & { href: string } =>
-              typeof e.href === "string" && e.href.length > 0,
-          )
-          .map((e) => ({ url: e.href, text: e.visibleText ?? e.labelText ?? e.ariaLabel ?? null }));
-      let code: string | null = null;
-      let link: string | null = null;
-      let sourceFrom: string | null = null;
-      for (let attempt = 0; attempt < 3 && code === null && link === null; attempt++) {
-        sourceFrom = null;
-        if (attempt > 0)
-          await browser.waitForCaptchaChallengeToSettle(4000, 0, inboxPage).catch(() => false);
-        await browser.goto(searchUrl, inboxPage);
-        const { text: listText, links: listLinks } = await readGmailSearchResultsResilient(
-          browser,
-          searchUrl,
-          inboxPage,
-          linkCandidatesOf,
-        );
-        const opened = await browser.openFirstMailResult(inboxPage).catch(() => false);
-        if (opened) {
-          const openedText = await browser.extractVisibleText(inboxPage);
-          const openedLinks = linkCandidatesOf(await browser.extractInteractiveElements(inboxPage));
-          sourceFrom = extractSenderEmail(openedText);
-          const expectedDomains = expectedVerificationDomains(opts.sender, sourceFrom);
-          ({ code, link } = parseVerification(
-            openedText,
-            [...openedLinks, ...listLinks],
-            expectedDomains,
-          ));
-        } else {
-          ({ code, link } = parseVerification(
-            listText,
-            listLinks,
-            expectedVerificationDomains(opts.sender, null),
-          ));
-        }
+    const query = buildVerificationSearchQuery(opts.sender);
+    const searchUrl = `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
+    const linkCandidatesOf = (
+      els: readonly {
+        href?: string | null;
+        visibleText?: string | null;
+        labelText?: string | null;
+        ariaLabel?: string | null;
+      }[],
+    ): VerificationLinkCandidate[] =>
+      els
+        .filter(
+          (e): e is typeof e & { href: string } => typeof e.href === "string" && e.href.length > 0,
+        )
+        .map((e) => ({ url: e.href, text: e.visibleText ?? e.labelText ?? e.ariaLabel ?? null }));
+    let code: string | null = null;
+    let link: string | null = null;
+    let sourceFrom: string | null = null;
+    for (let attempt = 0; attempt < 3 && code === null && link === null; attempt++) {
+      sourceFrom = null;
+      if (attempt > 0)
+        await browser.waitForCaptchaChallengeToSettle(4000, 0, inboxPage).catch(() => false);
+      await browser.goto(searchUrl, inboxPage);
+      const { text: listText, links: listLinks } = await readGmailSearchResultsResilient(
+        browser,
+        searchUrl,
+        inboxPage,
+        linkCandidatesOf,
+      );
+      const opened = await browser.openFirstMailResult(inboxPage).catch(() => false);
+      if (opened) {
+        const openedText = await browser.extractVisibleText(inboxPage);
+        const openedLinks = linkCandidatesOf(await browser.extractInteractiveElements(inboxPage));
+        sourceFrom = extractSenderEmail(openedText);
+        const expectedDomains = expectedVerificationDomains(opts.sender, sourceFrom);
+        ({ code, link } = parseVerification(
+          openedText,
+          [...openedLinks, ...listLinks],
+          expectedDomains,
+        ));
+      } else {
+        ({ code, link } = parseVerification(
+          listText,
+          listLinks,
+          expectedVerificationDomains(opts.sender, null),
+        ));
       }
-      return { code, link, sourceFrom };
-    });
+    }
+    return { code, link, sourceFrom };
   });
   const { code, link, sourceFrom } = verification;
   const found = code !== null || link !== null;

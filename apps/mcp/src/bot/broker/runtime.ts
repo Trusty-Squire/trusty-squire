@@ -111,7 +111,6 @@ export class BrokerRuntime implements BrokerBrowserCustody {
             } finally {
               if (timer !== undefined) clearTimeout(timer);
             }
-            await owner.enableBrokerRouting();
             return owner;
           } catch (error) {
             const closed =

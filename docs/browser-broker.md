@@ -56,13 +56,10 @@ binding. Browser epoch changes invalidate earlier capabilities.
   held through maintenance. A separate physical-profile lease coordinates Chrome
   and the existing plain-login path. Profile enrollment pins the account on disk.
 - Each session owns a target family, capability generation, serialized command
-  queue, and site reservations. Startup merchant hosts authorize matching
-  registrable-domain siblings; recipe-resolved startup hosts reserve before
-  page acquisition. Other required hosts must be declared at startup.
-  `operate_allow_host` cannot widen that startup entitlement. Conflicting
-  site custody queues until the existing owner releases it.
-- A context-level route selects the owning page's host policy. Unknown targets
-  cannot issue background API traffic. Session cleanup closes only that owned
+  queue, and site reservations. The service URL reserves its site before page
+  acquisition. Conflicting site custody queues until the existing owner releases it.
+  Legacy host declarations do not extend those reservations.
+- Browser egress is unrestricted for all targets. Session cleanup closes only that owned
   family. At reconnect-grace expiry, a close that cannot be proven removes the
   actor from broker inventory and releases its slot rather than retaining or
   reusing it; the existing exact owner-process identity backstop remains the

@@ -2866,18 +2866,14 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const inboxResume = new Promise<void>((resolve) => {
         resumeInbox = resolve;
       });
-      const originalTemporaryScope = controller.withTemporaryHostScopeAllowedHosts.bind(controller);
-      const temporaryScopeSpy = vi
-        .spyOn(controller, "withTemporaryHostScopeAllowedHosts")
-        .mockImplementation(
-          async <T>(hosts: readonly string[], operation: () => Promise<T>): Promise<T> => {
-            if (hosts.includes("mail.google.com")) {
-              enteredInbox();
-              await inboxResume;
-            }
-            return await originalTemporaryScope(hosts, operation);
-          },
-        );
+      const originalGoto = controller.goto.bind(controller);
+      const inboxGotoSpy = vi.spyOn(controller, "goto").mockImplementation(async (url, page) => {
+        if (url.startsWith("https://mail.google.com/")) {
+          enteredInbox();
+          await inboxResume;
+        }
+        return await originalGoto(url, page);
+      });
 
       const verification = awaitVerification(sessionId);
       await inboxEntered;
@@ -2892,7 +2888,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       expect(opened.url).toBe(openedUrl);
       resumeInbox();
       const result = await verification;
-      temporaryScopeSpy.mockRestore();
+      inboxGotoSpy.mockRestore();
 
       expect(result).toMatchObject({ found: true, code: "481920" });
       await expect(queuedOauth).rejects.toBeInstanceOf(ProvenPreDispatchMutationError);

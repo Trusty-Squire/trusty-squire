@@ -54,9 +54,7 @@ import type {
   Locator,
   Page,
   Request,
-  Route,
 } from "playwright";
-import { experimentalMultiSessionEnabled } from "./session/multisession-flag.js";
 import {
   currentOperatorRequestSignal,
   markOperatorMutationDispatchAttempted,
@@ -309,31 +307,6 @@ export function recognizedPaymentProviderFrame(frameUrl: string, pageUrl: string
     (allowed) => host === allowed || host.endsWith(`.${allowed}`),
   );
 }
-
-// 3-D Secure ACS/directory-server hosts that the host-scope guard
-// (requestHostInScope, below) must let through for XHR/fetch — NEVER for
-// card-fill (that stays RECOGNIZED_PAYMENT_PROVIDER_FRAME_HOSTS-only; keep
-// these two lists separate so widening network scope for a challenge can
-// never also widen where the raw PAN is allowed to be typed).
-//
-// Root cause (2026-08-23, Hibiya Kadan/EbisuMart live decoupled-3DS hang,
-// reproduced deterministically with a local ACS fixture — see
-// browser-decoupled-3ds.test.ts): detectThreeDsChallenge already treats a
-// cardinalcommerce.com frame as a legitimate 3DS authority (the urlPattern
-// above), but requestHostInScope did not — so the ACS page's OWN decoupled-
-// authentication status poll (a `fetch`/`XHR` to its own backend) was
-// fail-closed ABORTED by installHostScopeGuard the instant the challenge
-// attached, because cardinalcommerce.com was never a `start`-declared or
-// sibling-domain host for the checkout session. The issuer approval landed
-// out-of-band in ~2 seconds — nowhere near the wait budget — but the ACS
-// page's client-side JS could never learn about it, so it never redirected
-// or auto-submitted its CRes, and waitForThreeDsResolution correctly polled
-// forever for a navigation that could never happen. No wait-duration fix
-// (resumability, a longer budget) can repair this: the browser is stuck
-// independent of how long we watch it.
-const THREE_DS_ACS_NETWORK_HOSTS: readonly string[] = [
-  "cardinalcommerce.com", // Visa/Mastercard/etc.'s shared ACS/StepUp vendor — the one host requestHostInScope was missing that detectThreeDsChallenge's urlPattern above already names.
-];
 
 // Card fields exist on the page but only inside a frame that is NOT a
 // recognized payment-provider surface. Carries the frame origin so the
@@ -1399,121 +1372,6 @@ function isPayPalBraintreeHostedFieldsHost(host: string): boolean {
     h === "braintreegateway.com" ||
     h.endsWith(".braintreegateway.com")
   );
-}
-
-// Identity-provider + auth-handler hosts a page legitimately bounces subresource
-// traffic through. Mirror of provision-session.ts DEFAULT_AUTH_HOSTS, kept local
-// so browser.ts's request-scope guard never creates a circular import.
-const HOST_SCOPE_AUTH_HOSTS: readonly string[] = [
-  "accounts.google.com",
-  "github.com",
-  "login.microsoftonline.com",
-  "appleid.apple.com",
-];
-
-const HOST_SCOPE_ALWAYS_ALLOW_HOSTS: readonly string[] = [
-  "challenges.cloudflare.com",
-  "hcaptcha.com",
-  "newassets.hcaptcha.com",
-  "www.google.com",
-  "recaptcha.net",
-  "js.stripe.com",
-];
-
-// A Clerk account portal can host its own Turnstile wrapper. Its verification
-// result is posted from per-client random subdomains, so a fixed exact-host
-// allow-set cannot cover it. effectiveHostScopeForFrame must authorize the
-// document against base scope before consulting clerkChallengeScopeForDocument.
-const CLERK_CHALLENGE_SCOPE_HOSTS: readonly string[] = [
-  "*.client.protect.clerk.com",
-  "specter.protect.clerk.com",
-];
-
-export function clerkChallengeScopeForDocument(
-  documentUrl: string,
-  hasClerkAsset: boolean,
-): readonly string[] {
-  if (!hasClerkAsset) return [];
-  let hostname: string;
-  try {
-    hostname = new URL(documentUrl).hostname.toLowerCase();
-  } catch {
-    return [];
-  }
-  if (!hostname.startsWith("accounts.")) return [];
-  const serviceHost = hostname.slice("accounts.".length);
-  if (!serviceHost.includes(".")) return [];
-  return CLERK_CHALLENGE_SCOPE_HOSTS;
-}
-
-function hostMatchesScopeHost(host: string, allowedHost: string): boolean {
-  const allowed = allowedHost.trim().toLowerCase();
-  if (allowed.startsWith("*.")) return host.endsWith(`.${allowed.slice(2)}`);
-  return host === allowed;
-}
-
-// Whether a request URL's host is inside the operator's egress scope. In-scope
-// when it matches an allowed host, shares the SAME registrable
-// domain (eTLD+1) as an already-trusted host (the merchant's own API siblings —
-// the Rakuten cart/checkout backend), or is a known auth/captcha/payment host.
-// A request outside this scope is a candidate for fail-fast blocking rather than
-// being silently dropped to hang the page. Reuses isSameRecipeDomain (a tested
-// tldts-backed eTLD+1 comparison) for the same-registrable-domain auto-scope.
-export function requestHostInScope(
-  url: string,
-  allowedHosts: readonly string[],
-  siblingDomainHosts: readonly string[] = allowedHosts,
-): boolean {
-  let parsedUrl: URL;
-  try {
-    parsedUrl = new URL(url);
-  } catch {
-    return true; // unparseable URL — never fail-fast-block on a parse stumble
-  }
-  const host = parsedUrl.hostname.toLowerCase();
-  const bySuffix = (suffix: string): boolean => host === suffix || host.endsWith(`.${suffix}`);
-  if (allowedHosts.some((allowed) => host === allowed.toLowerCase())) return true;
-  if (siblingDomainHosts.some((allowed) => isSameRecipeDomain(host, allowed))) return true;
-  if (HOST_SCOPE_AUTH_HOSTS.some(bySuffix)) return true;
-  if (HOST_SCOPE_ALWAYS_ALLOW_HOSTS.some(bySuffix)) return true;
-  if (bySuffix("gstatic.com") && /^\/recaptcha(?:\/|$)/u.test(parsedUrl.pathname)) return true;
-  if (
-    RECOGNIZED_PAYMENT_PROVIDER_FRAME_HOSTS.some(bySuffix) ||
-    THREE_DS_ACS_NETWORK_HOSTS.some(bySuffix) ||
-    host.endsWith(".firebaseapp.com") ||
-    host.endsWith(".web.app")
-  ) {
-    return true;
-  }
-  return false;
-}
-
-// The fail-fast decision the request-scope guard calls. A request is aborted
-// (net error → the page's fetch/XHR rejects promptly instead of hanging) only
-// when it is an in-page XHR/fetch API call TO A HOST OUTSIDE THE SESSION SCOPE.
-// Page-load resources (scripts/styles/images/frames) and every in-scope call
-// (including same-registrable-domain merchant API siblings) always continue. A
-// null allowedHosts (harness/replay, no active session) never blocks.
-export function isFailFastScopeAbort(
-  url: string,
-  resourceType: string,
-  allowedHosts: readonly string[] | null,
-  siblingDomainHosts?: readonly string[],
-): boolean {
-  if (allowedHosts === null) return false;
-  if (resourceType !== "xhr" && resourceType !== "fetch") return false;
-  return !requestHostInScope(url, allowedHosts, siblingDomainHosts);
-}
-
-export interface HostScopeDenialDiagnostic {
-  hostname: string;
-  resource_type: "xhr" | "fetch";
-  reason: "host_not_allowed";
-  count: number;
-  first_seen_at: number;
-  last_seen_at: number;
-  owner: { document_id: string; frame: "main" | string; hostname: string };
-  remedy: { action: "restart_session"; tool: "operate_start"; allowed_host: string };
 }
 
 const CURRENCY_SYMBOLS: Record<string, string> = {
@@ -2922,7 +2780,6 @@ export class BrowserController {
   private checkoutOutcomeBaseline: CheckoutOutcomeBaseline | undefined;
   private paymentInstrumentExpectation: PaymentInstrumentExpectation | undefined;
   private observedPaymentInstrumentMismatch: PaymentInstrumentMismatch | undefined;
-  private readonly paymentNetworkDeadlines = new WeakMap<Page, number>();
   private checkoutSubmitSequence = 0;
   private clickDispatchSequence = 0;
   private readonly oauthConsentAttemptedPhases = new Set<string>();
@@ -2948,180 +2805,6 @@ export class BrowserController {
   private mouseX = 100;
   private mouseY = 100;
 
-  // Optional live provider of the session's current allowed hosts, used by the
-  // fail-fast request-scope guard. Set by provision-session once a session
-  // exists so the guard auto-scopes same-registrable-domain merchant API
-  // siblings and fails-fast on genuinely out-of-scope in-page API calls. When
-  // null/never set (harness replay, non-session use) the guard is inert.
-  private hostScopeAllowedHostsProvider:
-    | (() => { allowedHosts: readonly string[]; siblingDomainHosts: readonly string[] })
-    | null = null;
-  private readonly operationScopedAllowedHosts = new Map<string, number>();
-  private hostScopeGuardInstallation: Promise<void> | null = null;
-  private hostScopeGuardHandler: ((route: Route) => Promise<void>) | null = null;
-  private readonly hostScopeDenials = new Map<string, HostScopeDenialDiagnostic>();
-  private brokerRouteRegistration: (() => void) | null = null;
-  private static readonly brokerRoutes = new WeakMap<BrowserContext, Set<BrowserController>>();
-  private static readonly brokerIdentityPages = new WeakMap<BrowserContext, Set<Page>>();
-
-  private recordHostScopeDenial(frame: Frame, url: string, resourceType: string): void {
-    if (resourceType !== "xhr" && resourceType !== "fetch") return;
-    let hostname: string;
-    try {
-      hostname = new URL(url).hostname.toLowerCase();
-    } catch {
-      return;
-    }
-    const page = frame.page();
-    const framePath = frame === page.mainFrame() ? "main" : this.framePath(frame);
-    let ownerHostname = "";
-    try {
-      const ownerUrl = new URL(frame.url());
-      ownerHostname = ownerUrl.hostname.toLowerCase();
-    } catch {}
-    const documentId =
-      frame === page.mainFrame()
-        ? `${this.mainDocumentIdentity(page)}:${framePath}`
-        : this.pageDriver.frameDocumentIdentity(frame);
-    const key = JSON.stringify([documentId, hostname, resourceType]);
-    const now = Date.now();
-    const previous = this.hostScopeDenials.get(key);
-    if (previous !== undefined) {
-      previous.count += 1;
-      previous.last_seen_at = now;
-      return;
-    }
-    // Diagnostics are advisory observations, never an unbounded network log.
-    if (this.hostScopeDenials.size >= 16) return;
-    this.hostScopeDenials.set(key, {
-      hostname,
-      resource_type: resourceType,
-      reason: "host_not_allowed",
-      count: 1,
-      first_seen_at: now,
-      last_seen_at: now,
-      owner: { document_id: documentId, frame: framePath, hostname: ownerHostname },
-      remedy: {
-        action: "restart_session",
-        tool: "operate_start",
-        allowed_host: hostname,
-      },
-    });
-  }
-
-  peekHostScopeDenials(): HostScopeDenialDiagnostic[] {
-    return [...this.hostScopeDenials.values()].map((entry) => ({
-      ...entry,
-      owner: { ...entry.owner },
-      remedy: { ...entry.remedy },
-    }));
-  }
-
-  takeHostScopeDenials(): HostScopeDenialDiagnostic[] {
-    const diagnostics = this.peekHostScopeDenials();
-    this.hostScopeDenials.clear();
-    return diagnostics;
-  }
-
-  private async effectiveHostScopeForFrame(
-    frame: Frame,
-    requestUrl: string,
-    scope: { allowedHosts: readonly string[]; siblingDomainHosts: readonly string[] },
-  ): Promise<{ allowedHosts: readonly string[]; siblingDomainHosts: readonly string[] }> {
-    // Merchant and issuer JS can finish native authentication
-    // on this payment page without a curated network-host inventory.
-    if ((this.paymentNetworkDeadlines.get(frame.page()) ?? 0) > Date.now()) {
-      return { ...scope, allowedHosts: [...scope.allowedHosts, new URL(requestUrl).hostname] };
-    }
-    const documentUrl = frame.url();
-    if (!requestHostInScope(documentUrl, scope.allowedHosts, scope.siblingDomainHosts))
-      return scope;
-    const requestHost = new URL(requestUrl).hostname.toLowerCase();
-    if (
-      !CLERK_CHALLENGE_SCOPE_HOSTS.some((allowed) => hostMatchesScopeHost(requestHost, allowed))
-    ) {
-      return scope;
-    }
-    const hasClerkAsset = await frame
-      .evaluate(() =>
-        Array.from(document.querySelectorAll("script[src],link[href]")).some((element) => {
-          const source = element.getAttribute("src") ?? element.getAttribute("href") ?? "";
-          return /(?:^|[./@_-])clerk(?:[./@_-]|$)/iu.test(source);
-        }),
-      )
-      .catch(() => false);
-    const clerkHosts = clerkChallengeScopeForDocument(documentUrl, hasClerkAsset);
-    return clerkHosts.length === 0 || frame.url() !== documentUrl
-      ? scope
-      : { ...scope, allowedHosts: [...scope.allowedHosts, requestHost] };
-  }
-
-  /** One routing authority for the broker context. Clients never install routes. */
-  async enableBrokerRouting(): Promise<void> {
-    const context = this.context;
-    if (context === null) throw new Error("Browser not started");
-    if (BrowserController.brokerRoutes.has(context)) return;
-    const controllers = new Set<BrowserController>();
-    BrowserController.brokerRoutes.set(context, controllers);
-    BrowserController.brokerIdentityPages.set(context, new Set());
-    await context.route("**/*", async (route) => {
-      try {
-        const request = route.request();
-        if (!["xhr", "fetch"].includes(request.resourceType())) {
-          await route.fallback();
-          return;
-        }
-        // Service-worker traffic cannot be attributed to a tab family. Shared
-        // admission does not qualify it by guessing a URL-based owner.
-        const frame = request.frame();
-        const page = frame.page();
-        if (BrowserController.brokerIdentityPages.get(context)?.has(page)) {
-          if (
-            isFailFastScopeAbort(request.url(), request.resourceType(), [
-              "google.com",
-              "googleapis.com",
-              "gstatic.com",
-            ])
-          )
-            await route.abort("failed");
-          else await route.fallback();
-          return;
-        }
-        let owner = [...controllers].find((candidate) => candidate.ownedPages.has(page));
-        if (owner === undefined) {
-          const opener = await page.opener();
-          if (opener !== null)
-            owner = [...controllers].find((candidate) => candidate.ownedPages.has(opener));
-        }
-        if (owner === undefined) {
-          await route.abort("failed");
-          return;
-        }
-        const baseScope = owner.hostScopeAllowedHostsProvider?.();
-        const scope =
-          baseScope === undefined
-            ? undefined
-            : await owner.effectiveHostScopeForFrame(frame, request.url(), baseScope);
-        if (
-          scope === undefined ||
-          isFailFastScopeAbort(
-            request.url(),
-            request.resourceType(),
-            scope.allowedHosts,
-            scope.siblingDomainHosts,
-          )
-        ) {
-          owner.recordHostScopeDenial(frame, request.url(), request.resourceType());
-          await route.abort("failed");
-          return;
-        }
-        await route.fallback();
-      } catch {
-        await route.abort("failed").catch(() => undefined);
-      }
-    });
-  }
-
   async brokerTargetId(): Promise<string> {
     if (this.context === null || this.page === null) throw new Error("Browser not started");
     const cdp = await this.context.newCDPSession(this.page);
@@ -3132,130 +2815,6 @@ export class BrowserController {
     }
   }
 
-  // Feed the current session's allowed hosts to the request-scope guard. Read
-  // lazily per request, so allow_host / auto-widen updates take effect without
-  // re-registering the route. Registers the single fail-fast route handler on
-  // the first call — so the guard is only ever active for real operator
-  // sessions, never for harness/replay or non-session browsers.
-  async setHostScopeAllowedHosts(
-    provider: () => readonly string[],
-    siblingDomainProvider: () => readonly string[] = provider,
-  ): Promise<void> {
-    this.hostScopeAllowedHostsProvider = () => ({
-      allowedHosts: [...provider(), ...this.operationScopedAllowedHosts.keys()],
-      siblingDomainHosts: siblingDomainProvider(),
-    });
-    this.hostScopeGuardInstallation ??= this.installHostScopeGuard().catch((error: unknown) => {
-      this.hostScopeGuardInstallation = null;
-      throw error;
-    });
-    await this.hostScopeGuardInstallation;
-  }
-
-  async withTemporaryHostScopeAllowedHosts<T>(
-    hosts: readonly string[],
-    operation: () => Promise<T>,
-  ): Promise<T> {
-    const normalized = [...new Set(hosts.map((host) => host.trim().toLowerCase()).filter(Boolean))];
-    for (const host of normalized) {
-      this.operationScopedAllowedHosts.set(
-        host,
-        (this.operationScopedAllowedHosts.get(host) ?? 0) + 1,
-      );
-    }
-    try {
-      return await operation();
-    } finally {
-      for (const host of normalized) {
-        const remaining = (this.operationScopedAllowedHosts.get(host) ?? 1) - 1;
-        if (remaining <= 0) this.operationScopedAllowedHosts.delete(host);
-        else this.operationScopedAllowedHosts.set(host, remaining);
-      }
-    }
-  }
-
-  // Defect-A fail-fast request-scope guard. Only XHR/fetch subresource API
-  // calls are scope-guarded; page-load resources (scripts/styles/images/frames)
-  // always continue, so a legitimate render is never broken by the guard. A
-  // checkout SPA's own backend API often lives on a same-registrable-domain
-  // sibling subdomain (e.g. cart-api.step.rakuten.co.jp beside
-  // cart.step.rakuten.co.jp) and is auto-scoped in via requestHostInScope. For
-  // a genuinely out-of-scope call the old behavior was a silently-dropped
-  // request that never resolved — wedging the page with an infinite spinner.
-  // Here it is aborted with a real net error so the page's fetch/XHR rejects
-  // promptly and the site's own error handling runs.
-  //
-  // The route is CONTEXT-scoped. With TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION
-  // off (the shipped default) every request is judged here unconditionally,
-  // exactly as it always was. Under the flag every session sharing the
-  // context has its own guard here and Playwright runs them all for every
-  // request, so a request from a page another session's OwnedPages has
-  // positively claimed is handed on untouched for that session's guard to
-  // judge. A page nobody has claimed (every popup, between its first
-  // navigation commit and the opener's "popup" event), or one whose page
-  // can't be resolved (service-worker requests have no frame), is still
-  // judged here fail-closed.
-  private async installHostScopeGuard(): Promise<void> {
-    const ctx = this.context;
-    if (ctx === null) throw new Error("Browser not started");
-    const brokerControllers = BrowserController.brokerRoutes.get(ctx);
-    if (brokerControllers !== undefined) {
-      brokerControllers.add(this);
-      this.brokerRouteRegistration = () => brokerControllers.delete(this);
-      return;
-    }
-    const pageAware = experimentalMultiSessionEnabled();
-    const handler = async (route: Route): Promise<void> => {
-      try {
-        if (pageAware && this.requestPageClaimedByAnotherSession(route)) {
-          await route.fallback();
-          return;
-        }
-        const url = route.request().url();
-        const type = route.request().resourceType();
-        const baseScope = this.hostScopeAllowedHostsProvider?.() ?? null;
-        let frame: Frame | null = null;
-        try {
-          frame = route.request().frame();
-        } catch {}
-        const scope =
-          baseScope === null || frame === null
-            ? baseScope
-            : await this.effectiveHostScopeForFrame(frame, url, baseScope);
-        if (
-          isFailFastScopeAbort(url, type, scope?.allowedHosts ?? null, scope?.siblingDomainHosts)
-        ) {
-          if (frame !== null && this.ownedPages.has(frame.page())) {
-            this.recordHostScopeDenial(frame, url, type);
-          }
-          await route.abort("failed");
-          return;
-        }
-        await route.fallback();
-      } catch {
-        await route.fallback().catch(() => undefined);
-      }
-    };
-    await ctx.route("**/*", handler);
-    this.hostScopeGuardHandler = handler;
-  }
-  private requestPageClaimedByAnotherSession(route: Route): boolean {
-    try {
-      return this.ownedPages.claimedByAnother(route.request().frame().page());
-    } catch {
-      return false;
-    }
-  }
-  private async uninstallHostScopeGuard(): Promise<void> {
-    this.brokerRouteRegistration?.();
-    this.brokerRouteRegistration = null;
-    const handler = this.hostScopeGuardHandler;
-    const ctx = this.context;
-    this.hostScopeGuardHandler = null;
-    this.hostScopeGuardInstallation = null;
-    if (handler === null || ctx === null) return;
-    await ctx.unroute("**/*", handler).catch(() => undefined);
-  }
   get launchMode(): "headed" | "headless" | "remote" | "unknown" {
     return this.processOwner.launchMode;
   }
@@ -3310,10 +2869,7 @@ export class BrowserController {
   // same per-page normalization via installPageNormalization — minus the
   // context-level setup (init scripts, resource-blocking routes), which is
   // CONTEXT-scoped and already installed once by whichever controller
-  // launched the shared browser. The host-scope guard is NOT shared: each
-  // session installs its own via setHostScopeAllowedHosts, and under the
-  // flag the guard dispatches by page ownership so the two never judge each
-  // other's claimed pages.
+  // launched the shared browser.
   private async attachOwnPage(): Promise<void> {
     const ctx = this.processOwner.context;
     if (ctx === null) {
@@ -3351,7 +2907,6 @@ export class BrowserController {
       }),
     );
     if ([...family].some((page) => !page.isClosed())) return "unknown";
-    await this.uninstallHostScopeGuard();
     this.pageDriver.disposeRegistrations();
     this.pageDriver.page = null;
     this.pageDriver.primaryPage = null;
@@ -3590,9 +3145,7 @@ export class BrowserController {
   }
 
   // Resource blocking for speed (BOT_BLOCK_RESOURCES, default OFF). Aborts
-  // image/media/font requests + known analytics/tracker hosts to cut page-load
-  // wall-clock (3-5x on byte-heavy pages; also stops trackers from holding the
-  // network "busy"). HARD ALLOW-GUARD first for captcha/challenge + payment
+  // image/media/font requests to cut page-load wall-clock. Exempt captcha/challenge + payment
   // scripts (blocking those breaks the Turnstile/hCaptcha token poll and the
   // signup form). CSS + first-party JS are never blocked (not in BLOCK_TYPES) —
   // the SPA form renders from them and the vision planner reads the styled
@@ -3607,28 +3160,6 @@ export class BrowserController {
     if (ctx === null) return;
     if (!/^(1|true|on)$/i.test(process.env.BOT_BLOCK_RESOURCES ?? "")) return;
     const BLOCK_TYPES = new Set(["image", "media", "font"]);
-    const BLOCK_HOSTS = [
-      "google-analytics.com",
-      "googletagmanager.com",
-      "analytics.google.com",
-      "doubleclick.net",
-      "static.hotjar.com",
-      "script.hotjar.com",
-      "segment.com",
-      "segment.io",
-      "cdn.segment.com",
-      "fullstory.com",
-      "mixpanel.com",
-      "bugsnag.com",
-      "intercom.io",
-      "intercomcdn.com",
-      "widget.intercom.io",
-      "connect.facebook.net",
-      "analytics.tiktok.com",
-      "clarity.ms",
-      "cdn.heapanalytics.com",
-      "wistia.com",
-    ];
     // NEVER block — these break signup (captcha/challenge widgets + payment SDK).
     const ALWAYS_ALLOW = [
       "challenges.cloudflare.com",
@@ -3647,7 +3178,7 @@ export class BrowserController {
           return;
         }
         const type = route.request().resourceType();
-        if (BLOCK_TYPES.has(type) || BLOCK_HOSTS.some((h) => url.includes(h))) {
+        if (BLOCK_TYPES.has(type)) {
           await route.abort();
           return;
         }
@@ -3657,7 +3188,7 @@ export class BrowserController {
       }
     });
     console.error(
-      "[operator] resource blocking ON (image/media/font + analytics aborted; captcha/CSS/JS allowed)",
+      "[operator] resource blocking ON (image/media/font aborted; captcha/CSS/JS allowed)",
     );
   }
   async start(): Promise<void> {
@@ -4048,8 +3579,7 @@ export class BrowserController {
   // styled label): clicking it opens a file chooser, which Playwright intercepts
   // so the native dialog is never touched. This is how the operator uploads
   // (Drive, S3 consoles, any web form) through the session the user is already
-  // signed into — no API credential, no password. Bounded by the session's
-  // domain scope, so a file can only reach the site the task is already on.
+  // signed into — no API credential, no password.
   async uploadFile(selector: string, filePath: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     await this.uploadFileOnPage(this.page, selector, filePath);
@@ -9925,7 +9455,6 @@ export class BrowserController {
     }[] = [];
     try {
       await this.waitForPanField(10_000, undefined, page);
-      this.paymentNetworkDeadlines.set(page, Date.now() + 20 * 60_000);
       fillFrameSnapshot = await Promise.all(
         page.frames().map(async (frame) => ({
           frame,
@@ -10013,7 +9542,6 @@ export class BrowserController {
     this.checkoutOutcomeBaseline = await this.captureCheckoutOutcomeBaseline(page).catch(
       () => undefined,
     );
-    this.paymentNetworkDeadlines.set(page, Date.now() + 20 * 60_000);
     const allowed = page
       .frames()
       .filter(
@@ -10235,7 +9763,6 @@ export class BrowserController {
     if (savedCardSelection.outcome === "ambiguous") {
       throw new Error("payment_card_selection_ambiguous");
     }
-    this.paymentNetworkDeadlines.set(page, Date.now() + 20 * 60_000);
     let outcomeBaseline: CheckoutOutcomeBaseline | undefined;
     this.checkoutOutcomeBaseline = undefined;
     let submitted = false;
@@ -10568,7 +10095,6 @@ export class BrowserController {
       const challengeDeadline = Date.now() + 15_000;
       while (Date.now() < challengeDeadline) {
         if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline, page)) {
-          this.paymentNetworkDeadlines.delete(page);
           return { three_ds_required: false, order_confirmed: true };
         }
         const challenge = await this.detectThreeDsChallenge(undefined, page);
@@ -11182,11 +10708,9 @@ export class BrowserController {
         return challengeObserved ? "challenge_pending" : "timeout";
       }
       if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline, page)) {
-        this.paymentNetworkDeadlines.delete(page);
         return "succeeded";
       }
       if (await this.hasFailedCheckoutAuthentication(page)) {
-        this.paymentNetworkDeadlines.delete(page);
         return "failed";
       }
       const remainingMs = deadline - Date.now();
@@ -15277,7 +14801,6 @@ export class BrowserController {
       // Deliberately unregistered: this identity probe (and its popups) must
       // never become the session's working page.
       identityPage = await this.context.newPage();
-      BrowserController.brokerIdentityPages.get(this.context)?.add(identityPage);
       const identityUrl = new URL("https://myaccount.google.com/");
       const expectedEmail = expectedGoogleAccountEmail?.trim();
       if (expectedEmail !== undefined && expectedEmail.length > 0) {
@@ -15303,10 +14826,6 @@ export class BrowserController {
       return null;
     } finally {
       await identityPage?.close().catch(() => undefined);
-      const probes =
-        this.context === null ? undefined : BrowserController.brokerIdentityPages.get(this.context);
-      if (probes !== undefined && identityPage !== null && identityPage.isClosed())
-        probes.delete(identityPage);
     }
   }
 

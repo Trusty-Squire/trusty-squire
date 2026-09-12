@@ -379,11 +379,7 @@ export class OperatorBroker implements BrokerTransportPort {
         );
       if (input.capability !== undefined)
         throw new BrokerRefusal("invalid_arguments", "Start takes no existing capability");
-      const hosts = [
-        ...(typeof args.service_url === "string" ? [args.service_url] : []),
-        ...((args.allowed_hosts ?? []) as string[]),
-        ...((args.extra_allowed_hosts ?? []) as string[]),
-      ];
+      const hosts = [...(typeof args.service_url === "string" ? [args.service_url] : [])];
       let observation: unknown;
       let internalId = "";
       const capability = await this.authority.open(
@@ -708,7 +704,7 @@ export class OperatorBroker implements BrokerTransportPort {
     const capability = input.capability;
     if (capability === undefined || args.session_id !== capability.sessionId)
       throw new BrokerRefusal("stale_lease", "An owned session capability is required");
-    const extra = tool.name === "operate_allow_host" ? siteResources([String(args.host)]) : [];
+    const extra: string[] = [];
     const lane =
       tool.name === "operate_login"
         ? "oauth"

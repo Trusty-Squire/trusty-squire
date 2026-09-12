@@ -115,57 +115,17 @@ are not promoted into replay recipes. They do not change vault storage,
 credential capture, payment approval, or 3-D Secure behavior. Local regression
 fixtures prove pointer mechanics; they do not guarantee Cloudflare clearance.
 
-## Scope is declared at session start
+## Browser egress is unrestricted
 
-Startup merchant hosts also authorize matching registrable-domain siblings,
-such as `shop.example.com` and `api.example.com`. Declare other required
-non-provider action destinations in `allowed_hosts` on `operate_start`. `operate_allow_host`
-can activate a host only inside the declared startup entitlement and existing
-identity-provider allowance; it cannot broaden that entitlement.
+The operator does not filter browser requests by host. Payment SDKs, issuer/ACS
+frames, fingerprinting, authentication providers, analytics, and arbitrary
+third-party resources need no host declaration. This holds before, during, and
+after payment; there is no payment-network window or scope-denial reporting.
 
-```json
-{
-  "service_url": "https://console.example.test",
-  "allowed_hosts": ["api.example.test"]
-}
-```
-
-A small set of challenge-infrastructure hosts is always in scope: the captcha
-families (challenges.cloudflare.com, hCaptcha, reCAPTCHA). When an
-`accounts.<service>` document is authorized by the base scope and has loaded
-Clerk assets, its effective request scope also includes the bot-protection result
-endpoints (`*.client.protect.clerk.com`,
-`specter.protect.clerk.com`). Those endpoints are part of that already
-authorized Clerk sign-in, so a Clerk-fronted protect-check needs no extra host
-declaration for those requests. This exception applies to that document only;
-it does not authorize an out-of-scope embedded Clerk document or arbitrary
-caller-declared wildcard hosts.
-
-Card checkout has a time-boxed browser-network exception: entering card fill or
-payment submission opens or renews a twenty-minute allowance for the exact
-payment page and its frames. Their XHR/fetch requests may reach any hostname,
-so merchant/issuer JavaScript can perform native 3DS method, fingerprinting,
-and ACS requests without a curated issuer list. The allowance follows that
-page through navigation and resumable waits; it does not extend to other pages
-or broaden operator action hosts, PAN injection destinations, or vault egress.
-Card sealing and the purchase's single human approval remain unchanged.
-
-Split checkout confirmation reporting does not revoke this allowance: it expires
-at the window deadline. Browser submit/wait paths can clear it earlier when they
-recognize terminal outcomes, but revocation is not guaranteed for every payment
-path. Inconclusive waits retain it until expiry. Terminal-reporting integration
-is deferred in `ts-payment-window-terminal-revocation` in [TODOS.md](../TODOS.md).
-This permits native authentication traffic; it is not evidence that any specific
-merchant's 3DS flow completes.
-
-If an observation reports a scope denial, treat it as a bounded diagnostic:
-record the owning document/frame, exact hostname, resource type, reason, and
-occurrence range. Challenge blockers can identify a scope cause; see the
-[blocker diagnostic contract](browser-use-serializer-port.md#identity-deltas-and-query).
-Retrying a widget does not authorize a denied host. Do not add a permission
-or retry against another host. Start a new session with the required host
-declared instead. Diagnostics must not include
-request bodies or URL query values.
+`operate_start` accepts `allowed_hosts` and `extra_allowed_hosts` for backward
+compatibility and ignores them. `operate_allow_host` is a compatibility no-op.
+Existing control-plane action restrictions, credential vault egress, card-fill
+recognition and sealing, and the purchase's single human approval are unchanged.
 
 ## Finish with the flat schema
 

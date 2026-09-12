@@ -207,7 +207,6 @@ export async function replayRecipeOnHarnessPage(args: {
   const started = await startHarnessProvisionSession({
     browser: controller,
     serviceUrl: filledEntry.url,
-    extraAllowedHosts: args.recipe.allowed_hosts,
     observationFormat: "v1",
   });
   try {

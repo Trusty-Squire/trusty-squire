@@ -71,7 +71,6 @@ vi.mock("../browser.js", async (importOriginal) => {
       async detectGoogleAccountEmail(): Promise<string | null> {
         return h.workerEmail;
       }
-      async setHostScopeAllowedHosts(): Promise<void> {}
       async goto(url: string): Promise<void> {
         const first = h.gotos.length === 0;
         h.gotos.push(url);
@@ -292,7 +291,7 @@ describe("characterization: Session construction", () => {
     expect(constructed).toEqual({
       activePayment: null,
       actionTrace: { kind: "Array", length: 0 },
-      allowedHosts: { kind: "Array", length: 2 },
+      allowedHosts: { kind: "Array", length: 1 },
       browser: { kind: "object", ctor: "BrowserController" },
       callCount: 0,
       callDrainWaiters: { kind: "Set", size: 0 },
@@ -346,7 +345,7 @@ describe("characterization: Session construction", () => {
     expect(startedAt).toBeLessThanOrEqual(after);
   });
 
-  it("startProvisionSession seeds allowedHosts as start-sourced and keeps the api client key when supplied", async () => {
+  it("startProvisionSession ignores legacy extra hosts and keeps the api client key when supplied", async () => {
     let hosts: unknown = null;
     let hasApi = false;
     const api = { fake: true } as never;
@@ -361,10 +360,7 @@ describe("characterization: Session construction", () => {
       extraAllowedHosts: ["mail.example.com"],
       api,
     });
-    expect(hosts).toEqual([
-      { host: "app.example.com", source: "start" },
-      { host: "mail.example.com", source: "start" },
-    ]);
+    expect(hosts).toEqual([{ host: "app.example.com", source: "start" }]);
     expect(hasApi).toBe(true);
   });
 

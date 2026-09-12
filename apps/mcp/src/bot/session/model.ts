@@ -36,12 +36,9 @@ import type { OperatorBrowserWatchdog } from "../operator-browser-watchdog.js";
 // ActivePaymentLease). They follow this module when those phases land.
 import type { ActivePaymentLease, CartAddResult, ObserveDeltaState } from "../provision-session.js";
 
-// Where a host on the allow-set came from. start = declared at operate_start;
-// mid_session = added via an allow_host action; auto_widen = an organic
-// same-base-domain redirect we trust. Source-tracked so every widening is
-// attributable, and so auto-widen only chains off START hosts (no scope creep
-// off an agent-declared mid_session host) and credential egress can exclude
-// mid_session task scope.
+// Credential-egress seed provenance: start is the service host, auto_widen
+// is an observed same-base-domain redirect. mid_session is retained for legacy
+// metadata and excluded from credential egress. None filters browser requests.
 export type HostSource = "start" | "mid_session" | "auto_widen";
 
 export interface AllowedHostEntry {

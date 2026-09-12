@@ -91,7 +91,6 @@ vi.mock("../browser.js", async (importOriginal) => {
     async detectGoogleAccountEmail(): Promise<string | null> {
       return h.workerEmail;
     }
-    async setHostScopeAllowedHosts(): Promise<void> {}
     async goto(_url: string): Promise<void> {}
     currentUrl(): string {
       return "";
