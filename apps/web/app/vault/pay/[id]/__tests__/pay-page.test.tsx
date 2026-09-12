@@ -216,12 +216,17 @@ afterEach(() => cleanup());
 
 describe("pay page — JIT add-card ceremony", () => {
   it("starts in add-card mode for a card-less approval (no Approve yet)", async () => {
+    approvalAmountCents = 6600;
+    approvalCurrency = "JPY";
     render(<PaymentApprovalPage />);
     await waitFor(() => expect(screen.getByText("Add a card to pay")).toBeTruthy());
     expect(screen.getByTestId("card-entry")).toBeTruthy();
     // The card is impossible to tap past — no approve action exists yet.
     expect(screen.queryByRole("button", { name: /Approve payment/ })).toBeNull();
     expect(screen.getByRole("button", { name: "Deny payment" })).toBeTruthy();
+    expect(screen.getByText(/Pay with/).textContent).toContain("6,600");
+    expect(screen.queryByText("We couldn't load the saved card for this payment.")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
 
   it("add → bind shows the server record before one passkey approval", async () => {

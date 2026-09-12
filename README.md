@@ -109,7 +109,10 @@ challenge that remains unresolved on timeout stays `payment_3ds_required` with
 success or permits blind resubmission: manually check the merchant's order state
 before any retry.
 
-`operate_pay` surfaces the approval link before its bounded server-side wait. It
+`operate_pay` surfaces the approval link before its bounded server-side wait.
+Approval creation and linked-Telegram delivery failures surface as errors; see the
+[payment approval API contract](apps/api/README.md#endpoints).
+It
 may wait up to one minute for approval, denial, or expiry; if it returns
 `approval_pending` first, call `operate_pay` again with the same arguments. That
 call resumes the same approval and one-passkey boundary instead of creating a new

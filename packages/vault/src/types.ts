@@ -245,6 +245,9 @@ export const VAULT_AUDIT_TYPES = {
   // A stored-card payment event: either operate_pay's outcome report or a
   // caller-placed order attempt. Metadata only — never a PAN.
   paymentExecuted: "vault.payment_executed",
+  // An approval request was persisted; no card release or charge has occurred.
+  paymentApprovalCreated: "vault.payment_approval_created",
+  paymentApprovalDeliveryFailed: "vault.payment_approval_delivery_failed",
   // Egress-grant lifecycle — a standing token that lets a deployed app
   // spend the referenced credential through the injecting proxy.
   grantMinted: "vault.grant_minted",

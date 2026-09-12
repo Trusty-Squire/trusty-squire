@@ -148,7 +148,9 @@ alerts for credential store/rotate/delete/restore, card add/remove, payment
 execution or caller-placed order attempts, and egress-grant mint/revoke events. These sends decorate the single
 vault audit-store dependency, so every producer shares the same notification
 path. Delivery is fire-and-forget and all Telegram failures are swallowed; a
-Telegram outage never delays or fails a vault operation. Messages use only
+Telegram outage never delays or fails these lifecycle operations. Actionable
+payment approval delivery has a separate [creation contract](../apps/api/README.md#endpoints).
+Messages use only
 non-secret display metadata: service/label or merchant/amount, action, timestamp,
 and the card's last four digits when relevant. A caller-placed click is labeled
 as attempted rather than executed because its merchant outcome is not verified.

@@ -96,7 +96,20 @@ contains the approval id and status, bound card reference, operator public key,
 opaque account binding, approval-payload digest, and encrypted card blob, but no card display
 metadata. The owner web approval page renders those canonical values before one
 payment-context passkey action signs them, derives the card key, and seals the card
-to the operator.
+to the operator. Before card binding, the ceremony remains readable with a null
+card reference, card blob, and approval-payload digest so the page can show the
+add-card form; it does not authorize approval or card release.
+
+Creation awaits approval persistence and the `vault.payment_approval_created`
+audit write before returning success or sending a notification. These events are
+visible in the unfiltered vault ledger and its exact-type filter. A persistence
+or audit-write error fails creation without returning an approval URL.
+For an account with Telegram linked, creation also awaits notification delivery;
+missing bot configuration, a rejected send, or a transport failure (including the
+three-second timeout) records `vault.payment_approval_delivery_failed` and returns
+`502 { "error": "payment_approval_delivery_failed" }`. The persisted approval
+remains available to its owner; this failure authorizes neither release nor
+payment. Accounts without a linked chat still receive the normal create response.
 
 The same opaque account binding appears in authenticated agent approval reads and
 is carried verbatim by the owner page and MCP when they construct the signed

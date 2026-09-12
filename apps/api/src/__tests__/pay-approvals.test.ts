@@ -299,6 +299,193 @@ describe("payment approval relay", () => {
     expect(response.json().card).not.toHaveProperty("cvv");
   });
 
+  it("round-trips a fresh cardless approval through the owner ceremony and payment audit", async () => {
+    const created = await createCardlessApproval();
+    const ceremony = () =>
+      server.inject({
+        method: "GET",
+        url: `/v1/pay/approvals/${created.id}/ceremony`,
+        headers: { cookie: webCookie },
+      });
+    const beforeBinding = await ceremony();
+    expect(beforeBinding.statusCode).toBe(200);
+    expect(beforeBinding.json()).toMatchObject({
+      id: created.id,
+      status: "pending",
+      card_ref: null,
+      card: null,
+      approval_payload_sha256: null,
+    });
+    // The pre-binding read must not authorize releasing or charging a card.
+    const prematureApproval = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/approve`,
+      headers: { cookie: webCookie },
+      payload: { jws: "synthetic", sealed_card: "synthetic" },
+    });
+    expect(prematureApproval.statusCode).toBe(409);
+    expect(prematureApproval.json()).toEqual({ error: "card_required" });
+
+    const audit = await server.inject({
+      method: "GET",
+      url: "/v1/vault/audit?type=vault.payment_approval_created",
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    expect(audit.statusCode).toBe(200);
+    expect(audit.json().events).toHaveLength(1);
+    expect(audit.json().events[0]).toMatchObject({
+      type: "vault.payment_approval_created",
+      reference: `pay://${created.id}`,
+      approval_id: created.id,
+      payment_status: "approval_pending",
+      requester: "agent",
+      merchant: "Synthetic Books",
+      amount_cents: 2599,
+      currency: "USD",
+      attribution: {
+        agent_identity: "synthetic-payment-test-agent",
+        purpose: "payment.approval.create",
+      },
+    });
+    expect(audit.json().events[0]).not.toHaveProperty("operator_pubkey");
+    expect(audit.json().events[0]).not.toHaveProperty("sealed_card");
+    const foreignAudit = await server.inject({
+      method: "GET",
+      url: "/v1/vault/audit?type=vault.payment_approval_created",
+      headers: { authorization: `Bearer ${otherAgentToken}` },
+    });
+    expect(foreignAudit.json().events).toEqual([]);
+
+    const cardId = await createOwnedCard(webCookie);
+    const bound = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/bind-card`,
+      headers: { cookie: webCookie },
+      payload: { card_ref: cardId },
+    });
+    expect(bound.statusCode).toBe(200);
+    const afterBinding = await ceremony();
+    expect(afterBinding.statusCode).toBe(200);
+    expect(afterBinding.json()).toMatchObject({
+      card_ref: cardId,
+      status: "pending",
+      approval_payload_sha256: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+    });
+  });
+
+  it.each(["rejected", "network", "missing-token", "stalled", "success"])(
+    "reports Telegram delivery %s and records failures",
+    async (result) => {
+      const account = await deps.accountStore.findAccountByEmail("payer@example.test");
+      await deps.accountStore.setTelegramChatId(account!.id, "555000111");
+      vi.stubEnv("TELEGRAM_BOT_TOKEN", result === "missing-token" ? "" : "synthetic-token");
+      const fetchMock = vi.fn();
+      if (result === "network") fetchMock.mockRejectedValue(new Error("network failure"));
+      else if (result === "stalled") {
+        fetchMock.mockImplementation(
+          (_url: string, init: RequestInit) =>
+            new Promise((_resolve, reject) => {
+              init.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+                once: true,
+              });
+            }),
+        );
+      } else fetchMock.mockResolvedValue({ ok: result === "success" });
+      vi.stubGlobal("fetch", fetchMock);
+      const response = await server.inject({
+        method: "POST",
+        url: "/v1/pay/approvals",
+        headers: { authorization: `Bearer ${agentToken}` },
+        payload: {
+          merchant: "Synthetic Books",
+          checkout_origin: "https://checkout.synthetic.test",
+          amount_cents: 6600,
+          currency: "JPY",
+          operator_pubkey: "c3ludGhldGlj",
+          item: "Synthetic Book",
+          reason: "Synthetic test purchase",
+        },
+      });
+      expect(response.statusCode).toBe(result === "success" ? 201 : 502);
+      if (result === "stalled") {
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(fetchMock.mock.calls[0]![1].signal.aborted).toBe(true);
+      }
+      const audit = await server.inject({
+        method: "GET",
+        url: "/v1/vault/audit",
+        headers: { authorization: `Bearer ${agentToken}` },
+      });
+      const events = audit.json().events;
+      const created = events.find(
+        (event: { type: string }) => event.type === "vault.payment_approval_created",
+      );
+      expect(created.approval_id).toEqual(expect.any(String));
+      const ceremony = await server.inject({
+        method: "GET",
+        url: `/v1/pay/approvals/${created.approval_id}/ceremony`,
+        headers: { cookie: webCookie },
+      });
+      expect(ceremony.statusCode).toBe(200);
+      if (result === "success") {
+        expect(events).toHaveLength(1);
+        expect(response.json().id).toBe(created.approval_id);
+        expect(JSON.parse(fetchMock.mock.calls[0]![1].body)).toMatchObject({
+          chat_id: "555000111",
+          text: expect.stringContaining(`/vault/pay/${created.approval_id}`),
+        });
+      } else {
+        expect(response.json()).toEqual({ error: "payment_approval_delivery_failed" });
+        expect(events).toHaveLength(2);
+        expect(events).toContainEqual(
+          expect.objectContaining({
+            type: "vault.payment_approval_delivery_failed",
+            approval_id: created.approval_id,
+            channel: "telegram",
+          }),
+        );
+      }
+    },
+  );
+
+  it.each(["persist", "audit"])(
+    "returns an error and sends no approval when %s fails",
+    async (stage) => {
+      const account = await deps.accountStore.findAccountByEmail("payer@example.test");
+      await deps.accountStore.setTelegramChatId(account!.id, "555000111");
+      vi.stubEnv("TELEGRAM_BOT_TOKEN", "synthetic-bot-token");
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const failure =
+        stage === "persist"
+          ? vi.spyOn(deps.pendingPaymentApprovalStore, "create")
+          : vi.spyOn(deps.vaultAuditStore, "record");
+      failure.mockRejectedValue(new Error("synthetic write failure"));
+      try {
+        const response = await server.inject({
+          method: "POST",
+          url: "/v1/pay/approvals",
+          headers: { authorization: `Bearer ${agentToken}` },
+          payload: {
+            merchant: "Synthetic Books",
+            checkout_origin: "https://checkout.synthetic.test",
+            amount_cents: 6600,
+            currency: "JPY",
+            operator_pubkey: "c3ludGhldGlj",
+            item: "Synthetic Book",
+            reason: "Synthetic test purchase",
+          },
+        });
+        expect(response.statusCode).toBe(500);
+        expect(response.json()).not.toHaveProperty("id");
+        expect(response.json()).not.toHaveProperty("approval_url");
+        expect(fetchMock).not.toHaveBeenCalled();
+      } finally {
+        failure.mockRestore();
+      }
+    },
+  );
+
   it("binds ceremony and settlement to the owner web account", async () => {
     const cardId = await createOwnedCard(webCookie);
     const created = await createApproval(cardId);

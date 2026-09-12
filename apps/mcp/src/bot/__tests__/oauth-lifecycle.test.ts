@@ -662,27 +662,18 @@ describe("BrowserController OAuth popup lifecycle", () => {
     `)}`;
     await product.goto(delayedProductUrl);
     const controller = BrowserController.fromHarnessPage(product);
-    const onPage = (candidate: Page): void => {
-      void (async () => {
-        if ((await candidate.opener()) !== product) return;
-        await candidate.goto("data:text/html,provider-token-exchange");
-        await product.locator("#state").evaluate((element) => {
-          element.textContent = "Signed in";
-        });
-        await candidate.close();
-      })();
-    };
-    context.on("page", onPage);
-
     try {
       await expect(controller.loginWithOAuth("#oauth", 3_000)).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
       expect(product.isClosed()).toBe(false);
-      expect((controller as unknown as { page: Page }).page).toBe(product);
-      expect(await controller.extractVisibleText()).toContain("Signed in");
+      const popup = (controller as unknown as { page: Page }).page;
+      expect(popup).not.toBe(product);
+      expect(await popup.opener()).toBe(product);
+      expect(popup.isClosed()).toBe(false);
+      expect(popup.url()).toBe("about:blank");
+      expect(await product.locator("#state").innerText()).toBe("Signed out");
     } finally {
-      context.off("page", onPage);
       await context.close().catch(() => undefined);
     }
   });
