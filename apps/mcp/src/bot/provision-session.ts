@@ -2757,8 +2757,9 @@ export function clearReportedTerminalPaymentApproval(
     (state.terminalStatus !== "denied" && state.terminalStatus !== "expired")
   )
     return;
-  session.activePayment = paymentFieldsCleared ? null : { status: "sealed" };
-  session.paymentFieldSealActive = !paymentFieldsCleared;
+  const verifiedClean = paymentFieldsCleared && !session.paymentFieldSealActive;
+  session.activePayment = verifiedClean ? null : { status: "sealed" };
+  session.paymentFieldSealActive = !verifiedClean;
 }
 
 export function completeActivePendingApprovalWithTerminalStatus(

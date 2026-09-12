@@ -267,6 +267,8 @@ const h = vi.hoisted(() => ({
 let compactV2ModeBeforeTest: string | undefined;
 
 vi.mock("../browser.js", async (importOriginal) => ({
+  PaymentCardFillCleanupError: (await importOriginal<typeof BrowserModule>())
+    .PaymentCardFillCleanupError,
   OAuthOnboardingRequiredError: (await importOriginal<typeof BrowserModule>())
     .OAuthOnboardingRequiredError,
   BrowserClickDispatchError: (await importOriginal<typeof BrowserModule>())
@@ -9914,6 +9916,45 @@ describe("operate_pay tool completion — system-owned approval wait [P0]", () =
       expect(h.filledCards).toEqual([]);
       expect(paymentSession(started.session_id).activePayment?.status).toBe("awaiting_approval");
       expect(await activeProvisionBrowserForPayment()).toBe(browser);
+      expect(h.closeCalls).toBe(0);
+    },
+  );
+
+  it.each([false, true])(
+    "only retries expiry after card fill when cleanup succeeds (cleanup fails: %s)",
+    async (cleanupFails) => {
+      const env = buildPaymentEnv();
+      global.fetch = env.fetch;
+      const { PaymentCardFillCleanupError } = await import("../browser.js");
+      h.fillAndSubmitError = cleanupFails
+        ? new PaymentCardFillCleanupError(new Error("payment_approval_expired"))
+        : new Error("payment_approval_expired");
+      const started = await startProvisionSession({
+        serviceUrl: "https://store.kobeejapan.net/checkout",
+      });
+      const args = { ...baseArgs, session_id: started.session_id };
+      const result = await operatePayTool.handler(args, env.api, {
+        notifyUser: async () => env.setApproved(),
+      });
+      expect(result).toMatchObject({
+        status: "payment_approval_timeout",
+        payment_fields_cleared: !cleanupFails,
+      });
+      expect(h.filledCards).toEqual([SYNTHETIC_CARD]);
+      if (cleanupFails) {
+        expect(paymentSession(started.session_id).activePayment?.status).toBe("sealed");
+        expect(paymentSession(started.session_id).paymentFieldSealActive).toBe(true);
+        await expect(operatePayTool.handler(args, env.api)).rejects.toThrow(
+          /cleanup remains unverified/,
+        );
+        expect(env.approvalBodies).toHaveLength(1);
+      } else {
+        expect(paymentSession(started.session_id).activePayment).toBeNull();
+        expect(await operatePayTool.handler(args, env.api, { paymentApprovalWaitMs: 0 }))
+          .toMatchObject({ status: "approval_pending" });
+        expect(env.approvalBodies).toHaveLength(2);
+      }
+      expect(h.filledCards).toHaveLength(1);
       expect(h.closeCalls).toBe(0);
     },
   );
