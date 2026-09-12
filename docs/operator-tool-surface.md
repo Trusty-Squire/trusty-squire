@@ -322,7 +322,13 @@ job without exposing plaintext to the agent.
   unsettled cancellation keeps its existing wait/finish guidance. Never replay
   OAuth automatically after an uncertain result.
 - `operate_type` accepts exactly one of literal `text` or a protected `slot`.
-  Use `operate_fill_credential` for login slots; it does not expose vault values.
+  For a saved login, read the selected credential's `field_names` with
+  `list_credentials`, then call `operate_fill_credential` with `session_id`,
+  `reference` (or `service`), and those exact names as `fields`. Use each returned
+  slot with `operate_type(ref, slot)` on its matching form control; vault values
+  are not returned. The installed schema documents the field defaults and naming
+  conventions. A missing-slot error points to this vault flow; `operate_extract`
+  with `into_slot` is for capturing a page value instead.
 - `operate_extract`, `use_credential`, and `grant_app_access` preserve the
   write-only vault boundary. `fetch_credential` has the separate passkey gate
   above.
