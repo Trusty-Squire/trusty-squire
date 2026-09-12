@@ -1,10 +1,16 @@
 # Restore v1.1.6 credential selection
 
-Restore the known-good v1.1.6 masked-value and identifier predicates and named-candidate selection. Preserve the approved DeepInfra reconciliation: a contextually accepted near-copy key survives generic API-key sanitization. Unmasked Client Secret and Client ID leaves remain extractable inside preformatted containers. Persistence excludes truncated metadata and refuses identifier-only bundles, so the Exa masked-only fixture cannot produce a successful vault write. Source-content test guards are removed in favor of executable coverage.
+Restore v1.1.6 credential selection with the approved DeepInfra compatibility
+exception, and reject identifier-only or truncated-only storage bundles. The
+[credential capture contract](operator-tool-surface.md#credential-capture-and-retrieval)
+owns the resulting behavior. Source-content test guards are replaced by
+executable coverage.
 
 ## Accepted limitations
 
-This deliberately retains v1.1.6 behavior for exotic DOM layouts and multi-row masked displays. Split-node masks, substring scans of masked rows, and provider-specific rescans can still lose mask evidence and produce invalid credential storage or a successful outcome. The additional collector, truncation, secondary-token, provider, and value-screening persistence logic introduced during review has been removed under the explicit scope freeze. These pre-existing edge cases are not addressed by this PR.
+The accepted v1.1.6 exotic-DOM and multi-row masking limitations remain;
+see the authoritative [credential capture contract](operator-tool-surface.md#credential-capture-and-retrieval).
+This PR does not retune the broader selection or masking approach.
 
 ## Validation
 

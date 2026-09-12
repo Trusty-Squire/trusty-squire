@@ -900,13 +900,16 @@ async function persistExtracted(
 }
 
 /**
- * Build the MCP-visible result after a successful vault write.
+ * Build the MCP-visible result of a storage attempt, including no usable credential.
  *
  * `ExtractResult.credentials` contains the raw values read from the browser. A
  * stored extraction must never spread that object back into the MCP response:
  * the host/model receives only non-secret extraction and vault metadata.
  */
-export function storedExtractResult(extracted: ExtractResult, stored: StoredCredentialMetadata | null) {
+export function storedExtractResult(
+  extracted: ExtractResult,
+  stored: StoredCredentialMetadata | null,
+) {
   return {
     session_id: extracted.session_id,
     url: extracted.url,

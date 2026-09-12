@@ -187,9 +187,28 @@ inferred `already_closed`. Clients should feature-detect the output schema in
 ## Credential capture and retrieval
 
 `operate_extract(store=...)` sends a revealed credential directly to the
-write-only vault and returns storage metadata, not the secret. Its default
-behavior without `store` is unchanged. `operate_click`, `operate_type`,
-`operate_select`, and `operate_press` accept an optional `capture` field:
+write-only vault and returns storage metadata, not the secret. Without `store`,
+it returns selected credential fields. Extraction uses the v1.1.6 selection
+behavior: masked named candidates and identifier-like code values are excluded,
+a recovered primary key takes precedence over a same-named labeled snippet,
+and a recognized truncated primary candidate is returned as `api_key_truncated`.
+Team and project IDs retain their own labels. A contextually accepted near-copy
+key, such as DeepInfra's opaque key format, survives generic API-key sanitization.
+Reveal the full key on the provider page before storing it.
+
+Both `operate_extract(store=...)` and `operate_finish(outcome="credentials")`
+exclude `_truncated` fields from storage and return `stored_credential: null`
+when only identifiers or truncated metadata remain; that is not a successful
+credential capture. These checks retain v1.1.6's limitations: split-node masks,
+substring scans of masked rows, and provider-specific rescans can lose mask
+evidence and produce invalid storage or a successful outcome. They do not
+establish that every selected value is a usable key. Executable selection and
+storage coverage lives in `apps/mcp/src/bot/__tests__/operate-session-flow.test.ts`
+under “v1.1.6 credential candidate selection”. Observation and screenshot reads
+remain verbatim; credential selection does not redact those surfaces.
+
+`operate_click`, `operate_type`, `operate_select`, and `operate_press` accept an
+optional `capture` field:
 
 ```json
 {

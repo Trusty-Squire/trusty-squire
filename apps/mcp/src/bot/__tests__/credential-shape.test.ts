@@ -38,7 +38,6 @@ describe("isMaskedDisplay (canonical masked-glyph — unifies the 4 drifted spel
   it("does NOT flag a JWT (single dots, not 3+ consecutive)", () => {
     expect(isMaskedDisplay("eyJabc.eyJdef.sig123")).toBe(false);
   });
-
 });
 
 describe("looksLikeCodeIdentifier (reject the X-tombstone JS function name leak)", () => {

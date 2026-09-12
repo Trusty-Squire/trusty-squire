@@ -8819,7 +8819,12 @@ export function sanitizeExtractedCredentials(
     const k = normLabelKey(key);
     if (k === "refcode" || k === "referral_code") continue;
     if (isCredentialNoise(value)) continue;
-    if ((k === "key" || k === "api_key") && value !== acceptedNearCopyCredential && !looksLikeCredentialValue(value)) continue;
+    if (
+      (k === "key" || k === "api_key") &&
+      value !== acceptedNearCopyCredential &&
+      !looksLikeCredentialValue(value)
+    )
+      continue;
     if (host === "api.together.ai" && /^key_[A-Za-z0-9]{16,}$/i.test(value.trim())) continue;
     normalized[key] = value;
   }
