@@ -715,7 +715,7 @@ describe("characterization: agent-facing observation payload shapes", () => {
     expect(Object.keys(again).sort()).toEqual(QUERY_KEYS);
   });
 
-  it("compact-v2 full is an explicit verbatim DOM opt-in with unchanged delta behavior", async () => {
+  it("compact-v2 repeated explicit full reads return DOM while implicit reads retain unchanged deltas", async () => {
     const secret = "verification-code-481920";
     h.elements = [
       el({
@@ -736,10 +736,20 @@ describe("characterization: agent-facing observation payload shapes", () => {
     expect(Object.keys(start).sort()).toEqual(FULL_V2_KEYS);
     expect(start.dom).toContain(secret);
 
-    const again = await observe(start.session_id, "full");
-    expect(again.format).toBe("browser-use-dom");
-    expect(Object.keys(again).sort()).toEqual(FULL_V2_DELTA_KEYS);
-    expect(again.dom_unchanged).toBe(true);
+    for (let read = 0; read < 2; read += 1) {
+      const again = await observe(start.session_id, "full");
+      expect(again.format).toBe("browser-use-dom");
+      expect(Object.keys(again).sort()).toEqual(["delta", ...FULL_V2_KEYS]);
+      expect(again.delta).toBe(true);
+      expect(again.dom).toBe(start.dom);
+      expect(again.dom).toContain(secret);
+    }
+
+    const implicit = await observe(start.session_id);
+    expect(implicit.format).toBe("browser-use-dom");
+    expect(Object.keys(implicit).sort()).toEqual(FULL_V2_DELTA_KEYS);
+    expect(implicit.delta).toBe(true);
+    expect(implicit.dom_unchanged).toBe(true);
   });
 
   it("V1 compact operate_observe returns exactly these payload keys", async () => {
