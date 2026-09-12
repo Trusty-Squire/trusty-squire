@@ -1,3 +1,5 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { BrowserController } from "../browser.js";
@@ -86,6 +88,12 @@ it.each([
         format: "compact",
       });
       sessionId = started.session_id;
+      const evidenceDir = process.env.PICKER_TEST_EVIDENCE_DIR;
+      const evidencePrefix = `${mode}-${screenshot ? "coordinate" : "ref"}`;
+      if (evidenceDir) {
+        await mkdir(evidenceDir, { recursive: true });
+        await page.screenshot({ path: join(evidenceDir, `${evidencePrefix}-before.png`) });
+      }
       const before = await page.locator("body").innerHTML();
       const clicked = await operateClickTool.handler(
         { session_id: sessionId, ref: ref(started, "@select") },
@@ -105,6 +113,12 @@ it.each([
         mode === "popup" ? "https://picker.test/picker" : "https://picker.test/form",
       );
       expect(Buffer.from(shot.image.data_base64, "base64").length).toBeGreaterThan(100);
+      if (evidenceDir) {
+        await writeFile(
+          join(evidenceDir, `${evidencePrefix}-picker.png`),
+          Buffer.from(shot.image.data_base64, "base64"),
+        );
+      }
       const pickerPage = controller.activePage();
       if (pickerPage === null) throw new Error("No picker page");
       const box = await pickerPage.locator("#country").boundingBox();
@@ -132,6 +146,27 @@ it.each([
       expect(returned.url).toBe("https://picker.test/form");
       expect(controller.activePage()).toBe(page);
       expect((await captureScreenshot(sessionId)).url).toBe("https://picker.test/form");
+      if (evidenceDir) {
+        await page.screenshot({ path: join(evidenceDir, `${evidencePrefix}-after.png`) });
+        await writeFile(
+          join(evidenceDir, `${evidencePrefix}-responses.json`),
+          JSON.stringify(
+            {
+              fixture:
+                "Local reproduction of a readonly country field with a click-triggered picker; not the live JAF site",
+              mode,
+              input: screenshot ? "screenshot coordinates" : "element reference",
+              started,
+              opened: clicked,
+              selected,
+              returned,
+              countryValue: await page.locator("#select_country_name_pc").inputValue(),
+            },
+            null,
+            2,
+          ),
+        );
+      }
       // Finish must close a picker left open, as well as its form, without
       // closing another session's page in the shared context.
       const fresh = await observe(sessionId, "compact");

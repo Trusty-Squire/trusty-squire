@@ -352,8 +352,8 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   `operate_type` accepts either literal `text` or a protected session `slot`,
   never both. `operate_click` alone may use its guarded internal DOM-dispatch
   fallback after a proven non-dispatch; it is not a public alternative action.
-  Frame scope and stale-ref handling remain fail-closed. For ordinary actions,
-  an owned popup becomes the active page; unrelated/no-opener pages do not.
+  Frame scope and stale-ref handling remain fail-closed. For click-triggered
+  pickers, follow the [picker and popup guidance](docs/operator-tool-surface.md#pickers-and-popup-return).
   Use `operate_login` for atomic OAuth and the username/password lifecycle,
   `operate_extract` to capture
   credentials, and `operate_fill_credential` to load protected slots. CAPTCHA
