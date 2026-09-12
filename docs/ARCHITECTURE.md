@@ -73,14 +73,11 @@ identity, and fixture contract is in
 **Payment approval**
 
 A short-lived handoff from an active operate session to the user's phone. The
-phone can add and bind a card when needed. The owner-authenticated approval page displays
-the exact server-recorded purchase details and identifies the bound card by its
-non-secret label and last four digits for an amount-bound approval. One
-payment-context passkey authorization signs that approval. The API relays the
-signed mandate and operator-sealed card through an account-scoped, short-TTL
-database record and mutates approval state only after operator verification. The
-security contract is owned by
-[`SECURITY.md`](../SECURITY.md#client-encrypted-card-data).
+phone can add and bind a card when needed. Review and authorization follow the
+[card security contract](../SECURITY.md#client-encrypted-card-data).
+The API relays the signed mandate and operator-sealed card through an
+account-scoped, short-TTL database record and mutates approval state only after
+operator verification.
 
 **Sealed slot**
 
@@ -216,8 +213,8 @@ agent starts operate_pay in the addressed checkout session
      again with the same arguments, never by minting another approval
   -> if the approval has no card, the user adds one and the API binds that saved
      card to the still-pending approval
-  -> the owner-authenticated approval page displays merchant, checkout origin, item, reason,
-     requesting agent, amount, and currency from the short-lived server record
+  -> the approval page displays the canonical purchase details from the ceremony
+     response (apps/api/README.md); authentication follows SECURITY.md
   -> the user reviews that intent and one passkey ceremony signs the canonical
      payload, unlocks the card, and seals it to the ephemeral operator
   -> before submitting approval, the user may instead deny the pending request;

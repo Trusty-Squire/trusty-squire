@@ -5,8 +5,8 @@ surface, master-key custody, retention, and backup/DR. Companion to
 `docs/ARCHITECTURE.md`, which is the canonical system overview. This doc is
 the runbook, not the design history.
 
-Landed in the 2026-05-30 vault-hardening sweep. Everything below is
-account-scoped and, for the human paths, web-session only.
+Authentication requirements are defined by the
+[API endpoint contract](../apps/api/README.md#endpoints).
 
 ## Server-managed encryption model (what's actually at rest)
 
