@@ -127,6 +127,18 @@ export class PageDriver {
     return this.adoptLivePage();
   }
 
+  returnFromClosedPopup(page: Page): Page | null {
+    if (!page.isClosed()) return null;
+    if (page === this.oauthProviderPage || page === this.oauthProductPage) return null;
+    const opener = this.ownedPages.liveOpener(page);
+    if (opener === null) return null;
+    // Epoch checks may already have restored this opener before the action
+    // constructs its response from the captured (now closed) popup.
+    if (this.page !== page && this.page !== opener) return null;
+    this.page = opener;
+    return opener;
+  }
+
   // ───────────── new-tab adoption ─────────────
   //
   // Arm adoption immediately BEFORE an action that may open a tab. Anything

@@ -14967,6 +14967,9 @@ export class BrowserController {
   recoverActivePage(): boolean {
     return this.pageDriver.recoverActivePage();
   }
+  returnFromClosedPopup(page: Page): Page | null {
+    return this.pageDriver.returnFromClosedPopup(page);
+  }
   armOpenedTabAdoption(): void {
     return this.pageDriver.armOpenedTabAdoption();
   }

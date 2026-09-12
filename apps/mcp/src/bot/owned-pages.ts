@@ -8,6 +8,7 @@ const owners = new WeakMap<Page, symbol>();
 export class OwnedPages {
   private readonly owner = Symbol("browser-session");
   private readonly pages = new Map<Page, () => void>();
+  private readonly openers = new WeakMap<Page, Page>();
 
   constructor(private readonly onPopup: (page: Page) => void) {}
 
@@ -26,6 +27,7 @@ export class OwnedPages {
       if (!this.has(page) || child.context() !== page.context()) return;
       if (owners.has(child)) return; // duplicate/foreign attribution fails closed
       this.register(child);
+      this.openers.set(child, page);
       if (this.has(child)) this.onPopup(child);
     };
     const dispose = (): void => {
@@ -50,6 +52,16 @@ export class OwnedPages {
 
   live(): Page[] {
     return [...this.pages.keys()].filter((page) => this.has(page));
+  }
+
+  /** Creation-time ancestry survives window.close(), unlike Page.opener(). */
+  liveOpener(page: Page): Page | null {
+    let opener = this.openers.get(page);
+    while (opener !== undefined) {
+      if (this.has(opener)) return opener;
+      opener = this.openers.get(opener);
+    }
+    return null;
   }
 
   dispose(): void {

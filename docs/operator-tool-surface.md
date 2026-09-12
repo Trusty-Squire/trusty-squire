@@ -25,6 +25,27 @@ masks, seals, or refuses page content. `operate_screenshot` likewise returns
 the page’s actual pixels and is not a secret-redaction surface. Payment approval,
 3-D Secure, and vault write-only boundaries remain separate safety controls.
 
+## Pickers and popup return
+
+For a readonly field backed by a picker, click its Select button, then click
+the choice in the resulting observation or a fresh screenshot. Do not type
+into the readonly field. An inline dialog stays on the current page; an owned
+popup opened by an ordinary action becomes the active page. Unrelated pages
+and pages without a proven opener are not adopted.
+
+When the active picker closes after a selection, post-click observations and
+subsequent screenshots return to its nearest still-live, session-owned opener
+in the creation-time ancestry. This return does not choose a sibling or foreign
+page. Re-observe before using refs from the restored form and check the selected
+value. The dispatched click and field verification remain bound to the original
+picker document; returning does not dispatch another action on the form.
+
+This ordinary-popup return excludes tracked OAuth provider/product pages and
+is disabled while payment fields are sealed, a place-order approval exists,
+or a 3-D Secure outcome wait is active. Those flows retain their own lifecycle.
+The local regression fixture is
+[`picker-window.test.ts`](../apps/mcp/src/bot/__tests__/picker-window.test.ts).
+
 ## Clicking a screenshot-visible control
 
 Prefer an observed `ref` or unique `@label`. A closed-shadow control may be
@@ -86,9 +107,8 @@ For ordinary clicks, `target_unresolved` means the label was never issued in thi
 `stale_ref` remains the response for an expired physical ref or retired alias.
 
 When combined with `capture`, the vault capture result retains the click receipt;
-storage success does not establish the provider outcome. Screenshot clicks also
-use the existing popup adoption rules, so subsequent observations follow an
-adopted tab opened by the click.
+storage success does not establish the provider outcome. Screenshot clicks use
+the same [picker and popup return rules](#pickers-and-popup-return).
 
 Coordinate clicks use the session's existing domain and payment predicates and
 are not promoted into replay recipes. They do not change vault storage,
