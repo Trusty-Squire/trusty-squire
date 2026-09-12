@@ -382,12 +382,13 @@ describe("payment approval relay", () => {
       const fetchMock = vi.fn();
       if (result === "network") fetchMock.mockRejectedValue(new Error("network failure"));
       else if (result === "stalled") {
-        fetchMock.mockImplementation((_url: string, init: RequestInit) =>
-          new Promise((_resolve, reject) => {
-            init.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
-              once: true,
-            });
-          }),
+        fetchMock.mockImplementation(
+          (_url: string, init: RequestInit) =>
+            new Promise((_resolve, reject) => {
+              init.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+                once: true,
+              });
+            }),
         );
       } else fetchMock.mockResolvedValue({ ok: result === "success" });
       vi.stubGlobal("fetch", fetchMock);
@@ -416,8 +417,9 @@ describe("payment approval relay", () => {
         headers: { authorization: `Bearer ${agentToken}` },
       });
       const events = audit.json().events;
-      const created = events.find((event: { type: string }) =>
-        event.type === "vault.payment_approval_created");
+      const created = events.find(
+        (event: { type: string }) => event.type === "vault.payment_approval_created",
+      );
       expect(created.approval_id).toEqual(expect.any(String));
       const ceremony = await server.inject({
         method: "GET",
@@ -435,11 +437,13 @@ describe("payment approval relay", () => {
       } else {
         expect(response.json()).toEqual({ error: "payment_approval_delivery_failed" });
         expect(events).toHaveLength(2);
-        expect(events).toContainEqual(expect.objectContaining({
-          type: "vault.payment_approval_delivery_failed",
-          approval_id: created.approval_id,
-          channel: "telegram",
-        }));
+        expect(events).toContainEqual(
+          expect.objectContaining({
+            type: "vault.payment_approval_delivery_failed",
+            approval_id: created.approval_id,
+            channel: "telegram",
+          }),
+        );
       }
     },
   );
