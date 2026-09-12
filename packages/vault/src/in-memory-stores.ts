@@ -234,8 +234,7 @@ export class InMemoryVaultAuditStore implements VaultAuditStore {
       .filter(
         (e) =>
           e.account_id === accountId &&
-          (opts.type === undefined ||
-            (Array.isArray(opts.type) ? opts.type.includes(e.type) : e.type === opts.type)) &&
+          (opts.type === undefined || e.type === opts.type) &&
           (opts.reference === undefined || e.payload.reference === opts.reference) &&
           (opts.before === undefined || e.emitted_at < opts.before),
       )

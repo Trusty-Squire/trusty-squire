@@ -328,7 +328,7 @@ describe("payment approval relay", () => {
 
     const audit = await server.inject({
       method: "GET",
-      url: "/v1/vault/audit?type=payment",
+      url: "/v1/vault/audit?type=vault.payment_approval_created",
       headers: { authorization: `Bearer ${agentToken}` },
     });
     expect(audit.statusCode).toBe(200);
@@ -351,7 +351,7 @@ describe("payment approval relay", () => {
     expect(audit.json().events[0]).not.toHaveProperty("sealed_card");
     const foreignAudit = await server.inject({
       method: "GET",
-      url: "/v1/vault/audit?type=payment",
+      url: "/v1/vault/audit?type=vault.payment_approval_created",
       headers: { authorization: `Bearer ${otherAgentToken}` },
     });
     expect(foreignAudit.json().events).toEqual([]);
@@ -373,52 +373,64 @@ describe("payment approval relay", () => {
     });
   });
 
-  it("filters the payment category before limiting, retaining exact type and reference filters", async () => {
-    const created = await createCardlessApproval();
-    const payment = await server.inject({
-      method: "POST",
-      url: "/v1/vault/payments/audit",
-      headers: { authorization: `Bearer ${agentToken}` },
-      payload: {
-        merchant: "Synthetic Books",
-        amountCents: 2599,
-        currency: "USD",
-        last4: "4242",
-        status: "payment_place_order_attempted",
-        approvalId: created.id,
-      },
-    });
-    expect(payment.statusCode).toBe(201);
-    await createOwnedCard(webCookie);
-    const read = (query: string) =>
-      server.inject({
+  it.each(["rejected", "network", "missing-token", "success"])(
+    "reports Telegram delivery %s and records failures",
+    async (result) => {
+      const account = await deps.accountStore.findAccountByEmail("payer@example.test");
+      await deps.accountStore.setTelegramChatId(account!.id, "555000111");
+      vi.stubEnv("TELEGRAM_BOT_TOKEN", result === "missing-token" ? "" : "synthetic-token");
+      const fetchMock = vi.fn();
+      if (result === "network") fetchMock.mockRejectedValue(new Error("network failure"));
+      else fetchMock.mockResolvedValue({ ok: result === "success" });
+      vi.stubGlobal("fetch", fetchMock);
+      const response = await server.inject({
+        method: "POST",
+        url: "/v1/pay/approvals",
+        headers: { authorization: `Bearer ${agentToken}` },
+        payload: {
+          merchant: "Synthetic Books",
+          checkout_origin: "https://checkout.synthetic.test",
+          amount_cents: 6600,
+          currency: "JPY",
+          operator_pubkey: "c3ludGhldGlj",
+          item: "Synthetic Book",
+          reason: "Synthetic test purchase",
+        },
+      });
+      expect(response.statusCode).toBe(result === "success" ? 201 : 502);
+      const audit = await server.inject({
         method: "GET",
-        url: `/v1/vault/audit?${query}`,
+        url: "/v1/vault/audit",
         headers: { authorization: `Bearer ${agentToken}` },
       });
-    const category = await read("type=payment");
-    expect(category.statusCode).toBe(200);
-    expect(
-      category
-        .json()
-        .events.map((e: { type: string }) => e.type)
-        .sort(),
-    ).toEqual(["vault.payment_approval_created", "vault.payment_executed"]);
-    const limited = await read("type=payment&limit=1");
-    expect(limited.json().events).toHaveLength(1);
-    expect(limited.json().events[0].type).toMatch(/^vault\.payment_/);
-    expect(limited.json().next_before).toEqual(expect.any(String));
-    const referenced = await read(
-      `type=payment&reference=${encodeURIComponent(`pay://${created.id}`)}`,
-    );
-    expect(referenced.json().events).toHaveLength(1);
-    expect(referenced.json().events[0].type).toBe("vault.payment_approval_created");
-    const exact = await read("type=vault.payment_executed");
-    expect(exact.json().events).toHaveLength(1);
-    expect(exact.json().events[0].type).toBe("vault.payment_executed");
-    expect((await read("type=payment&before=2000-01-01T00:00:00.000Z")).json().events).toEqual([]);
-    expect((await read("type=bogus")).statusCode).toBe(400);
-  });
+      const events = audit.json().events;
+      const created = events.find((event: { type: string }) =>
+        event.type === "vault.payment_approval_created");
+      expect(created.approval_id).toEqual(expect.any(String));
+      const ceremony = await server.inject({
+        method: "GET",
+        url: `/v1/pay/approvals/${created.approval_id}/ceremony`,
+        headers: { cookie: webCookie },
+      });
+      expect(ceremony.statusCode).toBe(200);
+      if (result === "success") {
+        expect(events).toHaveLength(1);
+        expect(response.json().id).toBe(created.approval_id);
+        expect(JSON.parse(fetchMock.mock.calls[0]![1].body)).toMatchObject({
+          chat_id: "555000111",
+          text: expect.stringContaining(`/vault/pay/${created.approval_id}`),
+        });
+      } else {
+        expect(response.json()).toEqual({ error: "payment_approval_delivery_failed" });
+        expect(events).toHaveLength(2);
+        expect(events).toContainEqual(expect.objectContaining({
+          type: "vault.payment_approval_delivery_failed",
+          approval_id: created.approval_id,
+          channel: "telegram",
+        }));
+      }
+    },
+  );
 
   it.each(["persist", "audit"])(
     "returns an error and sends no approval when %s fails",

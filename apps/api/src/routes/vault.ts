@@ -40,7 +40,7 @@ const AUDIT_TYPE_VALUES = Object.values(VAULT_AUDIT_TYPES) as [VaultAuditType, .
 const auditQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
   before: z.string().datetime().optional(),
-  type: z.union([z.enum(AUDIT_TYPE_VALUES), z.literal("payment")]).optional(),
+  type: z.enum(AUDIT_TYPE_VALUES).optional(),
   reference: z.string().min(1).max(256).optional(),
 });
 
@@ -225,14 +225,7 @@ export const registerVaultRoute: FastifyPluginAsync<{
     const events = await opts.deps.vault.listAudit(auth.account_id, {
       ...(q.limit !== undefined ? { limit: q.limit } : {}),
       ...(q.before !== undefined ? { before: new Date(q.before) } : {}),
-      ...(q.type !== undefined
-        ? {
-            type:
-              q.type === "payment"
-                ? AUDIT_TYPE_VALUES.filter((type) => type.startsWith("vault.payment_"))
-                : q.type,
-          }
-        : {}),
+      ...(q.type !== undefined ? { type: q.type } : {}),
       ...(q.reference !== undefined ? { reference: q.reference } : {}),
     });
     const last = events.at(-1);

@@ -362,8 +362,6 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       },
     });
 
-    // Push to the user's linked Telegram, if any. Fire-and-forget — a
-    // Telegram error must never delay or fail the approval response.
     const account = await opts.deps.accountStore.findAccountById(auth.account_id);
     if (account?.telegram_chat_id != null) {
       const amount = formatCurrencyAmount(parsed.data.amount_cents, parsed.data.currency);
@@ -382,7 +380,21 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
               : "Using this payment's card.\n"
         }` +
         `${webBaseUrl()}/vault/pay/${id}`;
-      void sendTelegramMessage(account.telegram_chat_id, text).catch(() => {});
+      const sent = await sendTelegramMessage(account.telegram_chat_id, text);
+      if (!sent) {
+        await opts.deps.vaultAuditStore.record({
+          account_id: auth.account_id,
+          type: VAULT_AUDIT_TYPES.paymentApprovalDeliveryFailed,
+          payload: {
+            reference: `pay://${id}`,
+            approval_id: id,
+            requester: "agent",
+            channel: "telegram",
+            error: "payment_approval_delivery_failed",
+          },
+        });
+        return reply.code(502).send({ error: "payment_approval_delivery_failed" });
+      }
     }
 
     return reply.code(201).send({
