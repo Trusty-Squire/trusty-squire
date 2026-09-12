@@ -2,21 +2,11 @@
 
 ## 1.1.14-rc.15 (2026-09-12)
 
-- fix(mcp): detect SBPS CVV fields and allow payment-window 3DS requests (#738)
-- fix(api): restore payment approval without separate web login (#737)
-- fix(vault): declare payment approval audit delivery metadata (#736)
-- fix(api): repair cardless payment approvals and Telegram delivery (#735)
-- fix(mcp): restore full page reads and clarify saved-login filling (#734)
-- fix(mcp): recover orphaned browser profile locks after reconnect (#733)
-- fix(mcp): restore opener observations after picker popups close (#732)
-- fix(mcp): restore v1.1.6 credential extraction behavior (#731)
-- fix(mcp): resolve shadow-root credential capture sources (#730)
-- fix(mcp): detect shadow DOM transitions and preserve refs across dialog remounts (#725)
-- fix(mcp): resolve post-click captures and unblock recovery actions (#726)
-- fix(mcp): default operator action responses to compact control maps (#729)
-- fix(mcp): clear solved Turnstile observation blockers (#727)
-- fix(mcp): permit Clerk verification hosts for authorized accounts pages (#728)
-- feat(mcp): add service filters and compact credential summaries (#724)
+- Detect SBPS card-payment CVV fields and, during the captain-approved time-boxed payment window, allow 3DS requests within the relaxed payment-window host scope (#738).
+- Restore full-page and `operate_observe` reads, including saved-login filling guidance (#734).
+- Recover dead-owner browser profile locks after reconnect (#733).
+- Restore opener observations after picker popups close (#732).
+- Restore the v1.1.6 credential-extraction behavior (#731).
 
 ## 1.1.14-rc.14 (2026-09-11)
 
