@@ -11749,6 +11749,8 @@ export class BrowserController {
         "personal access token",
         "client id",
         "client secret",
+        "team id",
+        "project id",
         "client key",
         // Cloudinary
         "cloud name",

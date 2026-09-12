@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
   isMaskedDisplay,
-  MASKED_DISPLAY_RE,
   looksLikeCodeIdentifier,
   isCredentialNoise,
   findCredentialTokens,
@@ -39,9 +38,6 @@ describe("isMaskedDisplay (canonical masked-glyph — unifies the 4 drifted spel
   it("does NOT flag a JWT (single dots, not 3+ consecutive)", () => {
     expect(isMaskedDisplay("eyJabc.eyJdef.sig123")).toBe(false);
   });
-  it("exports MASKED_DISPLAY_RE so the in-page browser.ts mirror can stay in sync", () => {
-    expect(MASKED_DISPLAY_RE.source).toBe("[•●⬤]|\\*{3,}|…|\\.{3,}");
-  });
 });
 
 describe("looksLikeCodeIdentifier (reject the X-tombstone JS function name leak)", () => {
@@ -67,12 +63,9 @@ describe("isCredentialNoise (reject non-key page text)", () => {
     expect(isCredentialNoise("https://example.com/x")).toBe(true);
     expect(isCredentialNoise("trusty-squire-dogfood-20260625")).toBe(true);
   });
-  it("no longer rejects a masked display — the operator returns what the page renders", () => {
-    expect(isCredentialNoise("••••3f")).toBe(false);
-    expect(isCredentialNoise(sk("or-v1-1687…"))).toBe(false);
-    // isMaskedDisplay itself still exists: extract RANKS a masked candidate
-    // behind a revealed sibling, it just never refuses one.
-    expect(isMaskedDisplay("••••3f")).toBe(true);
+  it("rejects a masked display as a vaultable credential candidate", () => {
+    expect(isCredentialNoise("••••3f")).toBe(true);
+    expect(isCredentialNoise(sk("or-v1-1687…"))).toBe(true);
   });
   it("does NOT reject a real key", () => {
     expect(isCredentialNoise("re_fake_1234567890abcdef")).toBe(false);

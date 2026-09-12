@@ -63,10 +63,10 @@ export function isCredentialNoise(value: string): boolean {
   // var, and must reach the credential gate. Cap at 39 chars (key gate needs ≥40).
   if (/^[A-Z][A-Z0-9_]{2,38}=?$/.test(v)) return true;
   if (/^key_[A-Za-z0-9]{16,}$/i.test(v)) return true;
-  // A mask-glyph display is deliberately NOT noise. The operator no longer
-  // refuses to hand back a value because it still looks masked — the page is
-  // rendering it, the agent asked for it, so it is returned and the agent
-  // decides whether to reveal and extract again.
+  // A masked/truncated display is not a credential value. Keep this extraction
+  // gate separate from observation: page reads remain verbatim, while the
+  // credential picker must not vault a display stub as a usable secret.
+  if (isMaskedDisplay(v)) return true;
   return false;
 }
 

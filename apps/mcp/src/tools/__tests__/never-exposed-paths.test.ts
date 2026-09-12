@@ -96,7 +96,7 @@ describe("extract { store } is unchanged: vault metadata only", () => {
     expect(JSON.stringify(result)).not.toContain(SECRET);
     expect(JSON.stringify(result)).not.toContain("another-secret");
     expect(result).not.toHaveProperty("credentials");
-    expect(result.stored_credential.field_names).toEqual(["api_key", "api_secret"]);
+    expect(result.stored_credential?.field_names).toEqual(["api_key", "api_secret"]);
   });
 
   it("still carries a blocked_reason through, so a login wall is not a silent empty", () => {

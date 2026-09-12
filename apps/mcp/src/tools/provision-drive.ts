@@ -685,6 +685,7 @@ async function captureIntoVault(
       api,
       writeId,
     );
+    if (stored === null) throw new Error("No credential to store");
     await persistOperatorCaptureEvidence({
       write_id: writeId,
       binding,
@@ -861,7 +862,13 @@ async function persistExtracted(
   store: StoreSpec,
   api: ApiClient,
   writeId?: string,
-): Promise<StoredCredentialMetadata> {
+): Promise<StoredCredentialMetadata | null> {
+  credentials = Object.fromEntries(
+    Object.entries(credentials).filter(([key]) => !key.endsWith("_truncated")),
+  );
+  if (!Object.keys(credentials).some((key) => key !== "id" && !key.endsWith("_id"))) {
+    return null;
+  }
   const observedHosts = [
     ...new Set([...(store.egress_hosts ?? []), ...observedHostsForSession(sessionId)]),
   ];
@@ -893,13 +900,16 @@ async function persistExtracted(
 }
 
 /**
- * Build the MCP-visible result after a successful vault write.
+ * Build the MCP-visible result of a storage attempt, including no usable credential.
  *
  * `ExtractResult.credentials` contains the raw values read from the browser. A
  * stored extraction must never spread that object back into the MCP response:
  * the host/model receives only non-secret extraction and vault metadata.
  */
-export function storedExtractResult(extracted: ExtractResult, stored: StoredCredentialMetadata) {
+export function storedExtractResult(
+  extracted: ExtractResult,
+  stored: StoredCredentialMetadata | null,
+) {
   return {
     session_id: extracted.session_id,
     url: extracted.url,

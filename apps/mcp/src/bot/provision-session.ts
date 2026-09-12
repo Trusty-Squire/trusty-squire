@@ -150,6 +150,7 @@ import { serviceSlugFromHost } from "@trusty-squire/skill-schema";
 import type { PostVerifyStep } from "./provision-types.js";
 import {
   looksLikeCodeIdentifier,
+  looksLikeCredentialValue,
   isCredentialNoise,
   findCredentialTokens,
   findOtpCredential,
@@ -8789,6 +8790,7 @@ export function sanitizeExtractedCredentials(
   credentials: Record<string, string>,
   url: string,
   haystack = Object.values(credentials).join("\n"),
+  acceptedNearCopyCredential: string | null = null,
 ): Record<string, string> {
   const host = registrableHost(url) ?? "";
   const normalized: Record<string, string> = {};
@@ -8816,10 +8818,13 @@ export function sanitizeExtractedCredentials(
   for (const [key, value] of Object.entries(credentials)) {
     const k = normLabelKey(key);
     if (k === "refcode" || k === "referral_code") continue;
-    // Page PROSE is still dropped — a greeting or a date under a "Key" heading
-    // is not a value the page is presenting as a credential. A masked-looking
-    // display is NOT prose: it is what the page renders, so it is returned.
     if (isCredentialNoise(value)) continue;
+    if (
+      (k === "key" || k === "api_key") &&
+      value !== acceptedNearCopyCredential &&
+      !looksLikeCredentialValue(value)
+    )
+      continue;
     if (host === "api.together.ai" && /^key_[A-Za-z0-9]{16,}$/i.test(value.trim())) continue;
     normalized[key] = value;
   }
@@ -9432,13 +9437,14 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     state = accumulateCandidate(state, cls);
   }
 
-  // Named credentials for multi-cred services. Every labeled value the page
-  // renders is returned under its label — including one that still LOOKS masked.
-  // A value on the page is the agent's to read; refusing it (the old
-  // `isMasked` skip) boxed the operator out of keys the page was displaying.
+  // Named credentials for multi-cred services (skip still-masked values and
+  // env-var NAME displays — "LANGWATCH_API_KEY=" is the SDK-snippet prefix, not
+  // a credential).
   const named: Record<string, string> = {};
   for (const c of labeled) {
-    if (c.label === null) continue;
+    if (c.label === null || c.isMasked) continue;
+    if (isCredentialNoise(c.value)) continue;
+    if (looksLikeCodeIdentifier(c.value)) continue;
     const k = normLabelKey(c.label);
     if (k.length > 0 && !(k in named)) named[k] = c.value;
   }
@@ -9452,16 +9458,14 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     ...resolveExtraction(state),
   };
 
-  // Relaxed near-copy fallback: a PREFIXLESS, SEPARATORLESS key (deepinfra's
-  // `Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz`) that the strict scanners refuse from raw
-  // text but which was harvested from beside a copy/reveal affordance — that
-  // proximity is the disambiguator. Only when nothing better surfaced an api_key
-  // (a labeled or prefixed key always wins), so this can't clobber a real match.
-  if (!("api_key" in credentials)) {
-    const relaxed = pickRelaxedNearCopyCredential(nearCopy);
-    if (relaxed !== null && !Object.values(credentials).includes(relaxed)) {
-      credentials.api_key = relaxed;
-    }
+  const relaxed = pickRelaxedNearCopyCredential(nearCopy);
+  const acceptedNearCopyCredential =
+    relaxed !== null &&
+    !Object.entries(credentials).some(([key, value]) => key !== "api_key" && value === relaxed)
+      ? relaxed
+      : null;
+  if (!("api_key" in credentials) && acceptedNearCopyCredential !== null) {
+    credentials.api_key = acceptedNearCopyCredential;
   }
 
   // Multi-credential: a service may present several keys of the SAME family
@@ -9491,6 +9495,7 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     credentials,
     page?.url() ?? browser.currentUrl(),
     haystack,
+    acceptedNearCopyCredential,
   );
   const found = Object.keys(sanitized).length > 0;
   audit(sessionId, "extract", { found, candidate_count: labeled.length });

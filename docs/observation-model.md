@@ -177,9 +177,8 @@ The history of this section is a one-way ratchet toward visibility:
 3. **Removal (2026-09-05, this section's current state)** — **every seal comes
    out. No carve-outs, no payments remnant, no default-on flag.**
 
-**What that means concretely.** `operate_observe`, `operate_screenshot`, and
-`operate_extract` return what the page
-actually renders:
+**What that means concretely.** `operate_observe` and `operate_screenshot`
+return what the page actually renders:
 
 - Compact versus full observation is only a size/shape choice. Compact serializes
   controls; full serializes the verbatim DOM. Neither path masks, screens,
@@ -198,10 +197,9 @@ actually renders:
 - The browser-use DOM format's `url` is the live page URL, path and query included. Its DOM
   attributes follow canonical browser-use's selection and ordering; see the
   pinned serializer contract in `browser-use-serializer-port.md`.
-- `extract` returns every labeled candidate the page shows, including one that
-  still looks masked (it is ranked behind a revealed sibling, never refused).
-  The `no_legit_credential` and "the secret is still masked/hidden" refusals are
-  gone.
+- Credential extraction selects values rather than providing a verbatim page
+  read. Its restored selection, truncation metadata, storage behavior, and known
+  limitations are owned by the [credential capture contract](operator-tool-surface.md#credential-capture-and-retrieval).
 
 **Standing directive restated (2026-09-07).** The read-path screening introduced
 in #678 and extended in #685 contradicted this directive and is removed:
@@ -401,9 +399,10 @@ What was deleted:
   compact-v2 tool-result seal that blanked `credentials`, URLs, verification
   codes, and arbitrary strings to `<sealed>` — plus the `isMaskedDisplay`
   refusal in the `into_slot` extract path.
-- `credential-shape.ts`: the masked-display rejection inside
-  `isCredentialNoise`. `isMaskedDisplay` survives only to RANK a masked
-  candidate behind a revealed one.
+
+Credential-selection predicates in `credential-shape.ts` are governed by the
+[credential capture contract](operator-tool-surface.md#credential-capture-and-retrieval),
+not this inventory of removed observation seals.
 
 `recordableTokenV2` and its closed vocabulary remain, used solely by the stderr
 audit trail and the registry-bound action trace (§4.5) — neither is a read by

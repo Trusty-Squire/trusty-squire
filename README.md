@@ -355,8 +355,8 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   Frame scope and stale-ref handling remain fail-closed. For ordinary actions,
   an owned popup becomes the active page; unrelated/no-opener pages do not.
   Use `operate_login` for atomic OAuth and the username/password lifecycle,
-  `operate_extract` to capture
-  credentials, and `operate_fill_credential` to load protected slots. CAPTCHA
+  `operate_extract` to [capture credentials](docs/operator-tool-surface.md#credential-capture-and-retrieval),
+  and `operate_fill_credential` to load protected slots. CAPTCHA
   solving, inbox polling, local upload, and specialized cart mutation are not
   operator verbs; inspect and drive the page's ordinary UI or hand the task back
   to the user.

@@ -494,38 +494,13 @@ see CLAUDE.md's "Operator session model" for what may not be reordered.
 
 ### 16. The operator does not seal, redact, or refuse a read — do not add one back
 
-Owner's order (2026-09-05, stated three times, after twice declining an offered
-card-number carve-out): **remove ALL seals.** `operate_observe`,
-`operate_screenshot`, and `operate_extract` return what the page actually
-renders. There is no mask pass, no
-`screenshot_unavailable_sealed_context` (the code no longer exists), no
-observation value/label masking, no compact-v2 tool-result seal, and no
-"the secret is still masked/hidden" extract refusal.
-
-Do NOT reintroduce a reduced seal, a default-on env flag, an allowlist, or a
-"payments only" remnant — that carve-out was offered and refused. Repeated
-attempts to "harden" this by adding shape matching or a vocabulary allowlist are
-what blinded the agent on real signups and checkouts (#627 → #636 → #639 → #645),
-and the final failure was the two halves contradicting each other: on a
-BrowserStack settings page with the Access Key revealed, `operate_screenshot`
-refused ("a secret is present, you may not look") while `extract` on the same
-page answered `candidate_count: 4, blocked_reason: "still masked/hidden"`.
-
-Out of scope for that order and still in place: the vault's write-only property
-and `use_credential`'s server-side injection (storage, not sealing); the payment
-approval flow, 3DS, and the human-approval step; the
-`data-ts-sealed-payment="1"` marker (card-fill machinery — cleanup, saved-card
-resolution, profile destruction — which gates no read); and the two
-non-agent-read surfaces that keep `recordableTokenV2`'s vocabulary screen, the
-stderr audit trail and the registry-bound recipe action trace. The policy and its
-file-by-file map live in
-[`docs/observation-model.md`](docs/observation-model.md) §4.5 — read it before
-touching this area.
-
-Compact-v2's serializer now uses the canonical browser-use DOM port. Its
-names and text are emitted without read-path redaction, per the standing captain
-directive restated 2026-09-07. Payment fences and vault boundaries remain untouched. The separate page-text field and prose extractor
-are deleted. The capture, identity, query and fixture contracts are documented in
+Observation and screenshot reads remain verbatim. Do not reintroduce content
+seals, read-path redaction, or payment-only masking. The authoritative policy,
+remaining vault/payment boundaries, and implementation map are in
+[`docs/observation-model.md`](docs/observation-model.md) §4.5; read that section
+before touching this area. Credential selection is a separate contract owned by
+[`docs/operator-tool-surface.md`](docs/operator-tool-surface.md#credential-capture-and-retrieval).
+The canonical DOM capture, identity, query, and fixture contracts live in
 [`docs/browser-use-serializer-port.md`](docs/browser-use-serializer-port.md).
 
 ### 17. `await_verification` must score link-picking on anchor TEXT too, and must retry through Gmail's own transient backend error
