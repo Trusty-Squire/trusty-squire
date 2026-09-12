@@ -145,6 +145,8 @@ describe("explicit mutation capture", () => {
     expect(first).toMatchObject({
       stored: false,
       storage: "unknown",
+      candidate_count: 1,
+      found: [],
       write_id: "create-one",
       retry: "extract_only",
     });
@@ -170,6 +172,42 @@ describe("explicit mutation capture", () => {
     expect(state.action).toHaveBeenCalledOnce();
     expect(store.mock.calls.map(([input]) => input.write_id)).toEqual(["create-one", "create-one"]);
   });
+  it("reports one unresolved error code, with the found list, for a zero-match capture", async () => {
+    const found = [{ role: "textbox", name: null }];
+    state.capture.mockResolvedValueOnce({ candidate_count: 0, found });
+    const store = vi.fn();
+    expect(await click(api(store))).toMatchObject({
+      stored: false,
+      execution: "completed",
+      error: "capture_unresolved",
+      candidate_count: 0,
+      found,
+      retry: "extract_only",
+    });
+    expect(store).not.toHaveBeenCalled();
+  });
+  it.each(["empty", "omitted", "exception"])(
+    "includes empty diagnostics for %s capture results",
+    async (kind) => {
+      if (kind === "exception") state.capture.mockRejectedValueOnce(new Error(secret));
+      else
+        state.capture.mockResolvedValueOnce({
+          candidate_count: 0,
+          ...(kind === "empty" ? { found: [] } : {}),
+        });
+      const store = vi.fn();
+      const result = await click(api(store));
+      expect(result).toMatchObject({
+        stored: false,
+        error: "capture_unresolved",
+        candidate_count: 0,
+        found: [],
+        retry: "extract_only",
+      });
+      expect(JSON.stringify(result)).not.toContain(secret);
+      expect(store).not.toHaveBeenCalled();
+    },
+  );
   it("recovers a zero-match textbox capture through an explicit plain-text source", async () => {
     state.capture.mockResolvedValueOnce({ candidate_count: 0 });
     const store = vi.fn().mockResolvedValue(stored);

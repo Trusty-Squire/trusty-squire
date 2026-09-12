@@ -11273,8 +11273,8 @@ describe("flat operator verbs", () => {
     const api = { storeCredential } as unknown as ApiClient;
     const outcomes =
       _name === "click"
-        ? (["stored", "ambiguous", "unresolved", "unchanged"] as const)
-        : (["stored", "ambiguous", "unresolved"] as const);
+        ? (["stored", "ambiguous", "missing", "unresolved", "unchanged"] as const)
+        : (["stored", "ambiguous", "missing", "unresolved"] as const);
     for (const outcome of outcomes) {
       await observe(started.session_id, "compact");
       h.elements.push(
@@ -11285,8 +11285,10 @@ describe("flat operator verbs", () => {
       const before = '<input aria-label="API key" value="pre-action-value">';
       const after =
         outcome === "ambiguous"
-          ? "<p>No key available</p>"
-          : '<input aria-label="API key" value="captured-secret">';
+          ? '<input value="captured-secret"><input value="another-secret">'
+          : outcome === "missing"
+            ? "<p>No key available</p>"
+            : '<input aria-label="API key" value="captured-secret">';
       await page.setContent(_name === "click" ? before : after);
       h.captureClick =
         outcome === "unchanged"
@@ -11329,6 +11331,7 @@ describe("flat operator verbs", () => {
       } else {
         expect(storeCredential).toHaveBeenCalledTimes(writesBefore);
       }
+      if (outcome === "missing") expect(captured).toMatchObject({ candidate_count: 0, found: [] });
       expect(captured).not.toHaveProperty("safe_table");
       expect(captured).not.toHaveProperty("observation");
       const next = await operateScrollTool.handler(
