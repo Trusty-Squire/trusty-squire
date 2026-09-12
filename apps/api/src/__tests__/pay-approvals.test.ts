@@ -442,6 +442,7 @@ describe("payment approval relay", () => {
             type: "vault.payment_approval_delivery_failed",
             approval_id: created.approval_id,
             channel: "telegram",
+            error: "payment_approval_delivery_failed",
           }),
         );
       }
