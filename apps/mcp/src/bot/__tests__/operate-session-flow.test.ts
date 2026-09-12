@@ -7022,6 +7022,27 @@ describe("operate session — sealed credential transfer", () => {
 });
 
 describe("operate_extract — v1.1.6 credential candidate selection", () => {
+  it.each(["extract", "finish"] as const)("%s never stores a secondary key from two masked rows", async (caller) => {
+    const maskedRows = ["re_1234567890abcdefghij****", "re_0987654321abcdefghij****"];
+    h.labeledCredentialCandidates = maskedRows.map((value) => ({
+      label: "API Key", value, isMasked: true,
+    }));
+    h.nearCopyCredentialCandidates = maskedRows;
+    h.visibleText = maskedRows.map((value) => `API Key: ${value}`).join("\n");
+    const started = await startProvisionSession({ serviceUrl: "https://resend.com/api-keys" });
+    expect((await extractCredentials(started.session_id)).credentials).toEqual({
+      api_key_truncated: "re_1234567890abcdefghij",
+    });
+    const storeCredential = vi.fn();
+    const api = { storeCredential } as unknown as ApiClient;
+    const result = caller === "extract"
+      ? await provisionExtractTool.handler({ session_id: started.session_id, store: { service: "resend" } }, api)
+      : await operateFinishTool.handler({ session_id: started.session_id, outcome: "credentials", store: { service: "resend" } }, api);
+    expect(storeCredential).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ stored_credential: null });
+    expect(result).not.toHaveProperty("auto_promote");
+  });
+
   it.each(
     (["extract", "finish"] as const).flatMap((caller) =>
       [

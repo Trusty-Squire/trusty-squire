@@ -9,6 +9,7 @@
 //     OpenAI / Stripe key modals.
 
 import { describe, expect, it } from "vitest";
+import { findCredentialTokens } from "../credential-shape.js";
 import {
   extractApiKeyFromText,
   isTruncatedCapture,
@@ -303,6 +304,16 @@ describe("extractApiKeyFromText — OpenRouter / Anthropic / OpenAI prefixes (F1
 });
 
 describe("isTruncatedCapture — F10 truncation detection", () => {
+  it("excludes every masked secondary token while retaining revealed occurrences", () => {
+    const first = "re_1234567890abcdefghij";
+    const second = "re_0987654321abcdefghij";
+    const maskedRows = `API Key: ${first}****\nAPI Key: ${second}****`;
+    expect(findCredentialTokens(maskedRows)).toEqual([]);
+    expect(findCredentialTokens(`${maskedRows}\nAPI Key: ${second}`)).toEqual([second]);
+    expect(findCredentialTokens(`API Key: ${second}\n${maskedRows}`)).toEqual([second]);
+    expect(findCredentialTokens(`${first}…\n${second}...`)).toEqual([]);
+  });
+
   it.each(["****", " ***", "…", "..."])("preserves a trailing %s mask after substring extraction", (mask) => {
     const prefix = "re_1234567890abcdefghij";
     const source = `API Key: ${prefix}${mask}`;

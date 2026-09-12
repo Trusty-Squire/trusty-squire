@@ -1,3 +1,5 @@
+import { isTruncatedCapture } from "./credential-text.js";
+
 // credential-shape.ts — the canonical, browser-free, unit-tested predicates for
 // "is this string a masked display / noise / a credential value". Carved out of
 // provision-session.ts so the host-side judgments live in ONE place instead of
@@ -82,6 +84,7 @@ export function findCredentialTokens(text: string): string[] {
   const seen = new Set<string>();
   for (const m of text.matchAll(CRED_TOKEN_RE)) {
     const t = m[0];
+    if (isTruncatedCapture(text.slice(m.index), t)) continue;
     if (seen.has(t)) continue;
     if (t.length < 16) continue;
     if (!/[0-9]/.test(t)) continue; // real keys carry digits; dictionary words don't
