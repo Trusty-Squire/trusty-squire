@@ -887,7 +887,7 @@ describe("operate_pay", () => {
 
     expect(result).toMatchObject({ status: "payment_submitted" });
     expect(notifyCalls).toHaveLength(1);
-    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
+    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000, expect.any(Function));
     expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_submitted" })]);
     expect(pendingAtDispatchCounts).toEqual([1]);
   });
@@ -900,7 +900,7 @@ describe("operate_pay", () => {
 
     expect(result).toMatchObject({ status: "payment_submitted" });
     expect(notifyCalls).toHaveLength(1);
-    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
+    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000, expect.any(Function));
   });
 
   it("notifies and hands back when the 3DS challenge times out", async () => {
@@ -1207,7 +1207,7 @@ describe("operate_pay", () => {
     expect(pendingThreeDsStates).toHaveLength(0);
   });
 
-  it("hands back immediately without notifying when the 3DS wait is disabled", async () => {
+  it("notifies immediately when the 3DS wait is disabled", async () => {
     const { result, notifyCalls, browser, pendingThreeDsStates } = await harness(
       "happy",
       "customer_test",
@@ -1227,8 +1227,8 @@ describe("operate_pay", () => {
         message: expect.stringContaining("bank app"),
       },
     });
-    expect(notifyCalls).toHaveLength(0);
-    expect(browser.waitForThreeDsResolution).not.toHaveBeenCalled();
+    expect(notifyCalls).toHaveLength(1);
+    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(0, expect.any(Function));
     expect(pendingThreeDsStates).toHaveLength(1);
   });
 

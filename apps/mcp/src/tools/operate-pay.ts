@@ -28,6 +28,7 @@ import {
   classifyApprovalCandidate,
   executeOperatePay,
   executeOperatePayConfirm,
+  markPendingThreeDsChallenge,
   type PendingApprovalWait,
   type PendingCardFill,
   type PendingThreeDsWait,
@@ -670,8 +671,10 @@ async function threeDsStatusResult(
   const expiredAtEntry = Date.now() >= state.deadline;
   const boundMs =
     expiredAtEntry || waitSeconds <= 0 ? 0 : Math.min(Math.max(waitSeconds * 1000, 1_000), 15_000);
-  const resolution = await browser.waitForThreeDsResolution(boundMs);
-  if (resolution === "challenge_pending") state.outcome = "three_ds";
+  const notifyDetectedChallenge = (): void => markPendingThreeDsChallenge(api, state);
+  if (state.outcome === "three_ds") notifyDetectedChallenge();
+  const resolution = await browser.waitForThreeDsResolution(boundMs, notifyDetectedChallenge);
+  if (resolution === "challenge_pending") notifyDetectedChallenge();
   const mismatch = browser.paymentInstrumentMismatch?.();
   if (mismatch !== undefined) state.payment_instrument_mismatch ??= mismatch;
   const terminalStatus = threeDsResolutionStatus(resolution);

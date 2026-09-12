@@ -872,8 +872,10 @@ vi.mock("../browser.js", async (importOriginal) => ({
     }
     async waitForThreeDsResolution(
       timeoutMs: number,
+      onThreeDsDetected?: () => void,
     ): Promise<"succeeded" | "failed" | "challenge_pending" | "timeout"> {
       h.waitForThreeDsCalls.push(timeoutMs);
+      if (h.waitForThreeDsResult === "challenge_pending") onThreeDsDetected?.();
       return h.waitForThreeDsResult;
     }
     paymentInstrumentMismatch(): typeof h.paymentInstrumentMismatch {
@@ -10126,6 +10128,35 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
     expect(getActivePendingThreeDs()).toBe(unknownState);
     expect(env.auditBodies).toHaveLength(0);
   });
+
+  it.each([0, 15])(
+    "notifies once for a challenge discovered after an expired initial wait (wait %i)",
+    async (waitSeconds) => {
+      const env = buildStatusEnv();
+      const notify = vi.spyOn(env.api, "notifyThreeDs").mockResolvedValue({ sent: true });
+      await startProvisionSession({
+        serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+        api: env.api,
+      });
+      const state = buildThreeDsState(Date.now() + 60_000, undefined, "unknown");
+      setActivePendingThreeDs(state);
+      h.waitForThreeDsResult = "timeout";
+      await expect(
+        operatePaymentStatusTool.handler({ wait_seconds: 0 }, env.api),
+      ).resolves.toMatchObject({ status: "payment_outcome_unknown" });
+      expect(notify).not.toHaveBeenCalled();
+
+      h.waitForThreeDsResult = "challenge_pending";
+      for (let poll = 0; poll < 3; poll += 1) {
+        await expect(
+          operatePaymentStatusTool.handler({ wait_seconds: waitSeconds }, env.api),
+        ).resolves.toMatchObject({ status: "payment_3ds_pending" });
+      }
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(notify).toHaveBeenCalledWith("appr_3ds", "detected_challenge");
+      expect(getActivePendingThreeDs()).toBe(state);
+    },
+  );
 
   it("reports 3DS pending only after the browser observes a challenge", async () => {
     const env = buildStatusEnv();

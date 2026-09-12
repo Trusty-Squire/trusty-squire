@@ -1,11 +1,15 @@
 # SBPS 3DS2 method handshake investigation
 
-Status: **the operator-native topology passes; no production step-up fix is
-warranted by current evidence.** The reported SBPS failure is not reproduced by
-the supplied topology alone. Real SBPS AuthenticateInit completion remains
-unverified and requires a post-deploy human-in-loop payment. This diagnostic is
-folded into the SBPS detection and notification delivery so the no-fix decision
-stays executable as regression coverage.
+Status: **deferred pending a live 3DS reproduction.** Gap 3, auto-progressing
+the SBPS/EMV-TDS step-up, remains unverified and is not completed. The reported
+stalled LookupResult sequence may be a native operator bug or an artifact of
+manual/CDP driving. The synthetic fixture supplies working auto-submit JavaScript;
+its success does not reproduce or resolve that failure.
+
+The authorized follow-up requires a real human-in-the-loop transaction to
+observe native step-up behavior and actual SBPS AuthenticateInit completion.
+Keep this diagnostic coverage, but do not attempt a production step-up fix
+against the synthetic working fixture.
 
 ## Evidence ledger — 2026-09-12
 

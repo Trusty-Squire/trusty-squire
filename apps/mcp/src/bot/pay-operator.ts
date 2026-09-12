@@ -101,6 +101,7 @@ export interface PendingThreeDsWait {
   mandate_id?: string;
   deadline: number;
   outcome: "three_ds" | "unknown";
+  challengeNotification?: { sent?: boolean };
 }
 
 export interface CartCheckoutObservation {
@@ -568,24 +569,21 @@ const PAYMENT_APPROVAL_RESPONSE_RESERVE_MS = 500;
 // prompt itself. Because the operator's browser is headless, fire the Telegram
 // nudge WITHOUT awaiting it (a slow/unresolved Telegram call must never delay
 // the 3DS wait loop) while still tracking whether it actually went out.
-function trackThreeDsNotification(
-  sendPromise: Promise<{ sent: boolean }>,
-): () => boolean | undefined {
-  let sent: boolean | undefined;
-  void sendPromise.then(
+export function markPendingThreeDsChallenge(api: ApiClient, state: PendingThreeDsWait): void {
+  state.outcome = "three_ds";
+  if (state.challengeNotification !== undefined) return;
+  const notification: { sent?: boolean } = {};
+  state.challengeNotification = notification;
+  void api.notifyThreeDs(state.approval_id, "detected_challenge").then(
     (result) => {
-      sent = result.sent;
+      notification.sent = result.sent;
     },
     () => {
-      sent = false;
+      notification.sent = false;
     },
   );
-  return () => sent;
 }
 
-// telegramSent is undefined when the nudge was never attempted (wait
-// skipped via three_ds_wait_seconds: 0) or hasn't settled yet — the neutral
-// wording covers both without claiming a delivery we can't confirm.
 function threeDsChallengeMessage(telegramSent: boolean | undefined): string {
   if (telegramSent === false) {
     return (
@@ -1505,6 +1503,10 @@ export async function executeOperatePay(
       deadline: deps.now() + THREE_DS_RESUME_WINDOW_MS,
       outcome: "unknown",
     };
+    const notifyDetectedChallenge = (): void => {
+      markPendingThreeDsChallenge(api, pendingThreeDsHandoff);
+      submitResult.three_ds_required = true;
+    };
     deps.onThreeDsHandoffArmed(pendingThreeDsHandoff);
     let retainedPendingThreeDs: PendingThreeDsWait | null = null;
     const retainPendingThreeDs = (): void => {
@@ -1557,7 +1559,7 @@ export async function executeOperatePay(
       );
       if (submitResult.three_ds_required) paymentStatus = "payment_3ds_required";
       else if (!submitResult.order_confirmed) paymentStatus = "payment_outcome_unknown";
-      if (submitResult.three_ds_required) pendingThreeDsHandoff.outcome = "three_ds";
+      if (submitResult.three_ds_required) notifyDetectedChallenge();
     } catch (error) {
       if (error instanceof Error && error.message === "payment_approval_expired") {
         clearPendingThreeDs();
@@ -1571,12 +1573,6 @@ export async function executeOperatePay(
       paymentStatus = outcomeUnknown ? "payment_outcome_unknown" : "payment_checkout_failed";
       let terminalSubmitOutcome = false;
       if (outcomeUnknown) {
-        let challengeNotificationStarted = false;
-        const notifyDetectedChallenge = (): void => {
-          if (challengeNotificationStarted) return;
-          challengeNotificationStarted = true;
-          trackThreeDsNotification(api.notifyThreeDs(approvalId, "detected_challenge"));
-        };
         const resolution = await browser
           .waitForThreeDsResolution(0, notifyDetectedChallenge)
           .catch(() => undefined);
@@ -1585,8 +1581,6 @@ export async function executeOperatePay(
           terminalSubmitOutcome = resolution === "succeeded" || resolution === "failed";
           if (resolution === "challenge_pending") {
             notifyDetectedChallenge();
-            pendingThreeDsHandoff.outcome = "three_ds";
-            submitResult.three_ds_required = true;
           }
         }
         const mismatch = browser.paymentInstrumentMismatch?.();
@@ -1656,33 +1650,15 @@ export async function executeOperatePay(
       card = undefined;
     }
 
-    let getThreeDsTelegramSent: () => boolean | undefined = () => undefined;
-    if (
-      submitResult.payment_instrument_mismatch === undefined &&
-      !submitResult.order_confirmed &&
-      threeDsWaitMs > 0
-    ) {
-      const challengeKnownBeforeWait = pendingThreeDsHandoff.outcome === "three_ds";
-      let challengeNotificationStarted = false;
-      const notifyDetectedChallenge = (): void => {
-        if (challengeNotificationStarted) return;
-        challengeNotificationStarted = true;
-        pendingThreeDsHandoff.outcome = "three_ds";
-        submitResult.three_ds_required = true;
-        getThreeDsTelegramSent = trackThreeDsNotification(
-          api.notifyThreeDs(approvalId, "detected_challenge"),
-        );
-      };
-      if (challengeKnownBeforeWait) notifyDetectedChallenge();
-      const resolution = challengeKnownBeforeWait
-        ? await browser.waitForThreeDsResolution(threeDsWaitMs)
-        : await browser.waitForThreeDsResolution(threeDsWaitMs, notifyDetectedChallenge);
+    if (submitResult.payment_instrument_mismatch === undefined && !submitResult.order_confirmed) {
+      const resolution = await browser.waitForThreeDsResolution(
+        threeDsWaitMs,
+        notifyDetectedChallenge,
+      );
       const mismatch = browser.paymentInstrumentMismatch?.();
       if (mismatch !== undefined) submitResult.payment_instrument_mismatch ??= mismatch;
       paymentStatus = statusAfterThreeDsResolution(paymentStatus, resolution);
       if (resolution === "challenge_pending") {
-        pendingThreeDsHandoff.outcome = "three_ds";
-        submitResult.three_ds_required = true;
         notifyDetectedChallenge();
       }
     }
@@ -1716,7 +1692,10 @@ export async function executeOperatePay(
           ? {
               needs_user: {
                 wall: "3ds",
-                message: threeDsHandoffMessage(submitResult, getThreeDsTelegramSent()),
+                message: threeDsHandoffMessage(
+                  submitResult,
+                  pendingThreeDsHandoff.challengeNotification?.sent,
+                ),
                 resume: "checkout",
                 ...(submitResult.challenge_url !== undefined
                   ? { url: submitResult.challenge_url }
