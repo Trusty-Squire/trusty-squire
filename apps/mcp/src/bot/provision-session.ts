@@ -2489,6 +2489,9 @@ async function observeOwned(sessionId: string, format?: "compact" | "full"): Pro
       sourcePage?.isClosed() === true ? undefined : sourcePage,
       false,
       requestedFormat,
+      false,
+      true,
+      format === "full",
     ),
   );
 }
@@ -4650,6 +4653,7 @@ function compactV2Observation(
   outputFormat: "compact" | "full" = "full",
   compactActionDelta = false,
   compactMapEmitted = true,
+  forceFullDOM = false,
 ): Observation {
   rememberCompactV2SourcePage(session, sourcePage);
   const elements = capture.elements;
@@ -4840,7 +4844,7 @@ function compactV2Observation(
       ? { semantic: { blocked: true as const, blockers: semantics.blockers } }
       : {}),
     ...(sameFullDocument ? { delta: true } : {}),
-    ...(changed ? { dom } : { dom_unchanged: true as const }),
+    ...(changed || forceFullDOM ? { dom } : { dom_unchanged: true as const }),
     ...(removed.length ? { removed } : {}),
     more_above: capture.moreAbove,
     more_below: capture.moreBelow,
@@ -5044,6 +5048,7 @@ async function observeSession(
   outputFormat: "compact" | "full" = "full",
   compactActionDelta = false,
   compactMapEmitted = true,
+  forceFullDOM = false,
 ): Promise<Observation> {
   if (sourcePage === undefined) {
     const hadOAuthCompletionSource =
@@ -5126,6 +5131,7 @@ async function observeSession(
         outputFormat,
         compactActionDelta,
         compactMapEmitted,
+        forceFullDOM,
       );
     }
     if (v2Mode === "shadow")
@@ -5840,10 +5846,13 @@ async function executeAct(
       case "type_secret": {
         const value = session.secretSlots.get(action.slot);
         if (value === undefined) {
-          throw new Error(
-            `type_secret: no sealed slot named "${action.slot}". Capture it first with ` +
-              `operate_act { kind: "extract", into_slot: "${action.slot}" }. Known slots: ` +
-              `[${[...session.secretSlots.keys()].join(", ")}]`,
+          throw new CompactV2ActionFailureError(
+            "missing_secret_slot: no sealed slot is loaded. For a saved login, call " +
+              "operate_fill_credential with session_id, reference (or service), and fields. " +
+              "Use list_credentials to read the credential's field_names; pass those exact names " +
+              '(for example fields:["username","password"], or ["login","password"]). ' +
+              "Then call operate_type with ref and the returned slot name for each field. " +
+              "For a page value instead, use operate_extract with into_slot first.",
           );
         }
         sensitiveSource = {

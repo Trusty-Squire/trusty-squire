@@ -1408,11 +1408,29 @@ async function handleStoreLogin(args: z.infer<typeof storeLoginSchema>, api: Api
   };
 }
 
+const vaultCredentialFieldsDescription =
+  'Exact field_names from list_credentials for the selected reference. Defaults to ["login","password"] ' +
+  'for logins saved by operate_login; use ["username","password"] when those are the stored names. ' +
+  "Use operate_type with each returned slot to fill its matching form control.";
+const vaultCredentialFieldsJson = {
+  type: "array",
+  items: { type: "string" },
+  minItems: 1,
+  maxItems: 20,
+  default: ["login", "password"],
+  description: vaultCredentialFieldsDescription,
+};
+
 const sealVaultCredentialBaseSchema = z.object({
   session_id: z.string().min(1),
   reference: z.string().min(1).max(400).optional(),
   service: z.string().min(1).max(120).optional(),
-  fields: z.array(z.string().min(1).max(120)).min(1).max(20).default(["login", "password"]),
+  fields: z
+    .array(z.string().min(1).max(120))
+    .min(1)
+    .max(20)
+    .default(["login", "password"])
+    .describe(vaultCredentialFieldsDescription),
   slot_prefix: z.string().min(1).max(60).default("vault"),
 });
 
@@ -1478,7 +1496,7 @@ export const operateFillCredentialTool: Tool<z.infer<typeof sealVaultCredentialS
       session_id: { type: "string" },
       reference: { type: "string" },
       service: { type: "string" },
-      fields: { type: "array", items: { type: "string" } },
+      fields: vaultCredentialFieldsJson,
       slot_prefix: { type: "string" },
     },
   },
@@ -1562,7 +1580,7 @@ export const operateLoginTool: Tool<z.infer<typeof loginSchema>> = {
           session_id: { type: "string" },
           reference: { type: "string" },
           service: { type: "string" },
-          fields: { type: "array", items: { type: "string" } },
+          fields: vaultCredentialFieldsJson,
           slot_prefix: { type: "string" },
         },
       },
