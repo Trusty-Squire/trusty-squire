@@ -8782,10 +8782,8 @@ export function detectExtractionBlock(pageText: string): string | null {
 }
 
 function firstTokenMatching(haystack: string, re: RegExp): string | null {
-  for (const match of haystack.matchAll(new RegExp(re.source, re.flags + "g"))) {
-    if (!isTruncatedCapture(haystack.slice(match.index), match[0])) return match[0];
-  }
-  return null;
+  const match = haystack.match(re);
+  return match?.[0] ?? null;
 }
 
 export function sanitizeExtractedCredentials(
@@ -8805,9 +8803,6 @@ export function sanitizeExtractedCredentials(
       normalized.api_key = secret;
     }
     if (pub !== null) normalized.langfuse_public_key = pub;
-    if (secret === null && credentials.api_key_truncated !== undefined) {
-      normalized.api_key_truncated = credentials.api_key_truncated;
-    }
     return normalized;
   }
 
@@ -8816,8 +8811,6 @@ export function sanitizeExtractedCredentials(
     if (token !== null) {
       normalized.api_token = token;
       normalized.api_key = token;
-    } else if (credentials.api_key_truncated !== undefined) {
-      normalized.api_key_truncated = credentials.api_key_truncated;
     }
     return normalized;
   }
@@ -9415,17 +9408,13 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   const clip = await browser.readClipboard(page).catch(() => "");
 
   // Primary api_key: first FULL hit wins; a truncated/masked hit is the fallback.
-  const teamIds = new Set(
-    labeled.filter((candidate) => normLabelKey(candidate.label ?? "") === "team_id")
-      .map((candidate) => candidate.value.trim()),
-  );
   let state = initialExtractionState();
   const sources: string[] = [...labeled.map((c) => c.value), ...inputs, ...nearCopy, clip, text];
   const haystack = sources.join("\n");
   for (const src of sources) {
     if (hasFullHit(state)) break;
     const key = extractApiKeyFromText(src);
-    if (key === null || teamIds.has(key)) continue;
+    if (key === null) continue;
     // Reject an env-var NAME mistaken for a key — a "LANGWATCH_API_KEY="
     // display (the SDK snippet shows `LANGWATCH_API_KEY=sk-lw-…`) would
     // otherwise win first-full and mask the real token. Skip it so scanning
@@ -9452,7 +9441,6 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     if (isCredentialNoise(c.value)) continue;
     if (looksLikeCodeIdentifier(c.value)) continue;
     const k = normLabelKey(c.label);
-    if (k !== "team_id" && teamIds.has(c.value.trim())) continue;
     if (k.length > 0 && !(k in named)) named[k] = c.value;
   }
 
@@ -9465,7 +9453,7 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     ...resolveExtraction(state),
   };
 
-  const relaxed = pickRelaxedNearCopyCredential(nearCopy.filter((value) => !teamIds.has(value.trim())));
+  const relaxed = pickRelaxedNearCopyCredential(nearCopy);
   const acceptedNearCopyCredential =
     relaxed !== null &&
     !Object.entries(credentials).some(([key, value]) => key !== "api_key" && value === relaxed)
@@ -9490,7 +9478,7 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   const have = new Set(Object.values(credentials));
   let n = 1;
   for (const tok of findCredentialTokens(haystack)) {
-    if (have.has(tok) || teamIds.has(tok)) continue;
+    if (have.has(tok)) continue;
     if (n >= 8) break; // cap extras so page noise can't flood the result
     const fam = keyFamilyPrefix(tok);
     if (fam === null || !families.has(fam)) continue;

@@ -11679,7 +11679,7 @@ export class BrowserController {
       const harvest = (text: string): void => {
         if (text.length === 0 || text.length > 4096) return;
         // Tokenize by whitespace — each token is a separate candidate.
-        (text.match(/\S+(?:\s+(?:\*{3,}|…|\.{3,}|[•●⬤]+))?/g) ?? []).forEach((tok) => {
+        text.split(/\s+/).forEach((tok) => {
           if (tok.length < 16 || tok.length > 256) return;
           if (seen.has(tok)) return;
           seen.add(tok);
@@ -11747,7 +11747,6 @@ export class BrowserController {
         "auth token",
         "bearer token",
         "personal access token",
-        "team id",
         "client id",
         "client secret",
         "client key",
@@ -11964,14 +11963,14 @@ export class BrowserController {
       //    a skill only matches the labels it asks for.
       const bodyText = document.body?.innerText ?? "";
       const INLINE_PAIR =
-        /\b(team[ _-]id|[A-Za-z][A-Za-z0-9_-]{1,40})\s*[:=]\s*["']?([A-Za-z0-9._*-]{6,256}(?:\s*(?:\*{3,}|…|\.{3,}|[•●⬤]+))?)["']?/gi;
+        /\b([A-Za-z][A-Za-z0-9_-]{1,40})\s*[:=]\s*["']?([A-Za-z0-9._-]{6,256})["']?/g;
       for (const m of bodyText.matchAll(INLINE_PAIR)) {
         const label = (m[1] ?? "").toLowerCase();
         const value = m[2] ?? "";
-        if (!isMaskedShape(value) && !isCredentialShape(value)) continue;
+        if (!isCredentialShape(value)) continue;
         if (seen.has(value)) continue;
         seen.add(value);
-        out.push({ value, label, isMasked: isMaskedShape(value), hasRevealButton: false });
+        out.push({ value, label, isMasked: false, hasRevealButton: false });
       }
 
       // 1. <input> / <textarea> values (visible only).
@@ -11988,7 +11987,6 @@ export class BrowserController {
       document.querySelectorAll("body *").forEach((el) => {
         if (el.tagName === "SCRIPT" || el.tagName === "STYLE") return;
         if (!isVisible(el)) return;
-        if (el.closest('code, pre, kbd, samp, [role="textbox"]') !== null) return;
         let direct = "";
         el.childNodes.forEach((n) => {
           if (n.nodeType === Node.TEXT_NODE) direct += n.textContent ?? "";

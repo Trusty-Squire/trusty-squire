@@ -7022,110 +7022,42 @@ describe("operate session — sealed credential transfer", () => {
 });
 
 describe("operate_extract — v1.1.6 credential candidate selection", () => {
-  it.each(
-    (["extract", "finish"] as const).flatMap((caller) => [
-      { caller, url: "https://console.neon.tech/app/settings", keys: ["napi_1234567890abcdefghij1234567890"] },
-      { caller, url: "https://cloud.langfuse.com/project/x/settings/api-keys", keys: [sk("lf-1234567890abcdef1234567890"), "pk-lf-0987654321abcdef0987654321"] },
-    ].flatMap((fixture) => ["****", "••••", "●", " ⬤"].map((mask) => ({ ...fixture, mask })))),
-  )("$caller never stores masked provider keys at $url with $mask", async ({ caller, url, keys, mask }) => {
-    h.labeledCredentialCandidates = keys.map((key) => ({ label: "API Key", value: `${key}${mask}`, isMasked: true }));
-    h.nearCopyCredentialCandidates = keys.map((key) => `${key}${mask}`);
-    h.visibleText = keys.map((key) => `API Key: ${key}${mask}`).join("\n");
-    const started = await startProvisionSession({ serviceUrl: url });
-    expect((await extractCredentials(started.session_id)).credentials).toEqual({ api_key_truncated: keys[0] });
-    const storeCredential = vi.fn();
-    const api = { storeCredential } as unknown as ApiClient;
-    const result = caller === "extract"
-      ? await provisionExtractTool.handler({ session_id: started.session_id, store: { service: "provider" } }, api)
-      : await operateFinishTool.handler({ session_id: started.session_id, outcome: "credentials", store: { service: "provider" } }, api);
-    expect(storeCredential).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ stored_credential: null });
-    expect(result).not.toHaveProperty("auto_promote");
+  it.each([false, true])("preserves a contextually accepted DeepInfra key (labeled=%s)", async (labeled) => {
+    const apiKey = "Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz";
+    h.nearCopyCredentialCandidates = [apiKey];
+    h.labeledCredentialCandidates = labeled ? [{ label: "API Key", value: apiKey, isMasked: false }] : [];
+    const started = await startProvisionSession({ serviceUrl: "https://deepinfra.com/dash/api_keys" });
+    expect((await extractCredentials(started.session_id)).credentials.api_key).toBe(apiKey);
+    const storeCredential = vi.fn().mockResolvedValue({ reference: "vault://acct/deepinfra" });
+    await provisionExtractTool.handler({ session_id: started.session_id, store: { service: "deepinfra" } }, { storeCredential } as unknown as ApiClient);
+    expect(storeCredential).toHaveBeenCalledWith(expect.objectContaining({ value: apiKey, type: "api_key" }));
   });
 
-  it.each(["extract", "finish"] as const)("%s never stores a secondary key from two masked rows", async (caller) => {
-    const maskedRows = ["re_1234567890abcdefghij****", "re_0987654321abcdefghij****"];
-    h.labeledCredentialCandidates = maskedRows.map((value) => ({
-      label: "API Key", value, isMasked: true,
-    }));
-    h.nearCopyCredentialCandidates = maskedRows;
-    h.visibleText = maskedRows.map((value) => `API Key: ${value}`).join("\n");
-    const started = await startProvisionSession({ serviceUrl: "https://resend.com/api-keys" });
-    expect((await extractCredentials(started.session_id)).credentials).toEqual({
-      api_key_truncated: "re_1234567890abcdefghij",
-    });
-    const storeCredential = vi.fn();
-    const api = { storeCredential } as unknown as ApiClient;
-    const result = caller === "extract"
-      ? await provisionExtractTool.handler({ session_id: started.session_id, store: { service: "resend" } }, api)
-      : await operateFinishTool.handler({ session_id: started.session_id, outcome: "credentials", store: { service: "resend" } }, api);
-    expect(storeCredential).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ stored_credential: null });
-    expect(result).not.toHaveProperty("auto_promote");
-  });
-
-  it.each(
-    (["extract", "finish"] as const).flatMap((caller) =>
-      [
-        { label: "API Key", value: "re_1234567890abcdefghij****", inline: false },
-        { label: "API Key", value: "re_1234567890abcdefghij****", inline: true },
-        { label: "API Key", value: "re_1234567890abcdefghij ****", inline: true },
-        { label: "API Key", value: "re_1234567890abcdefghij…", inline: true },
-        { label: "API Key", value: "re_1234567890abcdefghij ...", inline: true },
-        { label: "API Key", value: "re_1234567890abcdefghij••••", inline: true },
-        { label: "API Key", value: "re_1234567890abcdefghij••••", inline: true, nested: true },
-        { label: "API Key", value: "re_1234567890abcdefghij****", inline: true, nested: true },
-        { label: "API Key", value: "re_1234567890abcdefghij…", inline: true, nested: true },
-        { label: "API Key", value: "re_1234567890abcdefghij●", inline: true },
-        { label: "API Key", value: "re_1234567890abcdefghij⬤", inline: true },
-        { label: "API Key", value: "re_1234567890abcdefghij ••••", inline: true },
-        { label: "API Key", value: "re_1234567890abcdefghij ●", inline: true },
-        { label: "API Key", value: "re_1234567890abcdefghij ⬤", inline: true },
-        { label: "Team ID", value: "exaTeam01J4M8Q7Z2N6P5R3", inline: false },
-        { label: "Team ID", value: "exaTeam01J4M8Q7Z2N6P5R3", inline: true },
-        { label: "Team ID", value: "re_1234567890abcdefghij", inline: false },
-      ].map((fixture) => ({ nested: false, ...fixture, caller })),
-    ),
-  )( "$caller rejects collected $label $value (inline=$inline, nested=$nested)", async ({ caller, label, value, inline, nested }) => {
-    const started = await startProvisionSession({ serviceUrl: "https://dashboard.exa.ai/api-keys" });
+  it("preserves Client Secret and Client ID leaves inside a pre block", async () => {
+    const secret = "aBcD1234EfGh5678IjKl9012";
+    const clientId = "client1234567890example";
+    const started = await startProvisionSession({ serviceUrl: "https://example.com/settings" });
     const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
     const page = await browser.newPage();
     h.capturePage = page;
-    await page.setContent(`
-      <h1 style="position:absolute;left:0;top:0">API Key</h1>
-      <div style="position:absolute;left:0;top:150px;display:flex;align-items:center;gap:10px">
-        ${nested
-          ? `<span>${label}:</span><code><span><span>re_1234567890abcdefghij</span></span><span>${value.slice("re_1234567890abcdefghij".length)}</span></code>`
-          : inline ? `<span>${label}: ${value}</span>` : `<span>${label}</span><code>${value}</code>`}
-        <button aria-label="Copy: ${value}">Copy</button>
-      </div>
-    `);
+    await page.setContent(`<pre style="width:400px"><span>Client Secret</span>
+<span>${secret}</span>
+
+
+<span>Client ID</span>
+<span>${clientId}</span></pre>`);
     const { BrowserController } = await vi.importActual<typeof BrowserModule>("../browser.js");
     const collector = Object.create(BrowserController.prototype) as BrowserModule.BrowserController;
     h.labeledCredentialCandidates = await collector.extractLabeledCredentialCandidates(page);
-    h.nearCopyCredentialCandidates = await collector.extractCredentialsNearCopyButtons(page);
     h.visibleText = await page.locator("body").innerText();
-    expect(h.nearCopyCredentialCandidates).toContain(value);
-    if (nested) {
-      expect(h.labeledCredentialCandidates.some((candidate) => candidate.value === "re_1234567890abcdefghij")).toBe(false);
-    }
-    expect(h.labeledCredentialCandidates).toContainEqual(expect.objectContaining({
-      value,
-      label: label === "Team ID" ? "team id" : inline ? "key" : "api key",
-      isMasked: label === "API Key",
-    }));
-    const extracted = await extractCredentials(started.session_id);
-    expect(extracted.credentials).toEqual(label === "Team ID"
-      ? { team_id: value }
-      : { api_key_truncated: "re_1234567890abcdefghij" });
-    const storeCredential = vi.fn();
-    const api = { storeCredential } as unknown as ApiClient;
-    const result = caller === "extract"
-      ? await provisionExtractTool.handler({ session_id: started.session_id, store: { service: "exa" } }, api)
-      : await operateFinishTool.handler({ session_id: started.session_id, outcome: "credentials", store: { service: "exa" } }, api);
-    expect(storeCredential).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ stored_credential: null });
-    expect(result).not.toHaveProperty("auto_promote");
+    expect(h.labeledCredentialCandidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: "client secret", value: secret, isMasked: false }),
+      expect.objectContaining({ label: "client id", value: clientId, isMasked: false }),
+    ]));
+    expect((await extractCredentials(started.session_id)).credentials).toMatchObject({
+      client_secret: secret,
+      client_id: clientId,
+    });
   });
 
   it("keeps a masked key as truncated and never promotes a nearby identifier to api_key", async () => {
@@ -7147,54 +7079,6 @@ describe("operate_extract — v1.1.6 credential candidate selection", () => {
     expect(extracted.credentials.api_key).toBeUndefined();
     expect(extracted.credentials.api_key_truncated).toBe(maskedKey.slice(0, -1));
     expect(extracted.credentials.api_key_truncated).not.toBe(teamId);
-  });
-
-  it.each(["extract", "finish"] as const)("%s never stores identifiers and truncated metadata", async (caller) => {
-    const maskedKey = sk("or-v1-992e9e1234567890abcd…");
-    const teamId = "exaTeam01J4M8Q7Z2N6P5R3";
-    h.labeledCredentialCandidates = [
-      { label: "API Key", value: maskedKey, isMasked: true },
-      { label: "Team ID", value: teamId, isMasked: false },
-      { label: "Organization ID", value: "exaOrg01J4M8Q7Z2N6P5R3", isMasked: false },
-    ];
-    h.nearCopyCredentialCandidates = [maskedKey, teamId];
-    h.visibleText = `API Key: ${maskedKey}`;
-    const started = await startProvisionSession({ serviceUrl: "https://dashboard.exa.ai/api-keys" });
-    const storeCredential = vi.fn();
-    const api = { storeCredential } as unknown as ApiClient;
-    const result = caller === "extract"
-      ? await provisionExtractTool.handler({ session_id: started.session_id, store: { service: "exa" } }, api)
-      : await operateFinishTool.handler({ session_id: started.session_id, outcome: "credentials", store: { service: "exa" } }, api);
-    expect(storeCredential).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ stored_credential: null });
-    expect(result).not.toHaveProperty("auto_promote");
-  });
-
-  it.each([false, true])("preserves a contextually accepted DeepInfra key (labeled=%s)", async (labeled) => {
-    const apiKey = "Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz";
-    h.nearCopyCredentialCandidates = [apiKey];
-    h.labeledCredentialCandidates = labeled ? [{ label: "API Key", value: apiKey, isMasked: false }] : [];
-    const started = await startProvisionSession({ serviceUrl: "https://deepinfra.com/dash/api_keys" });
-    expect((await extractCredentials(started.session_id)).credentials.api_key).toBe(apiKey);
-    const storeCredential = vi.fn().mockResolvedValue({ reference: "vault://acct/deepinfra" });
-    await provisionExtractTool.handler({ session_id: started.session_id, store: { service: "deepinfra" } }, { storeCredential } as unknown as ApiClient);
-    expect(storeCredential).toHaveBeenCalledWith(expect.objectContaining({ value: apiKey, type: "api_key" }));
-  });
-
-  it("omits truncated metadata when storing a usable credential bundle", async () => {
-    const maskedKey = sk("or-v1-992e9e1234567890abcd…");
-    const secret = "full-client-secret-123456789";
-    h.labeledCredentialCandidates = [
-      { label: "API Key", value: maskedKey, isMasked: true },
-      { label: "Client Secret", value: secret, isMasked: false },
-      { label: "Team ID", value: "exaTeam01J4M8Q7Z2N6P5R3", isMasked: false },
-    ];
-    h.visibleText = `API Key: ${maskedKey}`;
-    const started = await startProvisionSession({ serviceUrl: "https://dashboard.exa.ai/api-keys" });
-    const storeCredential = vi.fn().mockResolvedValue({ reference: "vault://acct/exa" });
-    await provisionExtractTool.handler({ session_id: started.session_id, store: { service: "exa" } }, { storeCredential } as unknown as ApiClient);
-    expect(storeCredential).toHaveBeenCalledOnce();
-    expect(storeCredential.mock.calls[0]![0].fields).toEqual({ client_secret: secret, team_id: "exaTeam01J4M8Q7Z2N6P5R3" });
   });
 
   it("selects the revealed real key when masked and identifier candidates are also present", async () => {
