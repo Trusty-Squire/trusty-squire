@@ -51,6 +51,23 @@ try {
   chromiumAvailable = false;
 }
 
+// Advance elapsed time at polling waits, independent of how many times the
+// controller reads the clock (for example, to open its payment network window).
+// Keep real browser timers running and allow the first outcome check to execute.
+function fastForwardCheckoutPolling(page: Page): { mockRestore(): void } {
+  let clock = Date.now();
+  const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+  const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async () => {
+    clock += 15_000;
+  });
+  return {
+    mockRestore() {
+      wait.mockRestore();
+      now.mockRestore();
+    },
+  };
+}
+
 describe("page-bound payment browser", () => {
   it.skipIf(!chromiumAvailable)("fills and submits only its captured checkout page", async () => {
     const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
@@ -1597,14 +1614,9 @@ describe("checkout payment parsing", () => {
     "ignores a merchant confirmation signal that predates the Pay now click",
     async () => {
       const browser = await chromium.launch({ headless: true });
-      const now = vi
-        .spyOn(Date, "now")
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(1)
-        .mockReturnValue(15_000);
+      const page = await browser.newPage();
+      const now = fastForwardCheckoutPolling(page);
       try {
-        const page = await browser.newPage();
         await page.setContent(`
           <p id="existing-confirmation">Order confirmed</p>
           <form id="checkout">
@@ -1651,14 +1663,9 @@ describe("checkout payment parsing", () => {
     "ignores merchant confirmation evidence that appears before Pay dispatch",
     async () => {
       const browser = await chromium.launch({ headless: true });
-      const now = vi
-        .spyOn(Date, "now")
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(1)
-        .mockReturnValue(15_000);
+      const page = await browser.newPage();
+      const now = fastForwardCheckoutPolling(page);
       try {
-        const page = await browser.newPage();
         await page.setContent(`
           <button id="decoy">Continue</button>
           <button id="pay-now">Pay now</button>
@@ -1725,13 +1732,8 @@ describe("checkout payment parsing", () => {
           'document.body.insertAdjacentHTML("beforeend", "<p>Receipt number: 1234****</p>")',
           'document.body.insertAdjacentHTML("beforeend", "<p>Receipt number: 1234 ****</p>")',
         ]) {
-          const now = vi
-            .spyOn(Date, "now")
-            .mockReturnValueOnce(0)
-            .mockReturnValueOnce(0)
-            .mockReturnValueOnce(1)
-            .mockReturnValue(15_000);
           const page = await browser.newPage();
+          const now = fastForwardCheckoutPolling(page);
           try {
             await page.route("https://merchant.test/**", async (route) =>
               route.fulfill({
@@ -1808,14 +1810,9 @@ describe("checkout payment parsing", () => {
     "does not confirm a declined payment that remains on checkout",
     async () => {
       const browser = await chromium.launch({ headless: true });
-      const now = vi
-        .spyOn(Date, "now")
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(1)
-        .mockReturnValue(15_000);
+      const page = await browser.newPage();
+      const now = fastForwardCheckoutPolling(page);
       try {
-        const page = await browser.newPage();
         await page.route("https://merchant.test/**", async (route) =>
           route.fulfill({
             contentType: "text/html",
@@ -1849,14 +1846,9 @@ describe("checkout payment parsing", () => {
     "does not confirm an order when only a terminal URL query or hash changes",
     async () => {
       const browser = await chromium.launch({ headless: true });
-      const now = vi
-        .spyOn(Date, "now")
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(1)
-        .mockReturnValue(15_000);
+      const page = await browser.newPage();
+      const now = fastForwardCheckoutPolling(page);
       try {
-        const page = await browser.newPage();
         await page.route("https://merchant.test/**", async (route) =>
           route.fulfill({
             contentType: "text/html",
@@ -1889,14 +1881,9 @@ describe("checkout payment parsing", () => {
     "does not confirm an existing order token when its route becomes terminal",
     async () => {
       const browser = await chromium.launch({ headless: true });
-      const now = vi
-        .spyOn(Date, "now")
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(1)
-        .mockReturnValue(15_000);
+      const page = await browser.newPage();
+      const now = fastForwardCheckoutPolling(page);
       try {
-        const page = await browser.newPage();
         await page.route("https://merchant.test/**", async (route) =>
           route.fulfill({
             contentType: "text/html",
@@ -1929,14 +1916,9 @@ describe("checkout payment parsing", () => {
     "does not confirm an order token already present in the checkout query",
     async () => {
       const browser = await chromium.launch({ headless: true });
-      const now = vi
-        .spyOn(Date, "now")
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(1)
-        .mockReturnValue(15_000);
+      const page = await browser.newPage();
+      const now = fastForwardCheckoutPolling(page);
       try {
-        const page = await browser.newPage();
         await page.route("https://merchant.test/**", async (route) =>
           route.fulfill({
             contentType: "text/html",
@@ -1969,14 +1951,9 @@ describe("checkout payment parsing", () => {
     "does not confirm an order token already present in a hash route",
     async () => {
       const browser = await chromium.launch({ headless: true });
-      const now = vi
-        .spyOn(Date, "now")
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(1)
-        .mockReturnValue(15_000);
+      const page = await browser.newPage();
+      const now = fastForwardCheckoutPolling(page);
       try {
-        const page = await browser.newPage();
         await page.route("https://merchant.test/**", async (route) =>
           route.fulfill({
             contentType: "text/html",
@@ -2009,14 +1986,9 @@ describe("checkout payment parsing", () => {
     "does not confirm an order token already present in a merchant frame",
     async () => {
       const browser = await chromium.launch({ headless: true });
-      const now = vi
-        .spyOn(Date, "now")
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(1)
-        .mockReturnValue(15_000);
+      const page = await browser.newPage();
+      const now = fastForwardCheckoutPolling(page);
       try {
-        const page = await browser.newPage();
         await page.route("https://merchant.test/**", async (route) => {
           const pathname = new URL(route.request().url()).pathname;
           await route.fulfill({
@@ -2055,14 +2027,9 @@ describe("checkout payment parsing", () => {
     "does not confirm a checkout token reused by a terminal route",
     async () => {
       const browser = await chromium.launch({ headless: true });
-      const now = vi
-        .spyOn(Date, "now")
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(1)
-        .mockReturnValue(15_000);
+      const page = await browser.newPage();
+      const now = fastForwardCheckoutPolling(page);
       try {
-        const page = await browser.newPage();
         await page.route("https://merchant.test/**", async (route) =>
           route.fulfill({
             contentType: "text/html",
@@ -2157,14 +2124,9 @@ describe("checkout payment parsing", () => {
     "ignores newly mounted hidden and covered merchant confirmation copy",
     async () => {
       const browser = await chromium.launch({ headless: true });
-      const now = vi
-        .spyOn(Date, "now")
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(1)
-        .mockReturnValue(15_000);
+      const page = await browser.newPage();
+      const now = fastForwardCheckoutPolling(page);
       try {
-        const page = await browser.newPage();
         await page.setContent(`
           <style>
             #covered-confirmation { display: block; position: relative; }
@@ -6493,4 +6455,37 @@ describe("3DS detection vs captcha frames", () => {
     },
     15_000,
   );
+});
+
+describe("SBPS security-code fields", () => {
+  it
+    .skipIf(!chromiumAvailable)
+    .each([
+      '<input id="securityCode" type="tel" maxlength="4">',
+      '<input name="securityCode" type="tel" maxlength="4">',
+      '<input id="security_code" type="tel" maxlength="4">',
+      '<label for="opaque">Security code</label><input id="opaque" type="tel" maxlength="4">',
+      '<label for="opaque">セキュリティコード</label><input id="opaque" type="tel" maxlength="4">',
+      '<input id="csc" type="tel" maxlength="4">',
+    ])("fills and clears a security code without cc-csc: %s", async (field) => {
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    try {
+      await page.route("https://fep.sps-system.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<meta charset="utf-8"><form><input autocomplete="cc-number"><input autocomplete="cc-exp"><input autocomplete="cc-name">${field}</form>`,
+        }),
+      );
+      await page.goto("https://fep.sps-system.com/card");
+      const controller = BrowserController.fromHarnessPage(page);
+      await controller.fillCheckoutCardFields(APPROVAL_CARD);
+      expect(await page.locator('input[type="tel"]').inputValue()).toBe(APPROVAL_CARD.cvv);
+      expect(await page.locator('input[type="tel"]').getAttribute("autocomplete")).toBeNull();
+      await controller.clearSealedPaymentFields();
+      expect(await page.locator('input[type="tel"]').inputValue()).toBe("");
+    } finally {
+      await browser.close();
+    }
+  });
 });

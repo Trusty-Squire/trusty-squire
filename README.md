@@ -363,18 +363,10 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   solving, inbox polling, local upload, and specialized cart mutation are not
   operator verbs; inspect and drive the page's ordinary UI or hand the task back
   to the user.
-  Startup hosts seed the session's merchant scope, including matching
-  registrable-domain siblings (for example, `shop.example.com` and
-  `api.example.com`). Declare other required non-provider hosts in
-  `allowed_hosts` at `operate_start`. A later `operate_allow_host` call can
-  activate only a host already in the startup entitlement; it cannot widen
-  that entitlement. Calls outside the session scope fail promptly.
-  Recognized payment-provider frames, OAuth/captcha providers, and 3-D Secure
-  ACS/directory-server hosts retain their narrowly scoped protocol allowances.
-  A scope-denial observation identifies its owner document/frame, exact host,
-  resource type, reason, and occurrence range without including request bodies
-  or URL-query values. Start a new session with the needed host declared rather
-  than trying to repair the denial in place.
+  Declare required action hosts at `operate_start`. See the
+  [scope contract](docs/operator-tool-surface.md#scope-is-declared-at-session-start)
+  for startup entitlements, provider allowances, the card-checkout network
+  window, and handling scope-denial diagnostics.
   Every operator task uses the user's Chrome profile directly. Before it starts,
   the operator checks the live Google My Account identity; if the profile is
   signed out, it returns a clear login handoff before navigating to the service.
