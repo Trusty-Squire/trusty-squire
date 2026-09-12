@@ -432,7 +432,7 @@ export default function PaymentApprovalPage() {
             Pay with <span className="mono">{cardLine}</span> · {amountLabel} to {approval.merchant}
           </p>
           <div style={{ display: "grid", gap: "10px" }}>
-            {jitReviewBlocked ? (
+            {needsCard ? null : jitReviewBlocked ? (
               <div className="app-banner err">
                 {jitBindingMismatch
                   ? "This payment was attached to a different card than the one you added."
