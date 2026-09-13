@@ -68,7 +68,6 @@ async function childMain() {
               serviceUrl: args.site,
               observationFormat: "browser-use-dom",
             });
-            await browser.setHostScopeAllowedHosts(() => [new URL(args.site).hostname]);
             await browser.goto(`${args.site}/login`);
             const targetId = await browser.brokerTargetId();
             return {

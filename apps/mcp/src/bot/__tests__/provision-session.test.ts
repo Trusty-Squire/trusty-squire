@@ -26,7 +26,6 @@ import {
   buildScreenOutline,
   provisionPerceptionGuidance,
   shouldBlockUnsafeProvisionAction,
-  validateAllowHost,
   maskSecretValue,
   googleSessionGate,
   isOnboardingOrOrgForm,
@@ -868,7 +867,7 @@ describe("detectExtractionBlock (fail-closed on a login wall)", () => {
   });
 });
 
-describe("hostAllowed (gates only agent-initiated goto)", () => {
+describe("hostAllowed (existing control-plane boundary only)", () => {
   const allowed = ["langwatch.ai"];
 
   it("allows the target host and its subdomains", () => {
@@ -876,10 +875,10 @@ describe("hostAllowed (gates only agent-initiated goto)", () => {
     expect(hostAllowed("https://app.langwatch.ai/x", allowed)).toBe(true);
   });
 
-  it("allows only Neon's exact cross-domain login route for a Neon signup", () => {
+  it("allows cross-domain login hosts without a provider list", () => {
     expect(hostAllowed("https://console.neon.tech", ["neon.com"])).toBe(true);
-    expect(hostAllowed("https://attacker.neon.tech", ["neon.com"])).toBe(false);
-    expect(hostAllowed("https://console.neon.tech", ["example.com"])).toBe(false);
+    expect(hostAllowed("https://attacker.neon.tech", ["neon.com"])).toBe(true);
+    expect(hostAllowed("https://console.neon.tech", ["example.com"])).toBe(true);
   });
 
   it("allows default identity-provider hosts", () => {
@@ -893,22 +892,22 @@ describe("hostAllowed (gates only agent-initiated goto)", () => {
     );
   });
 
-  it("blocks an unrelated host", () => {
-    expect(hostAllowed("https://evil.example.com/steal", allowed)).toBe(false);
+  it("allows an unrelated host", () => {
+    expect(hostAllowed("https://evil.example.com/steal", allowed)).toBe(true);
   });
 
   it("blocks a malformed url", () => {
     expect(hostAllowed("not a url", allowed)).toBe(false);
   });
 
-  it("honors extra allowed hosts", () => {
+  it("ignores legacy extra host declarations", () => {
     expect(hostAllowed("https://mail.proton.me/inbox", ["langwatch.ai", "mail.proton.me"])).toBe(
       true,
     );
   });
 
-  it("allows tenant sibling hosts once they are added after organic redirect", () => {
-    expect(hostAllowed("https://tsagent.kinde.com/admin", ["app.kinde.com"])).toBe(false);
+  it("allows tenant sibling hosts with or without declarations", () => {
+    expect(hostAllowed("https://tsagent.kinde.com/admin", ["app.kinde.com"])).toBe(true);
     expect(
       hostAllowed("https://tsagent.kinde.com/admin", ["app.kinde.com", "tsagent.kinde.com"]),
     ).toBe(true);
@@ -953,13 +952,6 @@ describe("isSquireControlPlaneHost (confused-deputy denylist)", () => {
       "",
     ]) {
       expect(isSquireControlPlaneHost(h)).toBe(false);
-    }
-  });
-
-  it("refuses to widen the operator scope into the control plane via allow_host", () => {
-    for (const h of ["trustysquire.ai", "vault.trustysquire.ai", "trusty-squire-api.fly.dev"]) {
-      const r = validateAllowHost(h);
-      expect("error" in r).toBe(true);
     }
   });
 });
@@ -1306,54 +1298,6 @@ describe("hasUnlinkedOAuthAccountSignal (OAuth not linked — Clerk)", () => {
     const g = provisionPerceptionGuidance("The External Account was not found.");
     expect(g).toContain("Unlinked OAuth");
     expect(g).toContain("EMAIL signup/OTP");
-  });
-});
-
-describe("validateAllowHost (operator allow_host hardening)", () => {
-  it("accepts a normal bare hostname and lowercases it", () => {
-    expect(validateAllowHost("Console.Cloud.Google.com")).toEqual({
-      host: "console.cloud.google.com",
-    });
-  });
-  it("accepts a two-label app domain", () => {
-    expect(validateAllowHost("myapp.com")).toEqual({ host: "myapp.com" });
-  });
-  it("rejects a wildcard", () => {
-    expect(validateAllowHost("*.google.com")).toHaveProperty("error");
-  });
-  it("rejects a scheme/port/path", () => {
-    expect(validateAllowHost("https://x.com")).toHaveProperty("error");
-    expect(validateAllowHost("x.com:443")).toHaveProperty("error");
-    expect(validateAllowHost("x.com/login")).toHaveProperty("error");
-  });
-  it("rejects punycode (homograph spoof)", () => {
-    expect(validateAllowHost("xn--80ak6aa92e.com")).toHaveProperty("error");
-  });
-  it("rejects non-ASCII unicode lookalikes", () => {
-    expect(validateAllowHost("gооgle.com")).toHaveProperty("error"); // cyrillic о
-  });
-  it("rejects an IPv4 literal", () => {
-    expect(validateAllowHost("10.0.0.1")).toHaveProperty("error");
-  });
-  it("rejects an IPv6 literal (via the colon guard)", () => {
-    expect(validateAllowHost("::1")).toHaveProperty("error");
-    expect(validateAllowHost("[fe80::1]")).toHaveProperty("error");
-  });
-  it("rejects localhost", () => {
-    expect(validateAllowHost("localhost")).toHaveProperty("error");
-    expect(validateAllowHost("api.localhost")).toHaveProperty("error");
-  });
-  it("rejects a bare TLD / single label", () => {
-    expect(validateAllowHost("com")).toHaveProperty("error");
-  });
-  it("rejects a two-label public suffix (would allow every subdomain)", () => {
-    expect(validateAllowHost("co.uk")).toHaveProperty("error");
-    expect(validateAllowHost("vercel.app")).toHaveProperty("error");
-  });
-  it("rejects malformed dots", () => {
-    expect(validateAllowHost(".x.com")).toHaveProperty("error");
-    expect(validateAllowHost("x..com")).toHaveProperty("error");
-    expect(validateAllowHost("x.com.")).toHaveProperty("error");
   });
 });
 

@@ -101,11 +101,6 @@ const h = vi.hoisted(() => ({
   identityProbeCalls: 0,
   identityProbeExpectedGoogleAccountEmails: [] as Array<string | undefined>,
   googleIdentityByExpectedEmail: new Map<string, string | null>(),
-  temporaryHostScopes: [] as Array<{ hosts: string[]; phase: "enter" | "exit" }>,
-  hostScopeProviders: [] as Array<{
-    allowedHosts: () => readonly string[];
-    siblingDomainHosts: () => readonly string[];
-  }>,
   connections: [] as boolean[],
   profileDirs: [] as Array<string | undefined>,
   proxyUrls: [] as Array<string | undefined>,
@@ -900,23 +895,6 @@ vi.mock("../browser.js", async (importOriginal) => ({
       if (h.restoreStorageStateGate !== null) await h.restoreStorageStateGate;
       h.restoredStorageStates.push({ browserIndex: this.index, state });
     }
-    async setHostScopeAllowedHosts(
-      allowedHosts: () => readonly string[],
-      siblingDomainHosts: () => readonly string[] = allowedHosts,
-    ): Promise<void> {
-      h.hostScopeProviders.push({ allowedHosts, siblingDomainHosts });
-    }
-    async withTemporaryHostScopeAllowedHosts<T>(
-      hosts: readonly string[],
-      operation: () => Promise<T>,
-    ): Promise<T> {
-      h.temporaryHostScopes.push({ hosts: [...hosts], phase: "enter" });
-      try {
-        return await operation();
-      } finally {
-        h.temporaryHostScopes.push({ hosts: [...hosts], phase: "exit" });
-      }
-    }
     async close(options?: {
       cancelStart?: boolean;
     }): Promise<"closed" | "force_closed_unproven" | "unknown"> {
@@ -1277,8 +1255,6 @@ beforeEach(() => {
   h.identityProbeCalls = 0;
   h.identityProbeExpectedGoogleAccountEmails = [];
   h.googleIdentityByExpectedEmail = new Map();
-  h.temporaryHostScopes = [];
-  h.hostScopeProviders = [];
   h.connections = [];
   h.profileDirs = [];
   h.proxyUrls = [];
@@ -2312,10 +2288,6 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
     h.elements = [];
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
-      // The new recipe-domain lock allows any subdomain of "example.com";
-      // the target must ALSO clear the session's own (pre-existing,
-      // unrelated) host-scope gate, so declare it there too.
-      extraAllowedHosts: ["checkout.example.com"],
     });
     const result = await replayOperatorRecipe(
       started.session_id,
@@ -4332,9 +4304,7 @@ describe("Compact V2 action-map boundary", () => {
       const started = await startProvisionSession({
         serviceUrl: "https://shop.example.com/signup",
       });
-      await expect(
-        act(started.session_id, { kind: "goto", url: `https://${secretHost}/checkout` }),
-      ).rejects.toThrow("target_not_allowed");
+      await act(started.session_id, { kind: "goto", url: `https://${secretHost}/checkout` });
       await act(started.session_id, { kind: "allow_host", host: secretHost });
 
       // A hostname is not a secret: nothing screens it out of the trace or the
@@ -4348,23 +4318,11 @@ describe("Compact V2 action-map boundary", () => {
     }
   });
 
-  it("names the refused host and the allow_host remedy in the compact-v2 goto refusal", async () => {
-    // 2026-09-06 dogfood: the bare `target_not_allowed` token left the agent
-    // with no host, no allowlist, and no way to recover. The refusal stays
-    // machine-readable (stable leading token) but now carries the detail.
+  it("navigates to an undeclared third-party host in compact-v2", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
-    const started = await startProvisionSession({
-      serviceUrl: "https://shop.example.com/signup",
-    });
-    const refusedHost = "metrics.example.net";
-    const error = await act(started.session_id, {
-      kind: "goto",
-      url: `https://${refusedHost}/stats`,
-    }).catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toMatch(/^target_not_allowed: /);
-    expect((error as Error).message).toContain(refusedHost);
-    expect((error as Error).message).toContain("allow_host");
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/signup" });
+    await act(started.session_id, { kind: "goto", url: "https://metrics.example.net/stats" });
+    expect(h.gotos).toContain("https://metrics.example.net/stats");
   });
 
   it("keeps start metadata, rejects locators, and binds a handle to its current page snapshot", async () => {
@@ -6137,7 +6095,7 @@ describe("Compact V2 action-map boundary", () => {
     expect((error as Error).message).not.toContain("Private option");
   });
 
-  it("refuses a cross-origin frame target without retiring the later ref", async () => {
+  it("selects a cross-origin frame target without retiring the later ref", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
@@ -6175,11 +6133,7 @@ describe("Compact V2 action-map boundary", () => {
     expect(h.selected).toEqual([{ selector: "#size", matcher: "Large" }]);
     expect(result.fields).toEqual([
       expect.objectContaining({
-        status: "failed",
-        // The refusal keeps its stable leading token but now names the host
-        // and the allow_host remedy (2026-09-06 dogfood: the bare token was a
-        // dead end).
-        reason: expect.stringMatching(/^target_not_allowed: /),
+        status: "selected",
       }),
       expect.objectContaining({ status: "selected" }),
     ]);
@@ -6575,7 +6529,7 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     expect(h.locatorClickCalls).toBe(1);
   });
 
-  it("applies the domain lock to a locator resolved inside a frame", async () => {
+  it("clicks a locator resolved inside an undeclared third-party frame", async () => {
     h.locatorResolve = {
       ok: true,
       text: "Pay",
@@ -6587,10 +6541,8 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
       },
     };
     const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
-    await expect(act(obs.session_id, { kind: "click", target: "text=Pay" })).rejects.toThrow(
-      /blocked by domain-scope/i,
-    );
-    expect(h.locatorClickCalls).toBe(0);
+    await act(obs.session_id, { kind: "click", target: "text=Pay" });
+    expect(h.locatorClickCalls).toBe(1);
     expect(h.locatorDisposeCalls).toBe(1);
   });
 
@@ -6611,7 +6563,7 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     expect(h.locatorTypeCalls).toEqual([{ text: "SAVE10", sealed: false }]);
   });
 
-  it("blocks type and type_secret locators in untrusted frames", async () => {
+  it("allows ordinary typing but preserves secret restrictions in third-party frames", async () => {
     h.locatorResolve = {
       ok: true,
       text: "Card number",
@@ -6623,14 +6575,12 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
       },
     };
     const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
-    await expect(
-      act(obs.session_id, { kind: "type", target: "css=#card", text: "4111" }),
-    ).rejects.toThrow(/blocked by domain-scope/i);
+    await act(obs.session_id, { kind: "type", target: "css=#card", text: "4111" });
     stashSecretSlot(obs.session_id, "card", "4111111111111111");
     await expect(
       act(obs.session_id, { kind: "type_secret", target: "css=#card", slot: "card" }),
     ).rejects.toThrow(/type_secret refused/i);
-    expect(h.locatorTypeCalls).toEqual([]);
+    expect(h.locatorTypeCalls).toEqual([{ text: "4111", sealed: false }]);
   });
 
   it("refuses secret locator typing into an opaque sandboxed frame", async () => {
@@ -6772,47 +6722,16 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
   });
 });
 
-describe("operate session — multi-host allow-set + allow_host", () => {
-  it("feeds only Neon's exact login route into the browser request scope", async () => {
-    await startProvisionSession({ serviceUrl: "https://neon.com/signup" });
-
-    expect(h.hostScopeProviders).toHaveLength(1);
-    expect(h.hostScopeProviders[0]!.allowedHosts()).toEqual(["neon.com", "console.neon.tech"]);
-    expect(h.hostScopeProviders[0]!.siblingDomainHosts()).toEqual(["neon.com"]);
-  });
-
-  it("blocks a goto outside the start scope, then allow_host unblocks it", async () => {
+describe("operate session — legacy host declarations are no-ops", () => {
+  it("reaches undeclared hosts without adding them to credential egress", async () => {
     const obs = await startProvisionSession({
       serviceUrl: "https://console.cloud.google.com/start",
+      extraAllowedHosts: ["unused.example.net"],
     });
-    const sid = obs.session_id;
-
-    // A cross-app host not declared at start is blocked.
-    await expect(
-      act(sid, { kind: "goto", url: "https://console.firebase.google.com/project" }),
-    ).rejects.toThrow(/domain-scope/i);
-
-    // Declare it mid-session, then the same goto is permitted.
-    await act(sid, { kind: "allow_host", host: "console.firebase.google.com" });
-    await act(sid, { kind: "goto", url: "https://console.firebase.google.com/project" });
-    expect(h.gotos).toContain("https://console.firebase.google.com/project");
-  });
-
-  it("accepts a host declared at start via allowed_hosts (multi-app)", async () => {
-    const obs = await startProvisionSession({
-      serviceUrl: "https://console.cloud.google.com/start",
-      extraAllowedHosts: ["console.firebase.google.com", "myapp.com"],
-    });
-    // Both declared hosts are immediately navigable (no allow_host needed).
-    await act(obs.session_id, { kind: "goto", url: "https://myapp.com/settings" });
-    expect(h.gotos).toContain("https://myapp.com/settings");
-  });
-
-  it("rejects a malformed allow_host (punycode spoof) and keeps the goto blocked", async () => {
-    const obs = await startProvisionSession({ serviceUrl: "https://a.com/" });
-    await expect(
-      act(obs.session_id, { kind: "allow_host", host: "xn--80ak6aa92e.com" }),
-    ).rejects.toThrow(/punycode|rejected/i);
+    await act(obs.session_id, { kind: "goto", url: "https://other.example.net/project" });
+    await act(obs.session_id, { kind: "allow_host", host: "xn--80ak6aa92e.com" });
+    expect(h.gotos).toContain("https://other.example.net/project");
+    expect(observedHostsForSession(obs.session_id)).toEqual(["console.cloud.google.com"]);
   });
 });
 
@@ -7633,10 +7552,6 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     expect(res.sealed).toBeUndefined();
     expect(h.seededStorageStates).toEqual([undefined]);
     expect(h.connections[0]).toBe(true);
-    expect(h.temporaryHostScopes).toEqual([
-      { hosts: ["mail.google.com"], phase: "enter" },
-      { hosts: ["mail.google.com"], phase: "exit" },
-    ]);
     expect(h.currentUrl).toContain("mail.google.com");
     expect(h.storageStateWrites).toEqual([]);
     expect(h.storageStates.get(canonical)).toEqual(googleState);
@@ -8627,15 +8542,8 @@ describe("withSigninHost (operate_store_login — cover the sign-in page's host)
   });
 });
 
-// operator-frame-support — the frame boundary must stay load-bearing for
-// security: a weak model can reach content inside iframes without reasoning
-// about frames, but an action on a frame element must never skip the SAME
-// domain-scope check a main-frame goto already gets. The page's own eTLD+1
-// (here "example.com", from serviceUrl "https://shop.example.com/cart") is
-// freely reachable via any subdomain (a merchant's own checkout iframe,
-// possibly on a different subdomain than the page); a genuinely unrelated
-// domain is refused exactly like an off-domain goto.
-describe("frame targets — domain-lock (operator-frame-support)", () => {
+// Frame identity and credential-injection boundaries survive unrestricted browser egress.
+describe("frame targets — identity and credential boundaries (operator-frame-support)", () => {
   const SAME_DOMAIN_FRAME_URL = "https://payments.example.com/widget";
   const CROSS_DOMAIN_FRAME_URL = "https://evil-payments.test/widget";
 
@@ -8679,7 +8587,7 @@ describe("frame targets — domain-lock (operator-frame-support)", () => {
     expect(h.clickCalls).toBe(0); // never fell through to the main-frame click
   });
 
-  it("click on a cross-domain iframe element is refused, exactly like an off-domain goto", async () => {
+  it("click on an undeclared cross-domain iframe element succeeds", async () => {
     h.elements = [
       elem({
         testId: "card-input",
@@ -8690,10 +8598,8 @@ describe("frame targets — domain-lock (operator-frame-support)", () => {
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await expect(
-      act(started.session_id, { kind: "click", target: "Enter Card Number" }),
-    ).rejects.toThrow(/blocked by domain-scope/i);
-    expect(h.frameClicks).toEqual([]);
+    await act(started.session_id, { kind: "click", target: "Enter Card Number" });
+    expect(h.frameClicks).toEqual([`${CROSS_DOMAIN_FRAME_URL}|#card-input`]);
     expect(h.clickCalls).toBe(0);
   });
 
@@ -8835,7 +8741,7 @@ describe("frame targets — domain-lock (operator-frame-support)", () => {
     expect(h.selected).toEqual([]); // never fell through to the main-frame select
   });
 
-  it("select on a cross-domain iframe element is refused by the domain lock, exactly like an off-domain goto", async () => {
+  it("select on an undeclared cross-domain iframe element succeeds", async () => {
     h.elements = [
       elem({
         tag: "select",
@@ -8848,10 +8754,10 @@ describe("frame targets — domain-lock (operator-frame-support)", () => {
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await expect(
-      act(started.session_id, { kind: "select", target: "Expiry Month", text: "January" }),
-    ).rejects.toThrow(/blocked by domain-scope/i);
-    expect(h.frameSelects).toEqual([]);
+    await act(started.session_id, { kind: "select", target: "Expiry Month", text: "January" });
+    expect(h.frameSelects).toEqual([
+      { frameUrl: CROSS_DOMAIN_FRAME_URL, selector: "#card-exp", matcher: "January" },
+    ]);
     expect(h.selected).toEqual([]);
   });
 
@@ -8885,7 +8791,7 @@ describe("frame targets — domain-lock (operator-frame-support)", () => {
     expect(h.uploads).toEqual([]);
   });
 
-  it("preserves frame scope through recording and re-gates it during replay", async () => {
+  it("preserves frame targeting through recording and replay without host scoping", async () => {
     const main = elem({
       testId: "continue",
       labelText: "Continue",
@@ -8919,8 +8825,8 @@ describe("frame targets — domain-lock (operator-frame-support)", () => {
       replayRecipe({ trace: [{ action: { kind: "click", target } }] }),
       {},
     );
-    expect(result.status).not.toBe("complete");
-    expect(h.frameClicks).toEqual([]);
+    expect(result.status).toBe("complete");
+    expect(h.frameClicks).toEqual([`${CROSS_DOMAIN_FRAME_URL}|#continue`]);
     expect(h.clickCalls).toBe(0);
   });
 });
@@ -11500,32 +11406,12 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
 });
 
 describe("flat operator verbs", () => {
-  it("cannot grant an unrelated host, even if an internal action added it mid-session", async () => {
+  it("accepts legacy allow_host calls and navigates without host declarations", async () => {
     const { session_id } = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-    await expect(
-      operateAllowHostTool.handler({ session_id, host: "unrelated.net" }, null),
-    ).rejects.toThrow(/target_not_allowed:.*unrelated.net.*operate_start.*allowed_hosts/);
-    await expect(
-      operateNavigateTool.handler({ session_id, url: "https://unrelated.net/" }, null),
-    ).rejects.toThrow(/unrelated.net.*allow_host/);
-    expect(h.gotos).not.toContain("https://unrelated.net/");
-    await act(session_id, { kind: "allow_host", host: "unrelated.net" });
-    await expect(
-      operateAllowHostTool.handler({ session_id, host: "unrelated.net" }, null),
-    ).rejects.toThrow(/startup host scope/);
-  });
-
-  it("allows startup-declared hosts and preserves malformed-host validation", async () => {
-    const { session_id } = await startProvisionSession({
-      serviceUrl: "https://app.example.com/",
-      extraAllowedHosts: ["other.net"],
-    });
-    await operateAllowHostTool.handler({ session_id, host: "other.net" }, null);
-    await operateNavigateTool.handler({ session_id, url: "https://other.net/settings" }, null);
-    expect(h.gotos).toContain("https://other.net/settings");
-    await expect(
-      operateAllowHostTool.handler({ session_id, host: "xn--80ak6aa92e.com" }, null),
-    ).rejects.toThrow(/punycode/);
+    await operateNavigateTool.handler({ session_id, url: "https://unrelated.net/" }, null);
+    await operateAllowHostTool.handler({ session_id, host: "xn--80ak6aa92e.com" }, null);
+    expect(h.gotos).toContain("https://unrelated.net/");
+    expect(observedHostsForSession(session_id)).toEqual(["app.example.com"]);
   });
 
   it("fills text and then submits, and fills a secret slot without returning its value", async () => {

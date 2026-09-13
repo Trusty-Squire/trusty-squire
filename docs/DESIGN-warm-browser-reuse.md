@@ -82,6 +82,6 @@ follow-up remains tracked by
 ## Preserved invariants
 
 The compact-observation-v2 serializer, card sealing, one-human approval per
-purchase, host-scoped egress, payment/3DS audit order, vault restrictions, and
+purchase, payment/3DS audit order, vault restrictions, and
 session addressing are unchanged. Browser teardown remains owner-bound and
 session-scoped.

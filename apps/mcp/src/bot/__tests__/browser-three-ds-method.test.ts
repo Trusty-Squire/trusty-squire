@@ -126,7 +126,6 @@ describe("native 3DS2 method completion", () => {
             }
           ).initializePages(context, true, false);
         }
-        await controller.setHostScopeAllowedHosts(() => ["127.0.0.1", "localhost"]);
         const response = page.waitForResponse(
           (r) => r.url().endsWith("/FepChargePaymentInfoAuthenticateInit.do"),
           { timeout: 10_000 },
@@ -143,7 +142,6 @@ describe("native 3DS2 method completion", () => {
           "authenticate",
         ]);
         expect(new URLSearchParams(authenticateBody).get("methodCompletion")).toBe(token);
-        expect(controller.peekHostScopeDenials()).toEqual([]);
       } finally {
         if (launched) await launched.close();
         await browser?.close();

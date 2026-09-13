@@ -1,42 +1,10 @@
-// Reproduction + regression coverage for the live Hibiya Kadan (EbisuMart)
-// decoupled/out-of-band 3-D Secure hang: the cardholder approved the ACS's
-// OOB push in ~2 seconds, yet the operator browser sat on the ACS CReq page
-// indefinitely — well inside the wait budget already in place, so the hang
-// was never a wait-duration problem (see the file-level comment on
-// THREE_DS_ACS_NETWORK_HOSTS in browser.ts for the full root-cause writeup).
-//
-// A real checkout session installs a fail-closed request-scope guard
-// (installHostScopeGuard / requestHostInScope) that aborts XHR/fetch calls
-// to hosts outside the session's allowlist. The ACS's own decoupled-approval
-// status poll is exactly such a call, and cardinalcommerce.com — a host our
-// OWN detectThreeDsChallenge already treats as a legitimate 3DS authority —
-// was never in that allowlist. So the ACS page's client-side JS could never
-// learn the issuer had already approved, and never redirected or
-// auto-submitted its CRes, no matter how long waitForThreeDsResolution kept
-// watching.
-//
-// This fixture reproduces the exact topology with a local mock ACS (no real
-// network, no real charge): a merchant page that, on submit, either
-// navigates the TOP-LEVEL page to the ACS host or attaches it as a
-// cross-origin iframe; the mock ACS polls its own backend for approval
-// status via fetch, and — once it sees approval, at t+2s — either redirects
-// (top-level topology) or auto-submits a `target="_top"` form (the real
-// EMV 3DS2 CRes mechanic, iframe topology) back to the merchant's
-// order-confirmation route. Both topologies are wired through the SAME
-// request-scope guard production sessions install, with the SAME kind of
-// merchant-only allowlist a real session would have (no ACS host — the
-// exact gap the fix closes).
+// Decoupled ACS polling and payment networking remain reachable without host scope.
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import {
-  BrowserController,
-  requestHostInScope,
-  isFailFastScopeAbort,
-  recognizedPaymentProviderFrame,
-} from "../browser.js";
+import { BrowserController, recognizedPaymentProviderFrame } from "../browser.js";
 
 // See browser-payment.test.ts's identical guard: the lean mcp-only
 // publish-verify install has no Playwright Chromium binary.
@@ -62,11 +30,6 @@ const ACS_ORIGIN = "https://authentication.cardinalcommerce.com";
 const ACS_CHALLENGE_URL = `${ACS_ORIGIN}/v1/cruise/stepup`;
 const ACS_STATUS_URL = `${ACS_ORIGIN}/api/decoupled-status`;
 const RECEIPT_URL = `${MERCHANT_ORIGIN}/receipt/456`;
-
-// The session's real, merchant-only allowlist — precisely what a live
-// operate_start on this checkout would have. No 3DS/ACS host is ever a
-// `start`-declared or sibling-domain host, which is the whole gap.
-const SESSION_ALLOWED_HOSTS = ["checkout.hibiyakadan.test"];
 
 const ACS_POLL_SCRIPT = (onApproved: string): string => `
   <p>Verifying your payment authorization&hellip;</p>
@@ -117,10 +80,6 @@ async function serveFixture(pages: Record<string, string>): Promise<{
 }> {
   if (sharedBrowser === undefined) throw new Error("Chromium test browser was not started");
   const context = await sharedBrowser.newContext();
-  // Content-serving route, registered BEFORE the guard below — Playwright
-  // runs same-scope (context) routes LIFO, so the guard (installed after,
-  // via setHostScopeAllowedHosts) is checked FIRST on every request, exactly
-  // like production: the guard gatekeeps before anything is ever served.
   await context.route("**/*", async (route) => {
     const url = route.request().url().split("?")[0] ?? route.request().url();
     if (url === ACS_STATUS_URL) {
@@ -136,7 +95,7 @@ async function serveFixture(pages: Record<string, string>): Promise<{
 
 describe("decoupled 3-D Secure — Hibiya Kadan/EbisuMart hang reproduction + fix", () => {
   it.skipIf(!chromiumAvailable)(
-    "resolves a top-level decoupled challenge approved at t+2s, with only the merchant host allowed",
+    "resolves a top-level decoupled challenge approved at t+2s, without declaring ACS hosts",
     async () => {
       const { context, page } = await serveFixture({
         [`${MERCHANT_ORIGIN}/checkout`]: TOP_LEVEL_MERCHANT_PAGE,
@@ -146,10 +105,6 @@ describe("decoupled 3-D Secure — Hibiya Kadan/EbisuMart hang reproduction + fi
       try {
         await page.goto(`${MERCHANT_ORIGIN}/checkout`);
         const controller = BrowserController.fromHarnessPage(page);
-        await controller.setHostScopeAllowedHosts(
-          () => SESSION_ALLOWED_HOSTS,
-          () => SESSION_ALLOWED_HOSTS,
-        );
         // submitFilledCheckout (not a raw page.click) so the outcome baseline is
         // captured the same way production does — at click-dispatch time, while
         // still on the merchant page, before the pay click's own navigation can
@@ -179,10 +134,6 @@ describe("decoupled 3-D Secure — Hibiya Kadan/EbisuMart hang reproduction + fi
       try {
         await page.goto(`${MERCHANT_ORIGIN}/checkout`);
         const controller = BrowserController.fromHarnessPage(page);
-        await controller.setHostScopeAllowedHosts(
-          () => SESSION_ALLOWED_HOSTS,
-          () => SESSION_ALLOWED_HOSTS,
-        );
         await expect(controller.submitFilledCheckout()).resolves.toMatchObject({
           three_ds_required: true,
           order_confirmed: false,
@@ -198,56 +149,7 @@ describe("decoupled 3-D Secure — Hibiya Kadan/EbisuMart hang reproduction + fi
   );
 });
 
-describe("requestHostInScope / isFailFastScopeAbort — 3DS ACS network allowlist (unit)", () => {
-  it("allows cardinalcommerce.com XHR/fetch even when it is not a session-configured host", () => {
-    expect(requestHostInScope(ACS_STATUS_URL, SESSION_ALLOWED_HOSTS)).toBe(true);
-    expect(isFailFastScopeAbort(ACS_STATUS_URL, "fetch", SESSION_ALLOWED_HOSTS)).toBe(false);
-    expect(isFailFastScopeAbort(ACS_STATUS_URL, "xhr", SESSION_ALLOWED_HOSTS)).toBe(false);
-  });
-
-  it("still fail-fast-blocks an unrelated out-of-scope host", () => {
-    const rogue = "https://exfil.evil.test/collect";
-    expect(requestHostInScope(rogue, SESSION_ALLOWED_HOSTS)).toBe(false);
-    expect(isFailFastScopeAbort(rogue, "fetch", SESSION_ALLOWED_HOSTS)).toBe(true);
-  });
-});
-
-describe("operation-scoped host allowances", () => {
-  it.skipIf(!chromiumAvailable)(
-    "allows Gmail only while the sanctioned inbox operation is active",
-    async () => {
-      const mailUrl = "https://mail.google.com/api/messages";
-      const { context, page } = await serveFixture({
-        [`${MERCHANT_ORIGIN}/checkout`]: "<main>Checkout</main>",
-        [mailUrl]: "mail",
-      });
-      try {
-        await page.goto(`${MERCHANT_ORIGIN}/checkout`);
-        const controller = BrowserController.fromHarnessPage(page);
-        await controller.setHostScopeAllowedHosts(
-          () => SESSION_ALLOWED_HOSTS,
-          () => SESSION_ALLOWED_HOSTS,
-        );
-
-        await expect(
-          controller.withTemporaryHostScopeAllowedHosts(
-            ["mail.google.com"],
-            async () =>
-              await page.evaluate(async (url) => await (await fetch(url)).text(), mailUrl),
-          ),
-        ).resolves.toBe("mail");
-
-        await expect(
-          page.evaluate(async (url) => await (await fetch(url)).text(), mailUrl),
-        ).rejects.toThrow();
-      } finally {
-        await context.close();
-      }
-    },
-  );
-});
-
-describe("payment-window browser networking", () => {
+describe("unrestricted browser networking", () => {
   it.skipIf(!chromiumAvailable).each(["single", "split"] as const)(
     "natively advances a %s checkout through EMV-TDS, method, fingerprint, challenge and receipt",
     async (phase) => {
@@ -295,7 +197,6 @@ describe("payment-window browser networking", () => {
           await page.screenshot({ path: join(evidence, "synthetic-checkout.png") });
         }
         const controller = BrowserController.fromHarnessPage(page);
-        await controller.setHostScopeAllowedHosts(() => SESSION_ALLOWED_HOSTS);
         const card = {
           pan: "4242424242424242",
           exp_month: "12",
@@ -332,7 +233,6 @@ describe("payment-window browser networking", () => {
         expect(resolution).toBe("succeeded");
         await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("succeeded");
         expect(page.url()).toBe(RECEIPT_URL);
-        expect(controller.takeHostScopeDenials()).toEqual([]);
         if (evidence) {
           await page.screenshot({ path: join(evidence, "synthetic-receipt.png") });
           await writeFile(
@@ -358,9 +258,9 @@ describe("payment-window browser networking", () => {
     20_000,
   );
 
-  it.skipIf(!chromiumAvailable).each([false, true])(
-    "admits issuer requests only within the payment page and window (broker=%s)",
-    async (broker) => {
+  it.skipIf(!chromiumAvailable)(
+    "admits issuer requests before filling, on other pages, and after the payment wait",
+    async () => {
       const method = "https://methodurl.vcas.visa.com/method/status";
       const fingerprint = "https://h.online-metrix.net/fp/status";
       const issuer = "https://emvtds.sps-system.com/emvtds-fe/status";
@@ -373,8 +273,6 @@ describe("payment-window browser networking", () => {
       try {
         await page.goto(`${MERCHANT_ORIGIN}/checkout`);
         const controller = BrowserController.fromHarnessPage(page);
-        if (broker) await controller.enableBrokerRouting();
-        await controller.setHostScopeAllowedHosts(() => SESSION_ALLOWED_HOSTS);
         const read = (target: Page, url: string) =>
           target.evaluate(async (url) => {
             try {
@@ -383,8 +281,7 @@ describe("payment-window browser networking", () => {
               return "blocked";
             }
           }, url);
-        expect(await read(page, method)).toBe("blocked");
-        controller.takeHostScopeDenials();
+        expect(await read(page, method)).toBe("method complete");
         await controller.fillCheckoutCardFields({
           pan: "4242424242424242",
           exp_month: "12",
@@ -396,7 +293,6 @@ describe("payment-window browser networking", () => {
         expect(await read(page, method)).toBe("method complete");
         expect(await read(page, fingerprint)).toBe("fingerprint complete");
         expect(await read(page, issuer)).toBe("issuer complete");
-        expect(controller.takeHostScopeDenials()).toEqual([]);
         expect(recognizedPaymentProviderFrame(issuer, page.url())).toBe(false);
         expect(recognizedPaymentProviderFrame(method, page.url())).toBe(false);
         await page.evaluate((url) => {
@@ -413,22 +309,22 @@ describe("payment-window browser networking", () => {
         ).toBe("fingerprint complete");
         const other = await context.newPage();
         await other.goto(`${MERCHANT_ORIGIN}/checkout`);
-        expect(await read(other, issuer)).toBe("blocked");
-        // An inconclusive status poll must retain the in-flight allowance.
+        expect(await read(other, issuer)).toBe("issuer complete");
+        // Outcome tracking does not change networking.
         await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("timeout");
         expect(await read(page, issuer)).toBe("issuer complete");
         const now = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 21 * 60_000);
         try {
-          expect(await read(page, issuer)).toBe("blocked");
+          expect(await read(page, issuer)).toBe("issuer complete");
         } finally {
           now.mockRestore();
         }
-        // A terminal failure removes the allowance even before its deadline.
+        // Terminal failure also leaves networking unrestricted.
         await page.evaluate(() => {
           document.body.append("Authentication failed");
         });
         await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("failed");
-        expect(await read(page, issuer)).toBe("blocked");
+        expect(await read(page, issuer)).toBe("issuer complete");
       } finally {
         await context.close();
       }

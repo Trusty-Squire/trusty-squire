@@ -159,10 +159,6 @@ export interface SafeBlockerV2 {
   target?: "unavailable";
   focus?: "focused" | "focusable";
   keyboard?: "space" | "tab_space";
-  // Attribution requires document ownership, not just a matching denied host;
-  // see docs/browser-use-serializer-port.md's blocker diagnostic contract.
-  cause?: "scope";
-  cause_hosts?: string[];
 }
 
 /**

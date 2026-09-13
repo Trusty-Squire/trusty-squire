@@ -389,10 +389,9 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   solving, inbox polling, local upload, and specialized cart mutation are not
   operator verbs; inspect and drive the page's ordinary UI or hand the task back
   to the user.
-  Declare required action hosts at `operate_start`. See the
-  [scope contract](docs/operator-tool-surface.md#scope-is-declared-at-session-start)
-  for startup entitlements, provider allowances, the card-checkout network
-  window, and handling scope-denial diagnostics.
+  Browser requests need no host declarations. See the
+  [egress contract](docs/operator-tool-surface.md#browser-egress-is-unrestricted)
+  for legacy parameter compatibility and the unchanged payment/vault boundaries.
   Every operator task uses the user's Chrome profile directly. Before it starts,
   the operator checks the live Google My Account identity; if the profile is
   signed out, it returns a clear login handoff before navigating to the service.
