@@ -583,12 +583,9 @@ behavior change, not a test to update.
 `BrowserController` composes one exclusive `BrowserProcessOwner`
 (`apps/mcp/src/bot/browser-process-owner.ts`, Chrome process custody + bounded
 teardown; launch helpers in `browser-process-runtime.ts`) and one `PageDriver`
-(`page-driver.ts`, page/tab ownership, navigation, adoption). Single-session
-only by default — no broker or shared browser. The one exception is the
-off-by-default experimental `TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION` flag
-(`session/multisession-flag.ts`), test scaffolding that lets a second
-`operate_start` join the live Chrome as a satellite; `AGENTS.md` owns that
-contract.
+(`page-driver.ts`, page/tab ownership, navigation, adoption). The broker owns
+one shared process; each session gets independent page state. MCP servers always
+forward over authenticated local IPC; see `docs/browser-broker.md`.
 [`docs/browser-process-page-boundary.md`](docs/browser-process-page-boundary.md)
 owns the boundary and the preserved close/cancellation ordering;
 `browser-process-page-boundary.test.ts` pins it.

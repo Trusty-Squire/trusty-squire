@@ -668,6 +668,18 @@ export class OperatorBroker implements BrokerTransportPort {
     const capability = input.capability;
     if (capability === undefined || args.session_id !== capability.sessionId)
       throw new BrokerRefusal("stale_lease", "An owned session capability is required");
+    // A credentials finish is a vaulting attempt. Refuse it before terminal
+    // admission changes the actor's state; capture recovery still owns a live
+    // session and ordinary reads/actions must remain usable.
+    if (
+      tool.name === "operate_finish" &&
+      args.outcome === "credentials" &&
+      (await this.journal?.unresolvedCapture(journalForwarderId(principal), capability.sessionId))
+    )
+      throw new BrokerRefusal(
+        "outcome_unknown",
+        "Recover the original capture write identity before credential finish",
+      );
     const extra: string[] = [];
     const lane =
       tool.name === "operate_login"

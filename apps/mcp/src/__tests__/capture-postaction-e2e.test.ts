@@ -1,3 +1,5 @@
+import type * as SessionLifecycle from "../bot/session/lifecycle.js";
+import { fixtureBrokerForwarder } from "./fixture-broker-forwarder.js";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +13,10 @@ import type { Session } from "../bot/session/model.js";
 import * as lifecycle from "../bot/session/lifecycle.js";
 import { markOperatorMutationDispatchAttempted } from "../bot/request-cancellation.js";
 
+vi.mock("../bot/session/lifecycle.js", async (original) => ({
+  ...(await original<typeof SessionLifecycle>()),
+  withProvisionSessionCall: async (_id: string, call: () => Promise<unknown>) => await call(),
+}));
 const state = vi.hoisted(() => ({ action: vi.fn() }));
 vi.mock("../bot/provision-session.js", async (original) => ({
   ...(await original<typeof ProvisionSession>()),
@@ -26,7 +32,13 @@ it("captures a created key through MCP and recovers an unchanged source without 
   const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
   const page: Page = await browser.newPage();
   const session = vi.spyOn(lifecycle, "sessionForCall").mockReturnValue({
-    browser: { activePage: () => page, waitForInteractiveDom: async () => undefined },
+    pendingThreeDs: null,
+    browser: {
+      activePage: () => page,
+      waitForInteractiveDom: async () => undefined,
+      brokerTargetId: async () => "fixture-target",
+      isConnected: () => true,
+    },
   } as unknown as Session);
   const writes: unknown[] = [];
   const storeCredential = vi.fn(async (input) => {
@@ -41,14 +53,19 @@ it("captures a created key through MCP and recovers an unchanged source without 
       updated: false,
     };
   });
-  const server = await buildServer(
-    { setRequestingAgent: vi.fn(), storeCredential } as unknown as ApiClient,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    { journal: new DispatchJournal(join(root, "journal.jsonl")), lineage: () => "fixture" },
+  const api = {
+    setRequestingAgent: vi.fn(),
+    storeCredential,
+    withAuditContext: async (_context: unknown, operation: () => Promise<unknown>) =>
+      await operation(),
+  } as unknown as ApiClient;
+  const fixture = await fixtureBrokerForwarder(
+    root,
+    api,
+    new DispatchJournal(join(root, "journal.jsonl")),
+    "fixture",
   );
+  const server = await buildServer(api, undefined, undefined, undefined, fixture.forwarder);
   const [transport, peer] = InMemoryTransport.createLinkedPair();
   await server.connect(peer);
   const client = new Client({ name: "postaction-fixture", version: "1" });
@@ -60,7 +77,10 @@ it("captures a created key through MCP and recovers an unchanged source without 
     source: { role: "textbox" },
   };
   const call = async (name: string, args: Record<string, unknown>) => {
-    const result = await client.callTool({ name, arguments: { session_id: "fixture", ...args } });
+    const result = await client.callTool({
+      name,
+      arguments: { session_id: fixture.sessionId, ...args },
+    });
     transcript.push({ name, arguments: args, response: result });
     return result;
   };
@@ -91,7 +111,7 @@ it("captures a created key through MCP and recovers an unchanged source without 
       `<h1>Unchanged creation result</h1><label>Display name <input value="My key display name"></label><button onclick="document.body.dataset.clicks = String(Number(document.body.dataset.clicks || 0) + 1)">Create key</button>`,
     );
     const unresolved = await call("operate_click", { ref: "@create", capture });
-    expect(unresolved.structuredContent).toMatchObject({
+    expect(unresolved.structuredContent, JSON.stringify(unresolved)).toMatchObject({
       stored: false,
       storage: "unknown",
       error: "capture_pre_action_only",
@@ -140,6 +160,7 @@ it("captures a created key through MCP and recovers an unchanged source without 
   } finally {
     await client.close();
     await server.close();
+    await fixture.close();
     session.mockRestore();
     await browser.close();
     await rm(root, { recursive: true, force: true });

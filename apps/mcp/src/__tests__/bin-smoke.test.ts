@@ -1,3 +1,7 @@
+import {
+  canRunDefaultBrokerAcceptance,
+  checkDefaultBrokerAcceptance,
+} from "./broker-default-acceptance.js";
 // Smoke tests that exercise the package the way it is actually launched
 // — spawned as a process through a bin symlink — not the way the other
 // unit tests import it.
@@ -669,3 +673,12 @@ function runSubcommand(scriptPath: string, args: string[]): string {
   });
   return `${r.stdout ?? ""}${r.stderr ?? ""}`;
 }
+
+// Keep compiled-artifact checks under this file's single build owner.
+it.skipIf(!canRunDefaultBrokerAcceptance)(
+  "auto-starts one default broker across concurrent MCP servers and replaces its dead owner",
+  async () => {
+    await checkDefaultBrokerAcceptance(distBin, path.join(tmpDir, "default-broker"));
+  },
+  120_000,
+);

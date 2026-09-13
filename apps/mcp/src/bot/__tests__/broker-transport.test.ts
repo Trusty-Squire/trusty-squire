@@ -1,3 +1,4 @@
+import { createServer, type Socket } from "node:net";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +11,27 @@ import { BrokerAuthority } from "../broker/authority.js";
 const require = createRequire(import.meta.url);
 
 describe("authenticated broker IPC", () => {
+  it("preserves the hello timeout cause when a connected socket never replies", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-ipc-wedged-"));
+    const path = join(root, "broker.sock");
+    const sockets = new Set<Socket>();
+    const server = createServer((socket) => {
+      sockets.add(socket);
+      socket.on("data", () => undefined);
+      socket.once("close", () => sockets.delete(socket));
+    });
+    await new Promise<void>((resolve) => server.listen(path, resolve));
+    try {
+      await expect(BrokerClient.connectSupervisor(path, "token")).rejects.toMatchObject({
+        code: "broker_handshake_timeout",
+      });
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 10_000);
+
   it("distinguishes explicit client release from a transient socket loss", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-ipc-release-"));
     const path = join(root, "broker.sock");

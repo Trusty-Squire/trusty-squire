@@ -1,3 +1,4 @@
+import { resolveBrokerSocket } from "./discovery.js";
 import { brokerElectionRoot, brokerIsSupervised, publishEndpointOwner } from "./discovery.js";
 import { DispatchJournal } from "./dispatch-journal.js";
 import { lstat, unlink, mkdir } from "node:fs/promises";
@@ -126,9 +127,7 @@ export function brokerIdleShutdownEligible(input: {
 /** Explicit foreground service entrypoint. A supervisor may retain the broker;
  * ordinary clients cannot stop it while another connection owns sessions. */
 export async function runBrokerDaemon(): Promise<void> {
-  const path = process.env.TRUSTY_SQUIRE_BROKER_SOCKET;
-  if (path === undefined)
-    throw new Error("TRUSTY_SQUIRE_BROKER_SOCKET must name a private local socket");
+  const path = resolveBrokerSocket();
   const parent = await lstat(dirname(path));
   if (!parent.isDirectory() || (parent.mode & 0o077) !== 0 || parent.uid !== process.getuid?.()) {
     throw new Error("Broker socket directory must be owned by this user with mode 0700");

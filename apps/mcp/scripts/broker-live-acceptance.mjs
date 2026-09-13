@@ -441,7 +441,6 @@ async function runConcurrencyAcceptance(configPath, config, nativeEvidence = nul
     TRUSTY_SQUIRE_PROFILE_DIR: profile,
     TRUSTY_SQUIRE_BROKER_SOCKET: socket,
     TRUSTY_SQUIRE_BROKER_QUALIFICATION_RUN_ID: runId,
-    TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION: "0",
     TRUSTY_SQUIRE_REAPER_DIR: join(lab, "reapers"),
     TMPDIR: join(root, ".t"),
     BOT_CDP_ENDPOINT: "",

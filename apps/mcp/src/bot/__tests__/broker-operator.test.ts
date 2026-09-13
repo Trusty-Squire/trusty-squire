@@ -938,8 +938,8 @@ it("retains acknowledged start control until a same-lineage follow-up", async ()
       return true;
     });
     const listener = await listenBroker(path, {
-      authenticate: async (token, agentId, lineageCredential) =>
-        await broker.authenticate(token, agentId, lineageCredential),
+      authenticate: async (token, agentId, lineageCredential, supervisor) =>
+        await broker.authenticate(token, agentId, lineageCredential, supervisor),
       connected: async (principal) => await broker.connected(principal),
       call: async (principal, method, params, requestId) => {
         if (method === "recover") return await broker.recover(principal, params);

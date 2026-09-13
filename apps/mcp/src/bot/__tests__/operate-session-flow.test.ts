@@ -239,6 +239,31 @@ const h = vi.hoisted(() => ({
 // protocols independently testable while V2 is the production default.
 let compactV2ModeBeforeTest: string | undefined;
 
+// Inject the broker page port; these tests exercise session behavior, not physical launch.
+vi.mock("../broker/custody.js", async () => {
+  const { BrowserController } = await import("../browser.js");
+  const { CHROME_PROFILE_DIR } = await import("../profile.js");
+  return {
+    brokerBrowserCustody: () => ({
+      acquire: async (options: { profileDir?: string; proxyUrl?: string }) => {
+        const profileDir = options.profileDir ?? CHROME_PROFILE_DIR;
+        const browser = new BrowserController({ ...options, profileDir });
+        await browser.start();
+        return { browser, profileDir };
+      },
+      release: async (
+        browser: InstanceType<typeof BrowserController>,
+        beforeRelease?: () => Promise<void>,
+      ) => {
+        if ((await browser.close()) !== "closed")
+          throw new Error("operator browser cleanup unproven");
+        await beforeRelease?.();
+      },
+      identity: async <T>(operation: () => Promise<T>) => await operation(),
+    }),
+  };
+});
+
 vi.mock("../browser.js", async (importOriginal) => ({
   OAuthOnboardingRequiredError: (await importOriginal<typeof BrowserModule>())
     .OAuthOnboardingRequiredError,
@@ -949,29 +974,13 @@ vi.mock("../profile.js", async (importOriginal) => {
   };
 });
 
-import {
-  chmodSync,
-  mkdirSync,
-  mkdtempSync,
-  symlinkSync,
-  writeFileSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-} from "node:fs";
-import { spawn } from "node:child_process";
-import { once } from "node:events";
-import { hostname, tmpdir } from "node:os";
+import { chmodSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ApiClient } from "../../api-client.js";
 import { dispatchOperatorBrowserProcessTermination } from "../operator-browser-watchdog.js";
 import { BrowserController, OAuthAwaitingHumanError } from "../browser.js";
-import {
-  acquireProfileOperationGuard,
-  processBirthIdentity,
-  profileProcessIdentity,
-  currentProfileHolderPid,
-} from "../profile.js";
+import {} from "../profile.js";
 import {
   startProvisionSession,
   startHarnessProvisionSession,
@@ -6989,7 +6998,7 @@ describe("operate session — live-profile precondition gate", () => {
     expect(h.startCalls).toBe(1);
     expect(h.started).toBe(0); // the rejected profile is closed before handoff
     expect(h.gotos).toHaveLength(0);
-    expect(h.identityProbeCalls).toBe(1); // warm the real context before provider admission
+    expect(h.identityProbeCalls).toBe(2); // broker identity lane probes before provider admission
     expect(h.storageStateReads).toEqual([]);
     expect(h.profileDirs).toEqual([canonical]);
     expect(h.destroyedProfiles).toEqual([]);
@@ -7049,202 +7058,8 @@ describe("operate session — live-profile precondition gate", () => {
   });
 });
 
-describe("operate session — real-profile lifecycle", () => {
-  it.skipIf(process.platform !== "linux").each(["dead", "live", "unrecorded", "other-profile"])(
-    "reconnect admission recovers only a proven dead owner (%s)",
-    async (ownerState) => {
-      const root = mkdtempSync(join(tmpdir(), "ts-reconnect-"));
-      const profileDir = join(root, "profile");
-      const reapers = join(root, "reapers");
-      mkdirSync(profileDir);
-      mkdirSync(reapers);
-      const oldReaperDir = process.env.TRUSTY_SQUIRE_REAPER_DIR;
-      const oldGrace = process.env.TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS;
-      process.env.TRUSTY_SQUIRE_REAPER_DIR = reapers;
-      process.env.TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS = "30";
-      const owner = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
-        stdio: "ignore",
-      });
-      // Real process + exact profile argv + Chrome-shaped lock. Ignore TERM
-      // to exercise bounded KILL escalation without needing a Chrome display.
-      const browser = spawn(
-        process.execPath,
-        [
-          "-e",
-          "process.on('SIGTERM', () => {}); console.log('ready'); setInterval(() => {}, 1000)",
-          "--",
-          `--user-data-dir=${profileDir}`,
-        ],
-        { stdio: ["ignore", "pipe", "ignore"] },
-      );
-      const ownerExited = once(owner, "exit");
-      const browserExited = once(browser, "exit");
-      try {
-        await once(browser.stdout!, "data");
-        const identity = profileProcessIdentity(browser.pid!, profileDir);
-        expect(identity).not.toBeNull();
-        const birth = processBirthIdentity(owner.pid!);
-        expect(birth).not.toBeNull();
-        if (ownerState !== "unrecorded")
-          writeFileSync(
-            join(reapers, "prior.json"),
-            JSON.stringify({
-              version: 5,
-              token: "fixture-owner",
-              owner: birth,
-              resources: [
-                {
-                  ...identity,
-                  user_data_dir: ownerState === "other-profile" ? join(root, "other") : profileDir,
-                },
-              ],
-              launches: [],
-              helpers: [],
-            }),
-          );
-        symlinkSync(`${hostname()}-${browser.pid!}`, join(profileDir, "SingletonLock"));
-        // Replacement admission while the old owner still lives must refuse,
-        // and its process-local registry cannot finish the prior session.
-        await expect(
-          startProvisionSession({ serviceUrl: "https://app.example.com/", profileDir }),
-        ).rejects.toThrow(/another Trusty Squire session/);
-        await expect(finishProvisionSession("prior-server-session")).rejects.toThrow(
-          /unknown provision session/,
-        );
-        expect(browser.exitCode).toBeNull();
-        expect(browser.signalCode).toBeNull();
-        if (ownerState !== "live") {
-          owner.kill("SIGKILL");
-          await ownerExited;
-        }
-        if (ownerState === "dead") {
-          const started = await startProvisionSession({
-            serviceUrl: "https://app.example.com/",
-            profileDir,
-          });
-          expect(started.session_id).toBeTypeOf("string");
-          expect(browser.signalCode).toBe("SIGKILL");
-          expect(currentProfileHolderPid(profileDir)).toBeNull();
-          await finishProvisionSession(started.session_id);
-        } else {
-          await expect(
-            startProvisionSession({ serviceUrl: "https://app.example.com/", profileDir }),
-          ).rejects.toThrow(/another Trusty Squire session/);
-          expect(browser.exitCode).toBeNull();
-          expect(browser.signalCode).toBeNull();
-          expect(currentProfileHolderPid(profileDir)).toBe(browser.pid);
-          expect(h.startCalls).toBe(0);
-        }
-      } finally {
-        owner.kill("SIGKILL");
-        browser.kill("SIGKILL");
-        await Promise.all([ownerExited, browserExited]);
-        if (oldReaperDir === undefined) delete process.env.TRUSTY_SQUIRE_REAPER_DIR;
-        else process.env.TRUSTY_SQUIRE_REAPER_DIR = oldReaperDir;
-        if (oldGrace === undefined) delete process.env.TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS;
-        else process.env.TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS = oldGrace;
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-  );
-
-  it("holds the profile lease for the complete session and releases it on finish", async () => {
-    const profileDir = "/tmp/trusty-squire-unit-live-profile-lease";
-    const started = await startProvisionSession({
-      serviceUrl: "https://app.example.com/one",
-      profileDir,
-    });
-    expect(() => acquireProfileOperationGuard(profileDir)).toThrow(
-      /another Trusty Squire session/i,
-    );
-    await finishProvisionSession(started.session_id);
-    const lease = acquireProfileOperationGuard(profileDir);
-    lease.release();
-    const replacement = await startProvisionSession({
-      serviceUrl: "https://app.example.com/two",
-      profileDir,
-    });
-    expect(replacement.session_id).not.toBe(started.session_id);
-    expect(h.startCalls).toBe(2);
-    expect(h.closeCalls).toBe(1);
-    await finishProvisionSession(replacement.session_id);
-  });
-
-  it("refuses a live profile holder before launching a browser", async () => {
-    const profileDir = "/tmp/trusty-squire-unit-live-profile-busy";
-    const lease = acquireProfileOperationGuard(profileDir);
-    try {
-      await expect(
-        startProvisionSession({ serviceUrl: "https://app.example.com/one", profileDir }),
-      ).rejects.toThrow(/another Trusty Squire session/i);
-      expect(h.started).toBe(0);
-    } finally {
-      lease.release();
-    }
-  });
-
-  it("closes the constructed browser and releases the profile when the launch rejects", async () => {
-    const profileDir = "/tmp/trusty-squire-unit-live-profile-launch-rejects";
-    h.startError = new Error("self-launched Chrome exposed no default browser context");
-    await expect(
-      startProvisionSession({ serviceUrl: "https://app.example.com/one", profileDir }),
-    ).rejects.toThrow(/no default browser context/);
-    expect(h.startCalls).toBe(1);
-    expect(h.closeCalls).toBe(1);
-    expect(h.connections).toEqual([false]);
-    expect(activeSessionCount()).toBe(0);
-
-    const started = await startProvisionSession({
-      serviceUrl: "https://app.example.com/one",
-      profileDir,
-    });
-    expect(h.startCalls).toBe(2);
-    expect(h.connections).toEqual([false, true]);
-    await finishProvisionSession(started.session_id);
-    const lease = acquireProfileOperationGuard(profileDir);
-    lease.release();
-  });
-
-  it("a harness session finishing does not forget a live operate_start browser's identity", async () => {
-    // The harness browser is caller-owned and never leased from the shared
-    // operator IdentityRuntime, so closing it must not reset that runtime's
-    // bookkeeping underneath a still-live operate_start session. Observable
-    // proxy: while session A's Chrome is live, a request for a different
-    // identity (another profile) is rejected instead of launching a second
-    // Chrome — and that stays true after an unrelated harness session closes.
-    const liveProfile = "/tmp/trusty-squire-unit-live-profile-harness-a";
-    const otherProfile = "/tmp/trusty-squire-unit-live-profile-harness-b";
-    const live = await startProvisionSession({
-      serviceUrl: "https://app.example.com/one",
-      profileDir: liveProfile,
-    });
-    try {
-      expect(h.startCalls).toBe(1);
-      const harness = await startHarnessProvisionSession({
-        browser: new BrowserController(),
-        serviceUrl: "https://shop.example.com/checkout",
-      });
-      await finishProvisionSession(harness.session_id);
-
-      await expect(
-        startProvisionSession({
-          serviceUrl: "https://app.example.com/two",
-          profileDir: otherProfile,
-        }),
-      ).rejects.toThrow(/incompatible with the live\/in-flight identity/);
-      // No second Chrome was launched for the live identity.
-      expect(h.startCalls).toBe(1);
-      expect(h.connections[0]).toBe(true);
-      expect(activeSessionCount()).toBe(1);
-      // The rejected start released its own profile lease.
-      acquireProfileOperationGuard(otherProfile).release();
-    } finally {
-      await finishProvisionSession(live.session_id);
-    }
-    expect(h.connections[0]).toBe(false);
-    acquireProfileOperationGuard(liveProfile).release();
-  });
-});
+// Physical profile election, launch failure and sibling custody are tested in
+// broker-discovery, broker-runtime and broker-daemon; session handlers never launch.
 describe("operate session — await_verification into_slot (T3 fix: OTP never round-trips)", () => {
   it("seals a found OTP into a slot (masked handle, no raw code) and type_secret enters it", async () => {
     const obs = await startProvisionSession({

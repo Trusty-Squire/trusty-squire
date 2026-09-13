@@ -1,32 +1,33 @@
 # Cross-process identity browser broker
 
-This increment moves physical Chrome custody into a separate broker process.
-Independent MCP servers retain opaque session capabilities and forward operator
-commands over authenticated local IPC. The broker owns one profile, one Chrome,
-and the existing operator handlers and payment state. The old
-`TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION` switch is not used by this path.
-
-The migration follows the engineering-reviewed identity-broker design in
-`/home/lunchbox/firstmate/data/ts-browser-architecture-audit/report.md` §§4–6 and
-its greenlight decision. Shared broker concurrency is enabled whenever a socket
-is configured. Mechanical fixture success is not Google-auth qualification;
-real enrolled-Google qualification remains a human-gated test run.
+The broker is the sole production path for MCP operator Chrome custody.
+Independent MCP servers retain opaque session capabilities and forward commands
+over authenticated local IPC. One broker owns one canonical profile, one Chrome,
+and the existing operator handlers and payment state. Admission is capped at three
+concurrent sessions. There is no direct-server browser launch or fallback.
 
 ## Configuration and operation
 
-Build with `pnpm --filter @trusty-squire/mcp build`. Setting a broker socket
-enables shared admission for participating MCP processes. Set the same
-`TRUSTY_SQUIRE_BROKER_SOCKET`, `TRUSTY_SQUIRE_PROFILE_DIR`, and pinned
-`TRUSTY_SQUIRE_ACCOUNT_ID` in each participating MCP process. Each MCP client
-lineage must also receive its own stable, random base64url
-`TRUSTY_SQUIRE_FORWARDER_CREDENTIAL` (at least 32 random bytes), retained only
-for that client's restart recovery and never shared with sibling clients. The
-socket parent must already exist, belong to the current user, and have mode 0700.
-Set `TRUSTY_SQUIRE_BROKER_SUPERVISED=1` for the durable service owner. In that
-mode a missing broker is an error instead of permission for an MCP front end to
-spawn a competitor, and zero clients never releases the profile lease. Without
-supervision, `TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS` defaults to five minutes and
-is clamped to a minimum of one minute.
+Build with `pnpm --filter @trusty-squire/mcp build`, then run
+`node apps/mcp/dist/bin.js server` with the enrolled profile and account.
+No broker-specific environment is required. Discovery derives a private local
+socket from the canonical profile path and user ID, independent of cwd and TMPDIR,
+and starts or attaches the elected broker. `TRUSTY_SQUIRE_BROKER_SOCKET` optionally
+overrides that endpoint; its parent must exist, belong to the current user, and
+have mode 0700. The default private parent is created automatically.
+
+Each MCP process generates an independent random forwarder credential. Launchers
+that need session recovery across process restarts can supply a stable random
+base64url `TRUSTY_SQUIRE_FORWARDER_CREDENTIAL` (at least 32 random bytes), retained
+only for that lineage and never shared with sibling clients. Generated credentials
+support connection recovery within that process; a fresh process without a retained
+credential cannot reclaim its predecessor's sessions.
+
+Set `TRUSTY_SQUIRE_BROKER_SUPERVISED=1` for a separately managed foreground service.
+In that mode a missing broker is an error and zero clients never releases the lease.
+Otherwise automatic startup applies and `TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS`
+defaults to five minutes, clamped to a minimum of one minute. Idle shutdown never
+changes the fact that the next operator call must attach or start a broker.
 The account must already be enrolled through `connect`; authentication reads its
 existing agent session token from session storage, never command-line token
 arguments. `connect` maintenance does not require an MCP lineage credential:
@@ -55,6 +56,14 @@ binding. Browser epoch changes invalidate earlier capabilities.
   when clients choose different socket paths or temporary directories. It stays
   held through maintenance. A separate physical-profile lease coordinates Chrome
   and the existing plain-login path. Profile enrollment pins the account on disk.
+- Default discovery probes broker responsiveness independently of a lineage handoff.
+  Two failed health handshakes permit retiring an unresponsive automatic broker
+  only after endpoint inode and process birth match its owner record. Retirement
+  is serialized by the launch lease and bounded through SIGTERM then SIGKILL.
+  The existing owner reaper closes Chrome. Dead endpoint reclamation waits for
+  that physical profile to become free, and preserves the dispatch journal.
+  A supervised broker remains its supervisor's responsibility. Neither recovery
+  path replays a mutation or bypasses journal reconciliation.
 - Each session owns a target family, capability generation, serialized command
   queue, and site reservations. The service URL reserves its site before page
   acquisition. Conflicting site custody queues until the existing owner releases it.
@@ -197,8 +206,9 @@ inventory. Parser behavior is covered in the required test tier.
 
 Evidence and limitations are recorded in [the evidence ledger](evidence/browser-broker/ledger.md).
 
-## Human setup for real-service qualification
+## Optional real-service acceptance
 
+Real Google-auth acceptance is optional validation, never a runtime or release gate.
 The shared evidence contract, including fresh-credential negative controls and
 native-transport distinctions, is in
 [operator-acceptance-runbook.md](operator-acceptance-runbook.md). This section

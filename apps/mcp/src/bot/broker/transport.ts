@@ -251,8 +251,15 @@ export class BrokerClient {
   ): Promise<BrokerClient> {
     const socket = createConnection(path);
     const client = new BrokerClient(socket);
+    let handshakeTimeout: BrokerRefusal | undefined;
     const deadline = setTimeout(
-      () => socket.destroy(new Error("Broker authentication timed out")),
+      () => {
+        handshakeTimeout = new BrokerRefusal(
+          "broker_handshake_timeout",
+          "Broker hello handshake timed out",
+        );
+        socket.destroy(handshakeTimeout);
+      },
       lineageCredential === undefined ? 5_000 : FORWARDER_HANDOFF_TIMEOUT_MS + 5_000,
     );
     try {
@@ -269,7 +276,9 @@ export class BrokerClient {
       return client;
     } catch (error) {
       socket.destroy();
-      throw error;
+      // Socket close rejects pending calls as broker_lost. During hello only,
+      // preserve the deadline cause so discovery can retire a wedged owner.
+      throw handshakeTimeout ?? error;
     } finally {
       clearTimeout(deadline);
     }

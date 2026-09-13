@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { BrokerRefusal } from "./scheduler.js";
 
 const CREDENTIAL = /^[A-Za-z0-9_-]{43,128}$/;
@@ -14,11 +14,9 @@ export function forwarderId(credential: string): string {
 
 export function requireLineageCredential(): string {
   const credential = process.env.TRUSTY_SQUIRE_FORWARDER_CREDENTIAL;
-  if (credential === undefined)
-    throw new BrokerRefusal(
-      "forwarder_credential_required",
-      "Set a stable forwarder lineage credential before using the broker",
-    );
+  // A new MCP process gets its own opaque lineage without launcher setup.
+  // Launchers may retain an explicit credential to recover across stdio restarts.
+  if (credential === undefined) return randomBytes(32).toString("base64url");
   forwarderId(credential);
   return credential;
 }

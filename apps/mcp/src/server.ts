@@ -1,10 +1,5 @@
-import { createHash, randomUUID } from "node:crypto";
-import { join } from "node:path";
-import { homedir } from "node:os";
-import type { CaptureEvidence } from "./bot/credential-capture.js";
-import type { OperationReceipt } from "./bot/operation-receipt.js";
-import { brokerCommandMutates } from "./bot/broker/operator.js";
-import { DispatchJournal } from "./bot/broker/dispatch-journal.js";
+import { resolveBrokerSocket } from "./bot/broker/discovery.js";
+import { randomUUID } from "node:crypto";
 import { BrokerRefusal } from "./bot/broker/scheduler.js";
 import {
   ForwardedResultError,
@@ -28,20 +23,12 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { ApiClient } from "./api-client.js";
-import { setSelfManagedChromeTerminationSignalExitEnabled } from "./bot/browser.js";
 import {
   awaitOperatorSettlement,
   composeOperatorSignals,
   withOperatorRequestContext,
 } from "./bot/request-cancellation.js";
-import { cancelActiveLoginBrowsers } from "./bot/google-login.js";
-import { startOwnerProcessReaper } from "./bot/owner-process-reaper.js";
-import {
-  activeSessionCount,
-  closeAllProvisionSessions,
-  maskOperatorSessionOutput,
-  withProvisionSessionCall,
-} from "./bot/provision-session.js";
+import { maskOperatorSessionOutput } from "./bot/provision-session.js";
 import {
   heartbeatIntervalMs,
   idleCheckIntervalMs,
@@ -225,8 +212,10 @@ export async function buildServer(
   callLifecycle?: ServerCallLifecycle,
   loadPublishedAccountSession?: AccountSessionLoader,
   sessionGuard?: SessionGuard,
-  operatorForwarder?: OperatorForwarder,
-  directPersistence?: { journal: DispatchJournal; lineage: () => string },
+  operatorForwarder: Pick<OperatorForwarder, "invoke"> = new OperatorForwarder(
+    resolveBrokerSocket(),
+    sessionGuard ?? createSessionGuard(),
+  ),
 ): Promise<Server> {
   let activeApi = api;
   const tools = buildToolRegistry();
@@ -321,46 +310,7 @@ export async function buildServer(
     try {
       const callApi = activeApi;
       callApi.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
-      const sessionId =
-        typeof parsed.data.session_id === "string" ? parsed.data.session_id : undefined;
       const operationId = randomUUID();
-      const directLineage = directPersistence?.lineage();
-      if (directPersistence && directLineage && tool.name === "operate_finish" && sessionId) {
-        const receipt = await directPersistence.journal.terminalReceipt(directLineage, sessionId);
-        if (receipt) return toolResultContent({ ...receipt, cleanup: "already_closed" });
-      }
-      const assertDirectCapture = async (checkpoint = false): Promise<void> => {
-        if (
-          directPersistence &&
-          directLineage &&
-          sessionId &&
-          (tool.name !== "operate_finish" || parsed.data.outcome === "credentials") &&
-          brokerCommandMutates(tool.name, parsed.data)
-        ) {
-          const pending = await directPersistence.journal.unresolvedCapture(
-            directLineage,
-            sessionId,
-          );
-          if (pending === undefined) return;
-          const capture = parsed.data.capture as { write_id?: string } | undefined;
-          if (checkpoint && pending.write_id === operationId) return;
-          if (tool.name === "operate_extract" && capture?.write_id === pending.write_id) return;
-          // An unresolved capture must not wedge the session: ordinary
-          // click/type/observe actions proceed while the write_id retry stays
-          // available. Only a NEW vaulting attempt (a repeated key creation)
-          // and a credentials finish stay fenced.
-          if (
-            capture === undefined &&
-            !(tool.name === "operate_extract" && parsed.data.store !== undefined) &&
-            tool.name !== "operate_finish"
-          )
-            return;
-          throw new BrokerRefusal(
-            "outcome_unknown",
-            "Capture storage is unresolved; use operate_extract with the original capture.write_id. Do not repeat creation.",
-          );
-        }
-      };
       const invokeHandler = async () =>
         await withOperatorRequestContext(
           composed.signal,
@@ -375,29 +325,10 @@ export async function buildServer(
                 });
               },
             }),
-          async () => await assertDirectCapture(true),
-          {
-            operationId,
-            ...(directPersistence && directLineage
-              ? {
-                  onTerminal: async (receipt: OperationReceipt) =>
-                    await directPersistence.journal.recordTerminalReceipt(directLineage, receipt),
-                  onCapture: async (capture: CaptureEvidence, recovery: boolean) => {
-                    if (!sessionId) throw new Error("capture requires a session");
-                    await directPersistence.journal.recordCapture(
-                      directLineage,
-                      sessionId,
-                      operationId,
-                      capture,
-                      recovery,
-                    );
-                  },
-                }
-              : {}),
-          },
+          undefined,
+          { operationId },
         );
       const invoke = async () => {
-        await assertDirectCapture();
         // Some embedders provide a narrow ApiClient test double. Production
         // clients always install the async-local audit context.
         const withAuditContext = callApi.withAuditContext?.bind(callApi);
@@ -414,9 +345,7 @@ export async function buildServer(
       // Tool handlers await independently.  A finish must therefore close the
       // admission gate and drain calls that already entered before it snapshots
       // eligible state and closes the browser. `operate_finish*` owns that transition.
-      const forwarded =
-        operatorForwarder !== undefined &&
-        (tool.name.startsWith("operate_") || tool.name === "inject_card");
+      const forwarded = tool.name.startsWith("operate_") || tool.name === "inject_card";
       const work = forwarded
         ? operatorForwarder.invoke(
             tool.name,
@@ -425,9 +354,7 @@ export async function buildServer(
             brokerRecoveryRequested((req.params as { _meta?: unknown })._meta),
             composed.signal,
           )
-        : sessionId !== undefined && !/^operate_finish(?:_task)?$/.test(tool.name)
-          ? withProvisionSessionCall(sessionId, async () => await invoke(), composed.signal)
-          : invoke();
+        : invoke();
       lifecycleHeldByWork = true;
       const trackedWork = work.finally(() => callLifecycle?.finished());
       const result = await awaitOperatorSettlement(
@@ -450,7 +377,9 @@ export async function buildServer(
         typeof parsed.data.session_id === "string"
           ? { session_id: parsed.data.session_id }
           : undefined;
+      const brokerUnavailable = err instanceof BrokerRefusal && err.code === "broker_unavailable";
       const serverUnavailable =
+        brokerUnavailable ||
         /unknown provision session|requires one active operate_start browser session/i.test(
           message,
         );
@@ -470,7 +399,7 @@ export async function buildServer(
       const retryableRead = tool.name === "operate_observe" || tool.name === "operate_screenshot";
       return serverUnavailable
         ? errorContent(
-            retryableRead ? "server_unavailable" : "unknown_session",
+            brokerUnavailable || retryableRead ? "server_unavailable" : "unknown_session",
             `${message}. ${retryableRead ? "Retry once." : "Do not replay mutations."} Never kill or restart the shared operator process; it serves every lane/home. Recover a same-lineage receipt if available; absence of a live session is not closure proof.`,
             {
               ...loginSession,
@@ -602,11 +531,6 @@ export function installServerProcessGuards(): void {
 // owns the process-level error handling.
 export async function runServer(): Promise<void> {
   installServerProcessGuards();
-  setSelfManagedChromeTerminationSignalExitEnabled(false);
-  // The detached Linux watchdog survives SIGKILL/parent death. It asynchronously
-  // sweeps strict process-only manifests, then tracks exact local browser and
-  // session-helper identities for launches owned by this server.
-  startOwnerProcessReaper();
   // Startup breadcrumb on stderr (which lands in the host agent's MCP
   // log). A silent no-op was the worst part of the entrypoint-guard
   // bug — this line makes "did the server actually start?" answerable
@@ -615,7 +539,6 @@ export async function runServer(): Promise<void> {
 
   // Owns this server's answer to "which account am I serving?".
   const sessionGuard = createSessionGuard();
-  let directLineage = "";
   const loadPublishedAccountSession = async (): Promise<ApiClient | null> => {
     try {
       const session = await sessionGuard.bind();
@@ -624,19 +547,6 @@ export async function runServer(): Promise<void> {
       // machine_token (pre-collapse install) yields api=null, and every
       // tool call returns the re-install instruction.
       if (session === null || session.agent_session_token === undefined) return null;
-      directLineage = createHash("sha256")
-        .update(
-          JSON.stringify([
-            session.account_id,
-            session.api_base_url,
-            session.agent_session_token,
-            serverLauncherLineage() || [
-              process.cwd(),
-              process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "unknown",
-            ],
-          ]),
-        )
-        .digest("hex");
       return new ApiClient({
         apiBaseUrl: session.api_base_url,
         registryBaseUrl: DEFAULT_REGISTRY_BASE,
@@ -663,25 +573,13 @@ export async function runServer(): Promise<void> {
   }
 
   const callAdmission = createServerCallAdmission();
-  const brokerPath = process.env.TRUSTY_SQUIRE_BROKER_SOCKET;
-  const forwarder =
-    brokerPath === undefined ? undefined : new OperatorForwarder(brokerPath, sessionGuard);
+  const forwarder = new OperatorForwarder(resolveBrokerSocket(), sessionGuard);
   const server = await buildServer(
     api,
     callAdmission,
     loadPublishedAccountSession,
     sessionGuard,
     forwarder,
-    {
-      journal: new DispatchJournal(
-        join(
-          process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"),
-          "trusty-squire",
-          "operator-receipts.jsonl",
-        ),
-      ),
-      lineage: () => directLineage,
-    },
   );
   const transport = new StdioServerTransport();
   // Publishes what a later launch of this identity needs to tell "still
@@ -722,7 +620,7 @@ export async function runServer(): Promise<void> {
     const shutdownDeadlineAt = Date.now() + deadlineMs;
     instance?.markDraining(shutdownDeadlineAt, {
       lastActivityAt,
-      activeSessions: forwarder?.sessionCount() ?? activeSessionCount(),
+      activeSessions: forwarder.sessionCount(),
       inFlightCalls: callAdmission.inFlightCount(),
     });
 
@@ -736,17 +634,10 @@ export async function runServer(): Promise<void> {
       if (heartbeatTimer !== undefined) clearInterval(heartbeatTimer);
       if (staleInstanceSweepTimer !== undefined) clearInterval(staleInstanceSweepTimer);
       try {
-        // The OAuth-bootstrap login Chrome (google-login) is tracked apart
-        // from provision sessions — drain it too so it cannot outlive the
-        // server. Its own signal handlers stand down in server mode (see
-        // registerHeadlessRigCleanup), leaving this coordinator as the one
-        // exit owner.
         const outcome = await runBoundedServerCleanup(
           admittedCallsDrained,
           async () => {
-            await cancelActiveLoginBrowsers();
-            await forwarder?.close();
-            await closeAllProvisionSessions();
+            await forwarder.close();
             await server.close();
           },
           deadlineMs,
@@ -796,8 +687,8 @@ export async function runServer(): Promise<void> {
 
   idleTimer = setInterval(() => {
     if (shutdown !== undefined) return;
-    if (forwarder?.connected()) return;
-    const sessionCount = activeSessionCount();
+    if (forwarder.connected()) return;
+    const sessionCount = forwarder.sessionCount();
     if (
       !shouldIdleExit(
         Date.now(),
@@ -821,8 +712,8 @@ export async function runServer(): Promise<void> {
     heartbeatTimer = setInterval(() => {
       if (shutdown !== undefined) return;
       instance.heartbeat({
-        lastActivityAt: forwarder?.connected() ? Date.now() : lastActivityAt,
-        activeSessions: forwarder?.sessionCount() ?? activeSessionCount(),
+        lastActivityAt: forwarder.connected() ? Date.now() : lastActivityAt,
+        activeSessions: forwarder.sessionCount(),
         inFlightCalls: callAdmission.inFlightCount(),
       });
     }, heartbeatIntervalMs());

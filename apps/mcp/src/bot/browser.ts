@@ -1714,11 +1714,7 @@ export class BrowserController {
   }
   private readonly processOwner: BrowserProcessOwner;
   private readonly pageDriver: PageDriver;
-  // Experimental (TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION only — see
-  // session/lifecycle.ts). True for a controller constructed by
-  // attachSatellite(): it shares ITS PEER's BrowserProcessOwner (same Chrome
-  // process/context) rather than owning one, so start()/close() must never
-  // touch the shared process — only this controller's own page(s).
+  // Session controllers share the broker's process owner and close only their pages.
   private readonly isSatelliteAttachment: boolean;
 
   constructor(opts: BrowserControllerOptions = {}, sharedFrom?: BrowserController) {
@@ -1731,21 +1727,6 @@ export class BrowserController {
             this.initializePages(context, hardened, remoteMode),
           );
     this.isSatelliteAttachment = sharedFrom !== undefined;
-  }
-
-  // Experimental (TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION only). A SECOND
-  // controller sharing `primary`'s already-live BrowserProcessOwner — same
-  // Chrome process and BrowserContext — but with its OWN independent
-  // PageDriver/OwnedPages, so it owns a tab family neither the primary nor
-  // any other satellite can adopt (owned-pages.ts already refuses to
-  // register a page under a second OwnedPages instance). close() on the
-  // result only ever tears down its own page — never the shared process; see
-  // session/lifecycle.ts for the shared-teardown ordering that requires.
-  static async attachSatellite(
-    primary: BrowserController,
-    opts: BrowserControllerOptions = {},
-  ): Promise<BrowserController> {
-    return await BrowserController.attachSessionPage(primary, opts);
   }
 
   /** Broker page port: shares only the process owner, with fresh page state. */
@@ -1768,7 +1749,7 @@ export class BrowserController {
     const ctx = this.processOwner.context;
     if (ctx === null) {
       throw new Error(
-        "BrowserController.attachSatellite: shared browser has no live context to attach a page to",
+        "BrowserController.attachSessionPage: shared browser has no live context to attach a page to",
       );
     }
     const page = await ctx.newPage();
@@ -2088,7 +2069,7 @@ export class BrowserController {
     );
   }
   async start(): Promise<void> {
-    // A satellite's page is already attached by attachSatellite() — there is
+    // A satellite's page is already attached by attachSessionPage() — there is
     // no process for it to start.
     if (this.isSatelliteAttachment) return;
     return await this.processOwner.start();

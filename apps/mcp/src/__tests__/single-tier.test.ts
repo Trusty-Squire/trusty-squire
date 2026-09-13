@@ -1,3 +1,4 @@
+import { operatorHandlerForwarder } from "./operator-handler-forwarder.js";
 // Locks the single-tier invariant: every install is account-bound.
 // (Previously this file enforced the Tier-0-by-default invariant; that
 // product position was removed in favor of one consistent auth path.)
@@ -81,7 +82,13 @@ describe("MCP client identity", () => {
       setRequestingAgent,
       listPaymentCards: vi.fn().mockResolvedValue([]),
     } as unknown as ApiClient;
-    const server = await buildServer(api);
+    const server = await buildServer(
+      api,
+      undefined,
+      undefined,
+      undefined,
+      operatorHandlerForwarder(api),
+    );
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
     const client = new Client({ name: "Hermes", version: "1.0.0" });
@@ -99,7 +106,13 @@ describe("MCP client identity", () => {
 describe("MCP tool argument validation", () => {
   it("rejects missing card-injection arguments", async () => {
     const api = { setRequestingAgent: vi.fn() } as unknown as ApiClient;
-    const server = await buildServer(api);
+    const server = await buildServer(
+      api,
+      undefined,
+      undefined,
+      undefined,
+      operatorHandlerForwarder(api),
+    );
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
     const client = new Client({ name: "validation-test", version: "1.0.0" });
@@ -118,7 +131,13 @@ describe("MCP tool argument validation", () => {
 
   it("returns repair objects for malformed action and card-target grammar", async () => {
     const api = { setRequestingAgent: vi.fn() } as unknown as ApiClient;
-    const server = await buildServer(api);
+    const server = await buildServer(
+      api,
+      undefined,
+      undefined,
+      undefined,
+      operatorHandlerForwarder(api),
+    );
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
     const client = new Client({ name: "validation-test", version: "1.0.0" });
