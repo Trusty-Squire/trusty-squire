@@ -108,16 +108,32 @@ export async function checkDefaultBrokerAcceptance(
     });
     expect(result.isError, JSON.stringify(result)).not.toBe(true);
     expect(result.structuredContent).toMatchObject({ needs_user: { wall: "google_session" } });
+    process.stdout.write(
+      "default-broker MCP operate_start:" + " " + JSON.stringify(result.structuredContent) + "\n",
+    );
     return client;
   };
   try {
     await Promise.all([start(), start(), start()]);
     owner = await waitFor(readOwner, "elected broker");
     expect(processBirthIdentityState(owner)).toBe("matching");
-    expect(await chromeRoots()).toBe(1);
+    const initialChromeRoots = await chromeRoots();
+    expect(initialChromeRoots).toBe(1);
+    process.stdout.write(
+      "default-broker concurrent servers:" +
+        " " +
+        JSON.stringify({ servers: clients.length, owner, chromeRoots: initialChromeRoots }) +
+        "\n",
+    );
     await Promise.all(clients.splice(0).map(async (client) => await client.close()));
     expect(await readOwner()).toEqual(owner);
     expect(processBirthIdentityState(owner)).toBe("matching");
+    process.stdout.write(
+      "default-broker after all MCP clients disconnect:" +
+        " " +
+        JSON.stringify({ owner: await readOwner(), state: processBirthIdentityState(owner) }) +
+        "\n",
+    );
     process.kill(owner.pid, "SIGKILL");
     await waitFor(
       async () => (processBirthIdentityState(owner!) === "stale" ? true : undefined),
@@ -130,7 +146,14 @@ export async function checkDefaultBrokerAcceptance(
     }, "replacement broker");
     expect(replacement.pid).not.toBe(owner.pid);
     owner = replacement;
-    expect(await chromeRoots()).toBe(1);
+    const replacementChromeRoots = await chromeRoots();
+    expect(replacementChromeRoots).toBe(1);
+    process.stdout.write(
+      "default-broker after SIGKILL replacement:" +
+        " " +
+        JSON.stringify({ owner, chromeRoots: replacementChromeRoots }) +
+        "\n",
+    );
     // A live PID with a stopped event loop must not wedge future clients.
     // Two health probes fail before the birth-proven owner is replaced.
     process.kill(owner.pid, "SIGSTOP");
@@ -141,7 +164,14 @@ export async function checkDefaultBrokerAcceptance(
     }, "unresponsive broker replacement");
     expect(recovered.pid).not.toBe(owner.pid);
     owner = recovered;
-    expect(await chromeRoots()).toBe(1);
+    const recoveredChromeRoots = await chromeRoots();
+    expect(recoveredChromeRoots).toBe(1);
+    process.stdout.write(
+      "default-broker after SIGSTOP replacement:" +
+        " " +
+        JSON.stringify({ owner, chromeRoots: recoveredChromeRoots }) +
+        "\n",
+    );
   } finally {
     await Promise.all(clients.map(async (client) => await client.close()));
     // Also find an elected child if a failed start returned before owner capture.

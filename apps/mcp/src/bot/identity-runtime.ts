@@ -1,12 +1,5 @@
-// Step 3 of the multi-session browser broker migration: a Chrome lifetime
-// that outlives any single session's reference to it. Production still admits
-// exactly one session at a time (the exclusive profile lease in
-// session/lifecycle.ts is unchanged) — this only separates "who owns Chrome's
-// process lifetime" from "who is currently borrowing its tabs" so a later PR
-// can attach a second session without re-deriving that boundary.
-//
-// Generic over the launched handle (BrowserController in production, a fake
-// in tests) so this file never has to construct a real browser to be tested.
+// Runtime foundation for broker custody; see docs/browser-process-page-boundary.md.
+// Generic over the launched handle so tests need not construct a real browser.
 
 export class IncompatibleIdentityRuntimeSettingsError extends Error {
   constructor(message: string) {
@@ -29,7 +22,7 @@ export interface AcquiredIdentity<THandle> {
   // than a fresh launch.
   reused: boolean;
   // Releases THIS caller's claim on the shared Chrome's tab family. Never
-  // closes Chrome — only forgetAfterShutdown() (below) does that. Idempotent.
+  // closes Chrome; the owner closes it before forgetAfterShutdown(). Idempotent.
   releaseTabs: () => void;
 }
 
@@ -69,12 +62,6 @@ export class IdentityRuntime<THandle extends IdentityRuntimeCloseable, TSettings
     return this.handle !== null;
   }
 
-  // True while some caller's launch() is in flight (single-flighted — see
-  // acquire()). Lets a caller that lost a synchronous race for the OS-level
-  // resource the launch itself protects (see session/lifecycle.ts's
-  // experimental-multisession fallback) tell "this identity is being (or
-  // already was) launched IN THIS PROCESS" from "busy for an unrelated
-  // reason" before deciding to join it.
   isLaunching(): boolean {
     return this.launchPromise !== null;
   }
@@ -168,10 +155,9 @@ export class IdentityRuntime<THandle extends IdentityRuntimeCloseable, TSettings
 
   /**
    * Forgets the current identity so the next acquire() launches fresh. Does
-   * NOT close Chrome — the caller closes the handle itself (its close()
-   * semantics, timeouts, and force-close fallbacks stay exactly where they
-   * are today) and calls this afterward, in a `finally`, regardless of
-   * outcome. Safe to call when nothing is live.
+   * NOT close Chrome — the owner must prove closure before calling this;
+   * forgetting an unproven owner would permit a competing launch.
+   * Safe to call when nothing is live.
    */
   forgetAfterShutdown(): void {
     this.handle = null;

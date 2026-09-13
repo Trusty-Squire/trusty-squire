@@ -7,7 +7,7 @@ import { afterEach, beforeEach, expect, it, vi, type MockInstance } from "vitest
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { z, type Tool } from "../../tools/index.js";
+import { z, type Tool, type ToolContext } from "../../tools/index.js";
 import type { ApiClient } from "../../api-client.js";
 import type { SessionGuard } from "../../session-guard.js";
 
@@ -1703,11 +1703,7 @@ it("delivers broker approval notifications to the originating MCP client before 
         description: "",
         inputSchema: z.object({ session_id: z.string() }),
         jsonInputSchema: {},
-        handler: async (
-          _args: unknown,
-          _api: unknown,
-          context?: import("../../tools/index.js").ToolContext,
-        ) => {
+        handler: async (_args: unknown, _api: unknown, context?: ToolContext) => {
           await context!.notifyUser!("Approve payment on your phone", {
             approval_url: "https://approval.test/payment",
           });
@@ -1798,6 +1794,16 @@ it("delivers broker approval notifications to the originating MCP client before 
       ]);
     expect(completed).toBe(false);
     expect(messages[1]).toEqual([]);
+    process.stdout.write(
+      "broker approval delivery before completion:" +
+        " " +
+        JSON.stringify({
+          originatingClient: messages[0],
+          siblingClient: messages[1],
+          paymentCompleted: completed,
+        }) +
+        "\n",
+    );
     release();
     const result = await payment;
     expect(result.isError).not.toBe(true);

@@ -498,8 +498,8 @@ self-managed and Playwright-launched local operator browsers. Every local launch
 must receive the private operator marker at the shared launch boundary; never
 register external/remote CDP browsers. The manifest records exact PID/group,
 marker, process birth identity, and `user_data_dir`; it owns process signaling,
-not profile or snapshot deletion. The profile pool and normal session teardown
-remain the only directory-cleanup owners. Process teardown uses bounded
+not profile or snapshot deletion. Physical profile custody follows
+[`docs/browser-broker.md`](docs/browser-broker.md). Process teardown uses bounded
 SIGTERM→SIGKILL.
 
 Idle cleanup uses the provision-session call lease as its action boundary. Any new

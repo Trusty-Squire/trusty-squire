@@ -561,10 +561,10 @@ side by side). `Session` is still re-exported from `provision-session.ts`.
 
 The **lifecycle registry transaction** now lives in
 `apps/mcp/src/bot/session/lifecycle.ts`: the session map + refused-start set,
-the real-profile lease and browser acquisition, the generic session call lease
+broker page acquisition and release, the generic session call lease
 and its drain, the watchdog, the bounded close, the single terminal-teardown
 owner, artifact cleanup, and start/finish/shutdown. Its ORDER is the contract —
-drain calls → run finish prep → close the browser → clear artifacts → delete the
+drain calls → run finish prep → close the owned tab family → clear artifacts → delete the
 EXACT session object from the map — so change it as one unit, never step by step.
 Perception has NOT moved: the two start paths
 reach `observeSession` through the `SessionStartPorts` the facade binds, which is

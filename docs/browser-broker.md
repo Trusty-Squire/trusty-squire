@@ -16,6 +16,13 @@ and starts or attaches the elected broker. `TRUSTY_SQUIRE_BROKER_SOCKET` optiona
 overrides that endpoint; its parent must exist, belong to the current user, and
 have mode 0700. The default private parent is created automatically.
 
+`operate_start` accepts `proxy` as an HTTP or HTTPS URL (optional credentials)
+or an unauthenticated SOCKS5 URL. It configures the shared browser at launch,
+not an individual tab family. Concurrent sessions must request compatible proxy
+settings; incompatible settings are refused rather than applied to the live
+browser. Omitting it requests direct egress. The value is sensitive and is not
+returned in session status, action traces, or saved recipes.
+
 Each operator process generates a fresh random forwarder credential, held only in
 memory. There is no credential persistence or slot reuse. By default, a restarted
 operator process starts a new lineage and does not recover a predecessor's
@@ -85,7 +92,10 @@ binding. Browser epoch changes invalidate earlier capabilities.
 - OAuth and live identity probes share a broker-wide lane. Clipboard-sensitive
   extract, credential fill, and payment commands use an interactive lane.
   Per-session approval, charge dispatch fences, and post-submit outcome custody
-  continue in the existing handlers. Rendered observations are not masked.
+  continue in the existing handlers. Approval notifications travel over the
+  originating request's IPC connection to its MCP client before the tool completes;
+  clients without notification support receive the approval link in the result.
+  Rendered observations are not masked.
 - Live sockets are mutation leases, not browser-custody leases. Disconnect
   immediately fences queued commands and aborts the old connection lease, but
   retains that lineage's actors for a five-minute authenticated reconnect grace.
