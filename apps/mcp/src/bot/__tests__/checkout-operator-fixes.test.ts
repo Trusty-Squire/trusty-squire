@@ -320,11 +320,13 @@ describe("Defect C — PayPal guard keys off the actual card-field frame", () =>
     },
     {
       name: "accepts Braintree hosted card fields identified by frame name",
-      frames: [cardFrame(
-        "https://assets.braintreegateway.com/card-fields",
-        '<input id="opaque-input">',
-        "braintree-hosted-field-number",
-      )],
+      frames: [
+        cardFrame(
+          "https://assets.braintreegateway.com/card-fields",
+          '<input id="opaque-input">',
+          "braintree-hosted-field-number",
+        ),
+      ],
       refused: false,
     },
     {
@@ -342,25 +344,34 @@ describe("Defect C — PayPal guard keys off the actual card-field frame", () =>
       frames: [],
       refused: false,
     },
-  ])("$name", async ({ frames, refused }) => {
-    const engine = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
-    try {
-      const page = await engine.newPage();
-      await page.route("**/*", async (route) => {
-        const frame = frames.find((candidate) => candidate.url === route.request().url());
-        await route.fulfill({
-          contentType: "text/html",
-          body: frame?.body ?? frames.map((candidate) =>
-            `<iframe name="${candidate.name}" src="${candidate.url}"></iframe>`,
-          ).join(""),
+  ])(
+    "$name",
+    async ({ frames, refused }) => {
+      const engine = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
+      try {
+        const page = await engine.newPage();
+        await page.route("**/*", async (route) => {
+          const frame = frames.find((candidate) => candidate.url === route.request().url());
+          await route.fulfill({
+            contentType: "text/html",
+            body:
+              frame?.body ??
+              frames
+                .map(
+                  (candidate) =>
+                    `<iframe name="${candidate.name}" src="${candidate.url}"></iframe>`,
+                )
+                .join(""),
+          });
         });
-      });
-      await page.goto("https://acme.myshopify.com/checkout");
-      const browser = new BrowserController({ humanize: false });
-      Object.defineProperty(browser, "page", { value: page });
-      await expect(browser.isPayPalHostedCheckout()).resolves.toBe(refused);
-    } finally {
-      await engine.close();
-    }
-  }, 20_000);
+        await page.goto("https://acme.myshopify.com/checkout");
+        const browser = new BrowserController({ humanize: false });
+        Object.defineProperty(browser, "page", { value: page });
+        await expect(browser.isPayPalHostedCheckout()).resolves.toBe(refused);
+      } finally {
+        await engine.close();
+      }
+    },
+    20_000,
+  );
 });

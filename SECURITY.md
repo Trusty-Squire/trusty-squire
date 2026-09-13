@@ -171,11 +171,18 @@ destruction) — it does NOT mask anything: observations and screenshots show th
 filled card like any other page content. Session state retains only approval and
 mandate metadata, the checkout binding, card reference, and last four digits.
 
-Unsupported-wallet detection follows the frame containing the actual visible PAN
-field. PayPal and Braintree hosted card fields fail closed, while an unrelated PayPal
-express-button frame does not disqualify a fillable merchant or recognized Shopify
-PCI card-field frame. When a checkout mounts multiple card forms, the operator fills
-one complete visible and enabled group containing PAN, name, expiry, and CVV. When
+Unsupported-wallet detection first uses the bounded card-readiness wait, including
+Japanese field normalization and hosted-field identification. If a visible, enabled
+PAN field is found, its frame determines the result: PayPal wallet hosts remain
+refused. Otherwise, a PayPal-hosted frame or a visible PayPal, Apple Pay, or Google
+Pay button triggers the wallet handoff. The response retains `paypal_checkout` and
+`paypal_hosted_fields_unfillable` for compatibility, including for other wallets.
+Supported card-entry capabilities are documented in [README.md](README.md#one-prompt).
+Braintree field identity comes from the provider frame name; autofill and focus
+helper controls are excluded from card candidates. Hosted fields reuse the existing
+cross-frame fill, approval recheck, submit, and document-bound cleanup path.
+When a checkout mounts multiple card forms, the operator fills
+one complete visible and enabled group containing PAN, expiry, and CVV. When
 multiple groups are complete, it uses the PAN's rendered center-point hit-test and
 selects only the unique topmost, non-occluded group; otherwise it fails with
 `payment_card_form_ambiguous`. Card filling stays inside that selected group. In the

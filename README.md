@@ -173,11 +173,14 @@ amount. If a payment gets stuck or a card is declined, recover with `operate_fin
 and start a fresh session; `operate_pay` does not support refilling a different card
 mid-session.
 
-Before an initial single-page or `fill_card` call, Trusty Squire follows the actual
-visible card-number field and hands the checkout back when that field is hosted by
-PayPal or Braintree. A separate PayPal express button does not block fillable merchant
-or Shopify PCI card fields. Trusty Squire does not sign in to PayPal or use vaulted
-PayPal credentials. After a single-page submit that has not yet reached a confirmed
+`operate_pay` supports cross-origin hosted card entry, including Braintree Hosted
+Fields and Stripe Elements, through the existing saved-card approval and fill flow.
+Wallet-only PayPal, Apple Pay, and Google Pay surfaces require you to select a
+credit-card form or complete the wallet payment yourself. A separate express button
+does not block supported card entry. Trusty Squire does not sign in to PayPal or use
+vaulted PayPal credentials. See the [payment contract](SECURITY.md#client-encrypted-card-data)
+for wallet detection and card-field selection details.
+After a single-page submit that has not yet reached a confirmed
 order, Trusty Squire waits 180 seconds by default for native completion, including
 out-of-band bank-app approval. A linked Telegram chat receives one best-effort
 challenge notification on first detection, whether during submission, the initial
