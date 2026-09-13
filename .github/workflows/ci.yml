@@ -322,6 +322,14 @@ jobs:
           node-version: 20.11.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Chromium is needed ONLY by the frozen-corpus replay gate below: the
+      # replay harness launches a headless browser against frozen HARs (no
+      # live network, deterministic). The real-browser test tier does NOT run
+      # on PRs (see vitest.tiers.ts REAL_BROWSER_FILES) and needs no browser
+      # install here.
+      - name: Install Chromium for the frozen-corpus replay gate
+        if: needs.secret-scan.outputs.replay_eval == 'true'
+        run: pnpm --filter '@trusty-squire/mcp' exec playwright install --with-deps chromium
       # Registry's Prisma client must be generated before its tests. NOT vault
       # (apps/api owns an isolated client; vault's src/tests don't import one)
       # and NOT api (its tests use the in-memory store fallback).
