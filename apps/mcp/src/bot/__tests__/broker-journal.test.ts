@@ -470,3 +470,29 @@ it("retains the capture identity across durable dispatch transitions and restart
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it.each(["observed_result", "delivery_acknowledged", "settled"] as const)(
+  "clears custody for not-dispatched outcomes at %s without clearing uncertain peers",
+  async (phase) => {
+    const root = await mkdtemp(join(tmpdir(), "ts-not-dispatched-"));
+    try {
+      const journal = new DispatchJournal(join(root, "dispatch.jsonl"));
+      await journal.record("session", "start", phase, {
+        start: true,
+        forwarderId: "lineage",
+        outcome: { status: "not_dispatched", error: "pre_dispatch_failure" },
+      });
+      expect(await journal.hasOutstanding(undefined, "lineage")).toBe(false);
+      expect(await journal.hasPendingStartDelivery("lineage")).toBe(false);
+      await journal.assertReconciled();
+      await journal.record("session", "uncertain", "unknown", {
+        forwarderId: "lineage",
+        outcome: { status: "unknown", reason: "execution_error" },
+      });
+      expect(await journal.hasOutstanding(undefined, "lineage")).toBe(true);
+      await expect(journal.assertReconciled()).rejects.toThrow("lost mutation custody");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);

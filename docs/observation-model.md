@@ -69,6 +69,22 @@ fail-closed and mints a fresh ref:
 4. its frame namespace and document loader match the retired anchor's; and
 5. the combined match is unique among both retired anchors and live controls.
 
+**SPA layout replacement fallback.** If structural adoption has no match, a
+named control may adopt by exact material intent and exact accessible name (or
+its authored label/local text) within the same frame namespace and document
+loader. This fallback also requires exactly one retired and one live match;
+it never selects by ordinal or fuzzy label similarity. It covers hydration
+replacing a control's surrounding layout. Changed destinations, roles, names,
+form intent, or documents still refuse adoption. `operator-click-fallback.test.ts`
+exercises click, type and select through real browser re-renders.
+
+Observation waits for bounded network/load and DOM quiet, then retries transient
+frame-binding omissions. Persistent binding failures and `dom_settle_timeout`
+remain explicit in `capture_omissions`; continuous churn never blocks indefinitely.
+A failed ref resolution before dispatch carries nominal `not_dispatched` evidence
+to the broker. Such recorded outcomes hold no session or lineage custody, even
+before acknowledgement; unknown post-dispatch outcomes retain their fence.
+
 Form submitters and checkbox label proxies record durable owner location and
 submission semantics in their intent. Physical owner IDs are captured separately:
 a persisting node whose owner changes retires its ref, while an unchanged control

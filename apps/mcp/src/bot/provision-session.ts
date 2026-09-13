@@ -4402,7 +4402,7 @@ async function observeQueryOwned(
   // A cursorless query/role is always a fresh observation. Capture action rows
   // and semantic page hints once, together, before filtering.
   session.generation += 1;
-  const capture = await session.browser.extractBrowserUseObservation(sourcePage);
+  const capture = await session.browser.extractBrowserUseObservation(sourcePage, true);
   let semanticSource: ObservationSemanticSourceV2 = { title: "", headings: [] };
   try {
     semanticSource = await session.browser.extractObservationSemantics(sourcePage);
@@ -4555,7 +4555,7 @@ async function observeSession(
     const generation = session.generation;
     const capture =
       session.compactV2Mode === "on"
-        ? await session.browser.extractBrowserUseObservation(sourcePage)
+        ? await session.browser.extractBrowserUseObservation(sourcePage, true)
         : null;
     const elements =
       capture?.elements ?? (await session.browser.extractInteractiveElements(sourcePage));
@@ -4973,7 +4973,10 @@ export async function act(
     if (error instanceof OAuthOnboardingRequiredError && session !== undefined) {
       return oauthOnboardingRequiredObservation(session, error);
     }
-    if (action.kind === "oauth_login") {
+    if (
+      ["oauth_login", "click", "type", "select"].includes(action.kind) &&
+      operatorMutationDispatchPhase() !== "dispatch_attempted"
+    ) {
       if (error instanceof ProvenPreDispatchMutationError) throw error;
       if (error instanceof CompactV2StaleRefError) {
         throw new ProvenPreDispatchMutationError("stale_ref", { cause: error });

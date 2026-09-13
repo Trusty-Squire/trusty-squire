@@ -31,10 +31,14 @@ interface DispatchRecord {
   terminalReceipt?: OperationReceipt;
 }
 
+// Delivery acknowledgement preserves replayable evidence, but a positive
+// no-dispatch outcome has no browser custody to retain on any lineage.
 const phaseHasOutstandingCustody = (record: DispatchRecord): boolean =>
-  ["prepared", "entered", "outcome", "dispatch_attempted", "observed_result", "unknown"].includes(
+  record.outcome?.status !== "not_dispatched" &&
+  (["prepared", "entered", "outcome", "dispatch_attempted", "observed_result", "unknown"].includes(
     record.phase,
-  ) || record.outcome?.status === "unknown";
+  ) ||
+    record.outcome?.status === "unknown");
 
 const phaseHasDeliverableOutcome = (record: DispatchRecord): boolean =>
   ["outcome", "acknowledged", "observed_result", "delivery_acknowledged", "unknown"].includes(
@@ -86,9 +90,7 @@ function validOutcome(value: unknown): value is ReconciledDispatchOutcome {
   const outcome = value as Record<string, unknown>;
   if (
     !["completed", "done", "unknown", "not_dispatched"].includes(String(outcome.status)) ||
-    !Object.keys(outcome).every((key) =>
-      ["status", "error", "reason", "capture"].includes(key),
-    ) ||
+    !Object.keys(outcome).every((key) => ["status", "error", "reason", "capture"].includes(key)) ||
     (outcome.capture !== undefined && !captureEvidenceSchema.safeParse(outcome.capture).success) ||
     (outcome.status === "not_dispatched"
       ? !["stale_ref", "cancelled", "pre_dispatch_failure"].includes(String(outcome.error)) ||
@@ -180,11 +182,12 @@ export class DispatchJournal {
     if (
       records.some(
         (record) =>
-          record.phase === "entered" ||
-          record.phase === "dispatch_attempted" ||
-          record.phase === "unknown" ||
-          (record.phase === "prepared" && record.dispatchTracked !== true) ||
-          record.outcome?.status === "unknown",
+          record.outcome?.status !== "not_dispatched" &&
+          (record.phase === "entered" ||
+            record.phase === "dispatch_attempted" ||
+            record.phase === "unknown" ||
+            (record.phase === "prepared" && record.dispatchTracked !== true) ||
+            record.outcome?.status === "unknown"),
       )
     )
       throw new BrokerRefusal(
@@ -268,6 +271,7 @@ export class DispatchJournal {
         record.forwarderId === forwarderId &&
         (sessionId === undefined || record.sessionId === sessionId) &&
         record.start === true &&
+        record.outcome?.status !== "not_dispatched" &&
         ["acknowledged", "delivery_acknowledged"].includes(record.phase),
     );
   }

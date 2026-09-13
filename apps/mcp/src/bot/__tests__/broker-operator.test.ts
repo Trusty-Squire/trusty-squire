@@ -1821,3 +1821,106 @@ it("delivers broker approval notifications to the originating MCP client before 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it("does not fence stale refs or reconciled not-dispatched outcomes on the same lineage", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ts-ref-lineage-"));
+  const journal = new DispatchJournal(join(root, "dispatch.jsonl"));
+  const broker = new OperatorBroker(
+    {
+      accountId: "account",
+      agentSessionToken: "token",
+      apiBaseUrl: "http://unused.test",
+      registryBaseUrl: "http://unused.test",
+    },
+    "cell",
+    journal,
+  );
+  let nextSession = 0;
+  let dispatchBeforeFailure = false;
+  const start: Tool = {
+    name: "operate_start",
+    description: "",
+    inputSchema: z.object({}),
+    jsonInputSchema: {},
+    handler: async () => {
+      const id = `internal-${++nextSession}`;
+      state.sessions.set(id, {
+        browser: {
+          brokerTargetId: async () => `target-${id}`,
+          isConnected: () => true,
+          waitForThreeDsResolution: async () => "succeeded",
+        },
+        pendingThreeDs: null,
+      });
+      return { session_id: id };
+    },
+  };
+  const action = (name: string): Tool => ({
+    name,
+    description: "",
+    inputSchema: z.object({ session_id: z.string() }),
+    jsonInputSchema: {},
+    handler: async () => {
+      if (name === "operate_click") {
+        if (dispatchBeforeFailure) await markOperatorMutationDispatchAttempted();
+        throw new ProvenPreDispatchMutationError("stale_ref");
+      }
+      return { ok: true };
+    },
+  });
+  Object.defineProperty(broker, "tools", {
+    value: [start, action("operate_click"), action("operate_observe"), action("operate_navigate")],
+  });
+  const identity = await broker.authenticate("token", "agent", "a".repeat(43));
+  const principal = { ...identity!, clientId: "client" };
+  await broker.connected(principal);
+  try {
+    const started = (await broker.call(
+      principal,
+      "tool",
+      { name: "operate_start", args: {} },
+      "start",
+    )) as { capability: TabCapability };
+    await broker.acknowledge(principal, "start");
+    await broker.confirmStartDelivery(principal, { capability: started.capability });
+    const args = { session_id: started.capability.sessionId };
+    await expect(
+      broker.call(
+        principal,
+        "tool",
+        { name: "operate_click", args, capability: started.capability },
+        "click",
+      ),
+    ).resolves.toEqual({ preDispatchFailure: { error: "stale_ref", dispatch: "not_dispatched" } });
+    // No delivery acknowledgement or out-of-band recover metadata is needed.
+    expect(await journal.hasOutstanding(undefined, principal.forwarderId)).toBe(false);
+    for (const name of ["operate_observe", "operate_navigate"]) {
+      await expect(
+        broker.call(principal, "tool", { name, args, capability: started.capability }, name),
+      ).resolves.toMatchObject({ result: { ok: true } });
+      await broker.acknowledge(principal, name);
+    }
+    await journal.record(args.session_id, "old-reconciled", "observed_result", {
+      forwarderId: principal.forwarderId!,
+      operation: "operate_click",
+      dispatchTracked: true,
+      outcome: { status: "not_dispatched", error: "stale_ref" },
+    });
+    await journal.assertReconciled();
+    await expect(
+      broker.call(principal, "tool", { name: "operate_start", args: {} }, "fresh-start"),
+    ).resolves.toHaveProperty("capability");
+    dispatchBeforeFailure = true;
+    await expect(
+      broker.call(
+        principal,
+        "tool",
+        { name: "operate_click", args, capability: started.capability },
+        "uncertain-click",
+      ),
+    ).rejects.toThrow("mutation=unknown");
+    expect(await journal.hasOutstanding(args.session_id, principal.forwarderId)).toBe(true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
