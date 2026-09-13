@@ -12,8 +12,7 @@ import { createHash, randomUUID } from "node:crypto";
 // drives. The host is the planner; these tools are the browser + the moat.
 // Backed by ../bot/provision-session.ts (the session registry over the existing
 // BrowserController substrate).
-// Domain-scoping, the write-only-vault de-fang, and a per-action audit log are
-// in place; the consent-at-install prompt is the remaining hardening.
+// Browser egress compatibility is documented in docs/operator-tool-surface.md.
 
 import { z } from "zod";
 import { constants, generateKeyPairSync, privateDecrypt } from "node:crypto";
