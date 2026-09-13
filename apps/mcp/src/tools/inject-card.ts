@@ -89,7 +89,10 @@ function fieldSummary(
 async function injectReleasedCard(session: Session, args: InjectCardInput) {
   const released = session.releasedPaymentCard;
   if (released === null) throw new Error("approved card release is unavailable");
-  if (args.approval_id !== undefined && args.approval_id !== released.approvalId) {
+  if (args.approval_id === undefined) {
+    throw new Error("approval_id is required to retry this session's released purchase");
+  }
+  if (args.approval_id !== released.approvalId) {
     throw new Error("approval_id does not match this session's released purchase");
   }
   if (Date.now() >= released.deadline) throw new Error("payment_approval_expired");

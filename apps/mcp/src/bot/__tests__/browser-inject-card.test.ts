@@ -1,6 +1,8 @@
 import { existsSync } from "node:fs";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { ApiClient } from "../../api-client.js";
+import { injectCardTool } from "../../tools/inject-card.js";
 import { BrowserController, type CheckoutCard, type InteractiveElement } from "../browser.js";
 import { serializeBrowserUseDOM } from "../browser-use-serializer.js";
 import {
@@ -8,6 +10,8 @@ import {
   observe,
   observeQuery,
   observeSubtree,
+  parseElementsTable,
+  paymentSession,
   startHarnessProvisionSession,
 } from "../provision-session.js";
 
@@ -50,6 +54,80 @@ function byName(elements: InteractiveElement[], name: string): InteractiveElemen
 }
 
 describe("direct card injection and masked observation", () => {
+  it.skipIf(!available)(
+    "requires the same approval id before re-injecting a released card",
+    async () => {
+      const isolated = await page();
+      let sessionId: string | undefined;
+      try {
+        const topUrl = "https://merchant.test/checkout";
+        await isolated.page.route(topUrl, (route) =>
+          route.fulfill({ contentType: "text/html", body: '<input name="number">' }),
+        );
+        const controller = BrowserController.fromHarnessPage(isolated.page);
+        const started = await startHarnessProvisionSession({
+          browser: controller,
+          serviceUrl: topUrl,
+        });
+        sessionId = started.session_id;
+        const panRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+        if (panRef === undefined) throw new Error("missing public PAN field ref");
+        paymentSession(sessionId).releasedPaymentCard = {
+          approvalId: "approval_same_purchase",
+          approvalUrl: "https://approve.test/approval_same_purchase",
+          checkout: {
+            merchant: "Synthetic Merchant",
+            checkout_origin: "https://merchant.test",
+            amount_cents: 123,
+            currency: "JPY",
+          },
+          cardRef: "card_synthetic",
+          last4: "1111",
+          deadline: Date.now() + 60_000,
+          card: CARD,
+        };
+        const input = {
+          session_id: sessionId,
+          merchant: "Synthetic Merchant",
+          amount_cents: 123,
+          currency: "JPY",
+          item: "Synthetic item",
+          reason: "Synthetic test purchase",
+          card_ref: "card_synthetic",
+          fields: { pan: { ref: panRef } },
+        };
+        const api = {} as ApiClient;
+
+        await expect(
+          injectCardTool.handler(injectCardTool.inputSchema.parse(input), api),
+        ).rejects.toThrow("approval_id is required to retry this session's released purchase");
+        await expect(
+          injectCardTool.handler(
+            injectCardTool.inputSchema.parse({ ...input, approval_id: "approval_other" }),
+            api,
+          ),
+        ).rejects.toThrow("approval_id does not match this session's released purchase");
+        await expect(
+          injectCardTool.handler(
+            injectCardTool.inputSchema.parse({
+              ...input,
+              approval_id: "approval_same_purchase",
+            }),
+            api,
+          ),
+        ).resolves.toMatchObject({
+          status: "card_injected",
+          approval_id: "approval_same_purchase",
+          fields: { pan: { status: "filled" } },
+        });
+        expect(await isolated.page.locator('[name="number"]').inputValue()).toBe(CARD.pan);
+      } finally {
+        if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
+        await isolated.context.close();
+      }
+    },
+  );
+
   it.skipIf(!available)(
     "fills only named main/open-shadow/cross-origin nodes and masks every normal read",
     async () => {
