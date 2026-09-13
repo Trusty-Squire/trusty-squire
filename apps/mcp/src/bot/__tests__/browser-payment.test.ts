@@ -114,7 +114,9 @@ describe("per-field hosted card checkout", () => {
           expect(
             await frame
               .locator("input")
-              .evaluateAll((inputs) => inputs.every((input) => input.value === "")),
+              .evaluateAll((inputs) =>
+                inputs.every((input) => (input as HTMLInputElement).value === ""),
+              ),
           ).toBe(true);
         }
       } finally {
@@ -190,7 +192,9 @@ describe("per-field hosted card checkout", () => {
           expect(
             await frame
               .locator("input")
-              .evaluateAll((inputs) => inputs.every((input) => input.value === "")),
+              .evaluateAll((inputs) =>
+                inputs.every((input) => (input as HTMLInputElement).value === ""),
+              ),
           ).toBe(true);
         }
       } finally {

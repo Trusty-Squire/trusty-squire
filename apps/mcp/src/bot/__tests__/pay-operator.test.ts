@@ -2813,7 +2813,9 @@ describe("hosted-field vaulted payment (real browser)", () => {
           expect(
             await frame
               .locator("input")
-              .evaluateAll((inputs) => inputs.every((input) => input.value === "")),
+              .evaluateAll((inputs) =>
+                inputs.every((input) => (input as HTMLInputElement).value === ""),
+              ),
           ).toBe(true);
         }
         if (evidenceDir) {
