@@ -15,8 +15,8 @@ import { brokerBrowserCustody } from "../broker/custody.js";
 // watchdog, the bounded close, the single terminal-teardown owner, the
 // session artifact cleanup, and start/finish/shutdown themselves. It is one
 // module because those are one transaction — a terminal transition drains
-// leases, runs finish preparation, audits a pending 3-D Secure outcome,
-// closes the browser, clears artifacts, and only then deletes the EXACT
+// leases, runs finish preparation, closes the browser, clears artifacts, and
+// only then deletes the EXACT
 // session object from the map. Splitting that ordering across modules is how
 // it silently regresses.
 //
@@ -33,8 +33,7 @@ import { randomUUID } from "node:crypto";
 import { lstatSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BrowserController, type ThreeDsResolution } from "../browser.js";
-import type { PendingThreeDsWait } from "../pay-operator.js";
+import { BrowserController } from "../browser.js";
 import { compactV2AuditValue } from "../compact-observation-v2.js";
 import type { ApiClient } from "../../api-client.js";
 import {
@@ -692,8 +691,6 @@ function disposeSessionWatchdog(session: Session): void {
   session.watchdog = null;
 }
 
-const DEFAULT_PENDING_THREE_DS_FINALIZE_TIMEOUT_MS = 3_000;
-const DEFAULT_SESSION_TERMINAL_TRANSITION_TIMEOUT_MS = 30_000;
 const DEFAULT_OPERATOR_FORCE_CLOSE_TIMEOUT_MS = 3_000;
 
 function positiveTimeout(name: string, fallback: number): number {
@@ -723,10 +720,8 @@ async function forceTerminateProvisionSession(
   session: Session,
   event: string,
   detail: Record<string, unknown>,
-  auditPendingThreeDs = true,
   requireProvenBrowserClose = false,
 ): Promise<unknown | undefined> {
-  session.paymentDispatchClosed = true;
   const owner =
     session.terminalTeardownOwner ??
     (session.terminalTeardownOwner = {
@@ -744,12 +739,7 @@ async function forceTerminateProvisionSession(
     return terminalError;
   }
   owner.forced = true;
-  owner.forcePromise = forceTerminateProvisionSessionOwned(
-    session,
-    event,
-    detail,
-    auditPendingThreeDs,
-  );
+  owner.forcePromise = forceTerminateProvisionSessionOwned(session, event, detail);
   return await owner.forcePromise;
 }
 
@@ -757,46 +747,14 @@ async function forceTerminateProvisionSessionOwned(
   session: Session,
   event: string,
   detail: Record<string, unknown>,
-  auditPendingThreeDs: boolean,
 ): Promise<unknown | undefined> {
   session.closing = true;
   stopSessionWatchdog(session);
   audit(session.id, event, detail);
-  const handoff = session.paymentDispatchHandoff;
-  if (handoff !== null) {
-    handoff.terminalizing = true;
-    const timeoutMs = positiveTimeout(
-      "TRUSTY_SQUIRE_OPERATOR_PENDING_3DS_FINALIZE_TIMEOUT_MS",
-      DEFAULT_PENDING_THREE_DS_FINALIZE_TIMEOUT_MS,
-    );
-    await withTerminalTimeout(
-      handoff.settled,
-      timeoutMs,
-      `payment dispatch handoff exceeded ${timeoutMs}ms`,
-    ).catch(() => undefined);
-  }
   deregisterProvisionSession(session);
   let terminalError: unknown;
-  if (auditPendingThreeDs && session.pendingThreeDs !== null) {
-    try {
-      await auditPendingThreeDsForSessionCloseBounded(session);
-    } catch (error) {
-      terminalError = error;
-      const message = error instanceof Error ? error.message : String(error);
-      process.stderr.write(
-        `[operator] terminal 3DS audit failed session=${session.id}: ${message}\n`,
-      );
-    }
-  }
-  if (handoff !== null) {
-    handoff.terminalComplete = true;
-    if (handoff.released && session.paymentDispatchHandoff === handoff) {
-      session.paymentDispatchHandoff = null;
-    }
-  }
   session.activePayment = null;
-  session.paymentFieldSealActive = false;
-  session.pendingThreeDs = null;
+  session.releasedPaymentCard = null;
   const terminalOwner = session.terminalTeardownOwner ?? undefined;
   const ephemeral = leasedBrowsers.get(session.browser);
   if (terminalOwner?.requireProvenBrowserClose === true && ephemeral !== undefined) {
@@ -825,7 +783,6 @@ async function terminateExpiredProvisionSession(
     session.initializing ||
     session.closing ||
     session.callCount > 0 ||
-    session.paymentCallCount > 0 ||
     sessions.get(session.id) !== session
   ) {
     return false;
@@ -846,17 +803,6 @@ async function terminateExpiredProvisionSession(
   session.closing = true;
   stopSessionWatchdog(session);
   owner.routinePromise = (async () => {
-    if (reason.kind !== "idle_timeout" && session.paymentCallCount > 0) {
-      const timeoutMs = positiveTimeout(
-        "TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS",
-        DEFAULT_SESSION_TERMINAL_TRANSITION_TIMEOUT_MS,
-      );
-      await withTerminalTimeout(
-        waitForPaymentCallsToDrain(session),
-        timeoutMs,
-        `payment call drain exceeded ${timeoutMs}ms`,
-      ).catch(() => undefined);
-    }
     if (owner.forcePromise !== null) {
       await owner.forcePromise;
       return;
@@ -878,8 +824,7 @@ function startSessionWatchdog(session: Session): void {
     hasActiveCall: () =>
       brokerBrowserCustody() !== undefined ||
       session.initializing ||
-      session.callCount > 0 ||
-      session.paymentCallCount > 0,
+      session.callCount > 0,
     processMarker: () => session.browser.operatorBrowserMarker?.() ?? null,
     onTerminate: async (reason) => await terminateExpiredProvisionSession(session, reason),
   });
@@ -891,11 +836,8 @@ export function sessionForCall(sessionId: string): Session | undefined {
   return sessions.get(sessionId);
 }
 
-// Money rule (simplified 2026-08-16): the fence is the live human biometric
-// approval per charge, not a software re-check of replay field values. The
-// only surviving invariant — a card-charging trace step is never blind-
-// replayed — is enforced unconditionally where operate_pay steps are
-// encountered during replay (see replayOperatorRecipe), not here.
+// Card release uses the existing live human purchase approval. This lifecycle
+// helper only resolves and leases the owning browser session.
 function assertPaymentSessionAllowed(session: Session): void {
   if (session.closing) {
     throw new Error(`provision session ${session.id} is closing`);
@@ -914,8 +856,8 @@ export function paymentSession(sessionId?: string): Session {
     if (sessions.size !== 1) {
       throw new Error(
         sessions.size === 0
-          ? "operate_pay requires one active operate_start browser session"
-          : "operate_pay requires session_id when multiple operator sessions are active",
+          ? "inject_card requires one active operate_start browser session"
+          : "inject_card requires session_id when multiple operator sessions are active",
       );
     }
     session = sessions.values().next().value!;
@@ -944,27 +886,6 @@ function acquireSessionCallLease(session: Session): () => void {
       session.callDrainWaiters.clear();
     }
   };
-}
-
-function acquirePaymentCallLease(session: Session): () => void {
-  session.paymentCallCount += 1;
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    session.paymentCallCount -= 1;
-    if (session.paymentCallCount === 0) {
-      for (const wake of session.paymentCallDrainWaiters) wake();
-      session.paymentCallDrainWaiters.clear();
-    }
-  };
-}
-
-async function waitForPaymentCallsToDrain(session: Session): Promise<void> {
-  if (session.paymentCallCount === 0) return;
-  await new Promise<void>((resolve) => {
-    session.paymentCallDrainWaiters.add(resolve);
-  });
 }
 
 async function waitForSessionCallsToDrain(session: Session): Promise<void> {
@@ -1013,14 +934,7 @@ export async function withPaymentSessionCall<T>(
   fn: (session: Session) => Promise<T>,
 ): Promise<T> {
   const session = paymentSession(sessionId);
-  return await withSelectedProvisionSessionCall(session, async (selectedSession) => {
-    const releasePaymentCall = acquirePaymentCallLease(selectedSession);
-    try {
-      return await fn(selectedSession);
-    } finally {
-      releasePaymentCall();
-    }
-  });
+  return await withSelectedProvisionSessionCall(session, fn);
 }
 
 // Where a session's rolling observe snapshot lives. Owned here because the
@@ -1337,14 +1251,6 @@ export interface PreparedFinishResult<T> {
   prepared: T | undefined;
 }
 
-function profileRequiresDestroy(session: Session): boolean {
-  return (
-    session.activePayment !== null ||
-    session.paymentFieldSealActive ||
-    session.pendingThreeDs !== null
-  );
-}
-
 const OBSERVE_SNAPSHOT_CLEANUP_RETRY_MS = 250;
 const OBSERVE_SNAPSHOT_SHUTDOWN_DRAIN_MS = 500;
 const pendingObserveSnapshotCleanup = new Set<string>();
@@ -1431,66 +1337,15 @@ function deregisterProvisionSession(session: Session): void {
   if (sessions.get(session.id) === session) sessions.delete(session.id);
 }
 
-function pendingThreeDsAuditStatus(
-  resolution: ThreeDsResolution,
-  pending: PendingThreeDsWait,
-): string {
-  if (resolution === "succeeded") return "payment_submitted";
-  if (resolution === "failed") return "payment_declined";
-  if (resolution === "challenge_pending") pending.outcome = "three_ds";
-  return pending.outcome === "three_ds" ? "payment_3ds_unresolved" : "payment_outcome_unknown";
-}
-
-async function auditPendingThreeDsForSessionClose(session: Session): Promise<void> {
-  const pending = session.pendingThreeDs;
-  if (pending === null) return;
-  if (session.api === undefined) {
-    throw new Error(
-      "operate_finish refused: pending 3-D Secure outcome cannot be audited without an active API session",
-    );
-  }
-  const resolution = await session.browser.waitForThreeDsResolution(0);
-  const recordAudit = async (): Promise<void> => {
-    await session.api!.auditPayment({
-      ...pending.checkout,
-      last4: pending.last4,
-      status: pendingThreeDsAuditStatus(resolution, pending),
-      approval_id: pending.approval_id,
-      ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
-    });
-  };
-  const handoff = session.paymentDispatchHandoff;
-  if (handoff?.state === pending) {
-    handoff.auditPromise ??= recordAudit();
-    await handoff.auditPromise;
-    return;
-  }
-  await recordAudit();
-}
-
-async function auditPendingThreeDsForSessionCloseBounded(session: Session): Promise<void> {
-  const timeoutMs = positiveTimeout(
-    "TRUSTY_SQUIRE_OPERATOR_PENDING_3DS_FINALIZE_TIMEOUT_MS",
-    DEFAULT_PENDING_THREE_DS_FINALIZE_TIMEOUT_MS,
-  );
-  await withTerminalTimeout(
-    auditPendingThreeDsForSessionClose(session),
-    timeoutMs,
-    `pending 3-D Secure finalization exceeded ${timeoutMs}ms`,
-  );
-}
-
 async function closeFinishingProvisionSession(
   session: Session,
   persistState: boolean,
 ): Promise<FinishResult> {
   const sessionId = session.id;
-  await auditPendingThreeDsForSessionCloseBounded(session);
   const url = session.browser.currentUrl();
   audit(sessionId, "finish", { url });
   session.activePayment = null;
-  session.paymentFieldSealActive = false;
-  session.pendingThreeDs = null;
+  session.releasedPaymentCard = null;
   stopSessionWatchdog(session);
   const finish = finishReceipt(sessionId, url, true);
   const receipt: OperationReceipt = {
@@ -1572,7 +1427,7 @@ export async function finishProvisionSessionWithPreparation<T>(
     if (owner.forced || sessions.get(sessionId) !== session) {
       throw new Error(`provision session ${sessionId} terminal transition was forced`);
     }
-    const persistState = successfulOutcome() && !profileRequiresDestroy(session);
+    const persistState = successfulOutcome();
     closingStarted = true;
     const retryCleanup = () => closeFinishingProvisionSession(session, persistState);
     try {

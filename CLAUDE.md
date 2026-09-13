@@ -121,21 +121,19 @@ silent failures.
     operator verb.
   - DOM/screenshot observation + vault-backed credential extraction +
     operator-recipe replay (`operate_recipe_run`) the host agent composes per step.
-  - **`operate_screenshot` (2026-08-23) — a dedicated debugging capture,**
+  - **`operate_screenshot` — a dedicated debugging capture,**
     separate from the per-step planner screenshot baked into `operate_observe`.
     Page (viewport or `full_page`) or ONE frame in isolation (`frame_index` /
     `frame_url_contains` — the case it exists for: a cross-origin ACS/challenge
     or captcha iframe a full-page shot won't show clearly). Read-only — no
     navigation, click, type, focus/`bringToFront`, or DOM mutation.
-    **No redaction and no refusal (2026-09-05, owner's order to remove ALL
-    seals).** The capture returns the page's real pixels. The capture-scoped
-    fail-closed refusal, the `screenshot_unavailable_sealed_context` error code,
-    the `SCREENSHOT_REDACTION_SELECTORS` mask set, the durable sealed-field
-    identity machinery, and the `sharp` compositing pass are all gone;
-    `captureOperatorScreenshot` takes only the frame options. A card fill in
-    progress is not a refusal. Do NOT reintroduce a reduced seal, an env flag,
-    or a "payments only" remnant — see `AGENTS.md` §16 and
-    `docs/observation-model.md` §4.5. Server-
+    It returns page pixels with only the released PAN and security-code pixels
+    composited out. `inject_card` marks the nodes it writes with a mask-provenance
+    attribute; screenshot capture itself does not clear, focus, or change their
+    values. A masked capture fails if the mask cannot scan or composite the
+    capture; an active mask is never bypassed. Do not widen it into general
+    redaction or a content gate; see
+    `AGENTS.md` §11/§16 and `docs/observation-model.md` §4.5. Server-
     side, a tool result carrying `image:{mime_type,data_base64}` (this tool,
     or any future one) gets a real MCP `type:"image"` content block
     (`toolResultContent` in `server.ts`), not base64 buried in JSON text.
@@ -563,24 +561,22 @@ side by side). `Session` is still re-exported from `provision-session.ts`.
 
 The **lifecycle registry transaction** now lives in
 `apps/mcp/src/bot/session/lifecycle.ts`: the session map + refused-start set,
-the real-profile lease and browser acquisition, the ordinary/payment call leases
-and their drains, the watchdog, the bounded close, the single terminal-teardown
+the real-profile lease and browser acquisition, the generic session call lease
+and its drain, the watchdog, the bounded close, the single terminal-teardown
 owner, artifact cleanup, and start/finish/shutdown. Its ORDER is the contract —
-drain leases → run finish prep → audit a pending 3DS outcome → close the browser
-→ clear artifacts → delete the EXACT session object from the map — so change it
-as one unit, never step by step. The credential-egress metadata views over `Session.allowedHosts`
-sit below it in `session/hosts.ts`. Perception has NOT moved: the two start paths
+drain calls → run finish prep → close the browser → clear artifacts → delete the
+EXACT session object from the map — so change it as one unit, never step by step.
+Perception has NOT moved: the two start paths
 reach `observeSession` through the `SessionStartPorts` the facade binds, which is
 what keeps the facade → lifecycle dependency one-way with no runtime import
-cycle. Payment state transitions are still in the facade.
+cycle.
 
 `apps/mcp/src/bot/__tests__/session-characterization.test.ts` is the before/after
 oracle for that work: it pins the registered `operate_*` tool surface, both
 starts' session construction field-for-field, start/observe/finish ordering, that
-the facade FORWARDS each lifecycle export rather than re-implementing it, the
-3DS-audit-before-browser-close terminal ordering, and the COMPLETE key set of
-every observation payload. Treat a failure there as a behavior change, not a test
-to update.
+the facade FORWARDS each lifecycle export rather than re-implementing it, and the
+COMPLETE key set of every observation payload. Treat a failure there as a
+behavior change, not a test to update.
 
 ### Browser process vs page lifetime (`browser.ts` is a facade)
 
@@ -606,18 +602,17 @@ per-act/per-observe ref churn.
 [`docs/browser-use-serializer-port.md`](docs/browser-use-serializer-port.md)
 owns the canonical DOM rendering, stable-ref, query, and fixture
 contracts. [`docs/observation-model.md`](docs/observation-model.md) §4.5 owns
-the no-seal policy; its remaining roadmap is historical.
+the narrow released-card value mask; its remaining roadmap is historical.
 
-**No observation sealing (2026-09-05, owner's order).** Observations return what
-the page renders — field values, labels, the live URL (path and query included),
-card material, and rendered API keys alike. The masking layer
-(`redactObservationText` / `present*` / `Session.sealedFieldKeys`), compact-v2's
-content screens, and `provision-drive.ts`'s compact-v2 tool-result seal
-(`compactV2ThickResult`) are deleted. Compact-v2 follows the pinned canonical
-DOM serializer. Read-path redaction is removed by the standing captain directive,
-restated 2026-09-07; payment fences and vault boundaries are untouched. See
-[`docs/browser-use-serializer-port.md`](docs/browser-use-serializer-port.md);
-§4.5 and `AGENTS.md` §16 own the no-seal rule.
+Observations return what the page renders — field values, labels, the live URL
+(path and query included), and rendered API keys alike — except for the released
+PAN (including ordinary formatted spellings and prefixes of at least eight
+digits) and CVV/CVC/CID. `CardValueOutputMask` replaces those values in
+model-facing text and composites their value-bearing control and copy pixels out
+of screenshots. It is session-persistent output state, not a browser-action gate
+or a general secret scanner. Raw Runtime.evaluate remains internal. See
+[`docs/browser-use-serializer-port.md`](docs/browser-use-serializer-port.md),
+§4.5, and `AGENTS.md` §11/§16.
 
 ### Operator Recipe registry (replay-serve-live-domainlock)
 
@@ -641,72 +636,22 @@ record remains in
 
 ### Payment implementation notes
 
-The public tool contract lives in the [README payment guide](README.md#one-prompt),
+The public tool contract lives in the [README payment guide](README.md#direct-payment-observation),
 the data flow in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#payment-flow), and
 the cross-session authorization boundary in [`SECURITY.md`](SECURITY.md#client-encrypted-card-data).
-Keep approval timing, denial/expiry custody, resume guidance, status bounds, and
-post-submit outcome labels in those owners rather than copying them here.
-
-- **Unreadable checkout totals.** Follow the README payment guide for the public
-  precedence contract; `executeOperatePay` in `pay-operator.ts` is the
-  authoritative implementation.
-- **Late-mounting cross-origin PCI iframe (fillAndSubmitCheckout /
-  fillCheckoutCardFields).** Before taking their `page.frames()` snapshot,
-  both paths wait up to 10 seconds for a PAN field. This lets a single-page
-  checkout complete within the existing approval when its cross-origin PCI
-  iframe mounts after the payment section renders. The wait changes only
-  when the snapshot is taken: `fillCheckoutCardFields` still writes only to
-  the main frame or a frame accepted by `recognizedPaymentProviderFrame`,
-  preserving split-checkout trust boundaries — `browser.ts`.
+Keep approval timing, denial/expiry custody, same-approval resume guidance, and
+the direct observation/action contract in those owners rather than copying them
+here. `inject_card` writes only explicitly named frame/node targets; the agent
+handles late mounts, total/currency reads, card choice, submission, 3DS, and
+outcome evidence through generic operator tools. It re-observes before submission
+for competing selected saved-card controls and immediately notifies the
+cardholder in chat when a 3DS challenge appears.
 
 ### Browser egress is unrestricted
 
 See the [operator egress contract](docs/operator-tool-surface.md#browser-egress-is-unrestricted)
 and the [acceptance runbook](docs/operator-acceptance-runbook.md#deterministic-acceptance)
 for behavior and regression coverage.
-
-### Positive new-card selection supersedes #572's saved-card refusal
-
-#572 refused (`payment_card_selection_ambiguous`) whenever a checked
-saved-card radio/select-option for a DIFFERENT card competed with the filled
-new-card fields — money-fence-correct (never let the wrong card win) but a
-dead end for the EbisuMart repeat-customer topology, where that competing
-radio is the checkout's OWN default state, not something the user asked for.
-`resolveCompetingSavedCardSelection` (`browser.ts`, replaces the old
-boolean-returning `detectCompetingSavedCardSelection`) now attempts positive
-resolution first, coordinated ACROSS frames (a merchant-owned radio can
-legitimately control card fields living in a recognized hosted-fields
-iframe): a read-only scan of every frame aggregates competing selections and
-sealed-field values globally, then a per-frame resolve pass finds the sole
-unambiguous unchecked sibling in the competing radio's choice group that
-isn't itself saved-card-shaped (a candidate whose container structurally
-owns one of the fields we sealed wins only when it is UNIQUE — i18n-agnostic;
-with no owning candidate it falls back to the sole remaining candidate),
-`.click()`s it (real radio-group semantics — natively unchecks the saved-card
-radio too), then re-identifies the marking target from the LIVE tree (the
-click can synchronously rerender the group, detaching the clicked node — the
-group must now contain exactly one connected, checked, non-saved-shaped
-member, which gets stamped `data-ts-checkout-selection="1"`; zero or several
-is ambiguous), then a global re-scan verifies no competing selection remains
-anywhere AND every sealed field in every frame still holds its snapshotted
-value. That same verification runs a SECOND time at the money-fence boundary
-in `submitFilledCheckoutInScope` — immediately before the charge click, after
-the async pay-button scan AND after `bringToFront()` (whose focus/visibility
-events can themselves trigger a merchant default-selection revert, so nothing
-page-state-changing sits between the re-check and the click) — additionally
-confirming every marked new-card control is still checked; a failure there
-clears the dispatch tracking and refuses. Any failure at any step — no candidate, more than one
-equally-plausible candidate, the click didn't actually deselect the saved
-card, the click reset the fields, the selection drifted before the charge
-click — still refuses with `payment_card_selection_ambiguous`; a competing
-`<select>` OPTION is deliberately never auto-resolved (a synthetic `change`
-commit is far less trustworthy across frameworks than a native radio click)
-and still always refuses. The page-context scan/resolve logic lives in
-module-level named functions (`scanSavedCardSelectionInPage` /
-`resolveSavedCardSelectionInPage`) because Playwright serializes evaluate
-callbacks via `toString()` — outer-scope bindings would be undefined in the
-page. No new tool surface — this lives entirely inside the existing
-checkout-submit path.
 
 ### Goose / local-dev MCP install
 

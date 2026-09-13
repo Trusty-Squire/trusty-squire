@@ -6,7 +6,6 @@ import {
   type CheckoutSummary,
 } from "../../bot/browser.js";
 import { fillTemplate, recipeEntryUrl, type OperatorRecipe } from "../../bot/operator-recipe.js";
-import { checkoutSummaryMatches } from "../../bot/pay-operator.js";
 import {
   act,
   finishProvisionSession,
@@ -304,7 +303,14 @@ export async function verifyCheckoutReview(
   try {
     const observed = await controller.readSettledCheckoutReviewSummary(expected.currency);
     return {
-      guard_action: checkoutSummaryMatches(expected, observed) ? "clean" : "abort",
+      guard_action:
+        observed !== undefined &&
+        observed.amount_cents === expected.amount_cents &&
+        observed.currency === expected.currency &&
+        observed.merchant === expected.merchant &&
+        observed.checkout_origin === expected.checkout_origin
+          ? "clean"
+          : "abort",
       ...(observed === undefined ? {} : { observed }),
     };
   } finally {

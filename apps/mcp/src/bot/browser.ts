@@ -1,5 +1,13 @@
 import { captureBoundScreenshot, type ScreenshotBinding } from "./screenshot-click.js";
 import { captureBrowserUseDOM, type BrowserUseCapture } from "./browser-use-capture.js";
+import {
+  CardValueOutputMask,
+  compositePngCardMasks,
+  type CardMaskKind,
+  type CardMaskRegistration,
+  type PixelMaskRect,
+} from "./card-value-output-mask.js";
+import { OperatorEvidenceCollector } from "./operator-evidence.js";
 // Browser automation wrapper for universal signup bot
 // Provides simple interface for AI agent to control browser.
 //
@@ -41,7 +49,6 @@ import {
   type StealthProfile,
 } from "./browser-process-runtime.js";
 
-import { isSameRecipeDomain } from "@trusty-squire/recipe-schema";
 import { type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
@@ -70,7 +77,6 @@ import {
   type GoogleHumanChallenge,
 } from "./google-auth-state.js";
 import type { HeightenedAuthNotificationResult } from "../api-client.js";
-import type { PaymentBrowser } from "./pay-operator.js";
 import { bindOwnerBrowserLaunch, untrackOwnerBrowserLaunch } from "./owner-process-reaper.js";
 import { PageDriver } from "./page-driver.js";
 import {
@@ -106,6 +112,18 @@ export interface FrameTarget {
   frameOrigin: string;
   frameUrl: string;
   frameOpaque?: boolean;
+}
+
+export type InjectCardField = "pan" | "cvv" | "exp_month" | "exp_year" | "exp" | "name";
+export type InjectCardFieldResult =
+  | { status: "filled" }
+  | { status: "not_found" | "detached" }
+  | { status: "native_error"; error: string };
+
+export interface InjectCardResolvedTarget {
+  element?: InteractiveElement;
+  missing?: "not_found" | "detached";
+  format?: string | undefined;
 }
 
 export type ResolvedPageTarget =
@@ -164,68 +182,6 @@ export interface CheckoutCard {
   };
 }
 
-interface CheckoutCardGroupRoot {
-  frame: Frame;
-  root: Locator;
-  token: string;
-}
-
-interface CheckoutCardGroupScope {
-  selected: CheckoutCardGroupRoot;
-  groups: readonly CheckoutCardGroupRoot[];
-}
-
-interface CheckoutPaymentFieldRoot {
-  frame: Frame;
-  token: string;
-}
-
-interface CheckoutOutcomeBaseline {
-  url: string;
-  orderUrlIdentities: readonly string[];
-  terminalUrlIdentity: string | null;
-}
-
-interface CheckoutOutcomeDispatchSnapshot {
-  url: string;
-  urls: readonly string[];
-}
-
-export interface CheckoutSubmitResult {
-  three_ds_required: boolean;
-  // A dispatched click is not a payment outcome. The submit path sets this
-  // only after it observes a terminal merchant order route.
-  order_confirmed: boolean;
-  challenge_url?: string;
-  // Passive post-submit ACS evidence. This is never an approval gate.
-  payment_instrument_mismatch?: PaymentInstrumentMismatch;
-}
-
-export interface PaymentInstrumentMismatch {
-  kind: "payment_instrument_mismatch";
-  confidence: "high" | "low";
-  evidence_used: Array<"last4" | "issuer" | "network">;
-  expected: { last4: string; issuer?: string; network?: string; label?: string };
-  observed: { last4?: string; issuer?: string; network?: string };
-  provenance: {
-    expected: {
-      last4: "released_card";
-      issuer?: "bin_metadata" | "vault_metadata" | "vault_label";
-      network?: "vault_metadata";
-      label?: "vault_label";
-    };
-    observed: "3ds_challenge";
-  };
-}
-
-interface PaymentInstrumentExpectation {
-  last4: string;
-  issuer?: string;
-  issuer_source?: "bin_metadata" | "vault_metadata" | "vault_label";
-  network?: string;
-  label?: string;
-}
-
 export type ClickDispatchStatus = "not_dispatched" | "dispatched" | "unknown";
 
 export type TrackedClickTarget =
@@ -250,92 +206,6 @@ export class BrowserClickDispatchError extends Error {
 
 export function clickDispatchStatusForError(error: unknown): ClickDispatchStatus {
   return error instanceof BrowserClickDispatchError ? error.dispatchStatus : "unknown";
-}
-
-// The browser completes 3-D Secure natively (its own checkout JS drives the
-// challenge, including out-of-band bank-app pushes) — we only classify the
-// outcome once it's over. An earlier operator-side detect/wait/teardown
-// machine (rc.21-rc.22) intercepted the challenge instead and could never
-// finish a decoupled/app-push ACS handshake in the headless operator
-// browser; do not reintroduce interception here.
-export type ThreeDsResolution = "succeeded" | "failed" | "challenge_pending" | "timeout";
-
-interface CheckoutFrameDescriptor {
-  url: string;
-  name: string;
-  title: string;
-}
-
-// Recognized payment-provider frames — the ONLY cross-registrable-domain
-// frames the fill-without-charge step (operate_pay phase="fill_card") may put
-// the vaulted card into. This mirrors the vault's egress model: the card may
-// travel to a surface we can confidently attribute to a legitimate payment
-// processor, never to an arbitrary third-party iframe (a possible rogue/
-// phishing frame) that merely appears on a checkout page. Entries are host
-// suffixes: a domain is listed at the registrable level only when the whole
-// domain IS the processor (everything under stripe.com is Stripe); a
-// mixed-purpose domain is pinned to its payment platform subdomain
-// (rakuten.com is a marketplace — only payment.global.rakuten.com, the
-// Rakuten Payment platform that serves the hosted card fields observed live
-// at static-content.payment.global.rakuten.com, qualifies). Deliberately
-// minimal; extend only with evidence of the processor's hosted-field host.
-const RECOGNIZED_PAYMENT_PROVIDER_FRAME_HOSTS: readonly string[] = [
-  "stripe.com", // Stripe Elements / Payment Element iframes (js.stripe.com)
-  "adyen.com", // Adyen web components hosted fields (checkoutshopper-*.adyen.com)
-  "braintreegateway.com", // Braintree Hosted Fields (assets.braintreegateway.com)
-  "paypal.com", // Scope classification only; an actual PayPal PAN frame is refused before fill
-  "worldpay.com", // Worldpay / Access Worldpay hosted payment fields
-  "payment.global.rakuten.com", // Rakuten Payment platform hosted card fields
-  "checkout.pci.shopifyinc.com", // Shopify PCI-compliant hosted card fields
-];
-
-// True when a child frame is a surface the vaulted card may be filled into:
-// the merchant's own registrable domain (its payment subdomain included), or
-// a curated recognized payment processor — https only. Anything else is
-// refused: a failed fill is far better than a card sent to a rogue frame.
-export function recognizedPaymentProviderFrame(frameUrl: string, pageUrl: string): boolean {
-  let frame: URL;
-  try {
-    frame = new URL(frameUrl);
-  } catch {
-    return false;
-  }
-  if (frame.protocol !== "https:") return false;
-  if (isSameRecipeDomain(frameUrl, pageUrl)) return true;
-  const host = frame.hostname.toLowerCase();
-  return RECOGNIZED_PAYMENT_PROVIDER_FRAME_HOSTS.some(
-    (allowed) => host === allowed || host.endsWith(`.${allowed}`),
-  );
-}
-
-// Card fields exist on the page but only inside a frame that is NOT a
-// recognized payment-provider surface. Carries the frame origin so the
-// refusal names what was refused without ever filling it.
-export class UnrecognizedPaymentFrameError extends Error {
-  readonly frameOrigin: string;
-  constructor(frameOrigin: string) {
-    super("payment_frame_not_recognized");
-    this.frameOrigin = frameOrigin;
-  }
-}
-
-export class PaymentCardFillCleanupError extends Error {
-  readonly paymentFieldsCleared = false;
-  readonly frameOrigin?: string;
-
-  constructor(error: unknown) {
-    const source = error instanceof Error ? error : new Error("payment_card_fill_failed");
-    super(source.message);
-    this.name = "PaymentCardFillCleanupError";
-    if (source instanceof UnrecognizedPaymentFrameError) this.frameOrigin = source.frameOrigin;
-  }
-}
-
-export class PaymentSubmitOutcomeUnknownError extends Error {
-  constructor() {
-    super("payment_submit_outcome_unknown");
-    this.name = "PaymentSubmitOutcomeUnknownError";
-  }
 }
 
 // Fix C (operator reliability, 2026-09): an OAuth completion wait that times
@@ -552,829 +422,6 @@ export function oauthAwaitingHumanMessage(productOrigin: string, budgetMs: numbe
   );
 }
 
-export async function runCaptureConfirmedPaymentSubmit<T>(options: {
-  click: (markInputDispatchPossible: () => void) => Promise<void>;
-  readEvidence: () => Promise<{ baseline: T | null; dispatched: boolean }>;
-  clear: () => Promise<void>;
-  onSubmitDispatched?: () => void;
-}): Promise<T | null> {
-  let clickError: unknown;
-  let inputDispatchPossible = false;
-  try {
-    await options.click(() => {
-      inputDispatchPossible = true;
-    });
-  } catch (error) {
-    clickError = error;
-  }
-  if (
-    clickError instanceof BrowserClickDispatchError &&
-    clickError.dispatchStatus === "not_dispatched"
-  ) {
-    await options.clear();
-    throw clickError;
-  }
-  const evidence = await options.readEvidence();
-  await options.clear();
-  if (!evidence.dispatched) {
-    if (clickError !== undefined && !inputDispatchPossible) throw clickError;
-    throw new PaymentSubmitOutcomeUnknownError();
-  }
-  options.onSubmitDispatched?.();
-  if (clickError !== undefined) throw new PaymentSubmitOutcomeUnknownError();
-  return evidence.baseline;
-}
-
-const CHECKOUT_TERMINAL_RESERVED_SEGMENTS = new Set([
-  "about_blank",
-  "blank",
-  "checkout",
-  "checkouts",
-  "complete",
-  "confirmation",
-  "confirmed",
-  "loading",
-  "lookup",
-  "masked",
-  "n_a",
-  "na",
-  "new",
-  "null",
-  "not_available",
-  "order",
-  "orders",
-  "pending",
-  "preview",
-  "processing",
-  "receipt",
-  "receipts",
-  "success",
-  "thank_you",
-  "undefined",
-  "unknown",
-]);
-
-const CHECKOUT_TERMINAL_PLACEHOLDER_TOKENS = new Set([
-  "blank",
-  "complete",
-  "confirmation",
-  "confirmed",
-  "loading",
-  "lookup",
-  "masked",
-  "new",
-  "null",
-  "pending",
-  "preview",
-  "processing",
-  "success",
-  "undefined",
-  "unknown",
-]);
-
-function isSubstantiveCheckoutIdentity(identity: string): boolean {
-  const rawIdentity = identity.normalize("NFKC").trim();
-  if (/(?:x{2,}|[*•●◦▪■□×])/iu.test(rawIdentity)) return false;
-  const normalizedIdentity = rawIdentity
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "");
-  if (normalizedIdentity.length === 0) return false;
-  if (CHECKOUT_TERMINAL_RESERVED_SEGMENTS.has(normalizedIdentity)) return false;
-  const identityTokens = normalizedIdentity.split("_").filter(Boolean);
-  if (
-    identityTokens.length === 0 ||
-    identityTokens.every((token) => /^0+$/.test(token)) ||
-    identityTokens.some((token) => CHECKOUT_TERMINAL_PLACEHOLDER_TOKENS.has(token))
-  ) {
-    return false;
-  }
-  const compactIdentity = identityTokens.join("");
-  return !/^x{2,}\d*$/i.test(compactIdentity);
-}
-
-function checkoutOutcomeBaselineFromDispatchSnapshot(
-  snapshot: CheckoutOutcomeDispatchSnapshot,
-): CheckoutOutcomeBaseline {
-  const identities = checkoutUrlOrderIdentities(snapshot.url);
-  const orderUrlIdentities = new Set<string>();
-  for (const url of [snapshot.url, ...snapshot.urls]) {
-    for (const identity of checkoutUrlOrderIdentities(url)?.orders ?? []) {
-      orderUrlIdentities.add(identity);
-    }
-  }
-  return {
-    url: snapshot.url,
-    orderUrlIdentities: [...orderUrlIdentities],
-    terminalUrlIdentity: identities?.terminal ?? null,
-  };
-}
-
-function checkoutUrlOrderIdentities(
-  rawUrl: string,
-): { orders: readonly string[]; terminal: string | null } | null {
-  try {
-    const url = new URL(rawUrl);
-    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    const canonicalIdentity = (identity: string | undefined): string | null => {
-      if (identity === undefined || !isSubstantiveCheckoutIdentity(identity)) return null;
-      const normalizedIdentity = identity.normalize("NFKC").trim().toLowerCase();
-      return `${url.origin}/order/${encodeURIComponent(normalizedIdentity)}`;
-    };
-    const surfaces: Array<{ pathname: string; searchParams: URLSearchParams }> = [
-      { pathname: url.pathname, searchParams: url.searchParams },
-    ];
-    const fragment = url.hash.slice(1).replace(/^!/, "");
-    if (fragment.length > 0) {
-      let decodedFragment = fragment;
-      try {
-        decodedFragment = decodeURIComponent(fragment);
-      } catch {
-        decodedFragment = fragment;
-      }
-      if (/^[^/?#]+=[^#]*$/.test(decodedFragment)) {
-        surfaces.push({ pathname: "", searchParams: new URLSearchParams(decodedFragment) });
-      } else {
-        try {
-          const fragmentUrl = new URL(
-            /^[a-z][a-z\d+.-]*:/i.test(decodedFragment)
-              ? decodedFragment
-              : decodedFragment.startsWith("/")
-                ? `${url.origin}${decodedFragment}`
-                : `${url.origin}/${decodedFragment}`,
-          );
-          surfaces.push({
-            pathname: fragmentUrl.pathname,
-            searchParams: fragmentUrl.searchParams,
-          });
-        } catch {
-          surfaces.push({ pathname: decodedFragment, searchParams: new URLSearchParams() });
-        }
-      }
-    }
-    const orders = new Set<string>();
-    let terminal: string | null = null;
-    for (const surface of surfaces) {
-      const segments = surface.pathname
-        .split("/")
-        .filter((segment) => segment.length > 0)
-        .map((segment) => {
-          try {
-            return decodeURIComponent(segment);
-          } catch {
-            return segment;
-          }
-        });
-      const routeSegment = (offset: number): string =>
-        (segments.at(offset) ?? "").toLowerCase().replace(/-/g, "_");
-      if (
-        segments.some((segment) =>
-          ["about_blank", "blank"].includes(segment.toLowerCase().replace(/[-:]/g, "_")),
-        )
-      ) {
-        continue;
-      }
-      for (let index = 0; index < segments.length - 1; index += 1) {
-        const marker = segments[index]?.toLowerCase().replace(/-/g, "_");
-        if (
-          !["checkout", "checkouts", "order", "orders", "receipt", "receipts"].includes(
-            marker ?? "",
-          )
-        ) {
-          continue;
-        }
-        const order = canonicalIdentity(segments[index + 1]);
-        if (order !== null) orders.add(order);
-      }
-      for (const [key, value] of surface.searchParams) {
-        const normalizedKey = key
-          .normalize("NFKC")
-          .replace(/([a-z\d])([A-Z])/g, "$1_$2")
-          .toLowerCase()
-          .replace(/[^a-z\d]+/g, "_")
-          .replace(/^_+|_+$/g, "");
-        if (!/(?:^|_)(?:order|receipt)(?:_(?:id|number|token))?(?:_|$)/.test(normalizedKey)) {
-          continue;
-        }
-        const order = canonicalIdentity(value);
-        if (order !== null) orders.add(order);
-      }
-      let terminalIdentity: string | undefined;
-      if (["receipt", "receipts"].includes(routeSegment(-2))) {
-        terminalIdentity = segments.at(-1);
-      } else if (
-        ["order", "orders"].includes(routeSegment(-3)) &&
-        ["confirmation", "confirmed", "thank_you"].includes(routeSegment(-1))
-      ) {
-        terminalIdentity = segments.at(-2);
-      } else if (
-        ["order_confirmation", "order_confirmed", "order_complete", "thank_you"].includes(
-          routeSegment(-2),
-        )
-      ) {
-        terminalIdentity = segments.at(-1);
-      } else if (
-        ["checkout", "checkouts"].includes(routeSegment(-3)) &&
-        routeSegment(-1) === "thank_you"
-      ) {
-        terminalIdentity = segments.at(-2);
-      }
-      const surfaceTerminal = canonicalIdentity(terminalIdentity);
-      if (surfaceTerminal !== null) {
-        orders.add(surfaceTerminal);
-        terminal ??= surfaceTerminal;
-      }
-    }
-    return { orders: [...orders], terminal };
-  } catch {
-    return null;
-  }
-}
-
-// Shopify's thank-you route keeps the checkout token in a nested path
-// (`/checkouts/cn/<token>/<locale>/thank-you`), so it has no terminal order
-// identity for checkoutUrlOrderIdentities to compare. Treat it as terminal
-// only when the post-submit page also exposes unambiguous confirmation copy.
-function isShopifyCheckoutThankYouRoute(rawUrl: string): boolean {
-  try {
-    const segments = new URL(rawUrl).pathname
-      .split("/")
-      .filter(Boolean)
-      .map((segment) => decodeURIComponent(segment).toLowerCase().replace(/-/g, "_"));
-    return (
-      (segments[0] === "checkout" || segments[0] === "checkouts") && segments.at(-1) === "thank_you"
-    );
-  } catch {
-    return false;
-  }
-}
-
-// EbisuMart — a widely-deployed Japanese EC platform (the Hibiya Kadan
-// checkout runs on it) — names its card fields CREDIT_NO / CREDIT_NAME /
-// SECURITY_CD / CREDIT_LIMIT_MONTH / CREDIT_LIMIT_YEAR. PAN name/id and JP
-// label conventions are normalized to data-ts-jp-card-field by
-// stampJapaneseCardLabelFields so this selector stays valid for both
-// frame.locator() and native element.matches() calls.
-const CHECKOUT_NON_CARD_IDENTITY_EXCLUSION =
-  ':not(.autofill-field):not(.focus-intercept):not([name*="gift" i]):not([id*="gift" i]):not([name*="loyalty" i]):not([id*="loyalty" i]):not([name*="point" i]):not([id*="point" i]):not([name*="prepaid" i]):not([id*="prepaid" i]):not([name*="member" i]):not([id*="member" i])';
-
-const CHECKOUT_LEGACY_PAN_FIELD_SELECTORS = [
-  'input[autocomplete~="cc-number"]',
-  'input[name*="cardnumber" i]',
-  'input[id*="card-number" i]',
-  'input[id*="cardnumber" i]',
-]
-  .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
-  .join(",");
-
-const CHECKOUT_PAN_FIELD_SELECTORS = [
-  CHECKOUT_LEGACY_PAN_FIELD_SELECTORS,
-  `input[data-ts-hosted-card-field="pan"]${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
-  `input[data-ts-jp-card-field="pan"]${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
-].join(",");
-
-const CHECKOUT_CONSERVATIVE_EXPIRY_MONTH_FIELD_SELECTORS = [
-  '[data-ts-hosted-card-field="month"]',
-  '[autocomplete~="cc-exp-month"]',
-  'select[name*="credit" i][name*="month" i]',
-  'select[name*="limit" i][name*="month" i]',
-  'select[id*="limit" i][id*="month" i]',
-  'select[data-ts-jp-card-exp="month"]',
-]
-  .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
-  .join(",");
-
-const CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS = [
-  CHECKOUT_CONSERVATIVE_EXPIRY_MONTH_FIELD_SELECTORS,
-  ...[
-    '[name*="exp_month" i]',
-    '[name*="expmonth" i]',
-    '[name*="exp" i][name*="month" i]',
-    '[id*="exp" i][id*="month" i]',
-  ].map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`),
-].join(",");
-
-const CHECKOUT_CONSERVATIVE_EXPIRY_YEAR_FIELD_SELECTORS = [
-  '[data-ts-hosted-card-field="year"]',
-  '[autocomplete~="cc-exp-year"]',
-  'select[name*="credit" i][name*="year" i]',
-  'select[name*="limit" i][name*="year" i]',
-  'select[id*="limit" i][id*="year" i]',
-  'select[data-ts-jp-card-exp="year"]',
-]
-  .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
-  .join(",");
-
-const CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS = [
-  CHECKOUT_CONSERVATIVE_EXPIRY_YEAR_FIELD_SELECTORS,
-  ...[
-    '[name*="exp_year" i]',
-    '[name*="expyear" i]',
-    '[name*="exp" i][name*="year" i]',
-    '[id*="exp" i][id*="year" i]',
-  ].map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`),
-].join(",");
-
-const CHECKOUT_CONSERVATIVE_COMBINED_EXPIRY_INPUT_SELECTORS = [
-  'input[data-ts-hosted-card-field="expiry"]',
-  'input[autocomplete~="cc-exp"]',
-  'input[name="exp" i]',
-  'input[id="exp" i]',
-  'input[placeholder="MM/YY" i]',
-  'input[placeholder="MM / YY" i]',
-  'input[aria-label="MM/YY" i]',
-  'input[aria-label="MM / YY" i]',
-  'input[data-ts-card-expiry="combined"]',
-].map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`);
-
-const CHECKOUT_COMBINED_EXPIRY_INPUT_SELECTORS = [
-  ...CHECKOUT_CONSERVATIVE_COMBINED_EXPIRY_INPUT_SELECTORS,
-  'input[name*="expir" i]:not([name*="month" i]):not([name*="year" i])',
-  'input[name*="exp-date" i]',
-  'input[id*="expir" i]:not([id*="month" i]):not([id*="year" i])',
-  'input[id*="exp-date" i]',
-].map((selector) =>
-  selector.includes(CHECKOUT_NON_CARD_IDENTITY_EXCLUSION)
-    ? selector
-    : `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
-);
-
-const CHECKOUT_CONSERVATIVE_COMBINED_EXPIRY_FIELD_SELECTORS = [
-  ...CHECKOUT_CONSERVATIVE_COMBINED_EXPIRY_INPUT_SELECTORS,
-  `label:has-text("MM/YY") input${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
-  `label:has-text("MM / YY") input${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
-].join(",");
-
-const CHECKOUT_COMBINED_EXPIRY_FIELD_SELECTORS = [
-  ...CHECKOUT_COMBINED_EXPIRY_INPUT_SELECTORS,
-  `label:has-text("MM/YY") input${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
-  `label:has-text("MM / YY") input${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
-].join(",");
-
-const CHECKOUT_COMBINED_EXPIRY_GROUP_SELECTORS = CHECKOUT_COMBINED_EXPIRY_INPUT_SELECTORS.join(",");
-
-const CHECKOUT_CONSERVATIVE_CVV_FIELD_SELECTORS = [
-  'input[data-ts-hosted-card-field="cvv"]',
-  'input[autocomplete~="cc-csc"]',
-  'input[data-ts-jp-card-field="cvv"]',
-  ...["name", "id"].flatMap((attribute) =>
-    ["cvv", "cvc", "csc", "securityCode", "security_code", "security-code"].map(
-      (identity) => `input[${attribute}="${identity}" i]`,
-    ),
-  ),
-  'input[aria-label="Security code" i]',
-  'input[aria-label="セキュリティコード"]',
-]
-  .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
-  .join(",");
-
-const CHECKOUT_CVV_FIELD_SELECTORS = [
-  CHECKOUT_CONSERVATIVE_CVV_FIELD_SELECTORS,
-  ...[
-    'input[name*="cvv" i]',
-    'input[name*="cvc" i]',
-    'input[name*="security-code" i]',
-    'input[id*="cvv" i]',
-    'input[id*="cvc" i]',
-  ].map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`),
-].join(",");
-
-const CHECKOUT_CARD_NAME_FIELD_SELECTORS = [
-  'input[data-ts-hosted-card-field="name"]',
-  'input[autocomplete~="cc-name"]',
-  'input[name*="cardholder" i]',
-  'input[name*="card-name" i]',
-  'input[id*="cardholder" i]',
-  'input[data-ts-jp-card-field="name"]',
-]
-  .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
-  .join(",");
-
-const CHECKOUT_CARD_VALUE_FIELD_SELECTORS = [
-  CHECKOUT_PAN_FIELD_SELECTORS,
-  CHECKOUT_COMBINED_EXPIRY_GROUP_SELECTORS,
-  CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS,
-  CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS,
-  CHECKOUT_CVV_FIELD_SELECTORS,
-  CHECKOUT_CARD_NAME_FIELD_SELECTORS,
-].join(",");
-
-// Charge-verb button labels — the click that may move money. Used by
-// submitFilledCheckout to find the charge control, and by operate_act's
-// pending-card-fill guard to recognize and cap caller-placed attempts while a
-// vaulted card sits filled in the checkout. NOT English-only: Japanese
-// checkouts (the
-// Rakuten-style flows the card-fill path targets) label the charge
-// ご注文を確定する / 注文する / 購入する / お支払い. Ambiguous confirm/pay
-// wording errs toward matching — a false positive may consume the approval's
-// one guarded attempt; a false negative leaves a charge click unguarded.
-// Note: \b is ASCII-only, so the Japanese alternatives anchor on ^ (with $
-// where a bare noun like 購入 would otherwise swallow navigation labels such
-// as 購入手続きへ). 確定 (finalize) is deliberate — 確認 (review) must NOT match.
-export const CHECKOUT_SUBMIT_LABEL_RE =
-  /^(?:pay(?:\s+now)?|place\s+order|complete\s+(?:order|purchase|payment)|submit\s+payment|buy\s+now|confirm\s+(?:order|payment))\b|^ご?注文(?:内容)?[をの]?確定|^ご?注文する|^確定(?:する|$)|^購入(?:する|を確定|$)|^今すぐ(?:購入|注文|支払)|^支払う|^お?支払い(?:を確定|$)/i;
-
-const CHECKOUT_PAYMENT_EXECUTION_PATHS = new Set([
-  "authorize",
-  "capture",
-  "charge",
-  "charges",
-  "completecheckout",
-  "completeorder",
-  "confirmpayment",
-  "orders",
-  "placeorder",
-  "purchase",
-]);
-const CHECKOUT_PAYMENT_EXECUTION_MUTATIONS = new Set([
-  "authorizepayment",
-  "capturepayment",
-  "completecheckout",
-  "completeorder",
-  "completepayment",
-  "confirmpayment",
-  "createcharge",
-  "placeorder",
-  "submitpayment",
-]);
-const CHECKOUT_PAYMENT_EXCLUDED_PATH_SEGMENTS = new Set([
-  "analytics",
-  "collect",
-  "events",
-  "logs",
-  "metrics",
-  "paymentmethods",
-  "setupintents",
-  "telemetry",
-  "tokenization",
-  "tokens",
-  "tracking",
-]);
-const CHECKOUT_PAYMENT_REQUEST_OBSERVATION_MS = 15_000;
-
-function normalizedPaymentOperation(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
-}
-
-function isCheckoutPaymentExecutionOperation(value: string): boolean {
-  return CHECKOUT_PAYMENT_EXECUTION_MUTATIONS.has(normalizedPaymentOperation(value));
-}
-
-function collectGraphqlMutationCandidates(query: string, candidates: string[]): void {
-  const mutation =
-    /\bmutation\b(?:\s+([A-Za-z_][A-Za-z0-9_-]*))?(?:\s*\([^{}]*\))?(?:\s+@[^{]+)?\s*\{\s*(?:([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*)?([A-Za-z_][A-Za-z0-9_-]*)/gi;
-  for (const match of query.matchAll(mutation)) {
-    if (match[1] !== undefined) candidates.push(match[1]);
-    if (match[3] !== undefined) candidates.push(match[3]);
-  }
-}
-
-function hasCheckoutPaymentExecutionPayload(request: Request): boolean {
-  const payload = request.postData();
-  if (payload === null) return false;
-  const candidates: string[] = [];
-  try {
-    const parsed = JSON.parse(payload) as unknown;
-    if (parsed === null || Array.isArray(parsed) || typeof parsed !== "object") return false;
-    const record = parsed as Record<string, unknown>;
-    if (typeof record.operationName === "string") candidates.push(record.operationName);
-    if (typeof record.query === "string")
-      collectGraphqlMutationCandidates(record.query, candidates);
-  } catch {
-    const form = new URLSearchParams(payload);
-    const operationName = form.get("operationName");
-    if (operationName !== null) candidates.push(operationName);
-    const query = form.get("query");
-    collectGraphqlMutationCandidates(query ?? payload, candidates);
-  }
-  return candidates.some(isCheckoutPaymentExecutionOperation);
-}
-
-function isCheckoutPaymentRequest(request: Request): boolean {
-  if (!["document", "fetch", "xhr"].includes(request.resourceType())) return false;
-  const method = request.method().toUpperCase();
-  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return false;
-  try {
-    const segments = new URL(request.url()).pathname.split("/").filter(Boolean);
-    const normalizedSegments = segments.map(normalizedPaymentOperation);
-    if (
-      normalizedSegments.some((segment) => CHECKOUT_PAYMENT_EXCLUDED_PATH_SEGMENTS.has(segment))
-    ) {
-      return false;
-    }
-    const lastSegment = segments.at(-1);
-    if (
-      lastSegment !== undefined &&
-      CHECKOUT_PAYMENT_EXECUTION_PATHS.has(normalizedPaymentOperation(lastSegment))
-    ) {
-      return true;
-    }
-    if (
-      lastSegment !== undefined &&
-      (normalizedPaymentOperation(lastSegment) === "confirm" ||
-        normalizedPaymentOperation(lastSegment) === "capture") &&
-      segments.some((segment) => normalizedPaymentOperation(segment) === "paymentintents")
-    ) {
-      return true;
-    }
-  } catch {
-    return false;
-  }
-  return hasCheckoutPaymentExecutionPayload(request);
-}
-
-export function checkoutSubmitLabel(signals: {
-  ariaLabel?: string | null;
-  inputValue?: string | null;
-  textContent?: string | null;
-}): string {
-  return (signals.ariaLabel || signals.inputValue || signals.textContent || "").trim();
-}
-
-// Cross-frame saved-card selection primitives (submitFilledCheckoutInScope's
-// money fence). A merchant-owned saved/new-card radio can legitimately control
-// card fields living in a DIFFERENT, recognized hosted-fields iframe, so
-// detection/verification aggregates a per-frame read-only SCAN across every
-// frame while the click-side RESOLVE runs only inside the radio's own frame
-// (an HTML radio group cannot span frames). These run in the PAGE via
-// frame.evaluate and are deliberately module-level, named, and fully
-// self-contained: Playwright serializes an evaluate callback via toString(),
-// so a reference to any outer module binding (e.g. a shared marker-name
-// constant) would be an undefined identifier at runtime inside the page — the
-// data-ts-checkout-selection marker name is therefore a literal in each
-// function.
-interface SavedCardSelectionScan {
-  competingRadioCount: number;
-  competingSelectOption: boolean;
-  sealedFieldValues: Array<string | null>;
-  markedCount: number;
-  markedUncheckedCount: number;
-}
-
-function scanSavedCardSelectionInPage(): SavedCardSelectionScan {
-  const savedCardPattern =
-    /(?:••+|\*{2,}|●+|×{2,}|x{4,})[\s-]*\d{2,4}\b|\bending\s+in\s+\d{4}\b|\bcard\s+on\s+file\b|\bsaved\s+card\b|登録済みのカード|前回(?:利用|使用)したカード|保存されたカード/iu;
-  const roots: Array<Document | ShadowRoot> = [document];
-  for (let index = 0; index < roots.length; index += 1) {
-    const root = roots[index]!;
-    for (const element of Array.from(root.querySelectorAll("*"))) {
-      const shadowRoot = element.shadowRoot;
-      if (shadowRoot !== null) roots.push(shadowRoot);
-    }
-  }
-  const isFilledCardField = (element: Element | null): boolean =>
-    element?.getAttribute("data-ts-sealed-payment") === "1";
-  const associatedLabelText = (control: Element): string[] => {
-    const labels = new Set<HTMLLabelElement>();
-    if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement) {
-      for (const label of Array.from(control.labels ?? [])) labels.add(label);
-    }
-    const id = control.getAttribute("id");
-    if (id !== null && id.length > 0) {
-      const root = control.getRootNode();
-      if (!(root instanceof Document) && !(root instanceof ShadowRoot)) {
-        throw new Error("saved-card control has no inspectable root");
-      }
-      for (const label of Array.from(root.querySelectorAll<HTMLLabelElement>("label[for]"))) {
-        if (label.htmlFor === id) labels.add(label);
-      }
-    }
-    return Array.from(labels, (label) => label.textContent ?? "");
-  };
-  const containerFor = (el: Element): Element | null =>
-    el.closest("[role='radio'],li,div") ?? el.parentElement;
-  const isChecked = (el: Element): boolean =>
-    el instanceof HTMLInputElement ? el.checked : el.getAttribute("aria-checked") === "true";
-  const labelTextFor = (el: Element, container: Element | null): string =>
-    [el.getAttribute("aria-label"), ...associatedLabelText(el), container?.textContent]
-      .filter((value): value is string => typeof value === "string")
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .trim();
-
-  let competingRadioCount = 0;
-  let competingSelectOption = false;
-  for (const root of roots) {
-    for (const candidate of Array.from(
-      root.querySelectorAll('input[type="radio"]:checked,[role="radio"][aria-checked="true"]'),
-    )) {
-      if (isFilledCardField(candidate)) continue;
-      const text = labelTextFor(candidate, containerFor(candidate));
-      if (text.length > 0 && savedCardPattern.test(text)) competingRadioCount += 1;
-    }
-    for (const select of Array.from(root.querySelectorAll("select"))) {
-      if (isFilledCardField(select)) continue;
-      for (const option of Array.from(select.selectedOptions)) {
-        if (isFilledCardField(option)) continue;
-        const text = [
-          option.textContent,
-          select.getAttribute("aria-label"),
-          ...associatedLabelText(select),
-        ]
-          .filter((value): value is string => typeof value === "string")
-          .join(" ")
-          .replace(/\s+/g, " ")
-          .trim();
-        if (text.length > 0 && savedCardPattern.test(text)) competingSelectOption = true;
-      }
-    }
-  }
-  const sealedFieldValues = roots.flatMap((root) =>
-    Array.from(root.querySelectorAll('[data-ts-sealed-payment="1"]')).map((el) =>
-      el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement ? el.value : null,
-    ),
-  );
-  let markedCount = 0;
-  let markedUncheckedCount = 0;
-  for (const root of roots) {
-    for (const marked of Array.from(root.querySelectorAll('[data-ts-checkout-selection="1"]'))) {
-      markedCount += 1;
-      if (!isChecked(marked)) markedUncheckedCount += 1;
-    }
-  }
-  return {
-    competingRadioCount,
-    competingSelectOption,
-    sealedFieldValues,
-    markedCount,
-    markedUncheckedCount,
-  };
-}
-
-function clearSavedCardSelectionMarkersInPage(): void {
-  const roots: Array<Document | ShadowRoot> = [document];
-  for (let index = 0; index < roots.length; index += 1) {
-    const root = roots[index]!;
-    for (const element of Array.from(root.querySelectorAll("*"))) {
-      const shadowRoot = element.shadowRoot;
-      if (shadowRoot !== null) roots.push(shadowRoot);
-    }
-  }
-  for (const root of roots) {
-    for (const marked of Array.from(root.querySelectorAll("[data-ts-checkout-selection]"))) {
-      marked.removeAttribute("data-ts-checkout-selection");
-    }
-  }
-}
-
-function resolveSavedCardSelectionInPage():
-  | { status: "resolved"; clicked: number }
-  | { status: "ambiguous" } {
-  const savedCardPattern =
-    /(?:••+|\*{2,}|●+|×{2,}|x{4,})[\s-]*\d{2,4}\b|\bending\s+in\s+\d{4}\b|\bcard\s+on\s+file\b|\bsaved\s+card\b|登録済みのカード|前回(?:利用|使用)したカード|保存されたカード/iu;
-  const roots: Array<Document | ShadowRoot> = [document];
-  for (let index = 0; index < roots.length; index += 1) {
-    const root = roots[index]!;
-    for (const element of Array.from(root.querySelectorAll("*"))) {
-      const shadowRoot = element.shadowRoot;
-      if (shadowRoot !== null) roots.push(shadowRoot);
-    }
-  }
-  const isFilledCardField = (element: Element | null): boolean =>
-    element?.getAttribute("data-ts-sealed-payment") === "1";
-  const associatedLabelText = (control: Element): string[] => {
-    const labels = new Set<HTMLLabelElement>();
-    if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement) {
-      for (const label of Array.from(control.labels ?? [])) labels.add(label);
-    }
-    const id = control.getAttribute("id");
-    if (id !== null && id.length > 0) {
-      const root = control.getRootNode();
-      if (!(root instanceof Document) && !(root instanceof ShadowRoot)) {
-        throw new Error("saved-card control has no inspectable root");
-      }
-      for (const label of Array.from(root.querySelectorAll<HTMLLabelElement>("label[for]"))) {
-        if (label.htmlFor === id) labels.add(label);
-      }
-    }
-    return Array.from(labels, (label) => label.textContent ?? "");
-  };
-  const containerFor = (el: Element): Element | null =>
-    el.closest("[role='radio'],li,div") ?? el.parentElement;
-  const isChecked = (el: Element): boolean =>
-    el instanceof HTMLInputElement ? el.checked : el.getAttribute("aria-checked") === "true";
-  const labelTextFor = (el: Element, container: Element | null): string =>
-    [el.getAttribute("aria-label"), ...associatedLabelText(el), container?.textContent]
-      .filter((value): value is string => typeof value === "string")
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .trim();
-
-  const competingRadios: Array<{ el: Element; root: Document | ShadowRoot }> = [];
-  for (const root of roots) {
-    for (const candidate of Array.from(
-      root.querySelectorAll('input[type="radio"]:checked,[role="radio"][aria-checked="true"]'),
-    )) {
-      if (isFilledCardField(candidate)) continue;
-      const text = labelTextFor(candidate, containerFor(candidate));
-      if (text.length > 0 && savedCardPattern.test(text)) {
-        competingRadios.push({ el: candidate, root });
-      }
-    }
-  }
-  let clicked = 0;
-  for (const { el: radio, root } of competingRadios) {
-    const radioGroup = radio.closest('[role="radiogroup"]');
-    const siblings: Element[] =
-      radio instanceof HTMLInputElement && radio.name.length > 0
-        ? Array.from(
-            (radio.form ?? root).querySelectorAll(
-              `input[type="radio"][name="${CSS.escape(radio.name)}"]`,
-            ),
-          )
-        : radioGroup !== null
-          ? Array.from(radioGroup.querySelectorAll('[role="radio"]'))
-          : [];
-    const candidates = siblings.filter((sibling) => {
-      if (sibling === radio || isChecked(sibling)) return false;
-      const text = labelTextFor(sibling, containerFor(sibling));
-      return !(text.length > 0 && savedCardPattern.test(text));
-    });
-    // Prefer whichever candidate structurally OWNS one of our sealed fields
-    // (its container wraps the actual form we just filled) — an i18n-agnostic,
-    // DOM-structural signal. That preference only holds when it is UNIQUE:
-    // two or more owning candidates must never silently resolve to the first
-    // DOM-order match. With no owning candidate, fall back to the sole
-    // remaining candidate only when exactly one exists.
-    const owningCandidates = candidates.filter((sibling) => {
-      const container = containerFor(sibling) ?? sibling;
-      return container.querySelector('[data-ts-sealed-payment="1"]') !== null;
-    });
-    const target =
-      owningCandidates.length === 1
-        ? owningCandidates[0]
-        : owningCandidates.length === 0 && candidates.length === 1
-          ? candidates[0]
-          : undefined;
-    if (target === undefined) return { status: "ambiguous" };
-    const requeryScope: ParentNode =
-      radio instanceof HTMLInputElement && radio.name.length > 0 ? root : (radioGroup ?? root);
-    const requerySelector =
-      radio instanceof HTMLInputElement && radio.name.length > 0
-        ? `input[type="radio"][name="${CSS.escape(radio.name)}"]`
-        : '[role="radio"]';
-    (target as HTMLElement).click();
-    // The click can synchronously rerender the group (framework-controlled
-    // radios), detaching the node we just clicked — marking that stale
-    // reference would leave the LIVE checked radio unmarked and force a false
-    // refusal later. Re-identify the marking target from the live tree: the
-    // group must now contain exactly one connected, checked, non-saved-shaped
-    // member; anything else is genuinely ambiguous.
-    const liveChecked = Array.from(requeryScope.querySelectorAll(requerySelector)).filter(
-      (member) => {
-        if (!member.isConnected || !isChecked(member)) return false;
-        const text = labelTextFor(member, containerFor(member));
-        return !(text.length > 0 && savedCardPattern.test(text));
-      },
-    );
-    if (liveChecked.length !== 1) return { status: "ambiguous" };
-    liveChecked[0]!.setAttribute("data-ts-checkout-selection", "1");
-    clicked += 1;
-  }
-  return { status: "resolved", clicked };
-}
-
-// Carried from resolveCompetingSavedCardSelection to the charge-click boundary
-// so the exact resolved state can be independently re-verified right before
-// the pay button is clicked.
-interface SavedCardSelectionVerification {
-  sealedValuesByFrame: ReadonlyMap<Frame, ReadonlyArray<string | null>>;
-  expectedMarkedCount: number;
-}
-
-// Descriptor-level PayPal surface classifier retained for callers that need to
-// inventory wallet/card frames. It is not the payment refusal gate: the operator
-// keys that decision off the frame containing the actual visible PAN field.
-export function hasPayPalHostedCheckoutFrame(frames: readonly CheckoutFrameDescriptor[]): boolean {
-  return frames.some((frame) => {
-    const marker = `${frame.url} ${frame.name} ${frame.title}`.toLowerCase();
-    if (/__zoid__paypal_(?:buttons|card_fields|checkout)/.test(marker)) return true;
-
-    try {
-      const url = new URL(frame.url);
-      const paypalHost =
-        url.hostname === "paypal.com" ||
-        url.hostname.endsWith(".paypal.com") ||
-        url.hostname === "paypalobjects.com" ||
-        url.hostname.endsWith(".paypalobjects.com");
-      return paypalHost && /(?:smart|checkout|card[_ -]?fields|zoid)/.test(marker);
-    } catch {
-      return false;
-    }
-  });
-}
-
-// Actual PayPal wallet/checkout hosts; Braintree hosted card inputs are fillable.
-function isPayPalWalletHost(host: string): boolean {
-  const h = host.toLowerCase();
-  return (
-    h === "paypal.com" ||
-    h.endsWith(".paypal.com") ||
-    h === "paypalobjects.com" ||
-    h.endsWith(".paypalobjects.com")
-  );
-}
-
 const CURRENCY_SYMBOLS: Record<string, string> = {
   $: "USD",
   US$: "USD",
@@ -1506,35 +553,6 @@ function classifyCheckoutCurrencyToken(token: string | undefined): string | unde
   return resolveCheckoutCurrencyToken(token);
 }
 
-const AMBIGUOUS_CONFIRM_CURRENCY_NOTATIONS = new Set(["$", "¥", "￥"]);
-const CONFIRM_DOLLAR_PREFIX_CURRENCIES: Readonly<Record<string, string>> = {
-  A: "AUD",
-  AU: "AUD",
-  C: "CAD",
-  CA: "CAD",
-  HK: "HKD",
-  MX: "MXN",
-  NZ: "NZD",
-  SG: "SGD",
-  US: "USD",
-};
-
-function classifyCheckoutConfirmCurrencyToken(token: string | undefined): string | undefined {
-  if (token === undefined) return undefined;
-  const upper = token.toUpperCase();
-  if (upper.endsWith("$") && upper.length > 1) {
-    const prefix = upper.slice(0, -1);
-    const currency = CHECKOUT_CURRENCY_CODES.has(prefix)
-      ? prefix
-      : CONFIRM_DOLLAR_PREFIX_CURRENCIES[prefix];
-    if (currency !== undefined) return currency;
-  }
-  if (AMBIGUOUS_CONFIRM_CURRENCY_NOTATIONS.has(upper)) {
-    return undefined;
-  }
-  return classifyCheckoutCurrencyToken(token);
-}
-
 // A lone separator with three trailing digits is ambiguous: it can be either a
 // group ("1,000") or, for a three-minor-unit currency, a fraction ("1.000").
 // Preserve the existing parser's handling of that case. Shorter trailing groups
@@ -1616,35 +634,6 @@ function parseCheckoutAmountResult(
     }
   }
   return null;
-}
-
-// The already-approved/selected currency (captured at fill_card time) is
-// passed as fallbackCurrency so a page notation that can't be pinned to one
-// ISO currency on its own (a bare "$" shared by USD/CAD/AUD/…, an FX-preview
-// module's secondary total, …) resolves against it instead of blocking the
-// confirm read. Retains every match instead of returning on the first, so a
-// currency-selector/FX-conversion widget positioned above the real order
-// summary — its own stray "total"-labeled line included — never wins over the
-// final payable total that follows it in reading order.
-function parseCheckoutConfirmAmountResult(
-  texts: readonly string[],
-  fallbackCurrency?: string,
-): CheckoutAmount | null {
-  let amount: CheckoutAmount | null = null;
-  for (const text of texts) {
-    checkoutTotalPattern.lastIndex = 0;
-    for (const match of text.matchAll(checkoutTotalPattern)) {
-      if (match[0].startsWith("小計")) continue;
-      const parsed = parseCheckoutAmountMatch(
-        text,
-        match,
-        fallbackCurrency,
-        classifyCheckoutConfirmCurrencyToken,
-      );
-      if (parsed !== null) amount = parsed;
-    }
-  }
-  return amount;
 }
 
 export function parseCheckoutAmount(
@@ -2031,37 +1020,6 @@ function extractCheckoutSummaryText(): string {
   }
 }
 
-function extractCheckoutConfirmSummaryText(): string {
-  const body = document.body;
-  if (!body) return "";
-  const excluded: Array<{ el: HTMLElement | SVGElement; style: string | null }> = [];
-  try {
-    for (const el of Array.from(body.querySelectorAll("*"))) {
-      if (!(el instanceof HTMLElement || el instanceof SVGElement)) continue;
-      const style = window.getComputedStyle(el);
-      const tagName = el.tagName.toLowerCase();
-      const struck =
-        tagName === "del" ||
-        tagName === "s" ||
-        tagName === "strike" ||
-        style.textDecorationLine.split(/\s+/).includes("line-through");
-      if (!struck && Number.parseFloat(style.opacity) > 0) continue;
-      excluded.push({ el, style: el.getAttribute("style") });
-      el.style.setProperty("display", "none", "important");
-    }
-    return body.innerText ?? "";
-  } finally {
-    for (const { el, style } of excluded.reverse()) {
-      if (style === null) {
-        el.style.removeProperty("display");
-        if (el.getAttribute("style") === "") el.removeAttribute("style");
-      } else {
-        el.setAttribute("style", style);
-      }
-    }
-  }
-}
-
 function extractObservationVisibleText(): string {
   const body = document.body;
   if (!body) return "";
@@ -2087,85 +1045,6 @@ function extractObservationVisibleText(): string {
     }
   }
   return text;
-}
-
-function elementHasEffectiveVisibleRect(element: Element): boolean {
-  if (!element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
-  const view = element.ownerDocument.defaultView;
-  if (view === null) return false;
-  const rect = element.getBoundingClientRect();
-  let left = Math.max(rect.left, 0);
-  let top = Math.max(rect.top, 0);
-  let right = Math.min(rect.right, view.innerWidth);
-  let bottom = Math.min(rect.bottom, view.innerHeight);
-  const clips = (overflow: string): boolean =>
-    /^(?:auto|clip|hidden|overlay|scroll)$/.test(overflow);
-  let ancestor = element.parentElement;
-  while (ancestor !== null) {
-    const style = view.getComputedStyle(ancestor);
-    const clipsX = clips(style.overflowX);
-    const clipsY = clips(style.overflowY);
-    if (clipsX || clipsY) {
-      const ancestorRect = ancestor.getBoundingClientRect();
-      const clientLeft = ancestor instanceof HTMLElement ? ancestor.clientLeft : 0;
-      const clientTop = ancestor instanceof HTMLElement ? ancestor.clientTop : 0;
-      const clipLeft = ancestorRect.left + clientLeft;
-      const clipTop = ancestorRect.top + clientTop;
-      const clipRight =
-        clipLeft + (ancestor instanceof HTMLElement ? ancestor.clientWidth : ancestorRect.width);
-      const clipBottom =
-        clipTop + (ancestor instanceof HTMLElement ? ancestor.clientHeight : ancestorRect.height);
-      if (clipsX) {
-        left = Math.max(left, clipLeft);
-        right = Math.min(right, clipRight);
-      }
-      if (clipsY) {
-        top = Math.max(top, clipTop);
-        bottom = Math.min(bottom, clipBottom);
-      }
-    }
-    ancestor = ancestor.parentElement;
-  }
-  return right - left >= 4 && bottom - top >= 4;
-}
-
-const PAYMENT_PAN_MAX_SPAN_CHARS = 96;
-
-function passesPaymentLuhn(digits: string): boolean {
-  let sum = 0;
-  let double = false;
-  for (let index = digits.length - 1; index >= 0; index -= 1) {
-    let digit = Number(digits[index]);
-    if (double) {
-      digit *= 2;
-      if (digit > 9) digit -= 9;
-    }
-    sum += digit;
-    double = !double;
-  }
-  return sum % 10 === 0;
-}
-
-function containsLuhnPanSpan(text: string): boolean {
-  const digitPositions = Array.from(text.matchAll(/\d/g), (match) => match.index);
-  for (let start = 0; start + 13 <= digitPositions.length; start += 1) {
-    const maxLength = Math.min(19, digitPositions.length - start);
-    for (let length = 13; length <= maxLength; length += 1) {
-      const positions = digitPositions.slice(start, start + length);
-      if (positions[positions.length - 1]! - positions[0]! + 1 > PAYMENT_PAN_MAX_SPAN_CHARS) {
-        break;
-      }
-      const digits = positions.map((position) => text[position]).join("");
-      if (passesPaymentLuhn(digits)) return true;
-    }
-  }
-  return false;
-}
-
-function containsVisiblePaymentMaterial(text: string): boolean {
-  return (
-    containsLuhnPanSpan(text) || /\b(?:cvv|cvc|security\s+code)\s*[:#-]?\s*\d{3,4}\b/iu.test(text)
-  );
 }
 
 function merchantFromPage(title: string, siteName: string, url: string): string {
@@ -2777,11 +1656,8 @@ export class BrowserController {
     return this.pageDriver.ownedPages;
   }
 
-  private checkoutCardGroupScope: CheckoutCardGroupScope | undefined;
-  private checkoutOutcomeBaseline: CheckoutOutcomeBaseline | undefined;
-  private paymentInstrumentExpectation: PaymentInstrumentExpectation | undefined;
-  private observedPaymentInstrumentMismatch: PaymentInstrumentMismatch | undefined;
-  private checkoutSubmitSequence = 0;
+  private readonly cardValueOutputMask = new CardValueOutputMask();
+  private readonly operatorEvidence = new OperatorEvidenceCollector(this.cardValueOutputMask);
   private clickDispatchSequence = 0;
   private readonly oauthConsentAttemptedPhases = new Set<string>();
   private activeOAuthAttempt: {
@@ -2805,6 +1681,23 @@ export class BrowserController {
   // along a continuous path (humans don't teleport between clicks).
   private mouseX = 100;
   private mouseY = 100;
+
+  /** Install the session-lifetime output mask before the first secret write. */
+  registerCardValueOutputMask(card: CardMaskRegistration): void {
+    this.cardValueOutputMask.register(card);
+  }
+
+  maskOperatorOutput<T>(value: T): T {
+    return this.cardValueOutputMask.maskValue(value);
+  }
+
+  private logOperatorDiagnostic(message: string): void {
+    console.error(this.cardValueOutputMask.maskText(message));
+  }
+
+  readOperatorEvidence(since = 0, requestId?: string) {
+    return this.operatorEvidence.read(since, requestId);
+  }
 
   async brokerTargetId(): Promise<string> {
     if (this.context === null || this.page === null) throw new Error("Browser not started");
@@ -2969,6 +1862,7 @@ export class BrowserController {
   // fingerprint normalization a page gets; a satellite's page
   // (attachOwnPage) must therefore go through it too.
   private async installPageNormalization(page: Page, remoteMode: boolean): Promise<void> {
+    await this.operatorEvidence.attach(page);
     // In baseline mode addInitScript covers document-start page JS, but
     // Playwright's page.evaluate utility execution can run in a separate realm.
     // Install the same no-op helper there with a STRING evaluate (tsx cannot
@@ -3023,7 +1917,7 @@ export class BrowserController {
       void (async () => {
         if (trace) {
           const before = await frame.evaluate(RENDERER_PROBE).catch(() => "eval-fail");
-          console.error(`[captcha-fp] ${cfHost} renderer BEFORE spoof: ${before}`);
+          this.logOperatorDiagnostic(`[captcha-fp] ${cfHost} renderer BEFORE spoof: ${before}`);
         }
         // Retry until the spoof STICKS. The first framenavigated commonly
         // eval-fails (frame mid-commit, or a throwaway about:blank hCaptcha
@@ -3039,7 +1933,7 @@ export class BrowserController {
           else await new Promise((res) => setTimeout(res, 150));
         }
         if (trace) {
-          console.error(
+          this.logOperatorDiagnostic(
             `[captcha-fp] ${cfHost} renderer AFTER spoof:  ${landed ? "Intel (landed)" : "FAILED to land in budget"}`,
           );
         }
@@ -3079,7 +1973,7 @@ export class BrowserController {
             // body may be evicted; ignore
           }
         }
-        console.error(
+        this.logOperatorDiagnostic(
           `[captcha-trace] ${status} ${url}${
             bodyPreview ? "\n  body: " + bodyPreview.replace(/\n/g, "\\n") : ""
           }`,
@@ -3088,7 +1982,7 @@ export class BrowserController {
       page.on("console", (msg) => {
         const text = msg.text();
         if (!/turnstile|cloudflare|challenge|recaptcha/i.test(text)) return;
-        console.error(`[captcha-trace] console.${msg.type()}: ${text}`);
+        this.logOperatorDiagnostic(`[captcha-trace] console.${msg.type()}: ${text}`);
       });
     }
   }
@@ -3127,7 +2021,8 @@ export class BrowserController {
     return controller;
   }
   private trackOpenedTabs(page: Page): void {
-    return this.pageDriver.trackOpenedTabs(page);
+    this.pageDriver.trackOpenedTabs(page);
+    void this.operatorEvidence.attach(page).catch(() => undefined);
   }
   operatorBrowserMarker(): string {
     return this.processOwner.operatorBrowserMarker();
@@ -3188,7 +2083,7 @@ export class BrowserController {
         // Routing race / already-handled — never let a decision crash nav.
       }
     });
-    console.error(
+    this.logOperatorDiagnostic(
       "[operator] resource blocking ON (image/media/font aborted; captcha/CSS/JS allowed)",
     );
   }
@@ -3341,7 +2236,7 @@ export class BrowserController {
       // Any step in the chain failing leaves us at *some* page (the
       // search results, the marketing site, an error page) — that's
       // still better than a cold landing on /sign_up. Log and proceed.
-      console.error(
+      this.logOperatorDiagnostic(
         `[operator] referrer-chain prewarm partial failure (non-fatal): ${
           err instanceof Error ? err.message : String(err)
         }`,
@@ -3395,9 +2290,8 @@ export class BrowserController {
     await page.waitForSelector(selector, { state: "visible", timeout: 10000 });
     await markOperatorMutationDispatchAttempted();
     const locator = page.locator(selector);
-    // The marker is payment machinery — the card-clearing and saved-card
-    // resolution passes find the fields they filled through it. It is not a
-    // read seal: nothing masks or refuses a read because of it.
+    // Internal secret writers may retain this provenance marker. It is not a
+    // generic read seal and never refuses an observation or browser action.
     if (sealed) {
       await locator.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
     }
@@ -4415,13 +3309,7 @@ export class BrowserController {
     });
     return Array.from(
       new Set(
-        [
-          checkoutSubmitLabel(signals),
-          signals.ariaLabel,
-          signals.inputValue,
-          signals.textContent,
-          ...signals.labelTexts,
-        ]
+        [signals.ariaLabel, signals.inputValue, signals.textContent, ...signals.labelTexts]
           .map((label) => label?.trim() ?? "")
           .filter((label) => label.length > 0),
       ),
@@ -4472,7 +3360,6 @@ export class BrowserController {
         throw new BrowserClickDispatchError("not_dispatched", error);
       }
       // Ordinary operator clicks retain their checkbox, modal and widget semantics.
-      // Payment callers omit this callback and keep their existing handle-bound path.
       const click =
         performClick ??
         (() => (target.method === "click" ? this.clickHandle(handle) : this.jsClickHandle(handle)));
@@ -6313,9 +5200,9 @@ export class BrowserController {
           out.touchPoints = navigator.maxTouchPoints;
           return out;
         });
-        console.error("[fingerprint] " + JSON.stringify(fp));
+        this.logOperatorDiagnostic("[fingerprint] " + JSON.stringify(fp));
       } catch (err) {
-        console.error(
+        this.logOperatorDiagnostic(
           "[fingerprint] probe failed: " + (err instanceof Error ? err.message : String(err)),
         );
       }
@@ -7452,9 +6339,140 @@ export class BrowserController {
     return null;
   }
 
-  // Read-only pixel capture for operate_screenshot. It never navigates, clicks,
-  // types, focuses, or mutates the DOM — and it never masks anything. What the
-  // page renders is what the driving agent gets back.
+  private async cardMaskPixelRects(page: Page): Promise<PixelMaskRect[]> {
+    if (!this.cardValueOutputMask.active) return [];
+    const needles = this.cardValueOutputMask.screenshotNeedles();
+    const rects: PixelMaskRect[] = [];
+    for (const frame of page.frames()) {
+      if (frame.isDetached()) continue;
+      let offset = { x: 0, y: 0 };
+      if (frame !== page.mainFrame()) {
+        const frameElement = await frame.frameElement().catch((error: unknown) => {
+          if (frame.isDetached()) return null;
+          throw new Error("card_mask_frame_unavailable", { cause: error });
+        });
+        if (frameElement === null) continue;
+        try {
+          const box = await frameElement.boundingBox();
+          if (box === null) throw new Error("card_mask_frame_not_visible");
+          offset = { x: box.x, y: box.y };
+        } finally {
+          await frameElement.dispose().catch(() => undefined);
+        }
+      }
+      const local = await frame
+        .evaluate(
+          ({ pans, cvvs, cvvNameSource, targets }) => {
+            const found: Array<{ x: number; y: number; width: number; height: number }> = [];
+            const roots: Array<Document | ShadowRoot> = [document];
+            const nativeShadowRoot = Object.getOwnPropertyDescriptor(
+              Element.prototype,
+              "shadowRoot",
+            )?.get;
+            for (let index = 0; index < roots.length; index += 1) {
+              for (const element of Array.from(roots[index]!.querySelectorAll("*"))) {
+                const shadow = nativeShadowRoot?.call(element) as ShadowRoot | null | undefined;
+                if (shadow !== null && shadow !== undefined) roots.push(shadow);
+              }
+            }
+            const pushControlValue = (element: Element): void => {
+              const box = element.getBoundingClientRect();
+              if (box.width <= 0 || box.height <= 0) return;
+              const insetX = Math.min(8, box.width * 0.08);
+              const insetY = Math.min(6, box.height * 0.2);
+              found.push({
+                x: box.x + insetX,
+                y: box.y + insetY,
+                width: Math.max(1, box.width - insetX * 2),
+                height: Math.max(1, box.height - insetY * 2),
+              });
+            };
+            const cvvLabel = new RegExp(cvvNameSource, "i");
+            const panSeparator = String.raw`[\s.\u00b7\u2010-\u2015-]*`;
+            for (const root of roots) {
+              root
+                .querySelectorAll('[data-ts-card-mask="pan"],[data-ts-card-mask="cvv"]')
+                .forEach(pushControlValue);
+              for (const target of targets) {
+                try {
+                  root.querySelectorAll(target.selector).forEach(pushControlValue);
+                } catch {
+                  // A stale or browser-specific selector is an ordinary miss.
+                }
+              }
+              root.querySelectorAll("input,textarea").forEach((element) => {
+                const digits = (
+                  (element as HTMLInputElement | HTMLTextAreaElement).value ?? ""
+                ).replace(/\D/g, "");
+                if (
+                  cvvs.includes(digits) ||
+                  pans.some(
+                    (pan) => digits === pan || (digits.length >= 8 && pan.startsWith(digits)),
+                  )
+                ) {
+                  pushControlValue(element);
+                }
+              });
+              const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+              let current: Node | null;
+              while ((current = walker.nextNode()) !== null) {
+                const value = current.nodeValue ?? "";
+                const patterns = pans.map((pan) => {
+                  const prefixes = Array.from({ length: pan.length - 7 }, (_, index) =>
+                    [...pan.slice(0, pan.length - index)].join(panSeparator),
+                  );
+                  return new RegExp(`(?<!\\d)(?:${prefixes.join("|")})(?!${panSeparator}\\d)`, "g");
+                });
+                let labelledCvvCopy = false;
+                let ancestor = current.parentElement;
+                for (let depth = 0; ancestor !== null && depth < 3; depth += 1) {
+                  const ancestorText = ancestor.textContent ?? "";
+                  if (ancestorText.length <= 160 && cvvLabel.test(ancestorText)) {
+                    labelledCvvCopy = true;
+                    break;
+                  }
+                  ancestor = ancestor.parentElement;
+                }
+                if (labelledCvvCopy) {
+                  for (const cvv of cvvs) patterns.push(new RegExp(`(?<!\\d)${cvv}(?!\\d)`, "g"));
+                }
+                for (const pattern of patterns) {
+                  for (const match of value.matchAll(pattern)) {
+                    if (match.index === undefined) continue;
+                    const range = document.createRange();
+                    range.setStart(current, match.index);
+                    range.setEnd(current, match.index + match[0].length);
+                    for (const box of Array.from(range.getClientRects())) {
+                      if (box.width > 0 && box.height > 0) {
+                        found.push({ x: box.x, y: box.y, width: box.width, height: box.height });
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            return found;
+          },
+          {
+            ...needles,
+            targets: this.cardValueOutputMask.screenshotTargets(
+              frame === page.mainFrame() ? null : this.framePath(frame),
+            ),
+          },
+        )
+        .catch((error: unknown) => {
+          if (frame.isDetached()) return [];
+          throw new Error("card_mask_frame_scan_failed", { cause: error });
+        });
+      for (const rect of local) {
+        rects.push({ ...rect, x: rect.x + offset.x, y: rect.y + offset.y });
+      }
+    }
+    return rects;
+  }
+
+  // Read-only pixel capture for operate_screenshot. Once card output masking is
+  // active, compositing changes only the returned image bytes, never the page.
   async captureOperatorScreenshot(
     opts: {
       frameIndex?: number;
@@ -7464,6 +6482,7 @@ export class BrowserController {
     page: Page | null = this.page,
   ): Promise<{
     base64: string;
+    mimeType: "image/jpeg" | "image/png";
     frameUrl: string | null;
     frameCount: number;
     clickBinding?: ScreenshotBinding;
@@ -7480,12 +6499,14 @@ export class BrowserController {
     page: Page | null = this.page,
   ): Promise<{
     base64: string;
+    mimeType: "image/jpeg" | "image/png";
     frameUrl: string | null;
     frameCount: number;
     clickBinding?: ScreenshotBinding;
   }> {
     if (!page) throw new Error("Browser not started");
     const targetFrame = this.resolveOperatorScreenshotFrame(opts, page);
+    const maskRectsBefore = await this.cardMaskPixelRects(page);
     const cdp = await page.context().newCDPSession(page);
     try {
       // caret:"initial" is not needed here — the CDP capture never runs
@@ -7514,8 +6535,8 @@ export class BrowserController {
               height: box.height,
             };
             const result = await cdp.send("Page.captureScreenshot", {
-              format: "jpeg",
-              quality: 80,
+              format: this.cardValueOutputMask.active ? "png" : "jpeg",
+              ...(this.cardValueOutputMask.active ? {} : { quality: 80 }),
               fromSurface: true,
               captureBeyondViewport: true,
               clip: {
@@ -7537,8 +6558,8 @@ export class BrowserController {
           }));
           rect = { x: 0, y: 0, width: size.width, height: size.height };
           const result = await cdp.send("Page.captureScreenshot", {
-            format: "jpeg",
-            quality: 80,
+            format: this.cardValueOutputMask.active ? "png" : "jpeg",
+            ...(this.cardValueOutputMask.active ? {} : { quality: 80 }),
             fromSurface: true,
             captureBeyondViewport: true,
             clip: { x: 0, y: 0, width: size.width, height: size.height, scale: 1 },
@@ -7546,16 +6567,56 @@ export class BrowserController {
           base64 = result.data;
         } else {
           const result = await cdp.send("Page.captureScreenshot", {
-            format: "jpeg",
-            quality: 80,
+            format: this.cardValueOutputMask.active ? "png" : "jpeg",
+            ...(this.cardValueOutputMask.active ? {} : { quality: 80 }),
             fromSurface: true,
           });
           base64 = result.data;
         }
         return { base64, rect };
       });
+      const maskRectsAfter = await this.cardMaskPixelRects(page);
+      let output = captured.base64;
+      if (this.cardValueOutputMask.active) {
+        const scroll = await page.evaluate(() => ({ x: window.scrollX, y: window.scrollY }));
+        const targetBox =
+          targetFrame !== null && targetFrame !== page.mainFrame()
+            ? await targetFrame.frameElement().then(async (handle) => {
+                try {
+                  const box = await handle.boundingBox();
+                  if (box === null) throw new Error("card_mask_frame_not_visible");
+                  return box;
+                } finally {
+                  await handle.dispose().catch(() => undefined);
+                }
+              })
+            : null;
+        const translated = [...maskRectsBefore, ...maskRectsAfter].map((rect) => ({
+          ...rect,
+          x:
+            targetBox !== null
+              ? rect.x - targetBox.x
+              : opts.fullPage === true
+                ? rect.x + scroll.x
+                : rect.x,
+          y:
+            targetBox !== null
+              ? rect.y - targetBox.y
+              : opts.fullPage === true
+                ? rect.y + scroll.y
+                : rect.y,
+        }));
+        output = await compositePngCardMasks(output, translated);
+      }
+      this.operatorEvidence.recordScreenshot({
+        url: page.url(),
+        frame_url: targetFrame?.url() ?? null,
+        full_page: opts.fullPage === true,
+      });
       return {
         ...captured,
+        base64: output,
+        mimeType: this.cardValueOutputMask.active ? "image/png" : "image/jpeg",
         frameUrl: targetFrame?.url() ?? null,
         frameCount: page.frames().length,
       };
@@ -7610,18 +6671,20 @@ export class BrowserController {
   // extractText() and must stay byte-identical, so this is purely additive.
   async extractVisibleText(page: Page | null = this.page): Promise<string> {
     if (page === null) throw new Error("Browser not started");
-    return await page.evaluate(extractObservationVisibleText);
+    return this.cardValueOutputMask.maskText(await page.evaluate(extractObservationVisibleText));
   }
 
   /** Canonical tree capture, with the existing whole-document action bindings. */
   async extractBrowserUseObservation(page: Page | null = this.page): Promise<BrowserUseCapture> {
     if (page === null) throw new Error("Browser not started");
     const elements = await this.extractInteractiveElements(page);
-    return captureBrowserUseDOM(
-      page,
-      elements,
-      (frame) => this.framePath(frame),
-      (frame) => this.frameSecurity(frame),
+    return this.cardValueOutputMask.maskCapture(
+      await captureBrowserUseDOM(
+        page,
+        elements,
+        (frame) => this.framePath(frame),
+        (frame) => this.frameSecurity(frame),
+      ),
     );
   }
 
@@ -7667,7 +6730,7 @@ export class BrowserController {
         document.querySelector<HTMLElement>('[itemprop="merchant"]')?.textContent ??
         "",
     }));
-    const frames = await this.visibleTrustedCheckoutFrames(page);
+    const frames = await this.visibleCheckoutFrames(page);
     const parsedFrames = await Promise.all(
       frames.map(async (frame) => {
         const [text, structuredExtract] = await Promise.all([
@@ -7712,99 +6775,15 @@ export class BrowserController {
     };
   }
 
-  paymentBrowser(page: Page): PaymentBrowser {
-    const requireLivePage = (): Page => {
-      if (page.isClosed()) throw new Error("payment page is unavailable");
-      return page;
-    };
-    return {
-      isPayPalHostedCheckout: async () => await this.isPayPalHostedCheckout(requireLivePage()),
-      readCheckoutSummary: async (fallbackCurrency) =>
-        await this.readCheckoutSummary(fallbackCurrency, requireLivePage()),
-      readCheckoutConfirmSummary: async (approvedCurrency) =>
-        await this.readCheckoutConfirmSummary(approvedCurrency, requireLivePage()),
-      fillAndSubmitCheckout: async (card, options) =>
-        await this.fillAndSubmitCheckout(card, options, requireLivePage()),
-      fillCheckoutCardFields: async (card, options) =>
-        await this.fillCheckoutCardFields(card, options, requireLivePage()),
-      submitFilledCheckout: async () => await this.submitFilledCheckout(requireLivePage()),
-      clearSealedPaymentFields: async () => await this.clearSealedPaymentFields(requireLivePage()),
-      clearCheckoutCardFields: async () => await this.clearCheckoutCardFields(requireLivePage()),
-      waitForThreeDsResolution: async (timeoutMs, onThreeDsDetected) =>
-        await this.waitForThreeDsResolution(timeoutMs, requireLivePage(), onThreeDsDetected),
-      paymentInstrumentMismatch: () => this.paymentInstrumentMismatch(),
-      currentUrl: () => requireLivePage().url(),
-    };
-  }
-
-  // approvedCurrency is the currency already approved for this purchase
-  // (captured at the fill_card phase's readCheckoutSummary call). It lets a
-  // page notation that can't be pinned to one ISO currency on its own — a
-  // bare "$"/"¥" shared by several locales, a currency-selector/FX-preview
-  // module's own stray total, … — resolve against the currency the operator
-  // already committed to instead of refusing the confirm read outright. The
-  // live amount/currency this returns is still checked against the approved
-  // mandate by the caller (executeOperatePayConfirm) before anything is
-  // charged, so a mis-resolution here cannot itself authorize a bad charge.
-  async readCheckoutConfirmSummary(
-    approvedCurrency?: string,
-    page: Page | null = this.page,
-  ): Promise<CheckoutSummary> {
-    if (!page) throw new Error("Browser not started");
-    const identity = await page.evaluate(() => ({
-      title: document.title,
-      siteName:
-        document.querySelector<HTMLMetaElement>('meta[property="og:site_name"]')?.content ??
-        document.querySelector<HTMLElement>('[itemprop="merchant"]')?.textContent ??
-        "",
-    }));
-    const frames = await this.visibleTrustedCheckoutFrames(page);
-    const parsedFrames = await Promise.all(
-      frames.map(async (frame) =>
-        parseCheckoutConfirmAmountResult(
-          [
-            scopedOrderSummaryText(
-              await frame.evaluate(extractCheckoutConfirmSummaryText).catch(() => ""),
-            ),
-          ],
-          approvedCurrency,
-        ),
-      ),
-    );
-    const mainAmount = parsedFrames[0] ?? null;
-    const childAmounts = parsedFrames
-      .slice(1)
-      .filter((amount): amount is NonNullable<typeof amount> => amount !== null);
-    const amount = mainAmount ?? childAmounts[0] ?? null;
-    if (amount === null) throw new Error("payment_checkout_total_not_found");
-    if (
-      childAmounts.some(
-        (child) => child.amount_cents !== amount.amount_cents || child.currency !== amount.currency,
-      )
-    ) {
-      throw new Error("payment_checkout_total_conflict");
-    }
-    return {
-      merchant: merchantFromPage(identity.title, identity.siteName, page.url()),
-      checkout_origin: new URL(page.url()).origin,
-      ...amount,
-    };
-  }
-
-  private async visibleTrustedCheckoutFrames(page: Page | null = this.page): Promise<Frame[]> {
+  private async visibleCheckoutFrames(page: Page | null = this.page): Promise<Frame[]> {
     if (!page) return [];
-    const pageUrl = page.url();
     const mainFrame = page.mainFrame();
     const visible: Frame[] = [mainFrame];
     for (const frame of page.frames()) {
-      if (frame === mainFrame || !recognizedPaymentProviderFrame(frame.url(), pageUrl)) continue;
+      if (frame === mainFrame) continue;
       let current: Frame | null = frame;
-      let trustedAndVisible = true;
+      let frameVisible = true;
       while (current !== null && current !== mainFrame) {
-        if (!recognizedPaymentProviderFrame(current.url(), pageUrl)) {
-          trustedAndVisible = false;
-          break;
-        }
         try {
           const owner = await current.frameElement();
           try {
@@ -7825,19 +6804,19 @@ export class BrowserController {
               return true;
             });
             if (!(await owner.isVisible()) || !rendered) {
-              trustedAndVisible = false;
+              frameVisible = false;
               break;
             }
           } finally {
             await owner.dispose().catch(() => undefined);
           }
         } catch {
-          trustedAndVisible = false;
+          frameVisible = false;
           break;
         }
         current = current.parentFrame();
       }
-      if (trustedAndVisible && current === mainFrame) visible.push(frame);
+      if (frameVisible && current === mainFrame) visible.push(frame);
     }
     return visible;
   }
@@ -7860,7 +6839,7 @@ export class BrowserController {
         document.querySelector<HTMLElement>('[itemprop="merchant"]')?.textContent ??
         "",
     }));
-    const frames = await this.visibleTrustedCheckoutFrames();
+    const frames = await this.visibleCheckoutFrames();
     const parsedFrames = await Promise.all(
       frames.map(async (frame) => {
         const [text, structuredExtract] = await Promise.all([
@@ -8122,2671 +7101,6 @@ export class BrowserController {
     return undefined;
   }
 
-  async isPayPalHostedCheckout(page: Page | null = this.page): Promise<boolean> {
-    if (!page) throw new Error("Browser not started");
-    // A fillable card checkout can also offer express wallets. Their presence
-    // must not block the saved-card path (including Braintree and Stripe).
-    await this.waitForPanField(10_000, undefined, page);
-    const panFrame = await this.panFieldFrame(undefined, page);
-    if (panFrame !== null) {
-      try {
-        return isPayPalWalletHost(new URL(panFrame.url()).hostname);
-      } catch {
-        return false;
-      }
-    }
-    for (const frame of page.frames()) {
-      try {
-        if (isPayPalWalletHost(new URL(frame.url()).hostname)) return true;
-      } catch {
-        /* about:blank has no wallet host */
-      }
-      const buttons = frame.getByRole("button", {
-        name: /paypal|apple\s*pay|google\s*pay/i,
-      });
-      for (let index = 0; index < (await buttons.count().catch(() => 0)); index += 1) {
-        if (
-          await buttons
-            .nth(index)
-            .isVisible()
-            .catch(() => false)
-        )
-          return true;
-      }
-    }
-    return false;
-  }
-
-  // Braintree communicates field identity through the iframe name even when
-  // the input itself has no portable autocomplete/name hint. Stamp only its
-  // text inputs, then reuse the ordinary cross-frame fill/seal/submit path.
-  private async stampHostedCardFields(frames: readonly Frame[]): Promise<void> {
-    const fields: Record<string, string> = {
-      number: "pan",
-      cvv: "cvv",
-      expirationMonth: "month",
-      expirationYear: "year",
-      expirationDate: "expiry",
-      cardholderName: "name",
-    };
-    for (const frame of frames) {
-      let host: string;
-      try {
-        host = new URL(frame.url()).hostname;
-      } catch {
-        continue;
-      }
-      if (host !== "braintreegateway.com" && !host.endsWith(".braintreegateway.com")) continue;
-      const match = /^braintree-hosted-field-(.+)$/.exec(frame.name());
-      const field = match === null ? undefined : fields[match[1] ?? ""];
-      if (field === undefined) continue;
-      await frame
-        .locator(
-          `input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]):not([type="button"]):not([type="submit"])${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION},select${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
-        )
-        .evaluateAll((inputs, role) => {
-          for (const input of inputs) input.setAttribute("data-ts-hosted-card-field", role);
-        }, field)
-        .catch(() => undefined);
-    }
-  }
-
-  // The first frame that actually renders a visible card (PAN) input, or null.
-  private async panFieldFrame(
-    frames?: readonly Frame[],
-    page: Page | null = this.page,
-  ): Promise<Frame | null> {
-    if (!page) return null;
-    await this.stampHostedCardFields(frames ?? page.frames());
-    for (const frame of frames ?? page.frames()) {
-      const locator = frame.locator(CHECKOUT_PAN_FIELD_SELECTORS);
-      const count = await locator.count().catch(() => 0);
-      for (let i = 0; i < count; i += 1) {
-        const input = locator.nth(i);
-        if (
-          (await input.isVisible().catch(() => false)) &&
-          (await input.isEnabled().catch(() => false))
-        ) {
-          return frame;
-        }
-      }
-    }
-    return null;
-  }
-
-  // Bounded wait for a PAN field to appear in caller-eligible frames. A
-  // single-page checkout's card entry can live in a cross-origin PCI iframe
-  // (e.g. Shopify's checkout.pci.shopifyinc.com) that mounts only after the
-  // payment section itself renders — later than the total becomes readable,
-  // and later than the approval-ceremony wait that precedes this call ends.
-  // fillAndSubmitCheckout/fillCheckoutCardFields used to take one frames()
-  // snapshot at call time; a frame that hadn't mounted YET at that exact
-  // instant made a genuinely fillable checkout fail closed.
-  private async waitForPanField(
-    timeoutMs: number,
-    frameAllowed: (frame: Frame) => boolean = () => true,
-    page: Page | null = this.page,
-  ): Promise<void> {
-    if (!page) return;
-    const deadline = Date.now() + timeoutMs;
-    while (true) {
-      // A JP form whose PAN carries no name/id hint (see
-      // stampJapaneseCardLabelFields) is only visible to
-      // CHECKOUT_PAN_FIELD_SELECTORS once stamped — without this,
-      // panFieldFrame() below can never match and every call here burns its
-      // full timeoutMs even though the field was on the page from the start.
-      const frames = page.frames().filter(frameAllowed);
-      await this.stampJapaneseCardLabelFields(frames);
-      if ((await this.panFieldFrame(frames, page)) !== null) return;
-      if (Date.now() >= deadline) return;
-      await page.waitForTimeout(200).catch(() => undefined);
-    }
-  }
-
-  // Split checkout waits are event-driven: a trusted hosted-field frame can
-  // attach as about:blank and only later navigate to its processor URL. Watch
-  // both lifecycle events and then wait inside that exact frame for the PAN.
-  // A settled page with a PAN only in excluded frames returns immediately so
-  // the caller can produce its existing fail-closed frame-origin refusal.
-  private async waitForRecognizedPanField(
-    pageUrl: string,
-    deadline?: number,
-    page: Page | null = this.page,
-  ): Promise<void> {
-    if (!page) return;
-    const frameAllowed = (frame: Frame): boolean =>
-      frame === page.mainFrame() || recognizedPaymentProviderFrame(frame.url(), pageUrl);
-    const remaining = (): number =>
-      deadline === undefined ? 0 : Math.max(0, deadline - Date.now());
-    let done = false;
-    let resolveDone!: () => void;
-    const complete = (): void => {
-      if (done) return;
-      done = true;
-      resolveDone();
-    };
-    const completed = new Promise<void>((resolve) => {
-      resolveDone = resolve;
-    });
-    const observeTrustedFrame = (frame: Frame): void => {
-      if (done || !frameAllowed(frame)) return;
-      void (async () => {
-        // JP checkouts can expose their PAN only through an associated label,
-        // so normalize the trusted frame before starting its selector wait.
-        // This preserves the existing conservative label-to-control contract
-        // while never evaluating or mutating an excluded payment frame.
-        await this.stampJapaneseCardLabelFields([frame]);
-        if ((await this.panFieldFrame([frame], page)) !== null) {
-          complete();
-          return;
-        }
-        await frame
-          .waitForSelector(CHECKOUT_PAN_FIELD_SELECTORS, {
-            state: "visible",
-            timeout: remaining(),
-          })
-          .then(() => complete())
-          .catch(() => undefined);
-      })();
-    };
-    const settleOrRefuse = (): void => {
-      void page
-        .waitForLoadState("networkidle", { timeout: remaining() })
-        .then(async () => {
-          if (done) return;
-          const frames = page.frames();
-          const trustedFrames = frames.filter(frameAllowed);
-          await this.stampJapaneseCardLabelFields(trustedFrames);
-          if ((await this.panFieldFrame(trustedFrames, page)) !== null) {
-            complete();
-            return;
-          }
-          // Do not reject while a recognized provider frame is still live:
-          // its PAN may appear after the provider's own hydration work. The
-          // deadline governs that wait; there is no local timing heuristic.
-          if (frames.some((frame) => frame !== page.mainFrame() && frameAllowed(frame))) return;
-          complete();
-        })
-        .catch(() => undefined);
-    };
-    const onFrameLifecycle = (frame: Frame): void => {
-      observeTrustedFrame(frame);
-      settleOrRefuse();
-    };
-    page.on("frameattached", onFrameLifecycle);
-    page.on("framenavigated", onFrameLifecycle);
-    for (const frame of page.frames()) observeTrustedFrame(frame);
-    settleOrRefuse();
-    let deadlineTimer: NodeJS.Timeout | undefined;
-    if (deadline !== undefined) {
-      const timeout = remaining();
-      if (timeout <= 0) complete();
-      else deadlineTimer = setTimeout(complete, timeout);
-    }
-    try {
-      await completed;
-    } finally {
-      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
-      page.off("frameattached", onFrameLifecycle);
-      page.off("framenavigated", onFrameLifecycle);
-    }
-  }
-
-  // Normalizes conservative PAN name/id conventions and scans
-  // dt/th/label/"table-label" elements for カード番号 / カード名義 /
-  // セキュリティコード and stamps the associated single text input with
-  // data-ts-jp-card-field; 有効期限 stamps its month/year <select>s via their
-  // own first ("月を指定"/"年を指定") option text, since the label spans both
-  // selects rather than identifying one. Conservative on purpose: a hidden,
-  // non-text, or unassociated control is left unstamped rather than guessed —
-  // a wrong-field card fill is worse than a fill_field_not_found refusal.
-  private async stampJapaneseCardLabelFields(frames: readonly Frame[]): Promise<void> {
-    await Promise.all(
-      frames.map(async (frame, frameIndex) => {
-        const documentElement = await frame.$("html").catch(() => null);
-        if (documentElement === null) return;
-        try {
-          await this.stampJapaneseCardLabelFieldsInDocument(documentElement, frameIndex);
-        } catch {
-          return;
-        } finally {
-          await documentElement.dispose().catch(() => undefined);
-        }
-      }),
-    );
-  }
-
-  private async stampJapaneseCardLabelFieldsInDocument(
-    documentElement: ElementHandle<HTMLElement>,
-    frameIndex: number,
-  ): Promise<void> {
-    const excludedCardIdentities = ["gift", "loyalty", "point", "prepaid", "member"];
-    const panLabels = ["カード番号"];
-    const excludedCardLabels = [
-      "ギフト",
-      "ポイント",
-      "プリペイド",
-      "会員",
-      "メンバー",
-      "ロイヤルティ",
-      "ロイヤリティ",
-    ];
-    const nameLabels = ["カード名義"];
-    const cvvLabels = ["セキュリティコード", "セキュリティーコード", "security code"];
-    const expiryLabels = ["有効期限"];
-    await documentElement.evaluate(
-      (root, labels) => {
-        const document = root.ownerDocument;
-        document
-          .querySelectorAll(
-            "[data-ts-jp-card-field],[data-ts-jp-card-exp],[data-ts-jp-card-exp-group],[data-ts-card-expiry]",
-          )
-          .forEach((element) => {
-            element.removeAttribute("data-ts-jp-card-field");
-            element.removeAttribute("data-ts-jp-card-exp");
-            element.removeAttribute("data-ts-jp-card-exp-group");
-            element.removeAttribute("data-ts-card-expiry");
-          });
-        const isVisible = (element: HTMLElement): boolean => {
-          if (element.matches(":disabled") || element.getClientRects().length === 0) {
-            return false;
-          }
-          let current: Element | null = element;
-          while (current !== null) {
-            const style = getComputedStyle(current);
-            if (
-              style.display === "none" ||
-              style.visibility === "hidden" ||
-              style.visibility === "collapse" ||
-              Number.parseFloat(style.opacity) <= 0
-            ) {
-              return false;
-            }
-            current = current.parentElement;
-          }
-          return true;
-        };
-        const isTextInput = (element: Element): element is HTMLInputElement =>
-          element instanceof HTMLInputElement &&
-          (element.type === "text" || element.type === "tel") &&
-          isVisible(element);
-        const identityTokens = (value: string): string[] =>
-          value
-            .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-            .toLowerCase()
-            .split(/[^a-z0-9]+/)
-            .filter((token) => token.length > 0);
-        const isPanIdentity = (value: string): boolean => {
-          const tokens = identityTokens(value);
-          const approvedPrefixes = new Set(["payment", "checkout", "primary", "backup"]);
-          while (approvedPrefixes.has(tokens[0] ?? "")) tokens.shift();
-          return [
-            "card-no",
-            "card-number",
-            "cardno",
-            "cardnumber",
-            "credit-no",
-            "creditno",
-          ].includes(tokens.join("-"));
-        };
-        const isCvvIdentity = (value: string): boolean =>
-          ["security-cd", "securitycd", "sec-code", "seccode"].includes(
-            identityTokens(value).join("-"),
-          );
-        const isNameIdentity = (value: string): boolean =>
-          ["card-name", "cardname", "credit-name", "creditname"].includes(
-            identityTokens(value).join("-"),
-          );
-        const isCombinedExpiryIdentity = (value: string): boolean => {
-          const tokens = identityTokens(value);
-          const prefixes = new Set(["card", "credit", "cc"]);
-          if (prefixes.has(tokens[0] ?? "")) tokens.shift();
-          if (tokens.length === 1) {
-            return [
-              "exp",
-              "expiry",
-              "expiration",
-              "expdate",
-              "expirydate",
-              "expirationdate",
-            ].includes(tokens[0] ?? "");
-          }
-          return (
-            tokens.length === 2 &&
-            ["exp", "expiry", "expiration"].includes(tokens[0] ?? "") &&
-            tokens[1] === "date"
-          );
-        };
-        document.querySelectorAll("input[name],input[id]").forEach((element) => {
-          if (!(element instanceof HTMLInputElement) || !isVisible(element)) return;
-          const identities = [element.getAttribute("name") ?? "", element.id];
-          const excluded = identities.some((identity) => {
-            const lower = identity.toLowerCase();
-            return labels.excludedCardIdentities.some((token) => lower.includes(token));
-          });
-          if (excluded) return;
-          if (isTextInput(element) && identities.some(isPanIdentity))
-            element.setAttribute("data-ts-jp-card-field", "pan");
-          if (isTextInput(element) && identities.some(isCvvIdentity))
-            element.setAttribute("data-ts-jp-card-field", "cvv");
-          if (isTextInput(element) && identities.some(isNameIdentity))
-            element.setAttribute("data-ts-jp-card-field", "name");
-          if (identities.some(isCombinedExpiryIdentity))
-            element.setAttribute("data-ts-card-expiry", "combined");
-        });
-        const associatedElements = (host: Element, selector: string): Element[] => {
-          const associated = new Set<Element>();
-          if (host instanceof HTMLLabelElement && host.htmlFor.length > 0) {
-            const byId = document.getElementById(host.htmlFor);
-            if (byId?.matches(selector)) associated.add(byId);
-          }
-          host.querySelectorAll(selector).forEach((element) => associated.add(element));
-          const sibling = host.nextElementSibling;
-          if (sibling !== null) {
-            if (sibling.matches(selector)) associated.add(sibling);
-            sibling.querySelectorAll(selector).forEach((element) => associated.add(element));
-            if (selector === "select" && sibling instanceof HTMLSelectElement) {
-              let adjacent = sibling.nextElementSibling;
-              while (adjacent instanceof HTMLSelectElement) {
-                associated.add(adjacent);
-                adjacent = adjacent.nextElementSibling;
-              }
-            }
-          }
-          return [...associated];
-        };
-        const stampField = (
-          host: Element,
-          fieldLabels: string[],
-          attrValue: string,
-          excludedLabels: string[] = [],
-        ): void => {
-          const text = (host.textContent ?? "").trim();
-          if (!fieldLabels.some((label) => text.toLowerCase().includes(label.toLowerCase())))
-            return;
-          if (excludedLabels.some((label) => text.includes(label))) return;
-          const inputs = associatedElements(host, "input").filter(isTextInput);
-          const [input] = inputs;
-          if (inputs.length === 1 && input !== undefined) {
-            input.setAttribute("data-ts-jp-card-field", attrValue);
-          }
-        };
-        let expiryGroupSequence = 0;
-        document.querySelectorAll("dt, th, label, .table-label, .form-label").forEach((host) => {
-          stampField(host, labels.pan, "pan", labels.excludedCard);
-          stampField(host, labels.name, "name", labels.excludedCard);
-          stampField(host, labels.cvv, "cvv", labels.excludedCard);
-          const text = (host.textContent ?? "").trim();
-          if (!labels.expiry.some((label) => text.includes(label))) return;
-          if (labels.excludedCard.some((label) => text.includes(label))) return;
-          const selects = associatedElements(host, "select").filter(
-            (element): element is HTMLSelectElement =>
-              element instanceof HTMLSelectElement && isVisible(element),
-          );
-          const monthSelects = selects.filter((select) =>
-            (select.options[0]?.textContent ?? "").includes("月"),
-          );
-          const yearSelects = selects.filter((select) =>
-            (select.options[0]?.textContent ?? "").includes("年"),
-          );
-          const [monthSelect] = monthSelects;
-          const [yearSelect] = yearSelects;
-          if (
-            monthSelects.length === 1 &&
-            yearSelects.length === 1 &&
-            monthSelect !== undefined &&
-            yearSelect !== undefined &&
-            monthSelect !== yearSelect
-          ) {
-            const group = `ts-jp-exp-${labels.frameIndex}-${expiryGroupSequence++}`;
-            monthSelect.setAttribute("data-ts-jp-card-exp", "month");
-            yearSelect.setAttribute("data-ts-jp-card-exp", "year");
-            monthSelect.setAttribute("data-ts-jp-card-exp-group", group);
-            yearSelect.setAttribute("data-ts-jp-card-exp-group", group);
-          }
-        });
-      },
-      {
-        frameIndex,
-        excludedCardIdentities,
-        pan: panLabels,
-        excludedCard: excludedCardLabels,
-        name: nameLabels,
-        cvv: cvvLabels,
-        expiry: expiryLabels,
-      },
-    );
-  }
-
-  // Common autocomplete/name selectors plus hosted-field identity markers. `frames` is
-  // the caller's trust decision: fillAndSubmitCheckout passes every
-  // CDP-reachable frame (single-page checkout — fill and charge in one vetted
-  // call), fillCheckoutCardFields passes only recognized payment-provider
-  // frames (split checkout — the filled card outlives the call).
-  private async fillCheckoutCardIntoFrames(
-    frames: readonly Frame[],
-    card: CheckoutCard,
-    billingOnly = false,
-    assertFrameEgress?: (frame: Frame, resolvedOrigin?: string) => void,
-  ): Promise<CheckoutCardGroupScope | undefined> {
-    const filled = new Set<string>();
-
-    type CardGroup = CheckoutCardGroupRoot & { panTopmost: boolean };
-    const groups = new Map<string, CardGroup>();
-    let fillablePanCount = 0;
-    let groupSequence = 0;
-    await Promise.all(
-      frames.map((frame) =>
-        frame
-          .locator(
-            "[data-ts-payment-card-group],[data-ts-payment-card-control-group],[data-ts-payment-billing-context],[data-ts-payment-billing-owner],[data-ts-payment-frame-owner]",
-          )
-          .evaluateAll((elements) => {
-            for (const element of elements) {
-              element.removeAttribute("data-ts-payment-card-group");
-              element.removeAttribute("data-ts-payment-card-control-group");
-              element.removeAttribute("data-ts-payment-billing-context");
-              element.removeAttribute("data-ts-payment-billing-owner");
-              element.removeAttribute("data-ts-payment-frame-owner");
-            }
-          })
-          .catch(() => undefined),
-      ),
-    );
-    await this.stampJapaneseCardLabelFields(frames);
-    await this.stampHostedCardFields(frames);
-    for (const [frameIndex, frame] of frames.entries()) {
-      const pans = frame.locator(CHECKOUT_PAN_FIELD_SELECTORS);
-      const count = await pans.count().catch(() => 0);
-      for (let index = 0; index < count; index += 1) {
-        const pan = pans.nth(index);
-        if (!(await pan.isVisible().catch(() => false))) continue;
-        if (!(await pan.isEnabled().catch(() => false))) continue;
-        fillablePanCount += 1;
-        const proposedToken = `ts-card-group-${groupSequence++}`;
-        const group = await pan
-          .evaluate(
-            (input, selectors) => {
-              const isFillable = (element: Element): boolean => {
-                if (!(element instanceof HTMLElement)) return false;
-                const control = element as HTMLInputElement | HTMLSelectElement;
-                if (control.matches(":disabled") || element.getClientRects().length === 0) {
-                  return false;
-                }
-                let current: Element | null = element;
-                while (current !== null) {
-                  const style = getComputedStyle(current);
-                  if (
-                    style.display === "none" ||
-                    style.visibility === "hidden" ||
-                    style.visibility === "collapse" ||
-                    Number.parseFloat(style.opacity) <= 0
-                  ) {
-                    return false;
-                  }
-                  current = current.parentElement;
-                }
-                return true;
-              };
-              const ownedControls = (root: Element): Element[] =>
-                root instanceof HTMLFormElement
-                  ? Array.from(root.elements)
-                  : Array.from(root.querySelectorAll("input,select,textarea,button"));
-              const count = (root: Element, selector: string): number =>
-                ownedControls(root).filter(
-                  (element) => element.matches(selector) && isFillable(element),
-                ).length;
-              // Match the operator observation's actual rendered hit-test, rather
-              // than trusting structural visibility. Shopify can mount two complete
-              // PCI forms at once while one is covered by the other.
-              const panTopmost = (): boolean => {
-                const rect = input.getBoundingClientRect();
-                if (rect.width < 1 || rect.height < 1) return false;
-                const x = Math.min(window.innerWidth - 1, Math.max(0, rect.left + rect.width / 2));
-                const y = Math.min(window.innerHeight - 1, Math.max(0, rect.top + rect.height / 2));
-                let hit = document.elementFromPoint(x, y);
-                if (hit === null) return false;
-                while (hit.shadowRoot !== null) {
-                  const deeper = hit.shadowRoot.elementFromPoint(x, y);
-                  if (deeper === null || deeper === hit) break;
-                  hit = deeper;
-                }
-                return hit === input || input.contains(hit);
-              };
-              const form = input instanceof HTMLInputElement ? input.form : input.closest("form");
-              let root: Element | null = form ?? input.parentElement;
-              while (root !== null && root !== document.body && root !== document.documentElement) {
-                const combinedExpiryCount = count(root, selectors.combinedExpiry);
-                const expiryMonthCount = count(root, selectors.expiryMonth);
-                const expiryYearCount = count(root, selectors.expiryYear);
-                const hasCombinedExpiry = combinedExpiryCount === 1;
-                const hasSplitExpiry = expiryMonthCount === 1 && expiryYearCount === 1;
-                const complete =
-                  count(root, selectors.pan) === 1 &&
-                  count(root, selectors.cvv) === 1 &&
-                  count(root, selectors.name) === 1 &&
-                  (hasCombinedExpiry || hasSplitExpiry);
-                if (complete) {
-                  const existing = root.getAttribute("data-ts-payment-card-group");
-                  const token = existing ?? selectors.token;
-                  if (existing === null) root.setAttribute("data-ts-payment-card-group", token);
-                  const controls = ownedControls(root);
-                  for (const control of controls) {
-                    control.setAttribute("data-ts-payment-card-control-group", token);
-                  }
-                  return {
-                    token,
-                    panTopmost: panTopmost(),
-                  };
-                }
-                if (form !== null) break;
-                root = root.parentElement;
-              }
-              return null;
-            },
-            {
-              token: proposedToken,
-              pan: CHECKOUT_PAN_FIELD_SELECTORS,
-              cvv: CHECKOUT_CVV_FIELD_SELECTORS,
-              name: CHECKOUT_CARD_NAME_FIELD_SELECTORS,
-              combinedExpiry: CHECKOUT_COMBINED_EXPIRY_GROUP_SELECTORS,
-              expiryMonth: CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS,
-              expiryYear: CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS,
-            },
-          )
-          .catch(() => null);
-        if (group !== null) {
-          groups.set(`${frameIndex}:${group.token}`, {
-            frame,
-            root: frame.locator(`[data-ts-payment-card-group="${group.token}"]`),
-            token: group.token,
-            panTopmost: group.panTopmost,
-          });
-        }
-      }
-    }
-
-    let cardGroup: CardGroup | undefined;
-    let cardGroupResolvedByTopmostPan = false;
-    if (groups.size === 1) {
-      cardGroup = [...groups.values()][0];
-    } else if (groups.size > 1) {
-      // A structurally complete PCI form may still be a covered duplicate. The
-      // PAN's center-point hit-test is the decisive live signal: accept exactly
-      // one rendered, non-occluded PAN and otherwise retain the fail-closed
-      // ambiguity refusal. Do not rank by completeness or active state here.
-      const topmost = [...groups.values()].filter((group) => group.panTopmost);
-      if (topmost.length !== 1) throw new Error("payment_card_form_ambiguous");
-      cardGroup = topmost[0];
-      cardGroupResolvedByTopmostPan = true;
-    } else if (fillablePanCount > 1) {
-      // Multiple PAN anchors with no single complete container are not safe to
-      // combine. A provider topology with one PAN and separate hosted-field
-      // frames remains supported by the cross-frame fallback below.
-      throw new Error("payment_card_form_ambiguous");
-    }
-
-    const billingRoots: CheckoutPaymentFieldRoot[] = [];
-    const addBillingRoot = async (frame: Frame, anchor: ElementHandle): Promise<void> => {
-      const proposedToken = `ts-billing-context-${groupSequence++}`;
-      const token = await anchor
-        .evaluate((element, candidateToken) => {
-          if (!(element instanceof Element)) return null;
-          const isFillable = (control: Element): boolean => {
-            if (!(control instanceof HTMLElement)) return false;
-            if (control.matches(":disabled") || control.getClientRects().length === 0) {
-              return false;
-            }
-            let current: Element | null = control;
-            while (current !== null) {
-              const style = getComputedStyle(current);
-              if (
-                style.display === "none" ||
-                style.visibility === "hidden" ||
-                style.visibility === "collapse" ||
-                Number.parseFloat(style.opacity) <= 0
-              ) {
-                return false;
-              }
-              current = current.parentElement;
-            }
-            return true;
-          };
-          const isExplicitBillingControl = (control: Element): boolean => {
-            if (
-              !(control instanceof HTMLInputElement) &&
-              !(control instanceof HTMLSelectElement) &&
-              !(control instanceof HTMLTextAreaElement)
-            ) {
-              return false;
-            }
-            const autocomplete = (control.getAttribute("autocomplete") ?? "")
-              .toLowerCase()
-              .split(/\s+/);
-            return (
-              autocomplete.includes("billing") ||
-              /billing/i.test(control.getAttribute("name") ?? "") ||
-              /billing/i.test(control.id)
-            );
-          };
-          const paymentBoundaryIdentity = (candidate: Element): string =>
-            [
-              candidate.id,
-              candidate.className,
-              candidate.getAttribute("name"),
-              candidate.getAttribute("aria-label"),
-              candidate.getAttribute("data-step"),
-              candidate.getAttribute("data-section"),
-              candidate.getAttribute("data-testid"),
-              candidate.getAttribute("data-payment-method"),
-              candidate.getAttribute("data-payment-method-type"),
-              candidate.getAttribute("data-payment-gateway"),
-              candidate.getAttribute("data-gateway"),
-              candidate.getAttribute("data-method"),
-              candidate.getAttribute("data-provider"),
-            ]
-              .filter((value): value is string => typeof value === "string")
-              .join(" ");
-          const isPaymentBoundary = (candidate: Element): boolean =>
-            /(?:^|[^a-z])(?:payment|billing|credit.?card)(?:[^a-z]|$)/i.test(
-              paymentBoundaryIdentity(candidate),
-            );
-          const isPaymentMethodBoundary = (candidate: Element): boolean =>
-            candidate.hasAttribute("data-ts-payment-frame-owner") ||
-            candidate.hasAttribute("data-ts-payment-card-group") ||
-            candidate.hasAttribute("data-payment-method") ||
-            candidate.hasAttribute("data-payment-method-type") ||
-            candidate.hasAttribute("data-payment-gateway") ||
-            candidate.hasAttribute("data-gateway") ||
-            candidate.hasAttribute("data-method") ||
-            candidate.hasAttribute("data-provider") ||
-            /(?:^|[^a-z])(?:payment|credit.?card|paypal|klarna|afterpay|shop.?pay|apple.?pay|google.?pay|bank.?transfer)(?:[^a-z]|$)/i.test(
-              paymentBoundaryIdentity(candidate),
-            );
-          const isTopmost = (control: Element): boolean => {
-            if (!(control instanceof HTMLElement)) return false;
-            const rect = control.getBoundingClientRect();
-            if (rect.width < 1 || rect.height < 1) return false;
-            const x = Math.min(window.innerWidth - 1, Math.max(0, rect.left + rect.width / 2));
-            const y = Math.min(window.innerHeight - 1, Math.max(0, rect.top + rect.height / 2));
-            let hit = document.elementFromPoint(x, y);
-            if (hit === null) return false;
-            while (hit.shadowRoot !== null) {
-              const deeper = hit.shadowRoot.elementFromPoint(x, y);
-              if (deeper === null || deeper === hit) break;
-              hit = deeper;
-            }
-            return hit === control || control.contains(hit);
-          };
-          const branchUnder = (root: Element, descendant: Element): Element => {
-            let branch = descendant;
-            while (branch.parentElement !== null && branch.parentElement !== root) {
-              branch = branch.parentElement;
-            }
-            return branch;
-          };
-          let candidate = element.parentElement;
-          while (
-            candidate !== null &&
-            candidate !== document.body &&
-            candidate !== document.documentElement
-          ) {
-            if (
-              isPaymentBoundary(candidate) &&
-              Array.from(candidate.querySelectorAll("input,select,textarea")).some(
-                (control) => isExplicitBillingControl(control) && isFillable(control),
-              )
-            ) {
-              const frameOwners = Array.from(
-                candidate.querySelectorAll("[data-ts-payment-frame-owner]"),
-              );
-              const cardGroups = Array.from(
-                candidate.querySelectorAll("[data-ts-payment-card-group]"),
-              );
-              if (
-                frameOwners.some((owner) => owner !== element) ||
-                cardGroups.some((group) => group !== element)
-              ) {
-                return null;
-              }
-              const anchorBranch = branchUnder(candidate, element);
-              const selectedLeafBoundary =
-                frameOwners.length === 1 &&
-                frameOwners[0] === element &&
-                !Array.from(candidate.querySelectorAll("*")).some(
-                  (descendant) =>
-                    descendant !== element &&
-                    !descendant.contains(element) &&
-                    !isExplicitBillingControl(descendant) &&
-                    isPaymentMethodBoundary(descendant),
-                );
-              let marked = 0;
-              for (const control of Array.from(
-                candidate.querySelectorAll("input,select,textarea"),
-              )) {
-                if (!isExplicitBillingControl(control) || !isFillable(control)) continue;
-                if (!isTopmost(control)) continue;
-                if (isPaymentMethodBoundary(control)) continue;
-                const owner = control.getAttribute("data-ts-payment-card-control-group");
-                const selectedOwner = element.getAttribute("data-ts-payment-card-group");
-                if (owner !== null && owner !== selectedOwner) continue;
-                const controlForm = control.closest("form");
-                const sharesSelectedForm = controlForm !== null && controlForm.contains(element);
-                if (controlForm !== null && !sharesSelectedForm) continue;
-                const hasSelectedOwner =
-                  owner !== null && selectedOwner !== null && owner === selectedOwner;
-                let nestedBoundary = control.parentElement;
-                while (nestedBoundary !== null && nestedBoundary !== candidate) {
-                  if (isPaymentMethodBoundary(nestedBoundary)) break;
-                  nestedBoundary = nestedBoundary.parentElement;
-                }
-                if (
-                  nestedBoundary !== null &&
-                  nestedBoundary !== candidate &&
-                  !nestedBoundary.contains(element)
-                ) {
-                  continue;
-                }
-                const controlBranch = branchUnder(candidate, control);
-                if (
-                  controlBranch !== anchorBranch &&
-                  !sharesSelectedForm &&
-                  !hasSelectedOwner &&
-                  !selectedLeafBoundary
-                ) {
-                  continue;
-                }
-                control.setAttribute("data-ts-payment-billing-owner", candidateToken);
-                marked += 1;
-              }
-              if (marked === 0) return null;
-              candidate.setAttribute("data-ts-payment-billing-context", candidateToken);
-              return candidateToken;
-            }
-            candidate = candidate.parentElement;
-          }
-          return null;
-        }, proposedToken)
-        .catch(() => null);
-      await anchor.dispose().catch(() => undefined);
-      if (token !== null) {
-        billingRoots.push({ frame, token });
-      }
-    };
-    if (cardGroup !== undefined) {
-      const directToken = `ts-billing-context-${groupSequence++}`;
-      const directCount = await cardGroup.root
-        .locator("input,select,textarea")
-        .evaluateAll(
-          (controls, { token, groupToken, selectors }) => {
-            const paymentBoundaryIdentity = (candidate: Element): string =>
-              [
-                candidate.id,
-                candidate.className,
-                candidate.getAttribute("name"),
-                candidate.getAttribute("aria-label"),
-                candidate.getAttribute("data-step"),
-                candidate.getAttribute("data-section"),
-                candidate.getAttribute("data-testid"),
-                candidate.getAttribute("data-payment-method"),
-                candidate.getAttribute("data-payment-method-type"),
-                candidate.getAttribute("data-payment-gateway"),
-                candidate.getAttribute("data-gateway"),
-                candidate.getAttribute("data-method"),
-                candidate.getAttribute("data-provider"),
-              ]
-                .filter((value): value is string => typeof value === "string")
-                .join(" ");
-            const isPaymentMethodBoundary = (candidate: Element): boolean =>
-              candidate.hasAttribute("data-payment-method") ||
-              candidate.hasAttribute("data-payment-method-type") ||
-              candidate.hasAttribute("data-payment-gateway") ||
-              candidate.hasAttribute("data-gateway") ||
-              candidate.hasAttribute("data-method") ||
-              candidate.hasAttribute("data-provider") ||
-              /(?:^|[^a-z])(?:payment|card|credit.?card|paypal|klarna|afterpay|shop.?pay|apple.?pay|google.?pay|bank.?transfer)(?:[^a-z]|$)/i.test(
-                paymentBoundaryIdentity(candidate),
-              );
-            const isPan = (input: Element): boolean => {
-              const autocomplete = (input.getAttribute("autocomplete") ?? "")
-                .toLowerCase()
-                .split(/\s+/);
-              return (
-                autocomplete.includes("cc-number") ||
-                /cardnumber/i.test(input.getAttribute("name") ?? "") ||
-                /card-?number|cardnumber/i.test(input.id)
-              );
-            };
-            const selectedPan = controls.find(
-              (control) =>
-                isPan(control) &&
-                control.getAttribute("data-ts-payment-card-control-group") === groupToken,
-            );
-            const groupRoot = selectedPan?.closest("[data-ts-payment-card-group]") ?? null;
-            const hasSelectedControl = (candidate: Element, selector: string): boolean =>
-              controls.some(
-                (control) =>
-                  candidate.contains(control) &&
-                  control.matches(selector) &&
-                  control.getAttribute("data-ts-payment-card-control-group") === groupToken,
-              );
-            const isCompleteSelectedCardBranch = (candidate: Element): boolean =>
-              hasSelectedControl(candidate, selectors.pan) &&
-              hasSelectedControl(candidate, selectors.cvv) &&
-              hasSelectedControl(candidate, selectors.name) &&
-              (hasSelectedControl(candidate, selectors.combinedExpiry) ||
-                (hasSelectedControl(candidate, selectors.expiryMonth) &&
-                  hasSelectedControl(candidate, selectors.expiryYear)));
-            let branchCandidate = selectedPan?.parentElement ?? null;
-            let selectedBranch: Element | null = null;
-            while (branchCandidate !== null) {
-              if (
-                isPaymentMethodBoundary(branchCandidate) &&
-                isCompleteSelectedCardBranch(branchCandidate)
-              ) {
-                selectedBranch = branchCandidate;
-                break;
-              }
-              if (branchCandidate === groupRoot) break;
-              branchCandidate = branchCandidate.parentElement;
-            }
-            let marked = 0;
-            for (const control of controls) {
-              const autocomplete = (control.getAttribute("autocomplete") ?? "")
-                .toLowerCase()
-                .split(/\s+/);
-              const explicit =
-                autocomplete.includes("billing") ||
-                /billing/i.test(control.getAttribute("name") ?? "") ||
-                /billing/i.test(control.id);
-              if (!explicit) continue;
-              if (isPaymentMethodBoundary(control)) continue;
-              const owner = control.getAttribute("data-ts-payment-card-control-group");
-              if (owner !== null && owner !== groupToken) continue;
-              if (selectedPan === undefined || selectedBranch === null) continue;
-              if (!selectedBranch.contains(control)) continue;
-              let paymentMethodBoundary = control.parentElement;
-              while (
-                paymentMethodBoundary !== null &&
-                paymentMethodBoundary !== selectedBranch &&
-                !isPaymentMethodBoundary(paymentMethodBoundary)
-              ) {
-                paymentMethodBoundary = paymentMethodBoundary.parentElement;
-              }
-              if (
-                paymentMethodBoundary !== null &&
-                paymentMethodBoundary !== selectedBranch &&
-                !paymentMethodBoundary.contains(selectedPan)
-              ) {
-                continue;
-              }
-              control.setAttribute("data-ts-payment-billing-owner", token);
-              marked += 1;
-            }
-            return marked;
-          },
-          {
-            token: directToken,
-            groupToken: cardGroup.token,
-            selectors: {
-              pan: CHECKOUT_PAN_FIELD_SELECTORS,
-              cvv: CHECKOUT_CVV_FIELD_SELECTORS,
-              name: CHECKOUT_CARD_NAME_FIELD_SELECTORS,
-              combinedExpiry: CHECKOUT_COMBINED_EXPIRY_GROUP_SELECTORS,
-              expiryMonth: CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS,
-              expiryYear: CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS,
-            },
-          },
-        )
-        .catch(() => 0);
-      if (directCount > 0) billingRoots.push({ frame: cardGroup.frame, token: directToken });
-
-      const groupFrames = new Set([...groups.values()].map((group) => group.frame));
-      for (const groupFrame of groupFrames) {
-        let childFrame = groupFrame;
-        let parentFrame = childFrame.parentFrame();
-        while (parentFrame !== null && frames.includes(parentFrame)) {
-          const frameElement = await childFrame.frameElement().catch(() => null);
-          if (frameElement === null) break;
-          await frameElement
-            .evaluate((element, selected) => {
-              if (!(element instanceof Element)) return;
-              element.setAttribute("data-ts-payment-frame-owner", selected ? "selected" : "other");
-            }, groupFrame === cardGroup.frame)
-            .catch(() => undefined);
-          await frameElement.dispose().catch(() => undefined);
-          childFrame = parentFrame;
-          parentFrame = childFrame.parentFrame();
-        }
-      }
-
-      const cardRoot = await cardGroup.root.elementHandle().catch(() => null);
-      if (cardRoot !== null) await addBillingRoot(cardGroup.frame, cardRoot);
-      let childFrame = cardGroup.frame;
-      let parentFrame = childFrame.parentFrame();
-      while (parentFrame !== null && frames.includes(parentFrame)) {
-        const frameElement = await childFrame.frameElement().catch(() => null);
-        if (frameElement === null) break;
-        await addBillingRoot(parentFrame, frameElement);
-        childFrame = parentFrame;
-        parentFrame = childFrame.parentFrame();
-      }
-    }
-
-    const cardFieldCandidates = (selectors: string): Array<{ frame: Frame; matches: Locator }> =>
-      cardGroup !== undefined
-        ? [
-            {
-              frame: cardGroup.frame,
-              matches: cardGroup.frame
-                .locator(selectors)
-                .and(
-                  cardGroup.frame.locator(
-                    `[data-ts-payment-card-control-group="${cardGroup.token}"]`,
-                  ),
-                ),
-            },
-          ]
-        : frames.map((frame) => ({ frame, matches: frame.locator(selectors) }));
-    const fillableCardFields = async (
-      selectors: string,
-    ): Promise<Array<{ frame: Frame; field: Locator }>> => {
-      const fillable: Array<{ frame: Frame; field: Locator }> = [];
-      for (const { frame, matches } of cardFieldCandidates(selectors)) {
-        const count = await matches.count().catch(() => 0);
-        for (let index = 0; index < count; index += 1) {
-          const field = matches.nth(index);
-          if (!(await field.isVisible().catch(() => false))) continue;
-          if (await field.isEnabled().catch(() => false)) fillable.push({ frame, field });
-        }
-      }
-      return fillable;
-    };
-    const countFillableCardFields = async (selectors: string): Promise<number> => {
-      return (await fillableCardFields(selectors)).length;
-    };
-    const requireExactlyOneCardField = async (field: string, selectors: string): Promise<void> => {
-      const count = await countFillableCardFields(selectors);
-      if (count > 1) throw new Error("payment_card_form_ambiguous");
-      if (count === 0) throw new Error(`payment_field_not_found:${field}`);
-    };
-    const refuseAmbiguousCardField = async (selectors: string): Promise<void> => {
-      if ((await countFillableCardFields(selectors)) > 1) {
-        throw new Error("payment_card_form_ambiguous");
-      }
-    };
-    const splitExpiryFieldsShareGroup = async (
-      monthSelectors: string,
-      yearSelectors: string,
-    ): Promise<boolean> => {
-      const months = await fillableCardFields(monthSelectors);
-      const years = await fillableCardFields(yearSelectors);
-      if (months.length !== 1 || years.length !== 1) return false;
-      const [month] = months;
-      const [year] = years;
-      if (month === undefined || year === undefined) return false;
-      if (month.frame === year.frame) {
-        const yearHandle = await year.field.elementHandle().catch(() => null);
-        if (yearHandle === null) return false;
-        const related = await month.field
-          .evaluate((monthElement, yearElement) => {
-            if (monthElement === yearElement) return false;
-            const monthControl = monthElement as HTMLInputElement | HTMLSelectElement;
-            const yearControl = yearElement as HTMLInputElement | HTMLSelectElement;
-            const monthOwner = monthElement.getAttribute("data-ts-payment-card-control-group");
-            const yearOwner = yearElement.getAttribute("data-ts-payment-card-control-group");
-            if (monthOwner !== null || yearOwner !== null) {
-              return monthOwner !== null && monthOwner === yearOwner;
-            }
-            const monthRoot = monthElement.closest("[data-ts-payment-card-group]");
-            const yearRoot = yearElement.closest("[data-ts-payment-card-group]");
-            if (monthRoot !== null || yearRoot !== null) return monthRoot === yearRoot;
-            const monthForm = monthControl.form ?? monthElement.closest("form");
-            const yearForm = yearControl.form ?? yearElement.closest("form");
-            return monthForm !== null && monthForm === yearForm;
-          }, yearHandle)
-          .catch(() => false);
-        await yearHandle.dispose().catch(() => undefined);
-        if (!related) return false;
-      }
-      const signatures = async (field: Locator): Promise<string[]> =>
-        await field
-          .evaluate((element) => {
-            const result = new Set<string>();
-            const hosted = element.getAttribute("data-ts-hosted-card-field");
-            if (hosted === "month" || hosted === "year") result.add("hosted:braintree-expiry");
-            const stamped = element.getAttribute("data-ts-jp-card-exp-group");
-            if (stamped !== null && stamped.length > 0) result.add(`stamp:${stamped}`);
-            const excludedIdentityParts = ["gift", "loyalty", "point", "prepaid", "member"];
-            for (const value of [
-              element.getAttribute("autocomplete") ?? "",
-              element.getAttribute("name") ?? "",
-              element.id,
-            ]) {
-              const normalized = value
-                .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-                .toLowerCase()
-                .replace(/[^a-z0-9]+/g, "-")
-                .replace(/^-+|-+$/g, "");
-              if (excludedIdentityParts.some((part) => normalized.includes(part))) continue;
-              const group = normalized
-                .replace(/(?:^|-)(?:month|year)(?=-|$)/g, "-")
-                .replace(/(?:month|year)$/g, "")
-                .replace(/-+/g, "-")
-                .replace(/^-+|-+$/g, "");
-              if (group.length > 0) result.add(`identity:${group}`);
-            }
-            return [...result];
-          })
-          .catch(() => []);
-      const monthSignatures = await signatures(month.field);
-      const yearSignatures = new Set(await signatures(year.field));
-      return monthSignatures.some((signature) => yearSignatures.has(signature));
-    };
-
-    const fillFirst = async (
-      field: string,
-      value: string | undefined,
-      selectors: string,
-      typePerKey = false,
-      withinCardGroup = false,
-      withinBillingContext = false,
-    ): Promise<boolean> => {
-      if (value === undefined || value.length === 0) return false;
-      // A card-group field is scanned ONCE via fillableCardFields — the same
-      // pass that decides the ambiguity/zero-candidate outcome below is reused
-      // for the actual fill target, rather than re-querying and re-checking
-      // visibility/enabled across every candidate a second time. On a form
-      // with many same-field-shaped decoys, a second full O(N) scan here was
-      // the dominant cost (and, pre-count-cap-fix, the source of a 30s+ hang).
-      let candidates: Array<{ frame: Frame; matches: Locator }>;
-      if (withinCardGroup) {
-        const fillable = await fillableCardFields(selectors);
-        if (fillable.length > 1) throw new Error("payment_card_form_ambiguous");
-        if (fillable.length === 0) return false;
-        candidates = [{ frame: fillable[0]!.frame, matches: fillable[0]!.field }];
-      } else if (withinBillingContext) {
-        candidates = billingRoots.map(({ frame, token }) => ({
-          frame,
-          matches: frame
-            .locator(selectors)
-            .and(frame.locator(`[data-ts-payment-billing-owner="${token}"]`)),
-        }));
-      } else {
-        candidates = frames.map((frame) => ({ frame, matches: frame.locator(selectors) }));
-      }
-      for (const { frame, matches } of candidates) {
-        const count = await matches.count().catch(() => 0);
-        for (let i = 0; i < count; i += 1) {
-          const input = matches.nth(i);
-          if (!(await input.isVisible().catch(() => false))) continue;
-          if (!(await input.isEnabled().catch(() => false))) continue;
-          if (
-            withinBillingContext &&
-            !(await input
-              .evaluate((element) => {
-                if (!(element instanceof HTMLElement)) return false;
-                const rect = element.getBoundingClientRect();
-                if (rect.width < 1 || rect.height < 1) return false;
-                const x = Math.min(window.innerWidth - 1, Math.max(0, rect.left + rect.width / 2));
-                const y = Math.min(window.innerHeight - 1, Math.max(0, rect.top + rect.height / 2));
-                const hit = document.elementFromPoint(x, y);
-                return hit !== null && (hit === element || element.contains(hit));
-              })
-              .catch(() => false))
-          ) {
-            continue;
-          }
-          if (assertFrameEgress !== undefined) {
-            const resolveHandle = async (): Promise<{
-              handle: ElementHandle<Element>;
-              tag: string;
-            } | null> => {
-              const handle = await input.elementHandle().catch(() => null);
-              if (handle === null) return null;
-              if (!(await handle.isVisible().catch(() => false))) {
-                await handle.dispose().catch(() => undefined);
-                return null;
-              }
-              if (!(await handle.isEnabled().catch(() => false))) {
-                await handle.dispose().catch(() => undefined);
-                return null;
-              }
-              await handle.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
-              const context = await handle.evaluate((el) => ({
-                tag: el.tagName.toLowerCase(),
-                origin: el.ownerDocument.defaultView?.location.origin ?? "",
-              }));
-              assertFrameEgress(frame, context.origin);
-              return { handle, tag: context.tag };
-            };
-            const resolved = await resolveHandle();
-            if (resolved === null) continue;
-            let { handle } = resolved;
-            try {
-              if (resolved.tag === "select") {
-                // A value-format mismatch (e.g. a 4-digit exp_year against a
-                // 2-digit <option value>, common on JP expiry selects — see
-                // stampJapaneseCardLabelFields) is not a transient
-                // actionability gap, so it must not eat Playwright's default
-                // 30s actionability wait before falling back to the label
-                // match. The element's visibility/enabled state was already
-                // confirmed by resolveHandle() above.
-                let selected = await handle
-                  .selectOption({ value }, { timeout: 3000 })
-                  .then((values) => values.length > 0)
-                  .catch(() => {
-                    assertFrameEgress(frame);
-                    return false;
-                  });
-                if (!selected) {
-                  await handle.dispose().catch(() => undefined);
-                  const fallback = await resolveHandle();
-                  if (fallback === null) continue;
-                  handle = fallback.handle;
-                  selected = await handle
-                    .selectOption({ label: value }, { timeout: 3000 })
-                    .then((values) => values.length > 0)
-                    .catch(() => {
-                      assertFrameEgress(frame);
-                      return false;
-                    });
-                }
-                if (!selected) continue;
-              } else if (typePerKey) {
-                await handle.fill("").catch((error) => {
-                  assertFrameEgress(frame);
-                  throw error;
-                });
-                const resolvedOrigin = await handle.evaluate(
-                  (el) => el.ownerDocument.defaultView?.location.origin ?? "",
-                );
-                assertFrameEgress(frame, resolvedOrigin);
-                await handle
-                  .type(value, {
-                    delay: this.humanize ? rand(40, 110) : 0,
-                  })
-                  .catch((error) => {
-                    assertFrameEgress(frame);
-                    throw error;
-                  });
-              } else {
-                await handle.fill(value).catch((error) => {
-                  assertFrameEgress(frame);
-                  throw error;
-                });
-              }
-            } finally {
-              await handle.dispose().catch(() => undefined);
-            }
-            filled.add(field);
-            return true;
-          }
-          const tag = await input.evaluate((el) => el.tagName.toLowerCase()).catch(() => "");
-          await input.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
-          if (tag === "select") {
-            // See the matching comment in the assertFrameEgress branch above:
-            // an explicit short timeout keeps a value-format mismatch from
-            // eating Playwright's default 30s actionability wait before the
-            // label fallback runs.
-            const selected =
-              (await input
-                .selectOption({ value }, { timeout: 3000 })
-                .then(() => true)
-                .catch(() => false)) ||
-              (await input
-                .selectOption({ label: value }, { timeout: 3000 })
-                .then(() => true)
-                .catch(() => false));
-            if (!selected) continue;
-          } else if (typePerKey) {
-            await input.fill("");
-            await input.pressSequentially(value, { delay: this.humanize ? rand(40, 110) : 0 });
-          } else {
-            await input.fill(value);
-          }
-          filled.add(field);
-          return true;
-        }
-      }
-      return false;
-    };
-    await requireExactlyOneCardField("pan", CHECKOUT_PAN_FIELD_SELECTORS);
-    const usesLegacyPanSelectors =
-      (await countFillableCardFields(CHECKOUT_LEGACY_PAN_FIELD_SELECTORS)) === 1;
-    const cvvSelectors = usesLegacyPanSelectors
-      ? CHECKOUT_CVV_FIELD_SELECTORS
-      : CHECKOUT_CONSERVATIVE_CVV_FIELD_SELECTORS;
-    const expiryMonthSelectors = usesLegacyPanSelectors
-      ? CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS
-      : CHECKOUT_CONSERVATIVE_EXPIRY_MONTH_FIELD_SELECTORS;
-    const expiryYearSelectors = usesLegacyPanSelectors
-      ? CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS
-      : CHECKOUT_CONSERVATIVE_EXPIRY_YEAR_FIELD_SELECTORS;
-    await refuseAmbiguousCardField(cvvSelectors);
-    await refuseAmbiguousCardField(CHECKOUT_CARD_NAME_FIELD_SELECTORS);
-    const combinedExpirySelectors = usesLegacyPanSelectors
-      ? CHECKOUT_COMBINED_EXPIRY_FIELD_SELECTORS
-      : CHECKOUT_CONSERVATIVE_COMBINED_EXPIRY_FIELD_SELECTORS;
-    const combinedExpiryCount = await countFillableCardFields(combinedExpirySelectors);
-    const expiryMonthCount = await countFillableCardFields(expiryMonthSelectors);
-    const expiryYearCount = await countFillableCardFields(expiryYearSelectors);
-    if (combinedExpiryCount > 1 || expiryMonthCount > 1 || expiryYearCount > 1) {
-      throw new Error("payment_card_form_ambiguous");
-    }
-    const hasCombinedExpiry = combinedExpiryCount === 1;
-    const hasSplitExpiry = expiryMonthCount === 1 && expiryYearCount === 1;
-    if (
-      hasCombinedExpiry &&
-      hasSplitExpiry &&
-      !(usesLegacyPanSelectors && cardGroupResolvedByTopmostPan)
-    ) {
-      throw new Error("payment_card_form_ambiguous");
-    }
-    if (
-      hasSplitExpiry &&
-      !(await splitExpiryFieldsShareGroup(expiryMonthSelectors, expiryYearSelectors))
-    ) {
-      throw new Error("payment_card_form_ambiguous");
-    }
-    if (!hasCombinedExpiry && !hasSplitExpiry) {
-      throw new Error("payment_field_not_found:expiry");
-    }
-    await fillFirst("pan", card.pan, CHECKOUT_PAN_FIELD_SELECTORS, false, true);
-    if (hasSplitExpiry) {
-      await fillFirst(
-        "exp_month",
-        card.exp_month.padStart(2, "0"),
-        expiryMonthSelectors,
-        false,
-        true,
-      );
-      await fillFirst("exp_year", card.exp_year, expiryYearSelectors, false, true);
-    } else {
-      // A combined expiry field's formatter owns the slash. Send only the four
-      // digits as real key events so numeric-only fields accept them and the
-      // site's key/input handlers can turn e.g. "1230" into "12/30".
-      const combined = await fillFirst(
-        "expiry",
-        `${card.exp_month.padStart(2, "0")}${card.exp_year.slice(-2)}`,
-        combinedExpirySelectors,
-        true,
-        true,
-      );
-      if (!combined) {
-        await fillFirst(
-          "exp_month",
-          card.exp_month.padStart(2, "0"),
-          expiryMonthSelectors,
-          false,
-          true,
-        );
-        await fillFirst("exp_year", card.exp_year, expiryYearSelectors, false, true);
-      }
-    }
-    const fields: Array<[string, string | undefined, string, string?]> = [
-      ["cvv", card.cvv, cvvSelectors],
-      ["name", card.name, CHECKOUT_CARD_NAME_FIELD_SELECTORS],
-      [
-        "line1",
-        card.billing.line1,
-        '[autocomplete~="address-line1"],[name*="address_line1" i],[name*="address1" i],[name="line1" i]',
-        '[autocomplete~="billing"][autocomplete~="address-line1"],[name*="billing" i][name*="address_line1" i],[name*="billing" i][name*="address1" i],[id*="billing" i][id*="address-line1" i],[id*="billing" i][id*="address_line1" i],[id*="billing" i][id*="address1" i]',
-      ],
-      [
-        "line2",
-        card.billing.line2,
-        '[autocomplete~="address-line2"],[name*="address_line2" i],[name*="address2" i],[name="line2" i]',
-        '[autocomplete~="billing"][autocomplete~="address-line2"],[name*="billing" i][name*="address_line2" i],[name*="billing" i][name*="address2" i],[id*="billing" i][id*="address-line2" i],[id*="billing" i][id*="address_line2" i],[id*="billing" i][id*="address2" i]',
-      ],
-      [
-        "city",
-        card.billing.city,
-        '[autocomplete~="address-level2"],[name*="city" i],[name*="locality" i]',
-        '[autocomplete~="billing"][autocomplete~="address-level2"],[name*="billing" i][name*="city" i],[name*="billing" i][name*="locality" i],[id*="billing" i][id*="city" i],[id*="billing" i][id*="locality" i]',
-      ],
-      [
-        "state",
-        card.billing.state,
-        '[autocomplete~="address-level1"],[name*="state" i],[name*="region" i]',
-        '[autocomplete~="billing"][autocomplete~="address-level1"],[name*="billing" i][name*="state" i],[name*="billing" i][name*="region" i],[id*="billing" i][id*="state" i],[id*="billing" i][id*="region" i]',
-      ],
-      [
-        "postal_code",
-        card.billing.postal_code,
-        '[autocomplete~="postal-code"],[name*="postal" i],[name*="zip" i]',
-        '[autocomplete~="billing"][autocomplete~="postal-code"],[name*="billing" i][name*="postal" i],[name*="billing" i][name*="zip" i],[id*="billing" i][id*="postal" i],[id*="billing" i][id*="zip" i]',
-      ],
-      [
-        "country",
-        card.billing.country,
-        '[autocomplete~="country"],[name*="country" i]',
-        '[autocomplete~="billing"][autocomplete~="country"],[name*="billing" i][name*="country" i],[id*="billing" i][id*="country" i]',
-      ],
-    ];
-    for (const [field, value, selectors, billingSelectors] of fields) {
-      const withinBillingContext = billingOnly && billingSelectors !== undefined;
-      await fillFirst(
-        field,
-        value,
-        withinBillingContext ? billingSelectors : selectors,
-        false,
-        field === "cvv" || field === "name",
-        withinBillingContext,
-      );
-    }
-    for (const required of ["pan", "expiry", "cvv"]) {
-      if (required === "expiry" && filled.has("exp_month") && filled.has("exp_year")) continue;
-      if (!filled.has(required)) throw new Error(`payment_field_not_found:${required}`);
-    }
-    return cardGroup === undefined
-      ? undefined
-      : { selected: cardGroup, groups: [...groups.values()] };
-  }
-
-  async fillAndSubmitCheckout(
-    card: CheckoutCard,
-    options: { onSubmitDispatched?: () => void; beforeSubmitDispatch?: () => void | number } = {},
-    page: Page | null = this.page,
-  ): Promise<CheckoutSubmitResult> {
-    if (!page) throw new Error("Browser not started");
-    this.checkoutCardGroupScope = undefined;
-    this.paymentInstrumentExpectation = undefined;
-    this.observedPaymentInstrumentMismatch = undefined;
-    let primary:
-      | { kind: "outcome"; value: CheckoutSubmitResult }
-      | { kind: "error"; value: unknown };
-    // Snapshot the frames fill actually wrote into, BEFORE submission, and
-    // reuse that exact set for cleanup below — never a fresh this.page.frames()
-    // taken after submitFilledCheckoutInScope returns. fill (a single vetted
-    // call) is trusted to write into every frame reachable at this point, but
-    // a 3-D Secure method/challenge iframe (methodurl.vcas.visa.com,
-    // *.cardinalcommerce.com, an issuer ACS) can attach or replace a snapshotted
-    // frame's document AFTER the submit click. Re-deriving cleanup targets would let the JP
-    // label-stamp scan and substring field-clear it delegates to evaluate JS
-    // in and mutate that live authentication hand-off, corrupting the
-    // in-flight device-fingerprint POST (regression: ts-operator-3ds-completion).
-    let fillFrameSnapshot: readonly {
-      frame: Frame;
-      url: string;
-      documentElement: ElementHandle<HTMLElement> | null;
-    }[] = [];
-    try {
-      await this.waitForPanField(10_000, undefined, page);
-      fillFrameSnapshot = await Promise.all(
-        page.frames().map(async (frame) => ({
-          frame,
-          url: frame.url(),
-          documentElement: await frame.$("html").catch(() => null),
-        })),
-      );
-      const fillFrames = fillFrameSnapshot.map(({ frame }) => frame);
-      // A single-page checkout's generic address controls are its shipping
-      // controls. Only an explicitly marked billing control is eligible here:
-      // sealing a shipping field would make the payment cleanup erase the
-      // merchant's selected address, country, and shipping rate after submit.
-      const cardGroup = await this.fillCheckoutCardIntoFrames(fillFrames, card, true);
-      this.rememberPaymentInstrumentExpectation(card);
-      primary = {
-        kind: "outcome",
-        value: await this.submitFilledCheckoutInScope(
-          cardGroup,
-          options.onSubmitDispatched,
-          options.beforeSubmitDispatch,
-          page,
-        ),
-      };
-    } catch (error) {
-      primary = { kind: "error", value: error };
-    }
-    try {
-      if (fillFrameSnapshot.length > 0) {
-        // History URL changes preserve this root handle; real ACS navigation invalidates it.
-        await this.clearCheckoutCardFieldsInDocuments(
-          fillFrameSnapshot.flatMap(({ documentElement }, frameIndex) =>
-            documentElement === null ? [] : [{ documentElement, frameIndex }],
-          ),
-          page,
-        );
-      } else {
-        await this.clearCheckoutCardFieldsInFrames(page.frames(), page);
-      }
-    } catch (error) {
-      console.error(
-        `[payment-cleanup] ${error instanceof Error ? error.message : "payment_fields_not_cleared"}`,
-      );
-      if (
-        primary.kind === "error" &&
-        primary.value instanceof Error &&
-        primary.value.message === "payment_approval_expired"
-      ) {
-        primary.value = new PaymentCardFillCleanupError(primary.value);
-      }
-    } finally {
-      await Promise.all(
-        fillFrameSnapshot.map(({ documentElement }) =>
-          documentElement?.dispose().catch(() => undefined),
-        ),
-      );
-    }
-    if (primary.kind === "error") throw primary.value;
-    return primary.value;
-  }
-
-  // Split-checkout card entry (operate_pay phase="fill_card"): fill the
-  // vaulted card into the payment fields WITHOUT touching any submit control —
-  // filling is not charging. The card may only enter the main frame, a frame
-  // on the page's own registrable domain, or a recognized payment-provider
-  // frame (recognizedPaymentProviderFrame); when the card fields live only in
-  // an unrecognized cross-origin frame the fill is refused and nothing is
-  // left behind. On success the filled values STAY in the page (the site
-  // needs them at its confirm step) marked data-ts-sealed-payment, which
-  // extractInteractiveElements reports as sealed so observations mask them.
-  async fillCheckoutCardFields(
-    card: CheckoutCard,
-    options: { deadline?: number } = {},
-    page: Page | null = this.page,
-  ): Promise<void> {
-    if (!page) throw new Error("Browser not started");
-    this.checkoutCardGroupScope = undefined;
-    const pageUrl = page.url();
-    if (!recognizedPaymentProviderFrame(pageUrl, pageUrl)) {
-      throw new Error("payment_checkout_https_required");
-    }
-    await this.waitForRecognizedPanField(pageUrl, options.deadline, page);
-    if (options.deadline !== undefined && Date.now() >= options.deadline) {
-      throw new Error("payment_approval_expired");
-    }
-    this.checkoutOutcomeBaseline = await this.captureCheckoutOutcomeBaseline(page).catch(
-      () => undefined,
-    );
-    const allowed = page
-      .frames()
-      .filter(
-        (frame) =>
-          frame === page.mainFrame() || recognizedPaymentProviderFrame(frame.url(), pageUrl),
-      );
-    const expectedPageOrigin = new URL(pageUrl).origin;
-    const expectedFrameOrigins = new Map(
-      allowed.map((frame) => [frame, new URL(frame.url()).origin] as const),
-    );
-    const assertFrameEgress = (frame: Frame, resolvedOrigin?: string): void => {
-      const livePageUrl = page.url();
-      let livePageOrigin: string;
-      let liveFrameOrigin: string;
-      try {
-        livePageOrigin = new URL(livePageUrl).origin;
-        liveFrameOrigin = new URL(frame.url()).origin;
-      } catch {
-        throw new UnrecognizedPaymentFrameError(frame.url());
-      }
-      if (
-        livePageOrigin !== expectedPageOrigin ||
-        liveFrameOrigin !== expectedFrameOrigins.get(frame) ||
-        (resolvedOrigin !== undefined && resolvedOrigin !== liveFrameOrigin) ||
-        (frame !== page.mainFrame() && !recognizedPaymentProviderFrame(frame.url(), livePageUrl))
-      ) {
-        throw new UnrecognizedPaymentFrameError(liveFrameOrigin);
-      }
-    };
-    try {
-      this.checkoutCardGroupScope = await this.fillCheckoutCardIntoFrames(
-        allowed,
-        card,
-        true,
-        assertFrameEgress,
-      );
-    } catch (error) {
-      let fillError = error;
-      if (error instanceof Error && error.message === "payment_field_not_found:pan") {
-        const excluded = await this.excludedPanFrameOrigin(new Set(allowed), page);
-        if (excluded !== null) fillError = new UnrecognizedPaymentFrameError(excluded);
-      }
-      try {
-        await this.clearCheckoutCardFieldsInFrames(allowed, page);
-      } catch {
-        throw new PaymentCardFillCleanupError(fillError);
-      }
-      throw fillError;
-    }
-  }
-
-  // No PAN field among the allowed frames — name the excluded frame that does
-  // carry one (if any) so the refusal is diagnosable without filling it.
-  private async excludedPanFrameOrigin(
-    allowed: ReadonlySet<Frame>,
-    page: Page | null = this.page,
-  ): Promise<string | null> {
-    if (!page) return null;
-    await this.stampJapaneseCardLabelFields(page.frames());
-    for (const frame of page.frames()) {
-      if (allowed.has(frame)) continue;
-      const count = await frame
-        .locator(CHECKOUT_PAN_FIELD_SELECTORS)
-        .count()
-        .catch(() => 0);
-      if (count > 0) {
-        try {
-          return new URL(frame.url()).origin;
-        } catch {
-          return frame.url();
-        }
-      }
-    }
-    return null;
-  }
-
-  private async scanSavedCardSelectionAcrossFrames(
-    page: Page | null = this.page,
-  ): Promise<Map<Frame, SavedCardSelectionScan>> {
-    if (!page) throw new Error("Browser not started");
-    const entries = await Promise.all(
-      page.frames().map(async (frame) => {
-        try {
-          return [frame, await frame.evaluate(scanSavedCardSelectionInPage)] as const;
-        } catch {
-          throw new Error("payment_card_selection_ambiguous");
-        }
-      }),
-    );
-    return new Map(entries);
-  }
-
-  // Re-runs the global scan and confirms the resolved state still holds: no
-  // competing saved-card selection anywhere, every marked (clicked) new-card
-  // control is STILL checked and none has vanished (a weaker "no saved card
-  // checked" test would miss a marked radio that was unchecked with nothing
-  // re-checked), and every sealed field across every frame still holds its
-  // snapshotted non-empty value.
-  private async savedCardSelectionVerified(
-    verification: SavedCardSelectionVerification,
-    page: Page | null = this.page,
-  ): Promise<boolean> {
-    const scans = await this.scanSavedCardSelectionAcrossFrames(page);
-    let markedCount = 0;
-    for (const scan of scans.values()) {
-      if (scan.competingRadioCount > 0 || scan.competingSelectOption) return false;
-      if (scan.markedUncheckedCount > 0) return false;
-      markedCount += scan.markedCount;
-    }
-    if (markedCount !== verification.expectedMarkedCount) return false;
-    for (const [frame, before] of verification.sealedValuesByFrame) {
-      const after = scans.get(frame)?.sealedFieldValues;
-      if (after === undefined || after.length !== before.length) return false;
-      for (let index = 0; index < before.length; index += 1) {
-        const beforeValue = before[index] ?? null;
-        const afterValue = after[index] ?? null;
-        if (beforeValue === null && afterValue === null) continue;
-        if (beforeValue === null || afterValue === null) return false;
-        if (beforeValue.length === 0 || afterValue !== beforeValue) return false;
-      }
-    }
-    for (const [frame, scan] of scans) {
-      if (!verification.sealedValuesByFrame.has(frame) && scan.sealedFieldValues.length > 0) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  // "none": no competing saved-card selection found anywhere — nothing to do.
-  // "resolved": a competing saved-card RADIO was found and positively
-  // resolved — the sole unambiguous new-card sibling in its choice group was
-  // clicked (real, event-firing radio-group semantics: clicking it natively
-  // unchecks the saved-card radio too) and marked, then a global re-scan
-  // verified no competing selection remains anywhere and every filled card
-  // field the operator sealed — in ANY frame, including a recognized
-  // hosted-fields iframe the radio's frame does not contain — still holds its
-  // value. The returned verification state lets submitFilledCheckoutInScope
-  // repeat that exact check at the charge-click boundary.
-  // "ambiguous": a competing selection exists and either it is a saved-card
-  // <select> OPTION (never auto-resolved — a select's "change" semantics
-  // vary too much across frameworks to trust a synthetic commit the way a
-  // native radio click can be trusted), or a competing radio's choice group
-  // has zero or more-than-one plausible new-card candidate, or resolving it
-  // did not actually clear the competing selection, or it cleared/reset the
-  // filled card fields. Fail-closed refusal is the ONLY outcome here — never
-  // silently re-fill (the raw card bytes are already gone by this point in
-  // the call chain) and never guess between multiple candidates.
-  private async resolveCompetingSavedCardSelection(
-    page: Page | null = this.page,
-  ): Promise<
-    | { outcome: "none" | "resolved"; verification: SavedCardSelectionVerification }
-    | { outcome: "ambiguous" }
-  > {
-    if (!page) throw new Error("Browser not started");
-    for (const frame of page.frames()) {
-      try {
-        await frame.evaluate(clearSavedCardSelectionMarkersInPage);
-      } catch {
-        throw new Error("payment_card_selection_ambiguous");
-      }
-    }
-    const initial = await this.scanSavedCardSelectionAcrossFrames(page);
-    const sealedValuesByFrame = new Map(
-      [...initial.entries()].map(([frame, scan]) => [frame, scan.sealedFieldValues] as const),
-    );
-    const anySelectOption = [...initial.values()].some((scan) => scan.competingSelectOption);
-    const radioFrames = [...initial.entries()]
-      .filter(([, scan]) => scan.competingRadioCount > 0)
-      .map(([frame]) => frame);
-    if (!anySelectOption && radioFrames.length === 0) {
-      return { outcome: "none", verification: { sealedValuesByFrame, expectedMarkedCount: 0 } };
-    }
-    if (anySelectOption) return { outcome: "ambiguous" };
-    if (![...sealedValuesByFrame.values()].some((values) => values.length > 0)) {
-      return { outcome: "ambiguous" };
-    }
-    let expectedMarkedCount = 0;
-    for (const frame of radioFrames) {
-      let resolved: { status: "resolved"; clicked: number } | { status: "ambiguous" };
-      try {
-        resolved = await frame.evaluate(resolveSavedCardSelectionInPage);
-      } catch {
-        throw new Error("payment_card_selection_ambiguous");
-      }
-      if (resolved.status === "ambiguous") return { outcome: "ambiguous" };
-      expectedMarkedCount += resolved.clicked;
-    }
-    if (expectedMarkedCount === 0) return { outcome: "ambiguous" };
-    const verification: SavedCardSelectionVerification = {
-      sealedValuesByFrame,
-      expectedMarkedCount,
-    };
-    if (!(await this.savedCardSelectionVerified(verification, page)))
-      return { outcome: "ambiguous" };
-    return { outcome: "resolved", verification };
-  }
-
-  // The charge: find and click the pay/place-order control, then poll for a
-  // terminal merchant order route or a 3-D Secure challenge. Callers gate this
-  // on a verified visible total.
-  async submitFilledCheckout(page: Page | null = this.page): Promise<CheckoutSubmitResult> {
-    return await this.submitFilledCheckoutInScope(
-      this.checkoutCardGroupScope,
-      undefined,
-      undefined,
-      page,
-    );
-  }
-
-  private async submitFilledCheckoutInScope(
-    cardGroup?: CheckoutCardGroupScope,
-    onSubmitDispatched?: () => void,
-    beforeSubmitDispatch?: () => void | number,
-    page: Page | null = this.page,
-  ): Promise<CheckoutSubmitResult> {
-    if (!page) throw new Error("Browser not started");
-    const savedCardSelection = await this.resolveCompetingSavedCardSelection(page);
-    if (savedCardSelection.outcome === "ambiguous") {
-      throw new Error("payment_card_selection_ambiguous");
-    }
-    let outcomeBaseline: CheckoutOutcomeBaseline | undefined;
-    this.checkoutOutcomeBaseline = undefined;
-    let submitted = false;
-    let clearSubmittedDispatchTracking: (() => Promise<void>) | null = null;
-    for (const frame of page.frames()) {
-      const matches = frame.locator('button,input[type="submit"],[role="button"]');
-      const count = Math.min(await matches.count().catch(() => 0), 100);
-      for (let i = 0; i < count; i += 1) {
-        const candidate = matches.nth(i);
-        if (!(await candidate.isVisible().catch(() => false))) continue;
-        if (!(await candidate.isEnabled().catch(() => false))) continue;
-        if (cardGroup !== undefined) {
-          const ownership = await candidate
-            .evaluate((element, cardFieldSelectors) => {
-              const form =
-                element instanceof HTMLButtonElement || element instanceof HTMLInputElement
-                  ? element.form
-                  : null;
-              const owner =
-                form?.closest("[data-ts-payment-card-group]") ??
-                element.closest("[data-ts-payment-card-group]");
-              return {
-                ownerToken: owner?.getAttribute("data-ts-payment-card-group") ?? null,
-                formOwnsCardFields:
-                  form !== null &&
-                  Array.from(form.elements).some((control) => control.matches(cardFieldSelectors)),
-              };
-            }, CHECKOUT_CARD_VALUE_FIELD_SELECTORS)
-            .catch(() => undefined);
-          if (ownership === undefined) continue;
-          if (ownership.ownerToken !== null) {
-            const knownOwner = cardGroup.groups.some(
-              (group) => group.frame === frame && group.token === ownership.ownerToken,
-            );
-            if (
-              !knownOwner ||
-              frame !== cardGroup.selected.frame ||
-              ownership.ownerToken !== cardGroup.selected.token
-            ) {
-              continue;
-            }
-          } else if (ownership.formOwnsCardFields) {
-            continue;
-          }
-        }
-        const labelSignals = await candidate
-          .evaluate((el) => ({
-            ariaLabel: el.getAttribute("aria-label"),
-            inputValue: el instanceof HTMLInputElement ? el.value : null,
-            textContent: el.textContent,
-          }))
-          .catch(() => null);
-        const label = checkoutSubmitLabel(labelSignals ?? {});
-        if (!CHECKOUT_SUBMIT_LABEL_RE.test(label)) continue;
-        const dispatchToken = `ts-payment-submit-${this.checkoutSubmitSequence++}`;
-        const preDispatchFrameUrls = page.frames().map((pageFrame) => pageFrame.url());
-        const clickOnlyOutcomeBaseline = checkoutOutcomeBaselineFromDispatchSnapshot({
-          url: page.url(),
-          urls: preDispatchFrameUrls,
-        });
-        let submitDispatchedReported = false;
-        const reportSubmitDispatched = (): void => {
-          if (submitDispatchedReported) return;
-          onSubmitDispatched?.();
-          submitDispatchedReported = true;
-        };
-        const dispatchTrackingInstalled = await candidate
-          .evaluate((element, token) => {
-            const stateWindow = window as Window & {
-              __trustySquirePaymentSubmitDispatch?: {
-                token: string;
-                validationBlocked: boolean;
-              };
-            };
-            const tracked = element as Element & {
-              __tsPaymentSubmitDispatchListeners?: Array<{
-                capture: boolean;
-                event: "invalid";
-                listener: EventListener;
-                target: Element;
-              }>;
-            };
-            const priorTracking = tracked.__tsPaymentSubmitDispatchListeners;
-            if (priorTracking !== undefined) {
-              for (const registration of priorTracking) {
-                registration.target.removeEventListener(
-                  registration.event,
-                  registration.listener,
-                  registration.capture,
-                );
-              }
-            }
-            stateWindow.__trustySquirePaymentSubmitDispatch = {
-              token,
-              validationBlocked: false,
-            };
-            const form =
-              element instanceof HTMLButtonElement || element instanceof HTMLInputElement
-                ? element.form
-                : element.closest("form");
-            const submitTargets = form !== null ? [form] : Array.from(document.forms);
-            const registrations: Array<{
-              capture: boolean;
-              event: "invalid";
-              listener: EventListener;
-              target: Element;
-            }> = [];
-            const invalidListener: EventListener = () => {
-              const state = stateWindow.__trustySquirePaymentSubmitDispatch;
-              if (state?.token === token) state.validationBlocked = true;
-            };
-            registrations.push(
-              ...submitTargets.map((target) => ({
-                capture: true,
-                event: "invalid" as const,
-                listener: invalidListener,
-                target,
-              })),
-            );
-            tracked.__tsPaymentSubmitDispatchListeners = registrations;
-            for (const registration of registrations) {
-              registration.target.addEventListener(registration.event, registration.listener, {
-                capture: registration.capture,
-                once: true,
-              });
-            }
-          }, dispatchToken)
-          .then(() => true)
-          .catch(() => false);
-        if (!dispatchTrackingInstalled) {
-          continue;
-        }
-        let paymentRequestTrackingArmed = false;
-        let concretePaymentRequestObserved = false;
-        let resolveConcretePaymentRequest = (): void => undefined;
-        const concretePaymentRequest = new Promise<void>((resolve) => {
-          resolveConcretePaymentRequest = resolve;
-        });
-        let navigationObserved = false;
-        let navigationTerminalObserved = false;
-        let navigationThreeDsObserved = false;
-        let resolveNavigationOutcome = (): void => undefined;
-        const navigationOutcome = new Promise<void>((resolve) => {
-          resolveNavigationOutcome = resolve;
-        });
-        const paymentRequestListener = (request: Request): void => {
-          if (!paymentRequestTrackingArmed) return;
-          let sourceFrame: Frame;
-          try {
-            sourceFrame = request.frame();
-          } catch {
-            return;
-          }
-          if (sourceFrame !== frame && sourceFrame !== page.mainFrame()) return;
-          if (!isCheckoutPaymentRequest(request)) return;
-          concretePaymentRequestObserved = true;
-          resolveConcretePaymentRequest();
-        };
-        const navigationListener = (): void => {
-          if (!paymentRequestTrackingArmed) return;
-          navigationObserved = true;
-          void (async () => {
-            if (await this.hasConfirmedCheckoutOutcome(clickOnlyOutcomeBaseline, page)) {
-              navigationTerminalObserved = true;
-              resolveNavigationOutcome();
-              return;
-            }
-            const challenge = await this.detectThreeDsChallenge(undefined, page).catch(
-              () => undefined,
-            );
-            if (challenge?.three_ds_required === true) {
-              navigationThreeDsObserved = true;
-              resolveNavigationOutcome();
-            }
-          })();
-        };
-        page.on("request", paymentRequestListener);
-        page.on("framenavigated", navigationListener);
-        const waitForDispatchEvidence = async (): Promise<void> => {
-          let timer: ReturnType<typeof setTimeout> | undefined;
-          await Promise.race([
-            concretePaymentRequest,
-            navigationOutcome,
-            new Promise<void>((resolve) => {
-              timer = setTimeout(resolve, CHECKOUT_PAYMENT_REQUEST_OBSERVATION_MS);
-            }),
-          ]);
-          if (timer !== undefined) clearTimeout(timer);
-        };
-        const readDispatchState = async (): Promise<{
-          validationBlocked: boolean;
-        } | null> =>
-          await frame
-            .evaluate((token) => {
-              const stateWindow = window as Window & {
-                __trustySquirePaymentSubmitDispatch?: {
-                  token: string;
-                  validationBlocked: boolean;
-                };
-              };
-              const state = stateWindow.__trustySquirePaymentSubmitDispatch;
-              return {
-                validationBlocked: state?.token === token && state.validationBlocked,
-              };
-            }, dispatchToken)
-            .catch(() => null);
-        const clearDispatchTracking = async (): Promise<void> => {
-          paymentRequestTrackingArmed = false;
-          page.off("request", paymentRequestListener);
-          page.off("framenavigated", navigationListener);
-          await candidate
-            .evaluate(
-              (element) => {
-                const tracked = element as Element & {
-                  __tsPaymentSubmitDispatchListeners?: Array<{
-                    capture: boolean;
-                    event: "invalid";
-                    listener: EventListener;
-                    target: Element;
-                  }>;
-                };
-                const tracking = tracked.__tsPaymentSubmitDispatchListeners;
-                if (tracking !== undefined) {
-                  for (const registration of tracking) {
-                    registration.target.removeEventListener(
-                      registration.event,
-                      registration.listener,
-                      registration.capture,
-                    );
-                  }
-                  delete tracked.__tsPaymentSubmitDispatchListeners;
-                }
-              },
-              undefined,
-              { timeout: 250 },
-            )
-            .catch(() => undefined);
-          await frame
-            .evaluate((token) => {
-              const stateWindow = window as Window & {
-                __trustySquirePaymentSubmitDispatch?: {
-                  token: string;
-                  validationBlocked: boolean;
-                };
-              };
-              if (stateWindow.__trustySquirePaymentSubmitDispatch?.token === token) {
-                delete stateWindow.__trustySquirePaymentSubmitDispatch;
-              }
-            }, dispatchToken)
-            .catch(() => undefined);
-        };
-        // Money-fence boundary: the async pay-button scan above (visibility/
-        // enabled/ownership/label checks, dispatch-tracking install) is a real
-        // window in which a page update — or the resolution click's own side
-        // effects — could restore the saved-card selection or clear the filled
-        // fields. bringToFront runs FIRST because its focus/visibility events
-        // can themselves trigger a merchant default-selection revert; the
-        // re-verification is then the LAST thing before the charge click is
-        // dispatched — never proceed on a stale check.
-        let capturedBaseline: CheckoutOutcomeBaseline | null = null;
-        try {
-          await page.bringToFront().catch(() => undefined);
-          await candidate.click({ trial: true });
-          if (!(await this.savedCardSelectionVerified(savedCardSelection.verification, page))) {
-            throw new Error("payment_card_selection_ambiguous");
-          }
-          capturedBaseline = await runCaptureConfirmedPaymentSubmit({
-            click: async (markInputDispatchPossible) => {
-              let remainingMs: void | number;
-              try {
-                remainingMs = beforeSubmitDispatch?.();
-              } catch (error) {
-                throw new BrowserClickDispatchError("not_dispatched", error);
-              }
-              paymentRequestTrackingArmed = true;
-              markInputDispatchPossible();
-              await candidate.click({
-                noWaitAfter: true,
-                ...(typeof remainingMs === "number"
-                  ? { timeout: Math.max(1, Math.ceil(remainingMs)) }
-                  : {}),
-              });
-            },
-            readEvidence: async () => {
-              await waitForDispatchEvidence();
-              const dispatchState = await readDispatchState();
-              const clickOnlyOutcomeConfirmed =
-                navigationTerminalObserved ||
-                (await this.hasConfirmedCheckoutOutcome(clickOnlyOutcomeBaseline, page));
-              const clickOnlyThreeDsObserved =
-                navigationObserved &&
-                (navigationThreeDsObserved ||
-                  (await this.detectThreeDsChallenge(undefined, page).catch(() => undefined))
-                    ?.three_ds_required === true);
-              const clickOnlyDispatchObserved =
-                (concretePaymentRequestObserved && dispatchState?.validationBlocked !== true) ||
-                clickOnlyOutcomeConfirmed ||
-                clickOnlyThreeDsObserved;
-              return {
-                baseline: clickOnlyDispatchObserved ? clickOnlyOutcomeBaseline : null,
-                dispatched: clickOnlyDispatchObserved,
-              };
-            },
-            clear: async () => undefined,
-            onSubmitDispatched: reportSubmitDispatched,
-          });
-          clearSubmittedDispatchTracking = clearDispatchTracking;
-        } catch (error) {
-          await clearDispatchTracking();
-          throw error;
-        }
-        try {
-          outcomeBaseline = capturedBaseline ?? (await this.captureCheckoutOutcomeBaseline(page));
-        } catch (error) {
-          await clearSubmittedDispatchTracking?.();
-          clearSubmittedDispatchTracking = null;
-          throw error;
-        }
-        this.checkoutOutcomeBaseline = outcomeBaseline;
-        submitted = true;
-        break;
-      }
-      if (submitted) break;
-    }
-    if (!submitted || outcomeBaseline === undefined) {
-      await clearSubmittedDispatchTracking?.();
-      throw new Error("payment_submit_not_found");
-    }
-    try {
-      const challengeDeadline = Date.now() + 15_000;
-      while (Date.now() < challengeDeadline) {
-        if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline, page)) {
-          return { three_ds_required: false, order_confirmed: true };
-        }
-        const challenge = await this.detectThreeDsChallenge(undefined, page);
-        if (challenge.three_ds_required) {
-          return challenge;
-        }
-        await page.waitForTimeout(250).catch(() => undefined);
-      }
-      return { three_ds_required: false, order_confirmed: false };
-    } catch (error) {
-      if (
-        error instanceof PaymentSubmitOutcomeUnknownError ||
-        error instanceof BrowserClickDispatchError
-      ) {
-        throw error;
-      }
-      throw new PaymentSubmitOutcomeUnknownError();
-    } finally {
-      await clearSubmittedDispatchTracking?.();
-    }
-  }
-
-  async clearSealedPaymentFields(page: Page | null = this.page): Promise<void> {
-    this.checkoutCardGroupScope = undefined;
-    if (!page) return;
-    await this.clearSealedPaymentFieldsInFrames(page.frames());
-  }
-
-  private async clearSealedPaymentFieldsInFrames(frames: readonly Frame[]): Promise<void> {
-    for (const frame of frames) {
-      await frame
-        .locator('[data-ts-sealed-payment="1"]')
-        .evaluateAll((elements) => {
-          for (const element of elements) {
-            if (
-              element instanceof HTMLInputElement ||
-              element instanceof HTMLTextAreaElement ||
-              element instanceof HTMLSelectElement
-            ) {
-              element.value = "";
-            }
-            element.removeAttribute("data-ts-sealed-payment");
-          }
-        })
-        .catch(() => undefined);
-    }
-  }
-
-  async clearCheckoutCardFields(page: Page | null = this.page): Promise<void> {
-    this.checkoutCardGroupScope = undefined;
-    if (!page) return;
-    await this.clearCheckoutCardFieldsInFrames(page.frames(), page);
-  }
-
-  private async clearCheckoutCardFieldsInDocuments(
-    documents: readonly {
-      documentElement: ElementHandle<HTMLElement>;
-      frameIndex: number;
-    }[],
-    page: Page | null = this.page,
-  ): Promise<void> {
-    if (!page) return;
-    await Promise.all(
-      documents.map(({ documentElement, frameIndex }) =>
-        this.stampJapaneseCardLabelFieldsInDocument(documentElement, frameIndex),
-      ),
-    );
-    for (const { documentElement } of documents) {
-      await documentElement.evaluate((root, selectors) => {
-        const document = root.ownerDocument;
-        const fields = Array.from(document.querySelectorAll(selectors)).slice(0, 40);
-        for (const element of fields) {
-          if (
-            !(element instanceof HTMLInputElement) &&
-            !(element instanceof HTMLTextAreaElement) &&
-            !(element instanceof HTMLSelectElement)
-          ) {
-            continue;
-          }
-          if (element.value.length > 0 || element.hasAttribute("data-ts-sealed-payment")) {
-            element.value = "";
-            if (element instanceof HTMLSelectElement && element.value !== "") {
-              element.selectedIndex = -1;
-            }
-            element.dispatchEvent(new Event("input", { bubbles: true }));
-            element.dispatchEvent(new Event("change", { bubbles: true }));
-          }
-          element.removeAttribute("data-ts-sealed-payment");
-        }
-        document.querySelectorAll('[data-ts-sealed-payment="1"]').forEach((element) => {
-          if (
-            element instanceof HTMLInputElement ||
-            element instanceof HTMLTextAreaElement ||
-            element instanceof HTMLSelectElement
-          ) {
-            element.value = "";
-          }
-          element.removeAttribute("data-ts-sealed-payment");
-        });
-      }, CHECKOUT_CARD_VALUE_FIELD_SELECTORS);
-    }
-    await page.waitForTimeout(0).catch(() => undefined);
-    await Promise.all(
-      documents.map(({ documentElement, frameIndex }) =>
-        this.stampJapaneseCardLabelFieldsInDocument(documentElement, frameIndex),
-      ),
-    );
-    const visibleTexts: string[] = [];
-    for (const { documentElement } of documents) {
-      const result = await documentElement.evaluate((root, selectors) => {
-        const document = root.ownerDocument;
-        const uncleared = Array.from(document.querySelectorAll(selectors)).some(
-          (element) =>
-            (element instanceof HTMLInputElement ||
-              element instanceof HTMLTextAreaElement ||
-              element instanceof HTMLSelectElement) &&
-            element.value.length > 0,
-        );
-        const body = document.body;
-        if (body === null) return { uncleared, visibleText: "" };
-        const view = document.defaultView;
-        if (view === null) return { uncleared, visibleText: "" };
-        const hidden: Array<{ element: HTMLElement | SVGElement; style: string | null }> = [];
-        let visibleText = "";
-        try {
-          for (const element of Array.from(body.querySelectorAll("*"))) {
-            if (!(element instanceof HTMLElement || element instanceof SVGElement)) continue;
-            if (view.getComputedStyle(element).opacity === "0") {
-              hidden.push({ element, style: element.getAttribute("style") });
-              element.style.setProperty("display", "none", "important");
-            }
-          }
-          visibleText = body.innerText ?? "";
-        } finally {
-          for (const { element, style } of hidden) {
-            if (style === null) {
-              element.style.removeProperty("display");
-              if (element.getAttribute("style") === "") element.removeAttribute("style");
-            } else {
-              element.setAttribute("style", style);
-            }
-          }
-        }
-        return { uncleared, visibleText };
-      }, CHECKOUT_CARD_VALUE_FIELD_SELECTORS);
-      if (result.uncleared) throw new Error("payment_fields_not_cleared");
-      visibleTexts.push(result.visibleText);
-    }
-    if (visibleTexts.some((text) => containsVisiblePaymentMaterial(text))) {
-      throw new Error("payment_fields_not_cleared");
-    }
-    const interactiveElements = await this.extractInteractiveElements(page).catch(() => undefined);
-    if (interactiveElements === undefined) throw new Error("payment_fields_not_cleared");
-    const interactiveText = interactiveElements
-      .flatMap((element) => [
-        element.ariaLabel,
-        element.title,
-        element.value,
-        element.labelText,
-        element.visibleText,
-        element.iconLabel,
-        element.placeholder,
-        element.name,
-        element.testId,
-        element.screenPath,
-        element.container,
-        element.occludedBy,
-      ])
-      .filter((value): value is string => typeof value === "string")
-      .join("\n");
-    if (containsVisiblePaymentMaterial(interactiveText)) {
-      throw new Error("payment_fields_not_cleared");
-    }
-  }
-
-  private async clearCheckoutCardFieldsInFrames(
-    frames: readonly Frame[],
-    page: Page | null = this.page,
-  ): Promise<void> {
-    if (!page) return;
-    await this.stampJapaneseCardLabelFields(frames);
-    for (const frame of frames) {
-      const fields = frame.locator(CHECKOUT_CARD_VALUE_FIELD_SELECTORS);
-      const count = Math.min(await fields.count().catch(() => 0), 40);
-      // Cleanup is verified semantically below, so clear in one DOM pass.
-      // Per-field fill("") performs actionability waits and can spend 30s on
-      // the first hidden PAN candidate after an early ambiguity refusal.
-      await fields
-        .evaluateAll((elements, limit) => {
-          for (const element of elements.slice(0, limit)) {
-            if (
-              !(element instanceof HTMLInputElement) &&
-              !(element instanceof HTMLTextAreaElement) &&
-              !(element instanceof HTMLSelectElement)
-            ) {
-              continue;
-            }
-            if (element.value.length > 0 || element.hasAttribute("data-ts-sealed-payment")) {
-              element.value = "";
-              if (element instanceof HTMLSelectElement && element.value !== "") {
-                element.selectedIndex = -1;
-              }
-              element.dispatchEvent(new Event("input", { bubbles: true }));
-              element.dispatchEvent(new Event("change", { bubbles: true }));
-            }
-            element.removeAttribute("data-ts-sealed-payment");
-          }
-        }, count)
-        .catch(() => undefined);
-    }
-    await this.clearSealedPaymentFieldsInFrames(frames);
-    await page.waitForTimeout(0).catch(() => undefined);
-    await this.stampJapaneseCardLabelFields(frames);
-    for (const frame of frames) {
-      const uncleared = await frame
-        .locator(CHECKOUT_CARD_VALUE_FIELD_SELECTORS)
-        .evaluateAll((elements) =>
-          elements.some(
-            (element) =>
-              (element instanceof HTMLInputElement ||
-                element instanceof HTMLTextAreaElement ||
-                element instanceof HTMLSelectElement) &&
-              element.value.length > 0,
-          ),
-        )
-        .catch(() => true);
-      if (uncleared) throw new Error("payment_fields_not_cleared");
-    }
-    const visibleTexts = await Promise.all(
-      frames.map(async (frame) =>
-        frame.evaluate(extractObservationVisibleText).catch(() => undefined),
-      ),
-    );
-    if (
-      visibleTexts.some((text) => text === undefined) ||
-      visibleTexts.some((text) => containsVisiblePaymentMaterial(text!))
-    ) {
-      throw new Error("payment_fields_not_cleared");
-    }
-    const interactiveElements = await this.extractInteractiveElements(page).catch(() => undefined);
-    if (interactiveElements === undefined) throw new Error("payment_fields_not_cleared");
-    const interactiveText = interactiveElements
-      .flatMap((element) => [
-        element.ariaLabel,
-        element.title,
-        element.value,
-        element.labelText,
-        element.visibleText,
-        element.iconLabel,
-        element.placeholder,
-        element.name,
-        element.testId,
-        element.screenPath,
-        element.container,
-        element.occludedBy,
-      ])
-      .filter((value): value is string => typeof value === "string")
-      .join("\n");
-    if (containsVisiblePaymentMaterial(interactiveText)) {
-      throw new Error("payment_fields_not_cleared");
-    }
-  }
-
-  private async isFrameVisible(frame: Frame, page: Page | null = this.page): Promise<boolean> {
-    if (!page) return false;
-    const mainFrame = page.mainFrame();
-    let current: Frame | null = frame;
-    while (current !== mainFrame) {
-      if (current === null) return false;
-      const frameElement = await current.frameElement().catch(() => null);
-      if (frameElement === null) return false;
-      try {
-        if (!(await frameElement.evaluate(elementHasEffectiveVisibleRect).catch(() => false))) {
-          return false;
-        }
-      } finally {
-        await frameElement.dispose().catch(() => undefined);
-      }
-      current = current.parentFrame();
-    }
-    return true;
-  }
-
-  private async hasVisibleThreeDsStructuralSignal(frame: Frame): Promise<boolean> {
-    const elements = await frame
-      .locator(
-        'iframe[title*="3d secure" i],form[action*="acs" i],form:has(input[name="creq" i]),form[name="credit3d2FepBuyAuthenticateActionForm" i],form:has(input[name="md" i]):has([name="resSumbitButtonId" i],#resSumbitButtonId)',
-      )
-      .elementHandles()
-      .catch(() => []);
-    try {
-      const visibility = await Promise.all(
-        elements.map((element) =>
-          element.evaluate(elementHasEffectiveVisibleRect).catch(() => false),
-        ),
-      );
-      return visibility.some(Boolean);
-    } finally {
-      await Promise.all(elements.map((element) => element.dispose().catch(() => undefined)));
-    }
-  }
-
-  private async frameWithinThreeDsStructuralFrame(
-    frame: Frame,
-    page: Page | null = this.page,
-  ): Promise<boolean> {
-    if (!page) return false;
-    let current: Frame | null = frame;
-    while (current !== page.mainFrame()) {
-      if (current === null) return false;
-      const frameElement = await current.frameElement().catch(() => null);
-      if (frameElement === null) return false;
-      try {
-        if (
-          await frameElement
-            .evaluate(
-              (element) =>
-                element instanceof Element &&
-                element.matches('iframe[title*="3d secure" i],iframe[name*="3ds" i]'),
-            )
-            .catch(() => false)
-        ) {
-          return true;
-        }
-      } finally {
-        await frameElement.dispose().catch(() => undefined);
-      }
-      current = current.parentFrame();
-    }
-    return false;
-  }
-
-  private rememberPaymentInstrumentExpectation(
-    card: Pick<CheckoutCard, "pan" | "issuer" | "issuer_source" | "network" | "label">,
-  ): void {
-    const comparableIssuer = (value: string | undefined) => {
-      const remainder = value
-        ?.replace(
-          /american\s+express|master\s*card|amex|visa|discover|diners\s+club|jcb|unionpay/gi,
-          " ",
-        )
-        .split(/\s+/)
-        .filter(
-          (token) =>
-            token.length > 0 &&
-            !/^(?:card|platinum|gold|infinite|signature|classic|debit|credit|business|corporate|rewards|world|elite|sapphire|personal|work|travel)$/i.test(
-              token,
-            ),
-        )
-        .join(" ")
-        .trim();
-      return remainder !== undefined && /^(?=.{2,32}$)[A-Za-z][A-Za-z0-9&.' -]*$/.test(remainder)
-        ? remainder
-        : undefined;
-    };
-    const networkIssuer = comparableIssuer(card.network);
-    const labelIssuer = comparableIssuer(card.label);
-    const issuer =
-      card.issuer !== undefined && card.issuer_source !== undefined
-        ? card.issuer
-        : (networkIssuer ?? labelIssuer);
-    const issuerSource =
-      card.issuer !== undefined && card.issuer_source !== undefined
-        ? card.issuer_source
-        : networkIssuer !== undefined
-          ? "vault_metadata"
-          : labelIssuer !== undefined
-            ? "vault_label"
-            : undefined;
-    this.paymentInstrumentExpectation = {
-      last4: card.pan.slice(-4),
-      ...(issuer !== undefined && issuerSource !== undefined
-        ? { issuer, issuer_source: issuerSource }
-        : {}),
-      ...(card.network !== undefined ? { network: card.network } : {}),
-      ...(card.label !== undefined ? { label: card.label } : {}),
-    };
-  }
-
-  private comparePaymentInstrumentEvidence(
-    expected: PaymentInstrumentExpectation | undefined,
-    challengeText: string,
-  ): PaymentInstrumentMismatch | undefined {
-    if (expected === undefined) return undefined;
-    // ACS copy is untrusted display evidence, so normalize only for
-    // comparison and return the bounded, non-secret fragments below. Never
-    // modify the live challenge or translate its controls.
-    const observedLast4 =
-      challengeText.match(/(?:card|ending|last\s*four|\*{2,}|•{2,})[^\d]{0,20}(\d{4})\b/i)?.[1] ??
-      undefined;
-    const observedIssuer =
-      challengeText.match(/\b([A-Z][A-Z0-9]{2,})\s+(?:app|bank)\b/)?.[1] ??
-      challengeText
-        .match(/\b(?:issuer|bank|app)\s*[:\-]\s*([A-Za-z][A-Za-z0-9 .-]{1,48})/i)?.[1]
-        ?.trim();
-    const observedNetwork = challengeText.match(
-      /\b(visa|mastercard|amex|american express)\b/i,
-    )?.[1];
-    const normalizedExpectedIssuer = expected.issuer?.replace(/[^a-z0-9]/gi, "").toLowerCase();
-    const normalizedObservedIssuer = observedIssuer?.replace(/[^a-z0-9]/gi, "").toLowerCase();
-    const networkFamily = (value: string | undefined) => {
-      const normalized = value?.replace(/[^a-z0-9]/gi, "").toLowerCase();
-      if (normalized === undefined) return undefined;
-      if (normalized.includes("mastercard")) return "mastercard";
-      if (normalized.includes("americanexpress") || normalized.includes("amex")) return "amex";
-      if (normalized.includes("visa")) return "visa";
-      if (normalized.includes("discover")) return "discover";
-      if (normalized.includes("diners")) return "diners";
-      if (normalized.includes("unionpay")) return "unionpay";
-      if (normalized.includes("jcb")) return "jcb";
-      return normalized;
-    };
-    const last4Mismatch = observedLast4 !== undefined && observedLast4 !== expected.last4;
-    const issuerMismatch =
-      expected.issuer !== undefined &&
-      normalizedExpectedIssuer !== undefined &&
-      normalizedObservedIssuer !== undefined &&
-      !normalizedObservedIssuer.includes(normalizedExpectedIssuer) &&
-      !normalizedExpectedIssuer.includes(normalizedObservedIssuer);
-    const networkMismatch =
-      observedNetwork !== undefined &&
-      expected.network !== undefined &&
-      networkFamily(observedNetwork) !== networkFamily(expected.network);
-    if (!last4Mismatch && !issuerMismatch && !networkMismatch) return undefined;
-    const evidenceUsed: Array<"last4" | "issuer" | "network"> = [];
-    if (last4Mismatch) evidenceUsed.push("last4");
-    if (issuerMismatch) evidenceUsed.push("issuer");
-    if (networkMismatch) evidenceUsed.push("network");
-    return {
-      kind: "payment_instrument_mismatch",
-      confidence:
-        last4Mismatch || networkMismatch || expected.issuer_source === "bin_metadata"
-          ? "high"
-          : "low",
-      evidence_used: evidenceUsed,
-      expected: {
-        last4: expected.last4,
-        ...(expected.issuer !== undefined ? { issuer: expected.issuer } : {}),
-        ...(expected.network !== undefined ? { network: expected.network } : {}),
-        ...(expected.label !== undefined ? { label: expected.label } : {}),
-      },
-      observed: {
-        ...(observedLast4 !== undefined ? { last4: observedLast4 } : {}),
-        ...(observedIssuer !== undefined ? { issuer: observedIssuer } : {}),
-        ...(observedNetwork !== undefined ? { network: observedNetwork } : {}),
-      },
-      provenance: {
-        expected: {
-          last4: "released_card",
-          ...(expected.issuer !== undefined && expected.issuer_source !== undefined
-            ? { issuer: expected.issuer_source }
-            : {}),
-          ...(expected.network !== undefined ? { network: "vault_metadata" as const } : {}),
-          ...(expected.label !== undefined ? { label: "vault_label" as const } : {}),
-        },
-        observed: "3ds_challenge",
-      },
-    };
-  }
-
-  private async hasFailedCheckoutAuthentication(page: Page): Promise<boolean> {
-    const failureText =
-      /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)|本人認証に失敗しました/iu;
-    const texts = await Promise.all(
-      page
-        .frames()
-        .filter((frame) => !this.frameWithinCaptcha(frame))
-        .map(
-          async (frame) =>
-            await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
-        ),
-    );
-    return texts.some((text) => failureText.test(text));
-  }
-
-  private async detectThreeDsChallenge(
-    expectedCard?: Pick<CheckoutCard, "pan" | "issuer" | "issuer_source" | "network" | "label">,
-    page: Page | null = this.page,
-  ): Promise<CheckoutSubmitResult> {
-    if (!page) throw new Error("Browser not started");
-    if (expectedCard !== undefined) {
-      this.rememberPaymentInstrumentExpectation(expectedCard);
-    }
-    if (await this.hasFailedCheckoutAuthentication(page)) {
-      return { three_ds_required: false, order_confirmed: false };
-    }
-    // Challenge URLs are evidence only when their frame is visibly rendered;
-    // hidden method/fingerprint documents must not prompt the cardholder.
-    const urlPattern =
-      /(?:https?:\/\/(?:[^/]+\.)*cardinalcommerce\.com\/(?:v\d+\/)?cruise\/stepup(?:[/?#]|$)|https?:\/\/hooks\.stripe\.com\/3d_secure|https?:\/\/(?:[^/]+\.)*emvtds(?:[-.][^/]*)?(?:\/|$)|3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/(?:emvtds|emv-?3ds)(?:[-_/]|$)|\/3ds(?:2)?\/|\/acs\/|\/credit3d2\/Fep(?:ChargePaymentInfo|BridgeAuthority)[^/?#]*\.do(?:[?#]|$))/i;
-    let challengeFallback: CheckoutSubmitResult | undefined;
-    for (const frame of page.frames()) {
-      // A captcha frame (fraud-check, not authentication) must never be
-      // misread as a 3DS challenge — e.g. Stripe's invisible hCaptcha frame
-      // at hcaptcha.html#frame=challenge previously tripped the bare
-      // "challenge" match this pattern used to include.
-      if (this.frameWithinCaptcha(frame)) continue;
-      if (!(await this.isFrameVisible(frame, page))) continue;
-      // Text signals intentionally use rendered innerText without effective-rect gating;
-      // overflow-clipped 3DS phrasing is an accepted contrived residual.
-      const [text, structural] = await Promise.all([
-        frame.evaluate(extractObservationVisibleText).catch(() => ""),
-        this.hasVisibleThreeDsStructuralSignal(frame),
-      ]);
-      const detected =
-        urlPattern.test(frame.url()) ||
-        structural ||
-        (await this.frameWithinThreeDsStructuralFrame(frame, page)) ||
-        /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i.test(
-          text,
-        ) ||
-        /本人認証/u.test(text);
-      if (!detected) continue;
-      const mismatch = this.comparePaymentInstrumentEvidence(
-        this.paymentInstrumentExpectation,
-        text,
-      );
-      const result: CheckoutSubmitResult = {
-        three_ds_required: true,
-        order_confirmed: false,
-        challenge_url: frame.url() || page.url(),
-        ...(mismatch !== undefined ? { payment_instrument_mismatch: mismatch } : {}),
-      };
-      if (mismatch !== undefined) {
-        this.observedPaymentInstrumentMismatch = mismatch;
-        return result;
-      }
-      challengeFallback ??= result;
-    }
-    return challengeFallback ?? { three_ds_required: false, order_confirmed: false };
-  }
-
-  paymentInstrumentMismatch(): PaymentInstrumentMismatch | undefined {
-    return this.observedPaymentInstrumentMismatch;
-  }
-
-  private async captureCheckoutOutcomeBaseline(
-    page: Page | null = this.page,
-  ): Promise<CheckoutOutcomeBaseline> {
-    if (!page) return { url: "", orderUrlIdentities: [], terminalUrlIdentity: null };
-    const url = page.url();
-    return checkoutOutcomeBaselineFromDispatchSnapshot({
-      url,
-      urls: page.frames().map((frame) => frame.url()),
-    });
-  }
-
-  private async hasConfirmedCheckoutOutcome(
-    baseline: CheckoutOutcomeBaseline,
-    page: Page | null = this.page,
-  ): Promise<boolean> {
-    if (!page) return false;
-    const current = await this.captureCheckoutOutcomeBaseline(page);
-    let sameCheckoutOrigin = false;
-    try {
-      const currentUrl = new URL(current.url);
-      sameCheckoutOrigin = currentUrl.origin === new URL(baseline.url).origin;
-    } catch {
-      sameCheckoutOrigin = current.url === baseline.url;
-    }
-    const newTerminalOrderIdentity =
-      sameCheckoutOrigin &&
-      current.terminalUrlIdentity !== null &&
-      !baseline.orderUrlIdentities.includes(current.terminalUrlIdentity);
-    if (newTerminalOrderIdentity) return true;
-    if (
-      !sameCheckoutOrigin ||
-      current.url === baseline.url ||
-      !isShopifyCheckoutThankYouRoute(current.url)
-    ) {
-      return false;
-    }
-    return await page.mainFrame().evaluate(() => {
-      const visibleText = document.body?.innerText ?? "";
-      const confirmationNumber = /\bconfirmation\s*#\s*[a-z0-9][a-z0-9-]{3,}\b/i.test(visibleText);
-      const confirmedOrder = /\byour order is confirmed\b/i.test(visibleText);
-      const thankYouHeading = Array.from(document.querySelectorAll("h1, h2, [role=heading]")).some(
-        (element) => /\bthank you\b/i.test(element.textContent ?? ""),
-      );
-      return confirmedOrder || (thankYouHeading && confirmationNumber);
-    });
-  }
-
-  // Let the browser complete the challenge natively (including out-of-band
-  // bank-app 3DS): just poll for the same terminal-order signal a plain
-  // non-3DS checkout uses, plus a passive plain-text decline check. It never
-  // manipulates, intercepts, or gates completion on the challenge frame.
-  async waitForThreeDsResolution(
-    timeoutMs: number,
-    page: Page | null = this.page,
-    onThreeDsDetected?: () => void,
-  ): Promise<ThreeDsResolution> {
-    if (!page) throw new Error("Browser not started");
-    const outcomeBaseline =
-      this.checkoutOutcomeBaseline ?? (await this.captureCheckoutOutcomeBaseline(page));
-    const deadline = Date.now() + Math.max(timeoutMs, 0);
-    const mismatchAtEntry = this.observedPaymentInstrumentMismatch;
-    let challengeObserved = false;
-    while (true) {
-      await page.bringToFront().catch(() => undefined);
-      const challenge = await this.detectThreeDsChallenge(undefined, page).catch(() => undefined);
-      if (challenge?.three_ds_required === true && !challengeObserved) {
-        challengeObserved = true;
-        try {
-          onThreeDsDetected?.();
-        } catch {
-          // Notification is best-effort and must never interrupt native 3DS.
-        }
-      }
-      if (mismatchAtEntry === undefined && this.observedPaymentInstrumentMismatch !== undefined) {
-        return challengeObserved ? "challenge_pending" : "timeout";
-      }
-      if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline, page)) {
-        return "succeeded";
-      }
-      if (await this.hasFailedCheckoutAuthentication(page)) {
-        return "failed";
-      }
-      const remainingMs = deadline - Date.now();
-      if (remainingMs <= 0) return challengeObserved ? "challenge_pending" : "timeout";
-      await page.waitForTimeout(Math.min(1_000, remainingMs)).catch(() => undefined);
-    }
-  }
-
-  // Deterministic Firebase/GCP credential extraction. Every Firebase project
-  // auto-creates a "Browser key (auto created by Firebase)" in its underlying
-  // Google Cloud project — the SAME AIzaSy value as firebaseConfig.apiKey AND a
-  // usable GCP API key — even with NO web app registered. PROVEN surface
-  // (2026-06-23): console.cloud.google.com/apis/credentials?project=<projectId>
-  // → API Keys row "Browser key (auto created by Firebase)" → "Show key" reveals
-  // the AIzaSy value inline in that row. Row-scoped so it never grabs one of the
-  // console's own internal AIzaSy keys (which live in script/attribute data, not
-  // the visible row text). Returns the key, or null when the page didn't render
-  // a Browser key (project not provisioned yet / different surface).
   async extractGoogleApiKeyFromCredentials(projectId: string): Promise<string | null> {
     if (!this.page) throw new Error("Browser not started");
     const KEY_RE = /AIzaSy[0-9A-Za-z_-]{33}/;
@@ -12253,8 +8567,7 @@ export class BrowserController {
   // The DOM-walk + extraction logic, generalized to run against ANY frame
   // context (the main page or a child <iframe>'s own Frame) — Playwright's
   // Frame.evaluate reaches a cross-origin frame's main world at the CDP level,
-  // the same primitive isPayPalHostedCheckout/fillAndSubmitCheckout/
-  // detectThreeDsChallenge already use to read/fill cross-origin PSP fields.
+  // the same primitive direct frame-targeted actions use for hosted fields.
   // Pulled out of extractInteractiveElements (below) so that method can call
   // it once for the main frame and once per child frame, tagging each result
   // with where it came from.
@@ -12823,6 +9136,7 @@ export class BrowserController {
         occludedBy: string | null;
         autocomplete: string | null;
         dataRole: string | null;
+        cardMaskKind: CardMaskKind | null;
       }> = [];
       for (const el of collected) {
         if (seen.has(el)) continue;
@@ -12928,6 +9242,11 @@ export class BrowserController {
           dataRole:
             (el.getAttribute("data-field-role") ?? el.getAttribute("data-role") ?? "").trim() ||
             null,
+          cardMaskKind:
+            el.getAttribute("data-ts-card-mask") === "pan" ||
+            el.getAttribute("data-ts-card-mask") === "cvv"
+              ? (el.getAttribute("data-ts-card-mask") as CardMaskKind)
+              : null,
           value:
             el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
               ? el.value
@@ -13259,8 +9578,8 @@ export class BrowserController {
   // the escape hatch for a control missing from the main-frame inventory.
   // Plain Playwright locator actions cover the money-path case this exists
   // for (a merchant's own same-domain checkout options rendered in an
-  // iframe), the same primitives fillAndSubmitCheckout already relies on for
-  // cross-origin PSP fields.
+  // iframe), using the same cross-origin frame resolution as other direct
+  // frame-targeted actions.
   async clickInFrame(
     target: FrameTarget,
     selector: string,
@@ -13423,6 +9742,112 @@ export class BrowserController {
     }
   }
 
+  async injectCardIntoTargets(
+    card: CheckoutCard,
+    targets: Partial<Record<InjectCardField, InjectCardResolvedTarget>>,
+    page: Page | null = this.page,
+  ): Promise<Record<InjectCardField, InjectCardFieldResult>> {
+    if (page === null) throw new Error("Browser not started");
+    // The mask is session-persistent and must exist before the first field write.
+    this.registerCardValueOutputMask(card);
+    const results = {} as Record<InjectCardField, InjectCardFieldResult>;
+    const valueFor = (field: InjectCardField, format?: string): string => {
+      switch (field) {
+        case "pan":
+          return format === "groups4" ? card.pan.replace(/(.{4})(?=.)/g, "$1 ") : card.pan;
+        case "cvv":
+          return card.cvv;
+        case "exp_month":
+          return format === "number" ? String(Number(card.exp_month)) : card.exp_month;
+        case "exp_year":
+          return format === "two_digit" ? card.exp_year.slice(-2) : card.exp_year;
+        case "exp": {
+          const year =
+            format === "mm/yyyy" ? card.exp_year.padStart(4, "20") : card.exp_year.slice(-2);
+          return format === "mmyy" ? `${card.exp_month}${year}` : `${card.exp_month}/${year}`;
+        }
+        case "name":
+          return card.name;
+      }
+    };
+    for (const field of ["pan", "cvv", "exp_month", "exp_year", "exp", "name"] as const) {
+      const target = targets[field];
+      if (target === undefined) {
+        results[field] = { status: "not_found" };
+        continue;
+      }
+      if (target.element === undefined) {
+        results[field] = { status: target.missing ?? "not_found" };
+        continue;
+      }
+      const element = target.element;
+      if (field === "pan" || field === "cvv") {
+        this.cardValueOutputMask.registerTarget({
+          kind: field,
+          selector: element.selector,
+          framePath: element.framePath ?? null,
+        });
+      }
+      let handle: ElementHandle<Element> | null = null;
+      try {
+        handle =
+          element.framePath === null || element.framePath === undefined
+            ? await page
+                .locator(element.selector)
+                .elementHandle({ timeout: 3_000 })
+                .catch(() => null)
+            : await this.resolveFrameElement(
+                {
+                  framePath: element.framePath,
+                  frameOrigin: element.frameOrigin ?? "null",
+                  frameUrl: element.frameUrl ?? "",
+                  ...(element.frameOpaque ? { frameOpaque: true } : {}),
+                },
+                element.selector,
+                0,
+                page,
+              );
+        if (handle === null) {
+          results[field] = { status: "detached" };
+          continue;
+        }
+        await markOperatorMutationDispatchAttempted();
+        if (field === "pan" || field === "cvv") {
+          await handle.evaluate(
+            (node, value) => node.setAttribute("data-ts-card-mask", value),
+            field,
+          );
+        }
+        const value = valueFor(field, target.format);
+        const tag = await handle.evaluate((node) => node.tagName.toLowerCase());
+        if (tag === "select") {
+          const owner = await handle.ownerFrame();
+          if (owner === null) throw new Error("target has no owning frame");
+          const selector = element.selector;
+          const select = owner.locator(selector);
+          try {
+            await select.selectOption({ value }, { timeout: 3_000 });
+          } catch {
+            await select.selectOption({ label: value }, { timeout: 3_000 });
+          }
+        } else {
+          await handle.fill(value, { timeout: 8_000 });
+        }
+        results[field] = { status: "filled" };
+      } catch (error) {
+        results[field] = {
+          status: "native_error",
+          error: this.cardValueOutputMask.maskText(
+            error instanceof Error ? error.message : String(error),
+          ),
+        };
+      } finally {
+        await handle?.dispose().catch(() => undefined);
+      }
+    }
+    return results;
+  }
+
   async extractInteractiveElements(page: Page | null = this.page): Promise<InteractiveElement[]> {
     if (page === null) throw new Error("Browser not started");
     const mainRaw = await this.extractElementsFromContext(page);
@@ -13436,15 +9861,11 @@ export class BrowserController {
     }));
 
     // Cross-frame support — surface elements inside child <iframe>s (same- AND
-    // cross-origin), each tagged with the frame's own origin/url so a caller
-    // can apply domain-lock/secret-fill guards against the ELEMENT's real
-    // origin, never the top page's (see frameTargetAllowed in
-    // provision-session.ts — the load-bearing reason this tag exists at
-    // all). Nothing is flattened away: every frame element keeps its origin.
+    // cross-origin), each tagged with the frame's own origin/url so direct
+    // observation and action can address the correct document. Nothing is
+    // flattened away: every frame element keeps its origin.
     // page.frames() is already flat (it includes nested frames, not just
-    // direct children) — the same primitive isPayPalHostedCheckout/
-    // fillAndSubmitCheckout/detectThreeDsChallenge use to reach cross-origin
-    // frame content.
+    // direct children) and reaches cross-origin hosted-field content.
     const framedElements: Array<Omit<InteractiveElement, "index">> = [];
     for (const frame of page.frames()) {
       if (frame === page.mainFrame() || frame.isDetached()) continue;
@@ -13478,7 +9899,9 @@ export class BrowserController {
 
     // T38 index is assigned ONCE, after merging, so it stays a stable,
     // collision-free ordinal across the whole combined set.
-    return [...mainElements, ...framedElements].map((e, i) => ({ ...e, index: i }));
+    return this.cardValueOutputMask.maskInteractiveElements(
+      [...mainElements, ...framedElements].map((e, i) => ({ ...e, index: i })),
+    );
   }
 
   // replay-per-leg-signature — the checkout-leg shape signature (see
@@ -14450,10 +10873,10 @@ export class BrowserController {
     try {
       cdp = await this.context.newCDPSession(this.page);
       await cdp.send("FedCm.enable", { disableRejectionDelay: true });
-      console.error("[operator] FedCm.enable ok — listening for dialogShown");
+      this.logOperatorDiagnostic("[operator] FedCm.enable ok — listening for dialogShown");
       cdp.on("FedCm.dialogShown", (ev: unknown) => {
         const e = ev as { dialogId?: string; dialogType?: string; accounts?: unknown[] };
-        console.error(
+        this.logOperatorDiagnostic(
           `[operator] FedCm.dialogShown type=${e.dialogType ?? "?"} accounts=${
             Array.isArray(e.accounts) ? e.accounts.length : "?"
           }`,
@@ -14503,7 +10926,7 @@ export class BrowserController {
       });
     } catch (err) {
       cdp = null; // FedCm domain unavailable — the popup path still works
-      console.error(
+      this.logOperatorDiagnostic(
         `[operator] FedCm.enable failed (${
           err instanceof Error ? err.message : String(err)
         }) — FedCM path disabled, relying on popup`,
@@ -14585,7 +11008,7 @@ export class BrowserController {
       }
       return { ok: true, via: "fedcm" };
     }
-    console.error(
+    this.logOperatorDiagnostic(
       `[operator] GSI resolved via none — fedcmEnabled=${cdp !== null} ` +
         `fedcmResolved=${fedcmResolved} pages=${this.context.pages().length}`,
     );
@@ -15233,7 +11656,7 @@ export class BrowserController {
             .filter((t) => t.length > 0);
         })
         .catch(() => [] as string[]);
-      console.error(
+      this.logOperatorDiagnostic(
         `[operator] GitHub advanceOAuthConsent failed — visible buttons: ` +
           `${seen.length === 0 ? "<none>" : seen.map((s) => JSON.stringify(s)).join(", ")}`,
       );
@@ -15407,7 +11830,7 @@ export class BrowserController {
           .filter((t) => t.length > 0);
       })
       .catch(() => [] as string[]);
-    console.error(
+    this.logOperatorDiagnostic(
       `[operator] Google advanceOAuthConsent failed — visible buttons: ` +
         `${seen.length === 0 ? "<none>" : seen.map((s) => JSON.stringify(s)).join(", ")}`,
     );
@@ -15818,6 +12241,8 @@ export interface InteractiveElement {
   // Site-authored stable role: data-field-role or data-role. Fallback when
   // autocomplete is absent.
   dataRole?: string | null;
+  /** Operator-authored provenance for the narrow PAN/CVV output mask. */
+  cardMaskKind?: CardMaskKind | null;
   // F15 — nearest HTML5 landmark ancestor: header | main | footer |
   // nav | aside | article | section, or null when the element is
   // outside any landmark. The agent's inventory renderer uses this to

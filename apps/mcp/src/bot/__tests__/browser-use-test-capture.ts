@@ -92,5 +92,6 @@ export function mockBrowserUseCapture(
     moreAbove: false,
     moreBelow: elements.some((e) => !e.inViewport),
     dynamics: browserUseDynamicsSignature(root),
+    omissions: [],
   };
 }

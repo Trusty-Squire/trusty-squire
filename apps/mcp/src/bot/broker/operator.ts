@@ -32,6 +32,14 @@ class DeliveredPreDispatchFailure {
   constructor(readonly error: "stale_ref") {}
 }
 
+function maskSessionOutput<T>(
+  session: { browser: { maskOperatorOutput?: (value: T) => T } },
+  value: T,
+): T {
+  const mask = session.browser.maskOperatorOutput;
+  return typeof mask === "function" ? mask.call(session.browser, value) : value;
+}
+
 const capabilitySchema = z
   .object({
     cellId: z.string(),
@@ -107,9 +115,14 @@ function dispatchDetail(
 }
 
 function brokerCommandDispatchTracked(name: string): boolean {
-  return /^(?:operate_(?:login|click|type|select|press|navigate|fill_credential|recipe_run))$/.test(
-    name,
+  return (
+    name === "inject_card" ||
+    /^(?:operate_(?:login|click|type|select|press|navigate|fill_credential|recipe_run))$/.test(name)
   );
+}
+
+function isOperatorCommand(name: string): boolean {
+  return name.startsWith("operate_") || name === "inject_card";
 }
 
 async function withBrokerAuditContext<T>(
@@ -122,62 +135,37 @@ async function withBrokerAuditContext<T>(
 }
 
 export function reconciliationOutcome(
-  operation: string,
+  _operation: string,
   result: unknown,
 ): ReconciledDispatchOutcome {
-  if (operation !== "operate_pay" || result === null || typeof result !== "object") {
-    if (
-      result !== null &&
-      typeof result === "object" &&
-      "write_id" in result &&
-      "stored" in result
-    ) {
-      const stored = "stored_credential" in result ? result.stored_credential : undefined;
-      const capture = captureEvidenceSchema.safeParse({
-        write_id: result.write_id,
-        stored: result.stored,
-        storage:
-          result.stored === true ? "stored" : "storage" in result ? result.storage : "unknown",
-        ...(stored !== null && typeof stored === "object" && "reference" in stored
-          ? { reference: stored.reference }
-          : {}),
-      });
-      if (capture.success && capture.data.storage === "not_attempted")
-        return { status: "not_dispatched", error: "pre_dispatch_failure", capture: capture.data };
-      if (capture.success)
-        return result.stored === true
-          ? { status: "completed", capture: capture.data }
-          : { status: "unknown", reason: "execution_error", capture: capture.data };
-    }
-    return { status: "completed" };
+  if (result !== null && typeof result === "object" && "write_id" in result && "stored" in result) {
+    const stored = "stored_credential" in result ? result.stored_credential : undefined;
+    const capture = captureEvidenceSchema.safeParse({
+      write_id: result.write_id,
+      stored: result.stored,
+      storage: result.stored === true ? "stored" : "storage" in result ? result.storage : "unknown",
+      ...(stored !== null && typeof stored === "object" && "reference" in stored
+        ? { reference: stored.reference }
+        : {}),
+    });
+    if (capture.success && capture.data.storage === "not_attempted")
+      return { status: "not_dispatched", error: "pre_dispatch_failure", capture: capture.data };
+    if (capture.success)
+      return result.stored === true
+        ? { status: "completed", capture: capture.data }
+        : { status: "unknown", reason: "execution_error", capture: capture.data };
   }
-  const payment = result as Record<string, unknown>;
-  if (payment.status === "payment_submitted") return { status: "done" };
-  if (payment.status !== "payment_3ds_required" && payment.status !== "payment_outcome_unknown")
-    return { status: "completed" };
-  const outcome: ReconciledDispatchOutcome = { status: payment.status };
-  if (payment.next !== null && typeof payment.next === "object") {
-    const next = payment.next as Record<string, unknown>;
-    if (
-      next.tool === "operate_payment_status" &&
-      typeof next.wait_seconds === "number" &&
-      Number.isSafeInteger(next.wait_seconds) &&
-      next.wait_seconds >= 0
-    )
-      outcome.next = { tool: "operate_payment_status", wait_seconds: next.wait_seconds };
-  }
-  return outcome;
+  return { status: "completed" };
 }
 
 export function brokerCommandMutates(name: string, args: Record<string, unknown>): boolean {
   return (
-    !["operate_observe", "operate_screenshot", "operate_payment_status"].includes(name) &&
+    !["operate_observe", "operate_screenshot", "operate_network"].includes(name) &&
     !(name === "operate_extract" && args.store === undefined && args.capture === undefined)
   );
 }
 
-/** Existing handlers and per-session payment state run unchanged INSIDE the
- * broker. Every MCP connection gets its own pinned API client and capability. */
+/** Existing handlers run inside the broker with a pinned API client and capability. */
 export class OperatorBroker implements BrokerTransportPort {
   readonly authority: BrokerAuthority;
   private readonly apis = new Map<string, ApiClient>();
@@ -198,13 +186,6 @@ export class OperatorBroker implements BrokerTransportPort {
     private readonly legacyPreDispatchAuthorization?: AuthorizedPreDispatchFailure,
   ) {
     this.authority = new BrokerAuthority(config.accountId, cellId);
-    this.authority.setDetachedExpiryHandler(async (capability, principal) => {
-      if (principal.forwarderId !== undefined)
-        await this.journal?.recordDetachedPaymentUncertainty(
-          capability.sessionId,
-          principal.forwarderId,
-        );
-    });
     this.token = createHash("sha256").update(config.agentSessionToken).digest();
   }
   refreshCredentials(session: { account_id?: string; agent_session_token?: string }): void {
@@ -323,7 +304,7 @@ export class OperatorBroker implements BrokerTransportPort {
     if (method !== "tool") throw new BrokerRefusal("unknown_method", "Unknown broker method");
     const input = callSchema.parse(params);
     const tool = findTool(input.name, this.tools);
-    if (tool === null || !tool.name.startsWith("operate_"))
+    if (tool === null || !isOperatorCommand(tool.name))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
     if (tool.name === "operate_finish" && typeof args.session_id === "string") {
@@ -589,7 +570,10 @@ export class OperatorBroker implements BrokerTransportPort {
                   });
                 }
                 if (mutating) {
-                  const message = error instanceof Error ? error.message : String(error);
+                  const message = maskSessionOutput(
+                    session,
+                    error instanceof Error ? error.message : String(error),
+                  );
                   const code =
                     error instanceof BrokerRefusal ? error.code : "tool_execution_failed";
                   const recovery = knownNotDispatched
@@ -603,14 +587,6 @@ export class OperatorBroker implements BrokerTransportPort {
                 }
                 throw error;
               }
-              await this.journal?.record(
-                id,
-                "payment-custody",
-                session.pendingThreeDs === null ? "settled" : "entered",
-                {
-                  forwarderId: journalForwarderId(principal),
-                },
-              );
               if (mutating)
                 await this.journal?.record(id, commandId, "observed_result", {
                   ...commandDispatch,
@@ -619,33 +595,21 @@ export class OperatorBroker implements BrokerTransportPort {
                     ...(captureEvidence ? { capture: captureEvidence } : {}),
                   },
                 });
-              return remapSession(result, internalId, id);
+              return maskSessionOutput(session, remapSession(result, internalId, id));
             },
             close: async (reason) => {
               const forwarderId = journalForwarderId(principal);
-              const detachedPaymentUncertainty =
-                reason === "expiry" &&
-                (await this.journal?.hasOnlyDetachedPaymentUncertainty(id, forwarderId));
               if (
-                ((await this.journal?.hasOutstanding(id)) && !detachedPaymentUncertainty) ||
+                (await this.journal?.hasOutstanding(id)) ||
                 (await this.journal?.hasPendingStartDelivery(forwarderId, id))
               )
                 return false;
-              const pending = session.pendingThreeDs;
-              if (reason === "disconnect" && pending !== null && Date.now() < pending.deadline) {
-                const resolution = await session.browser.waitForThreeDsResolution(0);
-                if (resolution !== "succeeded" && resolution !== "failed") return false;
-              }
               if (sessionForCall(internalId) === undefined) {
                 await brokerBrowserCustody()?.release(session.browser);
                 return true;
               }
               if (reason === "expiry") return await forceFinishProvisionSession(internalId);
               const result = await finishProvisionSession(internalId);
-              if (result.closed)
-                await this.journal?.record(id, "payment-custody", "settled", {
-                  forwarderId: journalForwarderId(principal),
-                });
               return result.closed;
             },
             orphan: async () => await brokerBrowserCustody()?.orphan(session.browser),
@@ -708,7 +672,7 @@ export class OperatorBroker implements BrokerTransportPort {
     const lane =
       tool.name === "operate_login"
         ? "oauth"
-        : ["operate_extract", "operate_fill_credential", "operate_pay"].includes(tool.name)
+        : ["operate_extract", "operate_fill_credential", "inject_card"].includes(tool.name)
           ? "interactive"
           : undefined;
     const result =
@@ -755,7 +719,7 @@ export class OperatorBroker implements BrokerTransportPort {
   } | null> {
     const input = recoverySchema.parse(params);
     const tool = findTool(input.name, this.tools);
-    if (tool === null || !tool.name.startsWith("operate_"))
+    if (tool === null || !isOperatorCommand(tool.name))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
     const explicitFailure = input.preDispatchFailure;
@@ -939,31 +903,6 @@ export class OperatorBroker implements BrokerTransportPort {
     );
   }
 
-  async canContinuePaymentStatus(
-    principal: BrokerPrincipal,
-    params: Record<string, unknown>,
-  ): Promise<boolean> {
-    const input = callSchema.safeParse(params);
-    if (!input.success || input.data.name !== "operate_payment_status") return false;
-    const capability = input.data.capability;
-    if (
-      capability === undefined ||
-      typeof input.data.args.session_id !== "string" ||
-      input.data.args.session_id !== capability.sessionId
-    )
-      return false;
-    try {
-      if (!this.authority.hasCapability(principal, capability)) return false;
-    } catch (error) {
-      if (error instanceof BrokerRefusal) return false;
-      throw error;
-    }
-    if (this.journal === undefined) return false;
-    return await this.journal.hasOnlyPaymentCustody(
-      capability.sessionId,
-      journalForwarderId(principal),
-    );
-  }
   async disconnect(principal: BrokerPrincipal, explicit = false): Promise<void> {
     this.pendingCancellations.delete(principal.clientId);
     for (const [key, request] of this.requestControllers) {

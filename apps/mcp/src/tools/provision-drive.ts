@@ -22,6 +22,8 @@ import {
   startProvisionSession,
   observe,
   captureScreenshot,
+  readOperatorEvidence,
+  observeSubtree,
   observeQuery,
   act,
   formSelectMany,
@@ -47,7 +49,6 @@ import {
   checkoutShapeSignatureForSession,
   type ProvisionAction,
   type ExtractResult,
-  manualCardEntryBlockReason,
 } from "../bot/provision-session.js";
 import { signSkillForPublish } from "../skill-cli/signing.js";
 import {
@@ -364,7 +365,7 @@ const CONTROL_QUERY_CONTRACT =
 
 const ACTION_FORMAT_NOTE =
   "The action response is the compact `browser-use-control-query` control map by default: after a compact map on the same document, `delta:true` carries changed/new controls in `safe_table` and departed refs in `removed`, never the verbatim DOM. " +
-  'Pass `format:"full"` to receive the verbatim `browser-use-dom` tree instead. Nothing is redacted in either format. ';
+  'Pass `format:"full"` to receive the `browser-use-dom` tree instead. After inject_card releases a card, its PAN (complete ordinary spellings and prefixes of at least eight digits) and security code are replaced in every normal observation; all other emitted content stays verbatim. ';
 
 const ACTION_FORMATS = ["compact", "full"] as const;
 const actionFormatSchema = z.enum(ACTION_FORMATS);
@@ -376,10 +377,10 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
     "Begin an interactive website task: opens a browser on the " +
     "user's machine at service_url and returns the initial page observation. " +
     CONTROL_QUERY_CONTRACT +
-    'Use `format:"full"` only when the verbatim page DOM and text are needed. Nothing is redacted in either format. ' +
+    'Use `format:"full"` only when the page DOM and text are needed. A released card\'s PAN (complete ordinary spellings and prefixes of at least eight digits) and security code are masked; all other emitted content stays verbatim. ' +
     DOM_OBSERVATION_CONTRACT +
     "YOU are the planner — read the observation, then drive the signup, setup, or " +
-    "checkout with operate_click, operate_type, operate_select, operate_navigate, operate_scroll, and operate_login (operate_pay for a purchase), re-read with " +
+    "checkout with operate_click, operate_type, operate_select, operate_navigate, operate_scroll, and operate_login (inject_card releases a saved card into named fields), re-read with " +
     "operate_observe, and call operate_extract " +
     "when you reach the credentials. Always operate_finish when done. The " +
     "browser has unrestricted egress. If the " +
@@ -429,6 +430,8 @@ const observeSchema = z.object({
     .describe("Emitted control role, including literal roles such as slider or generic")
     .optional(),
   format: z.enum(["compact", "full"]).optional(),
+  subtree_ref: z.string().min(1).max(512).optional(),
+  raw_attributes: z.boolean().optional(),
 });
 
 export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
@@ -436,7 +439,7 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
   description:
     "Re-read the current page of an operate session. " +
     CONTROL_QUERY_CONTRACT +
-    'Use `format:"full"` only when the verbatim page DOM and text are needed. Nothing is redacted in either format. ' +
+    'Use `format:"full"` only when the page DOM and text are needed. A released card\'s PAN (complete ordinary spellings and prefixes of at least eight digits) and security code are masked; all other emitted content stays verbatim. ' +
     DOM_OBSERVATION_CONTRACT +
     "Supplying query, role, or cursor always selects the compact control-map path, regardless of format. " +
     "Explicit legacy sessions (TRUSTY_SQUIRE_OBSERVE_V2=off or shadow) return legacy observations.",
@@ -455,9 +458,14 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
         pattern: "^[a-z][a-z0-9-]*$",
       },
       format: { type: "string", enum: ["compact", "full"] },
+      subtree_ref: { type: "string" },
+      raw_attributes: { type: "boolean" },
     },
   },
   async handler(args) {
+    if (args.subtree_ref !== undefined) {
+      return await observeSubtree(args.session_id, args.subtree_ref, args.raw_attributes === true);
+    }
     if (args.query !== undefined || args.cursor !== undefined || args.role !== undefined) {
       return await observeQuery(args.session_id, args.query ?? "", args.role, args.cursor);
     }
@@ -496,7 +504,7 @@ export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
     "selected V1 session, isn't enough to tell what state " +
     "a stuck page is actually in — a challenge that never advances, an unexpected layout, a captcha you " +
     "need to SEE. Read-only: never navigates, clicks, types, submits, or steals focus; it only reads " +
-    "pixels. The image is the page's real pixels, whatever the page is showing. When click_binding is present, its screenshot_id and original image width/height authorize one operate_click screenshot point for 60 seconds. Navigation, viewport/scroll or frame geometry changes invalidate it. An absent binding means this image is read-only; capture again for a coordinate click.",
+    "pixels. After inject_card releases a card, pixels containing that card's PAN (complete ordinary spellings or prefixes of at least eight digits) or security code in injected controls and identified ordinary displayed copies are covered in the returned image; surrounding borders, labels, and errors remain visible. An active mask is never bypassed: if the mask cannot scan or composite the capture, the screenshot call fails rather than returning the unmasked image. When click_binding is present, its screenshot_id and original image width/height authorize one operate_click screenshot point for 60 seconds. Navigation, viewport/scroll or frame geometry changes invalidate it. An absent binding means this image is read-only; capture again for a coordinate click.",
   inputSchema: screenshotSchema,
   jsonInputSchema: {
     type: "object",
@@ -532,6 +540,32 @@ export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
         : {}),
       ...(args.full_page !== undefined ? { fullPage: args.full_page } : {}),
     });
+  },
+};
+
+const networkSchema = z.object({
+  session_id: z.string().min(1),
+  since: z.number().int().min(0).optional(),
+  request_id: z.string().min(1).max(256).optional(),
+});
+
+export const provisionNetworkTool: Tool<z.infer<typeof networkSchema>> = {
+  name: "operate_network",
+  description:
+    "Read raw browser evidence collected since session start: requests, responses, pending/completed/failed state, HTTP status, loading failures, CORS/blocked reasons, console messages, exceptions, and screenshot events. Pass the returned cursor as since for an incremental read, or request_id for one request. This surface does not diagnose payment stages. Released card PAN/CVV copies are masked; status bodies and all unrelated values remain visible.",
+  inputSchema: networkSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id"],
+    properties: {
+      session_id: { type: "string" },
+      since: { type: "integer", minimum: 0 },
+      request_id: { type: "string" },
+    },
+  },
+  annotations: { readOnlyHint: true },
+  async handler(args) {
+    return readOperatorEvidence(args.session_id, args.since ?? 0, args.request_id);
   },
 };
 
@@ -1176,8 +1210,8 @@ export const operateRecipeRunTool: Tool<z.infer<typeof useSchema>> = {
     "resume_from=next_index. A recipe whose entry or declared hosts would leave its own " +
     "site (a tampered or malicious shared recipe) is refused outright: " +
     "replay.status='domain_lock_violation', and driving continues cold. " +
-    "A recorded operate_pay step is never replayed and instead returns fallback_required so " +
-    "the charge runs through a fresh, human-approved operate_pay. " +
+    "A historical recorded payment step is never replayed and instead returns fallback_required so " +
+    "card release runs through a fresh, human-approved inject_card call. " +
     "Pass verb + session_id + leg:'checkout' (no service_url) to resolve+replay just the " +
     "CHECKOUT leg against an already-open session's current page — keyed by the checkout page's " +
     "own field-name-set signature, so a checkout plan recorded on one store can replay on a " +
@@ -1186,7 +1220,7 @@ export const operateRecipeRunTool: Tool<z.infer<typeof useSchema>> = {
     "leg cold. A replay field failure on a recipe with a real catalog/storefront prefix " +
     "returns replay.status='leg_fallback_required' (not human_required): do not resume that " +
     "recipe; drive the checkout leg cold from from_step_index, and route any charge through " +
-    "a fresh, human-approved operate_pay on the live session.",
+    "a fresh, human-approved inject_card call on the live session.",
   inputSchema: useSchema,
   jsonInputSchema: {
     type: "object",
@@ -1615,16 +1649,6 @@ async function runAction(
   outputFormat: "compact" | "full" = "full",
   compactMapEmitted = true,
 ) {
-  if (action.kind === "type") {
-    const reason = manualCardEntryBlockReason(action.text);
-    if (reason !== null)
-      return {
-        status: "manual_card_entry_refused",
-        reason,
-        safe_alternative: "operate_pay",
-        missing_prerequisite: "verified_cart_total",
-      };
-  }
   try {
     return await act(sessionId, action, "compact", undefined, outputFormat, compactMapEmitted);
   } catch (error) {
@@ -1674,7 +1698,7 @@ export const operateClickTool: Tool<z.infer<typeof clickSchema>> = {
   name: "operate_click",
   description:
     ACTION_FORMAT_NOTE +
-    "Prefer a current observation ref or unique @label. If a screenshot-visible control has no usable ref, pass screenshot:{screenshot_id,x,y} from operate_screenshot.click_binding, in original image pixels. Provide exactly one of ref or screenshot. target_unresolved means the label was never issued in this document; stale_ref means its reference or alias expired. stale_screenshot requires a new image. Each image binding permits one attempt; after an uncertain click, observe before deciding any new action. Dispatch does not guarantee challenge clearance. Card charges require operate_pay. A pointer-interception failure may use guarded DOM dispatch internally only when the executor proves no click was dispatched.",
+    "Prefer a current observation ref or unique @label. If a screenshot-visible control has no usable ref, pass screenshot:{screenshot_id,x,y} from operate_screenshot.click_binding, in original image pixels. Provide exactly one of ref or screenshot. target_unresolved means the label was never issued in this document; stale_ref means its reference or alias expired. stale_screenshot requires a new image. Each image binding permits one attempt; after an uncertain click, observe before deciding any new action. Dispatch does not guarantee challenge clearance. Use inject_card for saved-card field entry. A pointer-interception failure may use guarded DOM dispatch internally only when the executor proves no click was dispatched.",
   inputSchema: clickSchema,
   jsonInputSchema: {
     type: "object",
@@ -1768,7 +1792,7 @@ export const operateTypeTool: Tool<z.infer<typeof typeSchema>> = {
   name: "operate_type",
   description:
     ACTION_FORMAT_NOTE +
-    "Fill a control with text, or a session slot returned by operate_login, operate_fill_credential, or operate_extract. Provide exactly one of text or slot. submit presses Enter after a successful fill. Model-supplied card-number-shaped text is refused; use operate_pay.",
+    "Fill a control with text, or a session slot returned by operate_login, operate_fill_credential, or operate_extract. Provide exactly one of text or slot. submit presses Enter after a successful fill.",
   inputSchema: typeSchema,
   jsonInputSchema: {
     type: "object",
@@ -1946,21 +1970,43 @@ export const operateScrollTool: Tool<z.infer<typeof scrollSchema>> = {
     ),
 };
 
-const allowHostSchema = z.object({ ...sessionShape, host: z.string().min(1).max(253) });
-export const operateAllowHostTool: Tool<z.infer<typeof allowHostSchema>> = {
-  name: "operate_allow_host",
+const waitSchema = z.object({
+  ...sessionShape,
+  milliseconds: z.number().int().min(0).max(30_000).default(1_000),
+  format: actionFormatSchema.optional(),
+});
+export const operateWaitTool: Tool<z.infer<typeof waitSchema>> = {
+  name: "operate_wait",
   description:
-    "Compatibility no-op. Browser egress is unrestricted; no host declaration is needed.",
-  inputSchema: allowHostSchema,
+    ACTION_FORMAT_NOTE +
+    "Wait briefly for the live page to change, then return a fresh observation. Use this for spinners, late-mounted fields, and pending requests without assigning them a payment stage.",
+  inputSchema: waitSchema,
   jsonInputSchema: {
     type: "object",
-    required: ["session_id", "host"],
-    properties: { ...sessionJson, host: { type: "string" } },
+    required: ["session_id"],
+    properties: {
+      ...sessionJson,
+      milliseconds: { type: "integer", minimum: 0, maximum: 30_000, default: 1_000 },
+      format: actionFormatJson,
+    },
   },
-  async handler(args) {
-    const session = sessionForCall(args.session_id);
-    if (session === undefined) throw new Error(`unknown provision session ${args.session_id}`);
-    return await runAction(args.session_id, { kind: "allow_host", host: args.host });
+  async handler(args, _api, context) {
+    await new Promise<void>((resolve, reject) => {
+      if (context?.signal?.aborted === true) {
+        reject(new Error("operation_cancelled"));
+        return;
+      }
+      const timer = setTimeout(resolve, args.milliseconds);
+      context?.signal?.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          reject(new Error("operation_cancelled"));
+        },
+        { once: true },
+      );
+    });
+    return await observe(args.session_id, args.format ?? "compact");
   },
 };
 
@@ -2033,21 +2079,21 @@ export const operateFinishTool: Tool<z.infer<typeof publicFinishSchema>> = {
   },
 };
 
-// The named target contains 18 tools including the two payment and two vault
-// tools registered in index.ts. Recipe tools and the rest of the vault surface
-// are unchanged and are outside that target set.
+// Recipe tools and the rest of the vault surface are unchanged and are outside
+// the direct observation/action target set.
 export const OPERATE_TOOLS: Tool[] = [
   provisionStartTool,
   operateFinishTool,
   provisionObserveTool,
   provisionScreenshotTool,
+  provisionNetworkTool,
   operateNavigateTool,
   operateClickTool,
   operateTypeTool,
   operateSelectTool,
   operatePressTool,
   operateScrollTool,
-  operateAllowHostTool,
+  operateWaitTool,
   operateLoginTool,
   operateFillCredentialTool,
   provisionExtractTool,

@@ -1,16 +1,27 @@
-// operate_screenshot's browser implementation. There is no redaction pass and no
-// sealed-context refusal any more (owner's decision, 2026-09-05: ALL seals out),
-// so these tests pin the opposite of what they used to: the scenarios that
-// previously masked pixels or threw `screenshot_unavailable_sealed_context` must
-// now return the page's real pixels. The read-only property (no navigation, no
-// DOM mutation, no page-visible byte handling) and frame targeting are unchanged
-// and still covered here. Real-Chromium, mirroring browser-payment.test.ts's
+// operate_screenshot's browser implementation. Ordinary sessions still return
+// real pixels. Once a card is released, the narrow PAN/CVV output mask composites
+// over value-bearing pixels while preserving the live DOM. Real-Chromium, mirroring
+// browser-payment.test.ts's
 // harness pattern — a screenshot is inherently about actual rendering, not
 // something a mocked page can meaningfully stand in for.
 import { existsSync } from "node:fs";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { BrowserController } from "../browser.js";
+import { BrowserController, type CheckoutCard } from "../browser.js";
+
+const SYNTHETIC_CARD: CheckoutCard = {
+  pan: "4111111111111111",
+  cvv: "123",
+  exp_month: "12",
+  exp_year: "2030",
+  name: "Synthetic Buyer",
+  billing: {
+    line1: "1 Test Street",
+    city: "Testville",
+    postal_code: "10000",
+    country: "US",
+  },
+};
 
 // Credential-shaped test fixtures are assembled at runtime from harmless
 // fragments so no complete vendor-prefixed token literal appears in this
@@ -62,6 +73,14 @@ function isValidJpegBase64(base64: string): boolean {
   return buffer.length > 100 && buffer[0] === 0xff && buffer[1] === 0xd8;
 }
 
+function isValidPngBase64(base64: string): boolean {
+  const buffer = Buffer.from(base64, "base64");
+  return (
+    buffer.length > 100 &&
+    buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+  );
+}
+
 // Decode the captured JPEG with the browser already at hand (Image + canvas —
 // a real decode of the produced bytes) and sample one RGBA pixel per point.
 // The canvas is never attached to the DOM.
@@ -90,8 +109,15 @@ async function samplePixels(
         ),
       );
     },
-    { dataUrl: `data:image/jpeg;base64,${base64}`, samplePoints: points.map((p) => [...p]) },
+    {
+      dataUrl: `data:${isValidPngBase64(base64) ? "image/png" : "image/jpeg"};base64,${base64}`,
+      samplePoints: points.map((p) => [...p]),
+    },
   );
+}
+
+function isCompositeGray(pixel: readonly number[]): boolean {
+  return [pixel[0], pixel[1], pixel[2]].every((value) => Math.abs((value ?? 0) - 232) <= 2);
 }
 
 // The old redaction painted #FF00FF over every masked box. Nothing paints it now,
@@ -106,7 +132,7 @@ async function centerOf(page: Page, selector: string): Promise<readonly [number,
   return [box.x + box.width / 2, box.y + box.height / 2] as const;
 }
 
-describe("operate_screenshot returns unmasked pixels (real browser)", () => {
+describe("operate_screenshot before card release (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "captures a filled card PAN/expiry/CVV/name without masking, and without mutating the DOM",
     async () => {
@@ -306,6 +332,145 @@ describe("operate_screenshot returns unmasked pixels (real browser)", () => {
   });
 });
 
+describe("operate_screenshot card-value output mask (real browser)", () => {
+  it.skipIf(!chromiumAvailable)(
+    "composites PAN/CVV controls and mirrored PAN text without changing the checkout DOM",
+    async () => {
+      const browser = await launchIsolatedTestBrowser();
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <style>body{font:24px sans-serif} input{display:block;width:420px;height:44px;margin:8px}</style>
+          <input id="pan" data-ts-card-mask="pan" value="4111 1111 1111 1111">
+          <input id="cvv" data-ts-card-mask="cvv" value="123">
+          <div id="mirror" style="display:inline-block">4111-1111-1111-1111</div>
+          <div id="prefix" style="display:inline-block">4111.1111.11</div>
+          <div id="unicode" style="display:inline-block">4111‑1111‑1111‑1111</div>
+          <div id="total" style="display:inline-block">Total: 123 JPY</div>
+          <div id="three-ds" style="display:inline-block">Enter your bank OTP</div>
+          <div id="split" style="display:block;background:rgb(0,204,0)">4111|1111|1111|1111 / 1 2 3</div>
+          <div id="encoded" style="display:block;background:rgb(0,204,0)">NDExMTExMTExMTExMTExMQ==</div>
+          <canvas id="canvas" width="420" height="44" style="display:block;background:rgb(204,0,0)"></canvas>
+        `);
+        await page.locator("#canvas").evaluate((node) => {
+          const canvas = node as HTMLCanvasElement;
+          const context = canvas.getContext("2d")!;
+          context.fillStyle = "white";
+          context.font = "24px sans-serif";
+          context.fillText("4111 1111 1111 1111", 8, 30);
+        });
+        const controller = BrowserController.fromHarnessPage(page);
+        controller.registerCardValueOutputMask({ pan: "4111111111111111", cvv: "123" });
+        const before = await page.content();
+
+        const viewport = await controller.screenshotForOperator();
+        const full = await controller.screenshotForOperator({ fullPage: true });
+
+        expect(viewport.mimeType).toBe("image/png");
+        expect(isValidPngBase64(viewport.base64)).toBe(true);
+        expect(isValidPngBase64(full.base64)).toBe(true);
+        const points = await Promise.all(
+          [
+            "#pan",
+            "#cvv",
+            "#mirror",
+            "#prefix",
+            "#unicode",
+            "#total",
+            "#three-ds",
+            "#split",
+            "#encoded",
+            "#canvas",
+          ].map(async (selector) => await centerOf(page, selector)),
+        );
+        const [pan, cvv, mirror, prefix, unicode, total, threeDs, split, encoded, canvas] =
+          await samplePixels(page, viewport.base64, points);
+        expect(isCompositeGray(pan ?? [])).toBe(true);
+        expect(isCompositeGray(cvv ?? [])).toBe(true);
+        expect(isCompositeGray(mirror ?? [])).toBe(true);
+        expect(isCompositeGray(prefix ?? [])).toBe(true);
+        expect(isCompositeGray(unicode ?? [])).toBe(true);
+        expect(isCompositeGray(total ?? [])).toBe(false);
+        expect(isCompositeGray(threeDs ?? [])).toBe(false);
+        // Accepted hostile-page limit: transformed/split/canvas copies are not
+        // ordinary complete-value copies and are intentionally not chased by
+        // an information-flow scanner.
+        expect(isCompositeGray(split ?? [])).toBe(false);
+        expect(isCompositeGray(encoded ?? [])).toBe(false);
+        expect(isCompositeGray(canvas ?? [])).toBe(false);
+        expect(await page.content()).toBe(before);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "masks both pre-capture and post-capture layout positions",
+    async () => {
+      const browser = await launchIsolatedTestBrowser();
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <style>body{margin:0}</style>
+          <input id="pan" data-ts-card-mask="pan" value="4111 1111 1111 1111"
+            style="position:absolute;left:300px;top:20px;width:300px;height:44px;background:rgb(204,0,0)">
+        `);
+        await page.locator("#pan").evaluate((node) => {
+          const element = node as HTMLInputElement & {
+            getBoundingClientRect: () => DOMRect;
+          };
+          const actual = element.getBoundingClientRect.bind(element);
+          let first = true;
+          element.getBoundingClientRect = () => {
+            const rect = actual();
+            if (!first) return rect;
+            first = false;
+            return DOMRect.fromRect({ x: 0, y: rect.y, width: rect.width, height: rect.height });
+          };
+        });
+        const controller = BrowserController.fromHarnessPage(page);
+        controller.registerCardValueOutputMask(SYNTHETIC_CARD);
+
+        const result = await controller.screenshotForOperator();
+
+        const [staleMask, liveControl] = await samplePixels(page, result.base64, [
+          [150, 42],
+          [450, 42],
+        ]);
+        expect(isCompositeGray(staleMask ?? [])).toBe(true);
+        expect(isCompositeGray(liveControl ?? [])).toBe(true);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "fails the screenshot when an active card mask cannot scan the rendered document",
+    async () => {
+      const browser = await launchIsolatedTestBrowser();
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`<input data-ts-card-mask="pan" value="${SYNTHETIC_CARD.pan}">`);
+        const controller = BrowserController.fromHarnessPage(page);
+        controller.registerCardValueOutputMask(SYNTHETIC_CARD);
+        await page.evaluate(() => {
+          Document.prototype.querySelectorAll = () => {
+            throw new Error("synthetic scan failure");
+          };
+        });
+
+        await expect(controller.screenshotForOperator()).rejects.toThrow(
+          "card_mask_frame_scan_failed",
+        );
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+});
+
 describe("operate_screenshot frame targeting (real browser)", () => {
   async function servePages(
     browser: IsolatedTestBrowser,
@@ -343,6 +508,55 @@ describe("operate_screenshot frame targeting (real browser)", () => {
       await browser.close();
     }
   });
+
+  it.skipIf(!chromiumAvailable)(
+    "masks a targeted cross-origin frame after PAN/CVV controls rerender with new identities",
+    async () => {
+      const browser = await launchIsolatedTestBrowser();
+      try {
+        const pageUrl = "https://shop.example.test/checkout";
+        const frameUrl = "https://assets.braintreegateway.test/hosted";
+        const page = await servePages(browser, {
+          [pageUrl]: `<iframe style="width:400px;height:160px;border:0" src="${frameUrl}"></iframe>`,
+          [frameUrl]: `<style>body{margin:0}input{display:block;width:300px;height:60px}</style><input id="number" name="pan"><input id="security" name="cvv">`,
+        });
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = BrowserController.fromHarnessPage(page);
+        const elements = await controller.extractInteractiveElements();
+        const pan = elements.find((element) => element.name === "pan");
+        const cvv = elements.find((element) => element.name === "cvv");
+        if (pan === undefined || cvv === undefined)
+          throw new Error("missing synthetic card fields");
+        await controller.injectCardIntoTargets(SYNTHETIC_CARD, {
+          pan: { element: pan },
+          cvv: { element: cvv },
+        });
+        const frame = page.frames().find((candidate) => candidate.url() === frameUrl)!;
+        await frame.evaluate((card) => {
+          document.body.innerHTML = `<style>body{margin:0}input{display:block;width:300px;height:60px}</style><input id="number-rerendered" name="card-number" value="${card.pan}"><input id="security-rerendered" name="cvv2" value="${card.cvv}">`;
+        }, SYNTHETIC_CARD);
+        expect(
+          await frame.locator("#security-rerendered").getAttribute("data-ts-card-mask"),
+        ).toBeNull();
+
+        const result = await controller.screenshotForOperator({ frameIndex: 1 });
+
+        expect(result.mimeType).toBe("image/png");
+        expect(result.frameUrl).toBe(frameUrl);
+        const [panPixel, cvvPixel] = await samplePixels(page, result.base64, [
+          [150, 30],
+          [150, 90],
+        ]);
+        expect(isCompositeGray(panPixel ?? [])).toBe(true);
+        expect(isCompositeGray(cvvPixel ?? [])).toBe(true);
+        expect(await frame.locator("#number-rerendered").inputValue()).toBe(SYNTHETIC_CARD.pan);
+        expect(await frame.locator("#security-rerendered").inputValue()).toBe(SYNTHETIC_CARD.cvv);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
 
   it.skipIf(!chromiumAvailable)(
     "captures an isolated ACS frame while the parent checkout holds a filled card field",

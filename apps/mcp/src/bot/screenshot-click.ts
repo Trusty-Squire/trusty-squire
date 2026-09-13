@@ -71,9 +71,15 @@ export class ScreenshotClickError extends Error {
   }
 }
 
-// Decode only JPEG dimensions, in Node. Image bytes never enter page JavaScript.
-function jpegSize(base64: string): { width: number; height: number } {
+// Decode JPEG/PNG dimensions in Node. Image bytes never enter page JavaScript.
+function imageSize(base64: string): { width: number; height: number } {
   const bytes = Buffer.from(base64, "base64");
+  if (
+    bytes.length >= 24 &&
+    bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+  ) {
+    return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+  }
   for (let offset = 2; offset + 8 < bytes.length; ) {
     if (bytes[offset] !== 0xff) break;
     const marker = bytes[offset + 1]!;
@@ -223,7 +229,7 @@ export async function captureBoundScreenshot(
       return { base64: result.base64 };
     const publicBinding: ScreenshotBinding = {
       screenshot_id: randomUUID(),
-      ...jpegSize(result.base64),
+      ...imageSize(result.base64),
       coordinate_space: "image_pixels",
     };
     bindings.set(page, {

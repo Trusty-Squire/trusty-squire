@@ -504,9 +504,9 @@ function wireControl(row: SafeControlV2): WireControlV2 {
 const SAFE_DESCRIPTION_MAX_CHARS = 40;
 // There is NO description screening on the observation path. Every string a
 // page renders — OAuth button copy, an email address, a Gmail subject line, a
-// street address, a rendered API key, a card number — is content the driving
-// agent needs to read. The only transform left is truncation, which is the
-// compactness budget, not masking.
+// street address, or a rendered API key — is content the driving agent needs to
+// read. Released complete PAN/CVV masking is applied at the browser capture
+// boundary before this serializer; the only transform here is truncation.
 const CARD_SECURITY_VALUE_RE = /\b(?:cvv|cvc|security\s*code)\s*[:#-]?\s*\d{3,4}\b/i;
 const PAN_MAX_SPAN_CHARS = 96;
 

@@ -103,7 +103,7 @@ describe("package README lifecycle", () => {
 });
 
 describe("canonical README discovery order", () => {
-  it("puts the sub-tagline, elevator pitch, trust line, and headline prompt after the tagline", async () => {
+  it("puts the sub-tagline, elevator pitch, trust line, and payment guide after the tagline", async () => {
     const readme = await fs.readFile(canonicalReadme, "utf8");
     const lines = readme
       .split("\n")
@@ -113,15 +113,11 @@ describe("canonical README discovery order", () => {
 
     expect(taglineAt).toBeGreaterThanOrEqual(0);
     expect(lines[taglineAt + 1]).toContain("MCP tools to automate auth and pay");
-    expect(lines[taglineAt + 1]).toContain("keys and card never leave the vault");
+    expect(lines[taglineAt + 1]).toContain("keys and card stay out of agent context");
     expect(lines[taglineAt + 2]).toContain("sign up, provision, and purchase on your behalf");
     expect(lines[taglineAt + 3]).toContain("Provider secrets and payment cards are write-only");
-    expect(lines.slice(taglineAt + 4, taglineAt + 8)).toEqual([
-      "## One prompt",
-      "```text",
-      "Add Google OAuth to this app in one prompt: create the OAuth client, save the client secret, and wire it in without putting the raw key in chat, code, or .env.",
-      "```",
-    ]);
+    expect(lines[taglineAt + 4]).toBe("## Direct payment observation");
+    expect(lines[taglineAt + 5]).toContain("agent drives the live checkout");
     expect(readme).not.toContain("Sign in to Sentry");
     expect(readme).not.toContain("Resend");
     expect(readme).not.toContain("/provider/path");

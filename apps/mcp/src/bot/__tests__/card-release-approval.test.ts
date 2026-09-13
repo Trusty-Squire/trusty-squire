@@ -18,7 +18,7 @@
 //
 // This test closes that gap by importing the REAL @vouchflow/web `canonicalize`
 // (the exact code the web app ships at the pinned 0.3.1) as the SIGNING side,
-// and driving the mandate through the REAL, unmocked mcp `executeOperatePay`
+// and driving the mandate through the REAL, unmocked mcp `executeCardReleaseApproval`
 // (npm `canonicalize`) as the VERIFYING side. A pass proves the two canonical
 // forms are byte-identical for the production payload; a hash-mismatch would be
 // a genuine cross-package drift, not a test artifact.
@@ -40,7 +40,7 @@ import { canonicalize as vouchflowCanonicalize } from "@vouchflow/web";
 import { exportJWK, SignJWT } from "jose";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiClient } from "../../api-client.js";
-import { executeOperatePay, type PaymentBrowser } from "../pay-operator.js";
+import { executeCardReleaseApproval, type CardReleaseBrowser } from "../card-release-approval.js";
 import { sealToRecipient } from "../payment-hpke.js";
 import type { CheckoutCard, CheckoutSummary } from "../browser.js";
 
@@ -164,10 +164,7 @@ async function signReviewLikeWeb(params: {
   return { jws, sealed_card };
 }
 
-// Drives the REAL executeOperatePay JIT resume path: a card-less approval whose
-// card_ref is bound SERVER-SIDE and read back on resume (per #403). The operator
-// holds NO args.card_ref, so it can only pass verifyMandate by re-canonicalizing
-// (with npm canonicalize) over the same fields the web SDK signed.
+// Drives the real single-approval card release path with a synthetic card.
 async function runSeam(cfg: {
   boundCardRef: string; // what the server binds + echoes as approval.card_ref
   signCardRef?: string; // what the phone signs over (default = bound)
@@ -293,19 +290,11 @@ async function runSeam(cfg: {
     return Response.json({ error: "not_found" }, { status: 404 });
   }) as typeof fetch;
 
-  const browser: PaymentBrowser = {
-    isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
-    readCheckoutSummary: vi.fn().mockResolvedValue(CHECKOUT),
-    readCheckoutConfirmSummary: vi.fn().mockResolvedValue(CHECKOUT),
+  const browser: CardReleaseBrowser = {
     currentUrl: vi.fn().mockReturnValue(`${CHECKOUT.checkout_origin}/session/test`),
-    fillAndSubmitCheckout: vi.fn(async (card: CheckoutCard) => {
+    injectCardFields: vi.fn(async (card: CheckoutCard) => {
       filledCards.push(card);
-      return { three_ds_required: false, order_confirmed: true };
     }),
-    fillCheckoutCardFields: vi.fn(),
-    submitFilledCheckout: vi.fn(),
-    clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
-    waitForThreeDsResolution: vi.fn().mockResolvedValue("timeout"),
   };
 
   const api = new ApiClient({
@@ -315,12 +304,12 @@ async function runSeam(cfg: {
     fetch: fetchMock,
   });
 
-  // JIT ceremony: NO card_ref in args (card is bound server-side mid-ceremony).
-  const result = (await executeOperatePay(
+  const result = (await executeCardReleaseApproval(
     {
       merchant: CHECKOUT.merchant,
       amount_cents: CHECKOUT.amount_cents,
       currency: CHECKOUT.currency,
+      card_ref: cfg.boundCardRef,
       item: "Synthetic seam item",
       reason: "Synthetic seam purchase reason",
     },
@@ -379,14 +368,14 @@ describe("web ↔ mcp mandate canonical form (cross-package seam)", () => {
     expect(vouchflowCanonicalize(edges)).toBe(canonicalize(edges));
   });
 
-  it("PASSES: a web-signed (vouchflow-canonical) mandate verifies through the real mcp JIT path", async () => {
+  it("PASSES: a web-signed mandate verifies through the real card-release path", async () => {
     const { result, filledCards, canonical, confirmationBodies, resolvedCardRefs } = await runSeam({
       boundCardRef: "card_bound_by_server",
     });
-    // payment_submitted is only reachable if verifyMandate's payload_hash check
+    // card_released is only reachable if verifyMandate's payload_hash check
     // passed AND the HPKE card unsealed under the same AAD — both derive from the
     // canonical bytes. So this asserts the web/mcp canonical forms are identical.
-    expect(result).toMatchObject({ status: "payment_submitted" });
+    expect(result).toMatchObject({ status: "card_released" });
     expect(filledCards).toEqual([expect.objectContaining({ pan: SYNTHETIC_CARD.pan })]);
     expect(confirmationBodies).toHaveLength(2);
     expect(resolvedCardRefs).toEqual(["card_bound_by_server"]);

@@ -83,7 +83,7 @@ describe("toCompactElement (BOT_OBSERVE_COMPACT)", () => {
     expect(Object.values(c).every((v) => v !== null && v !== undefined)).toBe(true);
   });
 
-  it("marks a card-number control as vaulted-card-only with its safe next tool", () => {
+  it("leaves a card-number control directly targetable without payment orchestration metadata", () => {
     const card = el({
       tag: "input",
       type: "text",
@@ -92,11 +92,11 @@ describe("toCompactElement (BOT_OBSERVE_COMPACT)", () => {
       labelText: "Card number",
     });
     expect(paymentFieldForObservation(card)).toBe("card_number");
-    expect(toCompactElement(card, "@e:card")).toMatchObject({
-      payment_field: "card_number",
-      interaction: "vaulted_card_only",
-      recommended_action: { tool: "operate_pay", phase: "fill_card" },
-    });
+    const compact = toCompactElement(card, "@e:card");
+    expect(compact).toMatchObject({ ref: "@e:card", label: "Card number", tag: "input" });
+    expect(compact).not.toHaveProperty("payment_field");
+    expect(compact).not.toHaveProperty("interaction");
+    expect(compact).not.toHaveProperty("recommended_action");
   });
 
   it("keeps role/type/href/testId; DROPS path from the default payload and the redundant container", () => {

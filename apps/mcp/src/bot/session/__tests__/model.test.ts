@@ -53,10 +53,7 @@ describe("createSession", () => {
       expect(collection).toBeInstanceOf(Map);
       expect(collection.size).toBe(0);
     }
-    for (const collection of [
-      session.callDrainWaiters,
-      session.paymentCallDrainWaiters,
-    ]) {
+    for (const collection of [session.callDrainWaiters]) {
       expect(collection).toBeInstanceOf(Set);
       expect(collection.size).toBe(0);
     }
@@ -78,23 +75,16 @@ describe("createSession", () => {
     expect(session.recipeRejectionReason).toBeNull();
     expect(session.replayState).toBeNull();
     expect(session.activePayment).toBeNull();
-    expect(session.pendingThreeDs).toBeNull();
-    expect(session.paymentDispatchHandoff).toBeNull();
-    expect(session.placeOrderApproval).toBeNull();
-    expect(session.lastCartCheckout).toBeNull();
+    expect(session.releasedPaymentCard).toBeNull();
     expect(session.lastCartMutation).toBeNull();
     expect(session.watchdog).toBeNull();
     expect(session.terminalTeardownOwner).toBeNull();
 
     expect(session.compactV2Active).toBe(false);
     expect(session.usedLocatorFallback).toBe(false);
-    expect(session.paymentFieldSealActive).toBe(false);
-    expect(session.placeOrderAttempted).toBe(false);
-    expect(session.paymentDispatchClosed).toBe(false);
     expect(session.closing).toBe(false);
     expect(session.initializing).toBe(true);
     expect(session.callCount).toBe(0);
-    expect(session.paymentCallCount).toBe(0);
 
     expect(session.startedAt).toBeGreaterThanOrEqual(before);
     expect(session.startedAt).toBeLessThanOrEqual(after);

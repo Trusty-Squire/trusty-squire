@@ -1,12 +1,14 @@
 # Secrets: sealing, masking, and steering
 
-**Status: decided 2026-09-05. Do not relitigate without new evidence.**
+**Status: updated 2026-09-12. Do not relitigate without new evidence.**
 
 ## Decision
 
-There is **no masking, sealing, redaction, or read refusal anywhere on the
-operator's read path.** Observation, screenshot, extract, and observe-query
-return what is on the page. No secret-shape detector runs on any read.
+There is no general masking, sealing, redaction, or read refusal on the
+operator's read path. Observation, screenshot, extract, and observe-query
+return what is on the page except for one exact-value boundary: after a card is
+released, its complete PAN and security code are masked from normal
+model-facing output. No secret-shape detector runs on any read.
 
 Removed in PR #663 after the seals blocked the product's core job: signing up
 for a service and coming away with the key. On the BrowserStack settings page,
@@ -50,20 +52,17 @@ so it cannot run on an arbitrary page. It is useless for masking on read.
 
 ## What guards secrets instead
 
-Two write-side guards. Both already exist. Neither has ever blocked a read.
+The vault remains the boundary for provider credentials: `use_credential` and
+egress grants inject them server-side without returning their values. Payment
+cards use the existing single human purchase approval, and `inject_card` opens
+the selected card only inside the operator.
 
-1. **The model never authors a card number.** `operate_pay` fills it from the
-   vault. `operate_type` refuses model-supplied card-shaped text.
-2. **The vault is the boundary.** Secrets kept in it are injected server-side
-   via `use_credential` and egress grants. The model uses them without seeing
-   them.
-
-That is the entire security model. Everything else was theater that broke the
-product.
-
-Optional, if ever wanted: mask at exactly two *write* points — saved recipes
-and the audit log. A detector there can never touch a read. Dropping it loses
-nothing that matters.
+Before the first card write, the operator registers that released complete PAN
+and CVV/CVC/CID in a session-persistent output mask. Normal DOM, AX, network,
+error, log, and screenshot output masks only those values; it does not refuse a
+read or browser action. This is deliberately not a Luhn-wide or general secret
+scanner, and it does not claim containment against hostile pages that split,
+encode, or draw the value.
 
 ## The rule
 

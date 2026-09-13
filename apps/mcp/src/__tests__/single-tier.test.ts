@@ -97,7 +97,7 @@ describe("MCP client identity", () => {
 });
 
 describe("MCP tool argument validation", () => {
-  it("returns an executable repair object for missing payment arguments", async () => {
+  it("rejects missing card-injection arguments", async () => {
     const api = { setRequestingAgent: vi.fn() } as unknown as ApiClient;
     const server = await buildServer(api);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -106,22 +106,17 @@ describe("MCP tool argument validation", () => {
     await client.connect(clientTransport);
 
     try {
-      const result = await client.callTool({ name: "operate_pay", arguments: {} });
+      const result = await client.callTool({ name: "inject_card", arguments: {} });
       expect(result.isError).toBe(true);
       const { error } = JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
       expect(error.code).toBe("invalid_arguments");
-      expect(error.guidance).toMatchObject({
-        allowed_kinds: ["operate_pay"],
-        missing: ["item", "reason"],
-        example: expect.any(Object),
-        safe_alternative: expect.any(String),
-      });
+      expect(error.message).toContain("merchant");
     } finally {
       await client.close();
     }
   });
 
-  it("returns repair objects for malformed action grammar and conflicting card selectors", async () => {
+  it("returns repair objects for malformed action and card-target grammar", async () => {
     const api = { setRequestingAgent: vi.fn() } as unknown as ApiClient;
     const server = await buildServer(api);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -142,16 +137,19 @@ describe("MCP tool argument validation", () => {
         name: "operate_type",
         arguments: { session_id: "session_1", text: "x" },
       });
-      const cardConflict = await client.callTool({
-        name: "operate_pay",
+      const badCardTarget = await client.callTool({
+        name: "inject_card",
         arguments: {
+          merchant: "Test merchant",
+          amount_cents: 100,
+          currency: "USD",
           item: "Test item",
           reason: "Test reason",
           card_ref: "card_1",
-          card_label: "Personal",
+          fields: { pan: { ref: "" } },
         },
       });
-      for (const result of [badKind, missingSlot, missingTypeTarget, cardConflict]) {
+      for (const result of [badKind, missingSlot, missingTypeTarget, badCardTarget]) {
         expect(result.isError).toBe(true);
         const { error } = JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
         expect(error.code).toBe("invalid_arguments");
@@ -164,9 +162,6 @@ describe("MCP tool argument validation", () => {
         (missingTypeTarget.content as Array<{ text: string }>)[0]!.text,
       ).error;
       expect(missingTypeTargetError.message).toContain("ref");
-      const cardRepair = JSON.parse((cardConflict.content as Array<{ text: string }>)[0]!.text)
-        .error.guidance;
-      expect(cardRepair.safe_alternative).toMatch(/only one of card_ref or card_label/i);
     } finally {
       await client.close();
     }
