@@ -292,9 +292,10 @@ it.each([false, true])("refuses a changed authored identity with layout change=%
 }, 20_000);
 
 it.each([
-  ["type_secret", false], ["js_click", false],
-  ["type_secret", true], ["js_click", true],
-] as const)("preserves stale-ref dispatch evidence for %s after dispatch=%s", async (kind, dispatched) => {
+  ["type_secret", false, false], ["js_click", false, false],
+  ["type_secret", true, false], ["js_click", true, false],
+  ["js_click", false, true],
+] as const)("preserves stale-ref dispatch evidence for %s after dispatch=%s with earlier dispatch=%s", async (kind, dispatched, earlierDispatch) => {
   const context = await browser.newContext();
   const page = await context.newPage();
   const url = "https://stale-paths.test/";
@@ -319,6 +320,7 @@ it.each([
       });
     } else await remove();
     const operation = withOperatorRequestContext(new AbortController().signal, async () => {
+      if (earlierDispatch) await markOperatorMutationDispatchAttempted();
       if (dispatched) {
         await markOperatorMutationDispatchAttempted();
         return await act(start.session_id, kind === "type_secret"
@@ -328,7 +330,7 @@ it.each([
         ? await operateTypeTool.handler({ session_id: start.session_id, ref, slot: "password" }, null)
         : await operateClickTool.handler({ session_id: start.session_id, ref }, null);
     });
-    if (dispatched) {
+    if (dispatched || earlierDispatch) {
       const error = await operation.catch((error: unknown) => error);
       expect(error).toBeInstanceOf(Error);
       expect(error).not.toBeInstanceOf(ProvenPreDispatchMutationError);
