@@ -168,8 +168,10 @@ import { ProfileBusyError } from "../profile.js";
 import {
   startProvisionSession,
   finishProvisionSession,
+  finishProvisionSessionWithPreparation,
   closeAllProvisionSessions,
 } from "../provision-session.js";
+import { sessionForCall } from "../session/lifecycle.js";
 
 let profileDir: string;
 
@@ -288,6 +290,46 @@ describe("TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION on", () => {
     // The primary itself is the last-out session, so it never needs its own
     // closeOwnPagesOnly — the real close() already tears its page down too.
     expect(primaryRecord!.closeOwnPagesOnlyCalls).toBe(0);
+  });
+
+  it("closes the shared Chrome exactly once when a forced shutdown preempts the last session's graceful finish", async () => {
+    const first = await startProvisionSession({
+      serviceUrl: "https://app.example.com",
+      profileDir,
+    });
+    const second = await startProvisionSession({
+      serviceUrl: "https://other.example.com",
+      profileDir,
+    });
+    const [primaryRecord, satelliteRecord] = h.instances;
+    await finishProvisionSession(first.session_id);
+    expect(primaryRecord!.closeOwnPagesOnlyCalls).toBe(1);
+
+    // Park the satellite in generic finish preparation. A transport shutdown
+    // can then take terminal ownership while graceful finish is still live,
+    // without relying on the deleted payment/3DS custody state.
+    let parked!: () => void;
+    const preparationStarted = new Promise<void>((resolve) => (parked = resolve));
+    let release!: () => void;
+    const preparationReleased = new Promise<void>((resolve) => (release = resolve));
+    const graceful = finishProvisionSessionWithPreparation(second.session_id, async () => {
+      parked();
+      await preparationReleased;
+    });
+    await preparationStarted;
+
+    const session = sessionForCall(second.session_id);
+    if (session === undefined) throw new Error("satellite session missing");
+    const shutdown = closeAllProvisionSessions();
+    while (session.terminalTeardownOwner?.forced !== true) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+    release();
+    await Promise.allSettled([graceful, shutdown]);
+
+    expect(primaryRecord!.closeCalls).toBe(1);
+    expect(satelliteRecord!.closeCalls).toBe(0);
+    expect(satelliteRecord!.closeOwnPagesOnlyCalls).toBe(1);
   });
 
   it("refuses to join while the last session's teardown is already closing the shared Chrome", async () => {

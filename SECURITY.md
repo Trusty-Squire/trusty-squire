@@ -83,14 +83,15 @@ display metadata such as brand and last4. The Vault detail view can reveal the
 PAN only through its owner-authenticated passkey ceremony and never renders the
 CVV.
 
-For a purchase, `inject_card` creates or resumes the existing single human
-approval bound to merchant, checkout origin, amount, currency, item, reason, and
-card reference. The phone decrypts the selected card locally and HPKE-seals it to
-the operator's ephemeral key. The operator verifies the signed purchase release,
-opens the sealed card locally, and confirms the exact delivered candidate. The
-API relays ciphertext and signed approval material, not plaintext PAN or CVV.
-Denial or expiry releases no card; the returned `approval_id` resumes only that
-same purchase approval.
+For the initial card release, `inject_card` creates or resumes the existing
+single human approval whose signed terms include merchant, checkout URL, amount,
+currency, item, reason, and card reference. The phone decrypts the selected card
+locally and HPKE-seals it to the operator's ephemeral key. The operator verifies
+the signed purchase release, opens the sealed card locally, and confirms the
+exact delivered candidate. The API relays ciphertext and signed approval
+material, not plaintext PAN or CVV.
+Denial or expiry releases no card; a pending returned `approval_id` resumes only
+that approval ceremony.
 
 After release, `inject_card` registers the card-value output mask before its
 first write and fills only caller-named field refs. It returns field-level browser
@@ -102,22 +103,26 @@ choice, place-order click, waits, and 3-D Secure interaction through generic
 browser tools. No post-submit payment custody or second authorization path exists.
 
 The released-card mask is deliberately narrow and session-persistent. It replaces
-the complete released PAN, including space/hyphen formatting, and the released
-CVV/CVC/CID in value-bearing DOM and AX properties, ordinary copies in
+the complete released PAN and ordinary prefixes of at least eight digits,
+including whitespace, common hyphen, period, and middle-dot formatting, and the
+released CVV/CVC/CID in value-bearing DOM and AX properties, ordinary copies in
 attributes/text/URLs/headers/bodies/errors, console and network evidence, and
-returned diagnostics. Screenshot compositing covers only the value-bearing pixels
-of injected controls and identified ordinary displayed copies; it does not clear
-merchant fields. Last4, brand/issuer, cardholder name, expiry, billing address,
+returned diagnostics. Screenshot compositing covers the value-bearing pixels of
+injected controls and identified ordinary displayed copies; it does not clear
+merchant fields. The injection step adds a `data-ts-card-mask` provenance
+attribute to named PAN/CVV nodes, while capture itself does not focus or change
+their values. Last4, brand/issuer, cardholder name, expiry, billing address,
 amount, currency, DCC text, OTP/3DS controls, HTTP errors, API keys, cookies, PII,
 and unrelated short numbers remain visible. The mask records released values and
 injected node identities across rerenders and navigation and never gates an
 action.
 
 The normal read surface is the masked snapshot; raw browser evaluation is
-operator-internal. This covers ordinary forms and reachable hosted-field
-checkouts. It is not a general secret scanner and does not claim containment
-against a hostile page that transforms, splits, encodes, or canvas-renders the
-card.
+operator-internal. This boundary is designed for ordinary forms and reachable
+hosted-field checkouts; provider-specific behavior is confirmed by field results
+and fresh observations. It is not a general secret scanner and does not claim
+containment against a hostile page that transforms, splits, encodes, or
+canvas-renders the card.
 
 Payment audit and approval lifecycle records remain metadata-only and never
 contain PAN, CVV, sealed-card ciphertext, or signed candidate bodies.

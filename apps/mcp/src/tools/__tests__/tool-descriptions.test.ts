@@ -116,6 +116,9 @@ describe("still-true contracts survive the cleanup", () => {
   it("inject_card guidance is present in its tool and the operator surface", () => {
     expect(injectCardTool.description).toContain("single human purchase approval");
     expect(injectCardTool.description).toContain("fill only the supplied observation refs");
+    expect(injectCardTool.description).toContain("competing saved-card control");
+    expect(injectCardTool.description).toContain("immediately notify the cardholder");
+    expect(injectCardTool.jsonInputSchema.required).toContain("session_id");
     expect(provisionStartTool.description).toContain("inject_card");
   });
 });
@@ -160,7 +163,7 @@ describe("current observation protocol documentation", () => {
       "[ref,role,facts?]",
       'format:"compact"',
       'format:"full"',
-      "complete PAN and security code are masked",
+      "prefixes of at least eight digits) and security code are masked",
     ]) {
       expect(description).toContain(token);
     }
@@ -184,7 +187,7 @@ describe("current observation protocol documentation", () => {
       "delta:true",
       'format:"compact"',
       'format:"full"',
-      "complete PAN and security code are masked",
+      "prefixes of at least eight digits) and security code are masked",
     ]) {
       expect(description).toContain(token);
     }

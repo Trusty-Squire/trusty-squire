@@ -435,19 +435,20 @@ guessing, post-submit custody, or checkout cleanup sweeps.
 
 ### 11. Released PAN and security code have one narrow output boundary
 
-Before the first card write, register the released complete PAN and CVV/CVC/CID
-plus the injected node identities in the session's card-value output mask. Every
+Before the first card write, register the released PAN and CVV/CVC/CID plus the
+injected node identities in the session's card-value output mask. Every
 model-facing DOM/AX property, attribute, text, URL, header, body, error,
 diagnostic, log, trace, and screenshot passes through that mask. The record
 survives failed fills, clearing, re-rendering, and navigation for the browser
 session, and it never gates a browser action.
 
-Mask only the released complete PAN (including ordinary formatting variants)
-and security code, replacing them with `[card number]` and `[security code]`.
+Mask only the released PAN (complete ordinary formatting variants and prefixes
+of at least eight digits) and security code, replacing them with `[card number]`
+and `[security code]`.
 Keep merchant last4, brand/issuer, name, expiry, billing address, amount,
 currency, DCC, OTP/3DS text, HTTP bodies, API keys, cookies, and other page data
-visible. This is not a general secret scanner or Luhn detector. The supported
-boundary is ordinary forms and hosted-field checkouts; hostile pages that
+visible. This is not a general secret scanner or Luhn detector. The boundary is
+designed for ordinary forms and hosted-field checkouts; hostile pages that
 transform secrets into split, encoded, or canvas copies are outside the claim.
 Raw live runtime evaluation remains internal rather than a public read API.
 
@@ -509,7 +510,8 @@ see CLAUDE.md's "Operator session model" for what may not be reordered.
 ### 16. Reads stay direct except for the narrow released-card value mask
 
 Observation and screenshot reads remain verbatim except for the session's
-released complete PAN and security code. Do not widen that exception into
+released PAN (complete ordinary spellings and prefixes of at least eight digits)
+and security code. Do not widen that exception into
 general secret screening, a content seal, or a read refusal. The authoritative
 policy and implementation map are in
 [`docs/observation-model.md`](docs/observation-model.md) §4.5; read that section

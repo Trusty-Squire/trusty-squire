@@ -189,7 +189,9 @@ agent calls inject_card with purchase terms, card_ref, and exact field refs
   -> per-field browser outcomes and approval metadata return; PAN/CVV do not
 agent re-observes and drives the checkout with generic browser actions
   -> partial fills can be retried under the same still-valid approval
-  -> agent chooses currency, clicks place order, waits, and handles 3-D Secure
+  -> agent chooses currency, clicks place order, and waits
+  -> when 3-D Secure appears, agent immediately notifies the cardholder in chat,
+     asks them to complete it, and continues observing
   -> operator does not guess submit controls, validate totals, clear fields,
      arbitrate saved cards, or keep post-submit payment custody
 ```
@@ -197,11 +199,14 @@ agent re-observes and drives the checkout with generic browser actions
 The normal read path is the masked snapshot. DOM/AX values and attributes,
 subtree/query/compact/full observations, console and exception evidence, network
 headers and bodies, errors, diagnostics, and viewport/full/frame screenshots all
-pass through the released-card mask. The mask is narrow: complete PAN and the
+pass through the released-card mask. The mask is narrow: the released PAN
+(complete ordinary spellings and prefixes of at least eight digits) and the
 released security code only. All other checkout evidence remains verbatim.
 
-Raw browser evaluation remains internal. Ordinary forms and reachable hosted
-fields are covered; a hostile page can transform, split, encode, or draw a value
+Raw browser evaluation remains internal. The boundary is designed for ordinary
+forms and reachable hosted fields; provider-specific behavior is confirmed from
+field results and fresh observations. A hostile page can transform, split,
+encode, or draw a value
 so it no longer matches. The architecture does not claim adversarial
 information-flow containment and adds no broad scanner, host allowlist, payment
 validation gate, rate limit, or second approval.

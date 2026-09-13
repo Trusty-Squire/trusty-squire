@@ -47,12 +47,23 @@ describe("released card value output mask", () => {
     expect(mask.maskText("PAN 4111111111111111")).toBe(`PAN ${CARD_NUMBER_MASK}`);
     expect(mask.maskText("Card 4111 1111 1111 1111")).toBe(`Card ${CARD_NUMBER_MASK}`);
     expect(mask.maskText("Card 4111-1111-1111-1111")).toBe(`Card ${CARD_NUMBER_MASK}`);
+    expect(mask.maskText("Card 4111.1111.1111.1111")).toBe(`Card ${CARD_NUMBER_MASK}`);
+    expect(mask.maskText("Card 4111‑1111‑1111‑1111")).toBe(`Card ${CARD_NUMBER_MASK}`);
+    expect(mask.maskText("Card preview 41111111")).toBe(`Card preview ${CARD_NUMBER_MASK}`);
+    expect(mask.maskText("Card preview 4111 1111 1111")).toBe(`Card preview ${CARD_NUMBER_MASK}`);
     expect(mask.maskText("security code: 123")).toBe(`security code: ${SECURITY_CODE_MASK}`);
+    expect(mask.maskText("nocvv2here order total 123")).toBe("nocvv2here order total 123");
     expect(mask.maskValue({ cvc: "123", total: "123", status: 401 })).toEqual({
       cvc: SECURITY_CODE_MASK,
       total: "123",
       status: 401,
     });
+    for (const key of ["cvv2", "cvc2", "cid", "csc", "cvn", "card_code", "security_code"]) {
+      expect(mask.maskValue({ [key]: SYNTHETIC_CARD.cvv })).toEqual({
+        [key]: SECURITY_CODE_MASK,
+      });
+      expect(mask.maskText(`{"${key}":"${SYNTHETIC_CARD.cvv}"}`)).toContain(SECURITY_CODE_MASK);
+    }
 
     expect(
       mask.maskValue({
@@ -145,7 +156,7 @@ describe("released card value output mask", () => {
     expect(evidence.response_body).toContain("401");
   });
 
-  it("retains injected node provenance when a rerender drops the marker", () => {
+  it("masks a CVV after a rerender replaces both the marker and original identity", () => {
     const mask = new CardValueOutputMask();
     mask.register(SYNTHETIC_CARD);
     mask.registerTarget({ kind: "cvv", selector: "#security", framePath: "0" });
@@ -153,12 +164,25 @@ describe("released card value output mask", () => {
       id: "rerendered-cvv",
       nodeName: "INPUT",
       value: SYNTHETIC_CARD.cvv,
-      attributes: { id: "security", value: SYNTHETIC_CARD.cvv },
-      axProperties: [{ name: "value", value: SYNTHETIC_CARD.cvv }],
+      attributes: {
+        id: "security-rerendered",
+        name: "cvv2",
+        autocomplete: "cc-csc",
+        "aria-label": "Security code",
+        value: SYNTHETIC_CARD.cvv,
+      },
+      axProperties: [
+        { name: "name", value: "Security code" },
+        { name: "value", value: SYNTHETIC_CARD.cvv },
+      ],
     });
     const element = {
-      selector: "#security",
+      selector: "#security-rerendered",
       framePath: "0",
+      id: "security-rerendered",
+      name: "cvv2",
+      autocomplete: "cc-csc",
+      ariaLabel: "Security code",
       value: SYNTHETIC_CARD.cvv,
       cardMaskKind: null,
     } as unknown as InteractiveElement;
@@ -173,7 +197,7 @@ describe("released card value output mask", () => {
         ],
       }),
       elements: [element],
-      nodeElements: new Map([[rerendered.id, element]]),
+      nodeElements: new Map(),
       moreAbove: false,
       moreBelow: false,
       dynamics: "rerender",
@@ -185,6 +209,7 @@ describe("released card value output mask", () => {
     expect(rerendered.value).toBe(SECURITY_CODE_MASK);
     expect(rerendered.attributes.value).toBe(SECURITY_CODE_MASK);
     expect(rerendered.axProperties[0]?.value).toBe(SECURITY_CODE_MASK);
+    expect(rerendered.axProperties[1]?.value).toBe(SECURITY_CODE_MASK);
     expect(masked.elements[0]?.value).toBe(SECURITY_CODE_MASK);
   });
 

@@ -6347,11 +6347,14 @@ export class BrowserController {
       if (frame.isDetached()) continue;
       let offset = { x: 0, y: 0 };
       if (frame !== page.mainFrame()) {
-        const frameElement = await frame.frameElement().catch(() => null);
+        const frameElement = await frame.frameElement().catch((error: unknown) => {
+          if (frame.isDetached()) return null;
+          throw new Error("card_mask_frame_unavailable", { cause: error });
+        });
         if (frameElement === null) continue;
         try {
           const box = await frameElement.boundingBox();
-          if (box === null) continue;
+          if (box === null) throw new Error("card_mask_frame_not_visible");
           offset = { x: box.x, y: box.y };
         } finally {
           await frameElement.dispose().catch(() => undefined);
@@ -6359,7 +6362,7 @@ export class BrowserController {
       }
       const local = await frame
         .evaluate(
-          ({ pans, cvvs, targets }) => {
+          ({ pans, cvvs, cvvNameSource, targets }) => {
             const found: Array<{ x: number; y: number; width: number; height: number }> = [];
             const roots: Array<Document | ShadowRoot> = [document];
             const nativeShadowRoot = Object.getOwnPropertyDescriptor(
@@ -6384,7 +6387,8 @@ export class BrowserController {
                 height: Math.max(1, box.height - insetY * 2),
               });
             };
-            const cvvLabel = /\b(?:cvv|cvc|cid|csc|security\s*code)\b/i;
+            const cvvLabel = new RegExp(cvvNameSource, "i");
+            const panSeparator = String.raw`[\s.\u00b7\u2010-\u2015-]*`;
             for (const root of roots) {
               root
                 .querySelectorAll('[data-ts-card-mask="pan"],[data-ts-card-mask="cvv"]')
@@ -6396,20 +6400,29 @@ export class BrowserController {
                   // A stale or browser-specific selector is an ordinary miss.
                 }
               }
+              root.querySelectorAll("input,textarea").forEach((element) => {
+                const digits = (
+                  (element as HTMLInputElement | HTMLTextAreaElement).value ?? ""
+                ).replace(/\D/g, "");
+                if (
+                  cvvs.includes(digits) ||
+                  pans.some(
+                    (pan) => digits === pan || (digits.length >= 8 && pan.startsWith(digits)),
+                  )
+                ) {
+                  pushControlValue(element);
+                }
+              });
               const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
               let current: Node | null;
               while ((current = walker.nextNode()) !== null) {
                 const value = current.nodeValue ?? "";
-                const patterns = pans.map(
-                  (pan) =>
-                    new RegExp(
-                      `(?<!\\d)${[...pan]
-                        .map((digit) => `${digit}[\\s-]*`)
-                        .join("")
-                        .replace(/\[\\s-\]\*$/, "")}(?!\\d)`,
-                      "g",
-                    ),
-                );
+                const patterns = pans.map((pan) => {
+                  const prefixes = Array.from({ length: pan.length - 7 }, (_, index) =>
+                    [...pan.slice(0, pan.length - index)].join(panSeparator),
+                  );
+                  return new RegExp(`(?<!\\d)(?:${prefixes.join("|")})(?!${panSeparator}\\d)`, "g");
+                });
                 let labelledCvvCopy = false;
                 let ancestor = current.parentElement;
                 for (let depth = 0; ancestor !== null && depth < 3; depth += 1) {
@@ -6447,7 +6460,10 @@ export class BrowserController {
             ),
           },
         )
-        .catch(() => []);
+        .catch((error: unknown) => {
+          if (frame.isDetached()) return [];
+          throw new Error("card_mask_frame_scan_failed", { cause: error });
+        });
       for (const rect of local) {
         rects.push({ ...rect, x: rect.x + offset.x, y: rect.y + offset.y });
       }
@@ -6490,7 +6506,7 @@ export class BrowserController {
   }> {
     if (!page) throw new Error("Browser not started");
     const targetFrame = this.resolveOperatorScreenshotFrame(opts, page);
-    const maskRects = await this.cardMaskPixelRects(page);
+    const maskRectsBefore = await this.cardMaskPixelRects(page);
     const cdp = await page.context().newCDPSession(page);
     try {
       // caret:"initial" is not needed here — the CDP capture never runs
@@ -6559,23 +6575,23 @@ export class BrowserController {
         }
         return { base64, rect };
       });
+      const maskRectsAfter = await this.cardMaskPixelRects(page);
       let output = captured.base64;
       if (this.cardValueOutputMask.active) {
         const scroll = await page.evaluate(() => ({ x: window.scrollX, y: window.scrollY }));
         const targetBox =
           targetFrame !== null && targetFrame !== page.mainFrame()
-            ? await targetFrame
-                .frameElement()
-                .then(async (handle) => {
-                  try {
-                    return await handle.boundingBox();
-                  } finally {
-                    await handle.dispose().catch(() => undefined);
-                  }
-                })
-                .catch(() => null)
+            ? await targetFrame.frameElement().then(async (handle) => {
+                try {
+                  const box = await handle.boundingBox();
+                  if (box === null) throw new Error("card_mask_frame_not_visible");
+                  return box;
+                } finally {
+                  await handle.dispose().catch(() => undefined);
+                }
+              })
             : null;
-        const translated = maskRects.map((rect) => ({
+        const translated = [...maskRectsBefore, ...maskRectsAfter].map((rect) => ({
           ...rect,
           x:
             targetBox !== null
@@ -6590,7 +6606,7 @@ export class BrowserController {
                 ? rect.y + scroll.y
                 : rect.y,
         }));
-        output = compositePngCardMasks(output, translated);
+        output = await compositePngCardMasks(output, translated);
       }
       this.operatorEvidence.recordScreenshot({
         url: page.url(),

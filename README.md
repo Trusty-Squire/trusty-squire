@@ -30,7 +30,7 @@ rendered state with `operate_observe`, `operate_network`, and
 and wait loop to advance the purchase. A spinner is evidence; the operator does
 not translate it into a payment stage.
 
-When saved-card fields are ready, call `list_payment_cards` and then
+When card fields are ready, call `list_payment_cards` and then
 `inject_card` with the addressed session, the purchase terms, the selected
 `card_ref`, and an observation ref for each field to fill. `inject_card` uses the
 existing single human approval for that purchase, verifies the signed release,
@@ -41,19 +41,28 @@ per-field `filled`, `not_found`, `detached`, or `native_error` result. It never
 searches for a provider, chooses a saved-card UI, rereads the total, submits,
 clears fields, or diagnoses the checkout.
 
+Hosted-field providers can render decoy autofill or focus-helper inputs beside
+the actual field (notably Braintree and Stripe). Choose the ref for the visible
+card control, not a helper input. Before placing the order, re-observe and
+confirm that no competing merchant-saved-card radio or option remains selected.
+If a 3-D Secure challenge appears, immediately notify the cardholder in chat and
+ask them to complete it, then continue observing the live checkout.
+
 Before the first card write, the operator installs a session-lifetime output
 mask for that released PAN and security code. Normal DOM/AX observations, raw
 attribute/subtree reads, network headers and bodies, errors, console evidence,
-and screenshots replace or cover those complete values. Merchant last4, brand,
-name, expiry, billing address, amounts, currency/DCC, HTTP errors, API keys, and
-3-D Secure controls remain visible. The agent re-observes partial fills, retries
-targets if needed, selects currency, clicks place order, and follows 3-D Secure
-from the same generic evidence stream. There is no `operate_payment_status` or
-operator-owned submit/outcome state machine.
+and screenshots replace or cover complete values and ordinary PAN prefixes of
+at least eight digits. Merchant last4, brand, name, expiry, billing address,
+amounts, currency/DCC, HTTP errors, API keys, and 3-D Secure controls remain
+visible. The agent re-observes partial fills, retries targets if needed, selects
+currency, clicks place order, and follows 3-D Secure from the same generic
+evidence stream. There is no `operate_payment_status` or operator-owned
+submit/outcome state machine.
 
 This is a narrow ordinary-checkout boundary, not hostile-page information-flow
-containment. Ordinary forms and reachable hosted fields such as Braintree,
-Stripe, and Amazon APX are covered. A hostile page can split, encode, or
+containment. It is designed for ordinary forms and reachable hosted fields;
+provider-specific behavior still has to be verified from the returned field
+results and fresh observations. A hostile page can split, encode, or
 canvas-render a card value so it no longer matches the released value; the
 operator does not add a broad secret scanner or claim to defeat that page.
 
@@ -150,19 +159,18 @@ The result contains a host-scoped egress `base_url` and a `token`, not the Clerk
 - App grants are host-scoped, auditable, rate-limitable, and independently revocable. A leaked grant can be revoked without rotating the provider key.
 - You connect Google or GitHub in a real browser. Trusty Squire does not ask the coding agent to type those passwords.
 - Saved cards are encrypted in your browser with a passkey-derived key. For a
-  single-page payment, your phone releases the card only after approving the
-  exact purchase details shown on the approval page. On a split checkout, one
-  amount-bound approval releases the card; the caller places the order and verifies
-  the final total itself. See the split-checkout guidance above for passive outcome
-  tracking. The API
+  purchase, your phone releases the card only after approving the exact purchase
+  details shown on the approval page. The caller then observes the live checkout,
+  places the order, and verifies the result through the generic operator tools. The API
   temporarily relays only operator-sealed card ciphertext and its signed mandate.
   Trusty Squire's API never receives plaintext PAN or CVV. The normal operator
-  read path masks the released complete PAN and security code before model-facing
+  read path masks the released PAN (including ordinary formatted spellings and
+  prefixes of at least eight digits) and security code before model-facing
   output; hostile transformed page output is outside that narrow boundary. See the
   [security model](https://github.com/trusty-squire/trusty-squire/blob/main/SECURITY.md#client-encrypted-card-data)
   for the signed mandate's binding contract.
 - Browser screenshots and diagnostics remain verbatim except for the released
-  card's complete PAN/security-code mask. Treat all other rendered values as
+  card's narrow PAN/security-code mask. Treat all other rendered values as
   potentially sensitive.
 - Trusty Squire does not bypass phone verification, hard CAPTCHAs, 3-D Secure,
   payment authorization, or decisions that belong to a person. It stops for
@@ -297,9 +305,13 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   [OAuth error and recovery contract](docs/operator-tool-surface.md#using-the-rest-of-the-surface).
   If an observation races the transition, it reports `oauth.state: "in_progress"`
   and directs the host to observe again.
-- Call `inject_card` with the exact observed refs for the saved-card fields.
+- Call `inject_card` with the exact observed refs for the card-entry fields.
   It fills only those refs under the existing purchase approval; the agent
-  observes partial results and drives every later checkout action itself.
+  observes partial results and drives every later checkout action itself. Pick
+  the real visible field rather than a hosted-provider autofill/focus helper;
+  before placing the order, re-observe for a competing selected saved card. If
+  3-D Secure appears, notify the cardholder in chat immediately and ask them to
+  complete it.
 - `operate_finish` closes the session with a flat `outcome` enum — never a
   nested union. `none` only closes; `credentials` requires `store` and preserves
   credential extraction and vault storage; `result` requires `summary` or
@@ -326,8 +338,9 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   Older name-only recipes remain planning hints.
 - `list_payment_cards` returns saved-card labels and opaque references.
   `inject_card` takes one explicit `card_ref`, purchase terms, and per-field
-  refs. It creates or resumes the single approval and returns per-field browser
-  outcomes plus approval metadata and last4; it never returns PAN/CVV or submits.
+  refs plus the addressed `session_id`. It creates or resumes the single approval
+  and returns per-field browser outcomes plus approval metadata and last4; it
+  never returns PAN/CVV or submits.
 - `list_credentials` and `use_credential` find saved credentials and make authenticated API calls without returning raw values.
   Before provisioning, call `list_credentials` with
   `{"service":["exa","groq","cartesia"],"fields":"summary"}` to check for

@@ -1,4 +1,4 @@
-import { deflateSync, inflateSync } from "node:zlib";
+import sharp from "sharp";
 import type { BrowserUseCapture } from "./browser-use-capture.js";
 import type { BrowserUseNode } from "./browser-use-serializer.js";
 import type { InteractiveElement } from "./browser.js";
@@ -33,23 +33,51 @@ interface RegisteredCardMask {
   cvv: string;
 }
 
-const cvvKeyPattern = /(?:^|[_-])(?:cvv|cvc|cid|csc)(?:$|[_-])|security[_-]?code/i;
-const cvvLabelPattern = /\b(?:cvv|cvc|cid|csc|security\s*code)\b/i;
+const CVV_NAME_SOURCE = String.raw`(?:cvv2?|cvc2?|cid|csc|cvn|card[\s_-]*code|security[\s_-]*code)`;
+const CVV_CONNECTOR_SOURCE = String.raw`[\s_\-:="']*`;
+const CVV_BOUNDARY_SOURCE = String.raw`[\s_\-:="'&?{},]`;
+const CVV_IDENTITY_SOURCE = String.raw`(?:^|${CVV_BOUNDARY_SOURCE})${CVV_NAME_SOURCE}(?=$|${CVV_BOUNDARY_SOURCE})`;
+const cvvKeyPattern = new RegExp(CVV_IDENTITY_SOURCE, "i");
+const PAN_SEPARATOR_SOURCE = String.raw`[\s.\u00b7\u2010-\u2015-]*`;
 
 function panPattern(digits: string): RegExp {
-  const separated = [...digits]
-    .map((digit) => `${digit}[\\s-]*`)
-    .join("")
-    .replace(/\[\\s-\]\*$/, "");
-  return new RegExp(`(?<!\\d)${separated}(?!\\d)`, "g");
+  const prefixes = Array.from({ length: digits.length - 7 }, (_, index) =>
+    [...digits.slice(0, digits.length - index)].join(PAN_SEPARATOR_SOURCE),
+  );
+  return new RegExp(`(?<!\\d)(?:${prefixes.join("|")})(?!${PAN_SEPARATOR_SOURCE}\\d)`, "g");
 }
 
 function maskCvvInLabelledText(value: string, cvv: string): string {
-  if (!cvvLabelPattern.test(value)) return value;
+  if (!cvvKeyPattern.test(value)) return value;
   return value.replace(
-    new RegExp(`(\\b(?:cvv|cvc|cid|csc|security\\s*code)\\b[^\\d\\n]{0,16})${cvv}(?!\\d)`, "gi"),
+    new RegExp(
+      `((?:^|${CVV_BOUNDARY_SOURCE})${CVV_NAME_SOURCE}${CVV_CONNECTOR_SOURCE})${cvv}(?!\\d)`,
+      "gi",
+    ),
     `$1${SECURITY_CODE_MASK}`,
   );
+}
+
+function nodeHasReleasedCvv(node: BrowserUseNode, records: readonly RegisteredCardMask[]): boolean {
+  const identity = [
+    node.attributes.name,
+    node.attributes.id,
+    node.attributes.autocomplete,
+    node.attributes.placeholder,
+    node.attributes["aria-label"],
+    ...node.axProperties
+      .filter((property) => /^(?:name|label|description)$/i.test(property.name))
+      .map((property) => (typeof property.value === "string" ? property.value : "")),
+  ].filter((value): value is string => typeof value === "string");
+  if (!identity.some((value) => cvvKeyPattern.test(value))) return false;
+  const values = [
+    node.value,
+    node.attributes.value,
+    ...node.axProperties
+      .filter((property) => /value|valuetext/i.test(property.name))
+      .map((property) => (typeof property.value === "string" ? property.value : "")),
+  ].filter((value): value is string => typeof value === "string");
+  return records.some((record) => values.some((value) => value.replace(/\D/g, "") === record.cvv));
 }
 
 function maskStringForKey(
@@ -77,7 +105,9 @@ function maskNode(
 ): void {
   const ownKind = node.attributes[CARD_MASK_ATTRIBUTE];
   const kind: CardMaskKind | undefined =
-    ownKind === "pan" || ownKind === "cvv" ? ownKind : (targetKinds.get(node.id) ?? inheritedKind);
+    ownKind === "pan" || ownKind === "cvv"
+      ? ownKind
+      : (targetKinds.get(node.id) ?? (nodeHasReleasedCvv(node, records) ? "cvv" : inheritedKind));
   node.value =
     kind === "pan"
       ? CARD_NUMBER_MASK
@@ -159,10 +189,11 @@ export class CardValueOutputMask {
   }
 
   /** Raw values for the internal, pre-output screenshot rectangle finder only. */
-  screenshotNeedles(): { pans: string[]; cvvs: string[] } {
+  screenshotNeedles(): { pans: string[]; cvvs: string[]; cvvNameSource: string } {
     return {
       pans: this.records.map((record) => record.panDigits),
       cvvs: this.records.map((record) => record.cvv),
+      cvvNameSource: CVV_IDENTITY_SOURCE,
     };
   }
 
@@ -177,15 +208,37 @@ export class CardValueOutputMask {
     return out as T;
   }
 
+  private inferredInteractiveKind(element: InteractiveElement): CardMaskKind | undefined {
+    const targetKind = this.targets.find(
+      (target) =>
+        target.selector === element.selector && target.framePath === (element.framePath ?? null),
+    )?.kind;
+    if (element.cardMaskKind === "pan" || element.cardMaskKind === "cvv") {
+      return element.cardMaskKind;
+    }
+    if (targetKind !== undefined) return targetKind;
+    const identity = [
+      element.name,
+      element.id,
+      element.autocomplete,
+      element.placeholder,
+      element.ariaLabel,
+      element.compactNames?.accessibleName,
+      element.compactNames?.labelText,
+    ].filter((value): value is string => typeof value === "string");
+    const digits = (element.value ?? "").replace(/\D/g, "");
+    if (
+      identity.some((value) => cvvKeyPattern.test(value)) &&
+      this.records.some((record) => record.cvv === digits)
+    ) {
+      return "cvv";
+    }
+    return undefined;
+  }
+
   maskInteractiveElements(elements: readonly InteractiveElement[]): InteractiveElement[] {
     return elements.map((element) => {
-      const kind =
-        element.cardMaskKind ??
-        this.targets.find(
-          (target) =>
-            target.selector === element.selector &&
-            target.framePath === (element.framePath ?? null),
-        )?.kind;
+      const kind = this.inferredInteractiveKind(element);
       const masked = this.maskValue(element);
       if (kind === "pan") masked.value = CARD_NUMBER_MASK;
       if (kind === "cvv") masked.value = SECURITY_CODE_MASK;
@@ -201,13 +254,7 @@ export class CardValueOutputMask {
     if (!this.active) return capture;
     const targetKinds = new Map<string, CardMaskKind>();
     for (const [id, element] of capture.nodeElements) {
-      const kind =
-        element.cardMaskKind ??
-        this.targets.find(
-          (target) =>
-            target.selector === element.selector &&
-            target.framePath === (element.framePath ?? null),
-        )?.kind;
+      const kind = this.inferredInteractiveKind(element);
       if (kind === "pan" || kind === "cvv") targetKinds.set(id, kind);
     }
     maskNode(capture.root, this.records, targetKinds);
@@ -224,112 +271,38 @@ export class CardValueOutputMask {
   }
 }
 
-const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-
-function crc32(bytes: Buffer): number {
-  let crc = 0xffffffff;
-  for (const byte of bytes) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
-function pngChunk(type: string, data: Buffer): Buffer {
-  const name = Buffer.from(type, "ascii");
-  const length = Buffer.alloc(4);
-  length.writeUInt32BE(data.length);
-  const crc = Buffer.alloc(4);
-  crc.writeUInt32BE(crc32(Buffer.concat([name, data])));
-  return Buffer.concat([length, name, data, crc]);
-}
-
-function paeth(left: number, up: number, upperLeft: number): number {
-  const estimate = left + up - upperLeft;
-  const dl = Math.abs(estimate - left);
-  const du = Math.abs(estimate - up);
-  const dul = Math.abs(estimate - upperLeft);
-  return dl <= du && dl <= dul ? left : du <= dul ? up : upperLeft;
-}
-
-/** Paint opaque neutral rectangles into an 8-bit RGB/RGBA PNG. */
-export function compositePngCardMasks(base64: string, rects: readonly PixelMaskRect[]): string {
+/** Paint opaque neutral rectangles into a captured PNG without touching the page. */
+export async function compositePngCardMasks(
+  base64: string,
+  rects: readonly PixelMaskRect[],
+): Promise<string> {
   if (rects.length === 0) return base64;
   const png = Buffer.from(base64, "base64");
-  if (!png.subarray(0, 8).equals(PNG_SIGNATURE)) throw new Error("card_mask_expected_png");
-  let offset = 8;
-  let ihdr: Buffer | undefined;
-  const compressed: Buffer[] = [];
-  while (offset + 12 <= png.length) {
-    const length = png.readUInt32BE(offset);
-    const type = png.subarray(offset + 4, offset + 8).toString("ascii");
-    const data = png.subarray(offset + 8, offset + 8 + length);
-    if (type === "IHDR") ihdr = Buffer.from(data);
-    if (type === "IDAT") compressed.push(Buffer.from(data));
-    offset += 12 + length;
-    if (type === "IEND") break;
-  }
-  if (ihdr === undefined || compressed.length === 0) throw new Error("card_mask_invalid_png");
-  const width = ihdr.readUInt32BE(0);
-  const height = ihdr.readUInt32BE(4);
-  const bitDepth = ihdr[8];
-  const colorType = ihdr[9];
-  if (bitDepth !== 8 || (colorType !== 2 && colorType !== 6) || ihdr[12] !== 0) {
-    throw new Error("card_mask_unsupported_png");
-  }
-  const channels = colorType === 6 ? 4 : 3;
-  const stride = width * channels;
-  const filtered = inflateSync(Buffer.concat(compressed));
-  const pixels = Buffer.alloc(stride * height);
-  let source = 0;
-  for (let y = 0; y < height; y += 1) {
-    const filter = filtered[source++]!;
-    for (let x = 0; x < stride; x += 1) {
-      const raw = filtered[source++]!;
-      const left = x >= channels ? pixels[y * stride + x - channels]! : 0;
-      const up = y > 0 ? pixels[(y - 1) * stride + x]! : 0;
-      const upperLeft = y > 0 && x >= channels ? pixels[(y - 1) * stride + x - channels]! : 0;
-      const decoded =
-        filter === 0
-          ? raw
-          : filter === 1
-            ? raw + left
-            : filter === 2
-              ? raw + up
-              : filter === 3
-                ? raw + Math.floor((left + up) / 2)
-                : filter === 4
-                  ? raw + paeth(left, up, upperLeft)
-                  : NaN;
-      if (!Number.isFinite(decoded)) throw new Error("card_mask_invalid_png_filter");
-      pixels[y * stride + x] = decoded & 0xff;
-    }
-  }
-  for (const rect of rects) {
-    const left = Math.max(0, Math.floor(rect.x));
-    const top = Math.max(0, Math.floor(rect.y));
-    const right = Math.min(width, Math.ceil(rect.x + rect.width));
-    const bottom = Math.min(height, Math.ceil(rect.y + rect.height));
-    for (let y = top; y < bottom; y += 1) {
-      for (let x = left; x < right; x += 1) {
-        const pixel = y * stride + x * channels;
-        pixels[pixel] = 232;
-        pixels[pixel + 1] = 232;
-        pixels[pixel + 2] = 232;
-        if (channels === 4) pixels[pixel + 3] = 255;
-      }
-    }
-  }
-  const scanlines = Buffer.alloc((stride + 1) * height);
-  for (let y = 0; y < height; y += 1) {
-    const row = y * (stride + 1);
-    scanlines[row] = 0;
-    pixels.copy(scanlines, row + 1, y * stride, (y + 1) * stride);
-  }
-  return Buffer.concat([
-    PNG_SIGNATURE,
-    pngChunk("IHDR", ihdr),
-    pngChunk("IDAT", deflateSync(scanlines)),
-    pngChunk("IEND", Buffer.alloc(0)),
-  ]).toString("base64");
+  const metadata = await sharp(png).metadata();
+  const width = metadata.width;
+  const height = metadata.height;
+  if (width === undefined || height === undefined) throw new Error("card_mask_invalid_png");
+  const boxes = rects
+    .map((rect) => {
+      const x = Math.max(0, Math.floor(rect.x));
+      const y = Math.max(0, Math.floor(rect.y));
+      const right = Math.min(width, Math.ceil(rect.x + rect.width));
+      const bottom = Math.min(height, Math.ceil(rect.y + rect.height));
+      return { x, y, width: right - x, height: bottom - y };
+    })
+    .filter((rect) => rect.width > 0 && rect.height > 0);
+  if (boxes.length === 0) return base64;
+  const overlay = Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">${boxes
+      .map(
+        (rect) =>
+          `<rect x="${rect.x}" y="${rect.y}" width="${rect.width}" height="${rect.height}" fill="#e8e8e8"/>`,
+      )
+      .join("")}</svg>`,
+  );
+  const output = await sharp(png)
+    .composite([{ input: overlay, top: 0, left: 0 }])
+    .png({ compressionLevel: 9, adaptiveFiltering: true })
+    .toBuffer();
+  return output.toString("base64");
 }

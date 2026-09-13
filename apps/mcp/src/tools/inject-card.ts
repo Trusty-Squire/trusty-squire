@@ -22,7 +22,7 @@ const targetSchema = z.object({
 });
 
 const inputSchema = z.object({
-  session_id: z.string().uuid().optional(),
+  session_id: z.string().uuid(),
   merchant: z.string().trim().min(1).max(256),
   amount_cents: z.number().int().min(0).max(2_147_483_647),
   currency: z.string().regex(/^[A-Za-z]{3}$/),
@@ -119,11 +119,20 @@ function pendingResult(session: Session, result: Record<string, unknown>): Recor
 export const injectCardTool: Tool<InjectCardInput> = {
   name: "inject_card",
   description:
-    "Release one saved card under the existing single human purchase approval and fill only the supplied observation refs. Supply refs for pan/cvv/expiry/name from operate_observe; each may target the main document or any reachable frame. This tool never searches for payment providers, chooses a card UI, reads or validates the total, clicks submit, clears fields, or diagnoses the checkout. Partial results are ordinary browser outcomes; retry changed refs with the same approval_id. The released PAN/CVV are masked from all normal operator output before the first write.",
+    "Release one saved card under the existing single human purchase approval and fill only the supplied observation refs. Supply session_id and refs for pan/cvv/expiry/name from operate_observe; each may target the main document or any reachable frame. Avoid provider helper/autofill/focus inputs and choose the actual card control. This tool never searches for payment providers, chooses a card UI, reads or validates the total, clicks submit, clears fields, or diagnoses the checkout. Partial results are ordinary browser outcomes; retry changed refs with the same approval_id. Before placing the order, re-observe and confirm no competing saved-card control is selected. If 3-D Secure appears, immediately notify the cardholder in chat and ask them to complete it. The released PAN/CVV are masked from all normal operator output before the first write.",
   inputSchema,
   jsonInputSchema: {
     type: "object",
-    required: ["merchant", "amount_cents", "currency", "item", "reason", "card_ref", "fields"],
+    required: [
+      "session_id",
+      "merchant",
+      "amount_cents",
+      "currency",
+      "item",
+      "reason",
+      "card_ref",
+      "fields",
+    ],
     properties: {
       session_id: { type: "string", format: "uuid" },
       merchant: { type: "string" },

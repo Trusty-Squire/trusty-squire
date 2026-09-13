@@ -78,7 +78,7 @@ describe("direct card injection and masked observation", () => {
             return route.fulfill({
               status: 401,
               contentType: "application/json",
-              body: `{"card":"${CARD.pan}","cvc":"${CARD.cvv}","status":401}`,
+              body: `{"card":"${CARD.pan}","card_code":"${CARD.cvv}","status":401}`,
             });
           }
           return route.fulfill({ status: 404, body: "not found" });
@@ -120,9 +120,22 @@ describe("direct card injection and masked observation", () => {
         const frame = isolated.page.frames().find((candidate) => candidate.url() === frameUrl)!;
         expect(await frame.locator('[name="cvv"]').inputValue()).toBe(CARD.cvv);
 
+        await isolated.page.locator('[name="number"]').evaluate((node, card) => {
+          node.outerHTML = `<input id="number-rerendered" name="card-number" value="${card.pan}">`;
+        }, CARD);
+        await frame.locator('[name="cvv"]').evaluate((node, card) => {
+          node.outerHTML = `<input id="security-rerendered" name="cvv2" aria-label="Security code" value="${card.cvv}">`;
+        }, CARD);
+        expect(
+          await isolated.page.locator("#number-rerendered").getAttribute("data-ts-card-mask"),
+        ).toBeNull();
+        expect(
+          await frame.locator("#security-rerendered").getAttribute("data-ts-card-mask"),
+        ).toBeNull();
+
         await isolated.page.evaluate((card) => {
           const mirror = document.createElement("div");
-          mirror.textContent = `Card ${card.pan}; CVV ${card.cvv}`;
+          mirror.textContent = `Card ${card.pan}; prefix ${card.pan.slice(0, 10)}; CVV ${card.cvv}`;
           document.body.append(mirror);
           console.error(`declined card ${card.pan} security code ${card.cvv}`);
         }, CARD);
@@ -130,7 +143,7 @@ describe("direct card injection and masked observation", () => {
           await fetch("https://merchant.test/decline", {
             method: "POST",
             headers: { "content-type": "application/json", "x-api-key": "api-visible" },
-            body: JSON.stringify({ card_number: card.pan, cvv: card.cvv }),
+            body: JSON.stringify({ card_number: card.pan, cvv2: card.cvv }),
           }).catch(() => undefined);
         }, CARD);
         await new Promise((resolve) => setTimeout(resolve, 100));
@@ -155,6 +168,7 @@ describe("direct card injection and masked observation", () => {
           JSON.stringify(subtree),
         ]) {
           expect(output).not.toContain(CARD.pan);
+          expect(output).not.toContain(CARD.pan.slice(0, 10));
           expect(output).not.toMatch(/(?:CVV|security code|\"cvv\"|\"cvc\")[^\n]{0,20}123/i);
         }
         expect(dom).toContain("[card number]");

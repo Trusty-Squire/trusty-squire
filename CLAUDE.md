@@ -127,11 +127,13 @@ silent failures.
     `frame_url_contains` — the case it exists for: a cross-origin ACS/challenge
     or captcha iframe a full-page shot won't show clearly). Read-only — no
     navigation, click, type, focus/`bringToFront`, or DOM mutation.
-    It returns page pixels with only the released complete PAN and security-code
-    pixels composited out. The session-persistent card-value output mask tracks
-    injected node identities across re-renders and never refuses the capture or
-    mutates merchant fields. Do not widen it into general redaction or a content
-    gate; see `AGENTS.md` §11/§16 and `docs/observation-model.md` §4.5. Server-
+    It returns page pixels with only the released PAN and security-code pixels
+    composited out. `inject_card` marks the nodes it writes with a mask-provenance
+    attribute; screenshot capture itself does not clear, focus, or change their
+    values. A masked capture fails if the mask cannot scan or composite the
+    capture; an active mask is never bypassed. Do not widen it into general
+    redaction or a content gate; see
+    `AGENTS.md` §11/§16 and `docs/observation-model.md` §4.5. Server-
     side, a tool result carrying `image:{mime_type,data_base64}` (this tool,
     or any future one) gets a real MCP `type:"image"` content block
     (`toolResultContent` in `server.ts`), not base64 buried in JSON text.
@@ -604,10 +606,11 @@ the narrow released-card value mask; its remaining roadmap is historical.
 
 Observations return what the page renders — field values, labels, the live URL
 (path and query included), and rendered API keys alike — except for the released
-complete PAN and CVV/CVC/CID. `CardValueOutputMask` replaces those values in all
-model-facing text and composites only their injected control pixels out of
-screenshots. It is session-persistent output state, not a browser-action gate or
-a general secret scanner. Raw Runtime.evaluate remains internal. See
+PAN (including ordinary formatted spellings and prefixes of at least eight
+digits) and CVV/CVC/CID. `CardValueOutputMask` replaces those values in
+model-facing text and composites their value-bearing control and copy pixels out
+of screenshots. It is session-persistent output state, not a browser-action gate
+or a general secret scanner. Raw Runtime.evaluate remains internal. See
 [`docs/browser-use-serializer-port.md`](docs/browser-use-serializer-port.md),
 §4.5, and `AGENTS.md` §11/§16.
 
@@ -640,7 +643,9 @@ Keep approval timing, denial/expiry custody, same-approval resume guidance, and
 the direct observation/action contract in those owners rather than copying them
 here. `inject_card` writes only explicitly named frame/node targets; the agent
 handles late mounts, total/currency reads, card choice, submission, 3DS, and
-outcome evidence through generic operator tools.
+outcome evidence through generic operator tools. It re-observes before submission
+for competing selected saved-card controls and immediately notifies the
+cardholder in chat when a 3DS challenge appears.
 
 ### Browser egress is unrestricted
 

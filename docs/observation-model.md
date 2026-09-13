@@ -169,17 +169,21 @@ Per-element cropped screenshots are O(N) calls — a flower grid would be death 
 
 `operate_observe`, `operate_network`, console/error evidence, and
 `operate_screenshot` expose the live checkout directly. They have one narrow
-exception: after `inject_card` opens a released card, that card's complete PAN
-and CVV/CVC/CID are replaced before any normal operator output. The record is
-installed before the first field write and remains for the browser session,
-including after rerenders, navigation, partial fills, or cleared controls.
+exception: after `inject_card` opens a released card, that card's PAN (complete
+or an ordinary displayed prefix of at least eight digits) and CVV/CVC/CID are
+replaced before any normal operator output. The record is installed before the
+first field write and remains for the browser session, including after
+rerenders, navigation, partial fills, or cleared controls.
 
 - Compact versus full observation remains a size/shape choice. The mask applies
   to emitted DOM/AX values, properties, attributes, text, URLs, errors, headers,
-  and request/response bodies. PAN formatting with spaces or hyphens is covered.
+  and request/response bodies. PAN formatting with whitespace, common hyphens,
+  periods, or middle dots is covered.
 - `operate_screenshot` composites masks over value-bearing pixels of injected
   controls and identified ordinary displayed copies. It preserves their borders,
-  labels, validation errors, and every unrelated pixel. Capturing is never refused.
+  labels, validation errors, and surrounding pixels. An active mask is never
+  bypassed; if the mask cannot scan or composite the capture, the screenshot
+  call fails rather than returning the unmasked image.
 - Merchant last4, brand/issuer, cardholder name, expiry, billing address, amount,
   currency, DCC text, OTP/3DS controls, HTTP error bodies, API keys, cookies, PII,
   and all unrelated three- or four-digit values remain visible. This is not a
@@ -193,16 +197,20 @@ including after rerenders, navigation, partial fills, or cleared controls.
 
 **Boundary and accepted limit.** The normal read API is the masked capture;
 raw `Runtime.evaluate` remains operator-internal and the live browser is not also
-exposed as an unfiltered debugger. Ordinary forms and reachable hosted fields are
-covered. A hostile page can transform, split, encode, or draw a value (for example
-into canvas pixels) so it no longer matches the released value; this design does
-not claim adversarial information-flow containment. It deliberately adds no
-entropy detector, vendor-prefix table, broad Luhn scan, host allowlist, or second
-approval.
+exposed as an unfiltered debugger. The boundary is designed for ordinary forms
+and reachable hosted fields; provider-specific behavior is verified through
+field results and fresh observations. A hostile page can transform, split,
+encode, or draw a value (for example into canvas pixels) so it no longer matches
+the released value; this design does not claim adversarial information-flow
+containment. It deliberately adds no entropy detector, vendor-prefix table,
+broad Luhn scan, host allowlist, or second approval.
 
 **What stays separate.** The vault's write-only property, `use_credential`'s
 server-side injection, and the existing single human purchase approval remain.
 The output mask observes but never blocks or changes a browser action.
+`inject_card` does add a `data-ts-card-mask` provenance attribute to each field
+it writes; screenshot compositing itself does not clear, focus, or change a
+merchant field value.
 
 Structured audit records and captured action traces carry closed-vocabulary
 metadata rather than card values. Browser-originated logs, errors, and
@@ -234,7 +242,7 @@ One handle names a skeleton row, addresses an `expand`/`read`, and labels a set-
 - Fill a 5+ field dynamic checkout (name/street/city/zip) in one observe + N acts without a re-observe-per-field, on a page that re-renders between acts.
 - Page-token churn (`?_r=` changing) does not invalidate refs on the same origin+path; a real path change does.
 - Set-of-marks screenshot labels every interactive element with its ref; a product grid is actionable from one image.
-- A rendered API key / recovery code stays visible. A released card's complete PAN/CVV is replaced in DOM/network/error output and covered in screenshots; no page or frame is sealed and no capture is refused.
+- A rendered API key / recovery code stays visible. A released card's PAN/CVV is replaced in DOM/network/error output and covered in screenshots; no page or frame is sealed, and an image is never returned by bypassing an active mask.
 - Recorded recipe replay still resolves its targets under descriptive refs.
 
 ## 8. Review outcomes (plan-eng-review, 2026-09-02)
