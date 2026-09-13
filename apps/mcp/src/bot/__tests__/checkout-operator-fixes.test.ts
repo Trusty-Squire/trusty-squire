@@ -285,9 +285,8 @@ describe("Defect B — scoped order-summary total vs recommendation noise", () =
 });
 
 // ── Defect C ────────────────────────────────────────────────────────────────
-// operate_pay must refuse PayPal/Braintree-hosted card fields ONLY when the
-// ACTUAL card field lives in one — a PayPal express button on an otherwise
-// fillable Shopify-PCI checkout must not cause a false-positive refusal.
+// Fillable hosted card fields take precedence over express wallets, including
+// fields that mount during the existing bounded readiness wait.
 
 describe("Defect C — PayPal guard keys off the actual card-field frame", () => {
   it("recognizes Shopify PCI card-field frames as fillable", () => {
@@ -299,51 +298,69 @@ describe("Defect C — PayPal guard keys off the actual card-field frame", () =>
     ).toBe(true);
   });
 
-  const panFrame = (url: string, panFields = 1) => ({
-    url: () => url,
-    locator: () => ({
-      count: async () => panFields,
-      nth: () => ({ isVisible: async () => true, isEnabled: async () => true }),
-    }),
+  const cardFrame = (url: string, body = '<input autocomplete="cc-number">', name = "") => ({
+    url,
+    body,
+    name,
   });
 
-  const browserWith = (frames: Array<{ url: () => string; locator: () => unknown }>) => {
-    const browser = new BrowserController({ humanize: false });
-    const page = {
-      frames: () => frames,
-      url: () => "https://acme.myshopify.com/checkout",
-    };
-    Object.defineProperty(browser, "page", { value: page });
-    return browser;
-  };
-
-  it("does NOT refuse a Shopify-PCI checkout that merely has a PayPal express button", async () => {
-    const browser = browserWith([
-      panFrame("https://acme.myshopify.com/checkout", 0),
-      panFrame("https://checkout.pci.shopifyinc.com/card-fields", 1),
-      panFrame("https://www.paypal.com/smart/buttons", 0),
-    ]);
-    await expect(browser.isPayPalHostedCheckout()).resolves.toBe(false);
-  });
-
-  it("still refuses when the card field itself is a genuine PayPal hosted-fields frame", async () => {
-    const browser = browserWith([
-      panFrame("https://www.paypal.com/vault/card-fields", 0),
-      panFrame("https://www.paypal.com/card-fields", 1),
-    ]);
-    await expect(browser.isPayPalHostedCheckout()).resolves.toBe(true);
-  });
-
-  it("still refuses Braintree hosted fields", async () => {
-    const browser = browserWith([panFrame("https://assets.braintreegateway.com/card-fields", 1)]);
-    await expect(browser.isPayPalHostedCheckout()).resolves.toBe(true);
-  });
-
-  it("reports false when no card (PAN) field is present yet", async () => {
-    const browser = browserWith([
-      panFrame("https://acme.myshopify.com/checkout", 0),
-      panFrame("https://www.paypal.com/smart/buttons", 0),
-    ]);
-    await expect(browser.isPayPalHostedCheckout()).resolves.toBe(false);
-  });
+  it.each([
+    {
+      name: "does NOT refuse Shopify PCI beside a PayPal express button",
+      frames: [
+        cardFrame("https://checkout.pci.shopifyinc.com/card-fields"),
+        cardFrame("https://www.paypal.com/smart/buttons", "<button>PayPal</button>"),
+      ],
+      refused: false,
+    },
+    {
+      name: "still refuses a genuine PayPal wallet-host card surface",
+      frames: [cardFrame("https://www.paypal.com/card-fields")],
+      refused: true,
+    },
+    {
+      name: "accepts Braintree hosted card fields identified by frame name",
+      frames: [cardFrame(
+        "https://assets.braintreegateway.com/card-fields",
+        '<input id="opaque-input">',
+        "braintree-hosted-field-number",
+      )],
+      refused: false,
+    },
+    {
+      name: "accepts Stripe Elements card fields",
+      frames: [cardFrame("https://js.stripe.com/card-fields", '<input name="cardnumber">')],
+      refused: false,
+    },
+    {
+      name: "refuses a wallet-only checkout after the card readiness wait",
+      frames: [cardFrame("https://www.paypal.com/smart/buttons", "<button>PayPal</button>")],
+      refused: true,
+    },
+    {
+      name: "reports false when neither a card nor a wallet is present",
+      frames: [],
+      refused: false,
+    },
+  ])("$name", async ({ frames, refused }) => {
+    const engine = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
+    try {
+      const page = await engine.newPage();
+      await page.route("**/*", async (route) => {
+        const frame = frames.find((candidate) => candidate.url === route.request().url());
+        await route.fulfill({
+          contentType: "text/html",
+          body: frame?.body ?? frames.map((candidate) =>
+            `<iframe name="${candidate.name}" src="${candidate.url}"></iframe>`,
+          ).join(""),
+        });
+      });
+      await page.goto("https://acme.myshopify.com/checkout");
+      const browser = new BrowserController({ humanize: false });
+      Object.defineProperty(browser, "page", { value: page });
+      await expect(browser.isPayPalHostedCheckout()).resolves.toBe(refused);
+    } finally {
+      await engine.close();
+    }
+  }, 20_000);
 });
