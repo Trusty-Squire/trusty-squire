@@ -306,6 +306,8 @@ export async function buildServer(
             workBudgetMs,
           )
         : undefined;
+    const sessionId =
+      typeof parsed.data.session_id === "string" ? parsed.data.session_id : undefined;
     let lifecycleHeldByWork = false;
     try {
       const callApi = activeApi;
@@ -369,8 +371,6 @@ export async function buildServer(
       );
     } catch (err) {
       const rawMessage = err instanceof Error ? err.message : String(err);
-      const sessionId =
-        typeof parsed.data.session_id === "string" ? parsed.data.session_id : undefined;
       const message =
         sessionId === undefined ? rawMessage : maskOperatorSessionOutput(sessionId, rawMessage);
       const loginSession =

@@ -25,7 +25,6 @@ describe("broker discovery election", () => {
     election = undefined;
     await mkdir(profile);
     vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profile);
-    vi.stubEnv("TRUSTY_SQUIRE_BROKER_SUPERVISED", undefined);
     vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", undefined);
     vi.resetModules();
     state.spawn.mockReset();
@@ -104,7 +103,7 @@ describe("broker discovery election", () => {
     await rm(socket.slice(0, socket.lastIndexOf("/")), { recursive: true });
   });
 
-  it("finds a supervised election holder without a frontend supervision flag", async () => {
+  it("attaches to an election holder without launching another broker", async () => {
     const { discovery, profileModule, transport } = await modules();
     const electionRoot = discovery.brokerElectionRoot(profile);
     await mkdir(electionRoot, { recursive: true, mode: 0o700 });
@@ -116,32 +115,6 @@ describe("broker discovery election", () => {
 
     expect(state.spawn).not.toHaveBeenCalled();
     await client.close();
-  });
-
-  it("upgrades an incumbent owner through an authenticated supervisor attachment", async () => {
-    const { transport } = await modules();
-    let supervised = false;
-    listener = await transport.listenBroker(socket, {
-      authenticate: async (_token, _agentId, _lineage, supervisor) =>
-        supervisor
-          ? { accountId: "account", agentId: "supervisor", supervisor: true as const }
-          : { accountId: "account", agentId: "agent", forwarderId: "lineage" },
-      connected: async () => undefined,
-      call: async (principal, method) => {
-        if (method === "supervise") {
-          expect(principal.supervisor).toBe(true);
-          supervised = true;
-        }
-        return {};
-      },
-      disconnect: async () => undefined,
-    });
-
-    const supervisor = await transport.BrokerClient.connectSupervisor(socket, "token");
-    await supervisor.call("supervise", {});
-
-    expect(supervised).toBe(true);
-    await supervisor.close();
   });
 
   it("lets one launch contender establish the owner and reconnects its loser", async () => {

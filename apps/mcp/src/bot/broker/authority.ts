@@ -8,7 +8,6 @@ export interface BrokerPrincipal {
   agentId: string;
   forwarderId?: string;
   clientId: string;
-  supervisor?: true;
 }
 export interface TabCapability {
   cellId: string;

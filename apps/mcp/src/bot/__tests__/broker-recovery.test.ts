@@ -1,5 +1,5 @@
 import type * as Profile from "../profile.js";
-import { mkdir, mkdtemp, lstat, rm, writeFile, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, lstat, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -18,7 +18,6 @@ beforeEach(async () => {
   const profile = join(root, "profile");
   await mkdir(profile);
   vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profile);
-  vi.stubEnv("TRUSTY_SQUIRE_BROKER_SUPERVISED", undefined);
   vi.resetModules();
   socket = join(root, "broker.sock");
   await writeFile(socket, "fixture endpoint inode");
@@ -32,7 +31,6 @@ beforeEach(async () => {
       profileDir: profile,
       inode: endpoint.ino,
       device: endpoint.dev,
-      supervised: false,
     }),
   );
   state.birth = "matching";
@@ -45,7 +43,7 @@ afterEach(async () => {
 async function stalled() {
   const { BrokerRefusal } = await import("../broker/scheduler.js");
   const { BrokerClient } = await import("../broker/transport.js");
-  vi.spyOn(BrokerClient, "connectSupervisor").mockRejectedValue(
+  vi.spyOn(BrokerClient, "connect").mockRejectedValue(
     new BrokerRefusal("broker_handshake_timeout", "Broker hello handshake timed out"),
   );
   return await import("../broker/discovery.js");
@@ -66,7 +64,7 @@ it("retires only the birth-proven unresponsive owner and preserves its journal",
 });
 it("does not terminate a healthy broker when a lineage handoff was slow", async () => {
   const { BrokerClient } = await import("../broker/transport.js");
-  vi.spyOn(BrokerClient, "connectSupervisor").mockResolvedValue({
+  vi.spyOn(BrokerClient, "connect").mockResolvedValue({
     close: async () => undefined,
   } as never);
   const signal = vi.spyOn(process, "kill").mockImplementation(() => true);
@@ -88,41 +86,5 @@ it("does not signal an owner when its endpoint was replaced", async () => {
   const owner = JSON.parse(await readFile(`${socket}.owner.json`, "utf8"));
   await writeFile(`${socket}.owner.json`, JSON.stringify({ ...owner, inode: owner.inode + 1 }));
   await expect(retireUnresponsiveBroker(socket, "token")).rejects.toThrow("ownership");
-  expect(signal).not.toHaveBeenCalled();
-});
-
-it.each([true, undefined])(
-  "refuses retirement when incumbent supervision is %s",
-  async (supervised) => {
-    const { retireUnresponsiveBroker, reclaimDeadBrokerEndpoint } = await stalled();
-    const owner = JSON.parse(await readFile(`${socket}.owner.json`, "utf8"));
-    await writeFile(`${socket}.owner.json`, JSON.stringify({ ...owner, supervised }));
-    const signal = vi.spyOn(process, "kill").mockImplementation(() => true);
-    await expect(retireUnresponsiveBroker(socket, "token")).rejects.toThrow("supervisor");
-    expect(signal).not.toHaveBeenCalled();
-    state.birth = "stale";
-    await expect(reclaimDeadBrokerEndpoint(socket)).rejects.toThrow("supervisor");
-    expect(await readFile(`${socket}.owner.json`, "utf8")).toBeDefined();
-  },
-);
-it("persists a supervision upgrade and prevents ordinary retirement", async () => {
-  const { publishEndpointOwner, retainBrokerSupervision, retireUnresponsiveBroker } =
-    await stalled();
-  await rm(`${socket}.owner.json`);
-  await publishEndpointOwner(socket);
-  retainBrokerSupervision(socket);
-  expect(JSON.parse(await readFile(`${socket}.owner.json`, "utf8")).supervised).toBe(true);
-  const signal = vi.spyOn(process, "kill").mockImplementation(() => true);
-  await expect(retireUnresponsiveBroker(socket, "token")).rejects.toThrow("supervisor");
-  expect(signal).not.toHaveBeenCalled();
-});
-it("publishes foreground supervisor ownership for ordinary clients", async () => {
-  const { publishEndpointOwner, retireUnresponsiveBroker } = await stalled();
-  await rm(`${socket}.owner.json`);
-  vi.stubEnv("TRUSTY_SQUIRE_BROKER_SUPERVISED", "1");
-  await publishEndpointOwner(socket);
-  vi.stubEnv("TRUSTY_SQUIRE_BROKER_SUPERVISED", undefined);
-  const signal = vi.spyOn(process, "kill").mockImplementation(() => true);
-  await expect(retireUnresponsiveBroker(socket, "token")).rejects.toThrow("supervisor");
   expect(signal).not.toHaveBeenCalled();
 });

@@ -22,7 +22,7 @@ describe("authenticated broker IPC", () => {
     });
     await new Promise<void>((resolve) => server.listen(path, resolve));
     try {
-      await expect(BrokerClient.connectSupervisor(path, "token")).rejects.toMatchObject({
+      await expect(BrokerClient.connect(path, "token")).rejects.toMatchObject({
         code: "broker_handshake_timeout",
       });
     } finally {

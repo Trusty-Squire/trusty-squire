@@ -36,13 +36,8 @@ launcher-supplied base64url credential (at least 32 random bytes). Same-lineage
 recovery requires possession of that exact credential; it is never automatically
 persisted or assigned to another client. Never share that override between siblings.
 
-Set `TRUSTY_SQUIRE_BROKER_SUPERVISED=1` for a separately managed foreground service.
-In that mode a missing broker is an error and zero clients never releases the lease.
-The endpoint owner record retains supervision, including authenticated `supervise`
-upgrades. Ordinary clients never retire or reclaim a supervised or unproven owner;
-its supervisor remains responsible for replacement.
-Otherwise automatic startup applies and `TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS`
-defaults to five minutes, clamped to a minimum of one minute. Idle shutdown never
+`TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS` defaults to five minutes, clamped to a
+minimum of one minute. Idle shutdown never
 changes the fact that the next operator call must attach or start a broker.
 The account must already be enrolled through `connect`; authentication reads its
 existing agent session token from session storage, never command-line token
@@ -51,8 +46,7 @@ after validating that enrolled token, it creates a one-use local identity solely
 to drain and resume maintenance. That identity cannot recover or reclaim MCP
 sessions.
 
-An unsupervised first client may start `node apps/mcp/dist/bin.js broker` if
-necessary. A supervised broker must already be running as a foreground service.
+The first client starts `node apps/mcp/dist/bin.js broker` when necessary.
 Socket mode is 0600. No CDP endpoint or browser
 handle crosses IPC. `TRUSTY_SQUIRE_AGENT_IDENTITY` supplies a connection's agent
 label. The lineage credential proves reconnect ownership independently of that
@@ -78,8 +72,7 @@ binding. Browser epoch changes invalidate earlier capabilities.
   is serialized by the launch lease and bounded through SIGTERM then SIGKILL.
   The existing owner reaper closes Chrome. Dead endpoint reclamation waits for
   that physical profile to become free, and preserves the dispatch journal.
-  A supervised broker remains its supervisor's responsibility. Neither recovery
-  path replays a mutation or bypasses journal reconciliation.
+  Neither recovery path replays a mutation or bypasses journal reconciliation.
 - Each session owns a target family, capability generation, serialized command
   queue, and site reservations. The service URL reserves its site before page
   acquisition. Conflicting site custody queues until the existing owner releases it.
@@ -181,9 +174,8 @@ binding. Browser epoch changes invalidate earlier capabilities.
   run the journal checker and require `DispatchJournal.assertReconciled()` to
   return normally. These preconditions rely on the acceptance report's retained
   tool output as the failure evidence; without it, leave the record fenced.
-- Unsupervised idle shutdown requires zero connected clients and zero active,
+- Idle shutdown requires zero connected clients and zero active,
   admitting, or quarantined sessions for the configured minutes-scale bound.
-  Supervised brokers stop only on their supervisor signal or an explicit drain.
   Graceful Chrome closure precedes lease release. Socket recovery requires
   process birth, endpoint inode, and old-profile-free evidence.
 

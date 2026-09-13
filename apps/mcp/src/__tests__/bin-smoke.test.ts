@@ -229,8 +229,8 @@ describe("launched through a bin symlink", () => {
 
     const replies = await mcpConversation(link, home, [
       // The replacement flat verbs retain malformed-input handling: an invalid
-      // select shape, a type call without text or a sealed slot, conflicting
-      // card selectors, and a click without its ref.
+      // select shape, a type call without text or a sealed slot, malformed
+      // card field targets, and a click without its ref.
       {
         name: "operate_select",
         arguments: { session_id: "s1", ref: "@e:quantity", values: [] },
@@ -240,12 +240,16 @@ describe("launched through a bin symlink", () => {
         arguments: { session_id: "s1", ref: "@e:card-number" },
       },
       {
-        name: "operate_pay",
+        name: "inject_card",
         arguments: {
-          item: "Rakuten cart",
+          session_id: "00000000-0000-4000-8000-000000000001",
+          merchant: "Test merchant",
+          amount_cents: 100,
+          currency: "USD",
+          item: "Test cart",
           reason: "checkout",
           card_ref: "card_a",
-          card_label: "Personal",
+          fields: { pan: {} },
         },
       },
       { name: "operate_click", arguments: { session_id: "s1" } },

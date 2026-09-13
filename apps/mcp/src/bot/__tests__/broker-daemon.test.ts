@@ -18,7 +18,7 @@ import {
   brokerIdleTimeoutMs,
   brokerShutdownCleanupComplete,
 } from "../broker/daemon.js";
-import { brokerEnvironment, brokerIsSupervised } from "../broker/discovery.js";
+import { brokerEnvironment } from "../broker/discovery.js";
 import { DispatchJournal } from "../broker/dispatch-journal.js";
 import { forwarderId } from "../broker/lineage.js";
 import { BrokerRefusal } from "../broker/scheduler.js";
@@ -59,17 +59,10 @@ it("keeps a forwarder's lineage credential out of the detached broker environmen
   ).toEqual({ PATH: "/bin", TRUSTY_SQUIRE_BROKER_SOCKET: "/tmp/broker.sock" });
 });
 
-it("uses a minutes-scale idle policy and disables it for supervised brokers", () => {
+it("uses a minutes-scale idle policy", () => {
   expect(brokerIdleTimeoutMs({})).toBe(5 * 60_000);
   expect(brokerIdleTimeoutMs({ TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS: "1000" })).toBe(60_000);
-  expect(brokerIdleTimeoutMs({ TRUSTY_SQUIRE_BROKER_SUPERVISED: "true" })).toBeUndefined();
-  expect(
-    brokerIdleTimeoutMs({
-      TRUSTY_SQUIRE_BROKER_SUPERVISED: "true",
-      TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS: "60000",
-    }),
-  ).toBeUndefined();
-  expect(brokerIsSupervised({ TRUSTY_SQUIRE_BROKER_SUPERVISED: "1" })).toBe(true);
+  expect(brokerIdleTimeoutMs({ TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS: "600000" })).toBe(600_000);
 });
 
 it("keeps startup browser work fenced while retained custody exposes only recovery", () => {
@@ -148,12 +141,11 @@ it("exposes recovery-only startup solely for the authorized retained Xata record
   }
 });
 
-it("defers unsupervised idle shutdown until reconnect custody resolves", () => {
+it("defers idle shutdown until reconnect custody resolves", () => {
   const idle = {
     closing: false,
     draining: false,
     connectedClients: 0,
-    idleTimeout: 60_000,
     inventory: { active: 0, quarantined: 0, admitting: 0 },
   };
   expect(brokerIdleShutdownEligible({ ...idle, hasReconnectGrace: false })).toBe(true);
@@ -270,7 +262,6 @@ itWithChromium(
           TRUSTY_SQUIRE_PROFILE_DIR: profile,
           TRUSTY_SQUIRE_REAPER_DIR: reapers,
           TRUSTY_SQUIRE_BROKER_SOCKET: socket,
-          TRUSTY_SQUIRE_BROKER_SUPERVISED: "1",
           UNIVERSAL_BOT_CHANNEL: "chrome",
           UNIVERSAL_BOT_CHROME_BINARY: chromium.executablePath(),
           BOT_SELF_LAUNCH: "1",
@@ -576,7 +567,6 @@ it("keeps a live control client, coordinates plain maintenance, refreshes creden
         TRUSTY_SQUIRE_REAPER_DIR: join(root, "reapers"),
         TRUSTY_SQUIRE_BROKER_SOCKET: socket,
         TRUSTY_SQUIRE_FORWARDER_CREDENTIAL: credential,
-        TRUSTY_SQUIRE_BROKER_SUPERVISED: "1",
         BOT_CDP_ENDPOINT: "",
       },
       stdio: ["ignore", "ignore", "pipe"],

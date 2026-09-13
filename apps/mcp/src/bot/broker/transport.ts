@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createServer, createConnection, type Socket } from "node:net";
 import { chmod, lstat, unlink } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomBytes } from "node:crypto";
 import { z } from "zod";
 import { BrokerRefusal } from "./scheduler.js";
 import {
@@ -71,7 +71,6 @@ export interface BrokerTransportPort {
     token: string,
     agentId?: string,
     lineageCredential?: string,
-    supervisor?: boolean,
   ): Promise<Omit<BrokerPrincipal, "clientId"> | null>;
   connected?(principal: BrokerPrincipal): Promise<void> | void;
   call(
@@ -127,14 +126,12 @@ export async function listenBroker(
           typeof request.params.lineageCredential === "string"
             ? request.params.lineageCredential
             : undefined;
-        const supervisor = request.params.supervisor === true;
         if (agentId.length === 0 || agentId.length > 128)
           throw new BrokerRefusal("unauthorized", "Invalid agent identity");
         const identity = await port.authenticate(
           request.params.token,
           agentId,
           lineageCredential,
-          supervisor,
         );
         if (identity === null) throw new BrokerRefusal("unauthorized", "Invalid broker credential");
         const candidate = { ...identity, clientId: randomUUID() };
@@ -280,7 +277,6 @@ export class BrokerClient {
     path: string,
     token: string,
     lineageCredential?: string,
-    supervisor = false,
   ): Promise<BrokerClient> {
     const socket = createConnection(path);
     const client = new BrokerClient(socket);
@@ -303,8 +299,9 @@ export class BrokerClient {
       await client.call("hello", {
         token,
         agentId: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "local-agent",
-        ...(lineageCredential === undefined ? {} : { lineageCredential }),
-        ...(supervisor ? { supervisor: true } : {}),
+        // Health probes use a fresh identity, so they never wait for or reclaim
+        // an existing forwarder lineage. All connections use the same authentication.
+        lineageCredential: lineageCredential ?? randomBytes(32).toString("base64url"),
       });
       return client;
     } catch (error) {
@@ -315,9 +312,6 @@ export class BrokerClient {
     } finally {
       clearTimeout(deadline);
     }
-  }
-  static async connectSupervisor(path: string, token: string): Promise<BrokerClient> {
-    return await BrokerClient.connect(path, token, undefined, true);
   }
   call(
     method: string,

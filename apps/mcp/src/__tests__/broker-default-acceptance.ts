@@ -24,7 +24,7 @@ async function waitFor<T>(read: () => Promise<T | undefined>, description: strin
   throw new Error(`Timed out: ${description}`);
 }
 
-/** Uses only the compiled package and isolated enrollment; no socket, supervisor,
+/** Uses only the compiled package and isolated enrollment; no socket,
  * or forwarder credential setting is supplied to any MCP process. */
 export async function checkDefaultBrokerAcceptance(
   distBin: string,

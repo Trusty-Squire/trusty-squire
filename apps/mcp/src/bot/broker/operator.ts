@@ -203,15 +203,8 @@ export class OperatorBroker implements BrokerTransportPort {
     token: string,
     agentId?: string,
     lineageCredential?: string,
-    supervisor = false,
   ): Promise<Omit<BrokerPrincipal, "clientId"> | null> {
     if (!timingSafeEqual(createHash("sha256").update(token).digest(), this.token)) return null;
-    if (supervisor)
-      return {
-        accountId: this.config.accountId,
-        agentId: "broker-supervisor",
-        supervisor: true,
-      };
     if (lineageCredential === undefined) return null;
     const id = forwarderId(lineageCredential);
     this.inputBindingKeys.set(id, createHash("sha256").update(lineageCredential).digest());
@@ -229,7 +222,6 @@ export class OperatorBroker implements BrokerTransportPort {
     return createHmac("sha256", key).update(canonicalJson(input)).digest("hex");
   }
   connected(principal: BrokerPrincipal): Promise<void> | void {
-    if (principal.supervisor) return;
     return this.authority.claimForwarder(principal);
   }
   async call(
@@ -275,7 +267,7 @@ export class OperatorBroker implements BrokerTransportPort {
   }
 
   cancel(principal: BrokerPrincipal, requestId: string): boolean {
-    if (requestId.length === 0 || requestId.length > 128 || principal.supervisor) return false;
+    if (requestId.length === 0 || requestId.length > 128) return false;
     const active = this.requestControllers.get(JSON.stringify([principal.clientId, requestId]));
     if (active !== undefined) {
       active.controller.abort(new BrokerRefusal("cancelled", "Caller cancelled the request"));

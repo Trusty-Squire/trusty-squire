@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, lstatSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { mkdirSync, lstatSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { lstat, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -23,7 +23,6 @@ interface EndpointOwner {
   profileDir: string;
   inode: number;
   device: number;
-  supervised: boolean;
 }
 
 const BROKER_CONNECT_TIMEOUT_MS = 10_000;
@@ -114,10 +113,6 @@ export function brokerEnvironment(env: NodeJS.ProcessEnv, path: string): NodeJS.
   return { ...brokerEnv, TRUSTY_SQUIRE_BROKER_SOCKET: path };
 }
 
-export function brokerIsSupervised(env: NodeJS.ProcessEnv = process.env): boolean {
-  return ["1", "true"].includes((env.TRUSTY_SQUIRE_BROKER_SUPERVISED ?? "").toLowerCase());
-}
-
 export async function publishEndpointOwner(path: string): Promise<void> {
   const identity = processBirthIdentity(process.pid);
   if (identity === null)
@@ -131,46 +126,9 @@ export async function publishEndpointOwner(path: string): Promise<void> {
       profileDir: profilePathIdentity(CHROME_PROFILE_DIR),
       inode: socket.ino,
       device: socket.dev,
-      supervised: brokerIsSupervised(),
     } satisfies EndpointOwner),
     { mode: 0o600, flag: "wx" },
   );
-}
-
-export function retainBrokerSupervision(path: string): void {
-  const profileDir = profilePathIdentity(CHROME_PROFILE_DIR);
-  const root = brokerLaunchRoot(profileDir);
-  mkdirSync(root, { recursive: true, mode: 0o700 });
-  const lease = acquireProfileOperationGuard(profileDir, root);
-  try {
-    const owner = JSON.parse(readFileSync(`${path}.owner.json`, "utf8")) as EndpointOwner;
-    const socket = lstatSync(path);
-    if (
-      owner.version !== 1 ||
-      owner.pid !== process.pid ||
-      owner.profileDir !== profileDir ||
-      processBirthIdentityState(owner) !== "matching" ||
-      owner.inode !== socket.ino ||
-      owner.device !== socket.dev
-    )
-      throw new BrokerRefusal("ownership_unknown", "Cannot prove supervised broker ownership");
-    const temporary = `${path}.owner.pending`;
-    writeFileSync(temporary, JSON.stringify({ ...owner, supervised: true }), {
-      mode: 0o600,
-      flush: true,
-    });
-    renameSync(temporary, `${path}.owner.json`);
-  } finally {
-    lease.release();
-  }
-}
-
-function assertUnsupervisedOwner(owner: EndpointOwner): void {
-  if (owner.supervised !== false)
-    throw new BrokerRefusal(
-      "broker_unavailable",
-      "Broker supervision is retained or unknown; its supervisor must replace it",
-    );
 }
 
 export async function reclaimDeadBrokerEndpoint(path: string): Promise<void> {
@@ -193,7 +151,6 @@ export async function reclaimDeadBrokerEndpoint(path: string): Promise<void> {
   ) {
     throw new BrokerRefusal("broker_unavailable", "Endpoint belongs to a live or unproven broker");
   }
-  assertUnsupervisedOwner(owner);
   const lease = acquireProfileOperationGuard(
     profileDir,
     await prepareBrokerElectionRoot(profileDir),
@@ -218,13 +175,13 @@ function handshakeTimedOut(error: unknown): boolean {
   return error instanceof BrokerRefusal && error.code === "broker_handshake_timeout";
 }
 
-/** A separate supervisor handshake does not wait for forwarder handoff. Only
+/** A fresh-lineage health handshake does not wait for forwarder handoff. Only
  * two timed-out handshakes plus the existing endpoint/birth proof permit
  * replacing a wedged owner. The owner's reaper closes Chrome; its journal is
  * retained and still decides whether replacement may admit any work. */
 export async function retireUnresponsiveBroker(path: string, token: string): Promise<void> {
   try {
-    const healthy = await BrokerClient.connectSupervisor(path, token);
+    const healthy = await BrokerClient.connect(path, token);
     await healthy.close();
     throw new BrokerRefusal(
       "broker_unavailable",
@@ -246,7 +203,6 @@ export async function retireUnresponsiveBroker(path: string, token: string): Pro
     owner.device !== endpoint.dev
   )
     throw new BrokerRefusal("ownership_unknown", "Cannot prove unresponsive broker ownership");
-  assertUnsupervisedOwner(owner);
   const waitForDeath = async (ms: number) => {
     const deadline = Date.now() + ms;
     while (processBirthIdentityState(owner) === "matching" && Date.now() < deadline)
@@ -266,16 +222,11 @@ export async function connectOrLaunchBroker(
   lineageCredential?: string,
 ): Promise<BrokerClient> {
   try {
-    const health = await BrokerClient.connectSupervisor(path, token);
+    const health = await BrokerClient.connect(path, token);
     await health.close();
     return await BrokerClient.connect(path, token, lineageCredential);
   } catch (error) {
     if (!isUnavailable(error) && !handshakeTimedOut(error)) throw error;
-    if (brokerIsSupervised())
-      throw new BrokerRefusal(
-        "broker_unavailable",
-        "Supervised broker is unavailable; its supervisor must replace it",
-      );
     if (handshakeTimedOut(error)) {
       const profileDir = profilePathIdentity(CHROME_PROFILE_DIR);
       const root = brokerLaunchRoot(profileDir);

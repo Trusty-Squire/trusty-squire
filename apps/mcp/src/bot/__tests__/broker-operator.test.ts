@@ -38,6 +38,7 @@ vi.mock("../session/lifecycle.js", () => ({
 }));
 
 vi.mock("../provision-session.js", () => ({
+  maskOperatorSessionOutput: (_sessionId: string, value: unknown) => value,
   preparePublicOAuthLoginTarget: (sessionId: string, target: string) =>
     state.prepareOAuth(sessionId, target),
   withPreparedOAuthLoginTarget: async (prepared: unknown, operation: () => Promise<unknown>) => {
@@ -938,8 +939,8 @@ it("retains acknowledged start control until a same-lineage follow-up", async ()
       return true;
     });
     const listener = await listenBroker(path, {
-      authenticate: async (token, agentId, lineageCredential, supervisor) =>
-        await broker.authenticate(token, agentId, lineageCredential, supervisor),
+      authenticate: async (token, agentId, lineageCredential) =>
+        await broker.authenticate(token, agentId, lineageCredential),
       connected: async (principal) => await broker.connected(principal),
       call: async (principal, method, params, requestId) => {
         if (method === "recover") return await broker.recover(principal, params);
@@ -1699,7 +1700,7 @@ it("delivers broker approval notifications to the originating MCP client before 
         },
       },
       {
-        name: "operate_pay",
+        name: "inject_card",
         description: "",
         inputSchema: z.object({ session_id: z.string() }),
         jsonInputSchema: {},
@@ -1770,9 +1771,14 @@ it("delivers broker approval notifications to the originating MCP client before 
     let completed = false;
     const payment = clients[0]!
       .callTool({
-        name: "operate_pay",
+        name: "inject_card",
         arguments: {
           session_id: started.session_id,
+          merchant: "Test merchant",
+          amount_cents: 100,
+          currency: "USD",
+          card_ref: "fixture-card",
+          fields: { pan: { ref: "@pan" } },
           item: "Test purchase",
           reason: "Verify approval delivery",
         },
