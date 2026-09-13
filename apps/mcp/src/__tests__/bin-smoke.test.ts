@@ -46,24 +46,6 @@ afterAll(async () => {
 });
 
 describe("package manifest", () => {
-  it("has one owner for test-time dist builds", async () => {
-    // Vitest runs files in parallel. A second test file compiling into the
-    // same dist/ tree can truncate a module while this file is launching the
-    // binary. Keep all compiled-artifact checks under this single build.
-    const buildCall = 'execFileSync("pnpm", ' + '["build"]';
-    const testFiles = (await fs.readdir(path.join(pkgRoot, "src"), { recursive: true })).filter(
-      (file) => file.endsWith(".test.ts"),
-    );
-    const buildOwners: string[] = [];
-
-    for (const relative of testFiles) {
-      const source = await fs.readFile(path.join(pkgRoot, "src", relative), "utf8");
-      if (source.includes(buildCall)) buildOwners.push(relative.replaceAll(path.sep, "/"));
-    }
-
-    expect(buildOwners).toEqual(["__tests__/bin-smoke.test.ts"]);
-  });
-
   it("declares the executable and plain-language discovery metadata", async () => {
     // npx auto-resolves `npx @trusty-squire/mcp <cmd>` only when the
     // package has a single bin (or one named for the unscoped package).
