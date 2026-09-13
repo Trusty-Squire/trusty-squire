@@ -843,7 +843,7 @@ function isShopifyCheckoutThankYouRoute(rawUrl: string): boolean {
 // stampJapaneseCardLabelFields so this selector stays valid for both
 // frame.locator() and native element.matches() calls.
 const CHECKOUT_NON_CARD_IDENTITY_EXCLUSION =
-  ':not([name*="gift" i]):not([id*="gift" i]):not([name*="loyalty" i]):not([id*="loyalty" i]):not([name*="point" i]):not([id*="point" i]):not([name*="prepaid" i]):not([id*="prepaid" i]):not([name*="member" i]):not([id*="member" i])';
+  ':not(.autofill-field):not(.focus-intercept):not([name*="gift" i]):not([id*="gift" i]):not([name*="loyalty" i]):not([id*="loyalty" i]):not([name*="point" i]):not([id*="point" i]):not([name*="prepaid" i]):not([id*="prepaid" i]):not([name*="member" i]):not([id*="member" i])';
 
 const CHECKOUT_LEGACY_PAN_FIELD_SELECTORS = [
   'input[autocomplete~="cc-number"]',
@@ -856,10 +856,12 @@ const CHECKOUT_LEGACY_PAN_FIELD_SELECTORS = [
 
 const CHECKOUT_PAN_FIELD_SELECTORS = [
   CHECKOUT_LEGACY_PAN_FIELD_SELECTORS,
+  `input[data-ts-hosted-card-field="pan"]${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
   `input[data-ts-jp-card-field="pan"]${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
 ].join(",");
 
 const CHECKOUT_CONSERVATIVE_EXPIRY_MONTH_FIELD_SELECTORS = [
+  '[data-ts-hosted-card-field="month"]',
   '[autocomplete~="cc-exp-month"]',
   'select[name*="credit" i][name*="month" i]',
   'select[name*="limit" i][name*="month" i]',
@@ -880,6 +882,7 @@ const CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS = [
 ].join(",");
 
 const CHECKOUT_CONSERVATIVE_EXPIRY_YEAR_FIELD_SELECTORS = [
+  '[data-ts-hosted-card-field="year"]',
   '[autocomplete~="cc-exp-year"]',
   'select[name*="credit" i][name*="year" i]',
   'select[name*="limit" i][name*="year" i]',
@@ -900,6 +903,7 @@ const CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS = [
 ].join(",");
 
 const CHECKOUT_CONSERVATIVE_COMBINED_EXPIRY_INPUT_SELECTORS = [
+  'input[data-ts-hosted-card-field="expiry"]',
   'input[autocomplete~="cc-exp"]',
   'input[name="exp" i]',
   'input[id="exp" i]',
@@ -937,6 +941,7 @@ const CHECKOUT_COMBINED_EXPIRY_FIELD_SELECTORS = [
 const CHECKOUT_COMBINED_EXPIRY_GROUP_SELECTORS = CHECKOUT_COMBINED_EXPIRY_INPUT_SELECTORS.join(",");
 
 const CHECKOUT_CONSERVATIVE_CVV_FIELD_SELECTORS = [
+  'input[data-ts-hosted-card-field="cvv"]',
   'input[autocomplete~="cc-csc"]',
   'input[data-ts-jp-card-field="cvv"]',
   ...["name", "id"].flatMap((attribute) =>
@@ -962,6 +967,7 @@ const CHECKOUT_CVV_FIELD_SELECTORS = [
 ].join(",");
 
 const CHECKOUT_CARD_NAME_FIELD_SELECTORS = [
+  'input[data-ts-hosted-card-field="name"]',
   'input[autocomplete~="cc-name"]',
   'input[name*="cardholder" i]',
   'input[name*="card-name" i]',
@@ -1385,19 +1391,14 @@ export function hasPayPalHostedCheckoutFrame(frames: readonly CheckoutFrameDescr
   });
 }
 
-// The frame hosts that render UNFILLABLE PayPal/Braintree-hosted card fields.
-// A PayPal EXPRESS button frame (smart/checkout) is deliberately NOT here —
-// the operator must not refuse a fillable checkout (e.g. Shopify-PCI card
-// fields with a plain PayPal express button) merely because a button exists.
-function isPayPalBraintreeHostedFieldsHost(host: string): boolean {
+// Actual PayPal wallet/checkout hosts; Braintree hosted card inputs are fillable.
+function isPayPalWalletHost(host: string): boolean {
   const h = host.toLowerCase();
   return (
     h === "paypal.com" ||
     h.endsWith(".paypal.com") ||
     h === "paypalobjects.com" ||
-    h.endsWith(".paypalobjects.com") ||
-    h === "braintreegateway.com" ||
-    h.endsWith(".braintreegateway.com")
+    h.endsWith(".paypalobjects.com")
   );
 }
 
@@ -8593,17 +8594,70 @@ export class BrowserController {
 
   async isPayPalHostedCheckout(page: Page | null = this.page): Promise<boolean> {
     if (!page) throw new Error("Browser not started");
-    // Key the refusal off the ACTUAL card (PAN) input's frame, not off "any
-    // PayPal iframe on the page." Shopify checkout frames card entry in a
-    // recognized PayPal-independent surface (checkout.pci.shopifyinc.com); a
-    // PayPal EXPRESS button (an unfillable-wallet iframe, not card fields)
-    // must not cause a false-positive refusal of a fillable checkout.
+    // A fillable card checkout can also offer express wallets. Their presence
+    // must not block the saved-card path (including Braintree and Stripe).
+    await this.waitForPanField(10_000, undefined, page);
     const panFrame = await this.panFieldFrame(undefined, page);
-    if (panFrame === null) return false;
-    try {
-      return isPayPalBraintreeHostedFieldsHost(new URL(panFrame.url()).hostname);
-    } catch {
-      return false;
+    if (panFrame !== null) {
+      try {
+        return isPayPalWalletHost(new URL(panFrame.url()).hostname);
+      } catch {
+        return false;
+      }
+    }
+    for (const frame of page.frames()) {
+      try {
+        if (isPayPalWalletHost(new URL(frame.url()).hostname)) return true;
+      } catch {
+        /* about:blank has no wallet host */
+      }
+      const buttons = frame.getByRole("button", {
+        name: /paypal|apple\s*pay|google\s*pay/i,
+      });
+      for (let index = 0; index < (await buttons.count().catch(() => 0)); index += 1) {
+        if (
+          await buttons
+            .nth(index)
+            .isVisible()
+            .catch(() => false)
+        )
+          return true;
+      }
+    }
+    return false;
+  }
+
+  // Braintree communicates field identity through the iframe name even when
+  // the input itself has no portable autocomplete/name hint. Stamp only its
+  // text inputs, then reuse the ordinary cross-frame fill/seal/submit path.
+  private async stampHostedCardFields(frames: readonly Frame[]): Promise<void> {
+    const fields: Record<string, string> = {
+      number: "pan",
+      cvv: "cvv",
+      expirationMonth: "month",
+      expirationYear: "year",
+      expirationDate: "expiry",
+      cardholderName: "name",
+    };
+    for (const frame of frames) {
+      let host: string;
+      try {
+        host = new URL(frame.url()).hostname;
+      } catch {
+        continue;
+      }
+      if (host !== "braintreegateway.com" && !host.endsWith(".braintreegateway.com")) continue;
+      const match = /^braintree-hosted-field-(.+)$/.exec(frame.name());
+      const field = match === null ? undefined : fields[match[1] ?? ""];
+      if (field === undefined) continue;
+      await frame
+        .locator(
+          `input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]):not([type="button"]):not([type="submit"])${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION},select${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
+        )
+        .evaluateAll((inputs, role) => {
+          for (const input of inputs) input.setAttribute("data-ts-hosted-card-field", role);
+        }, field)
+        .catch(() => undefined);
     }
   }
 
@@ -8613,6 +8667,7 @@ export class BrowserController {
     page: Page | null = this.page,
   ): Promise<Frame | null> {
     if (!page) return null;
+    await this.stampHostedCardFields(frames ?? page.frames());
     for (const frame of frames ?? page.frames()) {
       const locator = frame.locator(CHECKOUT_PAN_FIELD_SELECTORS);
       const count = await locator.count().catch(() => 0);
@@ -8973,7 +9028,7 @@ export class BrowserController {
     );
   }
 
-  // Common autocomplete/name selectors. No PSP-specific adapters. `frames` is
+  // Common autocomplete/name selectors plus hosted-field identity markers. `frames` is
   // the caller's trust decision: fillAndSubmitCheckout passes every
   // CDP-reachable frame (single-page checkout — fill and charge in one vetted
   // call), fillCheckoutCardFields passes only recognized payment-provider
@@ -9009,6 +9064,7 @@ export class BrowserController {
       ),
     );
     await this.stampJapaneseCardLabelFields(frames);
+    await this.stampHostedCardFields(frames);
     for (const [frameIndex, frame] of frames.entries()) {
       const pans = frame.locator(CHECKOUT_PAN_FIELD_SELECTORS);
       const count = await pans.count().catch(() => 0);
@@ -9567,6 +9623,8 @@ export class BrowserController {
         await field
           .evaluate((element) => {
             const result = new Set<string>();
+            const hosted = element.getAttribute("data-ts-hosted-card-field");
+            if (hosted === "month" || hosted === "year") result.add("hosted:braintree-expiry");
             const stamped = element.getAttribute("data-ts-jp-card-exp-group");
             if (stamped !== null && stamped.length > 0) result.add(`stamp:${stamped}`);
             const excludedIdentityParts = ["gift", "loyalty", "point", "prepaid", "member"];

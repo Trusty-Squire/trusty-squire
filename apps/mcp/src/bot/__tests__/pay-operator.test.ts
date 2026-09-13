@@ -1,3 +1,8 @@
+import { existsSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { chromium, type Page } from "playwright";
+import { serveHostedCardFields } from "./fixtures/hosted-card-fields.js";
 import { createHash, generateKeyPairSync, type KeyObject } from "node:crypto";
 import canonicalize from "canonicalize";
 import { exportJWK, SignJWT } from "jose";
@@ -2773,4 +2778,75 @@ describe("operate_pay bounded approval continuation [P0]", () => {
     expect(observedSignal).toBeDefined();
     expect(observedSignal?.aborted).toBe(true);
   });
+});
+
+describe("hosted-field vaulted payment (real browser)", () => {
+  it.skipIf(!existsSync(chromium.executablePath())).each(["braintree", "stripe"] as const)(
+    "releases the card server-side to %s and places the order with one approval",
+    async (provider) => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await serveHostedCardFields(page, provider, SYNTHETIC_CARD);
+        const evidenceDir = process.env.HOSTED_CARD_TEST_EVIDENCE_DIR;
+        if (evidenceDir) {
+          await mkdir(evidenceDir, { recursive: true });
+          await page.screenshot({
+            path: join(evidenceDir, `${provider}-before.png`),
+            fullPage: true,
+          });
+        }
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+        expect(await controller.isPayPalHostedCheckout()).toBe(false);
+        const payment = await harness("happy", undefined, undefined, undefined, {
+          fillAndSubmitCheckout: (card, options) => controller.fillAndSubmitCheckout(card, options),
+        });
+        expect(payment.result.status).toBe("payment_submitted");
+        expect(payment.approvalBodies).toHaveLength(1);
+        expect(payment.confirmationBodies).toHaveLength(1);
+        expect(await page.locator("body").getAttribute("data-charged")).toBe("true");
+        const transcript = JSON.stringify(payment.result);
+        expect(transcript).not.toContain(SYNTHETIC_CARD.pan);
+        expect(transcript).not.toContain(SYNTHETIC_CARD.cvv);
+        for (const frame of page.frames().slice(1)) {
+          expect(
+            await frame
+              .locator("input")
+              .evaluateAll((inputs) =>
+                inputs.every((input) => (input as HTMLInputElement).value === ""),
+              ),
+          ).toBe(true);
+        }
+        if (evidenceDir) {
+          await page.screenshot({
+            path: join(evidenceDir, `${provider}-confirmed.png`),
+            fullPage: true,
+          });
+          await writeFile(
+            join(evidenceDir, `${provider}-payment.json`),
+            JSON.stringify(
+              {
+                fixture: "Synthetic merchant and provider pages; no live charge",
+                provider,
+                url: page.url(),
+                frameOrigins: page.frames().map((frame) => new URL(frame.url()).origin),
+                approvalRequests: payment.approvalBodies.length,
+                confirmationRequests: payment.confirmationBodies.length,
+                merchantConfirmation: await page.locator("main").innerText(),
+                charged: await page.locator("body").getAttribute("data-charged"),
+                result: payment.result,
+                fieldsCleared: true,
+              },
+              null,
+              2,
+            ),
+          );
+        }
+      } finally {
+        await browser.close();
+      }
+    },
+    15_000,
+  );
 });
