@@ -82,9 +82,9 @@ exercises click, type and select through real browser re-renders.
 Observation waits for bounded network/load and DOM quiet, then retries transient
 frame-binding omissions. Persistent binding failures and `dom_settle_timeout`
 remain explicit in `capture_omissions`; continuous churn never blocks indefinitely.
-A failed ref resolution before dispatch carries nominal `not_dispatched` evidence
-to the broker. Such recorded outcomes hold no session or lineage custody, even
-before acknowledgement; unknown post-dispatch outcomes retain their fence.
+A ref that fails to resolve before dispatch is `not_dispatched`, never
+`unknown`; the broker journal contract in [browser-broker.md](browser-broker.md)
+owns what that evidence does and does not fence.
 
 Form submitters and checkbox label proxies record durable owner location and
 submission semantics in their intent. Physical owner IDs are captured separately:

@@ -121,9 +121,17 @@ binding. Browser epoch changes invalidate earlier capabilities.
   invents a capability, restarts work, or replays an uncertain payment. The
   record gives the caller a reconciliation next step and remains a no-replay
   fence until that retention window expires.
-- A code-proven `operate_login` stale-ref failure is recorded as
-  `status: not_dispatched, error: stale_ref`: stale-ref resolution precedes the
-  sole OAuth dispatch boundary. Older retained `entered` records may be
+- A code-proven pre-dispatch stale-ref failure on any mutating command
+  (`operate_login`, `operate_click` including its `js_click` fallback,
+  `operate_type` including slot-based secret typing, and `operate_select`) is
+  recorded as `status: not_dispatched, error: stale_ref`: ref resolution
+  precedes the dispatch boundary, and a failure after the attempt is marked
+  `dispatch_attempted` stays `unknown`. A recorded `not_dispatched` outcome
+  holds no session or lineage custody, even before delivery acknowledgement: it
+  never refuses browser replacement with `outcome_unknown`, fences later
+  commands, or counts as a pending start delivery. `dispatch-journal.ts` owns
+  that rule; `broker-journal.test.ts` and `broker-operator.test.ts` pin it.
+  Older retained `entered` records may be
   reconciled only from independently preserved exact failure evidence by using
   object metadata instead of the ordinary boolean:
   `"trusty-squire/recover": {"request_id":"...","error":"stale_ref","dispatch":"not_dispatched"}`.

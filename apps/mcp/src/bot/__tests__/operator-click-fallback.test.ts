@@ -259,88 +259,122 @@ it.each(["removed", "ambiguous"])(
   20_000,
 );
 
-
-it.each([false, true])("refuses a changed authored identity with layout change=%s", async (layout) => {
-  const context = await browser.newContext();
-  const page = await context.newPage();
-  const url = "https://identity-spa.test/";
-  await page.route(url, (route) => route.fulfill({
-    contentType: "text/html",
-    body: `<main><button id="remove-item-a" onclick="document.querySelector('output').textContent='removed'">Remove</button></main><output></output>`,
-  }));
-  const start = await startHarnessProvisionSession({
-    browser: BrowserController.fromHarnessPage(page), serviceUrl: url,
-    observationFormat: "browser-use-dom", format: "compact",
-  });
-  try {
-    const rows = (start as unknown as { safe_table: string[][] }).safe_table;
-    const ref = rows.find((row) => row[2]?.split("|")[0] === "@remove")![0]!;
-    await page.evaluate((layout) => {
-      const main = document.querySelector("main")!;
-      const replacement = main.innerHTML.replace("remove-item-a", "remove-item-b");
-      main.innerHTML = layout ? `<section>${replacement}</section>` : replacement;
-    }, layout);
-    await expect(operateClickTool.handler({ session_id: start.session_id, ref }, null))
-      .rejects.toBeInstanceOf(ProvenPreDispatchMutationError);
-    expect(await page.locator("output").textContent()).toBe("");
-    await expect(provisionObserveTool.handler({ session_id: start.session_id }, null))
-      .resolves.toHaveProperty("session_id", start.session_id);
-  } finally {
-    await finishProvisionSession(start.session_id);
-    await context.close();
-  }
-}, 20_000);
+it.each([false, true])(
+  "refuses a changed authored identity with layout change=%s",
+  async (layout) => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const url = "https://identity-spa.test/";
+    await page.route(url, (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<main><button id="remove-item-a" onclick="document.querySelector('output').textContent='removed'">Remove</button></main><output></output>`,
+      }),
+    );
+    const start = await startHarnessProvisionSession({
+      browser: BrowserController.fromHarnessPage(page),
+      serviceUrl: url,
+      observationFormat: "browser-use-dom",
+      format: "compact",
+    });
+    try {
+      const rows = (start as unknown as { safe_table: string[][] }).safe_table;
+      const ref = rows.find((row) => row[2]?.split("|")[0] === "@remove")![0]!;
+      await page.evaluate((layout) => {
+        const main = document.querySelector("main")!;
+        const replacement = main.innerHTML.replace("remove-item-a", "remove-item-b");
+        main.innerHTML = layout ? `<section>${replacement}</section>` : replacement;
+      }, layout);
+      await expect(
+        operateClickTool.handler({ session_id: start.session_id, ref }, null),
+      ).rejects.toBeInstanceOf(ProvenPreDispatchMutationError);
+      expect(await page.locator("output").textContent()).toBe("");
+      await expect(
+        provisionObserveTool.handler({ session_id: start.session_id }, null),
+      ).resolves.toHaveProperty("session_id", start.session_id);
+    } finally {
+      await finishProvisionSession(start.session_id);
+      await context.close();
+    }
+  },
+  20_000,
+);
 
 it.each([
-  ["type_secret", false, false], ["js_click", false, false],
-  ["type_secret", true, false], ["js_click", true, false],
+  ["type_secret", false, false],
+  ["js_click", false, false],
+  ["type_secret", true, false],
+  ["js_click", true, false],
   ["js_click", false, true],
-] as const)("preserves stale-ref dispatch evidence for %s after dispatch=%s with earlier dispatch=%s", async (kind, dispatched, earlierDispatch) => {
-  const context = await browser.newContext();
-  const page = await context.newPage();
-  const url = "https://stale-paths.test/";
-  await page.route(url, (route) => route.fulfill({
-    contentType: "text/html", body: `<main><button>Continue</button><input aria-label="Password"></main>`,
-  }));
-  const controller = BrowserController.fromHarnessPage(page);
-  const start = await startHarnessProvisionSession({
-    browser: controller, serviceUrl: url,
-    observationFormat: "browser-use-dom", format: "compact",
-  });
-  try {
-    stashSecretSlot(start.session_id, "password", "synthetic-password");
-    const rows = (start as unknown as { safe_table: string[][] }).safe_table;
-    const label = kind === "type_secret" ? "@password" : "@continue";
-    const ref = rows.find((row) => row[2]?.split("|")[0] === label)![0]!;
-    const remove = () => page.evaluate(() => { document.querySelector("main")!.innerHTML = "<p>Gone</p>"; });
-    if (kind === "js_click" && !dispatched) {
-      vi.spyOn(controller, "click").mockImplementationOnce(async () => {
-        await remove();
-        throw new BrowserClickDispatchError("not_dispatched", new Error("intercepts pointer events"));
-      });
-    } else await remove();
-    const operation = withOperatorRequestContext(new AbortController().signal, async () => {
-      if (earlierDispatch) await markOperatorMutationDispatchAttempted();
-      if (dispatched) {
-        await markOperatorMutationDispatchAttempted();
-        return await act(start.session_id, kind === "type_secret"
-          ? { kind, target: ref, slot: "password" } : { kind, target: ref });
-      }
-      return kind === "type_secret"
-        ? await operateTypeTool.handler({ session_id: start.session_id, ref, slot: "password" }, null)
-        : await operateClickTool.handler({ session_id: start.session_id, ref }, null);
+] as const)(
+  "preserves stale-ref dispatch evidence for %s after dispatch=%s with earlier dispatch=%s",
+  async (kind, dispatched, earlierDispatch) => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const url = "https://stale-paths.test/";
+    await page.route(url, (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<main><button>Continue</button><input aria-label="Password"></main>`,
+      }),
+    );
+    const controller = BrowserController.fromHarnessPage(page);
+    const start = await startHarnessProvisionSession({
+      browser: controller,
+      serviceUrl: url,
+      observationFormat: "browser-use-dom",
+      format: "compact",
     });
-    if (dispatched || earlierDispatch) {
-      const error = await operation.catch((error: unknown) => error);
-      expect(error).toBeInstanceOf(Error);
-      expect(error).not.toBeInstanceOf(ProvenPreDispatchMutationError);
-    } else {
-      await expect(operation).rejects.toBeInstanceOf(ProvenPreDispatchMutationError);
-      await expect(provisionObserveTool.handler({ session_id: start.session_id }, null))
-        .resolves.toHaveProperty("session_id", start.session_id);
+    try {
+      stashSecretSlot(start.session_id, "password", "synthetic-password");
+      const rows = (start as unknown as { safe_table: string[][] }).safe_table;
+      const label = kind === "type_secret" ? "@password" : "@continue";
+      const ref = rows.find((row) => row[2]?.split("|")[0] === label)![0]!;
+      const remove = () =>
+        page.evaluate(() => {
+          document.querySelector("main")!.innerHTML = "<p>Gone</p>";
+        });
+      if (kind === "js_click" && !dispatched) {
+        vi.spyOn(controller, "click").mockImplementationOnce(async () => {
+          await remove();
+          throw new BrowserClickDispatchError(
+            "not_dispatched",
+            new Error("intercepts pointer events"),
+          );
+        });
+      } else await remove();
+      const operation = withOperatorRequestContext(new AbortController().signal, async () => {
+        if (earlierDispatch) await markOperatorMutationDispatchAttempted();
+        if (dispatched) {
+          await markOperatorMutationDispatchAttempted();
+          return await act(
+            start.session_id,
+            kind === "type_secret"
+              ? { kind, target: ref, slot: "password" }
+              : { kind, target: ref },
+          );
+        }
+        return kind === "type_secret"
+          ? await operateTypeTool.handler(
+              { session_id: start.session_id, ref, slot: "password" },
+              null,
+            )
+          : await operateClickTool.handler({ session_id: start.session_id, ref }, null);
+      });
+      if (dispatched || earlierDispatch) {
+        const error = await operation.catch((error: unknown) => error);
+        expect(error).toBeInstanceOf(Error);
+        expect(error).not.toBeInstanceOf(ProvenPreDispatchMutationError);
+      } else {
+        await expect(operation).rejects.toBeInstanceOf(ProvenPreDispatchMutationError);
+        await expect(
+          provisionObserveTool.handler({ session_id: start.session_id }, null),
+        ).resolves.toHaveProperty("session_id", start.session_id);
+      }
+    } finally {
+      await finishProvisionSession(start.session_id);
+      await context.close();
     }
-  } finally {
-    await finishProvisionSession(start.session_id);
-    await context.close();
-  }
-}, 20_000);
+  },
+  20_000,
+);
