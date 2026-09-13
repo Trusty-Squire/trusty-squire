@@ -16,13 +16,18 @@ and starts or attaches the elected broker. `TRUSTY_SQUIRE_BROKER_SOCKET` optiona
 overrides that endpoint; its parent must exist, belong to the current user, and
 have mode 0700. The default private parent is created automatically.
 
-Default forwarder credentials are retained in private leased slots under the
-canonical profile's `trusty-squire-forwarders` directory. Live MCP processes hold
-independent slots; a replacement process reuses the first free slot and its retained
-journal identity. Credentials survive process exit, including a crash, while stale
-slot leases are reclaimed using the existing process-birth proof. Launchers can
-still supply a stable base64url `TRUSTY_SQUIRE_FORWARDER_CREDENTIAL` (at least 32
-random bytes) for a particular lineage. Never share that override between siblings.
+Each operator process generates a fresh random forwarder credential, held only in
+memory. There is no credential persistence or slot reuse. By default, a restarted
+operator process starts a new lineage and does not recover a predecessor's
+in-flight payment journal; multi-operator-per-profile restart-journal-recovery is
+a known limitation, tracked by `ts-broker-crash-hardening`. A fresh lineage cannot
+reclaim a predecessor's or sibling's session capabilities. Existing journal records
+remain intact; a fresh lineage does not reconcile them or authorize replay.
+
+The existing explicit `TRUSTY_SQUIRE_FORWARDER_CREDENTIAL` override still accepts a
+launcher-supplied base64url credential (at least 32 random bytes). Same-lineage
+recovery requires possession of that exact credential; it is never automatically
+persisted or assigned to another client. Never share that override between siblings.
 
 Set `TRUSTY_SQUIRE_BROKER_SUPERVISED=1` for a separately managed foreground service.
 In that mode a missing broker is an error and zero clients never releases the lease.
@@ -99,8 +104,8 @@ binding. Browser epoch changes invalidate earlier capabilities.
   erase-and-retry recovery for uncertain payments. Reconciliation keeps a
   confirmed payment submission as `done`, distinct from 3-D Secure-required and
   unknown outcomes.
-- After a restarted MCP process loses an operator reply, its retry must set MCP
-  request metadata `"trusty-squire/recover": true`. This explicitly asks the
+- When a client retaining the original lineage credential loses an operator reply,
+  its reconciliation request must set MCP request metadata `"trusty-squire/recover": true`. This explicitly asks the
   broker to reconcile its authenticated lineage's newest matching durable
   operation, input, and capability outcome; the retry may use a new JSON-RPC
   request ID. Ordinary reset IDs without that metadata are fresh calls. A

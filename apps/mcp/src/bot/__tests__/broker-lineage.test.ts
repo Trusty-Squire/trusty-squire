@@ -1,10 +1,11 @@
-import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { afterEach, expect, it, vi } from "vitest";
 import { forwarderId, requireLineageCredential } from "../broker/lineage.js";
+import { BrokerAuthority } from "../broker/authority.js";
 import { DispatchJournal } from "../broker/dispatch-journal.js";
 
 const require = createRequire(import.meta.url);
@@ -18,43 +19,7 @@ function profile(): string {
   roots.push(root);
   return root;
 }
-function restartedCredential(root: string): string {
-  return execFileSync(
-    process.execPath,
-    [
-      "--import",
-      require.resolve("tsx"),
-      "--input-type=module",
-      "-e",
-      `import { requireLineageCredential } from ${JSON.stringify(new URL("../broker/lineage.ts", import.meta.url).href)};
-     process.stdout.write(requireLineageCredential());`,
-    ],
-    { encoding: "utf8", env: { ...process.env, TRUSTY_SQUIRE_PROFILE_DIR: root } },
-  );
-}
-it("retains a default lineage across process restarts and finds its unresolved journal", async () => {
-  vi.stubEnv("TRUSTY_SQUIRE_FORWARDER_CREDENTIAL", undefined);
-  const root = profile();
-  const first = restartedCredential(root);
-  const journal = new DispatchJournal(join(root, "dispatch.jsonl"));
-  await journal.record("session", "payment", "entered", {
-    forwarderId: forwarderId(first),
-    operation: "operate_pay",
-    inputHash: "input",
-  });
-  const second = restartedCredential(root);
-  expect(second).toBe(first);
-  expect(first).toMatch(/^[A-Za-z0-9_-]{43}$/);
-  expect(statSync(join(root, "trusty-squire-forwarders", "0", "credential")).mode & 0o777).toBe(
-    0o600,
-  );
-  expect(await journal.hasOutstanding(undefined, forwarderId(second))).toBe(true);
-  await journal.record("session", "payment", "settled");
-  expect(await journal.hasOutstanding(undefined, forwarderId(second))).toBe(false);
-});
-it("recovers the retained lineage after a process is killed without releasing its lease", () => {
-  vi.stubEnv("TRUSTY_SQUIRE_FORWARDER_CREDENTIAL", undefined);
-  const root = profile();
+function restartedCredential(root: string, crash = false): string {
   const child = spawnSync(
     process.execPath,
     [
@@ -65,29 +30,73 @@ it("recovers the retained lineage after a process is killed without releasing it
       `import { requireLineageCredential } from ${JSON.stringify(new URL("../broker/lineage.ts", import.meta.url).href)};
      import { writeSync } from "node:fs";
      writeSync(1, requireLineageCredential());
-     process.kill(process.pid, "SIGKILL");`,
+     ${crash ? 'process.kill(process.pid, "SIGKILL");' : ""}`,
     ],
     { encoding: "utf8", env: { ...process.env, TRUSTY_SQUIRE_PROFILE_DIR: root } },
   );
-  expect(child.signal).toBe("SIGKILL");
+  if (crash) expect(child.signal).toBe("SIGKILL");
+  else expect(child.status, child.stderr).toBe(0);
   expect(child.stdout).toMatch(/^[A-Za-z0-9_-]{43}$/);
-  expect(restartedCredential(root)).toBe(child.stdout);
+  return child.stdout;
+}
+it("keeps its default credential in memory for the process lifetime", () => {
+  vi.stubEnv("TRUSTY_SQUIRE_FORWARDER_CREDENTIAL", undefined);
+  const first = requireLineageCredential();
+  expect(first).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  expect(requireLineageCredential()).toBe(first);
 });
-it("keeps live sibling processes independent while reusing a retired sibling slot", () => {
+it("never reassigns crashed sibling lineages or their capabilities to restarted processes", async () => {
   vi.stubEnv("TRUSTY_SQUIRE_FORWARDER_CREDENTIAL", undefined);
   const root = profile();
-  const first = requireLineageCredential(root);
-  const sibling = restartedCredential(root);
-  expect(sibling).not.toBe(first);
-  expect(restartedCredential(root)).toBe(sibling);
-  expect(requireLineageCredential(root)).toBe(first);
-});
-it("refuses a corrupt retained credential instead of losing journal identity", () => {
-  vi.stubEnv("TRUSTY_SQUIRE_FORWARDER_CREDENTIAL", undefined);
-  const root = profile();
-  restartedCredential(root);
-  writeFileSync(join(root, "trusty-squire-forwarders", "0", "credential"), "short");
-  expect(() => requireLineageCredential(root)).toThrow("unguessable");
+  const oldSlot = join(root, "trusty-squire-forwarders", "0");
+  mkdirSync(oldSlot, { recursive: true });
+  writeFileSync(join(oldSlot, "credential"), "z".repeat(43));
+  const credentials = [restartedCredential(root, true), restartedCredential(root, true)];
+  const broker = new BrokerAuthority("account", "cell");
+  const journal = new DispatchJournal(join(root, "dispatch.jsonl"));
+  const owners = credentials.map((credential, index) => ({
+    accountId: "account",
+    agentId: "local-agent",
+    clientId: String(index),
+    forwarderId: forwarderId(credential),
+  }));
+  const capabilities = [];
+  for (const owner of owners) {
+    await broker.claimForwarder(owner);
+    const capability = await broker.open(owner, [`site:${owner.clientId}`], async () => ({
+      targetId: owner.clientId,
+      invoke: async () => "owned",
+      close: async () => true,
+      orphan: async () => undefined,
+    }));
+    capabilities.push(capability);
+    await journal.record(capability.sessionId, owner.clientId, "entered", {
+      forwarderId: owner.forwarderId,
+      operation: "operate_pay",
+      inputHash: "input",
+    });
+    broker.detach(owner);
+    broker.releaseForwarder(owner);
+  }
+  const replacements = [restartedCredential(root), restartedCredential(root)];
+  expect(new Set([...credentials, ...replacements, "z".repeat(43)]).size).toBe(5);
+  for (const [index, credential] of replacements.entries()) {
+    const replacement = {
+      ...owners[index]!,
+      clientId: `restart-${index}`,
+      forwarderId: forwarderId(credential),
+    };
+    await broker.claimForwarder(replacement);
+    expect(broker.reclaim(replacement)).toEqual([]);
+    for (const capability of capabilities)
+      expect(() => broker.invoke(replacement, capability, "foreign", "read", {})).toThrow(
+        "owned live session",
+      );
+    expect(await journal.hasOutstanding(undefined, replacement.forwarderId)).toBe(false);
+  }
+  for (const owner of owners)
+    expect(await journal.hasOutstanding(undefined, owner.forwarderId)).toBe(true);
+  expect(await journal.hasOutstanding()).toBe(true);
 });
 it("preserves an explicit restart credential and refuses malformed credentials", () => {
   vi.stubEnv("TRUSTY_SQUIRE_FORWARDER_CREDENTIAL", "a".repeat(43));
