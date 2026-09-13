@@ -220,8 +220,8 @@ export async function runBrokerDaemon(): Promise<void> {
           (await journal.hasOutstanding(undefined, principal.forwarderId)) &&
           !(
             method === "tool" &&
-              (params.name === "operate_finish" ||
-                (await operator.canReconcileCapture(principal, params)) ||
+            (params.name === "operate_finish" ||
+              (await operator.canReconcileCapture(principal, params)) ||
               (await operator.canContinueAfterCapture(principal, params)))
           )
         )
@@ -364,8 +364,7 @@ export async function runBrokerDaemon(): Promise<void> {
           await restoreMaintenance();
         }
         if (draining) await shutdown(true);
-        else if (connected.size === 0 && idleTimer === undefined)
-          scheduleShutdownIfIdle();
+        else if (connected.size === 0 && idleTimer === undefined) scheduleShutdownIfIdle();
       })
       .catch((error: unknown) => {
         process.stderr.write(

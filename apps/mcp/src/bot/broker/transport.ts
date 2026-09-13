@@ -128,11 +128,7 @@ export async function listenBroker(
             : undefined;
         if (agentId.length === 0 || agentId.length > 128)
           throw new BrokerRefusal("unauthorized", "Invalid agent identity");
-        const identity = await port.authenticate(
-          request.params.token,
-          agentId,
-          lineageCredential,
-        );
+        const identity = await port.authenticate(request.params.token, agentId, lineageCredential);
         if (identity === null) throw new BrokerRefusal("unauthorized", "Invalid broker credential");
         const candidate = { ...identity, clientId: randomUUID() };
         await port.connected?.(candidate);

@@ -353,9 +353,7 @@ function startSessionWatchdog(session: Session): void {
     startedAt: session.startedAt,
     lastActivityAt: () => session.lastActivityAt,
     hasActiveCall: () =>
-      brokerBrowserCustody() !== undefined ||
-      session.initializing ||
-      session.callCount > 0,
+      brokerBrowserCustody() !== undefined || session.initializing || session.callCount > 0,
     processMarker: () => session.browser.operatorBrowserMarker?.() ?? null,
     onTerminate: async (reason) => await terminateExpiredProvisionSession(session, reason),
   });

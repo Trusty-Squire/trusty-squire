@@ -88,7 +88,7 @@ binding. Browser epoch changes invalidate earlier capabilities.
   continue in the existing handlers. Approval notifications travel over the
   originating request's IPC connection to its MCP client before the tool completes;
   clients without notification support receive the approval link in the result.
-  Rendered observations are not masked.
+  Observation output follows the [narrow released-card mask policy](observation-model.md#45-narrow-released-card-output-mask-final-owners-order-2026-09-12).
 - Live sockets are mutation leases, not browser-custody leases. Disconnect
   immediately fences queued commands and aborts the old connection lease, but
   retains that lineage's actors for a five-minute authenticated reconnect grace.
