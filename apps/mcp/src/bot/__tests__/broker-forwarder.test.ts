@@ -840,7 +840,7 @@ it("reconciles benign unsettled dispatched work in-band and admits a fresh start
     },
     call: async (_principal, method, params) => {
       if (method === "reclaim") return { capabilities: [] };
-      if (method === "acknowledge") return {};
+      if (method === "acknowledge" || method === "confirm_start") return {};
       if (method === "cancel") return { cancelled: true };
       if (params.name === "operate_start") {
         const sessionId = `session-${++nextSession}`;

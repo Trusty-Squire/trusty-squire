@@ -19,9 +19,14 @@ have mode 0700. The default private parent is created automatically.
 `operate_start` accepts `proxy` as an HTTP or HTTPS URL (optional credentials)
 or an unauthenticated SOCKS5 URL. It configures the shared browser at launch,
 not an individual tab family. Concurrent sessions must request compatible proxy
-settings; incompatible settings are refused rather than applied to the live
-browser. Omitting it requests direct egress. The value is sensitive and is not
-returned in session status, action traces, or saved recipes.
+settings; incompatible settings are never applied to the live browser. When no
+other session is active on the profile, a different proxy recycles the shared
+Chrome in-band (close, release the lease, relaunch) without restarting the
+broker; with other active sessions it is refused with `incompatible_runtime`
+until they finish. The recycle mechanics live in
+[`browser-process-page-boundary.md`](browser-process-page-boundary.md). Omitting
+it requests direct egress. The value is sensitive and is not returned in
+session status, action traces, or saved recipes.
 
 Each operator process generates a fresh random forwarder credential, held only in
 memory. There is no credential persistence or slot reuse. By default, a restarted

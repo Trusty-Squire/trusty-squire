@@ -1983,18 +1983,23 @@ it("reconciles cancelled benign browsing in-band: the same lineage admits a fres
     await broker.confirmStartDelivery(principal, { capability: started.capability });
     const args = { session_id: started.capability.sessionId };
     await expect(
-      broker.call(principal, "tool", { name: "operate_click", args, capability: started.capability }, "click"),
+      broker.call(
+        principal,
+        "tool",
+        { name: "operate_click", args, capability: started.capability },
+        "click",
+      ),
     ).rejects.toMatchObject({ code: "tool_execution_failed" });
     // The uncertain benign click is recorded (session-scoped fence still
     // reports it), and the durable reconciliation stays available without any
     // replay.
     expect(await journal.hasOutstanding(started.capability.sessionId)).toBe(true);
-    await expect(
-      broker.recover(principal, { name: "operate_click", args }),
-    ).resolves.toMatchObject({
-      requestId: "click",
-      result: { reconciliation: { status: "unknown", operation: "operate_click" } },
-    });
+    await expect(broker.recover(principal, { name: "operate_click", args })).resolves.toMatchObject(
+      {
+        requestId: "click",
+        result: { reconciliation: { status: "unknown", operation: "operate_click" } },
+      },
+    );
     // Facet C: the lineage fence reconciles in-band — a fresh operate_start on
     // the SAME lineage is admitted without any client reconnect.
     expect(await journal.hasOutstanding(undefined, principal.forwarderId)).toBe(false);

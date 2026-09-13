@@ -233,8 +233,7 @@ export class OperatorForwarder {
         throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
       if (!starting && name !== "operate_finish" && capability !== undefined)
         await awaitOperatorPreparation(this.confirmStartDelivery(client, capability), signal);
-      if (starting)
-        await awaitOperatorPreparation(this.reconcileUnsettledForFreshStart(), signal);
+      if (starting) await awaitOperatorPreparation(this.reconcileUnsettledForFreshStart(), signal);
       if (recovery.recover)
         throw new BrokerRefusal("recovery_not_found", "No matching durable outcome is available");
       checkCancelled();
