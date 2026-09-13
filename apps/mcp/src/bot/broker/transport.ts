@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createServer, createConnection, type Socket } from "node:net";
 import { chmod, lstat, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -16,9 +17,19 @@ const requestSchema = z
     id: z.string().min(1).max(128),
     method: z.string().min(1).max(64),
     params: z.record(z.unknown()),
+    notifications: z.boolean().optional(),
   })
   .strict();
 type Request = z.infer<typeof requestSchema>;
+export type BrokerNotifier = (message: string, data?: Record<string, unknown>) => Promise<void>;
+const notificationContext = new AsyncLocalStorage<BrokerNotifier | undefined>();
+export function brokerNotifier(): BrokerNotifier | undefined {
+  return notificationContext.getStore();
+}
+const notificationSchema = z.object({
+  message: z.string(),
+  data: z.record(z.unknown()).optional(),
+});
 type Reply = { id: string; result?: unknown; error?: { code: string; message: string } };
 
 /** A socket is the client-liveness lease. There is deliberately no idle TTL:
@@ -141,7 +152,16 @@ export async function listenBroker(
         explicitClose = true;
         return {};
       }
-      return await port.call(principal, request.method, request.params, request.id);
+      const owner = principal;
+      const notify: BrokerNotifier | undefined = request.notifications
+        ? async (message, data) => {
+            if (closed) throw new BrokerRefusal("broker_lost", "Notification connection is closed");
+            send(socket, { id: request.id, notification: { message, data } });
+          }
+        : undefined;
+      return await notificationContext.run(notify, () =>
+        port.call(owner, request.method, request.params, request.id),
+      );
     };
     frames(socket, (value) => {
       const parsed = requestSchema.safeParse(value);
@@ -211,7 +231,13 @@ export async function listenBroker(
 export class BrokerClient {
   private readonly pending = new Map<
     string,
-    { method: string; resolve: (value: unknown) => void; reject: (error: Error) => void }
+    {
+      method: string;
+      resolve: (value: unknown) => void;
+      reject: (error: Error) => void;
+      notifyUser?: BrokerNotifier;
+      notifications: Promise<void>;
+    }
   >();
   private ended = false;
   private constructor(private readonly socket: Socket) {
@@ -235,11 +261,18 @@ export class BrokerClient {
       }
       const pending = this.pending.get(reply.id);
       if (pending === undefined) return;
+      if ("notification" in reply) {
+        const notification = notificationSchema.parse(reply.notification);
+        pending.notifications = pending.notifications
+          .then(() => pending.notifyUser?.(notification.message, notification.data))
+          .catch(() => undefined);
+        return;
+      }
       this.pending.delete(reply.id);
       if (reply.error !== undefined)
         pending.reject(new BrokerRefusal(reply.error.code, reply.error.message));
       else {
-        pending.resolve(reply.result);
+        void pending.notifications.then(() => pending.resolve(reply.result));
       }
     });
   }
@@ -290,6 +323,7 @@ export class BrokerClient {
     method: string,
     params: Record<string, unknown>,
     id: string = randomUUID(),
+    notifyUser?: BrokerNotifier,
   ): Promise<unknown> {
     if (this.ended || this.socket.destroyed)
       return Promise.reject(new BrokerRefusal("broker_lost", "Broker connection is closed"));
@@ -298,8 +332,20 @@ export class BrokerClient {
     if (this.pending.size >= 64)
       return Promise.reject(new BrokerRefusal("capacity", "Too many pending broker calls"));
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { method, resolve, reject });
-      send(this.socket, { version: 1, id, method, params });
+      this.pending.set(id, {
+        method,
+        resolve,
+        reject,
+        notifyUser,
+        notifications: Promise.resolve(),
+      });
+      send(this.socket, {
+        version: 1,
+        id,
+        method,
+        params,
+        ...(notifyUser ? { notifications: true } : {}),
+      });
     });
   }
   async acknowledge(requestId: string): Promise<void> {

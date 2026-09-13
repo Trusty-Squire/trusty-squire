@@ -1,3 +1,4 @@
+import { brokerNotifier } from "./transport.js";
 import { captureEvidenceSchema, type CaptureEvidence } from "../credential-capture.js";
 import { withBrokerAdmission } from "./admission-context.js";
 import { brokerBrowserCustody } from "./custody.js";
@@ -462,7 +463,7 @@ export class OperatorBroker implements BrokerTransportPort {
                 await withBrokerAuditContext(pinnedApi, name, commandId, async () =>
                   command.handler(translated, pinnedApi, {
                     signal,
-                    notifyUser: async () => undefined,
+                    notifyUser: brokerNotifier(),
                   }),
                 );
               const execute = async () =>

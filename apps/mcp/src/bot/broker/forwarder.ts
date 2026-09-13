@@ -2,7 +2,7 @@ import { awaitOperatorPreparation } from "../request-cancellation.js";
 import { connectOrLaunchBroker } from "./discovery.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { SessionGuard } from "../../session-guard.js";
-import type { BrokerClient } from "./transport.js";
+import type { BrokerClient, BrokerNotifier } from "./transport.js";
 import type { TabCapability } from "./authority.js";
 import { BrokerRefusal } from "./scheduler.js";
 import { requireLineageCredential } from "./lineage.js";
@@ -125,6 +125,7 @@ export class OperatorForwarder {
     requestId: string = randomUUID(),
     recovery: BrokerRecoveryRequest = {},
     signal?: AbortSignal,
+    notifyUser?: BrokerNotifier,
   ): Promise<unknown> {
     const callerRequestHash = this.callerRequestHash(requestId);
     const idempotencyKey = this.idempotencyKey(callerRequestHash);
@@ -207,6 +208,7 @@ export class OperatorForwarder {
           ...(capability === undefined ? {} : { capability }),
         },
         idempotencyKey,
+        notifyUser,
       );
       const rawReply = await brokerCall;
       if (!isRecord(rawReply))

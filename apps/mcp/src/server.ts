@@ -221,7 +221,7 @@ export async function buildServer(
   const tools = buildToolRegistry();
   const server = new Server(
     { name: SERVER_NAME, version: VERSION },
-    { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS },
+    { capabilities: { tools: {}, logging: {} }, instructions: SERVER_INSTRUCTIONS },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -311,19 +311,20 @@ export async function buildServer(
       const callApi = activeApi;
       callApi.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
       const operationId = randomUUID();
+      const notifyUser = async (message: string, data?: Record<string, unknown>) => {
+        await server.sendLoggingMessage({
+          level: "notice",
+          logger: "trusty-squire",
+          data: { message, ...data },
+        });
+      };
       const invokeHandler = async () =>
         await withOperatorRequestContext(
           composed.signal,
           async () =>
             await tool.handler(parsed.data, callApi, {
               signal: composed.signal,
-              notifyUser: async (message, data) => {
-                await server.sendLoggingMessage({
-                  level: "notice",
-                  logger: "trusty-squire",
-                  data: { message, ...data },
-                });
-              },
+              notifyUser,
             }),
           undefined,
           { operationId },
@@ -353,6 +354,7 @@ export async function buildServer(
             String(extra.requestId),
             brokerRecoveryRequested((req.params as { _meta?: unknown })._meta),
             composed.signal,
+            notifyUser,
           )
         : invoke();
       lifecycleHeldByWork = true;
