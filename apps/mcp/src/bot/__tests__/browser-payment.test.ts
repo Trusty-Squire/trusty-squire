@@ -70,6 +70,26 @@ function fastForwardCheckoutPolling(page: Page): { mockRestore(): void } {
 }
 
 describe("per-field hosted card checkout", () => {
+  it.skipIf(!chromiumAvailable)(
+    "recognizes Japanese card entry beside a wallet button",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+        for (const input of [
+          '<input name="CREDIT_NO">',
+          '<label for="opaque">カード番号</label><input id="opaque">',
+        ]) {
+          await page.setContent(`<button>PayPal</button>${input}`);
+          expect(await controller.isPayPalHostedCheckout()).toBe(false);
+        }
+      } finally {
+        await browser.close();
+      }
+    },
+  );
   it.skipIf(!chromiumAvailable).each(["braintree", "stripe"] as const)(
     "clears %s hosted fields without charging if the final approval recheck fails",
     async (provider) => {
@@ -91,7 +111,11 @@ describe("per-field hosted card checkout", () => {
         expect(onSubmitDispatched).not.toHaveBeenCalled();
         expect(await page.locator("body").getAttribute("data-charged")).toBeNull();
         for (const frame of page.frames().slice(1)) {
-          expect(await frame.locator("input").inputValue()).toBe("");
+          expect(
+            await frame
+              .locator("input")
+              .evaluateAll((inputs) => inputs.every((input) => input.value === "")),
+          ).toBe(true);
         }
       } finally {
         await browser.close();
@@ -123,7 +147,7 @@ describe("per-field hosted card checkout", () => {
           .frames()
           .find((frame) => frame.name() === "braintree-hosted-field-number")!;
         await pan
-          .locator("input")
+          .locator("input:not(.autofill-field):not(.focus-intercept)")
           .evaluate((input) => input.setAttribute("autocomplete", "cc-number"));
         await page.locator("body").evaluate((body, label) => {
           const button = document.createElement("button");
@@ -135,6 +159,7 @@ describe("per-field hosted card checkout", () => {
         await browser.close();
       }
     },
+    30_000,
   );
   it.skipIf(!chromiumAvailable).each(["braintree", "stripe"] as const)(
     "fills %s cross-origin fields and places the order through the guarded submit path",
@@ -142,7 +167,11 @@ describe("per-field hosted card checkout", () => {
       const browser = await chromium.launch({ headless: true });
       try {
         const page = await browser.newPage();
-        await serveHostedCardFields(page, provider, APPROVAL_CARD);
+        await serveHostedCardFields(page, provider, APPROVAL_CARD, 500);
+        expect(page.frames()).toHaveLength(1);
+        await page.evaluate(() =>
+          (window as unknown as { mountHostedFields(): void }).mountHostedFields(),
+        );
         const controller = new BrowserController({ humanize: false });
         (controller as unknown as { page: Page }).page = page;
         expect(await controller.isPayPalHostedCheckout()).toBe(false);
@@ -158,7 +187,11 @@ describe("per-field hosted card checkout", () => {
         expect(onSubmitDispatched).toHaveBeenCalledOnce();
         expect(JSON.stringify(result)).not.toContain(APPROVAL_CARD.pan);
         for (const frame of page.frames().slice(1)) {
-          expect(await frame.locator("input").inputValue()).toBe("");
+          expect(
+            await frame
+              .locator("input")
+              .evaluateAll((inputs) => inputs.every((input) => input.value === "")),
+          ).toBe(true);
         }
       } finally {
         await browser.close();

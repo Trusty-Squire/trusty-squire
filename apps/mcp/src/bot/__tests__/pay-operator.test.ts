@@ -2800,7 +2800,11 @@ describe("hosted-field vaulted payment (real browser)", () => {
         expect(transcript).not.toContain(SYNTHETIC_CARD.pan);
         expect(transcript).not.toContain(SYNTHETIC_CARD.cvv);
         for (const frame of page.frames().slice(1)) {
-          expect(await frame.locator("input").inputValue()).toBe("");
+          expect(
+            await frame
+              .locator("input")
+              .evaluateAll((inputs) => inputs.every((input) => input.value === "")),
+          ).toBe(true);
         }
       } finally {
         await browser.close();

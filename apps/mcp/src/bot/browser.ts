@@ -843,7 +843,7 @@ function isShopifyCheckoutThankYouRoute(rawUrl: string): boolean {
 // stampJapaneseCardLabelFields so this selector stays valid for both
 // frame.locator() and native element.matches() calls.
 const CHECKOUT_NON_CARD_IDENTITY_EXCLUSION =
-  ':not([name*="gift" i]):not([id*="gift" i]):not([name*="loyalty" i]):not([id*="loyalty" i]):not([name*="point" i]):not([id*="point" i]):not([name*="prepaid" i]):not([id*="prepaid" i]):not([name*="member" i]):not([id*="member" i])';
+  ':not(.autofill-field):not(.focus-intercept):not([name*="gift" i]):not([id*="gift" i]):not([name*="loyalty" i]):not([id*="loyalty" i]):not([name*="point" i]):not([id*="point" i]):not([name*="prepaid" i]):not([id*="prepaid" i]):not([name*="member" i]):not([id*="member" i])';
 
 const CHECKOUT_LEGACY_PAN_FIELD_SELECTORS = [
   'input[autocomplete~="cc-number"]',
@@ -8596,6 +8596,7 @@ export class BrowserController {
     if (!page) throw new Error("Browser not started");
     // A fillable card checkout can also offer express wallets. Their presence
     // must not block the saved-card path (including Braintree and Stripe).
+    await this.waitForPanField(10_000, undefined, page);
     const panFrame = await this.panFieldFrame(undefined, page);
     if (panFrame !== null) {
       try {
@@ -8651,7 +8652,7 @@ export class BrowserController {
       if (field === undefined) continue;
       await frame
         .locator(
-          'input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]):not([type="button"]):not([type="submit"]),select',
+          `input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]):not([type="button"]):not([type="submit"])${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION},select${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
         )
         .evaluateAll((inputs, role) => {
           for (const input of inputs) input.setAttribute("data-ts-hosted-card-field", role);
