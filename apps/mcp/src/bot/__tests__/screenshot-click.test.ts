@@ -764,6 +764,7 @@ describe("native screenshot/click tool contract on an isolated session", () => {
             };
           });
           session.placeOrderApproval = {
+            outcome: null,
             approvalId: "synthetic",
             merchant: "parent.test",
             amountCents: 100,

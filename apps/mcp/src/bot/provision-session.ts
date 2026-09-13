@@ -56,6 +56,7 @@ import {
   type OAuthCompletionEvidence,
   type PageTargetSafetySignals,
 } from "./browser.js";
+import { markPendingThreeDsChallenge, THREE_DS_RESUME_WINDOW_MS } from "./pay-operator.js";
 import type {
   CartCheckoutObservation,
   PendingApprovalWait,
@@ -2693,6 +2694,15 @@ function placeOrderApprovalFromPendingFill(
   pending: PendingCardFill,
 ): NonNullable<Session["placeOrderApproval"]> {
   return {
+    outcome: {
+      approval_id: pending.approval_id,
+      approval_url: pending.approval_url,
+      checkout: pending.checkout,
+      last4: pending.last4,
+      ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
+      deadline: 0,
+      outcome: "unknown",
+    },
     approvalId: pending.approval_id,
     ...(pending.mandate_id !== undefined ? { mandateId: pending.mandate_id } : {}),
     merchant: pending.checkout.merchant,
@@ -2795,6 +2805,22 @@ export function getActivePendingThreeDs(selectedSession?: Session): PendingThree
   return (selectedSession ?? activeProvisionSession()).pendingThreeDs ?? null;
 }
 
+export function getCallerDrivenPaymentOutcome(session: Session): PendingThreeDsWait | null {
+  return session.placeOrderAttempted ? (session.placeOrderApproval?.outcome ?? null) : null;
+}
+
+export async function observeCallerDrivenPayment(session: Session): Promise<void> {
+  const state = getCallerDrivenPaymentOutcome(session);
+  const api = session.api;
+  if (state === null || api === undefined) return;
+  try {
+    const browser = await activeProvisionBrowserForPayment(session);
+    const notify = (): void => markPendingThreeDsChallenge(api, state);
+    const resolution = await browser.waitForThreeDsResolution(0, notify);
+    if (resolution === "challenge_pending") notify();
+  } catch {}
+}
+
 export function armPaymentDispatchHandoff(
   state: PendingThreeDsWait,
   selectedSession?: Session,
@@ -2863,6 +2889,10 @@ export function clearActivePendingThreeDsIfCurrent(
   selectedSession?: Session,
 ): boolean {
   const session = selectedSession ?? activeProvisionSession();
+  if (session.placeOrderApproval?.outcome === state) {
+    session.placeOrderApproval.outcome = null;
+    return true;
+  }
   if (session.pendingThreeDs !== state) return false;
   session.pendingThreeDs = null;
   return true;
@@ -5366,6 +5396,9 @@ function enforcePlaceOrderGuard(
   }
   const approval = session.placeOrderApproval;
   session.placeOrderAttempted = true;
+  if (approval.outcome !== null) {
+    approval.outcome.deadline = Date.now() + THREE_DS_RESUME_WINDOW_MS;
+  }
   return approval;
 }
 
@@ -5379,6 +5412,7 @@ async function recordPlaceOrderAttemptAudit(
   session: Session,
   approval: NonNullable<Session["placeOrderApproval"]>,
 ): Promise<void> {
+  await observeCallerDrivenPayment(session);
   if (session.api === undefined) return;
   try {
     await session.api.auditPayment({

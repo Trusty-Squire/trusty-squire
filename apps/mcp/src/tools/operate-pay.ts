@@ -15,6 +15,8 @@ import {
   finishPaymentDispatchHandoff,
   getActivePendingApproval,
   getActivePendingThreeDs,
+  getCallerDrivenPaymentOutcome,
+  observeCallerDrivenPayment,
   getTerminalPaymentApproval,
   recordActivePaymentProvenance,
   releaseActivePaymentLease,
@@ -28,6 +30,7 @@ import {
   classifyApprovalCandidate,
   executeOperatePay,
   executeOperatePayConfirm,
+  markPendingThreeDsChallenge,
   type PendingApprovalWait,
   type PendingCardFill,
   type PendingThreeDsWait,
@@ -230,8 +233,6 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
       }
       // Confirm step of a split checkout: the card is already filled (and the
       // mandate already signed), so no card resolution and no PayPal gate.
-      // confirm no longer touches the browser or charges anything — it only
-      // reports the approved terms back and releases the pending-fill lease.
       // Card values are NEVER cleared here (the caller still needs them
       // filled to submit), so masking must stay active: clear with
       // paymentFieldsCleared=false, which moves the session to "sealed" —
@@ -250,6 +251,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         }
         const pending = paymentClaim.pending;
         try {
+          await observeCallerDrivenPayment(session);
           const result = await executeOperatePayConfirm(pending);
           clearActivePendingCardFill(false, session);
           return paymentResult(session, result);
@@ -670,8 +672,10 @@ async function threeDsStatusResult(
   const expiredAtEntry = Date.now() >= state.deadline;
   const boundMs =
     expiredAtEntry || waitSeconds <= 0 ? 0 : Math.min(Math.max(waitSeconds * 1000, 1_000), 15_000);
-  const resolution = await browser.waitForThreeDsResolution(boundMs);
-  if (resolution === "challenge_pending") state.outcome = "three_ds";
+  const notifyDetectedChallenge = (): void => markPendingThreeDsChallenge(api, state);
+  if (state.outcome === "three_ds") notifyDetectedChallenge();
+  const resolution = await browser.waitForThreeDsResolution(boundMs, notifyDetectedChallenge);
+  if (resolution === "challenge_pending") notifyDetectedChallenge();
   const mismatch = browser.paymentInstrumentMismatch?.();
   if (mismatch !== undefined) state.payment_instrument_mismatch ??= mismatch;
   const terminalStatus = threeDsResolutionStatus(resolution);
@@ -798,7 +802,7 @@ async function paymentStatusResult(
       ready_to_charge: false,
     });
   }
-  const threeDsState = getActivePendingThreeDs(session);
+  const threeDsState = getActivePendingThreeDs(session) ?? getCallerDrivenPaymentOutcome(session);
   if (threeDsState !== null) {
     return paymentResult(
       session,

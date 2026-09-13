@@ -659,28 +659,11 @@ post-submit outcome labels in those owners rather than copying them here.
   the main frame or a frame accepted by `recognizedPaymentProviderFrame`,
   preserving split-checkout trust boundaries — `browser.ts`.
 
-### Decoupled/out-of-band 3-D Secure: the real bug was network scope, not wait duration
+### Native 3-D Secure networking
 
-`#570`/`#572` (2026-08-23) fixed two real defects reproduced live against
-Hibiya Kadan/EbisuMart, but a THIRD one survived them: a decoupled/OOB 3DS
-challenge could still hang indefinitely even though the cardholder approved
-in ~2 seconds — nowhere near either the original single wait or #572's
-resumable 20-minute one. **Root cause, confirmed with a local ACS fixture
-(`browser-decoupled-3ds.test.ts`, both top-level-navigation and iframe/CRes-
-auto-submit topologies): `installHostScopeGuard`'s fail-closed XHR/fetch
-guard (`requestHostInScope`, `browser.ts`) never allow-listed
-`cardinalcommerce.com`** — a host `detectThreeDsChallenge`'s own `urlPattern`
-already treats as a legitimate 3DS authority. So the ACS page's OWN
-decoupled-approval status poll got `route.abort("failed")`ed the instant the
-challenge attached, and its client-side JS could never learn the issuer had
-already approved — no redirect, no CRes auto-submit, independent of how long
-`waitForThreeDsResolution` kept watching. Fix: `THREE_DS_ACS_NETWORK_HOSTS`
-(`browser.ts`, next to `RECOGNIZED_PAYMENT_PROVIDER_FRAME_HOSTS` — kept as a
-SEPARATE list on purpose, so widening 3DS network scope never also widens
-where the raw PAN may be typed). Confirmed by temporarily disabling the fix
-against the same fixture: the hang reproduces byte-for-byte in both
-topologies. `waitForThreeDsResolution` itself needed no change — the
-detection logic was never the bug.
+The payment-page network allowance is owned by
+[the operator network-scope contract](docs/operator-tool-surface.md#scope-is-declared-at-session-start).
+See `browser-decoupled-3ds.test.ts` for native ACS polling and redirect coverage.
 
 ### Positive new-card selection supersedes #572's saved-card refusal
 

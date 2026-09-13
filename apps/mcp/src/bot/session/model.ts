@@ -227,6 +227,7 @@ export interface Session {
   // itself has moved on to "confirming" or "sealed" (sealed drops `pending`).
   // Cleared only at session (re)init or after verified full field cleanup.
   placeOrderApproval: {
+    outcome: PendingThreeDsWait | null;
     approvalId: string;
     mandateId?: string;
     merchant: string;

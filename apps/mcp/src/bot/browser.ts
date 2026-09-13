@@ -8199,8 +8199,8 @@ export class BrowserController {
       submitFilledCheckout: async () => await this.submitFilledCheckout(requireLivePage()),
       clearSealedPaymentFields: async () => await this.clearSealedPaymentFields(requireLivePage()),
       clearCheckoutCardFields: async () => await this.clearCheckoutCardFields(requireLivePage()),
-      waitForThreeDsResolution: async (timeoutMs) =>
-        await this.waitForThreeDsResolution(timeoutMs, requireLivePage()),
+      waitForThreeDsResolution: async (timeoutMs, onThreeDsDetected) =>
+        await this.waitForThreeDsResolution(timeoutMs, requireLivePage(), onThreeDsDetected),
       paymentInstrumentMismatch: () => this.paymentInstrumentMismatch(),
       currentUrl: () => requireLivePage().url(),
     };
@@ -10010,6 +10010,9 @@ export class BrowserController {
     if (options.deadline !== undefined && Date.now() >= options.deadline) {
       throw new Error("payment_approval_expired");
     }
+    this.checkoutOutcomeBaseline = await this.captureCheckoutOutcomeBaseline(page).catch(
+      () => undefined,
+    );
     this.paymentNetworkDeadlines.set(page, Date.now() + 20 * 60_000);
     const allowed = page
       .frames()
@@ -10851,7 +10854,9 @@ export class BrowserController {
 
   private async hasVisibleThreeDsStructuralSignal(frame: Frame): Promise<boolean> {
     const elements = await frame
-      .locator('iframe[title*="3d secure" i],form[action*="acs" i],form:has(input[name="creq" i])')
+      .locator(
+        'iframe[title*="3d secure" i],form[action*="acs" i],form:has(input[name="creq" i]),form[name="credit3d2FepBuyAuthenticateActionForm" i],form:has(input[name="md" i]):has([name="resSumbitButtonId" i],#resSumbitButtonId)',
+      )
       .elementHandles()
       .catch(() => []);
     try {
@@ -11024,6 +11029,21 @@ export class BrowserController {
     };
   }
 
+  private async hasFailedCheckoutAuthentication(page: Page): Promise<boolean> {
+    const failureText =
+      /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)|本人認証に失敗しました/iu;
+    const texts = await Promise.all(
+      page
+        .frames()
+        .filter((frame) => !this.frameWithinCaptcha(frame))
+        .map(
+          async (frame) =>
+            await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
+        ),
+    );
+    return texts.some((text) => failureText.test(text));
+  }
+
   private async detectThreeDsChallenge(
     expectedCard?: Pick<CheckoutCard, "pan" | "issuer" | "issuer_source" | "network" | "label">,
     page: Page | null = this.page,
@@ -11032,11 +11052,13 @@ export class BrowserController {
     if (expectedCard !== undefined) {
       this.rememberPaymentInstrumentExpectation(expectedCard);
     }
-    // Cross-processor 3DS signals only — never key on a single PSP's internal
-    // state. CardinalCommerce backs the ACS/StepUp flow for many processors
-    // (not just Stripe), so its host is a generic signal, not Stripe-specific.
+    if (await this.hasFailedCheckoutAuthentication(page)) {
+      return { three_ds_required: false, order_confirmed: false };
+    }
+    // Challenge URLs are evidence only when their frame is visibly rendered;
+    // hidden method/fingerprint documents must not prompt the cardholder.
     const urlPattern =
-      /(?:https?:\/\/(?:[^/]+\.)*cardinalcommerce\.com\/(?:v\d+\/)?cruise\/stepup(?:[/?#]|$)|https?:\/\/hooks\.stripe\.com\/3d_secure|3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/3ds(?:2)?\/|\/acs\/)/i;
+      /(?:https?:\/\/(?:[^/]+\.)*cardinalcommerce\.com\/(?:v\d+\/)?cruise\/stepup(?:[/?#]|$)|https?:\/\/hooks\.stripe\.com\/3d_secure|https?:\/\/(?:[^/]+\.)*emvtds(?:[-.][^/]*)?(?:\/|$)|3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/(?:emvtds|emv-?3ds)(?:[-_/]|$)|\/3ds(?:2)?\/|\/acs\/|\/credit3d2\/Fep(?:ChargePaymentInfo|BridgeAuthority)[^/?#]*\.do(?:[?#]|$))/i;
     let challengeFallback: CheckoutSubmitResult | undefined;
     for (const frame of page.frames()) {
       // A captcha frame (fraud-check, not authentication) must never be
@@ -11057,7 +11079,8 @@ export class BrowserController {
         (await this.frameWithinThreeDsStructuralFrame(frame, page)) ||
         /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i.test(
           text,
-        );
+        ) ||
+        /本人認証/u.test(text);
       if (!detected) continue;
       const mismatch = this.comparePaymentInstrumentEvidence(
         this.paymentInstrumentExpectation,
@@ -11136,19 +11159,25 @@ export class BrowserController {
   async waitForThreeDsResolution(
     timeoutMs: number,
     page: Page | null = this.page,
+    onThreeDsDetected?: () => void,
   ): Promise<ThreeDsResolution> {
     if (!page) throw new Error("Browser not started");
     const outcomeBaseline =
       this.checkoutOutcomeBaseline ?? (await this.captureCheckoutOutcomeBaseline(page));
-    const failureText =
-      /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
     const deadline = Date.now() + Math.max(timeoutMs, 0);
     const mismatchAtEntry = this.observedPaymentInstrumentMismatch;
     let challengeObserved = false;
     while (true) {
       await page.bringToFront().catch(() => undefined);
       const challenge = await this.detectThreeDsChallenge(undefined, page).catch(() => undefined);
-      if (challenge?.three_ds_required === true) challengeObserved = true;
+      if (challenge?.three_ds_required === true && !challengeObserved) {
+        challengeObserved = true;
+        try {
+          onThreeDsDetected?.();
+        } catch {
+          // Notification is best-effort and must never interrupt native 3DS.
+        }
+      }
       if (mismatchAtEntry === undefined && this.observedPaymentInstrumentMismatch !== undefined) {
         return challengeObserved ? "challenge_pending" : "timeout";
       }
@@ -11156,16 +11185,7 @@ export class BrowserController {
         this.paymentNetworkDeadlines.delete(page);
         return "succeeded";
       }
-      const texts = await Promise.all(
-        page
-          .frames()
-          .filter((frame) => !this.frameWithinCaptcha(frame))
-          .map(
-            async (frame) =>
-              await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
-          ),
-      );
-      if (texts.some((text) => failureText.test(text))) {
+      if (await this.hasFailedCheckoutAuthentication(page)) {
         this.paymentNetworkDeadlines.delete(page);
         return "failed";
       }

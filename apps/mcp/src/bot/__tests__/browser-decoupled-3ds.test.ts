@@ -248,12 +248,13 @@ describe("operation-scoped host allowances", () => {
 });
 
 describe("payment-window browser networking", () => {
-  it.skipIf(!chromiumAvailable)(
-    "natively advances a synthetic securityCode checkout through method, fingerprint, challenge and receipt",
-    async () => {
+  it.skipIf(!chromiumAvailable).each(["single", "split"] as const)(
+    "natively advances a %s checkout through EMV-TDS, method, fingerprint, challenge and receipt",
+    async (phase) => {
       const method = "https://methodurl.vcas.visa.com/method/status";
       const fingerprint = "https://h.online-metrix.net/fp/status";
       const checkout = `${MERCHANT_ORIGIN}/checkout`;
+      const emvTds = "https://emvtds.sps-system.com/emvtds-fe/status";
       const { context, page } = await serveFixture({
         [checkout]: `<meta charset="utf-8"><h1>Synthetic card checkout</h1>
           <p>Test fixture only — no real payment. Total: ¥6,600</p>
@@ -265,10 +266,12 @@ describe("payment-window browser networking", () => {
           document.querySelector('form').onsubmit = async (event) => {
             event.preventDefault();
             if (!document.querySelector('#securityCode').value) return;
+            await fetch(${JSON.stringify(emvTds)});
             await fetch(${JSON.stringify(method)});
             await fetch(${JSON.stringify(fingerprint)});
             location.href = ${JSON.stringify(ACS_CHALLENGE_URL)};
           };</script>`,
+        [emvTds]: "emv-tds complete",
         [method]: "method complete",
         [fingerprint]: "fingerprint complete",
         [ACS_CHALLENGE_URL]: `<meta charset="utf-8"><h1>3D Secure authentication</h1>
@@ -282,7 +285,9 @@ describe("payment-window browser networking", () => {
       page.on("response", (response) => {
         responses.push({ url: response.url(), status: response.status() });
       });
-      const evidence = process.env.PAYMENT_TEST_EVIDENCE_DIR;
+      const evidence = process.env.PAYMENT_TEST_EVIDENCE_DIR
+        ? join(process.env.PAYMENT_TEST_EVIDENCE_DIR, phase)
+        : undefined;
       try {
         await page.goto(checkout);
         if (evidence) {
@@ -291,27 +296,41 @@ describe("payment-window browser networking", () => {
         }
         const controller = BrowserController.fromHarnessPage(page);
         await controller.setHostScopeAllowedHosts(() => SESSION_ALLOWED_HOSTS);
-        const submission = await controller.fillAndSubmitCheckout({
+        const card = {
           pan: "4242424242424242",
           exp_month: "12",
           exp_year: "30",
           cvv: "123",
           name: "Synthetic Cardholder",
           billing: { line1: "1 Test Street", city: "Test", postal_code: "10001", country: "US" },
-        });
-        expect(submission).toMatchObject({ three_ds_required: true, order_confirmed: false });
+        };
+        let submission;
+        if (phase === "single") {
+          submission = await controller.fillAndSubmitCheckout(card);
+          expect(submission).toMatchObject({ three_ds_required: true, order_confirmed: false });
+        } else {
+          await controller.fillCheckoutCardFields(card);
+          await page.getByRole("button", { name: "Pay now" }).click();
+          await page.waitForURL(ACS_CHALLENGE_URL);
+        }
         expect(page.url()).toBe(ACS_CHALLENGE_URL);
         expect(responses).toEqual(
           expect.arrayContaining([
+            { url: emvTds, status: 200 },
             { url: method, status: 200 },
             { url: fingerprint, status: 200 },
           ]),
         );
         if (evidence) await page.screenshot({ path: join(evidence, "synthetic-challenge.png") });
+        if (phase === "split") {
+          await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("challenge_pending");
+        }
         // This click represents the human's issuer interaction, not an operator workaround.
         await page.getByRole("button", { name: "Simulate cardholder confirmation" }).click();
+        await page.waitForURL(RECEIPT_URL);
         const resolution = await controller.waitForThreeDsResolution(5_000);
         expect(resolution).toBe("succeeded");
+        await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("succeeded");
         expect(page.url()).toBe(RECEIPT_URL);
         expect(controller.takeHostScopeDenials()).toEqual([]);
         if (evidence) {
@@ -344,7 +363,7 @@ describe("payment-window browser networking", () => {
     async (broker) => {
       const method = "https://methodurl.vcas.visa.com/method/status";
       const fingerprint = "https://h.online-metrix.net/fp/status";
-      const issuer = "https://issuer.synthetic.test/status";
+      const issuer = "https://emvtds.sps-system.com/emvtds-fe/status";
       const { context, page } = await serveFixture({
         [`${MERCHANT_ORIGIN}/checkout`]: `<form><input autocomplete="cc-number"><input autocomplete="cc-exp"><input autocomplete="cc-csc"><input autocomplete="cc-name"></form>`,
         [method]: "method complete",

@@ -3122,8 +3122,12 @@ describe("3-D Secure resolution", () => {
       const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
         clock += timeout;
       });
+      const onThreeDsDetected = vi.fn();
       try {
-        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("challenge_pending");
+        await expect(
+          controller.waitForThreeDsResolution(5_000, page, onThreeDsDetected),
+        ).resolves.toBe("challenge_pending");
+        expect(onThreeDsDetected).toHaveBeenCalledOnce();
       } finally {
         wait.mockRestore();
         now.mockRestore();
@@ -6401,6 +6405,25 @@ describe("3DS detection vs captcha frames", () => {
           frameUrl: "https://0merchantacsstag.cardinalcommerce.com/V1/Cruise/StepUp",
         },
         { frameUrl: "https://hooks.stripe.com/3d_secure/authenticate/src_1" },
+        { frameUrl: "https://emvtds.sps-system.com/emvtds-fe/authenticate" },
+        {
+          frameUrl:
+            "https://fep.sps-system.com/f02/credit3d2/FepChargePaymentInfoBinIntelligenceResult.do",
+        },
+        {
+          frameUrl: "https://fep.sps-system.com/f02/credit3d2/FepChargePaymentInfoLookupResult.do",
+        },
+        {
+          frameUrl:
+            "https://fep.sps-system.com/f02/credit3d2/FepChargePaymentInfoAuthenticateInit.do",
+        },
+        {
+          frameUrl:
+            "https://fep.sps-system.com/f02/credit3d2/FepChargePaymentInfoAuthenticateResult.do",
+        },
+        {
+          frameUrl: "https://fep.sps-system.com/f02/credit3d2/FepBridgeAuthorityResult.do",
+        },
         { frameUrl: "https://issuer.example.test/acs/challenge?provider=hcaptcha.com" },
         { frameUrl: "https://issuer.example.test/flow/3d-secure/start" },
         { frameUrl: "https://issuer.example.test/flow/three-d-secure/start" },
@@ -6413,11 +6436,21 @@ describe("3DS detection vs captcha frames", () => {
           frameUrl: "https://issuer.example.test/authenticate",
           frameHtml: '<form><input type="hidden" name="creq"><button>Authorize</button></form>',
         },
+        {
+          merchantHtml:
+            '<form name="credit3d2FepBuyAuthenticateActionForm" action="/processor/authenticate"><input type="hidden" name="org.apache.struts.taglib.html.TOKEN" value="synthetic"><button name="resSumbitButtonId">Continue</button></form><iframe id="iframeId" srcdoc="<p>Processing</p>"></iframe>',
+        },
+        {
+          merchantHtml:
+            '<form action="/processor/authenticate"><input type="hidden" name="md" value="synthetic"><button name="resSumbitButtonId">Continue</button></form>',
+        },
         { merchantHtml: "<p>Please authenticate this payment using 3-D Secure</p>" },
+        { merchantHtml: '<meta charset="utf-8"><p>本人認証</p>' },
       ];
       try {
         for (const testCase of cases) {
-          await expect(detectInRealPage(browser, testCase)).resolves.toMatchObject({
+          const result = await detectInRealPage(browser, testCase);
+          expect(result, JSON.stringify(testCase)).toMatchObject({
             three_ds_required: true,
           });
         }
@@ -6505,6 +6538,41 @@ describe("3DS detection vs captcha frames", () => {
       }
     },
     15_000,
+  );
+});
+
+describe("SBPS 3DS result classification", () => {
+  it.skipIf(!chromiumAvailable).each(["本人認証に失敗しました", "3D Secure authentication failed"])(
+    "does not prompt for approval after terminal authentication failure: %s",
+    async (failure) => {
+      const browser = await chromium.launch({ headless: true });
+      const page = await browser.newPage();
+      const acs = "https://emvtds.sps-system.com/emvtds-fe/authenticate";
+      await page.route("**/*", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<meta charset="utf-8"><p>${failure}</p>`,
+        }),
+      );
+      try {
+        await page.goto(acs);
+        const controller = BrowserController.fromHarnessPage(page);
+        await expect(
+          (
+            controller as unknown as {
+              detectThreeDsChallenge(): Promise<CheckoutSubmitResult>;
+            }
+          ).detectThreeDsChallenge(),
+        ).resolves.toMatchObject({ three_ds_required: false });
+        const notify = vi.fn();
+        await expect(
+          controller.paymentBrowser(page).waitForThreeDsResolution(0, notify),
+        ).resolves.toBe("failed");
+        expect(notify).not.toHaveBeenCalled();
+      } finally {
+        await browser.close();
+      }
+    },
   );
 });
 

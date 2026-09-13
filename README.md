@@ -143,7 +143,7 @@ as the approval amount. If they are omitted, Trusty Squire may use the most rece
 total observed earlier in the same browser session, such as the cart subtotal, only
 when the checkout origin still matches. One phone approval
 binds that amount and releases the card; Trusty Squire fills the card without
-submitting and its role in the purchase ends there. It fills only the merchant's own
+submitting. It fills only the merchant's own
 HTTPS frames or recognized payment-provider frames. The card stays in the page as
 filled fields while the agent advances to the review step and places the order;
 those fields are ordinary page content in `operate_observe` and
@@ -158,9 +158,16 @@ After a recognized click dispatches, Trusty Squire best-effort records a secret-
 mandate, approved amount/currency, merchant, and opaque card reference. This records
 an attempt, not a verified charge outcome.
 
-`operate_pay { phase: "confirm" }` just releases the session's pending-fill lock and
-reports the approved terms back — it makes no browser or provider call, records no
-audit event itself, and never charges. It can be called any time after the fill — it does not
+After a recognized split-checkout charge click, Trusty Squire passively checks for
+3-D Secure. `operate_payment_status` can then poll the same attempt for up to
+twenty minutes, reporting and auditing its terminal outcome. It compares receipt
+evidence against the pre-submit card-fill page.
+
+`operate_pay { phase: "confirm" }` releases the session's pending-fill lock and
+reports the approved terms back. After a recognized charge attempt it also makes
+a passive challenge check, without consuming a terminal outcome: use
+`operate_payment_status` to retrieve that outcome even if authentication completed
+before confirmation. Confirm never charges. It can be called any time after the fill — it does not
 need to happen before you place the order, and it never reads a total or verifies an
 amount. If a payment gets stuck or a card is declined, recover with `operate_finish`
 and start a fresh session; `operate_pay` does not support refilling a different card
@@ -170,18 +177,27 @@ Before an initial single-page or `fill_card` call, Trusty Squire follows the act
 visible card-number field and hands the checkout back when that field is hosted by
 PayPal or Braintree. A separate PayPal express button does not block fillable merchant
 or Shopify PCI card fields. Trusty Squire does not sign in to PayPal or use vaulted
-PayPal credentials. After any submit that has not yet reached a confirmed order,
-Trusty Squire waits 180 seconds by default for native completion, including
-out-of-band bank-app approval. A linked Telegram chat receives a challenge-specific
-nudge only after 3-D Secure is detected. Standard cross-processor 3-D Secure signals and recognized
-CardinalCommerce or Stripe challenge frames classify the first case only when the
-containing frame is visibly rendered. Hidden 3-D Secure Method pre-authentication and
-captcha-hosted frames never count as 3-D Secure, and an ordinary Shopify PCI card-field
-host alone does not either. It reports a visible decline and hands an unresolved outcome
-back on timeout, noting whether the Telegram nudge actually went out.
+PayPal credentials. After a single-page submit that has not yet reached a confirmed
+order, Trusty Squire waits 180 seconds by default for native completion, including
+out-of-band bank-app approval. A linked Telegram chat receives one best-effort
+challenge notification on first detection, whether during submission, the initial
+wait, a recognized split-checkout charge click, confirmation, or status polling.
+Repeated polls do not send another notification for that attempt. The cardholder
+may need to open their bank app after this nudge; a bank push is not guaranteed.
+Notification delivery never delays or gates native authentication.
+
+Detection recognizes visible cross-processor signals, including CardinalCommerce,
+Stripe, SBPS/EMV-TDS hosts and `/credit3d2/` challenge routes, SBPS authentication
+forms, and Japanese 本人認証 text. Hidden 3-D Secure Method pre-authentication,
+captcha-hosted frames, and an ordinary Shopify PCI card-field host alone do not
+count as a challenge. Terminal authentication failure, including
+本人認証に失敗しました, is reported as failure without a new challenge nudge.
+SBPS step-up auto-progression remains [deferred pending a live reproduction](docs/investigations/sbps-three-ds-method-handshake.md).
+
 `three_ds_wait_seconds` accepts whole seconds from 0 to 600; set it to `0` on
-`operate_pay` to skip the notification and waiting and receive the handoff
-immediately.
+`operate_pay` to take an immediate outcome check without waiting. A detected
+challenge still triggers the notification; a challenge appearing later can be
+picked up by `operate_payment_status`.
 
 Connect Telegram under Vault Settings to receive secret-free alerts for
 credential, card, payment, and app-grant lifecycle changes. Routine credential
@@ -283,8 +299,9 @@ The result contains a host-scoped egress `base_url` and a `token`, not the Clerk
 - Saved cards are encrypted in your browser with a passkey-derived key. For a
   single-page payment, your phone releases the card only after approving the
   exact purchase details shown on the approval page. On a split checkout, one
-  amount-bound approval releases the card; Trusty Squire's role ends at the fill
-  and the caller places the order and verifies the final total itself. The API
+  amount-bound approval releases the card; the caller places the order and verifies
+  the final total itself. See the split-checkout guidance above for passive outcome
+  tracking. The API
   temporarily relays only operator-sealed card ciphertext and its signed mandate.
   Trusty Squire's API and the coding-agent model never receive plaintext PAN or
   CVV. See the
