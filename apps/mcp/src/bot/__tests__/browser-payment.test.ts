@@ -1,3 +1,4 @@
+import { serveHostedCardFields } from "./fixtures/hosted-card-fields.js";
 import { existsSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
 import { describe, expect, it, vi } from "vitest";
@@ -67,6 +68,104 @@ function fastForwardCheckoutPolling(page: Page): { mockRestore(): void } {
     },
   };
 }
+
+describe("per-field hosted card checkout", () => {
+  it.skipIf(!chromiumAvailable).each(["braintree", "stripe"] as const)(
+    "clears %s hosted fields without charging if the final approval recheck fails",
+    async (provider) => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await serveHostedCardFields(page, provider, APPROVAL_CARD);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+        const onSubmitDispatched = vi.fn();
+        await expect(
+          controller.fillAndSubmitCheckout(APPROVAL_CARD, {
+            beforeSubmitDispatch: () => {
+              throw new Error("payment_approval_expired");
+            },
+            onSubmitDispatched,
+          }),
+        ).rejects.toThrow("payment_approval_expired");
+        expect(onSubmitDispatched).not.toHaveBeenCalled();
+        expect(await page.locator("body").getAttribute("data-charged")).toBeNull();
+        for (const frame of page.frames().slice(1)) {
+          expect(await frame.locator("input").inputValue()).toBe("");
+        }
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+  it.skipIf(!chromiumAvailable).each(["PayPal", "Apple Pay", "Google Pay"])(
+    "refuses a standalone %s express wallet but permits accompanying card entry",
+    async (wallet) => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+        await page.setContent(`<button>${wallet}</button>`);
+        expect(await controller.isPayPalHostedCheckout()).toBe(true);
+        if (wallet === "PayPal") {
+          await page.route("https://www.paypal.com/**", (route) =>
+            route.fulfill({
+              contentType: "text/html",
+              body: "<button>PayPal</button>",
+            }),
+          );
+          await page.setContent('<iframe src="https://www.paypal.com/smart/buttons"></iframe>');
+          expect(await controller.isPayPalHostedCheckout()).toBe(true);
+        }
+        await serveHostedCardFields(page, "braintree", APPROVAL_CARD);
+        const pan = page
+          .frames()
+          .find((frame) => frame.name() === "braintree-hosted-field-number")!;
+        await pan
+          .locator("input")
+          .evaluate((input) => input.setAttribute("autocomplete", "cc-number"));
+        await page.locator("body").evaluate((body, label) => {
+          const button = document.createElement("button");
+          button.textContent = label;
+          body.append(button);
+        }, wallet);
+        expect(await controller.isPayPalHostedCheckout()).toBe(false);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+  it.skipIf(!chromiumAvailable).each(["braintree", "stripe"] as const)(
+    "fills %s cross-origin fields and places the order through the guarded submit path",
+    async (provider) => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await serveHostedCardFields(page, provider, APPROVAL_CARD);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+        expect(await controller.isPayPalHostedCheckout()).toBe(false);
+        const beforeSubmitDispatch = vi.fn();
+        const onSubmitDispatched = vi.fn();
+        const result = await controller.fillAndSubmitCheckout(APPROVAL_CARD, {
+          beforeSubmitDispatch,
+          onSubmitDispatched,
+        });
+        expect(result.order_confirmed).toBe(true);
+        expect(await page.locator("body").getAttribute("data-charged")).toBe("true");
+        expect(beforeSubmitDispatch).toHaveBeenCalled();
+        expect(onSubmitDispatched).toHaveBeenCalledOnce();
+        expect(JSON.stringify(result)).not.toContain(APPROVAL_CARD.pan);
+        for (const frame of page.frames().slice(1)) {
+          expect(await frame.locator("input").inputValue()).toBe("");
+        }
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+});
 
 describe("page-bound payment browser", () => {
   it.skipIf(!chromiumAvailable)("fills and submits only its captured checkout page", async () => {

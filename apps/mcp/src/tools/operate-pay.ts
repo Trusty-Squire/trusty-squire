@@ -286,7 +286,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
             needs_user: {
               wall: "paypal",
               message:
-                "This checkout uses PayPal-hosted payment fields. Trusty Squire cannot enter a saved card into that cross-origin PayPal frame.",
+                "This checkout uses a wallet or express payment surface. Select a credit-card entry form or complete the wallet payment yourself.",
               resume: "checkout",
             },
           });
