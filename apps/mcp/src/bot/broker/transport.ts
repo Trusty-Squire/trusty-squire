@@ -336,7 +336,7 @@ export class BrokerClient {
         method,
         resolve,
         reject,
-        notifyUser,
+        ...(notifyUser ? { notifyUser } : {}),
         notifications: Promise.resolve(),
       });
       send(this.socket, {

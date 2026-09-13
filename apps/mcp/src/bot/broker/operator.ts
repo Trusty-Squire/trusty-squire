@@ -459,11 +459,12 @@ export class OperatorBroker implements BrokerTransportPort {
               if (command === null)
                 throw new BrokerRefusal("unknown_tool", "Unknown operator command");
               const translated = { ...commandArgs, session_id: internalId };
+              const notifyUser = brokerNotifier();
               const executeHandler = async () =>
                 await withBrokerAuditContext(pinnedApi, name, commandId, async () =>
                   command.handler(translated, pinnedApi, {
                     signal,
-                    notifyUser: brokerNotifier(),
+                    ...(notifyUser ? { notifyUser } : {}),
                   }),
                 );
               const execute = async () =>
