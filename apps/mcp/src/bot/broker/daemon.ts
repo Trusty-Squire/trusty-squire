@@ -287,15 +287,7 @@ export async function runBrokerDaemon(): Promise<void> {
           return {};
         }
         if (
-          (await journal.hasOutstanding(
-            undefined,
-            method === "tool" &&
-              (params.name === "operate_start" ||
-                (params.name === "operate_recipe_run" &&
-                  (params.args as Record<string, unknown> | undefined)?.session_id === undefined))
-              ? undefined
-              : principal.forwarderId,
-          )) &&
+          (await journal.hasOutstanding(undefined, principal.forwarderId)) &&
           !(
             method === "tool" &&
               (params.name === "operate_finish" ||
