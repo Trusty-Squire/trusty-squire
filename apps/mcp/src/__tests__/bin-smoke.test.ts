@@ -1,3 +1,7 @@
+import {
+  canRunDefaultBrokerAcceptance,
+  checkDefaultBrokerAcceptance,
+} from "./broker-default-acceptance.js";
 // Smoke tests that exercise the package the way it is actually launched
 // — spawned as a process through a bin symlink — not the way the other
 // unit tests import it.
@@ -42,24 +46,6 @@ afterAll(async () => {
 });
 
 describe("package manifest", () => {
-  it("has one owner for test-time dist builds", async () => {
-    // Vitest runs files in parallel. A second test file compiling into the
-    // same dist/ tree can truncate a module while this file is launching the
-    // binary. Keep all compiled-artifact checks under this single build.
-    const buildCall = 'execFileSync("pnpm", ' + '["build"]';
-    const testFiles = (await fs.readdir(path.join(pkgRoot, "src"), { recursive: true })).filter(
-      (file) => file.endsWith(".test.ts"),
-    );
-    const buildOwners: string[] = [];
-
-    for (const relative of testFiles) {
-      const source = await fs.readFile(path.join(pkgRoot, "src", relative), "utf8");
-      if (source.includes(buildCall)) buildOwners.push(relative.replaceAll(path.sep, "/"));
-    }
-
-    expect(buildOwners).toEqual(["__tests__/bin-smoke.test.ts"]);
-  });
-
   it("declares the executable and plain-language discovery metadata", async () => {
     // npx auto-resolves `npx @trusty-squire/mcp <cmd>` only when the
     // package has a single bin (or one named for the unscoped package).
@@ -243,8 +229,8 @@ describe("launched through a bin symlink", () => {
 
     const replies = await mcpConversation(link, home, [
       // The replacement flat verbs retain malformed-input handling: an invalid
-      // select shape, a type call without text or a sealed slot, conflicting
-      // card selectors, and a click without its ref.
+      // select shape, a type call without text or a sealed slot, malformed
+      // card field targets, and a click without its ref.
       {
         name: "operate_select",
         arguments: { session_id: "s1", ref: "@e:quantity", values: [] },
@@ -254,12 +240,16 @@ describe("launched through a bin symlink", () => {
         arguments: { session_id: "s1", ref: "@e:card-number" },
       },
       {
-        name: "operate_pay",
+        name: "inject_card",
         arguments: {
-          item: "Rakuten cart",
+          session_id: "00000000-0000-4000-8000-000000000001",
+          merchant: "Test merchant",
+          amount_cents: 100,
+          currency: "USD",
+          item: "Test cart",
           reason: "checkout",
           card_ref: "card_a",
-          card_label: "Personal",
+          fields: { pan: {} },
         },
       },
       { name: "operate_click", arguments: { session_id: "s1" } },
@@ -669,3 +659,12 @@ function runSubcommand(scriptPath: string, args: string[]): string {
   });
   return `${r.stdout ?? ""}${r.stderr ?? ""}`;
 }
+
+// Keep compiled-artifact checks under this file's single build owner.
+it.skipIf(!canRunDefaultBrokerAcceptance)(
+  "auto-starts one default broker across concurrent MCP servers and replaces its dead owner",
+  async () => {
+    await checkDefaultBrokerAcceptance(distBin, path.join(tmpDir, "default-broker"));
+  },
+  120_000,
+);

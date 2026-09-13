@@ -3,14 +3,13 @@ import { randomBytes } from "node:crypto";
 import { createSessionGuard } from "../../session-guard.js";
 import { BrokerClient } from "./transport.js";
 import { BrokerRefusal } from "./scheduler.js";
-import { reclaimDeadBrokerEndpoint } from "./discovery.js";
+import { resolveBrokerSocket, reclaimDeadBrokerEndpoint } from "./discovery.js";
 
 /** Connect retains the maintenance connection throughout the existing plain,
  * no-CDP login lifecycle. It never opens a second automated browser. */
 export async function withBrokerMaintenance<T>(operation: () => Promise<T>): Promise<T> {
-  const path = process.env.TRUSTY_SQUIRE_BROKER_SOCKET;
+  const path = resolveBrokerSocket();
   if (
-    path === undefined ||
     !(await lstat(path).then(
       () => true,
       () => false,

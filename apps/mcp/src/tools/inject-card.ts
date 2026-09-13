@@ -227,7 +227,7 @@ export const injectCardTool: Tool<InjectCardInput> = {
             ...(resumeFrom === undefined ? {} : { resumeFrom }),
             pollBudgetMs: context?.paymentApprovalWaitMs ?? APPROVAL_WAIT_MS,
             surfaceApprovalUrl: async (url) => {
-              await context?.notifyUser(`Approve this purchase on your phone: ${url}`, {
+              await context?.notifyUser?.(`Approve this purchase on your phone: ${url}`, {
                 approval_url: url,
               });
             },

@@ -1,3 +1,4 @@
+import { brokerNotifier } from "./transport.js";
 import { captureEvidenceSchema, type CaptureEvidence } from "../credential-capture.js";
 import { withBrokerAdmission } from "./admission-context.js";
 import { brokerBrowserCustody } from "./custody.js";
@@ -202,15 +203,8 @@ export class OperatorBroker implements BrokerTransportPort {
     token: string,
     agentId?: string,
     lineageCredential?: string,
-    supervisor = false,
   ): Promise<Omit<BrokerPrincipal, "clientId"> | null> {
     if (!timingSafeEqual(createHash("sha256").update(token).digest(), this.token)) return null;
-    if (supervisor)
-      return {
-        accountId: this.config.accountId,
-        agentId: "broker-supervisor",
-        supervisor: true,
-      };
     if (lineageCredential === undefined) return null;
     const id = forwarderId(lineageCredential);
     this.inputBindingKeys.set(id, createHash("sha256").update(lineageCredential).digest());
@@ -228,7 +222,6 @@ export class OperatorBroker implements BrokerTransportPort {
     return createHmac("sha256", key).update(canonicalJson(input)).digest("hex");
   }
   connected(principal: BrokerPrincipal): Promise<void> | void {
-    if (principal.supervisor) return;
     return this.authority.claimForwarder(principal);
   }
   async call(
@@ -274,7 +267,7 @@ export class OperatorBroker implements BrokerTransportPort {
   }
 
   cancel(principal: BrokerPrincipal, requestId: string): boolean {
-    if (requestId.length === 0 || requestId.length > 128 || principal.supervisor) return false;
+    if (requestId.length === 0 || requestId.length > 128) return false;
     const active = this.requestControllers.get(JSON.stringify([principal.clientId, requestId]));
     if (active !== undefined) {
       active.controller.abort(new BrokerRefusal("cancelled", "Caller cancelled the request"));
@@ -458,11 +451,12 @@ export class OperatorBroker implements BrokerTransportPort {
               if (command === null)
                 throw new BrokerRefusal("unknown_tool", "Unknown operator command");
               const translated = { ...commandArgs, session_id: internalId };
+              const notifyUser = brokerNotifier();
               const executeHandler = async () =>
                 await withBrokerAuditContext(pinnedApi, name, commandId, async () =>
                   command.handler(translated, pinnedApi, {
                     signal,
-                    notifyUser: async () => undefined,
+                    ...(notifyUser ? { notifyUser } : {}),
                   }),
                 );
               const execute = async () =>
@@ -668,6 +662,18 @@ export class OperatorBroker implements BrokerTransportPort {
     const capability = input.capability;
     if (capability === undefined || args.session_id !== capability.sessionId)
       throw new BrokerRefusal("stale_lease", "An owned session capability is required");
+    // A credentials finish is a vaulting attempt. Refuse it before terminal
+    // admission changes the actor's state; capture recovery still owns a live
+    // session and ordinary reads/actions must remain usable.
+    if (
+      tool.name === "operate_finish" &&
+      args.outcome === "credentials" &&
+      (await this.journal?.unresolvedCapture(journalForwarderId(principal), capability.sessionId))
+    )
+      throw new BrokerRefusal(
+        "outcome_unknown",
+        "Recover the original capture write identity before credential finish",
+      );
     const extra: string[] = [];
     const lane =
       tool.name === "operate_login"

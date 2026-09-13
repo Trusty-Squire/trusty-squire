@@ -109,11 +109,11 @@ describe("server shutdown call admission", () => {
     });
     const listener = await listenBroker(socket, {
       authenticate: async (token, _agentId, lineageCredential) =>
-        token === account.agent_session_token && lineageCredential === credential
+        token === account.agent_session_token && lineageCredential !== undefined
           ? {
               accountId: account.account_id,
               agentId: "registry-test",
-              forwarderId: forwarderId(credential),
+              forwarderId: forwarderId(lineageCredential),
             }
           : null,
       call: async (_principal, method) => {

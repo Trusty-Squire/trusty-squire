@@ -144,7 +144,6 @@ export async function runFixtureAcceptance(root = process.cwd(), crashFirst = fa
     TRUSTY_SQUIRE_REAPER_DIR: join(lab, "reapers"),
     TRUSTY_SQUIRE_BROKER_SOCKET: socket,
     BOT_CDP_ENDPOINT: "",
-    TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION: "0",
   };
   const baseline = await inventory(profile);
   const services = new Map();

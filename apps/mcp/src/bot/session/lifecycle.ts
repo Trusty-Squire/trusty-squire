@@ -10,13 +10,13 @@ import { brokerBrowserCustody } from "../broker/custody.js";
 // lifecycle, moved out of provision-session.ts as ONE transaction.
 //
 // This module owns the live-session registry and everything whose ORDER is
-// load-bearing around it: the real-profile lease and its browser acquisition,
+// load-bearing around it: broker page acquisition and release,
 // the ordinary and payment call leases and their drains, the idle/lifetime
 // watchdog, the bounded close, the single terminal-teardown owner, the
 // session artifact cleanup, and start/finish/shutdown themselves. It is one
 // module because those are one transaction — a terminal transition drains
-// leases, runs finish preparation, closes the browser, clears artifacts, and
-// only then deletes the EXACT
+// leases, runs finish preparation, closes the owned tab family, clears artifacts,
+// and only then deletes the EXACT
 // session object from the map. Splitting that ordering across modules is how
 // it silently regresses.
 //
@@ -33,28 +33,15 @@ import { randomUUID } from "node:crypto";
 import { lstatSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BrowserController } from "../browser.js";
+import type { BrowserController } from "../browser.js";
 import { compactV2AuditValue } from "../compact-observation-v2.js";
 import type { ApiClient } from "../../api-client.js";
-import {
-  acquireProfileOperationGuard,
-  CHROME_PROFILE_DIR,
-  ProfileBusyError,
-  type ProfileOperationLease,
-  waitForProfileFree,
-} from "../profile.js";
 import { loginSessionGuidance } from "../skill-hint.js";
 import type { OAuthProviderId } from "../oauth-providers.js";
 import {
   OperatorBrowserWatchdog,
   type OperatorBrowserWatchdogReason,
 } from "../operator-browser-watchdog.js";
-import {
-  IdentityRuntime,
-  IncompatibleIdentityRuntimeSettingsError,
-  type AcquiredIdentity,
-} from "../identity-runtime.js";
-import { experimentalMultiSessionEnabled } from "./multisession-flag.js";
 import { createSession } from "./model.js";
 import type { AllowedHostEntry, Session, SessionTerminalTeardownOwner } from "./model.js";
 import { hostStrings, registrableHost } from "./hosts.js";
@@ -85,69 +72,12 @@ const sessions = new Map<string, Session>();
 // no-op rather than an "unknown session" error.
 const refusedStartSessionIds = new Set<string>();
 
-interface LeasedBrowser {
-  controller: BrowserController;
-  profileDir: string;
-  lease: ProfileOperationLease;
-  shutdownGeneration: number;
-  proxyUrl?: string;
-  // This session's claim on identityRuntime's shared Chrome. Calling it
-  // releases only the tab family — never the browser process itself.
-  identityLease: () => void;
-  // Present only under TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION: the group of
-  // every session currently sharing this identity's Chrome. Absent entirely
-  // when the flag is off, so the flag-off close path below never touches it.
-  identityGroup?: SharedIdentityGroup;
-}
-
-// Experimental (TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION) — every session
-// currently sharing one identity's warm Chrome. `refCount` decides who
-// actually tears the shared browser down: whichever session's finish drops
-// it to 0, even if that isn't `primary` (see releaseWarmBrowserPage /
-// forceReleaseWarmBrowserPage). `lease` is the ONE real cross-process
-// profile-operation lease for the group — acquired once, by whichever
-// session became primary, and released only when the group empties.
-interface SharedIdentityGroup {
-  primary: BrowserController;
-  profileDir: string;
-  lease: ProfileOperationLease;
-  refCount: number;
-}
-// At most one live group per process today (one shared operator profile).
-let sharedIdentityGroup: SharedIdentityGroup | null = null;
-
-// Step 3 of the browser-broker migration: the identity that owns Chrome's
-// process lifetime for the (currently single) operator profile, independent
-// of any one session's reference to it. Production still closes this
-// identity's browser at every finish of a session that leased it from here
-// (forgetAfterShutdown() below runs after each such close; harness-owned
-// browsers never touch it), so launch is single-flighted and stale references
-// are epoch-detectable, but Chrome is not yet kept warm across sessions —
-// see docs/browser-process-page-boundary.md and identity-runtime.ts.
-interface OperatorIdentitySettings {
-  profileDir: string;
-  proxyUrl?: string;
-}
-const operatorIdentityRuntime = new IdentityRuntime<BrowserController, OperatorIdentitySettings>();
-
 interface AcquiredBrowser {
   controller: BrowserController;
   profileDir: string;
   shutdownGeneration: number;
 }
 
-interface StartingBrowser {
-  controller: BrowserController | null;
-  profileDir: string;
-  launch: Promise<void>;
-  cancelRequested: boolean;
-  cleanupPromise: Promise<"closed" | "force_closed_unproven" | "unknown"> | null;
-  quiescencePromise: Promise<"closed" | "force_closed_unproven" | "unknown"> | null;
-  retainProfileUntilQuiescent: boolean;
-}
-
-const leasedBrowsers = new Map<BrowserController, LeasedBrowser>();
-const startingBrowsers = new Set<StartingBrowser>();
 let shutdownGeneration = 0;
 let shutdownInProgress = 0;
 
@@ -172,57 +102,6 @@ export function audit(
   );
 }
 
-// operate_start's browser launch is the one UNBOUNDED step in the session
-// bootstrap: on a fresh box the first launch downloads Chromium, and a wedged
-// profile lock or missing browser deps can
-// otherwise hang it indefinitely — a real dogfood run sat on a silent ~30-min
-// hang here with zero feedback (the worst first-run failure: the user assumes
-// it's broken and never comes back). Cap it so a stuck launch fails LOUDLY with
-// an actionable message. The default is generous (a cold Chromium download is
-// legitimately multi-minute — better to wait than false-fail a slow-but-working
-// launch); tune with BOT_START_TIMEOUT_MS. Timeout uses the independent bounded
-// cancellation boundary: it releases or quarantines profile custody without
-// awaiting the unresolved launch, and late settlement cleans up only this
-// controller's marked process.
-async function startBrowserBounded(
-  browser: BrowserController,
-  sessionId: string,
-  cancel: () => Promise<void>,
-  maximumTimeoutMs?: number,
-): Promise<void> {
-  const configuredTimeoutMs = Number(process.env.BOT_START_TIMEOUT_MS) || 600_000;
-  const timeoutMs =
-    maximumTimeoutMs === undefined
-      ? configuredTimeoutMs
-      : Math.max(1, Math.min(configuredTimeoutMs, maximumTimeoutMs));
-  audit(sessionId, "browser_launch", {
-    note: "first launch may download Chromium; slow but one-time",
-    timeout_ms: timeoutMs,
-  });
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error("__browser_start_timeout__")), timeoutMs);
-  });
-  try {
-    await Promise.race([browser.start(), timeout]);
-  } catch (err) {
-    if (err instanceof Error && err.message === "__browser_start_timeout__") {
-      const cancellation = cancel().catch(() => undefined);
-      if (maximumTimeoutMs === undefined) await cancellation;
-      throw new Error(
-        `operate_start: browser did not launch within ${Math.round(timeoutMs / 1000)}s. ` +
-          "On a fresh machine the first launch downloads Chromium — slow but one-time. A hang this long " +
-          "usually means browser binaries are missing on this box. Retry once (a partial download resumes and later launches reuse " +
-          "the cache); if it recurs, run `npx @trusty-squire/mcp connect` here to install the browser " +
-          "deps, or raise BOT_START_TIMEOUT_MS to wait longer.",
-      );
-    }
-    throw err;
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
-}
-
 function provisionStartGeneration(): number {
   if (shutdownInProgress > 0) {
     throw new Error("operate_start cancelled: operator server is shutting down");
@@ -236,87 +115,7 @@ function assertProvisionStartAdmitted(generation: number): void {
   }
 }
 
-// Experimental (TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION) — a second (or Nth)
-// operate_start joining an identity that is already live or mid-launch IN
-// THIS PROCESS. Returns null when there is nothing of ours to join (the busy
-// signal is from an unrelated process, or a genuinely different profile), so
-// the caller re-throws the original ProfileBusyError instead of silently
-// swallowing a real cross-process busy condition.
-//
-// Deliberately does NOT re-acquire the profile-operation guard: that lease is
-// the group's, held once by whichever session became primary (see
-// acquireWarmBrowser) and released only when the group empties (see
-// releaseWarmBrowserPage). Joining here only ever reuses operatorIdentityRuntime's
-// already-live handle — its own single-flight is what makes this race-free
-// against a primary launch still in flight.
-async function tryAcquireSatelliteBrowser(
-  opts: StartOptions,
-  profileDir: string,
-  generation: number,
-  sessionId: string,
-): Promise<AcquiredBrowser | null> {
-  if (!operatorIdentityRuntime.isLive() && !operatorIdentityRuntime.isLaunching()) return null;
-  const identitySettings: OperatorIdentitySettings = {
-    profileDir,
-    ...(opts.proxyUrl !== undefined ? { proxyUrl: opts.proxyUrl } : {}),
-  };
-  let acquired: AcquiredIdentity<BrowserController>;
-  try {
-    acquired = await operatorIdentityRuntime.acquire(identitySettings, async () => {
-      throw new Error(
-        "operate_start (TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION): expected to join an already-live " +
-          "identity but the runtime attempted a fresh launch instead — this should be unreachable",
-      );
-    });
-  } catch (err) {
-    if (err instanceof IncompatibleIdentityRuntimeSettingsError) return null;
-    throw err;
-  }
-  const joinable = (group: SharedIdentityGroup | null): group is SharedIdentityGroup =>
-    group !== null && group.profileDir === profileDir && group.refCount > 0;
-  if (!acquired.reused || !joinable(sharedIdentityGroup)) {
-    acquired.releaseTabs();
-    return null;
-  }
-  const group = sharedIdentityGroup;
-  try {
-    assertProvisionStartAdmitted(generation);
-  } catch (err) {
-    acquired.releaseTabs();
-    throw err;
-  }
-  let satellite: BrowserController;
-  try {
-    satellite = await BrowserController.attachSatellite(group.primary, {
-      profileDir,
-      ...(opts.proxyUrl !== undefined ? { proxyUrl: opts.proxyUrl } : {}),
-    });
-  } catch (err) {
-    acquired.releaseTabs();
-    throw err;
-  }
-  // The last live session's teardown may have emptied the group while the
-  // attach was in flight; a satellite must never be committed onto it.
-  if (sharedIdentityGroup !== group || !joinable(group)) {
-    await satellite.closeOwnPagesOnly().catch(() => undefined);
-    acquired.releaseTabs();
-    return null;
-  }
-  group.refCount += 1;
-  audit(sessionId, "multisession_satellite_attach", { profile_dir: profileDir });
-  leasedBrowsers.set(satellite, {
-    controller: satellite,
-    profileDir,
-    lease: group.lease,
-    shutdownGeneration: generation,
-    identityLease: acquired.releaseTabs,
-    identityGroup: group,
-    ...(opts.proxyUrl === undefined ? {} : { proxyUrl: opts.proxyUrl }),
-  });
-  return { controller: satellite, profileDir, shutdownGeneration: generation };
-}
-
-async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promise<AcquiredBrowser> {
+async function acquireWarmBrowser(opts: StartOptions): Promise<AcquiredBrowser> {
   const generation = provisionStartGeneration();
   const custody = brokerBrowserCustody();
   if (custody !== undefined) {
@@ -333,109 +132,7 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
       shutdownGeneration: generation,
     };
   }
-  if ((process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0) {
-    throw new Error("operate_start does not support remote CDP with the local Chrome profile");
-  }
-  const profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
-  const multiSession = experimentalMultiSessionEnabled();
-  // This lease is held for the complete operate session. Its on-disk owner
-  // records host + pid + process birth time, so a crashed holder is reclaimed
-  // while a live or indeterminate holder is never stolen.
-  let lease: ProfileOperationLease;
-  try {
-    lease = acquireProfileOperationGuard(profileDir);
-  } catch (err) {
-    if (multiSession && err instanceof ProfileBusyError) {
-      const satellite = await tryAcquireSatelliteBrowser(opts, profileDir, generation, sessionId);
-      if (satellite !== null) return satellite;
-    }
-    throw err;
-  }
-  if (!(await waitForProfileFree(profileDir, { deadlineMs: 0 }))) {
-    lease.release();
-    throw new ProfileBusyError(
-      "another Trusty Squire session is already using the browser — close it first",
-    );
-  }
-  const pending: StartingBrowser = {
-    controller: null,
-    profileDir,
-    launch: Promise.resolve(),
-    cancelRequested: false,
-    cleanupPromise: null,
-    quiescencePromise: null,
-    retainProfileUntilQuiescent: false,
-  };
-  startingBrowsers.add(pending);
-  let controller: BrowserController | null = null;
-  let identityLease: (() => void) | null = null;
-  try {
-    if (pending.cancelRequested) {
-      throw new Error("operate_start cancelled: operator server is shutting down");
-    }
-    const identitySettings: OperatorIdentitySettings = {
-      profileDir,
-      ...(opts.proxyUrl !== undefined ? { proxyUrl: opts.proxyUrl } : {}),
-    };
-    // Single-flighted through operatorIdentityRuntime rather than constructed
-    // inline: today it always launches fresh (production still forgets this
-    // identity at every session finish, below), but the acquisition itself
-    // now goes through the one place that will later decide whether to reuse
-    // a still-live Chrome instead of relaunching it.
-    const acquired = await operatorIdentityRuntime.acquire(identitySettings, async (settings) => {
-      const launched = new BrowserController({
-        profileDir: settings.profileDir,
-        ...(settings.proxyUrl !== undefined ? { proxyUrl: settings.proxyUrl } : {}),
-      });
-      pending.controller = launched;
-      pending.launch = startBrowserBounded(launched, sessionId, async () => {
-        await cancelStartingBrowser(pending);
-      });
-      await pending.launch;
-      return launched;
-    });
-    controller = acquired.handle;
-    identityLease = acquired.releaseTabs;
-    if (pending.cancelRequested) {
-      throw new Error("operate_start cancelled: operator server is shutting down");
-    }
-    assertProvisionStartAdmitted(generation);
-  } catch (err) {
-    const constructed = controller ?? pending.controller;
-    if (constructed !== null) {
-      identityLease?.();
-      await constructed.close().catch(() => undefined);
-      operatorIdentityRuntime.forgetAfterShutdown();
-    }
-    lease.release();
-    throw err;
-  } finally {
-    startingBrowsers.delete(pending);
-  }
-  if (controller === null || identityLease === null) {
-    throw new Error("operate_start cancelled before browser initialization");
-  }
-  // This session became primary: form the shared group so a subsequent
-  // busy-guard failure (above) knows there is something of ours to join, and
-  // so releaseWarmBrowserPage/forceReleaseWarmBrowserPage know who actually
-  // owns the profile-operation lease and the real teardown.
-  const identityGroup = multiSession
-    ? (sharedIdentityGroup = { primary: controller, profileDir, lease, refCount: 1 })
-    : undefined;
-  leasedBrowsers.set(controller, {
-    controller,
-    profileDir,
-    lease,
-    shutdownGeneration: generation,
-    identityLease,
-    ...(opts.proxyUrl === undefined ? {} : { proxyUrl: opts.proxyUrl }),
-    ...(identityGroup !== undefined ? { identityGroup } : {}),
-  });
-  return {
-    controller,
-    profileDir,
-    shutdownGeneration: generation,
-  };
+  throw new Error("operate_start requires broker browser custody");
 }
 
 async function releaseWarmBrowserPage(
@@ -449,56 +146,11 @@ async function releaseWarmBrowserPage(
     await custody.release(browser, beforeRelease);
     return;
   }
-  const leased = leasedBrowsers.get(browser);
-  const group = leased?.identityGroup;
-  // A forced teardown of a GROUPED session belongs wholly to
-  // forceReleaseWarmBrowserPage, which the forcing path runs next on this same
-  // session: it performs the group's one decrement and, when last, the
-  // primary close. Touching the refcount, the lease, or the leasedBrowsers
-  // entry here first would discard the group before anything closed the
-  // shared Chrome. The ungrouped (flag-off) path is unchanged.
-  if (group !== undefined && owner?.forced) {
-    throw new Error("operator browser terminal teardown was forced");
-  }
-  if (group !== undefined) group.refCount -= 1;
-  const emptiedGroup = group !== undefined && group.refCount <= 0;
-  try {
-    if (owner?.forced) throw new Error("operator browser terminal teardown was forced");
-    if (group === undefined) {
-      // Production still tears the identity's Chrome down at every session
-      // finish (flag off, or no multisession group formed).
-      const closed = await browser.close();
-      if (closed !== "closed") throw new Error("operator browser cleanup unproven");
-    } else if (!emptiedGroup) {
-      const closed = await browser.closeOwnPagesOnly();
-      if (closed !== "closed") throw new Error("operator page cleanup unproven");
-    } else {
-      if (browser !== group.primary) await browser.closeOwnPagesOnly().catch(() => undefined);
-      const closed = await group.primary.close();
-      if (closed !== "closed") throw new Error("operator browser cleanup unproven");
-    }
-    await beforeRelease?.();
-  } catch (error) {
-    if (group !== undefined) group.refCount += 1;
-    throw error;
-  }
-  {
-    leasedBrowsers.delete(browser);
-    if (leased !== undefined) {
-      if (group === undefined) {
-        leased.lease.release();
-        leased.identityLease();
-        operatorIdentityRuntime.forgetAfterShutdown();
-      } else {
-        leased.identityLease();
-        if (emptiedGroup) {
-          group.lease.release();
-          operatorIdentityRuntime.forgetAfterShutdown();
-          if (sharedIdentityGroup === group) sharedIdentityGroup = null;
-        }
-      }
-    }
-  }
+  // Only explicit caller-owned harness sessions have no broker custody.
+  if (owner?.forced) throw new Error("operator browser terminal teardown was forced");
+  const closed = await browser.close();
+  if (closed !== "closed") throw new Error("operator browser cleanup unproven");
+  await beforeRelease?.();
 }
 
 async function forceReleaseWarmBrowserPage(
@@ -510,63 +162,12 @@ async function forceReleaseWarmBrowserPage(
     await custody.release(browser);
     return;
   }
-  const leased = leasedBrowsers.get(browser);
-  const group = leased?.identityGroup;
-  // The group's one decrement for a forced session happens here, never in a
-  // preempted releaseWarmBrowserPage (see there), so whichever session's
-  // teardown empties the group — primary or satellite, graceful or forced —
-  // is the one that closes the shared Chrome.
-  if (group !== undefined) group.refCount -= 1;
-  const emptiedGroup = group !== undefined && group.refCount <= 0;
-  try {
-    if (group === undefined) {
-      await closeBrowserUntilProven(
-        browser,
-        false,
-        "operator browser force-close timed out",
-        () => owner?.requireProvenBrowserClose === true,
-      );
-    } else if (!emptiedGroup) {
-      await closeOwnPagesBounded(browser);
-    } else {
-      if (browser !== group.primary) await closeOwnPagesBounded(browser);
-      await closeBrowserUntilProven(
-        group.primary,
-        false,
-        "operator browser force-close timed out",
-        () => owner?.requireProvenBrowserClose === true,
-      );
-    }
-  } finally {
-    if (leased !== undefined) {
-      leased.identityLease();
-      if (group === undefined) {
-        operatorIdentityRuntime.forgetAfterShutdown();
-      } else if (emptiedGroup) {
-        operatorIdentityRuntime.forgetAfterShutdown();
-        if (sharedIdentityGroup === group) sharedIdentityGroup = null;
-      }
-    }
-  }
-  if (leased === undefined) return;
-  if (group === undefined) leased.lease.release();
-  else if (emptiedGroup) group.lease.release();
-  leasedBrowsers.delete(browser);
-}
-
-// The forced-teardown counterpart of closeOwnPagesOnly: page.close() can hang
-// indefinitely on a wedged Chrome, so the grouped forced path keeps the same
-// bounded contract closeBrowserBounded gives the ungrouped one.
-async function closeOwnPagesBounded(browser: BrowserController): Promise<void> {
-  const timeoutMs = positiveTimeout(
-    "TRUSTY_SQUIRE_OPERATOR_FORCE_CLOSE_TIMEOUT_MS",
-    DEFAULT_OPERATOR_FORCE_CLOSE_TIMEOUT_MS,
+  await closeBrowserUntilProven(
+    browser,
+    false,
+    "operator browser force-close timed out",
+    () => owner?.requireProvenBrowserClose === true,
   );
-  await withTerminalTimeout(
-    browser.closeOwnPagesOnly(),
-    timeoutMs,
-    "operator browser own-page force-close timed out",
-  ).catch(() => undefined);
 }
 
 async function closeBrowserBounded(
@@ -617,68 +218,6 @@ async function closeBrowserUntilProven(
     });
     closeState = await closeBrowserBounded(browser, true, timeoutMessage);
   }
-  return closeState;
-}
-
-async function cancelStartingBrowser(
-  pending: StartingBrowser,
-  maximumTimeoutMs?: number,
-): Promise<"closed" | "force_closed_unproven" | "unknown"> {
-  pending.cancelRequested = true;
-  if (pending.cleanupPromise !== null) return await pending.cleanupPromise;
-  pending.cleanupPromise = (async () => {
-    if (pending.controller === null) {
-      return "closed" as const;
-    }
-    const closeState = await closeBrowserBounded(
-      pending.controller,
-      true,
-      "operator browser startup cancellation timed out",
-      maximumTimeoutMs,
-    );
-    return closeState;
-  })();
-  return await pending.cleanupPromise;
-}
-
-async function quiesceStartingBrowser(
-  pending: StartingBrowser,
-  requireProvenClose = false,
-): Promise<"closed" | "force_closed_unproven" | "unknown"> {
-  pending.retainProfileUntilQuiescent = true;
-  if (pending.quiescencePromise === null) {
-    pending.quiescencePromise = (async () => {
-      let closeState = await cancelStartingBrowser(pending);
-      if (pending.controller === null) return closeState;
-      await pending.controller.waitForCancelledStartQuiescence();
-      if (closeState !== "closed") {
-        closeState = await closeBrowserBounded(
-          pending.controller,
-          true,
-          "operator browser startup cancellation did not quiesce",
-        );
-      }
-      return closeState;
-    })();
-    void pending.quiescencePromise.then(
-      (closeState) => {
-        if (closeState === "closed") startingBrowsers.delete(pending);
-      },
-      () => undefined,
-    );
-  }
-  let closeState = await pending.quiescencePromise;
-  while (closeState !== "closed" && requireProvenClose) {
-    await new Promise<void>((resolve) => {
-      setTimeout(resolve, 25);
-    });
-    closeState = await closeBrowserBounded(
-      pending.controller!,
-      true,
-      "operator browser startup cancellation did not quiesce",
-    );
-  }
-  if (closeState === "closed") startingBrowsers.delete(pending);
   return closeState;
 }
 
@@ -733,7 +272,7 @@ async function forceTerminateProvisionSession(
   if (requireProvenBrowserClose) owner.requireProvenBrowserClose = true;
   if (owner.forcePromise !== null) {
     const terminalError = await owner.forcePromise;
-    if (owner.requireProvenBrowserClose && leasedBrowsers.has(session.browser)) {
+    if (owner.requireProvenBrowserClose && sessions.has(session.id)) {
       await forceReleaseWarmBrowserPage(session.browser, owner);
     }
     return terminalError;
@@ -756,14 +295,6 @@ async function forceTerminateProvisionSessionOwned(
   session.activePayment = null;
   session.releasedPaymentCard = null;
   const terminalOwner = session.terminalTeardownOwner ?? undefined;
-  const ephemeral = leasedBrowsers.get(session.browser);
-  if (terminalOwner?.requireProvenBrowserClose === true && ephemeral !== undefined) {
-    await Promise.all(
-      [...startingBrowsers]
-        .filter((pending) => pending.profileDir === ephemeral.profileDir)
-        .map(async (pending) => await quiesceStartingBrowser(pending, true)),
-    );
-  }
   await forceReleaseWarmBrowserPage(session.browser, terminalOwner).catch((error: unknown) => {
     if (terminalError === undefined) terminalError = error;
     const message = error instanceof Error ? error.message : String(error);
@@ -822,9 +353,7 @@ function startSessionWatchdog(session: Session): void {
     startedAt: session.startedAt,
     lastActivityAt: () => session.lastActivityAt,
     hasActiveCall: () =>
-      brokerBrowserCustody() !== undefined ||
-      session.initializing ||
-      session.callCount > 0,
+      brokerBrowserCustody() !== undefined || session.initializing || session.callCount > 0,
     processMarker: () => session.browser.operatorBrowserMarker?.() ?? null,
     onTerminate: async (reason) => await terminateExpiredProvisionSession(session, reason),
   });
@@ -1050,7 +579,7 @@ export async function startProvisionSession(
   let browser: BrowserController;
   let liveProviders: OAuthProviderId[];
   let workerEmail: string | null = null;
-  const acquired = await acquireWarmBrowser(opts, id);
+  const acquired = await acquireWarmBrowser(opts);
   browser = acquired.controller;
   try {
     const probe = async () => {
@@ -1496,11 +1025,6 @@ export async function closeAllProvisionSessions(): Promise<void> {
   shutdownInProgress += 1;
   try {
     await (async () => {
-      await Promise.all(
-        [...startingBrowsers].map(async (pending) => {
-          await cancelStartingBrowser(pending).catch(() => undefined);
-        }),
-      );
       const closingSessions = [...sessions.values()];
       for (const session of closingSessions) {
         session.closing = true;
@@ -1512,11 +1036,6 @@ export async function closeAllProvisionSessions(): Promise<void> {
           return await forceTerminateProvisionSession(session, "shutdown_terminate", {
             reason: "transport_disconnect",
           });
-        }),
-      );
-      await Promise.all(
-        [...leasedBrowsers.values()].map(async (ephemeral) => {
-          await forceReleaseWarmBrowserPage(ephemeral.controller).catch(() => undefined);
         }),
       );
       const closeError = closeErrors.find((error) => error !== undefined);

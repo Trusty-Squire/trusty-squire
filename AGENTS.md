@@ -452,14 +452,16 @@ designed for ordinary forms and hosted-field checkouts; hostile pages that
 transform secrets into split, encoded, or canvas copies are outside the claim.
 Raw live runtime evaluation remains internal rather than a public read API.
 
-### 12. An operator browser is session-scoped: never remove its watchdog or containment
+### 12. Broker browser custody and session tab lifetime
 
-The authoritative lifecycle, bounded teardown, Linux marker-watchdog, and accepted
-reparented-idle-renderer residual are documented in
-[`docs/DESIGN-warm-browser-reuse.md`](docs/DESIGN-warm-browser-reuse.md#5-ownership-crash-recovery-and-containment).
-Preserve that contract when changing browser startup or shutdown: never replace its
-identity-proven scope with root-PID-only signaling or broad `pkill`. The strict
-containment follow-up is `ts-operator-browser-cgroup-containment` in `TODOS.md`.
+The broker exclusively owns the physical operator browser; sessions own independent
+families of tabs. Preserve the election, physical-profile lease, and process-marker
+watchdog/reaper contracts in [`docs/browser-broker.md`](docs/browser-broker.md).
+The underlying bounded teardown and accepted reparented-idle-renderer residual are
+in [`docs/DESIGN-warm-browser-reuse.md`](docs/DESIGN-warm-browser-reuse.md#5-ownership-crash-recovery-and-containment).
+Never replace identity-proven Chrome containment with root-PID-only signaling or
+broad `pkill`. The strict containment follow-up remains
+`ts-operator-browser-cgroup-containment` in `TODOS.md`.
 
 ### 13. OAuth identity uses the real profile and a narrow lease
 
@@ -496,8 +498,8 @@ self-managed and Playwright-launched local operator browsers. Every local launch
 must receive the private operator marker at the shared launch boundary; never
 register external/remote CDP browsers. The manifest records exact PID/group,
 marker, process birth identity, and `user_data_dir`; it owns process signaling,
-not profile or snapshot deletion. The profile pool and normal session teardown
-remain the only directory-cleanup owners. Process teardown uses bounded
+not profile or snapshot deletion. Physical profile custody follows
+[`docs/browser-broker.md`](docs/browser-broker.md). Process teardown uses bounded
 SIGTERM→SIGKILL.
 
 Idle cleanup uses the provision-session call lease as its action boundary. Any new
@@ -678,19 +680,10 @@ virgin signup succeeds on an UNCOVERED service (no active skill in registry)
   `apps/mcp/src/bot/browser-process-owner.ts` (launch helpers in
   `browser-process-runtime.ts`) owns the supported local and remote-CDP
   operator paths.
-- `apps/mcp/src/bot/identity-runtime.ts` owns Chrome's lifetime independent of
-  any one session (single-flight launch + epoch + tab acquire/release, wired
-  into `session/lifecycle.ts`). Outside socket-configured broker mode, production
-  tears the identity's Chrome down at every finish of a session whose browser
-  came from the runtime (`forgetAfterShutdown()` after the close). Don't skip
-  `forgetAfterShutdown()` at finish without also resetting
-  `BrowserController`/`PageDriver` per-session state to a clean baseline; see
-  `docs/browser-process-page-boundary.md#identity-runtime-step-3--chrome-lifetime-independent-of-one-session`.
-- `TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION` remains default-off, in-process
-  auth-preservation test scaffolding; it neither enables nor governs the
-  socket-configured broker. Its direct-runtime details are in
-  `docs/browser-process-page-boundary.md`; broker behavior is owned by
-  `docs/browser-broker.md`.
+- `apps/mcp/src/bot/broker/runtime.ts` owns Chrome's identity runtime and physical
+  profile lease. The broker is the only operator launch path; sessions acquire
+  independent tab families and MCP servers forward over IPC. See
+  `docs/browser-broker.md` for discovery, election, maintenance, and recovery.
 - Interactive human login is the deliberate exception. When `connect` (the one
   onboarding and re-auth pathway, including `--force-relogin`) runs without a
   user-visible display,
@@ -759,7 +752,7 @@ The public operator contract and capability migration are owned by
 
 ## Cross-process browser broker
 
-The socket-configured broker custody, maintenance, recovery, and qualification
+The default broker custody, maintenance, and recovery
 contracts live in [`docs/browser-broker.md`](docs/browser-broker.md). Mechanical
 fixture acceptance does not qualify real Google auth or prove the current head.
 

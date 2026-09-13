@@ -230,7 +230,7 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
 
 - Rejected tool calls return a JSON `error` envelope with a stable `code` and
   message. Malformed and unknown calls fail only that request; they do not stop
-  the shared stdio process or discard its active in-memory operator session.
+  the stdio process or discard the broker-owned operator session.
   `server_unavailable` includes `retry.max_attempts: 1`: retry once, and never
   kill or restart the shared operator process.
 - `operate_start` opens a scoped website session and `operate_observe` reads its
@@ -251,16 +251,14 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   Browser requests need no host declarations. See the
   [egress contract](docs/operator-tool-surface.md#browser-egress-is-unrestricted)
   for legacy parameter compatibility and the unchanged payment/vault boundaries.
-  Every operator task uses the user's Chrome profile directly. Before it starts,
+  Operator servers automatically share the [browser broker](docs/browser-broker.md),
+  which owns the user's Chrome profile. Before a session starts,
   the operator checks the live Google My Account identity; if the profile is
   signed out, it returns a clear login handoff before navigating to the service.
   If a restart or reconnect leaves the browser profile busy, follow the
   [reconnect recovery guide](docs/DESIGN-warm-browser-reuse.md#recovering-after-reconnect).
-  To route only that browser session through a proxy, pass `proxy` to
-  `operate_start` as an HTTP or HTTPS URL (credentials are optional), or as an
-  unauthenticated SOCKS5 URL. The value is launch-only and sensitive: it is not
-  returned in session status, action traces, or saved recipes. Omitting it uses
-  direct egress.
+  For proxy configuration and shared-browser compatibility, see the
+  [broker configuration guide](docs/browser-broker.md#configuration-and-operation).
   Under the browser-use DOM format, an expired, forged, wrong-generation, cross-page, or drifted
   `@e:` handle fails opaquely with `reobserve_required`; re-observe and choose a
   current handle. Under V1, DOM churn returns `target_stale` with the last

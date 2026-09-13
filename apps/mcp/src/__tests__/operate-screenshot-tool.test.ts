@@ -1,3 +1,4 @@
+import { operatorHandlerForwarder } from "./operator-handler-forwarder.js";
 // End-to-end coverage for operate_screenshot through the REAL MCP tool-call
 // path (InMemoryTransport, same harness as server-resilience.test.ts): a
 // session, a mocked BrowserController.captureOperatorScreenshot, and an assertion
@@ -18,7 +19,13 @@ import {
 
 async function connectedClient(): Promise<Client> {
   const api = { setRequestingAgent: vi.fn() } as unknown as ApiClient;
-  const server = await buildServer(api);
+  const server = await buildServer(
+    api,
+    undefined,
+    undefined,
+    undefined,
+    operatorHandlerForwarder(api),
+  );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
   const client = new Client({ name: "screenshot-tool-test", version: "1.0.0" });

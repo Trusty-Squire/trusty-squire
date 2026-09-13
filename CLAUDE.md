@@ -561,10 +561,10 @@ side by side). `Session` is still re-exported from `provision-session.ts`.
 
 The **lifecycle registry transaction** now lives in
 `apps/mcp/src/bot/session/lifecycle.ts`: the session map + refused-start set,
-the real-profile lease and browser acquisition, the generic session call lease
+broker page acquisition and release, the generic session call lease
 and its drain, the watchdog, the bounded close, the single terminal-teardown
 owner, artifact cleanup, and start/finish/shutdown. Its ORDER is the contract —
-drain calls → run finish prep → close the browser → clear artifacts → delete the
+drain calls → run finish prep → close the owned tab family → clear artifacts → delete the
 EXACT session object from the map — so change it as one unit, never step by step.
 Perception has NOT moved: the two start paths
 reach `observeSession` through the `SessionStartPorts` the facade binds, which is
@@ -583,12 +583,9 @@ behavior change, not a test to update.
 `BrowserController` composes one exclusive `BrowserProcessOwner`
 (`apps/mcp/src/bot/browser-process-owner.ts`, Chrome process custody + bounded
 teardown; launch helpers in `browser-process-runtime.ts`) and one `PageDriver`
-(`page-driver.ts`, page/tab ownership, navigation, adoption). Single-session
-only by default — no broker or shared browser. The one exception is the
-off-by-default experimental `TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION` flag
-(`session/multisession-flag.ts`), test scaffolding that lets a second
-`operate_start` join the live Chrome as a satellite; `AGENTS.md` owns that
-contract.
+(`page-driver.ts`, page/tab ownership, navigation, adoption). The broker owns
+one shared process; each session gets independent page state. MCP servers always
+forward over authenticated local IPC; see `docs/browser-broker.md`.
 [`docs/browser-process-page-boundary.md`](docs/browser-process-page-boundary.md)
 owns the boundary and the preserved close/cancellation ordering;
 `browser-process-page-boundary.test.ts` pins it.

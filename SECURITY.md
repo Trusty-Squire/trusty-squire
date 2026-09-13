@@ -172,12 +172,11 @@ back at all.
 - OAuth sign-in (Google / GitHub) happens in the **user's own real browser
   session** that they explicitly connect. Trusty Squire does not ask the agent to
   type those passwords.
-- A context-backed login and an explicitly confirmed, non-payment operator result
-  may save a private (`0600`) Playwright storage-state snapshot containing all
-  cookies, local storage, and IndexedDB in the canonical profile namespace. Each
-  operator session restores that sensitive auth material into a fresh private
-  profile instead of opening the canonical profile. Plain-Chrome login, failed or
-  unconfirmed results, and payment-sensitive sessions preserve the prior snapshot.
+- Live-profile admission and OAuth identity follow the
+  [operator profile contract](docs/DESIGN-warm-browser-reuse.md#admission-and-oauth).
+  Physical browser custody and independent session tab families follow the
+  [broker contract](docs/browser-broker.md); sessions do not restore snapshots
+  into private profile copies.
 - Learned automation ("skills") are **Ed25519-signed** replayable recipes.
   Captures used to synthesize them record post-verify state with **secrets
   redacted**, and skill promotion is deterministic — it must not depend on clocks,

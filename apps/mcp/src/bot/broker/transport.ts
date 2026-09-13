@@ -1,6 +1,7 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createServer, createConnection, type Socket } from "node:net";
 import { chmod, lstat, unlink } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomBytes } from "node:crypto";
 import { z } from "zod";
 import { BrokerRefusal } from "./scheduler.js";
 import {
@@ -16,9 +17,19 @@ const requestSchema = z
     id: z.string().min(1).max(128),
     method: z.string().min(1).max(64),
     params: z.record(z.unknown()),
+    notifications: z.boolean().optional(),
   })
   .strict();
 type Request = z.infer<typeof requestSchema>;
+export type BrokerNotifier = (message: string, data?: Record<string, unknown>) => Promise<void>;
+const notificationContext = new AsyncLocalStorage<BrokerNotifier | undefined>();
+export function brokerNotifier(): BrokerNotifier | undefined {
+  return notificationContext.getStore();
+}
+const notificationSchema = z.object({
+  message: z.string(),
+  data: z.record(z.unknown()).optional(),
+});
 type Reply = { id: string; result?: unknown; error?: { code: string; message: string } };
 
 /** A socket is the client-liveness lease. There is deliberately no idle TTL:
@@ -60,7 +71,6 @@ export interface BrokerTransportPort {
     token: string,
     agentId?: string,
     lineageCredential?: string,
-    supervisor?: boolean,
   ): Promise<Omit<BrokerPrincipal, "clientId"> | null>;
   connected?(principal: BrokerPrincipal): Promise<void> | void;
   call(
@@ -116,15 +126,9 @@ export async function listenBroker(
           typeof request.params.lineageCredential === "string"
             ? request.params.lineageCredential
             : undefined;
-        const supervisor = request.params.supervisor === true;
         if (agentId.length === 0 || agentId.length > 128)
           throw new BrokerRefusal("unauthorized", "Invalid agent identity");
-        const identity = await port.authenticate(
-          request.params.token,
-          agentId,
-          lineageCredential,
-          supervisor,
-        );
+        const identity = await port.authenticate(request.params.token, agentId, lineageCredential);
         if (identity === null) throw new BrokerRefusal("unauthorized", "Invalid broker credential");
         const candidate = { ...identity, clientId: randomUUID() };
         await port.connected?.(candidate);
@@ -141,7 +145,16 @@ export async function listenBroker(
         explicitClose = true;
         return {};
       }
-      return await port.call(principal, request.method, request.params, request.id);
+      const owner = principal;
+      const notify: BrokerNotifier | undefined = request.notifications
+        ? async (message, data) => {
+            if (closed) throw new BrokerRefusal("broker_lost", "Notification connection is closed");
+            send(socket, { id: request.id, notification: { message, data } });
+          }
+        : undefined;
+      return await notificationContext.run(notify, () =>
+        port.call(owner, request.method, request.params, request.id),
+      );
     };
     frames(socket, (value) => {
       const parsed = requestSchema.safeParse(value);
@@ -211,7 +224,13 @@ export async function listenBroker(
 export class BrokerClient {
   private readonly pending = new Map<
     string,
-    { method: string; resolve: (value: unknown) => void; reject: (error: Error) => void }
+    {
+      method: string;
+      resolve: (value: unknown) => void;
+      reject: (error: Error) => void;
+      notifyUser?: BrokerNotifier;
+      notifications: Promise<void>;
+    }
   >();
   private ended = false;
   private constructor(private readonly socket: Socket) {
@@ -235,11 +254,18 @@ export class BrokerClient {
       }
       const pending = this.pending.get(reply.id);
       if (pending === undefined) return;
+      if ("notification" in reply) {
+        const notification = notificationSchema.parse(reply.notification);
+        pending.notifications = pending.notifications
+          .then(() => pending.notifyUser?.(notification.message, notification.data))
+          .catch(() => undefined);
+        return;
+      }
       this.pending.delete(reply.id);
       if (reply.error !== undefined)
         pending.reject(new BrokerRefusal(reply.error.code, reply.error.message));
       else {
-        pending.resolve(reply.result);
+        void pending.notifications.then(() => pending.resolve(reply.result));
       }
     });
   }
@@ -247,12 +273,18 @@ export class BrokerClient {
     path: string,
     token: string,
     lineageCredential?: string,
-    supervisor = false,
   ): Promise<BrokerClient> {
     const socket = createConnection(path);
     const client = new BrokerClient(socket);
+    let handshakeTimeout: BrokerRefusal | undefined;
     const deadline = setTimeout(
-      () => socket.destroy(new Error("Broker authentication timed out")),
+      () => {
+        handshakeTimeout = new BrokerRefusal(
+          "broker_handshake_timeout",
+          "Broker hello handshake timed out",
+        );
+        socket.destroy(handshakeTimeout);
+      },
       lineageCredential === undefined ? 5_000 : FORWARDER_HANDOFF_TIMEOUT_MS + 5_000,
     );
     try {
@@ -263,24 +295,25 @@ export class BrokerClient {
       await client.call("hello", {
         token,
         agentId: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "local-agent",
-        ...(lineageCredential === undefined ? {} : { lineageCredential }),
-        ...(supervisor ? { supervisor: true } : {}),
+        // Health probes use a fresh identity, so they never wait for or reclaim
+        // an existing forwarder lineage. All connections use the same authentication.
+        lineageCredential: lineageCredential ?? randomBytes(32).toString("base64url"),
       });
       return client;
     } catch (error) {
       socket.destroy();
-      throw error;
+      // Socket close rejects pending calls as broker_lost. During hello only,
+      // preserve the deadline cause so discovery can retire a wedged owner.
+      throw handshakeTimeout ?? error;
     } finally {
       clearTimeout(deadline);
     }
-  }
-  static async connectSupervisor(path: string, token: string): Promise<BrokerClient> {
-    return await BrokerClient.connect(path, token, undefined, true);
   }
   call(
     method: string,
     params: Record<string, unknown>,
     id: string = randomUUID(),
+    notifyUser?: BrokerNotifier,
   ): Promise<unknown> {
     if (this.ended || this.socket.destroyed)
       return Promise.reject(new BrokerRefusal("broker_lost", "Broker connection is closed"));
@@ -289,8 +322,20 @@ export class BrokerClient {
     if (this.pending.size >= 64)
       return Promise.reject(new BrokerRefusal("capacity", "Too many pending broker calls"));
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { method, resolve, reject });
-      send(this.socket, { version: 1, id, method, params });
+      this.pending.set(id, {
+        method,
+        resolve,
+        reject,
+        ...(notifyUser ? { notifyUser } : {}),
+        notifications: Promise.resolve(),
+      });
+      send(this.socket, {
+        version: 1,
+        id,
+        method,
+        params,
+        ...(notifyUser ? { notifications: true } : {}),
+      });
     });
   }
   async acknowledge(requestId: string): Promise<void> {

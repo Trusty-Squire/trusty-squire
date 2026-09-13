@@ -1,4 +1,5 @@
-import { brokerElectionRoot, brokerIsSupervised, publishEndpointOwner } from "./discovery.js";
+import { resolveBrokerSocket } from "./discovery.js";
+import { brokerElectionRoot, publishEndpointOwner } from "./discovery.js";
 import { DispatchJournal } from "./dispatch-journal.js";
 import { lstat, unlink, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -8,23 +9,19 @@ import { setSelfManagedChromeTerminationSignalExitEnabled } from "../browser.js"
 import { startOwnerProcessReaper } from "../owner-process-reaper.js";
 import {
   acquireProfileOperationGuard,
-  ProfileBusyError,
   profilePathIdentity,
   CHROME_PROFILE_DIR,
-  type ProfileOperationLease,
   waitForProfileFree,
 } from "../profile.js";
 import { installBrokerBrowserCustody } from "./custody.js";
 import { BrokerRuntime } from "./runtime.js";
 import { OperatorBroker } from "./operator.js";
 import { BrokerRefusal } from "./scheduler.js";
-import { BrokerClient, listenBroker } from "./transport.js";
+import { listenBroker } from "./transport.js";
 
 const MIN_BROKER_IDLE_TIMEOUT_MS = 60_000;
 const DEFAULT_BROKER_IDLE_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_BROKER_DRAIN_CLEANUP_TIMEOUT_MS = 3_000;
-const SUPERVISOR_ATTACH_TIMEOUT_MS = 10_000;
-const SUPERVISOR_ATTACH_POLL_MS = 100;
 const DRAIN_RECOVERY_METHODS = new Set([
   "recover",
   "reclaim",
@@ -62,42 +59,7 @@ export async function brokerShutdownCleanupComplete(
   }
 }
 
-function brokerUnavailable(error: unknown): boolean {
-  const code = (error as NodeJS.ErrnoException).code;
-  return (
-    code === "ENOENT" || code === "ECONNREFUSED" || (error as BrokerRefusal).code === "broker_lost"
-  );
-}
-
-async function attachSupervisor(path: string, token: string): Promise<boolean> {
-  let client: BrokerClient | undefined;
-  try {
-    client = await BrokerClient.connectSupervisor(path, token);
-    await client.call("supervise", {});
-    return true;
-  } catch (error) {
-    if (brokerUnavailable(error)) return false;
-    throw error;
-  } finally {
-    await client?.close().catch(() => undefined);
-  }
-}
-
-async function waitForSupervisorAttachment(path: string, token: string): Promise<void> {
-  const deadline = Date.now() + SUPERVISOR_ATTACH_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (await attachSupervisor(path, token)) return;
-    await new Promise((resolve) => setTimeout(resolve, SUPERVISOR_ATTACH_POLL_MS));
-  }
-  throw new BrokerRefusal(
-    "broker_unavailable",
-    "Supervised broker did not become available within 10 seconds",
-  );
-}
-
-export function brokerIdleTimeoutMs(env: NodeJS.ProcessEnv = process.env): number | undefined {
-  if (["1", "true"].includes((env.TRUSTY_SQUIRE_BROKER_SUPERVISED ?? "").toLowerCase()))
-    return undefined;
+export function brokerIdleTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
   const configured = Number(env.TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS);
   if (!Number.isFinite(configured) || configured <= 0) return DEFAULT_BROKER_IDLE_TIMEOUT_MS;
   return Math.max(MIN_BROKER_IDLE_TIMEOUT_MS, configured);
@@ -107,7 +69,6 @@ export function brokerIdleShutdownEligible(input: {
   closing: boolean;
   draining: boolean;
   connectedClients: number;
-  idleTimeout: number | undefined;
   inventory: { active: number; quarantined: number; admitting: number };
   hasReconnectGrace: boolean;
 }): boolean {
@@ -115,7 +76,6 @@ export function brokerIdleShutdownEligible(input: {
     !input.closing &&
     !input.draining &&
     input.connectedClients === 0 &&
-    input.idleTimeout !== undefined &&
     !input.hasReconnectGrace &&
     input.inventory.active === 0 &&
     input.inventory.quarantined === 0 &&
@@ -123,12 +83,9 @@ export function brokerIdleShutdownEligible(input: {
   );
 }
 
-/** Explicit foreground service entrypoint. A supervisor may retain the broker;
- * ordinary clients cannot stop it while another connection owns sessions. */
+/** On-demand broker entrypoint; retains custody while clients own sessions. */
 export async function runBrokerDaemon(): Promise<void> {
-  const path = process.env.TRUSTY_SQUIRE_BROKER_SOCKET;
-  if (path === undefined)
-    throw new Error("TRUSTY_SQUIRE_BROKER_SOCKET must name a private local socket");
+  const path = resolveBrokerSocket();
   const parent = await lstat(dirname(path));
   if (!parent.isDirectory() || (parent.mode & 0o077) !== 0 || parent.uid !== process.getuid?.()) {
     throw new Error("Broker socket directory must be owned by this user with mode 0700");
@@ -141,27 +98,15 @@ export async function runBrokerDaemon(): Promise<void> {
   const cellId = createHash("sha256")
     .update(JSON.stringify([session.account_id, profilePathIdentity(CHROME_PROFILE_DIR)]))
     .digest("hex");
-  const supervised = brokerIsSupervised();
   const electionRoot = brokerElectionRoot(CHROME_PROFILE_DIR);
   await mkdir(electionRoot, { recursive: true, mode: 0o700 });
-  let election: ProfileOperationLease | undefined;
-  if (supervised) {
-    try {
-      election = acquireProfileOperationGuard(CHROME_PROFILE_DIR, electionRoot);
-    } catch (error) {
-      if (!(error instanceof ProfileBusyError)) throw error;
-      await waitForSupervisorAttachment(path, session.agent_session_token);
-      return;
-    }
-  }
   const runtime = new BrokerRuntime(session.account_id);
   installBrokerBrowserCustody(runtime);
   setSelfManagedChromeTerminationSignalExitEnabled(false);
   startOwnerProcessReaper();
   // Broker election is anchored beside the canonical profile, independent of
   // each client's socket path or TMPDIR. Retain it through plain-login maintenance.
-  const profileElection =
-    election ?? acquireProfileOperationGuard(CHROME_PROFILE_DIR, electionRoot);
+  const profileElection = acquireProfileOperationGuard(CHROME_PROFILE_DIR, electionRoot);
   runtime.claimProfile();
   const journal = new DispatchJournal(
     join(profilePathIdentity(CHROME_PROFILE_DIR), "trusty-squire-broker-dispatch.jsonl"),
@@ -195,7 +140,7 @@ export async function runBrokerDaemon(): Promise<void> {
   let maintenanceReady = false;
   let idleTimer: NodeJS.Timeout | undefined;
   let runtimeClose: Promise<boolean> | undefined;
-  let idleTimeout = brokerIdleTimeoutMs();
+  const idleTimeout = brokerIdleTimeoutMs();
   const closeRuntime = (): Promise<boolean> => {
     if (runtimeClose === undefined) {
       runtimeClose = runtime.close().finally(() => {
@@ -215,8 +160,8 @@ export async function runBrokerDaemon(): Promise<void> {
     maintenanceReady = false;
   };
   const listener = await listenBroker(path, {
-    authenticate: async (token, agentId, lineageCredential, supervisor) =>
-      await operator.authenticate(token, agentId, lineageCredential, supervisor),
+    authenticate: async (token, agentId, lineageCredential) =>
+      await operator.authenticate(token, agentId, lineageCredential),
     connected: async (principal) => {
       await operator.connected(principal);
       connected.add(principal.clientId);
@@ -231,8 +176,6 @@ export async function runBrokerDaemon(): Promise<void> {
             "broker_draining",
             "Broker is draining; only durable recovery is available",
           );
-        if (principal.supervisor && method !== "supervise")
-          throw new BrokerRefusal("unauthorized", "Supervisor connections may only supervise");
         if (method === "cancel") {
           if (typeof params.requestId !== "string")
             throw new Error("A broker cancellation requires its request ID");
@@ -249,12 +192,6 @@ export async function runBrokerDaemon(): Promise<void> {
             "browser_lost",
             "Browser transport is lost; the pending start cannot be recovered",
           );
-        if (method === "supervise") {
-          if (!principal.supervisor)
-            throw new BrokerRefusal("unauthorized", "Supervisor identity is required");
-          idleTimeout = undefined;
-          return { state: "supervised" };
-        }
         if (method === "recover") {
           const result = await operator.recover(principal, params);
           if (startupReconciliation && retainedXataPreDispatchAuthorization !== undefined)
@@ -283,8 +220,8 @@ export async function runBrokerDaemon(): Promise<void> {
           (await journal.hasOutstanding(undefined, principal.forwarderId)) &&
           !(
             method === "tool" &&
-              (params.name === "operate_finish" ||
-                (await operator.canReconcileCapture(principal, params)) ||
+            (params.name === "operate_finish" ||
+              (await operator.canReconcileCapture(principal, params)) ||
               (await operator.canContinueAfterCapture(principal, params)))
           )
         )
@@ -367,7 +304,6 @@ export async function runBrokerDaemon(): Promise<void> {
         closing,
         draining,
         connectedClients: connected.size,
-        idleTimeout,
         inventory: operator.authority.inventory(),
         hasReconnectGrace: operator.authority.hasReconnectGrace(),
       })
@@ -387,7 +323,6 @@ export async function runBrokerDaemon(): Promise<void> {
           closing,
           draining,
           connectedClients: connected.size,
-          idleTimeout,
           inventory: operator.authority.inventory(),
           hasReconnectGrace: operator.authority.hasReconnectGrace(),
         }))
@@ -429,8 +364,7 @@ export async function runBrokerDaemon(): Promise<void> {
           await restoreMaintenance();
         }
         if (draining) await shutdown(true);
-        else if (connected.size === 0 && idleTimeout !== undefined && idleTimer === undefined)
-          scheduleShutdownIfIdle();
+        else if (connected.size === 0 && idleTimer === undefined) scheduleShutdownIfIdle();
       })
       .catch((error: unknown) => {
         process.stderr.write(

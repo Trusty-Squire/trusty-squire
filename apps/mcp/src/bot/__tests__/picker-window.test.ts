@@ -78,7 +78,7 @@ it.each([
       );
       const sibling = await context.newPage();
       const owner = BrowserController.fromHarnessPage(sibling);
-      const controller = await BrowserController.attachSatellite(owner, { humanize: false });
+      const controller = await BrowserController.attachSessionPage(owner, { humanize: false });
       const page = controller.activePage();
       if (page === null) throw new Error("No session page");
       const started = await startHarnessProvisionSession({

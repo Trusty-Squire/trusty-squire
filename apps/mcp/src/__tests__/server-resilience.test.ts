@@ -1,3 +1,4 @@
+import { operatorHandlerForwarder } from "./operator-handler-forwarder.js";
 // Operator crash hardening: malformed / erroring operate_* calls must come
 // back as clean per-call tool errors, and the server must keep serving the
 // NEXT call. A live Hermes-driven checkout run sent a batch of operator calls
@@ -6,10 +7,6 @@
 // tests lock the per-call boundary; the process-level unhandledRejection
 // backstop is covered in bin-smoke.test.ts against the built artifact.
 
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { DispatchJournal } from "../bot/broker/dispatch-journal.js";
 import { ForwardedResultError, type OperatorForwarder } from "../bot/broker/forwarder.js";
 import { createServerCallAdmission } from "../server.js";
 import { describe, expect, it, vi } from "vitest";
@@ -33,9 +30,15 @@ import {
   startHarnessProvisionSession,
 } from "../bot/provision-session.js";
 
-async function connectedClient(persistence?: Parameters<typeof buildServer>[5]): Promise<Client> {
+async function connectedClient(): Promise<Client> {
   const api = { setRequestingAgent: vi.fn() } as unknown as ApiClient;
-  const server = await buildServer(api, undefined, undefined, undefined, undefined, persistence);
+  const server = await buildServer(
+    api,
+    undefined,
+    undefined,
+    undefined,
+    operatorHandlerForwarder(api),
+  );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
   const client = new Client({ name: "resilience-test", version: "1.0.0" });
@@ -324,12 +327,7 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
 });
 
 it("roundtrips flat finish schemas and typed receipts through the MCP SDK", async () => {
-  const root = await mkdtemp(join(tmpdir(), "direct-receipt-"));
-  const path = join(root, "journal.jsonl");
-  const client = await connectedClient({
-    journal: new DispatchJournal(path),
-    lineage: () => "account-lineage",
-  });
+  const client = await connectedClient();
   const browser = {
     goto: vi.fn().mockResolvedValue(undefined),
     recoverActivePage: vi.fn(),
@@ -396,40 +394,10 @@ it("roundtrips flat finish schemas and typed receipts through the MCP SDK", asyn
     });
     expect(JSON.parse(resultText(result))).toEqual(result.structuredContent);
     await client.close();
-    const restarted = await connectedClient({
-      journal: new DispatchJournal(path),
-      lineage: () => "account-lineage",
-    });
-    const foreign = await connectedClient({
-      journal: new DispatchJournal(path),
-      lineage: () => "other-lineage",
-    });
-    try {
-      expect(
-        (
-          await restarted.callTool({
-            name: "operate_finish",
-            arguments: { session_id: started.session_id },
-          })
-        ).structuredContent,
-      ).toMatchObject({ closed: true, cleanup: "already_closed" });
-      expect(
-        (
-          await foreign.callTool({
-            name: "operate_finish",
-            arguments: { session_id: started.session_id },
-          })
-        ).isError,
-      ).toBe(true);
-      expect(browser.close).toHaveBeenCalledOnce();
-    } finally {
-      await restarted.close();
-      await foreign.close();
-    }
+    expect(browser.close).toHaveBeenCalledOnce();
   } finally {
     await client.close();
     await closeAllProvisionSessions();
-    await rm(root, { recursive: true, force: true });
   }
 });
 

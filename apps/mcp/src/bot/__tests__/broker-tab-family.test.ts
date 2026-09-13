@@ -1,20 +1,4 @@
-// Real-Chromium proof of the tab-family isolation the experimental
-// multisession flag (TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION) depends on. Two
-// BrowserControllers share ONE BrowserContext — a primary attached to its
-// harness page and a satellite attached via BrowserController.attachSatellite —
-// and the claims below are all about what the real OwnedPages registry and the
-// browser networking do under that sharing:
-//
-//   - a popup opened from one session's page registers to THAT session only;
-//     the other session can neither register it nor adopt it;
-//   - closing a session's own pages closes its whole family (its page plus
-//     every popup it owns) and nothing the other session owns;
-//   - the satellite's page gets the same per-navigation normalization as the
-//     primary's page (the evaluate-name shim and device spoof);
-//   - all pages can reach arbitrary hosts, with either flag value.
-//
-// The lifecycle refcounting around this (who runs the real close, finish
-// order) is covered with a fake controller in multisession-concurrency.test.ts.
+// Real Chromium proof of broker session tab-family isolation and unrestricted egress.
 
 import { existsSync } from "node:fs";
 import { createServer, type Server } from "node:http";
@@ -72,7 +56,7 @@ async function fetchOutcome(from: Page, url: string): Promise<string> {
   }, url);
 }
 
-describeChromium("experimental multisession — real tab-family isolation", () => {
+describeChromium("broker sessions — real tab-family isolation", () => {
   beforeEach(async () => {
     apiHits.length = 0;
     server = createServer((req, res) => {
@@ -92,7 +76,7 @@ describeChromium("experimental multisession — real tab-family isolation", () =
     primaryPage = await context.newPage();
     await primaryPage.goto(`http://127.0.0.1:${port}/primary`);
     primary = BrowserController.fromHarnessPage(primaryPage);
-    satellite = await BrowserController.attachSatellite(primary, { humanize: false });
+    satellite = await BrowserController.attachSessionPage(primary, { humanize: false });
     const attached = internals(satellite).page;
     if (attached === null) throw new Error("satellite attached no page");
     satellitePage = attached;
@@ -100,7 +84,6 @@ describeChromium("experimental multisession — real tab-family isolation", () =
   }, 60_000);
 
   afterEach(async () => {
-    delete process.env.TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION;
     await browser?.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
@@ -216,27 +199,20 @@ describeChromium("experimental multisession — real tab-family isolation", () =
     expect(await normalized(raw)).toBe(false);
   }, 30_000);
 
-  it.each(["0", "1"])(
-    "allows cross-host requests for every tab family (flag=%s)",
-    async (flag) => {
-      process.env.TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION = flag;
-      expect(await fetchOutcome(primaryPage, `http://localhost:${port}/api/primary`)).toBe(
-        "resolved",
-      );
-      expect(await fetchOutcome(satellitePage, `http://127.0.0.1:${port}/api/satellite`)).toBe(
-        "resolved",
-      );
-      const unclaimed = await context.newPage();
-      await unclaimed.goto(`http://127.0.0.1:${port}/unclaimed`);
-      expect(await fetchOutcome(unclaimed, `http://localhost:${port}/api/unclaimed`)).toBe(
-        "resolved",
-      );
-      await satellite.closeOwnPagesOnly();
-      expect(await fetchOutcome(primaryPage, `http://localhost:${port}/api/after`)).toBe(
-        "resolved",
-      );
-      expect(apiHits).toHaveLength(4);
-    },
-    30_000,
-  );
+  it("allows cross-host requests for every tab family", async () => {
+    expect(await fetchOutcome(primaryPage, `http://localhost:${port}/api/primary`)).toBe(
+      "resolved",
+    );
+    expect(await fetchOutcome(satellitePage, `http://127.0.0.1:${port}/api/satellite`)).toBe(
+      "resolved",
+    );
+    const unclaimed = await context.newPage();
+    await unclaimed.goto(`http://127.0.0.1:${port}/unclaimed`);
+    expect(await fetchOutcome(unclaimed, `http://localhost:${port}/api/unclaimed`)).toBe(
+      "resolved",
+    );
+    await satellite.closeOwnPagesOnly();
+    expect(await fetchOutcome(primaryPage, `http://localhost:${port}/api/after`)).toBe("resolved");
+    expect(apiHits).toHaveLength(4);
+  }, 30_000);
 });

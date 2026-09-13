@@ -43,6 +43,31 @@ const h = vi.hoisted(() => ({
   visibleText: "",
 }));
 
+// Inject the broker page port; these tests exercise session behavior, not physical launch.
+vi.mock("../broker/custody.js", async () => {
+  const { BrowserController } = await import("../browser.js");
+  const { CHROME_PROFILE_DIR } = await import("../profile.js");
+  return {
+    brokerBrowserCustody: () => ({
+      acquire: async (options: { profileDir?: string; proxyUrl?: string }) => {
+        const profileDir = options.profileDir ?? CHROME_PROFILE_DIR;
+        const browser = new BrowserController({ ...options, profileDir });
+        await browser.start();
+        return { browser, profileDir };
+      },
+      release: async (
+        browser: InstanceType<typeof BrowserController>,
+        beforeRelease?: () => Promise<void>,
+      ) => {
+        if ((await browser.close()) !== "closed")
+          throw new Error("operator browser cleanup unproven");
+        await beforeRelease?.();
+      },
+      identity: async <T>(operation: () => Promise<T>) => await operation(),
+    }),
+  };
+});
+
 vi.mock("../browser.js", () => ({
   registerLocalBrowserLaunch: (
     _profileDir: string,
@@ -105,7 +130,9 @@ vi.mock("../browser.js", () => ({
     async dismissConsentBanner(): Promise<string | null> {
       return null;
     }
-    async close(): Promise<void> {}
+    async close(): Promise<"closed"> {
+      return "closed";
+    }
   },
 }));
 

@@ -7,7 +7,7 @@ import { afterEach, beforeEach, expect, it, vi, type MockInstance } from "vitest
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { z, type Tool } from "../../tools/index.js";
+import { z, type Tool, type ToolContext } from "../../tools/index.js";
 import type { ApiClient } from "../../api-client.js";
 import type { SessionGuard } from "../../session-guard.js";
 
@@ -38,6 +38,7 @@ vi.mock("../session/lifecycle.js", () => ({
 }));
 
 vi.mock("../provision-session.js", () => ({
+  maskOperatorSessionOutput: (_sessionId: string, value: unknown) => value,
   preparePublicOAuthLoginTarget: (sessionId: string, target: string) =>
     state.prepareOAuth(sessionId, target),
   withPreparedOAuthLoginTarget: async (prepared: unknown, operation: () => Promise<unknown>) => {
@@ -1653,6 +1654,170 @@ it("admits ordinary actions only while the caller has solely completed capture u
     expect(await broker.canContinueAfterCapture(principal, params)).toBe(false);
   } finally {
     hasCapability?.mockRestore();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("delivers broker approval notifications to the originating MCP client before payment completes", async () => {
+  const { buildServer } = await import("../../server.js");
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+  const { LoggingMessageNotificationSchema } = await import("@modelcontextprotocol/sdk/types.js");
+  const root = await mkdtemp(join(tmpdir(), "ts-broker-notify-"));
+  const path = join(root, "b.sock");
+  const broker = new OperatorBroker(
+    {
+      accountId: "account",
+      agentSessionToken: "token",
+      apiBaseUrl: "http://unused.test",
+      registryBaseUrl: "http://unused.test",
+    },
+    "cell",
+  );
+  let release!: () => void;
+  const waiting = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let starts = 0;
+  Object.defineProperty(broker, "tools", {
+    value: [
+      {
+        name: "operate_start",
+        description: "",
+        inputSchema: z.object({}),
+        jsonInputSchema: {},
+        handler: async () => {
+          const id = `internal-${++starts}`;
+          state.sessions.set(id, {
+            browser: {
+              brokerTargetId: async () => id,
+              isConnected: () => true,
+              waitForThreeDsResolution: async () => "succeeded",
+            },
+            pendingThreeDs: null,
+          });
+          return { session_id: id };
+        },
+      },
+      {
+        name: "inject_card",
+        description: "",
+        inputSchema: z.object({ session_id: z.string() }),
+        jsonInputSchema: {},
+        handler: async (_args: unknown, _api: unknown, context?: ToolContext) => {
+          await context!.notifyUser!("Approve payment on your phone", {
+            approval_url: "https://approval.test/payment",
+          });
+          await waiting;
+          return { status: "approval_pending" };
+        },
+      },
+    ],
+  });
+  const listener = await listenBroker(path, {
+    authenticate: (...args) => broker.authenticate(...args),
+    connected: (principal) => broker.connected(principal),
+    call: async (principal, method, params, id) => {
+      if (method === "reclaim") return broker.reclaim(principal);
+      if (method === "acknowledge") {
+        await broker.acknowledge(principal, String(params.requestId));
+        return {};
+      }
+      if (method === "confirm_start") {
+        await broker.confirmStartDelivery(principal, params);
+        return {};
+      }
+      return broker.call(principal, method, params, id);
+    },
+    disconnect: (principal, explicit) => broker.disconnect(principal, explicit),
+  });
+  const guard: SessionGuard = {
+    bind: async () => ({
+      account_id: "account",
+      agent_session_token: "token",
+      api_base_url: "http://unused.test",
+      saved_at: "",
+    }),
+    inspect: async () => ({ problem: null }),
+    boundAccountId: () => "account",
+  };
+  const forwarders = [
+    new OperatorForwarder(path, guard, "a".repeat(43)),
+    new OperatorForwarder(path, guard, "b".repeat(43)),
+  ];
+  const clients: InstanceType<typeof Client>[] = [];
+  const messages: unknown[][] = [[], []];
+  try {
+    for (const [index, forwarder] of forwarders.entries()) {
+      const server = await buildServer(
+        { setRequestingAgent: () => undefined } as unknown as ApiClient,
+        undefined,
+        undefined,
+        guard,
+        forwarder,
+      );
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverTransport);
+      const client = new Client({ name: `notify-${index}`, version: "1" });
+      client.setNotificationHandler(LoggingMessageNotificationSchema, (notification) => {
+        messages[index]!.push(notification.params);
+      });
+      await client.connect(clientTransport);
+      clients.push(client);
+    }
+    const started = (await forwarders[0]!.invoke("operate_start", {}, "start")) as {
+      session_id: string;
+    };
+    let completed = false;
+    const payment = clients[0]!
+      .callTool({
+        name: "inject_card",
+        arguments: {
+          session_id: started.session_id,
+          merchant: "Test merchant",
+          amount_cents: 100,
+          currency: "USD",
+          card_ref: "fixture-card",
+          fields: { pan: { ref: "@pan" } },
+          item: "Test purchase",
+          reason: "Verify approval delivery",
+        },
+      })
+      .finally(() => {
+        completed = true;
+      });
+    await expect
+      .poll(() => messages[0])
+      .toEqual([
+        {
+          level: "notice",
+          logger: "trusty-squire",
+          data: {
+            message: "Approve payment on your phone",
+            approval_url: "https://approval.test/payment",
+          },
+        },
+      ]);
+    expect(completed).toBe(false);
+    expect(messages[1]).toEqual([]);
+    process.stdout.write(
+      "broker approval delivery before completion:" +
+        " " +
+        JSON.stringify({
+          originatingClient: messages[0],
+          siblingClient: messages[1],
+          paymentCompleted: completed,
+        }) +
+        "\n",
+    );
+    release();
+    const result = await payment;
+    expect(result.isError).not.toBe(true);
+  } finally {
+    release();
+    await Promise.all(clients.map((client) => client.close()));
+    await Promise.all(forwarders.map((forwarder) => forwarder.close()));
+    await listener.close();
     await rm(root, { recursive: true, force: true });
   }
 });

@@ -200,7 +200,7 @@ describeChromium("broker-backed MCP stdio restart", () => {
     );
   });
 
-  it("reclaims one supervised broker and one real browser after an MCP stdio restart", async () => {
+  it("reclaims one broker and one real browser after an MCP stdio restart", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-broker-stdio-restart-"));
     roots.push(root);
     const socket = join(root, "broker.sock");
@@ -245,7 +245,6 @@ describeChromium("broker-backed MCP stdio restart", () => {
           TRUSTY_SQUIRE_PROFILE_DIR: profile,
           TRUSTY_SQUIRE_REAPER_DIR: reapers,
           TRUSTY_SQUIRE_BROKER_SOCKET: socket,
-          TRUSTY_SQUIRE_BROKER_SUPERVISED: "1",
           TRUSTY_SQUIRE_REAPER_POLL_MS: "20",
           TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS: "20",
           TRUSTY_SQUIRE_AGENT_IDENTITY: "stdio-restart",
@@ -282,7 +281,6 @@ describeChromium("broker-backed MCP stdio restart", () => {
             TRUSTY_SQUIRE_PROFILE_DIR: profile,
             TRUSTY_SQUIRE_REAPER_DIR: reapers,
             TRUSTY_SQUIRE_BROKER_SOCKET: socket,
-            TRUSTY_SQUIRE_BROKER_SUPERVISED: "1",
             TRUSTY_SQUIRE_FORWARDER_CREDENTIAL: credential,
             TRUSTY_SQUIRE_AGENT_IDENTITY: "stdio-restart",
             BOT_CDP_ENDPOINT: "",
@@ -301,11 +299,11 @@ describeChromium("broker-backed MCP stdio restart", () => {
       const owner = await waitFor(async () => {
         if (broker.exitCode !== null) throw new Error(brokerDiagnostics);
         return await endpointOwner(socket);
-      }, "supervised broker endpoint owner");
+      }, "broker endpoint owner");
       let contender: { release(): void } | undefined;
       try {
         contender = acquireProfileOperationGuard(profile, brokerElectionRoot(profile));
-        throw new Error("supervised broker did not retain its canonical profile election");
+        throw new Error("broker did not retain its canonical profile election");
       } catch (error) {
         expect(error).toBeInstanceOf(ProfileBusyError);
       } finally {
