@@ -49,8 +49,7 @@ export async function fixtureBrokerForwarder(
           method === "tool" &&
           (args.name === "operate_finish" ||
             (await broker.canReconcileCapture(principal, args)) ||
-            (await broker.canContinueAfterCapture(principal, args)) ||
-            (await broker.canContinuePaymentStatus(principal, args)))
+            (await broker.canContinueAfterCapture(principal, args)))
         )
       )
         throw new Error("Prior mutation outcome awaits reconciliation");
