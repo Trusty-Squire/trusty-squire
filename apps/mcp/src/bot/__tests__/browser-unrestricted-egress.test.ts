@@ -106,13 +106,17 @@ describe("operator egress", () => {
         await mkdir(evidenceDirectory, { recursive: true });
         await writeFile(
           join(evidenceDirectory, "operator-egress.json"),
-          JSON.stringify({
-            fixture: "Real Chromium operator session with intercepted synthetic HTTP responses",
-            merchantUrl: page.url(),
-            deliveredRequests: delivered,
-            sdkExecuted: await page.evaluate("window.sdkLoaded"),
-            providerFrameUrl: frame.url(),
-          }, null, 2),
+          JSON.stringify(
+            {
+              fixture: "Real Chromium operator session with intercepted synthetic HTTP responses",
+              merchantUrl: page.url(),
+              deliveredRequests: delivered,
+              sdkExecuted: await page.evaluate("window.sdkLoaded"),
+              providerFrameUrl: frame.url(),
+            },
+            null,
+            2,
+          ),
         );
       }
     } finally {
