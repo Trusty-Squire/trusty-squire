@@ -3,8 +3,8 @@
 import { spawn } from "node:child_process";
 
 const tier = process.argv[2];
-if (tier !== "fast" && tier !== "slow") {
-  console.error("usage: node scripts/run-test-tier.mjs <fast|slow>");
+if (tier !== "fast" && tier !== "slow" && tier !== "real-browser") {
+  console.error("usage: node scripts/run-test-tier.mjs <fast|slow|real-browser>");
   process.exit(2);
 }
 
@@ -29,7 +29,9 @@ function runVitest(name, config) {
 const groups =
   tier === "slow"
     ? [["slow post-merge tier", "vitest.slow.config.ts"]]
-    : [
+    : tier === "real-browser"
+      ? [["real browser", "vitest.real-browser.config.ts"]]
+      : [
         ["fast core", "vitest.fast-core.config.ts"],
         ["required behavior", "vitest.behavior-required.config.ts"],
         ["required payment safety", "vitest.payment-required.config.ts"],

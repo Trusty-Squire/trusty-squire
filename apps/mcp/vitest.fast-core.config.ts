@@ -2,6 +2,7 @@ import { defineConfig } from "vitest/config";
 import {
   MCP_TEST_INCLUDE_GLOBS,
   QUARANTINED_FILES,
+  REAL_BROWSER_FILES,
   REQUIRED_BEHAVIOR_FILES,
   REQUIRED_PAYMENT_SAFETY_FILES,
   SLOW_POST_MERGE_FILES,
@@ -14,6 +15,7 @@ export default defineConfig({
     include: MCP_TEST_INCLUDE_GLOBS,
     exclude: [
       ...SLOW_POST_MERGE_FILES,
+      ...REAL_BROWSER_FILES,
       ...REQUIRED_BEHAVIOR_FILES,
       ...REQUIRED_PAYMENT_SAFETY_FILES,
       ...QUARANTINED_FILES,
