@@ -544,12 +544,9 @@ export class BrowserProcessOwner {
     // Launch args shared by BOTH paths (launchPersistentContext and the
     // self-launch). See the per-flag rationale: swiftshader gives a real
     // (software) WebGL context on GPU-less hosts; the others are the
-    // standard headless/sandbox flags. The three background-throttling disables
-    // are payment correctness controls: a backgrounded CardinalCommerce ACS
-    // frame must keep running its timers long enough to finish the issuer's OOB
-    // post-approval handshake with Stripe. Keep them paired with bringToFront()
-    // before payment submission and in waitForThreeDsResolution(). NOTE we
-    // deliberately do NOT include Playwright's automation flags
+    // standard headless/sandbox flags. The background-throttling disables keep
+    // interactive pages and authentication frames responsive when backgrounded.
+    // NOTE we deliberately do NOT include Playwright's automation flags
     // (--enable-automation et al.) — on the self-launch path their ABSENCE is
     // the whole fix.
     const launchArgs: readonly string[] = [

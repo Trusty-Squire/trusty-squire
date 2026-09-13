@@ -14,14 +14,11 @@
 // the tool layer passed none.
 import { randomBytes } from "node:crypto";
 import type { Buffer } from "node:buffer";
-import type { BrowserController, InteractiveElement } from "../browser.js";
+import type { BrowserController, CheckoutCard, InteractiveElement } from "../browser.js";
 import type {
-  CartCheckoutObservation,
   PendingApprovalWait,
-  PendingCardFill,
-  PendingThreeDsWait,
   TerminalPaymentApprovalStatus,
-} from "../pay-operator.js";
+} from "../card-release-approval.js";
 import type {
   SafeObservationBaselineV2,
   SafeObservationIndexV2,
@@ -34,7 +31,7 @@ import type { OperatorBrowserWatchdog } from "../operator-browser-watchdog.js";
 // the facade because they belong to regions later phases move (perception for
 // ObserveDeltaState, actions for CartAddResult, the payment bridge for
 // ActivePaymentLease). They follow this module when those phases land.
-import type { ActivePaymentLease, CartAddResult, ObserveDeltaState } from "../provision-session.js";
+import type { CartAddResult, ObserveDeltaState } from "../provision-session.js";
 
 // Credential-egress seed provenance: start is the service host, auto_widen
 // is an observed same-base-domain redirect. mid_session is retained for legacy
@@ -107,16 +104,6 @@ export interface SessionTerminalTeardownOwner {
   requireProvenBrowserClose: boolean;
 }
 
-export interface PaymentDispatchHandoff {
-  state: PendingThreeDsWait;
-  settled: Promise<void>;
-  resolveSettled: () => void;
-  terminalizing: boolean;
-  terminalComplete: boolean;
-  released: boolean;
-  auditPromise: Promise<void> | null;
-}
-
 export interface Session {
   id: string;
   browser: BrowserController;
@@ -187,64 +174,27 @@ export interface Session {
   usedLocatorFallback: boolean;
   recipeRejectionReason: string | null;
   replayState: ReplayState | null;
-  // One session-wide payment lease is claimed before any await. The
-  // pending -> confirming transition prevents duplicate confirmation, while
-  // submitStarted forbids restoring retry state after a charge may have begun.
-  // "sealed" survives unverified field cleanup and blocks later payments.
-  // "awaiting_approval" is the rest state after one bounded operate_pay wait:
-  // the human has not approved or denied yet. A later operate_pay call resumes
+  // The human has not approved or denied yet. A later inject_card call resumes
   // the same approval. Once denial or expiry is observed, terminal_approval
-  // keeps that attempt in custody and its private operator key is scrubbed.
+  // retains that outcome long enough to report it once.
   activePayment:
-    | { status: "operating"; lease: ActivePaymentLease }
     | { status: "awaiting_approval"; state: PendingApprovalWait }
     | {
         status: "terminal_approval";
         state: PendingApprovalWait;
         terminalStatus: TerminalPaymentApprovalStatus;
       }
-    | { status: "pending"; pending: PendingCardFill }
-    | { status: "confirming"; pending: PendingCardFill; submitStarted: boolean }
-    | { status: "sealed" }
     | null;
-  paymentFieldSealActive: boolean;
-  // A completed operate_pay single-page submit whose post-submit outcome wait
-  // exhausted its budget with no terminal signal. Deliberately NOT part of
-  // activePayment: the card is already released and the charge already
-  // submitted, so there is no lease to hold and no re-authorization risk —
-  // this is resumable bookkeeping for operate_payment_status,
-  // mirroring the "awaiting_approval" gap it closes for the pre-charge wait.
-  // Set by setActivePendingThreeDs, read by getActivePendingThreeDs, cleared
-  // by clearActivePendingThreeDsIfCurrent once resolved or its deadline passes.
-  pendingThreeDs: PendingThreeDsWait | null;
-  paymentDispatchHandoff: PaymentDispatchHandoff | null;
-  // Snapshot of the single approval a filled card belongs to, captured at
-  // fill time (setActivePendingCardFill / completeActivePaymentLeaseWithPendingFill)
-  // so the place-order guard below still has what it needs after activePayment
-  // itself has moved on to "confirming" or "sealed" (sealed drops `pending`).
-  // Cleared only at session (re)init or after verified full field cleanup.
-  placeOrderApproval: {
-    outcome: PendingThreeDsWait | null;
+  /** Internal card released by the existing purchase approval; never serialized. */
+  releasedPaymentCard: {
     approvalId: string;
-    mandateId?: string;
-    merchant: string;
-    amountCents: number;
-    currency: string;
+    approvalUrl: string;
+    checkout: { merchant: string; checkout_origin: string; amount_cents: number; currency: string };
     cardRef: string;
     last4: string;
+    deadline: number;
+    card: CheckoutCard;
   } | null;
-  // True once a checkout-submit-labeled operate_act click has fired against
-  // placeOrderApproval. A second one is refused — one human passkey approval
-  // authorizes at most one place-order attempt (see enforcePlaceOrderGuard).
-  placeOrderAttempted: boolean;
-  // The most recent real checkout total this session actually observed on a
-  // page (e.g. the cart step), scoped to that page's own origin. Split
-  // checkouts (Rakuten-style) show no total on the card-entry page itself;
-  // operate_pay {phase:"fill_card"} falls back to this ONLY when the live
-  // card-entry page has no readable total of its own, and only when the
-  // origin still matches. Replaced (never accumulated) on each successful
-  // observe of a page with a parseable total; never a caller-supplied value.
-  lastCartCheckout: CartCheckoutObservation | null;
   // Per-line idempotency records are local to the one active browser/cart. A
   // retry must inspect this before it ever reaches a merchant add button.
   cartAdds: Map<string, CartAddRecord>;
@@ -263,9 +213,6 @@ export interface Session {
   lastActivityAt: number;
   callCount: number;
   callDrainWaiters: Set<() => void>;
-  paymentCallCount: number;
-  paymentCallDrainWaiters: Set<() => void>;
-  paymentDispatchClosed: boolean;
   // Session ownership must be a resource boundary, not merely a convention for
   // cooperative hosts. The watchdog observes the browser but teardown may only
   // begin between complete action leases.
@@ -318,12 +265,7 @@ export function createSession(input: CreateSessionInput): Session {
     recipeRejectionReason: null,
     replayState: null,
     activePayment: null,
-    paymentFieldSealActive: false,
-    pendingThreeDs: null,
-    paymentDispatchHandoff: null,
-    placeOrderApproval: null,
-    placeOrderAttempted: false,
-    lastCartCheckout: null,
+    releasedPaymentCard: null,
     cartAdds: new Map(),
     cartAddsByIdempotencyKey: new Map(),
     cartUrls: new Map(),
@@ -333,9 +275,6 @@ export function createSession(input: CreateSessionInput): Session {
     lastActivityAt: Date.now(),
     callCount: 0,
     callDrainWaiters: new Set(),
-    paymentCallCount: 0,
-    paymentCallDrainWaiters: new Set(),
-    paymentDispatchClosed: false,
     startedAt: Date.now(),
     watchdog: null,
     terminalTeardownOwner: null,

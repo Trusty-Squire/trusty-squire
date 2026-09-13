@@ -159,6 +159,9 @@ importers:
       rebrowser-playwright-core:
         specifier: ^1.52.0
         version: 1.52.0
+      sharp:
+        specifier: ^0.34.5
+        version: 0.34.5
       smol-toml:
         specifier: ^1.6.1
         version: 1.6.1

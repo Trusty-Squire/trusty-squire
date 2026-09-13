@@ -39,29 +39,22 @@ import { join } from "node:path";
 import type { ElementHandle, Page } from "playwright";
 import {
   BrowserClickDispatchError,
-  CHECKOUT_SUBMIT_LABEL_RE,
   clickDispatchStatusForError,
   parseCheckoutAmount,
   OAuthAwaitingHumanError,
   OAuthFailedError,
   OAuthOnboardingRequiredError,
   type BrowserController,
-  type ClickDispatchStatus,
   type CheckoutSummary,
+  type CheckoutCard,
   type FrameTarget,
+  type InjectCardField,
+  type InjectCardFieldResult,
+  type InjectCardResolvedTarget,
   type InteractiveElement,
   type OAuthCompletionEvidence,
   type PageTargetSafetySignals,
 } from "./browser.js";
-import { markPendingThreeDsChallenge, THREE_DS_RESUME_WINDOW_MS } from "./pay-operator.js";
-import type {
-  CartCheckoutObservation,
-  PendingApprovalWait,
-  PendingCardFill,
-  PendingThreeDsWait,
-  PaymentBrowser,
-  TerminalPaymentApprovalStatus,
-} from "./pay-operator.js";
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import {
   buildSafeControlsV2,
@@ -203,11 +196,6 @@ export interface ObservedElement {
   // signal, not decoration: operate_act re-derives which frame to act in (and
   // which credential-injection guard applies) from this, never from the top page's URL.
   frame_origin?: string | null;
-  // PCI controls are deliberately still observable, but they are never ordinary
-  // planner inputs: only operate_pay may fill a vaulted card into them.
-  payment_field?: PaymentField;
-  interaction?: "vaulted_card_only";
-  recommended_action?: { tool: "operate_pay"; phase: "fill_card" };
 }
 
 export type PaymentField =
@@ -240,7 +228,6 @@ export interface CheckoutState {
   cart_url: string | null;
   next_action:
     | { tool: "operate_act"; kind: "click"; intent: "proceed_to_checkout" }
-    | { tool: "operate_pay"; phase: "fill_card" }
     | { tool: "operate_observe" };
 }
 
@@ -1456,7 +1443,7 @@ function operationPageForSession(session: Session): Page | undefined {
 }
 
 function returnFromClosedPicker(session: Session, page: Page | undefined): Page | undefined {
-  if (page === undefined || !page.isClosed() || !newTabAdoptionAllowed(session)) return page;
+  if (page === undefined || !page.isClosed()) return page;
   const opener = session.browser.returnFromClosedPopup(page);
   if (opener === null) return page;
   // Only post-click perception follows the opener. The dispatched target and
@@ -2099,48 +2086,6 @@ export function shouldBlockUnsafeProvisionAction(
   );
 }
 
-// Manual card-entry guard — a model must never be the thing that types a
-// payment card number into a page. When operate_pay fails, the recovery is
-// surfacing that failure, not routing around the vault by typing the PAN via
-// an ordinary `type`. "Card-number-shaped" = a 13–19 digit run (spaces/hyphens
-// allowed as grouping) that passes the Luhn checksum — requiring Luhn keeps
-// order numbers, tracking numbers, and other long digit strings from
-// false-positiving. Scoped to MODEL-SUPPLIED `type` text only: operate_pay's
-// vaulted-card fill methods and type_secret's
-// sealed-slot transfer never pass through this check.
-function passesLuhn(digits: string): boolean {
-  let sum = 0;
-  let double = false;
-  for (let i = digits.length - 1; i >= 0; i -= 1) {
-    let d = digits.charCodeAt(i) - 48;
-    if (double) {
-      d *= 2;
-      if (d > 9) d -= 9;
-    }
-    sum += d;
-    double = !double;
-  }
-  return sum % 10 === 0;
-}
-
-class ManualCardEntryBlockedError extends Error {}
-
-export function manualCardEntryBlockReason(text: string): string | null {
-  for (const match of text.matchAll(/\d(?:[\d\s-]*\d)?/g)) {
-    const digits = match[0].replace(/[\s-]/g, "");
-    if (digits.length >= 13 && digits.length <= 19 && passesLuhn(digits)) {
-      return (
-        "type refused: the value is card-number-shaped (a 13–19 digit Luhn-valid " +
-        "sequence). Manual payment-card entry is not permitted through operate_act — " +
-        "the model must never hold or type a card number. Card payment goes through " +
-        "operate_pay, which fills the user's vaulted card server-side. If operate_pay " +
-        "failed, report that failure to the user instead of entering a card by hand."
-      );
-    }
-  }
-  return null;
-}
-
 export function buildScreenOutline(
   elements: readonly InteractiveElement[],
   pageText: string,
@@ -2391,8 +2336,8 @@ export interface ScreenshotCapture {
   image: { mime_type: string; data_base64: string };
 }
 
-// operate_screenshot's session-level entry point. The capture is the page's real
-// pixels — there is no redaction pass and no sealed-context refusal.
+// operate_screenshot's session-level entry point. Once a card has been released,
+// the controller composites over PAN/CVV value pixels before this output seam.
 export async function captureScreenshot(
   sessionId: string,
   opts: { frameIndex?: number; frameUrlContains?: string; fullPage?: boolean } = {},
@@ -2407,7 +2352,117 @@ export async function captureScreenshot(
     frame_url: captured.frameUrl,
     frame_count: captured.frameCount,
     ...(captured.clickBinding ? { click_binding: captured.clickBinding } : {}),
-    image: { mime_type: "image/jpeg", data_base64: captured.base64 },
+    image: { mime_type: captured.mimeType ?? "image/jpeg", data_base64: captured.base64 },
+  };
+}
+
+export function readOperatorEvidence(
+  sessionId: string,
+  since = 0,
+  requestId?: string,
+): ReturnType<BrowserController["readOperatorEvidence"]> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  return session.browser.readOperatorEvidence(since, requestId);
+}
+
+export function maskOperatorSessionOutput<T>(sessionId: string, value: T): T {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) return value;
+  const mask = session.browser.maskOperatorOutput;
+  return typeof mask === "function" ? (mask.call(session.browser, value) as T) : value;
+}
+
+export async function injectCardIntoSessionTargets(
+  sessionId: string,
+  card: CheckoutCard,
+  targets: Partial<
+    Record<InjectCardField, { ref: string; format?: string | undefined } | undefined>
+  >,
+): Promise<Record<InjectCardField, InjectCardFieldResult>> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const page = operationPageForSession(session);
+  const fresh = await session.browser.extractInteractiveElements(page);
+  const resolved: Partial<Record<InjectCardField, InjectCardResolvedTarget>> = {};
+  for (const field of ["pan", "cvv", "exp_month", "exp_year", "exp", "name"] as const) {
+    const target = targets[field];
+    if (target === undefined) continue;
+    const legacy = session.compactV2Active ? session.compactV2Refs.get(target.ref) : target.ref;
+    if (legacy === undefined) {
+      resolved[field] = { missing: "not_found", format: target.format };
+      continue;
+    }
+    const previouslyPresent = resolveTarget(session.lastElements, legacy) !== null;
+    const element = resolveTarget(fresh, legacy);
+    resolved[field] =
+      element === null
+        ? { missing: previouslyPresent ? "detached" : "not_found", format: target.format }
+        : { element, format: target.format };
+  }
+  return await session.browser.injectCardIntoTargets(card, resolved, page);
+}
+
+export async function observeSubtree(
+  sessionId: string,
+  target: string,
+  rawAttributes = false,
+): Promise<Record<string, unknown>> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const page = operationPageForSession(session);
+  const capture = await session.browser.extractBrowserUseObservation(page);
+  const legacy = session.compactV2Active ? session.compactV2Refs.get(target) : target;
+  if (legacy === undefined) throw new Error("stale_ref");
+  const element = resolveTarget(capture.elements, legacy);
+  if (element === null) throw new Error("stale_ref");
+  const entry = [...capture.nodeElements].find(
+    ([, candidate]) => candidate.observationIdentity === element.observationIdentity,
+  );
+  if (entry === undefined) throw new Error("observation_subtree_unavailable");
+  const findNode = (
+    root: BrowserUseCapture["root"],
+    id: string,
+  ): BrowserUseCapture["root"] | null => {
+    if (root.id === id) return root;
+    for (const child of root.children) {
+      const found = findNode(child, id);
+      if (found !== null) return found;
+    }
+    return root.contentDocument === null ? null : findNode(root.contentDocument, id);
+  };
+  const root = findNode(capture.root, entry[0]);
+  if (root === null) throw new Error("observation_subtree_unavailable");
+  let remaining = 1_000;
+  const project = (node: BrowserUseCapture["root"]): Record<string, unknown> => {
+    remaining -= 1;
+    const children = remaining <= 0 ? [] : node.children.map(project);
+    const contentDocument =
+      remaining <= 0 || node.contentDocument === null ? null : project(node.contentDocument);
+    return {
+      node_id: node.id,
+      node_type: node.nodeType,
+      tag: node.nodeName.toLowerCase(),
+      value: node.value,
+      ...(rawAttributes ? { attributes: node.attributes } : {}),
+      visible: node.visible,
+      rendered: node.rendered ?? null,
+      bounds: node.bounds,
+      ax_role: node.axRole,
+      ax_properties: node.axProperties,
+      shadow_type: node.shadowType,
+      children,
+      content_document: contentDocument,
+      ...(remaining <= 0 ? { capture_truncated: true } : {}),
+    };
+  };
+  return {
+    format: "browser-use-subtree",
+    session_id: session.id,
+    url: page?.url() ?? session.browser.currentUrl(),
+    target,
+    subtree: project(root),
+    ...(capture.omissions.length === 0 ? {} : { capture_omissions: capture.omissions }),
   };
 }
 
@@ -2474,410 +2529,6 @@ export function currentProvisionUrl(sessionId: string): string {
 
 export function isCompactV2ProvisionSession(sessionId: string): boolean {
   return sessionForCall(sessionId)?.compactV2Mode === "on";
-}
-
-function activeProvisionSession(): Session {
-  return paymentSession();
-}
-
-export function activeProvisionBrowser(): BrowserController {
-  const session = activeProvisionSession();
-  invalidateCompactV2Snapshot(session);
-  return session.browser;
-}
-
-export async function activeProvisionBrowserForPayment(
-  selectedSession?: Session,
-): Promise<PaymentBrowser> {
-  const session = selectedSession ?? activeProvisionSession();
-  const page = operationPageForSession(session);
-  if (page === undefined || page.isClosed()) {
-    throw new Error("payment page is unavailable");
-  }
-  invalidateCompactV2Snapshot(session);
-  return session.browser.paymentBrowser(page);
-}
-
-function placeOrderApprovalFromPendingFill(
-  pending: PendingCardFill,
-): NonNullable<Session["placeOrderApproval"]> {
-  return {
-    outcome: {
-      approval_id: pending.approval_id,
-      approval_url: pending.approval_url,
-      checkout: pending.checkout,
-      last4: pending.last4,
-      ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
-      deadline: 0,
-      outcome: "unknown",
-    },
-    approvalId: pending.approval_id,
-    ...(pending.mandate_id !== undefined ? { mandateId: pending.mandate_id } : {}),
-    merchant: pending.checkout.merchant,
-    amountCents: pending.checkout.amount_cents,
-    currency: pending.checkout.currency,
-    cardRef: pending.card_ref,
-    last4: pending.last4,
-  };
-}
-
-export function setActivePendingCardFill(
-  pending: PendingCardFill,
-  selectedSession?: Session,
-): void {
-  const session = selectedSession ?? activeProvisionSession();
-  session.activePayment = { status: "pending", pending };
-  session.paymentFieldSealActive = true;
-  session.placeOrderApproval = placeOrderApprovalFromPendingFill(pending);
-  session.placeOrderAttempted = false;
-}
-
-export function retainActivePaymentFieldSeal(selectedSession?: Session): void {
-  const session = selectedSession ?? activeProvisionSession();
-  if (session.activePayment?.status !== "operating") {
-    session.activePayment = { status: "sealed" };
-  }
-  session.paymentFieldSealActive = true;
-}
-
-export function getActivePendingCardFill(selectedSession?: Session): PendingCardFill | null {
-  const state = (selectedSession ?? activeProvisionSession()).activePayment;
-  return state?.status === "pending" ? state.pending : null;
-}
-
-// The outstanding approval a prior bounded operate_pay call left waiting on
-// the human, if any. A status read may transition this exact state to terminal
-// denial/expiry and scrub its private operator key.
-export function getActivePendingApproval(selectedSession?: Session): PendingApprovalWait | null {
-  const state = (selectedSession ?? activeProvisionSession()).activePayment;
-  return state?.status === "awaiting_approval" ? state.state : null;
-}
-
-export function getTerminalPaymentApproval(
-  selectedSession?: Session,
-): { state: PendingApprovalWait; terminalStatus: TerminalPaymentApprovalStatus } | null {
-  const activePayment = (selectedSession ?? activeProvisionSession()).activePayment;
-  return activePayment?.status === "terminal_approval"
-    ? { state: activePayment.state, terminalStatus: activePayment.terminalStatus }
-    : null;
-}
-
-// operate_pay reports a lapsed attempt once, then permits a new human approval.
-// Confirmation failures and unverified field cleanup retain their existing guards.
-export function clearReportedTerminalPaymentApproval(
-  paymentFieldsCleared: boolean,
-  selectedSession?: Session,
-): void {
-  const session = selectedSession ?? activeProvisionSession();
-  const state = session.activePayment;
-  if (
-    state?.status !== "terminal_approval" ||
-    (state.terminalStatus !== "denied" && state.terminalStatus !== "expired")
-  )
-    return;
-  session.activePayment = paymentFieldsCleared ? null : { status: "sealed" };
-  session.paymentFieldSealActive = !paymentFieldsCleared;
-}
-
-export function completeActivePendingApprovalWithTerminalStatus(
-  state: PendingApprovalWait,
-  terminalStatus: "denied" | "expired",
-  selectedSession?: Session,
-): boolean {
-  const session = selectedSession ?? activeProvisionSession();
-  const activePayment = session.activePayment;
-  if (activePayment?.status !== "awaiting_approval" || activePayment.state !== state) return false;
-  state.keypair.privateKey = "";
-  session.activePayment = { status: "terminal_approval", state, terminalStatus };
-  return true;
-}
-
-export function completeActivePaymentLeaseWithTerminalApproval(
-  lease: ActivePaymentLease,
-  state: PendingApprovalWait,
-  terminalStatus: TerminalPaymentApprovalStatus,
-  selectedSession?: Session,
-): void {
-  const session = selectedSession ?? activeProvisionSession();
-  const activePayment = session.activePayment;
-  if (activePayment?.status !== "operating" || activePayment.lease !== lease) {
-    throw new Error(
-      "operate_pay terminal approval completed without ownership of the active payment lease",
-    );
-  }
-  state.keypair.privateKey = "";
-  session.activePayment = { status: "terminal_approval", state, terminalStatus };
-}
-
-export function getActivePendingThreeDs(selectedSession?: Session): PendingThreeDsWait | null {
-  return (selectedSession ?? activeProvisionSession()).pendingThreeDs ?? null;
-}
-
-export function getCallerDrivenPaymentOutcome(session: Session): PendingThreeDsWait | null {
-  return session.placeOrderAttempted ? (session.placeOrderApproval?.outcome ?? null) : null;
-}
-
-export async function observeCallerDrivenPayment(session: Session): Promise<void> {
-  const state = getCallerDrivenPaymentOutcome(session);
-  const api = session.api;
-  if (state === null || api === undefined) return;
-  try {
-    const browser = await activeProvisionBrowserForPayment(session);
-    const notify = (): void => markPendingThreeDsChallenge(api, state);
-    const resolution = await browser.waitForThreeDsResolution(0, notify);
-    if (resolution === "challenge_pending") notify();
-  } catch {}
-}
-
-export function armPaymentDispatchHandoff(
-  state: PendingThreeDsWait,
-  selectedSession?: Session,
-): void {
-  const session = selectedSession ?? activeProvisionSession();
-  if (session.paymentDispatchClosed || (session.closing && session.paymentCallCount === 0)) {
-    throw new Error(`provision session ${session.id} closed before payment dispatch`);
-  }
-  let resolveSettled = (): void => undefined;
-  const settled = new Promise<void>((resolve) => {
-    resolveSettled = resolve;
-  });
-  session.paymentDispatchHandoff = {
-    state,
-    settled,
-    resolveSettled,
-    terminalizing: false,
-    terminalComplete: false,
-    released: false,
-    auditPromise: null,
-  };
-}
-
-export function finishPaymentDispatchHandoff(
-  state: PendingThreeDsWait,
-  selectedSession?: Session,
-): void {
-  const session = selectedSession ?? activeProvisionSession();
-  const handoff = session.paymentDispatchHandoff;
-  if (handoff?.state !== state) return;
-  handoff.released = true;
-  handoff.resolveSettled();
-  if (!handoff.terminalizing || handoff.terminalComplete) {
-    session.paymentDispatchHandoff = null;
-  }
-}
-
-export async function coordinatePaymentDispatchAudit(
-  state: PendingThreeDsWait,
-  recordAudit: () => Promise<void>,
-  selectedSession?: Session,
-): Promise<void> {
-  const session = selectedSession ?? activeProvisionSession();
-  const handoff = session.paymentDispatchHandoff;
-  if (handoff?.state === state) {
-    handoff.auditPromise ??= recordAudit();
-    await handoff.auditPromise;
-    return;
-  }
-  await recordAudit();
-}
-
-export function setActivePendingThreeDs(
-  state: PendingThreeDsWait,
-  selectedSession?: Session,
-): void {
-  const session = selectedSession ?? activeProvisionSession();
-  const handoff = session.paymentDispatchHandoff;
-  if (session.closing && handoff?.state !== state) return;
-  session.pendingThreeDs = state;
-  if (handoff?.state === state) handoff.resolveSettled();
-}
-
-export function clearActivePendingThreeDsIfCurrent(
-  state: PendingThreeDsWait,
-  selectedSession?: Session,
-): boolean {
-  const session = selectedSession ?? activeProvisionSession();
-  if (session.placeOrderApproval?.outcome === state) {
-    session.placeOrderApproval.outcome = null;
-    return true;
-  }
-  if (session.pendingThreeDs !== state) return false;
-  session.pendingThreeDs = null;
-  return true;
-}
-
-export interface ActivePaymentLease {
-  phase: "fill_card" | "single";
-}
-
-export type ActivePaymentClaim =
-  | { kind: "lease"; lease: ActivePaymentLease; resumeApproval?: PendingApprovalWait }
-  | { kind: "confirm"; pending: PendingCardFill }
-  | {
-      kind: "terminal";
-      state: PendingApprovalWait;
-      terminalStatus: TerminalPaymentApprovalStatus;
-    }
-  | { kind: "missing_confirm" };
-
-export function claimActivePaymentForOperatePay(
-  phase: "fill_card" | "confirm" | undefined,
-  selectedSession?: Session,
-): ActivePaymentClaim {
-  const session = selectedSession ?? activeProvisionSession();
-  if (getActivePendingThreeDs(session) !== null) {
-    throw new Error(
-      "operate_pay refused: a prior charge has unresolved 3-D Secure state; call " +
-        "operate_payment_status first",
-    );
-  }
-  const state = session.activePayment;
-  if (state?.status === "operating") {
-    throw new Error("operate_pay refused: another payment operation is already in progress");
-  }
-  if (state?.status === "confirming") {
-    throw new Error("operate_pay refused: another payment confirmation is already in progress");
-  }
-  if (state?.status === "sealed") {
-    throw new Error("operate_pay refused: payment field cleanup remains unverified");
-  }
-  if (state?.status === "terminal_approval") {
-    return {
-      kind: "terminal",
-      state: state.state,
-      terminalStatus: state.terminalStatus,
-    };
-  }
-  if (state?.status === "pending") {
-    if (phase !== "confirm") {
-      throw new Error(
-        'operate_pay refused: a vaulted card fill is pending; phase="confirm" is required next',
-      );
-    }
-    session.activePayment = {
-      status: "confirming",
-      pending: state.pending,
-      submitStarted: false,
-    };
-    return { kind: "confirm", pending: state.pending };
-  }
-  if (phase === "confirm") return { kind: "missing_confirm" };
-  // [P0] Resuming an outstanding approval (status "awaiting_approval" — the
-  // human hasn't tapped approve yet) takes the SAME "operating" lease as a
-  // fresh call, carrying the prior approval/keypair through so the operator can
-  // validate the resource before either reusing it or minting a replacement.
-  const resumeApproval = state?.status === "awaiting_approval" ? state.state : undefined;
-  const lease: ActivePaymentLease = { phase: phase === "fill_card" ? "fill_card" : "single" };
-  session.activePayment = { status: "operating", lease };
-  if (lease.phase === "fill_card") session.paymentFieldSealActive = true;
-  return resumeApproval !== undefined
-    ? { kind: "lease", lease, resumeApproval }
-    : { kind: "lease", lease };
-}
-
-export function completeActivePaymentLeaseWithPendingFill(
-  lease: ActivePaymentLease,
-  pending: PendingCardFill,
-  selectedSession?: Session,
-): void {
-  const session = selectedSession ?? activeProvisionSession();
-  const state = session.activePayment;
-  if (state?.status !== "operating" || state.lease !== lease || lease.phase !== "fill_card") {
-    throw new Error(
-      "operate_pay fill_card completed without ownership of the active payment lease",
-    );
-  }
-  session.activePayment = { status: "pending", pending };
-  session.paymentFieldSealActive = true;
-  session.placeOrderApproval = placeOrderApprovalFromPendingFill(pending);
-  session.placeOrderAttempted = false;
-}
-
-// [P0] Mirrors completeActivePaymentLeaseWithPendingFill for the
-// still-pending-approval outcome: the human hasn't responded yet, so this
-// call ends with no card filled — just a resumable wait, picked up by the
-// NEXT operate_pay call for live-resource validation or read by
-// operate_payment_status.
-export function completeActivePaymentLeaseWithPendingApproval(
-  lease: ActivePaymentLease,
-  state: PendingApprovalWait,
-  selectedSession?: Session,
-): void {
-  const session = selectedSession ?? activeProvisionSession();
-  const current = session.activePayment;
-  if (current?.status !== "operating" || current.lease !== lease) {
-    throw new Error(
-      "operate_pay approval_pending completed without ownership of the active payment lease",
-    );
-  }
-  session.activePayment = { status: "awaiting_approval", state };
-}
-
-export function releaseActivePaymentLease(
-  lease: ActivePaymentLease,
-  paymentFieldsCleared = true,
-  selectedSession?: Session,
-): boolean {
-  const session = selectedSession ?? activeProvisionSession();
-  const state = session.activePayment;
-  if (state?.status !== "operating" || state.lease !== lease) return false;
-  session.activePayment = paymentFieldsCleared ? null : { status: "sealed" };
-  if (lease.phase === "fill_card") session.paymentFieldSealActive = !paymentFieldsCleared;
-  return true;
-}
-
-export function markActivePendingCardFillSubmitStarted(selectedSession?: Session): void {
-  const state = (selectedSession ?? activeProvisionSession()).activePayment;
-  if (state?.status === "confirming") state.submitStarted = true;
-}
-
-export function restoreActivePendingCardFillAfterConfirmThrow(
-  pending: PendingCardFill,
-  selectedSession?: Session,
-): boolean {
-  const session = selectedSession ?? activeProvisionSession();
-  const state = session.activePayment;
-  if (state?.status !== "confirming" || state.submitStarted) return false;
-  session.activePayment = { status: "pending", pending };
-  return true;
-}
-
-export function clearActivePendingCardFill(
-  paymentFieldsCleared = true,
-  selectedSession?: Session,
-): void {
-  const session = selectedSession ?? activeProvisionSession();
-  session.activePayment = paymentFieldsCleared ? null : { status: "sealed" };
-  session.paymentFieldSealActive = !paymentFieldsCleared;
-  // A verified full clear (paymentFieldsCleared=true) is a clean slate — no
-  // approval is pending a place-order attempt anymore. The real confirm call
-  // site always passes false (moving to "sealed"), which deliberately leaves
-  // placeOrderApproval/placeOrderAttempted untouched: the guard must keep
-  // binding to the SAME approval across the pending -> sealed transition.
-  if (paymentFieldsCleared) {
-    session.placeOrderApproval = null;
-    session.placeOrderAttempted = false;
-  }
-}
-
-export function recordActivePaymentProvenance(cardRef: string, selectedSession?: Session): void {
-  const session = selectedSession ?? activeProvisionSession();
-  const last = session.actionTrace.at(-1)?.action;
-  if (last?.kind === "operate_pay") return;
-  const traceIndex = session.actionTrace.length;
-  session.actionTrace.push({ action: { kind: "operate_pay", value: { hole: "card" } } });
-  session.recordedValues.push({ traceIndex, hole: "card", literal: cardRef });
-}
-
-// operate_pay {phase:"fill_card"} fallback source (see Session.lastCartCheckout):
-// the most recent real total this SAME session actually read off a page,
-// returned only when it still matches the given (current, live) origin.
-export function activeCartCheckoutForOrigin(
-  origin: string,
-  selectedSession?: Session,
-): CartCheckoutObservation | null {
-  const cached = (selectedSession ?? activeProvisionSession()).lastCartCheckout;
-  return cached !== null && cached.checkout.checkout_origin === origin ? cached : null;
 }
 
 export interface CartAddResult {
@@ -3124,7 +2775,6 @@ export async function cartClear(sessionId: string): Promise<CartClearResult> {
   session.cartAdds.clear();
   session.cartAddsByIdempotencyKey.clear();
   session.lastCartMutation = null;
-  session.lastCartCheckout = null;
   const observed = await observeSession(session, "compact", undefined, operationPage);
   return {
     status: "cleared",
@@ -3274,14 +2924,6 @@ export function paymentFieldForObservation(el: InteractiveElement): PaymentField
   return null;
 }
 
-function annotatePaymentControl(out: ObservedElement, el: InteractiveElement): void {
-  const paymentField = paymentFieldForObservation(el);
-  if (paymentField === null) return;
-  out.payment_field = paymentField;
-  out.interaction = "vaulted_card_only";
-  out.recommended_action = { tool: "operate_pay", phase: "fill_card" };
-}
-
 // One element, compacted: ref/label/tag always; every other field omitted when
 // empty. `value`→`value_len` (never the raw value — keeps the sealed-field moat);
 // `checked` kept for real checkables (true OR false), omitted when null;
@@ -3325,7 +2967,6 @@ export function toCompactElement(
   if (el.frameOrigin) {
     out.frame_origin = el.frameOrigin;
   }
-  annotatePaymentControl(out, el);
   return out;
 }
 
@@ -3348,9 +2989,6 @@ const ELEMENT_TABLE_COLUMNS = [
   "topmost",
   "occluded_by",
   "frame_origin",
-  "payment_field",
-  "interaction",
-  "recommended_action",
 ] as const;
 type ElementColumn = (typeof ELEMENT_TABLE_COLUMNS)[number];
 
@@ -3382,12 +3020,6 @@ function elementCell(e: ObservedElement, col: ElementColumn): string | undefined
       return e.occluded_by ?? undefined;
     case "frame_origin":
       return e.frame_origin ?? undefined;
-    case "payment_field":
-      return e.payment_field;
-    case "interaction":
-      return e.interaction;
-    case "recommended_action":
-      return e.recommended_action === undefined ? undefined : JSON.stringify(e.recommended_action);
   }
 }
 
@@ -3447,30 +3079,6 @@ export function parseElementsTable(table: string): ObservedElement[] {
       else if (col === "topmost") e.topmost = false;
       else if (col === "occluded_by") e.occluded_by = raw;
       else if (col === "frame_origin") e.frame_origin = raw;
-      else if (
-        col === "payment_field" &&
-        [
-          "card_number",
-          "expiry",
-          "expiry_month",
-          "expiry_year",
-          "security_code",
-          "cardholder_name",
-        ].includes(raw)
-      )
-        e.payment_field = raw as PaymentField;
-      else if (col === "interaction" && raw === "vaulted_card_only") e.interaction = raw;
-      else if (col === "recommended_action") {
-        try {
-          const action = JSON.parse(raw) as { tool?: string; phase?: string };
-          if (action.tool === "operate_pay" && action.phase === "fill_card") {
-            e.recommended_action = { tool: "operate_pay", phase: "fill_card" };
-          }
-        } catch {
-          // A malformed optional advisory column is ignored, never allowed to
-          // break reconstruction of the actual actionable inventory.
-        }
-      }
     });
     out.push(e);
   }
@@ -3771,13 +3379,8 @@ export function buildCompactObservation(args: {
   };
 }
 
-// Best-effort: on every observation, try to read a real checkout total off
-// the CURRENT live page and cache it as the fill_card fallback (see
-// Session.lastCartCheckout). Most pages have no parseable total — that's the
-// overwhelmingly common, expected outcome, not an error, so a throw here
-// simply leaves the existing cache untouched rather than clearing it. Scoped
-// to the observed page's own origin so a later cross-origin fallback read
-// (checked again at use time) can never happen even if this cache were stale.
+// Best-effort structured checkout evidence for the current observation. Most
+// pages have no parseable total; that is an ordinary null result.
 async function captureCartCheckoutForFillCardFallback(
   session: Session,
   url: string,
@@ -3791,12 +3394,9 @@ async function captureCartCheckoutForFillCardFallback(
   }
   try {
     const checkout = await session.browser.readCheckoutSummary(undefined, page);
-    if (checkout.checkout_origin === origin) {
-      session.lastCartCheckout = { checkout, url, observedAt: Date.now() };
-      return checkout;
-    }
+    if (checkout.checkout_origin === origin) return checkout;
   } catch {
-    // No readable total on this page — leave any previously cached total alone.
+    // No readable total on this page.
   }
   return null;
 }
@@ -3986,11 +3586,9 @@ function checkoutStateForObservation(
     payable_total: payableTotal,
     cart_url: cartUrlForState(session, url, elements),
     next_action:
-      resolvedStage === "checkout"
-        ? { tool: "operate_pay", phase: "fill_card" }
-        : resolvedStage === "cart"
-          ? { tool: "operate_act", kind: "click", intent: "proceed_to_checkout" }
-          : { tool: "operate_observe" },
+      resolvedStage === "cart"
+        ? { tool: "operate_act", kind: "click", intent: "proceed_to_checkout" }
+        : { tool: "operate_observe" },
   };
 }
 
@@ -4683,7 +4281,10 @@ function compactV2Observation(
     }
     if (compactMapEmitted && page.payload.overflow === undefined)
       session.compactV2Previous.compactMapEmitted = true;
-    return page.payload as unknown as Observation;
+    return {
+      ...page.payload,
+      ...(capture.omissions.length === 0 ? {} : { capture_omissions: capture.omissions }),
+    } as unknown as Observation;
   }
   const removed = sameDocument
     ? (previous.renderedRefs ?? []).filter((ref) => !rendered.refs.includes(ref))
@@ -4698,6 +4299,7 @@ function compactV2Observation(
     ...(removed.length ? { removed } : {}),
     more_above: capture.moreAbove,
     more_below: capture.moreBelow,
+    ...(capture.omissions.length === 0 ? {} : { capture_omissions: capture.omissions }),
     ...(startMetadata?.hintPages?.[0] ? { hint: startMetadata.hintPages[0] } : {}),
     ...(startMetadata?.userEmail ? { user_email: startMetadata.userEmail } : {}),
     ...(session.compactV2HintPages.length > 1 && startMetadata
@@ -5111,7 +4713,6 @@ async function observeSession(
             frame_origin:
               el.frameOrigin === null || el.frameOrigin === undefined ? null : el.frameOrigin,
           };
-          annotatePaymentControl(observed, el);
           return observed;
         }),
       },
@@ -5129,117 +4730,6 @@ async function observeSession(
     }
     throw err;
   }
-}
-
-function isCheckoutSubmitLabeled(labels: readonly (string | null | undefined)[]): boolean {
-  return labels.some(
-    (label) => label !== null && label !== undefined && CHECKOUT_SUBMIT_LABEL_RE.test(label.trim()),
-  );
-}
-
-function isPlaceOrderClickCandidate(el: InteractiveElement): boolean {
-  return isCheckoutSubmitLabeled([
-    el.ariaLabel,
-    el.value,
-    el.visibleText,
-    el.labelText,
-    el.iconLabel,
-    el.title,
-  ]);
-}
-
-// D2 — one human passkey approval authorizes at most one place-order attempt.
-// operate_act is otherwise fully generic (no merchant hostname/selector
-// knowledge); this reuses the SAME label heuristic (CHECKOUT_SUBMIT_LABEL_RE)
-// Squire's own retired single-phase submit used to find the pay/place-order
-// control, so a click/js_click only counts as a place-order attempt when it
-// targets a control that reads like one. Returns the approval snapshot when
-// THIS action is the first attempt; throws before the click executes on a
-// repeat. A fresh attempt requires a fresh operate_pay approval — since a
-// filled card can never be refilled in the same session (Pillar 2), that
-// means a new session.
-function enforcePlaceOrderGuard(
-  session: Session,
-  labels: readonly (string | null | undefined)[],
-): Session["placeOrderApproval"] {
-  if (!isCheckoutSubmitLabeled(labels)) return null;
-  if (getActivePendingThreeDs(session) !== null) {
-    throw new Error(
-      "operate_act refused: a prior charge has unresolved 3-D Secure state; call " +
-        "operate_payment_status first",
-    );
-  }
-  if (session.placeOrderApproval === null) return null;
-  if (session.placeOrderAttempted) {
-    throw new Error(
-      "operate_act refused: a place-order attempt already fired for this approval " +
-        `(approval_id=${session.placeOrderApproval.approvalId}). One human passkey approval ` +
-        "authorizes at most one place-order attempt — a fresh operate_pay approval is required " +
-        "before placing the order again.",
-    );
-  }
-  const approval = session.placeOrderApproval;
-  session.placeOrderAttempted = true;
-  if (approval.outcome !== null) {
-    approval.outcome.deadline = Date.now() + THREE_DS_RESUME_WINDOW_MS;
-  }
-  return approval;
-}
-
-// D1 — best-effort server-side record that a caller-placed charge was
-// attempted. Deliberately attempt semantics, not execution: Squire cannot
-// verify what the merchant did after the caller's click (it never re-reads
-// the total or the order-confirmation page here), only that the approval was
-// consumed and the place-order control was pressed. Never blocks the click —
-// mirrors the audit_recorded best-effort handling in pay-operator.ts.
-async function recordPlaceOrderAttemptAudit(
-  session: Session,
-  approval: NonNullable<Session["placeOrderApproval"]>,
-): Promise<void> {
-  await observeCallerDrivenPayment(session);
-  if (session.api === undefined) return;
-  try {
-    await session.api.auditPayment({
-      merchant: approval.merchant,
-      amount_cents: approval.amountCents,
-      currency: approval.currency,
-      last4: approval.last4,
-      card_ref: approval.cardRef,
-      approval_id: approval.approvalId,
-      status: "payment_place_order_attempted",
-      ...(approval.mandateId !== undefined ? { mandate_id: approval.mandateId } : {}),
-    });
-  } catch {
-    // Best-effort — an audit write failure must never fail the caller's
-    // place-order action.
-  }
-}
-
-async function runClickWithPlaceOrderGuard(
-  session: Session,
-  click: (shouldTrack: (labels: readonly string[]) => boolean) => Promise<ClickDispatchStatus>,
-): Promise<void> {
-  let approval: Session["placeOrderApproval"] = null;
-  try {
-    const dispatchStatus = await click((labels) => {
-      approval = enforcePlaceOrderGuard(session, labels);
-      return approval !== null;
-    });
-    if (approval === null) return;
-    if (dispatchStatus === "not_dispatched") {
-      if (session.placeOrderApproval === approval) session.placeOrderAttempted = false;
-      return;
-    }
-  } catch (error) {
-    if (approval === null) throw error;
-    if (clickDispatchStatusForError(error) === "not_dispatched") {
-      if (session.placeOrderApproval === approval) session.placeOrderAttempted = false;
-    } else {
-      await recordPlaceOrderAttemptAudit(session, approval);
-    }
-    throw error;
-  }
-  await recordPlaceOrderAttemptAudit(session, approval);
 }
 
 interface InternalActResult {
@@ -5393,11 +4883,7 @@ async function actInternally(
     if (error instanceof OAuthOnboardingRequiredError && session !== undefined) {
       return { observation: oauthOnboardingRequiredObservation(session, error), outcome: {} };
     }
-    if (
-      session?.compactV2Active === true &&
-      !(error instanceof ManualCardEntryBlockedError) &&
-      !(error instanceof ProvisionTargetMissingError)
-    ) {
+    if (session?.compactV2Active === true && !(error instanceof ProvisionTargetMissingError)) {
       throw new CompactV2ActionFailureError(compactV2ActionFailureReason(error, action.kind));
     }
     throw error;
@@ -5538,12 +5024,6 @@ async function executeAct(
     throw new Error(
       `type_secret provenance must match the authoritative slot credential.${action.slot}`,
     );
-  }
-  // Gate here — ahead of BOTH the locator and element `type` branches, and of
-  // replay's act() calls — so no model-supplied text path can reach a PAN fill.
-  if (action.kind === "type") {
-    const cardBlock = manualCardEntryBlockReason(action.text);
-    if (cardBlock !== null) throw new ManualCardEntryBlockedError(cardBlock);
   }
   let browser = session.browser;
   const compactV2ActionPage = operationPage ?? operationPageForSession(session);
@@ -5841,36 +5321,28 @@ async function executeAct(
             throw new ScreenshotClickError("stale_screenshot", "not_dispatched");
           actionPageAfter =
             (await adoptTabOpenedByClick(session, browser, async () => {
-              await runClickWithPlaceOrderGuard(session, async (shouldTrack) => {
-                const dispatched = await clickScreenshot(
-                  compactV2ActionPage,
-                  action.screenshot!,
-                  (target) => {
-                    const blocked = shouldBlockUnsafeProvisionAction(
-                      pageText,
-                      { kind: "click", target: target.labels.join(" ") },
-                      { redactTarget: true },
-                    );
-                    if (blocked !== null) throw new Error(blocked);
-                    if (!target.mainFrame)
-                      assertFrameTargetAllowed(
-                        session,
-                        {
-                          framePath: "screenshot",
-                          frameUrl: target.frameUrl,
-                          frameOrigin: target.frameOrigin,
-                          frameOpaque: target.frameOpaque,
-                        },
-                        "click",
-                        compactV2ActionPage,
-                      );
-                    shouldTrack(target.labels);
-                    session.usedLocatorFallback = true; // Dispatched image points cannot be replayed.
-                  },
+              await clickScreenshot(compactV2ActionPage, action.screenshot!, (target) => {
+                const blocked = shouldBlockUnsafeProvisionAction(
+                  pageText,
+                  { kind: "click", target: target.labels.join(" ") },
+                  { redactTarget: true },
                 );
-                onScreenshotDispatched?.();
-                return dispatched;
+                if (blocked !== null) throw new Error(blocked);
+                if (!target.mainFrame)
+                  assertFrameTargetAllowed(
+                    session,
+                    {
+                      framePath: "screenshot",
+                      frameUrl: target.frameUrl,
+                      frameOrigin: target.frameOrigin,
+                      frameOpaque: target.frameOpaque,
+                    },
+                    "click",
+                    compactV2ActionPage,
+                  );
+                session.usedLocatorFallback = true; // Dispatched image points cannot be replayed.
               });
+              onScreenshotDispatched?.();
             })) ?? actionPageAfter;
           await settleAfterStateChange(browser, compactV2ActionPage);
           if (browser.isActivePage(compactV2ActionPage)) {
@@ -5935,26 +5407,7 @@ async function executeAct(
             }
             bindCartIdentity(isCartAffectingAction(action, null, resolved.labels));
             session.usedLocatorFallback = true;
-            const isPlaceOrderCandidate = isCheckoutSubmitLabeled([
-              resolved.text,
-              ...resolved.labels,
-            ]);
-            if (
-              (session.placeOrderApproval !== null || getActivePendingThreeDs(session) !== null) &&
-              isPlaceOrderCandidate &&
-              (action.kind === "click" || action.kind === "js_click")
-            ) {
-              await runClickWithPlaceOrderGuard(session, (shouldTrack) =>
-                browser.clickWithDispatchTracking(
-                  {
-                    kind: "handle",
-                    handle: resolved.handle,
-                    method: action.kind,
-                  },
-                  shouldTrack,
-                ),
-              );
-            } else if (action.kind === "click" || action.kind === "js_click") {
+            if (action.kind === "click" || action.kind === "js_click") {
               const method = action.kind;
               if (compactV2ActionPage !== undefined && !browser.isActivePage(compactV2ActionPage)) {
                 actionPageAfter =
@@ -6030,21 +5483,7 @@ async function executeAct(
           const target = frameTargetFor(el);
           const sourcePageIsActive =
             compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage);
-          if (
-            (session.placeOrderApproval !== null || getActivePendingThreeDs(session) !== null) &&
-            isPlaceOrderClickCandidate(el)
-          ) {
-            await runClickWithPlaceOrderGuard(session, (shouldTrack) =>
-              browser.clickWithDispatchTracking(
-                target !== null
-                  ? { kind: "frame", frame: target, selector: el.selector, method: action.kind }
-                  : { kind: "selector", selector: el.selector, method: action.kind },
-                shouldTrack,
-                undefined,
-                compactV2ActionPage,
-              ),
-            );
-          } else if (!sourcePageIsActive && compactV2ActionPage !== undefined) {
+          if (!sourcePageIsActive && compactV2ActionPage !== undefined) {
             actionPageAfter =
               (await adoptTabOpenedByClick(session, browser, async () => {
                 if (target !== null) {
@@ -7292,23 +6731,11 @@ async function withOpenedTabAdoptionLease<T>(
   }
 }
 
-// Payment is deliberately out of scope. A sealed card fill and a live
-// place-order/3DS approval both own their page identity, so leave the operator
-// anchored where those flows put it rather than following a tab into them.
-function newTabAdoptionAllowed(session: Session): boolean {
-  return (
-    !session.paymentFieldSealActive &&
-    session.placeOrderApproval === null &&
-    getActivePendingThreeDs(session) === null
-  );
-}
-
 async function adoptOpenedTab(
   session: Session,
   browser: BrowserController,
   graceMs: number,
 ): Promise<Page | undefined> {
-  if (!newTabAdoptionAllowed(session)) return undefined;
   const url = await browser.adoptOpenedTab(graceMs).catch(() => null);
   if (url === null) return undefined;
   const page = browser.activePage();
@@ -7326,10 +6753,6 @@ async function adoptTabOpenedByClick(
   browser: BrowserController,
   click: () => Promise<void>,
 ): Promise<Page | undefined> {
-  if (!newTabAdoptionAllowed(session)) {
-    await click();
-    return undefined;
-  }
   browser.armOpenedTabAdoption();
   let adopted: Page | undefined;
   try {
@@ -7821,7 +7244,7 @@ export type OperatorReplayResult =
       // single-leg (or leg-less) recipe. It is not resumable via resume_from,
       // and recipe recording remains refused because recipeRejectionReason is
       // set. The host may drive the checkout leg cold from from_step_index;
-      // any charge still goes through a fresh, human-approved operate_pay.
+      // card release still goes through a fresh, human-approved inject_card call.
       status: "leg_fallback_required";
       observation: Observation;
       leg: "checkout";
@@ -8234,7 +7657,7 @@ export async function replayOperatorRecipe(
   // recipe-key-redesign money rule: the only surviving invariant is that a
   // card-charging step is never blind-replayed — enforced unconditionally
   // below where recorded.kind === "operate_pay" always forces a fallback to
-  // the fresh, human-approved operate_pay path. isMoneyPath here only feeds
+  // the fresh, human-approved inject_card path. isMoneyPath here only feeds
   // the leg-fallback narrowing (where to resume cold-driving), not a
   // software field-verification gate.
   const isMoneyPath = recipe.trace.some((entry) => entry.action.kind === "operate_pay");
@@ -8369,7 +7792,7 @@ export async function replayOperatorRecipe(
     }
 
     if (recorded.kind === "operate_pay") {
-      return await fallback(step, i, "payment requires the existing operate_pay approval flow");
+      return await fallback(step, i, "payment requires the existing inject_card approval flow");
     }
 
     if (recorded.kind === "goto") {
@@ -8541,7 +7964,6 @@ export async function replayOperatorRecipe(
         state.verifiedFields.add(i);
       }
     } catch (error) {
-      if (error instanceof ManualCardEntryBlockedError) throw error;
       return await fallback(
         step,
         i,

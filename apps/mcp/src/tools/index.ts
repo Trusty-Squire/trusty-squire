@@ -18,7 +18,8 @@ import { grantAppAccessTool } from "./grant-app-access.js";
 import { revokeAppAccessTool, listAppAccessTool } from "./revoke-app-access.js";
 import { auditLogTool } from "./audit-log.js";
 import { OPERATE_TOOLS } from "./provision-drive.js";
-import { listPaymentCardsTool, operatePayTool, operatePaymentStatusTool } from "./operate-pay.js";
+import { listPaymentCardsTool } from "./list-payment-cards.js";
+import { injectCardTool } from "./inject-card.js";
 import { deleteCredentialTool, editCredentialTool } from "./credential-mutations.js";
 import { fetchCredentialTool } from "./fetch-credential.js";
 
@@ -44,7 +45,7 @@ export interface Tool<TArgs extends Record<string, unknown> = Record<string, unk
 export interface ToolContext {
   notifyUser: (message: string, data?: Record<string, unknown>) => Promise<void>;
   // In-process override for hosts/tests with a tighter transport deadline.
-  // Omitted by the MCP server, which uses operate_pay's one-minute default.
+  // Omitted by the MCP server, which uses inject_card's one-minute default.
   paymentApprovalWaitMs?: number;
   signal?: AbortSignal;
 }
@@ -95,10 +96,7 @@ export function buildToolRegistry(env: NodeJS.ProcessEnv = process.env): Tool[] 
     auditLogTool,
     ...(diagnosticsProfileEnabled(env) ? diagnosticsTools : []),
     listPaymentCardsTool,
-    operatePayTool,
-    // Non-charging bounded status for pre-charge approval and post-submit
-    // outcomes; operate_pay owns approval continuation and charge execution.
-    operatePaymentStatusTool,
+    injectCardTool,
     // Interactive host-driven provisioning through discoverable flat verbs,
     // plus the unchanged recipe save/run tools.
     ...OPERATE_TOOLS,
@@ -132,6 +130,5 @@ export {
   listExtractFailuresTool,
   getExtractFailureTool,
   listPaymentCardsTool,
-  operatePayTool,
-  operatePaymentStatusTool,
+  injectCardTool,
 };

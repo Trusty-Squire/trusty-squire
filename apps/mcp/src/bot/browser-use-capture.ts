@@ -82,6 +82,11 @@ export interface BrowserUseCapture {
   moreBelow: boolean;
   /** Closed-shadow/iframe/frame-set structural signature (delta change hash). */
   dynamics: string;
+  omissions: Array<{
+    kind: "frame_binding_failed" | "frame_accessibility_failed" | "frame_attach_failed";
+    framePath: string | null;
+    url: string;
+  }>;
 }
 const rect = (v: number[] | undefined): DOMBounds | null =>
   v && v.length >= 4 ? { x: v[0]!, y: v[1]!, width: v[2]!, height: v[3]! } : null;
@@ -93,6 +98,7 @@ export async function captureBrowserUseDOM(
   frameSecurity: (frame: Frame) => Promise<{ opaque: boolean }>,
 ): Promise<BrowserUseCapture> {
   const nodeElements = new Map<string, InteractiveElement>();
+  const omissions: BrowserUseCapture["omissions"] = [];
   const opaqueFrames = new Map<Frame, boolean>();
   const renderedNodes = new Map<string, boolean>();
   const frameViews = new Map<Frame, { width: number; height: number; x: number; y: number }>();
@@ -200,6 +206,11 @@ export async function captureBrowserUseDOM(
     const markUnboundFrameTree = (tree: FrameTree, frame: Frame | undefined): void => {
       unboundFrameIds.add(tree.frame.id);
       if (frame) framePathById.set(tree.frame.id, framePath(frame));
+      omissions.push({
+        kind: "frame_binding_failed",
+        framePath: frame === undefined ? null : framePath(frame),
+        url: tree.frame.url,
+      });
       for (const [index, child] of (tree.childFrames ?? []).entries())
         markUnboundFrameTree(child, frame?.childFrames()[index]);
     };
@@ -243,6 +254,12 @@ export async function captureBrowserUseDOM(
         for (const n of tree.nodes)
           if (n.backendDOMNodeId !== undefined) axs.set(n.backendDOMNodeId, n);
       } catch {
+        const failed = frameById.get(frameId);
+        omissions.push({
+          kind: "frame_accessibility_failed",
+          framePath: framePathById.get(frameId) ?? null,
+          url: failed?.url() ?? "",
+        });
         forgetFrame(frameId);
       }
     }
@@ -1056,6 +1073,10 @@ export async function captureBrowserUseDOM(
             href: a.href ?? null,
             title: a.title ?? null,
             value: a.value ?? null,
+            cardMaskKind:
+              a["data-ts-card-mask"] === "pan" || a["data-ts-card-mask"] === "cvv"
+                ? a["data-ts-card-mask"]
+                : null,
             frameOrigin: frame === page.mainFrame() ? null : new URL(frame.url()).origin,
             frameUrl: frame === page.mainFrame() ? null : frame.url(),
             framePath: path,
@@ -1190,6 +1211,11 @@ export async function captureBrowserUseDOM(
             sessions.push(child);
             n.contentDocument = await capture(child, `${framePath(frame)}:`, frame);
           } catch {
+            omissions.push({
+              kind: "frame_attach_failed",
+              framePath: framePath(frame),
+              url: frame.url(),
+            });
             n.contentDocument = null;
           }
         }
@@ -1286,6 +1312,7 @@ export async function captureBrowserUseDOM(
       moreAbove: moreAbove || scroll.above,
       moreBelow: moreBelow || scroll.below,
       dynamics,
+      omissions,
     };
   } finally {
     await Promise.all(sessions.map((s) => s.detach().catch(() => undefined)));

@@ -168,9 +168,9 @@ import { ProfileBusyError } from "../profile.js";
 import {
   startProvisionSession,
   finishProvisionSession,
+  finishProvisionSessionWithPreparation,
   closeAllProvisionSessions,
 } from "../provision-session.js";
-import type { Session } from "../provision-session.js";
 import { sessionForCall } from "../session/lifecycle.js";
 
 let profileDir: string;
@@ -305,34 +305,21 @@ describe("TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION on", () => {
     await finishProvisionSession(first.session_id);
     expect(primaryRecord!.closeOwnPagesOnlyCalls).toBe(1);
 
-    // Park the satellite's graceful finish INSIDE its terminal 3DS audit —
-    // past its own forced check, before it releases the browser — by giving
-    // it a pending 3DS outcome whose audit call only returns when told to.
+    // Park the satellite in generic finish preparation. A transport shutdown
+    // can then take terminal ownership while graceful finish is still live,
+    // without relying on the deleted payment/3DS custody state.
+    let parked!: () => void;
+    const preparationStarted = new Promise<void>((resolve) => (parked = resolve));
+    let release!: () => void;
+    const preparationReleased = new Promise<void>((resolve) => (release = resolve));
+    const graceful = finishProvisionSessionWithPreparation(second.session_id, async () => {
+      parked();
+      await preparationReleased;
+    });
+    await preparationStarted;
+
     const session = sessionForCall(second.session_id);
     if (session === undefined) throw new Error("satellite session missing");
-    let parked!: () => void;
-    const audited = new Promise<void>((resolve) => (parked = resolve));
-    let release!: () => void;
-    const released = new Promise<void>((resolve) => (release = resolve));
-    session.api = {
-      auditPayment: async () => {
-        parked();
-        await released;
-      },
-    } as unknown as NonNullable<Session["api"]>;
-    session.pendingThreeDs = {
-      approval_id: "approval",
-      approval_url: "https://trustysquire.ai/vault/approve/approval",
-      checkout: {},
-      last4: "4242",
-      deadline: Date.now() + 60_000,
-      outcome: "unknown",
-    } as unknown as Session["pendingThreeDs"];
-
-    const graceful = finishProvisionSession(second.session_id);
-    await audited;
-    // The transport disconnects: shutdown force-terminates the same session
-    // while its graceful finish is still parked in the audit.
     const shutdown = closeAllProvisionSessions();
     while (session.terminalTeardownOwner?.forced !== true) {
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -340,8 +327,6 @@ describe("TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION on", () => {
     release();
     await Promise.allSettled([graceful, shutdown]);
 
-    // The group empties exactly once and the real close runs on the primary
-    // — the shared Chrome is never orphaned by the race.
     expect(primaryRecord!.closeCalls).toBe(1);
     expect(satelliteRecord!.closeCalls).toBe(0);
     expect(satelliteRecord!.closeOwnPagesOnlyCalls).toBe(1);

@@ -1,6 +1,6 @@
 # Design: Trusty Squire operator observation model — skeleton + resident DOM + descriptive refs
 
-**Status:** Current authority for the observation-format and no-seal policy. The
+**Status:** Current authority for the observation format and narrow card-value mask. The
 full browser-use DOM wire, identity, and fixture contract is owned by
 [`browser-use-serializer-port.md`](browser-use-serializer-port.md); the remaining
 roadmap material is historical.
@@ -165,35 +165,29 @@ Per-element cropped screenshots are O(N) calls — a flower grid would be death 
 - `screenshot` → **one** viewport (or full-page) capture with a labeled bounding box drawn over each interactive element, each box labeled with **the same descriptive ref**. The agent sees the whole grid at once and correlates "the red one, `@product-flower-3`" to its ref — one call, whole page. (This is the proven "set-of-marks" pattern.)
 - `show @ref` survives only as a secondary "zoom into this one element" primitive (e.g. one product image in detail), never the default.
 
-### 4.5 No redaction and no sealing (FINAL: owner's order, 2026-09-05 — remove ALL seals)
+### 4.5 Narrow released-card output mask (FINAL: owner's order, 2026-09-12)
 
-The history of this section is a one-way ratchet toward visibility:
+`operate_observe`, `operate_network`, console/error evidence, and
+`operate_screenshot` expose the live checkout directly. They have one narrow
+exception: after `inject_card` opens a released card, that card's PAN (complete
+or an ordinary displayed prefix of at least eight digits) and CVV/CVC/CID are
+replaced before any normal operator output. The record is installed before the
+first field write and remains for the browser session, including after
+rerenders, navigation, partial fills, or cleared controls.
 
-1. **Option B (2026-09-02)** — never seal a whole page or frame; redact at the
-   node level only, against codex's push for a frame-level seal.
-2. **Payment-only narrowing (2026-09-03)** — "do not mask anything not payments
-   related." Redaction kept only the injected vault value, the active card-fill
-   seal, and a Luhn PAN / labeled CVV.
-3. **Removal (2026-09-05, this section's current state)** — **every seal comes
-   out. No carve-outs, no payments remnant, no default-on flag.**
-
-**What that means concretely.** `operate_observe` and `operate_screenshot`
-return what the page actually renders:
-
-- Compact versus full observation is only a size/shape choice. Compact serializes
-  controls; full serializes the verbatim DOM. Neither path masks, screens,
-  substitutes, or redacts content that its format emits.
-
-- `operate_screenshot` returns the page's real pixels. There is no mask
-  compositing pass or content-based capture refusal, and no
-  `screenshot_unavailable_sealed_context` refusal — the error code no longer
-  exists. Optional screenshot-click binding is governed by the
-  [operator tool contract](operator-tool-surface.md#clicking-a-screenshot-visible-control);
-  its identity checks do not gate the image read.
-- Observation text, element values, labels, hrefs, test ids, paths, and frame
-  origins are verbatim. A password field's value, an operator-injected vault
-  value, a filled card number and CVV, a rendered API key, recovery code, TOTP,
-  or JWT are all ordinary page content.
+- Compact versus full observation remains a size/shape choice. The mask applies
+  to emitted DOM/AX values, properties, attributes, text, URLs, errors, headers,
+  and request/response bodies. PAN formatting with whitespace, common hyphens,
+  periods, or middle dots is covered.
+- `operate_screenshot` composites masks over value-bearing pixels of injected
+  controls and identified ordinary displayed copies. It preserves their borders,
+  labels, validation errors, and surrounding pixels. An active mask is never
+  bypassed; if the mask cannot scan or composite the capture, the screenshot
+  call fails rather than returning the unmasked image.
+- Merchant last4, brand/issuer, cardholder name, expiry, billing address, amount,
+  currency, DCC text, OTP/3DS controls, HTTP error bodies, API keys, cookies, PII,
+  and all unrelated three- or four-digit values remain visible. This is not a
+  general secret scanner and does not apply Luhn-wide masking.
 - The browser-use DOM format's `url` is the live page URL, path and query included. Its DOM
   attributes follow canonical browser-use's selection and ordering; see the
   pinned serializer contract in `browser-use-serializer-port.md`.
@@ -201,40 +195,27 @@ return what the page actually renders:
   read. Its restored selection, truncation metadata, storage behavior, and known
   limitations are owned by the [credential capture contract](operator-tool-surface.md#credential-capture-and-retrieval).
 
-**Standing directive restated (2026-09-07).** The read-path screening introduced
-in #678 and extended in #685 contradicted this directive and is removed:
-control labels, region context, semantic titles/headings and interleaved DOM text
-have no secret-shape redactor. There is no vendor-prefix table, entropy detector
-or screening hook. Payment fences and vault/credential-slot boundaries are
-untouched. The canonical DOM and fixture contracts are owned by
-[`browser-use-serializer-port.md`](browser-use-serializer-port.md).
+**Boundary and accepted limit.** The normal read API is the masked capture;
+raw `Runtime.evaluate` remains operator-internal and the live browser is not also
+exposed as an unfiltered debugger. The boundary is designed for ordinary forms
+and reachable hosted fields; provider-specific behavior is verified through
+field results and fresh observations. A hostile page can transform, split,
+encode, or draw a value (for example into canvas pixels) so it no longer matches
+the released value; this design does not claim adversarial information-flow
+containment. It deliberately adds no entropy detector, vendor-prefix table,
+broad Luhn scan, host allowlist, or second approval.
 
-**Why.** The seal and the extractor contradicted each other in production: on
-BrowserStack's settings page, with the Access Key revealed, `operate_screenshot`
-refused with `screenshot_unavailable_sealed_context` ("a real secret is present,
-you may not look") while `extract` on the same page at the same moment answered
-`candidate_count: 4, blocked_reason: "the secret is still masked/hidden — reveal
-it first"`. The operator was boxed out of a key the page was plainly displaying,
-which is the product's core purpose.
+**What stays separate.** The vault's write-only property, `use_credential`'s
+server-side injection, and the existing single human purchase approval remain.
+The output mask observes but never blocks or changes a browser action.
+`inject_card` does add a `data-ts-card-mask` provenance attribute to each field
+it writes; screenshot compositing itself does not clear, focus, or change a
+merchant field value.
 
-**What is NOT sealing and stays.** The vault's write-only property and
-`use_credential`'s server-side injection (that is storage, not reading); the
-payment approval flow, 3DS, and the human-approval step; the
-`data-ts-sealed-payment="1"` marker, which is card-fill machinery (cleanup,
-saved-card resolution, profile destruction) and no longer gates any read; and the
-two surfaces below, which are not the agent's view of the page.
-
-**Two surfaces are explicitly NOT covered by this section**, because they are not
-reads by the agent: the operator's structured stderr **audit trail**, and the
-recorded **action trace** a captured run publishes to the shared skill
-registry. Both keep their closed-vocabulary screen (`recordableTokenV2` in
-`compact-observation-v2.ts`) — one is a log, the other is cross-user
-institutional memory, and neither is the operator being refused a read.
-
-**Accepted exposure (recorded, not hand-waved).** Everything the page renders can
-reach the agent's context, including a card number the operator itself filled.
-The owner made this call explicitly and repeatedly, having been offered and twice
-declined a card-number carve-out.
+Structured audit records and captured action traces carry closed-vocabulary
+metadata rather than card values. Browser-originated logs, errors, and
+diagnostics pass through the same card-value mask before they leave the
+operator.
 
 ### 4.6 Superseded proposal: descriptive-ref join key
 
@@ -261,7 +242,7 @@ One handle names a skeleton row, addresses an `expand`/`read`, and labels a set-
 - Fill a 5+ field dynamic checkout (name/street/city/zip) in one observe + N acts without a re-observe-per-field, on a page that re-renders between acts.
 - Page-token churn (`?_r=` changing) does not invalidate refs on the same origin+path; a real path change does.
 - Set-of-marks screenshot labels every interactive element with its ref; a product grid is actionable from one image.
-- A rendered API key / recovery code / card value is VISIBLE in `read` and `screenshot`; no page or frame is ever sealed, and no capture is refused for its content.
+- A rendered API key / recovery code stays visible. A released card's PAN/CVV is replaced in DOM/network/error output and covered in screenshots; no page or frame is sealed, and an image is never returned by bypassing an active mask.
 - Recorded recipe replay still resolves its targets under descriptive refs.
 
 ## 8. Review outcomes (plan-eng-review, 2026-09-02)
@@ -365,45 +346,17 @@ The legacy non-compact interface retains its structural fingerprints.
 For physical continuity and guarded benign re-render adoption, see
 [§4.1](#41-opaque-durable-identity--descriptive-label-decided-option-a).
 
-### Phase 2 — redaction shipped, then removed entirely (2026-09-05)
+### Phase 2 — broad seals removed; released-card value mask added
 
-Phase 2 originally replaced `operate_screenshot`'s document-level refusal with
-node-level pixel redaction, and then narrowed that redaction to payment material
-only (#639, #645). Both are now gone: **the operator does not redact or refuse
-any read.**
+The earlier document-level screenshot refusal and broad observation screening
+were removed in 2026-09. Reads are direct and never refused. The current, much
+narrower exception is §4.5's session-persistent mask for the released complete
+PAN and CVV/CVC/CID. `CardValueOutputMask` applies to model-facing text and
+composites covers over injected value-bearing screenshot pixels without
+clearing or otherwise changing merchant controls.
 
-What was deleted:
-
-- `browser.ts`: `SCREENSHOT_REDACTION_SELECTORS` /
-  `SCREENSHOT_SECRET_FIELD_SELECTORS`, the capture-scoped node scan
-  (`collectOperatorScreenshotMask`), the `sharp` mask compositing
-  (`redactOperatorScreenshot`), the pre-capture verification
-  (`assertOperatorScreenshotFramesNoSealedValues`), the post-capture stability
-  re-check, the durable sealed-field identity machinery
-  (`sealedElementSemanticKeys` / `sealedDocumentIdentity` /
-  `operatorScreenshotIdentityKeys` and the `sealedIdentityKeys` /
-  `sealedOrdinal` / `sealed` element fields), and every
-  `screenshot_unavailable_sealed_context` throw. `captureOperatorScreenshot`
-  now takes only the frame options and returns raw JPEG bytes; `redactedCount`
-  is gone from its result and `redacted_count` from the tool payload.
-- `provision-session.ts`: the whole observation-masking layer —
-  `redactObservationText`, `redactPaymentObservationText`,
-  `redactLuhnPanSpans`, `redactExactDigitSequence`, `presentPaymentSafeString`,
-  `presentFieldValue`, `presentLabel`, `isSealedFieldValue`,
-  `observationSealedFieldKeys`, and `Session.sealedFieldKeys` itself.
-- `compact-observation-v2.ts`: the `carriesPaymentMaterial` and `knownSecrets`
-  screens in `safeDescriptionV2`, `safeHostnameV2`, and
-  `controlMatchesPrivateQueryV2`; the payload's `url` is the live URL rather
-  than a screened origin.
-- `provision-drive.ts`: `compactV2PublicValue` / `compactV2ThickResult` — the
-  compact-v2 tool-result seal that blanked `credentials`, URLs, verification
-  codes, and arbitrary strings to `<sealed>` — plus the `isMaskedDisplay`
-  refusal in the `into_slot` extract path.
-
-Credential-selection predicates in `credential-shape.ts` are governed by the
-[credential capture contract](operator-tool-surface.md#credential-capture-and-retrieval),
-not this inventory of removed observation seals.
-
-`recordableTokenV2` and its closed vocabulary remain, used solely by the stderr
-audit trail and the registry-bound action trace (§4.5) — neither is a read by
-the agent.
+Credential-selection predicates in `credential-shape.ts` remain governed by
+the [credential capture contract](operator-tool-surface.md#credential-capture-and-retrieval),
+not by this narrow card-value boundary. `recordableTokenV2` and its closed
+vocabulary remain for the stderr audit trail and registry-bound action trace;
+browser-originated text is masked before it reaches either output.

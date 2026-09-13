@@ -5,25 +5,24 @@
 //
 // Deliberately NOT a banned-word test. A word ban ("seal", "mask") would fail
 // on sentences that accurately describe behaviour that still exists — sealed
-// session slots, operate_pay's card handling — and the fix for a failing word
+// session slots and inject_card's narrow output mask — and the fix for a failing word
 // ban is to make the description less accurate, which is backwards.
 
 import { describe, expect, it } from "vitest";
 import {
   OPERATE_TOOLS,
   operateLoginTool,
-  operateTypeTool,
   provisionScreenshotTool,
   operateFillCredentialTool,
   provisionStartTool,
 } from "../provision-drive.js";
-import { operatePayTool } from "../operate-pay.js";
+import { injectCardTool } from "../inject-card.js";
 import { useCredentialTool } from "../use-credential.js";
 import { fetchCredentialTool } from "../fetch-credential.js";
 import { SERVER_INSTRUCTIONS } from "../../server.js";
 
 const STEERING_SURFACE = [...OPERATE_TOOLS, useCredentialTool, fetchCredentialTool];
-const PRESERVED_SURFACE = [operatePayTool];
+const PRESERVED_SURFACE = [injectCardTool];
 
 describe("agent-facing steering text", () => {
   for (const tool of [...STEERING_SURFACE, ...PRESERVED_SURFACE]) {
@@ -114,13 +113,13 @@ describe("still-true contracts survive the cleanup", () => {
     expect(description).toContain("operate_type with slot");
   });
 
-  it("operate_pay guidance survives in its own tool and in the operator surface", () => {
-    expect(operatePayTool.description).toContain("operate_pay");
-    // The money fence on `type` is a WRITE refusal that still exists; #663
-    // removed read seals, not this.
-    expect(operateTypeTool.description).toContain("card-number-shaped text is refused");
-    expect(operateTypeTool.description).toContain("operate_pay");
-    expect(provisionStartTool.description).toContain("operate_pay");
+  it("inject_card guidance is present in its tool and the operator surface", () => {
+    expect(injectCardTool.description).toContain("single human purchase approval");
+    expect(injectCardTool.description).toContain("fill only the supplied observation refs");
+    expect(injectCardTool.description).toContain("competing saved-card control");
+    expect(injectCardTool.description).toContain("immediately notify the cardholder");
+    expect(injectCardTool.jsonInputSchema.required).toContain("session_id");
+    expect(provisionStartTool.description).toContain("inject_card");
   });
 });
 
@@ -128,7 +127,6 @@ describe("descriptions do not promise guards that #663 removed", () => {
   // Each of these described a seal, redaction, or read refusal that no longer
   // exists. A description that promises one is a lie the model plans around.
   const DEAD_CLAIMS: Array<[string, RegExp]> = [
-    ["screenshot masking", /nothing is masked or redacted/i],
     ["screenshot refusal", /never refused because the page is showing/i],
     ["screened labels", /never screened for content/i],
     ["withheld verification code", /never emits the raw code/i],
@@ -165,7 +163,7 @@ describe("current observation protocol documentation", () => {
       "[ref,role,facts?]",
       'format:"compact"',
       'format:"full"',
-      "Nothing is redacted",
+      "prefixes of at least eight digits) and security code are masked",
     ]) {
       expect(description).toContain(token);
     }
@@ -189,7 +187,7 @@ describe("current observation protocol documentation", () => {
       "delta:true",
       'format:"compact"',
       'format:"full"',
-      "Nothing is redacted",
+      "prefixes of at least eight digits) and security code are masked",
     ]) {
       expect(description).toContain(token);
     }

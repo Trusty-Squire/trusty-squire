@@ -11,7 +11,6 @@ import {
   observe,
   observeQuery,
 } from "../provision-session.js";
-import { paymentSession } from "../session/lifecycle.js";
 import { operateClickTool } from "../../tools/provision-drive.js";
 import {
   operatorMutationDispatchPhase,
@@ -594,7 +593,7 @@ describe("native screenshot/click tool contract on an isolated session", () => {
     },
   );
 
-  it.each(["success", "uncertain", "payment"] as const)(
+  it.each(["success", "uncertain"] as const)(
     "handles a closed-shadow popup link with %s dispatch",
     async (mode) => {
       const f = await fixture();
@@ -609,14 +608,12 @@ describe("native screenshot/click tool contract on an isolated session", () => {
         serviceUrl: "http://parent.test/",
         observationFormat: "browser-use-dom",
       });
-      const session = paymentSession(started.session_id);
       try {
         await f.page.evaluate(() => {
           document.body.innerHTML = '<main>Original page</main><div id="popup-host"></div>';
           document.querySelector("#popup-host")!.attachShadow({ mode: "closed" }).innerHTML =
             '<a href="http://parent.test/destination" target="_blank" style="position:absolute;left:150px;top:220px;width:150px;height:60px;display:block">Open destination</a>';
         });
-        if (mode === "payment") session.paymentFieldSealActive = true;
         const shot = await captureScreenshot(started.session_id);
         const originalClick = f.page.mouse.click.bind(f.page.mouse);
         const mouse = vi.spyOn(f.page.mouse, "click").mockImplementation(async (x, y) => {
@@ -647,18 +644,11 @@ describe("native screenshot/click tool contract on an isolated session", () => {
           el.textContent = "Popup destination ready";
         });
         const after = await observe(started.session_id, "full");
-        if (mode === "payment") {
-          expect(f.controller.activePage()).toBe(f.page);
-          expect(after.url).toBe("http://parent.test/");
-          expect(after.dom).toContain("Original page");
-        } else {
-          expect(f.controller.activePage()).toBe(popup);
-          expect(after.url).toBe("http://parent.test/destination");
-          expect(after.dom).toContain("Popup destination ready");
-          if (mode === "success") expect(result).toMatchObject({ url: popup.url() });
-        }
+        expect(f.controller.activePage()).toBe(popup);
+        expect(after.url).toBe("http://parent.test/destination");
+        expect(after.dom).toContain("Popup destination ready");
+        if (mode === "success") expect(result).toMatchObject({ url: popup.url() });
       } finally {
-        session.paymentFieldSealActive = false;
         vi.restoreAllMocks();
         await finishProvisionSession(started.session_id);
         await f.close();
@@ -776,51 +766,6 @@ describe("native screenshot/click tool contract on an isolated session", () => {
       ).toMatchObject({ status: "stale_screenshot" });
       expect(mouse).toHaveBeenCalledOnce();
     } finally {
-      vi.restoreAllMocks();
-      await finishProvisionSession(started.session_id);
-      await f.close();
-    }
-  });
-
-  it("preserves the existing payment refusal for coordinate clicks", async () => {
-    const f = await fixture();
-    const started = await startHarnessProvisionSession({
-      browser: f.controller,
-      serviceUrl: "http://parent.test/",
-      observationFormat: "browser-use-dom",
-    });
-    const session = paymentSession(started.session_id);
-    try {
-      await f.page.evaluate(() => {
-        document.body.innerHTML =
-          '<button style="position:absolute;left:150px;top:220px;width:100px;height:60px">Place order</button>';
-        (window as unknown as { clicks: number }).clicks = 0;
-        document.querySelector("button")!.onclick = () => {
-          (window as unknown as { clicks: number }).clicks++;
-        };
-      });
-      session.placeOrderApproval = {
-        outcome: null,
-        approvalId: "synthetic",
-        merchant: "parent.test",
-        amountCents: 100,
-        currency: "USD",
-        cardRef: "synthetic",
-        last4: "1234",
-      };
-      session.placeOrderAttempted = true;
-      const shot = await captureScreenshot(started.session_id);
-      const mouse = vi.spyOn(f.page.mouse, "click");
-      const screenshot = { screenshot_id: shot.click_binding!.screenshot_id, x: 174, y: 244 };
-      await expect(
-        operateClickTool.handler({ session_id: started.session_id, screenshot }, null),
-      ).rejects.toThrow("action_failed");
-      expect(mouse).not.toHaveBeenCalled();
-      expect(
-        await operateClickTool.handler({ session_id: started.session_id, screenshot }, null),
-      ).toMatchObject({ status: "stale_screenshot" });
-    } finally {
-      session.placeOrderApproval = null;
       vi.restoreAllMocks();
       await finishProvisionSession(started.session_id);
       await f.close();
