@@ -22,6 +22,82 @@ async function authenticate(
 }
 
 describe("broker dispatch custody", () => {
+  it("recycles startup over an uncertain dispatchTracked entry superseded by its session's terminal receipt", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-journal-terminal-"));
+    const path = join(root, "dispatch.jsonl");
+    try {
+      const journal = new DispatchJournal(path);
+      // A stale-ref browsing click whose outcome was lost after dispatch.
+      await journal.record("session", "click", "dispatch_attempted", {
+        forwarderId: "lineage",
+        operation: "operate_click",
+        inputHash: "input",
+        dispatchTracked: true,
+      });
+      await journal.record("session", "click", "unknown", {
+        forwarderId: "lineage",
+        operation: "operate_click",
+        inputHash: "input",
+        dispatchTracked: true,
+        outcome: { status: "unknown", reason: "execution_error" },
+      });
+      await expect(new DispatchJournal(path).assertReconciled()).rejects.toThrow(
+        "lost mutation custody",
+      );
+
+      // The session then closed in an orderly terminal teardown.
+      await journal.recordTerminalReceipt("lineage", {
+        session_id: "session",
+        operation_id: "finish-op",
+        execution: "completed",
+        mutation: "not_dispatched",
+        cleanup: "closed",
+        closed: true,
+      });
+
+      const restarted = new DispatchJournal(path);
+      await expect(restarted.assertReconciled()).resolves.toBeUndefined();
+      expect(await restarted.hasOutstanding(undefined, "lineage")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("still refuses browser replacement for an uncertain payment outcome without a terminal receipt", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-journal-payment-"));
+    const path = join(root, "dispatch.jsonl");
+    try {
+      const journal = new DispatchJournal(path);
+      await journal.record("session", "card", "dispatch_attempted", {
+        forwarderId: "lineage",
+        operation: "inject_card",
+        inputHash: "card-input",
+        dispatchTracked: true,
+      });
+      await journal.record("session", "card", "unknown", {
+        forwarderId: "lineage",
+        operation: "inject_card",
+        inputHash: "card-input",
+        dispatchTracked: true,
+        outcome: { status: "unknown", reason: "execution_error" },
+      });
+      // A terminal receipt for a DIFFERENT session reconciles nothing here.
+      await journal.recordTerminalReceipt("lineage", {
+        session_id: "other-session",
+        operation_id: "finish-op",
+        execution: "completed",
+        mutation: "not_dispatched",
+        cleanup: "closed",
+        closed: true,
+      });
+      const restarted = new DispatchJournal(path);
+      await expect(restarted.assertReconciled()).rejects.toThrow("lost mutation custody");
+      expect(await restarted.hasOutstanding(undefined, "lineage")).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("refuses replacement after an uncertain dispatch and admits only a settled journal", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-journal-"));
     const path = join(root, "dispatch.jsonl");

@@ -66,6 +66,20 @@ export class IdentityRuntime<THandle extends IdentityRuntimeCloseable, TSettings
     return this.launchPromise !== null;
   }
 
+  // Live or in-flight launch settings, for callers deciding whether a request
+  // needs a clean in-band recycle (forgetAfterShutdown after proven closure)
+  // instead of a plain acquire. Null when nothing is live or launching.
+  liveSettings(): TSettings | null {
+    return this.settings ?? this.pendingSettings;
+  }
+
+  // True when a fresh acquire() with these settings would be refused because
+  // the live/in-flight identity differs.
+  requestsIncompatibleIdentity(settings: TSettings): boolean {
+    const live = this.settings ?? this.pendingSettings;
+    return live !== null && !this.settingsCompatible(live, settings);
+  }
+
   activeLeaseCount(): number {
     return this.leaseCount;
   }

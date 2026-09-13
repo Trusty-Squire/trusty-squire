@@ -45,6 +45,22 @@ const phaseHasDeliverableOutcome = (record: DispatchRecord): boolean =>
     record.phase,
   );
 
+// A terminal receipt (operate_finish, closed) for the same session proves the
+// session ended in an orderly terminal teardown AFTER the entry was written.
+// It supersedes a dispatchTracked entry's uncertain custody: a browsing action
+// already settled by its session's terminal close must not block browser
+// replacement or startup. Without such a receipt — e.g. a genuinely
+// unreconciled uncertain payment outcome — the no-replay fence holds.
+const terminallyReconciled = (record: DispatchRecord, records: DispatchRecord[]): boolean =>
+  record.dispatchTracked === true &&
+  records.some(
+    (receipt) =>
+      receipt.sessionId === record.sessionId &&
+      receipt.requestId === "terminal-receipt" &&
+      receipt.terminalReceipt?.closed === true &&
+      receipt.at >= record.at,
+  );
+
 export interface ReconciledDispatchOutcome {
   capture?: CaptureEvidence;
   status: "completed" | "done" | "unknown" | "not_dispatched";
@@ -183,6 +199,7 @@ export class DispatchJournal {
       records.some(
         (record) =>
           record.outcome?.status !== "not_dispatched" &&
+          !terminallyReconciled(record, records) &&
           (record.phase === "entered" ||
             record.phase === "dispatch_attempted" ||
             record.phase === "unknown" ||
@@ -241,11 +258,15 @@ export class DispatchJournal {
   }
 
   async hasOutstanding(sessionId?: string, forwarderId?: string): Promise<boolean> {
-    return [...(await this.states()).values()].some(
+    const records = [...(await this.states()).values()];
+    return records.some(
       (record) =>
         (sessionId === undefined || record.sessionId === sessionId) &&
         (forwarderId === undefined || record.forwarderId === forwarderId) &&
-        phaseHasOutstandingCustody(record),
+        phaseHasOutstandingCustody(record) &&
+        // A session's terminal receipt settles its own uncertain entries;
+        // without it the no-replay fence holds.
+        !terminallyReconciled(record, records),
     );
   }
 

@@ -114,6 +114,24 @@ describe("IdentityRuntime", () => {
     expect(acquired.handle.closed).toBe(false);
   });
 
+  it("reports live settings and incompatibility for recycle decisions", async () => {
+    const runtime = new IdentityRuntime<FakeChrome, FakeSettings>();
+    const launch = vi.fn(async () => new FakeChrome());
+    expect(runtime.liveSettings()).toBeNull();
+    expect(runtime.requestsIncompatibleIdentity({ profileDir: "/p" })).toBe(false);
+
+    await runtime.acquire({ profileDir: "/p", proxyUrl: "http://proxy-a" }, launch);
+    expect(runtime.liveSettings()).toEqual({ profileDir: "/p", proxyUrl: "http://proxy-a" });
+    expect(runtime.requestsIncompatibleIdentity({ profileDir: "/p" })).toBe(true);
+    expect(
+      runtime.requestsIncompatibleIdentity({ profileDir: "/p", proxyUrl: "http://proxy-a" }),
+    ).toBe(false);
+
+    runtime.forgetAfterShutdown();
+    expect(runtime.liveSettings()).toBeNull();
+    expect(runtime.requestsIncompatibleIdentity({ profileDir: "/p" })).toBe(false);
+  });
+
   it("rejects incompatible settings against a live runtime instead of mutating it", async () => {
     const runtime = new IdentityRuntime<FakeChrome, FakeSettings>();
     const launch = vi.fn(async () => new FakeChrome());
