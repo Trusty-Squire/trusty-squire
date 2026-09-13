@@ -262,7 +262,12 @@ export class StableObservationRefs {
       const name =
         el.compactNames?.accessibleName || el.ariaLabel || el.labelText || el.visibleText;
       if (!documentIdentity || !name || el.observationIntent === undefined) return;
-      return JSON.stringify([documentIdentity, el.observationIntent, name]);
+      return JSON.stringify([
+        documentIdentity,
+        elementFingerprints([el]).get(el),
+        el.observationIntent,
+        name,
+      ]);
     };
     const retiredSemantic = new Map<string, string | null>();
     const retired = new Map<string, string | null>();

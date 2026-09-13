@@ -70,9 +70,10 @@ fail-closed and mints a fresh ref:
 5. the combined match is unique among both retired anchors and live controls.
 
 **SPA layout replacement fallback.** If structural adoption has no match, a
-named control may adopt by exact material intent and exact accessible name (or
-its authored label/local text) within the same frame namespace and document
-loader. This fallback also requires exactly one retired and one live match;
+named control may adopt by the same inventory-independent durable fingerprint,
+exact material intent and exact accessible name (or its authored label/local text)
+within the same frame namespace and document loader. Only layout equality is
+relaxed; a changed authored DOM identity never inherits the retired ref. This fallback also requires exactly one retired and one live match;
 it never selects by ordinal or fuzzy label similarity. It covers hydration
 replacing a control's surrounding layout. Changed destinations, roles, names,
 form intent, or documents still refuse adoption. `operator-click-fallback.test.ts`

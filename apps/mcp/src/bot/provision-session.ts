@@ -4974,7 +4974,7 @@ export async function act(
       return oauthOnboardingRequiredObservation(session, error);
     }
     if (
-      ["oauth_login", "click", "type", "select"].includes(action.kind) &&
+      ["oauth_login", "click", "js_click", "type", "type_secret", "select"].includes(action.kind) &&
       operatorMutationDispatchPhase() !== "dispatch_attempted"
     ) {
       if (error instanceof ProvenPreDispatchMutationError) throw error;
