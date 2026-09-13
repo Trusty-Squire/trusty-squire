@@ -743,55 +743,84 @@ describe("native screenshot/click tool contract on an isolated session", () => {
     },
   );
 
-  it.each(["scope", "payment"] as const)(
-    "preserves the existing %s refusal for coordinate clicks",
-    async (guard) => {
-      const f = await fixture();
-      const started = await startHarnessProvisionSession({
-        browser: f.controller,
-        serviceUrl: "http://parent.test/",
-        observationFormat: "browser-use-dom",
+  it("navigates to an undeclared host through a screenshot-bound coordinate click", async () => {
+    const f = await fixture();
+    const started = await startHarnessProvisionSession({
+      browser: f.controller,
+      serviceUrl: "http://parent.test/",
+      observationFormat: "browser-use-dom",
+    });
+    try {
+      await f.page.evaluate(() => {
+        document.body.innerHTML =
+          '<a href="http://undeclared.test/destination" style="position:absolute;left:150px;top:220px;width:160px;height:60px">Continue</a>';
       });
-      const session = paymentSession(started.session_id);
-      try {
-        if (guard === "payment") {
-          await f.page.evaluate(() => {
-            document.body.innerHTML =
-              '<button style="position:absolute;left:150px;top:220px;width:100px;height:60px">Place order</button>';
-            (window as unknown as { clicks: number }).clicks = 0;
-            document.querySelector("button")!.onclick = () => {
-              (window as unknown as { clicks: number }).clicks++;
-            };
-          });
-          session.placeOrderApproval = {
-            outcome: null,
-            approvalId: "synthetic",
-            merchant: "parent.test",
-            amountCents: 100,
-            currency: "USD",
-            cardRef: "synthetic",
-            last4: "1234",
-          };
-          session.placeOrderAttempted = true;
-        }
-        const shot = await captureScreenshot(started.session_id);
-        const mouse = vi.spyOn(f.page.mouse, "click");
-        const screenshot = { screenshot_id: shot.click_binding!.screenshot_id, x: 174, y: 244 };
-        await expect(
-          operateClickTool.handler({ session_id: started.session_id, screenshot }, null),
-        ).rejects.toThrow(guard === "scope" ? "target_not_allowed" : "action_failed");
-        expect(mouse).not.toHaveBeenCalled();
-        expect(
-          await operateClickTool.handler({ session_id: started.session_id, screenshot }, null),
-        ).toMatchObject({ status: "stale_screenshot" });
-      } finally {
-        session.placeOrderApproval = null;
-        vi.restoreAllMocks();
-        await finishProvisionSession(started.session_id);
-        await f.close();
-      }
-    },
-  );
+      const shot = await captureScreenshot(started.session_id);
+      const mouse = vi.spyOn(f.page.mouse, "click");
+      const screenshot = { screenshot_id: shot.click_binding!.screenshot_id, x: 174, y: 244 };
+      const result = await operateClickTool.handler(
+        { session_id: started.session_id, screenshot },
+        null,
+      );
+      expect(result).toMatchObject({ screenshot_click: { dispatch: "dispatched" } });
+      expect(mouse).toHaveBeenCalledOnce();
+      await f.page.waitForURL("http://undeclared.test/destination");
+      expect(f.page.url()).toBe("http://undeclared.test/destination");
+      expect(
+        await operateClickTool.handler({ session_id: started.session_id, screenshot }, null),
+      ).toMatchObject({ status: "stale_screenshot" });
+      expect(mouse).toHaveBeenCalledOnce();
+    } finally {
+      vi.restoreAllMocks();
+      await finishProvisionSession(started.session_id);
+      await f.close();
+    }
+  });
+
+  it("preserves the existing payment refusal for coordinate clicks", async () => {
+    const f = await fixture();
+    const started = await startHarnessProvisionSession({
+      browser: f.controller,
+      serviceUrl: "http://parent.test/",
+      observationFormat: "browser-use-dom",
+    });
+    const session = paymentSession(started.session_id);
+    try {
+      await f.page.evaluate(() => {
+        document.body.innerHTML =
+          '<button style="position:absolute;left:150px;top:220px;width:100px;height:60px">Place order</button>';
+        (window as unknown as { clicks: number }).clicks = 0;
+        document.querySelector("button")!.onclick = () => {
+          (window as unknown as { clicks: number }).clicks++;
+        };
+      });
+      session.placeOrderApproval = {
+        outcome: null,
+        approvalId: "synthetic",
+        merchant: "parent.test",
+        amountCents: 100,
+        currency: "USD",
+        cardRef: "synthetic",
+        last4: "1234",
+      };
+      session.placeOrderAttempted = true;
+      const shot = await captureScreenshot(started.session_id);
+      const mouse = vi.spyOn(f.page.mouse, "click");
+      const screenshot = { screenshot_id: shot.click_binding!.screenshot_id, x: 174, y: 244 };
+      await expect(
+        operateClickTool.handler({ session_id: started.session_id, screenshot }, null),
+      ).rejects.toThrow("action_failed");
+      expect(mouse).not.toHaveBeenCalled();
+      expect(
+        await operateClickTool.handler({ session_id: started.session_id, screenshot }, null),
+      ).toMatchObject({ status: "stale_screenshot" });
+    } finally {
+      session.placeOrderApproval = null;
+      vi.restoreAllMocks();
+      await finishProvisionSession(started.session_id);
+      await f.close();
+    }
+  });
 
   it("distinguishes an unresolved screenshot-derived label from an expired physical ref", async () => {
     const f = await fixture();
