@@ -14,6 +14,12 @@ export interface CardMaskRegistration {
   cvv: string;
 }
 
+export interface CardMaskTarget {
+  kind: CardMaskKind;
+  selector: string;
+  framePath: string | null;
+}
+
 export interface PixelMaskRect {
   x: number;
   y: number;
@@ -66,11 +72,12 @@ function maskStringForKey(
 function maskNode(
   node: BrowserUseNode,
   records: readonly RegisteredCardMask[],
+  targetKinds: ReadonlyMap<string, CardMaskKind>,
   inheritedKind?: CardMaskKind,
 ): void {
   const ownKind = node.attributes[CARD_MASK_ATTRIBUTE];
   const kind: CardMaskKind | undefined =
-    ownKind === "pan" || ownKind === "cvv" ? ownKind : inheritedKind;
+    ownKind === "pan" || ownKind === "cvv" ? ownKind : (targetKinds.get(node.id) ?? inheritedKind);
   node.value =
     kind === "pan"
       ? CARD_NUMBER_MASK
@@ -96,8 +103,8 @@ function maskNode(
             ? SECURITY_CODE_MASK
             : maskStringForKey(property.value, property.name, records),
   }));
-  node.children.forEach((child) => maskNode(child, records, kind));
-  if (node.contentDocument !== null) maskNode(node.contentDocument, records);
+  node.children.forEach((child) => maskNode(child, records, targetKinds, kind));
+  if (node.contentDocument !== null) maskNode(node.contentDocument, records, targetKinds);
 }
 
 /**
@@ -107,6 +114,7 @@ function maskNode(
  */
 export class CardValueOutputMask {
   private readonly records: RegisteredCardMask[] = [];
+  private readonly targets: CardMaskTarget[] = [];
 
   get active(): boolean {
     return this.records.length > 0;
@@ -122,6 +130,28 @@ export class CardValueOutputMask {
       return;
     }
     this.records.push({ panDigits, panPattern: panPattern(panDigits), cvv: card.cvv });
+  }
+
+  registerTarget(target: CardMaskTarget): void {
+    if (
+      this.targets.some(
+        (known) =>
+          known.kind === target.kind &&
+          known.selector === target.selector &&
+          known.framePath === target.framePath,
+      )
+    ) {
+      return;
+    }
+    this.targets.push({ ...target });
+  }
+
+  screenshotTargets(framePath: string | null): CardMaskTarget[] {
+    return this.targets
+      .filter((target) => target.framePath === framePath)
+      .map((target) => ({
+        ...target,
+      }));
   }
 
   maskText(value: string, key?: string): string {
@@ -149,7 +179,13 @@ export class CardValueOutputMask {
 
   maskInteractiveElements(elements: readonly InteractiveElement[]): InteractiveElement[] {
     return elements.map((element) => {
-      const kind = element.cardMaskKind;
+      const kind =
+        element.cardMaskKind ??
+        this.targets.find(
+          (target) =>
+            target.selector === element.selector &&
+            target.framePath === (element.framePath ?? null),
+        )?.kind;
       const masked = this.maskValue(element);
       if (kind === "pan") masked.value = CARD_NUMBER_MASK;
       if (kind === "cvv") masked.value = SECURITY_CODE_MASK;
@@ -163,7 +199,18 @@ export class CardValueOutputMask {
 
   maskCapture(capture: BrowserUseCapture): BrowserUseCapture {
     if (!this.active) return capture;
-    maskNode(capture.root, this.records);
+    const targetKinds = new Map<string, CardMaskKind>();
+    for (const [id, element] of capture.nodeElements) {
+      const kind =
+        element.cardMaskKind ??
+        this.targets.find(
+          (target) =>
+            target.selector === element.selector &&
+            target.framePath === (element.framePath ?? null),
+        )?.kind;
+      if (kind === "pan" || kind === "cvv") targetKinds.set(id, kind);
+    }
+    maskNode(capture.root, this.records, targetKinds);
     return {
       ...capture,
       elements: this.maskInteractiveElements(capture.elements),

@@ -47,7 +47,7 @@ export async function withBrokerMaintenance<T>(operation: () => Promise<T>): Pro
     if (!ready)
       throw new BrokerRefusal(
         "maintenance",
-        "Active workflows or payment outcomes still own the browser; finish them before reconnecting",
+        "Active workflows still own the browser; finish them before reconnecting",
       );
     return await operation();
   } finally {

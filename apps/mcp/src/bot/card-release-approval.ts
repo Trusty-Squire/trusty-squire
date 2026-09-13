@@ -13,10 +13,7 @@ import {
   type ApiClient,
   type PaymentApproval,
 } from "../api-client.js";
-import type {
-  CheckoutCard,
-  CheckoutSummary,
-} from "./browser.js";
+import type { CheckoutCard, CheckoutSummary } from "./browser.js";
 import { generateOperatorKeypair, openSealed, type OperatorKeypair } from "./payment-hpke.js";
 
 export interface InjectCardApprovalArgs {
@@ -31,7 +28,7 @@ export interface InjectCardApprovalArgs {
 export type TerminalPaymentApprovalStatus = "denied" | "expired" | "payment_confirmation_failed";
 
 export interface CardReleaseBrowser {
-  fillCheckoutCardFields(card: CheckoutCard, options?: { deadline?: number }): Promise<void>;
+  injectCardFields(card: CheckoutCard, options?: { deadline?: number }): Promise<void>;
   currentUrl(): string;
 }
 
@@ -1114,7 +1111,7 @@ export async function executeCardReleaseApproval(
     if (approvalExpired()) return expiredApprovalResult();
     deps.onCardResolved(cardRef);
     try {
-      await browser.fillCheckoutCardFields(card, { deadline });
+      await browser.injectCardFields(card, { deadline });
     } finally {
       cardBytes?.fill(0);
       cardBytes = undefined;

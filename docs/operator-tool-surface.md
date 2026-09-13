@@ -4,17 +4,17 @@ Trusty Squire’s operator surface is a set of flat, single-purpose MCP tools.
 Discover the installed server’s exact input and output schemas with `tools/list`;
 that registered schema is authoritative for a particular server version.
 
-The named operator surface contains 18 tools: the 14 driving verbs in
+The named operator surface contains 18 tools: the 15 driving verbs in
 `OPERATE_TOOLS`, excluding the separately exposed recipe tools, plus
-`operate_pay`, `operate_payment_status`, `list_credentials`, and
-`list_payment_cards`. Recipe tools and vault/account tools are separate surfaces.
+`inject_card`, `list_credentials`, and `list_payment_cards`. Recipe tools and
+vault/account tools are separate surfaces.
 
 | Purpose | Tool |
 | --- | --- |
 | Start and finish | `operate_start`, `operate_finish` |
-| Read the page | `operate_observe`, `operate_screenshot` |
-| Drive ordinary UI | `operate_navigate`, `operate_click`, `operate_type`, `operate_select`, `operate_press`, `operate_scroll` |
-| Compatibility and login | `operate_allow_host`, `operate_login` |
+| Read the page | `operate_observe`, `operate_screenshot`, `operate_network` |
+| Drive ordinary UI | `operate_navigate`, `operate_click`, `operate_type`, `operate_select`, `operate_press`, `operate_scroll`, `operate_wait` |
+| Login | `operate_login` |
 | Vault-aware browser work | `operate_fill_credential`, `operate_extract` |
 | Payments and vault lists | `inject_card`, `list_credentials`, `list_payment_cards` |
 
@@ -41,9 +41,8 @@ page. Re-observe before using refs from the restored form and check the selected
 value. The dispatched click and field verification remain bound to the original
 picker document; returning does not dispatch another action on the form.
 
-This ordinary-popup return excludes tracked OAuth provider/product pages and
-is disabled while payment fields are sealed, a place-order approval exists,
-or a 3-D Secure outcome wait is active. Those flows retain their own lifecycle.
+This ordinary-popup return excludes tracked OAuth provider/product pages. Card
+release and later checkout actions use the same generic page lifecycle.
 The local regression fixture is
 [`picker-window.test.ts`](../apps/mcp/src/bot/__tests__/picker-window.test.ts).
 
@@ -124,7 +123,7 @@ third-party resources need no host declaration. This holds before, during, and
 after payment; there is no payment-network window or scope-denial reporting.
 
 `operate_start` accepts `allowed_hosts` and `extra_allowed_hosts` for backward
-compatibility and ignores them. `operate_allow_host` is a compatibility no-op.
+compatibility and ignores them. There is no host-widening tool.
 Existing control-plane action restrictions, credential vault egress, card-fill
 recognition and sealing, and the purchase's single human approval are unchanged.
 
@@ -349,9 +348,10 @@ job without exposing plaintext to the agent.
 - `operate_extract`, `use_credential`, and `grant_app_access` preserve the
   write-only vault boundary. `fetch_credential` has the separate passkey gate
   above.
-- `operate_pay` and `operate_payment_status` retain their independent approval,
-  card-selection, and 3-D Secure rules. Never infer a charge from form
-  validation, repeat an uncertain submit, or use page reads as approval.
+- `inject_card` retains the existing single purchase approval and fills only
+  caller-named refs. It does not submit or interpret the checkout. Use
+  `operate_observe`, `operate_network`, and masked screenshots as evidence, then
+  drive the page with ordinary actions.
 
 Legacy union verbs and aliases are not part of this contract. Use the flat names
 shown above, and use the installed server’s `tools/list` schema for optional

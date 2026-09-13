@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { z, type Tool } from "../../tools/index.js";
 import { installBrokerBrowserCustody } from "../broker/custody.js";
 import { DispatchJournal } from "../broker/dispatch-journal.js";
-import { OperatorBroker, brokerCommandMutates, reconciliationOutcome } from "../broker/operator.js";
+import { OperatorBroker, brokerCommandMutates } from "../broker/operator.js";
 
 const credential = (character: string) => character.repeat(43);
 
@@ -366,7 +366,6 @@ describe("broker dispatch custody", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
-
 });
 
 it("retains lineage-bound closure proof across acknowledgement and journal restart", async () => {

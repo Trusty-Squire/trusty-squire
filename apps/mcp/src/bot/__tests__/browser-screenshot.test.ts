@@ -7,7 +7,21 @@
 import { existsSync } from "node:fs";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { BrowserController } from "../browser.js";
+import { BrowserController, type CheckoutCard } from "../browser.js";
+
+const SYNTHETIC_CARD: CheckoutCard = {
+  pan: "4111111111111111",
+  cvv: "123",
+  exp_month: "12",
+  exp_year: "2030",
+  name: "Synthetic Buyer",
+  billing: {
+    line1: "1 Test Street",
+    city: "Testville",
+    postal_code: "10000",
+    country: "US",
+  },
+};
 
 // Credential-shaped test fixtures are assembled at runtime from harmless
 // fragments so no complete vendor-prefixed token literal appears in this
@@ -118,7 +132,7 @@ async function centerOf(page: Page, selector: string): Promise<readonly [number,
   return [box.x + box.width / 2, box.y + box.height / 2] as const;
 }
 
-describe("operate_screenshot returns unmasked pixels (real browser)", () => {
+describe("operate_screenshot before card release (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "captures a filled card PAN/expiry/CVV/name without masking, and without mutating the DOM",
     async () => {
@@ -332,7 +346,17 @@ describe("operate_screenshot card-value output mask (real browser)", () => {
           <div id="mirror" style="display:inline-block">4111-1111-1111-1111</div>
           <div id="total" style="display:inline-block">Total: 123 JPY</div>
           <div id="three-ds" style="display:inline-block">Enter your bank OTP</div>
+          <div id="split" style="display:block;background:rgb(0,204,0)">4111|1111|1111|1111 / 1 2 3</div>
+          <div id="encoded" style="display:block;background:rgb(0,204,0)">NDExMTExMTExMTExMTExMQ==</div>
+          <canvas id="canvas" width="420" height="44" style="display:block;background:rgb(204,0,0)"></canvas>
         `);
+        await page.locator("#canvas").evaluate((node) => {
+          const canvas = node as HTMLCanvasElement;
+          const context = canvas.getContext("2d")!;
+          context.fillStyle = "white";
+          context.font = "24px sans-serif";
+          context.fillText("4111 1111 1111 1111", 8, 30);
+        });
         const controller = BrowserController.fromHarnessPage(page);
         controller.registerCardValueOutputMask({ pan: "4111111111111111", cvv: "123" });
         const before = await page.content();
@@ -344,11 +368,11 @@ describe("operate_screenshot card-value output mask (real browser)", () => {
         expect(isValidPngBase64(viewport.base64)).toBe(true);
         expect(isValidPngBase64(full.base64)).toBe(true);
         const points = await Promise.all(
-          ["#pan", "#cvv", "#mirror", "#total", "#three-ds"].map(
+          ["#pan", "#cvv", "#mirror", "#total", "#three-ds", "#split", "#encoded", "#canvas"].map(
             async (selector) => await centerOf(page, selector),
           ),
         );
-        const [pan, cvv, mirror, total, threeDs] = await samplePixels(
+        const [pan, cvv, mirror, total, threeDs, split, encoded, canvas] = await samplePixels(
           page,
           viewport.base64,
           points,
@@ -358,12 +382,56 @@ describe("operate_screenshot card-value output mask (real browser)", () => {
         expect(isCompositeGray(mirror ?? [])).toBe(true);
         expect(isCompositeGray(total ?? [])).toBe(false);
         expect(isCompositeGray(threeDs ?? [])).toBe(false);
+        // Accepted hostile-page limit: transformed/split/canvas copies are not
+        // ordinary complete-value copies and are intentionally not chased by
+        // an information-flow scanner.
+        expect(isCompositeGray(split ?? [])).toBe(false);
+        expect(isCompositeGray(encoded ?? [])).toBe(false);
+        expect(isCompositeGray(canvas ?? [])).toBe(false);
         expect(await page.content()).toBe(before);
       } finally {
         await browser.close();
       }
     },
   );
+
+  it.skipIf(!chromiumAvailable)("documents the known screenshot layout-race limit", async () => {
+    const browser = await launchIsolatedTestBrowser();
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`
+          <style>body{margin:0}</style>
+          <input id="pan" data-ts-card-mask="pan" value="4111 1111 1111 1111"
+            style="position:absolute;left:300px;top:20px;width:300px;height:44px;background:rgb(204,0,0)">
+        `);
+      await page.locator("#pan").evaluate((node) => {
+        const element = node as HTMLInputElement & {
+          getBoundingClientRect: () => DOMRect;
+        };
+        const actual = element.getBoundingClientRect.bind(element);
+        let first = true;
+        element.getBoundingClientRect = () => {
+          const rect = actual();
+          if (!first) return rect;
+          first = false;
+          return DOMRect.fromRect({ x: 0, y: rect.y, width: rect.width, height: rect.height });
+        };
+      });
+      const controller = BrowserController.fromHarnessPage(page);
+      controller.registerCardValueOutputMask(SYNTHETIC_CARD);
+
+      const result = await controller.screenshotForOperator();
+
+      const [staleMask, liveControl] = await samplePixels(page, result.base64, [
+        [150, 42],
+        [450, 42],
+      ]);
+      expect(isCompositeGray(staleMask ?? [])).toBe(true);
+      expect(isCompositeGray(liveControl ?? [])).toBe(false);
+    } finally {
+      await browser.close();
+    }
+  });
 });
 
 describe("operate_screenshot frame targeting (real browser)", () => {
@@ -403,6 +471,44 @@ describe("operate_screenshot frame targeting (real browser)", () => {
       await browser.close();
     }
   });
+
+  it.skipIf(!chromiumAvailable)(
+    "masks a targeted cross-origin frame after its injected CVV control rerenders",
+    async () => {
+      const browser = await launchIsolatedTestBrowser();
+      try {
+        const pageUrl = "https://shop.example.test/checkout";
+        const frameUrl = "https://assets.braintreegateway.test/hosted";
+        const page = await servePages(browser, {
+          [pageUrl]: `<iframe style="width:400px;height:120px;border:0" src="${frameUrl}"></iframe>`,
+          [frameUrl]: `<style>body{margin:0}</style><input id="security" name="cvv" style="display:block;width:300px;height:60px">`,
+        });
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = BrowserController.fromHarnessPage(page);
+        const cvv = (await controller.extractInteractiveElements()).find(
+          (element) => element.name === "cvv",
+        );
+        if (cvv === undefined) throw new Error("missing synthetic CVV field");
+        await controller.injectCardIntoTargets(SYNTHETIC_CARD, { cvv: { element: cvv } });
+        const frame = page.frames().find((candidate) => candidate.url() === frameUrl)!;
+        await frame.evaluate((value) => {
+          document.body.innerHTML = `<input id="security" name="cvv" value="${value}" style="display:block;width:300px;height:60px">`;
+        }, SYNTHETIC_CARD.cvv);
+        expect(await frame.locator("#security").getAttribute("data-ts-card-mask")).toBeNull();
+
+        const result = await controller.screenshotForOperator({ frameIndex: 1 });
+
+        expect(result.mimeType).toBe("image/png");
+        expect(result.frameUrl).toBe(frameUrl);
+        const [pixel] = await samplePixels(page, result.base64, [[150, 30]]);
+        expect(isCompositeGray(pixel ?? [])).toBe(true);
+        expect(await frame.locator("#security").inputValue()).toBe(SYNTHETIC_CARD.cvv);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
 
   it.skipIf(!chromiumAvailable)(
     "captures an isolated ACS frame while the parent checkout holds a filled card field",

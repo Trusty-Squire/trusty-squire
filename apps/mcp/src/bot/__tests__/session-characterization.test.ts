@@ -166,8 +166,6 @@ import {
 } from "../provision-session.js";
 import * as provisionSession from "../provision-session.js";
 import * as sessionLifecycle from "../session/lifecycle.js";
-import type { ApiClient } from "../../api-client.js";
-
 // A Session snapshot reduced to comparable primitives. Collections render as
 // kind + size so "empty Map" is asserted as exactly that, rather than as an
 // opaque object a loose deep-equal would wave through.
@@ -215,19 +213,18 @@ afterEach(async () => {
 describe("characterization: registered operator tool surface", () => {
   it("registers exactly these operate_* tools, in this order", () => {
     expect(TOOLS.map((tool) => tool.name).filter((name) => name.startsWith("operate_"))).toEqual([
-      "operate_pay",
-      "operate_payment_status",
       "operate_start",
       "operate_finish",
       "operate_observe",
       "operate_screenshot",
+      "operate_network",
       "operate_navigate",
       "operate_click",
       "operate_type",
       "operate_select",
       "operate_press",
       "operate_scroll",
-      "operate_allow_host",
+      "operate_wait",
       "operate_login",
       "operate_fill_credential",
       "operate_extract",
@@ -251,6 +248,8 @@ describe("characterization: registered operator tool surface", () => {
           maxLength: 64,
           pattern: "^[a-z][a-z0-9-]*$",
         },
+        subtree_ref: { type: "string" },
+        raw_attributes: { type: "boolean" },
       },
     });
     expect(provisionStartTool.name).toBe("operate_start");
@@ -289,6 +288,7 @@ describe("characterization: Session construction", () => {
 
     expect(constructed).toEqual({
       activePayment: null,
+      releasedPaymentCard: null,
       actionTrace: { kind: "Array", length: 0 },
       allowedHosts: { kind: "Array", length: 1 },
       browser: { kind: "object", ctor: "BrowserController" },
@@ -369,6 +369,7 @@ describe("characterization: Session construction", () => {
 
     expect(constructed).toEqual({
       activePayment: null,
+      releasedPaymentCard: null,
       actionTrace: { kind: "Array", length: 0 },
       allowedHosts: { kind: "Array", length: 1 },
       browser: { kind: "object", ctor: "BrowserController" },
@@ -581,7 +582,6 @@ describe("characterization: session lifecycle facade", () => {
       expect(facade).toBe(owner);
     }
   });
-
 });
 
 describe("characterization: agent-facing observation payload shapes", () => {

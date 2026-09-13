@@ -49,7 +49,6 @@ import {
   checkoutShapeSignatureForSession,
   type ProvisionAction,
   type ExtractResult,
-  manualCardEntryBlockReason,
 } from "../bot/provision-session.js";
 import { signSkillForPublish } from "../skill-cli/signing.js";
 import {
@@ -1211,8 +1210,8 @@ export const operateRecipeRunTool: Tool<z.infer<typeof useSchema>> = {
     "resume_from=next_index. A recipe whose entry or declared hosts would leave its own " +
     "site (a tampered or malicious shared recipe) is refused outright: " +
     "replay.status='domain_lock_violation', and driving continues cold. " +
-    "A recorded operate_pay step is never replayed and instead returns fallback_required so " +
-    "the charge runs through a fresh, human-approved operate_pay. " +
+    "A historical recorded payment step is never replayed and instead returns fallback_required so " +
+    "card release runs through a fresh, human-approved inject_card call. " +
     "Pass verb + session_id + leg:'checkout' (no service_url) to resolve+replay just the " +
     "CHECKOUT leg against an already-open session's current page — keyed by the checkout page's " +
     "own field-name-set signature, so a checkout plan recorded on one store can replay on a " +
@@ -1221,7 +1220,7 @@ export const operateRecipeRunTool: Tool<z.infer<typeof useSchema>> = {
     "leg cold. A replay field failure on a recipe with a real catalog/storefront prefix " +
     "returns replay.status='leg_fallback_required' (not human_required): do not resume that " +
     "recipe; drive the checkout leg cold from from_step_index, and route any charge through " +
-    "a fresh, human-approved operate_pay on the live session.",
+    "a fresh, human-approved inject_card call on the live session.",
   inputSchema: useSchema,
   jsonInputSchema: {
     type: "object",
@@ -1650,15 +1649,6 @@ async function runAction(
   outputFormat: "compact" | "full" = "full",
   compactMapEmitted = true,
 ) {
-  if (action.kind === "type") {
-    const reason = manualCardEntryBlockReason(action.text);
-    if (reason !== null)
-      return {
-        status: "manual_card_entry_refused",
-        reason,
-        safe_alternative: "inject_card",
-      };
-  }
   try {
     return await act(sessionId, action, "compact", undefined, outputFormat, compactMapEmitted);
   } catch (error) {
@@ -1802,7 +1792,7 @@ export const operateTypeTool: Tool<z.infer<typeof typeSchema>> = {
   name: "operate_type",
   description:
     ACTION_FORMAT_NOTE +
-    "Fill a control with text, or a session slot returned by operate_login, operate_fill_credential, or operate_extract. Provide exactly one of text or slot. submit presses Enter after a successful fill. Model-supplied card-number-shaped text is refused; use inject_card.",
+    "Fill a control with text, or a session slot returned by operate_login, operate_fill_credential, or operate_extract. Provide exactly one of text or slot. submit presses Enter after a successful fill.",
   inputSchema: typeSchema,
   jsonInputSchema: {
     type: "object",
@@ -1980,21 +1970,43 @@ export const operateScrollTool: Tool<z.infer<typeof scrollSchema>> = {
     ),
 };
 
-const allowHostSchema = z.object({ ...sessionShape, host: z.string().min(1).max(253) });
-export const operateAllowHostTool: Tool<z.infer<typeof allowHostSchema>> = {
-  name: "operate_allow_host",
+const waitSchema = z.object({
+  ...sessionShape,
+  milliseconds: z.number().int().min(0).max(30_000).default(1_000),
+  format: actionFormatSchema.optional(),
+});
+export const operateWaitTool: Tool<z.infer<typeof waitSchema>> = {
+  name: "operate_wait",
   description:
-    "Compatibility no-op. Browser egress is unrestricted; no host declaration is needed.",
-  inputSchema: allowHostSchema,
+    ACTION_FORMAT_NOTE +
+    "Wait briefly for the live page to change, then return a fresh observation. Use this for spinners, late-mounted fields, and pending requests without assigning them a payment stage.",
+  inputSchema: waitSchema,
   jsonInputSchema: {
     type: "object",
-    required: ["session_id", "host"],
-    properties: { ...sessionJson, host: { type: "string" } },
+    required: ["session_id"],
+    properties: {
+      ...sessionJson,
+      milliseconds: { type: "integer", minimum: 0, maximum: 30_000, default: 1_000 },
+      format: actionFormatJson,
+    },
   },
-  async handler(args) {
-    const session = sessionForCall(args.session_id);
-    if (session === undefined) throw new Error(`unknown provision session ${args.session_id}`);
-    return await runAction(args.session_id, { kind: "allow_host", host: args.host });
+  async handler(args, _api, context) {
+    await new Promise<void>((resolve, reject) => {
+      if (context?.signal?.aborted === true) {
+        reject(new Error("operation_cancelled"));
+        return;
+      }
+      const timer = setTimeout(resolve, args.milliseconds);
+      context?.signal?.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          reject(new Error("operation_cancelled"));
+        },
+        { once: true },
+      );
+    });
+    return await observe(args.session_id, args.format ?? "compact");
   },
 };
 
@@ -2067,9 +2079,8 @@ export const operateFinishTool: Tool<z.infer<typeof publicFinishSchema>> = {
   },
 };
 
-// The named target contains 18 tools including the two payment and two vault
-// tools registered in index.ts. Recipe tools and the rest of the vault surface
-// are unchanged and are outside that target set.
+// Recipe tools and the rest of the vault surface are unchanged and are outside
+// the direct observation/action target set.
 export const OPERATE_TOOLS: Tool[] = [
   provisionStartTool,
   operateFinishTool,
@@ -2082,7 +2093,7 @@ export const OPERATE_TOOLS: Tool[] = [
   operateSelectTool,
   operatePressTool,
   operateScrollTool,
-  operateAllowHostTool,
+  operateWaitTool,
   operateLoginTool,
   operateFillCredentialTool,
   provisionExtractTool,

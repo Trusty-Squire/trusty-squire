@@ -139,7 +139,7 @@ it("exposes recovery-only startup solely for the authorized retained Xata record
       forwarderId: "forwarder",
       operation: "inject_card",
       inputHash: "input",
-      outcome: { status: "unknown", reason: "execution_error" },
+      outcome: { status: "completed" },
     });
     expect(await unrelatedOutcome.retainedXataPreDispatchAuthorization()).toBeUndefined();
     await expect(unrelatedOutcome.assertReconciled()).resolves.toBeUndefined();
@@ -338,15 +338,20 @@ itWithChromium(
         throw new Error("real broker browser was not registered with its reaper");
       const mutationArgs = {
         session_id: sessionId,
+        merchant: "Fixture Merchant",
+        amount_cents: 1200,
+        currency: "USD",
         item: "fixture purchase",
         reason: "drain recovery",
+        card_ref: "card_fixture",
+        fields: {},
       };
       await journal.record(sessionId, "stuck-mutation", "outcome", {
         forwarderId: forwarderId(credential),
         operation: "inject_card",
         inputHash: createHmac("sha256", createHash("sha256").update(credential).digest())
           .update(
-            `{"args":{"item":"fixture purchase","reason":"drain recovery","session_id":"${sessionId}"},"name":"inject_card"}`,
+            `{"args":{"amount_cents":1200,"card_ref":"card_fixture","currency":"USD","fields":{},"item":"fixture purchase","merchant":"Fixture Merchant","reason":"drain recovery","session_id":"${sessionId}"},"name":"inject_card"}`,
           )
           .digest("hex"),
         outcome: { status: "unknown", reason: "execution_error" },
@@ -382,6 +387,7 @@ itWithChromium(
             request_id: "stuck-mutation",
             operation: "inject_card",
             status: "unknown",
+            reason: "execution_error",
           },
         },
       });

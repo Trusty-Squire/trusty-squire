@@ -25,7 +25,6 @@ import {
   operateRecipeSaveTool,
   operateFinishTool,
   provisionStartTool,
-  operateTypeTool,
 } from "../tools/provision-drive.js";
 
 function makeMockApi(overrides: Partial<ApiClient> = {}): ApiClient {
@@ -157,25 +156,8 @@ describe("list_payment_cards", () => {
   });
 });
 
-describe("operate_act manual card refusal", () => {
-  it("returns the vaulted-card alternative and its verified-total prerequisite", async () => {
-    const args = operateTypeTool.inputSchema.parse({
-      session_id: "session_1",
-      text: "5555 5555 5555 4444",
-      ref: "Card number",
-    });
-    await expect(
-      operateTypeTool.handler(operateTypeTool.inputSchema.parse(args), null),
-    ).resolves.toMatchObject({
-      status: "manual_card_entry_refused",
-      safe_alternative: "inject_card",
-    });
-  });
-});
-
-// Approval detection is system-owned: when progress notifications can surface
-// the link while the RPC remains open, operate_pay waits for the human itself.
-// A bounded wait still persists an idempotent same-approval continuation.
+// Approval detection is system-owned: progress notifications surface the link
+// while inject_card waits, and a bounded wait preserves the same approval.
 describe("revoke_app_access", () => {
   it("revokes a grant by id via the egress DELETE route", async () => {
     const revokeEgressGrant = vi.fn().mockResolvedValue({ revoked: true, grant_id: "g_abc" });
@@ -341,7 +323,7 @@ describe("TOOLS registry", () => {
       "operate_select",
       "operate_press",
       "operate_scroll",
-      "operate_allow_host",
+      "operate_wait",
       "operate_login",
       "operate_fill_credential",
       "operate_extract",
@@ -456,7 +438,7 @@ describe("TOOLS registry", () => {
         "operate_select",
         "operate_press",
         "operate_scroll",
-        "operate_allow_host",
+        "operate_wait",
         "operate_login",
         "operate_fill_credential",
         "operate_extract",

@@ -5,6 +5,7 @@ import {
   SECURITY_CODE_MASK,
 } from "../card-value-output-mask.js";
 import type { BrowserUseNode } from "../browser-use-serializer.js";
+import type { InteractiveElement } from "../browser.js";
 
 const SYNTHETIC_CARD = {
   pan: "4111111111111111",
@@ -142,6 +143,49 @@ describe("released card value output mask", () => {
     expect(evidence.console).toContain(SECURITY_CODE_MASK);
     expect(evidence.request_headers["x-api-key"]).toBe("api-visible");
     expect(evidence.response_body).toContain("401");
+  });
+
+  it("retains injected node provenance when a rerender drops the marker", () => {
+    const mask = new CardValueOutputMask();
+    mask.register(SYNTHETIC_CARD);
+    mask.registerTarget({ kind: "cvv", selector: "#security", framePath: "0" });
+    const rerendered = node({
+      id: "rerendered-cvv",
+      nodeName: "INPUT",
+      value: SYNTHETIC_CARD.cvv,
+      attributes: { id: "security", value: SYNTHETIC_CARD.cvv },
+      axProperties: [{ name: "value", value: SYNTHETIC_CARD.cvv }],
+    });
+    const element = {
+      selector: "#security",
+      framePath: "0",
+      value: SYNTHETIC_CARD.cvv,
+      cardMaskKind: null,
+    } as unknown as InteractiveElement;
+    const capture = {
+      root: node({
+        children: [
+          node({
+            id: "frame",
+            nodeName: "IFRAME",
+            contentDocument: node({ children: [rerendered] }),
+          }),
+        ],
+      }),
+      elements: [element],
+      nodeElements: new Map([[rerendered.id, element]]),
+      moreAbove: false,
+      moreBelow: false,
+      dynamics: "rerender",
+      omissions: [],
+    };
+
+    const masked = mask.maskCapture(capture);
+
+    expect(rerendered.value).toBe(SECURITY_CODE_MASK);
+    expect(rerendered.attributes.value).toBe(SECURITY_CODE_MASK);
+    expect(rerendered.axProperties[0]?.value).toBe(SECURITY_CODE_MASK);
+    expect(masked.elements[0]?.value).toBe(SECURITY_CODE_MASK);
   });
 
   it("documents the approved hostile-page limit without broadening the mask", () => {

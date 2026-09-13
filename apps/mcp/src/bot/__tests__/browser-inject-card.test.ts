@@ -3,6 +3,13 @@ import { chromium, type Browser, type BrowserContext, type Page } from "playwrig
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BrowserController, type CheckoutCard, type InteractiveElement } from "../browser.js";
 import { serializeBrowserUseDOM } from "../browser-use-serializer.js";
+import {
+  finishProvisionSession,
+  observe,
+  observeQuery,
+  observeSubtree,
+  startHarnessProvisionSession,
+} from "../provision-session.js";
 
 const CARD: CheckoutCard = {
   pan: "4111111111111111",
@@ -47,6 +54,7 @@ describe("direct card injection and masked observation", () => {
     "fills only named main/open-shadow/cross-origin nodes and masks every normal read",
     async () => {
       const isolated = await page();
+      let sessionId: string | undefined;
       try {
         const topUrl = "https://merchant.test/checkout";
         const frameUrl = "https://assets.braintreegateway.test/hosted";
@@ -56,7 +64,8 @@ describe("direct card injection and masked observation", () => {
             return route.fulfill({
               contentType: "text/html",
               body: `<input name="number"><div id="host"></div><iframe src="${frameUrl}"></iframe>
-                <div>Total 123 JPY</div><div>3-D Secure authentication</div>`,
+                <div>Total 123 JPY</div><div>3-D Secure authentication</div>
+                <script>const root=document.querySelector('#host').attachShadow({mode:'open'});const input=document.createElement('input');input.name='cardholder';root.append(input)</script>`,
             });
           }
           if (url === frameUrl) {
@@ -74,15 +83,14 @@ describe("direct card injection and masked observation", () => {
           }
           return route.fulfill({ status: 404, body: "not found" });
         });
-        await isolated.page.goto(topUrl);
-        await isolated.page.locator("#host").evaluate((host) => {
-          const root = host.attachShadow({ mode: "open" });
-          const input = document.createElement("input");
-          input.name = "cardholder";
-          root.append(input);
-        });
         const controller = BrowserController.fromHarnessPage(isolated.page);
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        const started = await startHarnessProvisionSession({
+          browser: controller,
+          serviceUrl: topUrl,
+          format: "full",
+          observationFormat: "browser-use-dom",
+        });
+        sessionId = started.session_id;
         const elements = await controller.extractInteractiveElements();
         const results = await controller.injectCardIntoTargets(CARD, {
           pan: { element: byName(elements, "number") },
@@ -131,7 +139,21 @@ describe("direct card injection and masked observation", () => {
         const dom = serializeBrowserUseDOM(capture.root).dom;
         const visible = await controller.extractVisibleText();
         const evidence = controller.readOperatorEvidence();
-        for (const output of [dom, visible, JSON.stringify(evidence)]) {
+        const full = await observe(sessionId, "full");
+        const compact = await observe(sessionId, "compact");
+        const query = await observeQuery(sessionId, "number");
+        const subtreeRef = (query.safe_table as unknown[][] | undefined)?.[0]?.[0];
+        if (typeof subtreeRef !== "string") throw new Error("missing subtree ref");
+        const subtree = await observeSubtree(sessionId, subtreeRef, true);
+        for (const output of [
+          dom,
+          visible,
+          JSON.stringify(evidence),
+          JSON.stringify(full),
+          JSON.stringify(compact),
+          JSON.stringify(query),
+          JSON.stringify(subtree),
+        ]) {
           expect(output).not.toContain(CARD.pan);
           expect(output).not.toMatch(/(?:CVV|security code|\"cvv\"|\"cvc\")[^\n]{0,20}123/i);
         }
@@ -142,6 +164,7 @@ describe("direct card injection and masked observation", () => {
         expect(JSON.stringify(evidence)).toContain("401");
         expect(JSON.stringify(evidence)).toContain("api-visible");
       } finally {
+        if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
         await isolated.context.close();
       }
     },

@@ -292,7 +292,7 @@ async function runSeam(cfg: {
 
   const browser: CardReleaseBrowser = {
     currentUrl: vi.fn().mockReturnValue(`${CHECKOUT.checkout_origin}/session/test`),
-    fillCheckoutCardFields: vi.fn(async (card: CheckoutCard) => {
+    injectCardFields: vi.fn(async (card: CheckoutCard) => {
       filledCards.push(card);
     }),
   };

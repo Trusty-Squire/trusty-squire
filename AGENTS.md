@@ -423,19 +423,33 @@ Playwright's `selectOption({ value })` (and `{ label }`) treats "no `<option>` w
 
 **The rule:** any `selectOption()` call written on the expectation that a miss falls through to another attempt (a value→label fallback, a try/catch retry, etc.) MUST pass an explicit short `{ timeout }` (3000ms in the existing fixes) — never rely on the default. This applies to any future `<select>` fill code in this file (address/country dropdowns included), not just card expiry.
 
-### 10. Post-submit checkout cleanup must stay bound to its pre-submit documents
+### 10. Payment is driven through generic observation and actions
 
-`fillAndSubmitCheckout` (`apps/mcp/src/bot/browser.ts`) fills into every CDP-reachable frame present at fill time, then submits, then cleans up filled fields. PR #565's cleanup refactor swapped a narrow, marker-only cleanup for one that also JP-label-stamps and substring-clears card-shaped fields — but wired it to a **fresh** `this.page.frames()` call taken _after_ `submitFilledCheckoutInScope` returned. On a checkout that forces 3-D Secure, a method/challenge iframe (`methodurl.vcas.visa.com`, `*.cardinalcommerce.com`, an issuer ACS) can already be attached by then, so cleanup evaluated JS in and cleared fields inside that live, cross-origin authentication frame — corrupting the in-flight device-fingerprint POST and silently failing real EbisuMart/JP 3DS checkouts (root-caused in `ts-operator-3ds-completion`; PR #565's own verification was explicitly "detection only, no submission," so this path went untested).
+The operator does not own a checkout state machine. The agent reads the same
+masked DOM, network, console, exception, and screenshot evidence used for other
+browser work, then drives ordinary click/type/select/press/scroll/wait actions.
+`inject_card` only releases and writes the named card fields; it never searches
+for providers, chooses a saved/new card, submits, re-reads totals, clears fields,
+or claims a payment outcome. Do not restore payment status stages, submitter
+guessing, post-submit custody, or checkout cleanup sweeps.
 
-**The rule:** cleanup must reuse `fillAndSubmitCheckout`'s pre-submit `fillFrameSnapshot`, preserve each original document's root handle, and perform every stamping, clearing, and verification pass through that handle. Never re-query frames or use fresh frame locators after submission: a 3DS/ACS frame may be newly attached or may replace a snapshotted frame's document, and only document-bound handles make either transition fail closed without retargeting cleanup to the authentication page. See the regression tests `"never clears fields inside an unrecognized 3-D Secure frame during post-submit cleanup"` and `"never clears fields after a filled frame navigates to a 3-D Secure document"` in `browser-payment.test.ts`.
+### 11. Released PAN and security code have one narrow output boundary
 
-### 11. Bind checkout selection and post-submit evidence to the released card
+Before the first card write, register the released complete PAN and CVV/CVC/CID
+plus the injected node identities in the session's card-value output mask. Every
+model-facing DOM/AX property, attribute, text, URL, header, body, error,
+diagnostic, log, trace, and screenshot passes through that mask. The record
+survives failed fills, clearing, re-rendering, and navigation for the browser
+session, and it never gates a browser action.
 
-**The rule:** `submitFilledCheckoutInScope` (`apps/mcp/src/bot/browser.ts`) scans every page frame and open shadow root for a competing merchant-saved card. It may select only the sole unambiguous new-card radio, using native radio-group semantics, and must verify that selection and every sealed field value again as the last operation before dispatching the charge click. Selected saved-card options, ambiguous radio groups, cleared fields, traversal errors, or any intervening state change fail closed with `payment_card_selection_ambiguous`; never guess or re-fill. See `"positively selects the new-card radio and completes on the filled card, deselecting the competing saved card"`, `"still refuses when the new-card radio's choice group has two equally-plausible non-saved candidates"`, and `"refuses (never re-fills) when selecting the new-card radio itself clears the filled fields"` in `browser-payment.test.ts`.
-
-After submission, ACS content is untrusted, read-only evidence. `detectThreeDsChallenge` may compare rendered issuer/network/last-four evidence with the released card and return `payment_instrument_mismatch`, but it must never mutate, cancel, or add an approval gate to the challenge. `PendingThreeDsWait` preserves the first mismatch across `operate_payment_status` polls of the same live browser. See `"warns when a top-level token-override ACS names another issuer"` in `browser-payment.test.ts` and `"keeps an ACS instrument-mismatch warning visible across 3DS status waits"` in `operate-session-flow.test.ts`.
-
-Post-submit outcome tracking remains resumable for 20 minutes without becoming a second authorization or charge path. `PendingThreeDsWait.outcome` must stay `unknown` until concrete 3DS evidence appears; neither timeout nor missing merchant confirmation may relabel uncertainty as 3DS. While `pendingThreeDs` exists, new `operate_pay` calls and guarded `operate_click` charge clicks are refused; session close performs one final live check and audit before clearing it. A charge click issued through `operate_click` during `operate_pay`'s own in-progress outcome wait is still governed by the existing `activePayment: "operating"` lease rather than `pendingThreeDs`.
+Mask only the released complete PAN (including ordinary formatting variants)
+and security code, replacing them with `[card number]` and `[security code]`.
+Keep merchant last4, brand/issuer, name, expiry, billing address, amount,
+currency, DCC, OTP/3DS text, HTTP bodies, API keys, cookies, and other page data
+visible. This is not a general secret scanner or Luhn detector. The supported
+boundary is ordinary forms and hosted-field checkouts; hostile pages that
+transform secrets into split, encoded, or canvas copies are outside the claim.
+Raw live runtime evaluation remains internal rather than a public read API.
 
 ### 12. An operator browser is session-scoped: never remove its watchdog or containment
 
@@ -467,7 +481,7 @@ probe. See `apps/mcp/src/bot/google-login.ts` and
 `apps/mcp/vitest.tiers.ts` is the static tier manifest. The required `test`
 check and `release.yml` run `test:fast`; `.github/workflows/mcp-slow-tests.yml`
 runs the named integration files after merges and the complete suite nightly.
-Payment/card-sealing files and operator behavior files (session fail-closed,
+Card-value masking files and operator behavior files (session fail-closed,
 OAuth lifecycle, observation — `REQUIRED_BEHAVIOR_FILES`) are explicitly listed
 in the required tier and run whole, without generated test-name filters. Never
 move card-sealing, payment-safety, or operator behavior coverage to the slow
@@ -492,11 +506,12 @@ That lease, the watchdog, and the whole terminal-teardown ordering now live in
 `apps/mcp/src/bot/session/lifecycle.ts` (`provision-session.ts` re-exports them);
 see CLAUDE.md's "Operator session model" for what may not be reordered.
 
-### 16. The operator does not seal, redact, or refuse a read — do not add one back
+### 16. Reads stay direct except for the narrow released-card value mask
 
-Observation and screenshot reads remain verbatim. Do not reintroduce content
-seals, read-path redaction, or payment-only masking. The authoritative policy,
-remaining vault/payment boundaries, and implementation map are in
+Observation and screenshot reads remain verbatim except for the session's
+released complete PAN and security code. Do not widen that exception into
+general secret screening, a content seal, or a read refusal. The authoritative
+policy and implementation map are in
 [`docs/observation-model.md`](docs/observation-model.md) §4.5; read that section
 before touching this area. Credential selection is a separate contract owned by
 [`docs/operator-tool-surface.md`](docs/operator-tool-surface.md#credential-capture-and-retrieval).

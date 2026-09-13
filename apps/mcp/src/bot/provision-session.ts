@@ -45,7 +45,6 @@ import {
   OAuthFailedError,
   OAuthOnboardingRequiredError,
   type BrowserController,
-  type ClickDispatchStatus,
   type CheckoutSummary,
   type CheckoutCard,
   type FrameTarget,
@@ -2087,48 +2086,6 @@ export function shouldBlockUnsafeProvisionAction(
   );
 }
 
-// Manual card-entry guard — a model must never be the thing that types a
-// payment card number into a page. When inject_card fails, the recovery is
-// surfacing that failure, not routing around the vault by typing the PAN via
-// an ordinary `type`. "Card-number-shaped" = a 13–19 digit run (spaces/hyphens
-// allowed as grouping) that passes the Luhn checksum — requiring Luhn keeps
-// order numbers, tracking numbers, and other long digit strings from
-// false-positiving. Scoped to MODEL-SUPPLIED `type` text only: inject_card's
-// vaulted-card fill methods and type_secret's
-// sealed-slot transfer never pass through this check.
-function passesLuhn(digits: string): boolean {
-  let sum = 0;
-  let double = false;
-  for (let i = digits.length - 1; i >= 0; i -= 1) {
-    let d = digits.charCodeAt(i) - 48;
-    if (double) {
-      d *= 2;
-      if (d > 9) d -= 9;
-    }
-    sum += d;
-    double = !double;
-  }
-  return sum % 10 === 0;
-}
-
-class ManualCardEntryBlockedError extends Error {}
-
-export function manualCardEntryBlockReason(text: string): string | null {
-  for (const match of text.matchAll(/\d(?:[\d\s-]*\d)?/g)) {
-    const digits = match[0].replace(/[\s-]/g, "");
-    if (digits.length >= 13 && digits.length <= 19 && passesLuhn(digits)) {
-      return (
-        "type refused: the value is card-number-shaped (a 13–19 digit Luhn-valid " +
-        "sequence). Manual payment-card entry is not permitted through operate_act — " +
-        "the model must never hold or type a card number. Card payment goes through " +
-        "inject_card, which fills the user's vaulted card into named fields. If inject_card " +
-        "failed, report that failure to the user instead of entering a card by hand."
-      );
-    }
-  }
-  return null;
-}
-
 export function buildScreenOutline(
   elements: readonly InteractiveElement[],
   pageText: string,
@@ -2395,7 +2352,7 @@ export async function captureScreenshot(
     frame_url: captured.frameUrl,
     frame_count: captured.frameCount,
     ...(captured.clickBinding ? { click_binding: captured.clickBinding } : {}),
-    image: { mime_type: captured.mimeType, data_base64: captured.base64 },
+    image: { mime_type: captured.mimeType ?? "image/jpeg", data_base64: captured.base64 },
   };
 }
 
@@ -2411,7 +2368,9 @@ export function readOperatorEvidence(
 
 export function maskOperatorSessionOutput<T>(sessionId: string, value: T): T {
   const session = sessionForCall(sessionId);
-  return session === undefined ? value : session.browser.maskOperatorOutput(value);
+  if (session === undefined) return value;
+  const mask = session.browser.maskOperatorOutput;
+  return typeof mask === "function" ? (mask.call(session.browser, value) as T) : value;
 }
 
 export async function injectCardIntoSessionTargets(
@@ -3628,8 +3587,8 @@ function checkoutStateForObservation(
     cart_url: cartUrlForState(session, url, elements),
     next_action:
       resolvedStage === "cart"
-          ? { tool: "operate_act", kind: "click", intent: "proceed_to_checkout" }
-          : { tool: "operate_observe" },
+        ? { tool: "operate_act", kind: "click", intent: "proceed_to_checkout" }
+        : { tool: "operate_observe" },
   };
 }
 
@@ -4924,11 +4883,7 @@ async function actInternally(
     if (error instanceof OAuthOnboardingRequiredError && session !== undefined) {
       return { observation: oauthOnboardingRequiredObservation(session, error), outcome: {} };
     }
-    if (
-      session?.compactV2Active === true &&
-      !(error instanceof ManualCardEntryBlockedError) &&
-      !(error instanceof ProvisionTargetMissingError)
-    ) {
+    if (session?.compactV2Active === true && !(error instanceof ProvisionTargetMissingError)) {
       throw new CompactV2ActionFailureError(compactV2ActionFailureReason(error, action.kind));
     }
     throw error;
@@ -5069,12 +5024,6 @@ async function executeAct(
     throw new Error(
       `type_secret provenance must match the authoritative slot credential.${action.slot}`,
     );
-  }
-  // Gate here — ahead of BOTH the locator and element `type` branches, and of
-  // replay's act() calls — so no model-supplied text path can reach a PAN fill.
-  if (action.kind === "type") {
-    const cardBlock = manualCardEntryBlockReason(action.text);
-    if (cardBlock !== null) throw new ManualCardEntryBlockedError(cardBlock);
   }
   let browser = session.browser;
   const compactV2ActionPage = operationPage ?? operationPageForSession(session);
@@ -7295,7 +7244,7 @@ export type OperatorReplayResult =
       // single-leg (or leg-less) recipe. It is not resumable via resume_from,
       // and recipe recording remains refused because recipeRejectionReason is
       // set. The host may drive the checkout leg cold from from_step_index;
-      // any charge still goes through a fresh, human-approved operate_pay.
+      // card release still goes through a fresh, human-approved inject_card call.
       status: "leg_fallback_required";
       observation: Observation;
       leg: "checkout";
@@ -7708,7 +7657,7 @@ export async function replayOperatorRecipe(
   // recipe-key-redesign money rule: the only surviving invariant is that a
   // card-charging step is never blind-replayed — enforced unconditionally
   // below where recorded.kind === "operate_pay" always forces a fallback to
-  // the fresh, human-approved operate_pay path. isMoneyPath here only feeds
+  // the fresh, human-approved inject_card path. isMoneyPath here only feeds
   // the leg-fallback narrowing (where to resume cold-driving), not a
   // software field-verification gate.
   const isMoneyPath = recipe.trace.some((entry) => entry.action.kind === "operate_pay");
@@ -7843,7 +7792,7 @@ export async function replayOperatorRecipe(
     }
 
     if (recorded.kind === "operate_pay") {
-      return await fallback(step, i, "payment requires the existing operate_pay approval flow");
+      return await fallback(step, i, "payment requires the existing inject_card approval flow");
     }
 
     if (recorded.kind === "goto") {
@@ -8015,7 +7964,6 @@ export async function replayOperatorRecipe(
         state.verifiedFields.add(i);
       }
     } catch (error) {
-      if (error instanceof ManualCardEntryBlockedError) throw error;
       return await fallback(
         step,
         i,

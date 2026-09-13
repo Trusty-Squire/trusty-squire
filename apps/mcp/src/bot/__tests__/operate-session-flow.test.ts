@@ -963,7 +963,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
-import { ApiClient } from "../../api-client.js";
+import type { ApiClient } from "../../api-client.js";
 import { dispatchOperatorBrowserProcessTermination } from "../operator-browser-watchdog.js";
 import { BrowserController, OAuthAwaitingHumanError } from "../browser.js";
 import {
@@ -986,14 +986,11 @@ import {
   gmailTransientBackoffMs,
   captchaGate,
   finishProvisionSession,
-  finishProvisionSessionWithPreparation,
   paymentSession,
   closeAllProvisionSessions,
   activeSessionCount,
   parseElementsTable,
   replayOperatorRecipe,
-  cartAdd,
-  cartClear,
   formSelectMany,
   recipeTargetFor,
   captureObserved,
@@ -1014,13 +1011,12 @@ import {
   type OperatorRecipe,
 } from "../operator-recipe.js";
 import {
-  operateAllowHostTool,
-  operateNavigateTool,
   operateClickTool,
   operateTypeTool,
   operateSelectTool,
   operatePressTool,
   operateScrollTool,
+  operateWaitTool,
   operateFinishTool,
   provisionExtractTool,
   operateRecipeSaveTool,
@@ -1363,7 +1359,7 @@ describe("prepared-statement replay", () => {
     expect(JSON.stringify(result)).not.toContain("Private option");
   });
 
-  it("never replays operate_pay and hands the charge to the fresh approval flow", async () => {
+  it("never replays a historical payment step and hands card release to inject_card", async () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
@@ -1386,61 +1382,9 @@ describe("prepared-statement replay", () => {
       status: "fallback_required",
       step_index: 0,
       next_index: 1,
-      reason: "payment requires the existing operate_pay approval flow",
+      reason: "payment requires the existing inject_card approval flow",
     });
     expect(replayDispatchedPayment).toBe(false);
-  });
-
-  it("makes manual card-entry refusal terminal without exposing replay data", async () => {
-    const pan = "5555 5555 5555 4444";
-    h.elements = [
-      elem({
-        testId: "card-number",
-        labelText: "Card number",
-        selector: "#card-number",
-        value: "",
-      }),
-    ];
-    const started = await startProvisionSession({
-      serviceUrl: "https://shop.example.com/checkout",
-    });
-    const recipe = replayRecipe({
-      trace: [
-        {
-          action: {
-            kind: "type",
-            target: {
-              dom_hint: { testid: "card-number" },
-              accessible_name: "Card number",
-              css: "#card-number",
-            },
-            value: pan,
-          },
-        },
-      ],
-    });
-
-    let refusal: unknown;
-    try {
-      await replayOperatorRecipe(started.session_id, recipe, {});
-    } catch (error) {
-      refusal = error;
-    }
-
-    expect(refusal).toBeInstanceOf(Error);
-    const surfaced = String(refusal);
-    expect(surfaced).toMatch(/operate_pay/);
-    expect(surfaced).not.toContain(pan);
-    expect(surfaced).not.toContain("fallback_required");
-    expect(surfaced).not.toContain("next_index");
-    expect(refusal).not.toHaveProperty("step");
-    expect(refusal).not.toHaveProperty("next_index");
-    expect(h.typed).toEqual([]);
-    await expect(replayOperatorRecipe(started.session_id, recipe, {}, 1)).rejects.toThrow(
-      /invalid replay continuation/i,
-    );
-    await finishProvisionSession(started.session_id);
-    expect(h.destroyedProfiles).toEqual([]);
   });
 
   it("rejects fresh, wrong-index, and changed-binding replay continuations", async () => {
@@ -1836,11 +1780,8 @@ describe("prepared-statement replay", () => {
     });
   });
 
-  // Money rule simplification (2026-08-16): activeProvisionBrowserForPayment
-  // no longer re-verifies field mounts/values before handing the browser to
-  // operate_pay — that software re-check was deleted along with the rest of
-  // the payment-validation guards.
-  it("does not re-check mounted verified fields at the payment boundary", async () => {
+  // Direct checkout driving does not add a hidden payment-boundary re-check.
+  it("does not re-check mounted verified fields after recipe fallback", async () => {
     h.elements = [
       elem({
         testId: "shipping-city",
@@ -5762,7 +5703,6 @@ describe("Compact V2 action-map boundary", () => {
     );
   });
 
-
   it("requires sealed V2 handles before bulk selection enters the private executor", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
@@ -6615,65 +6555,6 @@ describe("operate session — egress seed excludes mid_session task scope", () =
     const egress = observedHostsForSession(sid);
     expect(egress).toContain("console.cloud.google.com"); // start host included
     expect(egress).not.toContain("console.firebase.google.com"); // mid_session excluded
-  });
-});
-
-describe("operate session — manual card-entry guard", () => {
-  it("refuses to type a Luhn-valid card number (spaced) and types nothing", async () => {
-    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
-    h.elements = [elem({ visibleText: "Card number", selector: "#card" })];
-    await expect(
-      act(obs.session_id, { kind: "type", target: "Card number", text: "5555 5555 5555 4444" }),
-    ).rejects.toThrow(/operate_pay/);
-    expect(h.typed).toEqual([]);
-  });
-
-  it("refuses the same card number unspaced and hyphenated", async () => {
-    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
-    h.elements = [elem({ visibleText: "Card number", selector: "#card" })];
-    await expect(
-      act(obs.session_id, { kind: "type", target: "Card number", text: "5555555555554444" }),
-    ).rejects.toThrow(/operate_pay/);
-    await expect(
-      act(obs.session_id, { kind: "type", target: "Card number", text: "5555-5555-5555-4444" }),
-    ).rejects.toThrow(/operate_pay/);
-    expect(h.typed).toEqual([]);
-  });
-
-  it("refuses a card number on the locator-fallback type path too", async () => {
-    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
-    await expect(
-      act(obs.session_id, { kind: "type", target: "css=#card", text: "4242 4242 4242 4242" }),
-    ).rejects.toThrow(/operate_pay/);
-    expect(h.locatorTypeCalls).toEqual([]);
-    expect(h.typed).toEqual([]);
-  });
-
-  it("allows a 16-digit NON-Luhn value (an order number) through", async () => {
-    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/support" });
-    h.elements = [elem({ visibleText: "Order number", selector: "#order" })];
-    await act(obs.session_id, { kind: "type", target: "Order number", text: "4242424242424243" });
-    expect(h.typed).toEqual([{ selector: "#order", text: "4242424242424243" }]);
-  });
-
-  it("allows ordinary non-card text through", async () => {
-    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
-    h.elements = [elem({ visibleText: "City", selector: "#city" })];
-    await act(obs.session_id, { kind: "type", target: "City", text: "Brooklyn" });
-    expect(h.typed).toEqual([{ selector: "#city", text: "Brooklyn" }]);
-  });
-
-  it("does not gate a card-shaped type_secret sealed-slot transfer (vault flow unaffected)", async () => {
-    const obs = await startProvisionSession({ serviceUrl: "https://console.example.com/" });
-    const sealedPan = "5555 5555 5555 4444";
-    stashSecretSlot(obs.session_id, "sealed_card", sealedPan);
-    h.elements = [elem({ visibleText: "Sealed field", selector: "#sealed" })];
-    await act(obs.session_id, {
-      kind: "type_secret",
-      slot: "sealed_card",
-      target: "Sealed field",
-    });
-    expect(h.typed).toEqual([{ selector: "#sealed", text: sealedPan, sealed: true }]);
   });
 });
 
@@ -9072,14 +8953,6 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
 });
 
 describe("flat operator verbs", () => {
-  it("accepts legacy allow_host calls and navigates without host declarations", async () => {
-    const { session_id } = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-    await operateNavigateTool.handler({ session_id, url: "https://unrelated.net/" }, null);
-    await operateAllowHostTool.handler({ session_id, host: "xn--80ak6aa92e.com" }, null);
-    expect(h.gotos).toContain("https://unrelated.net/");
-    expect(observedHostsForSession(session_id)).toEqual(["app.example.com"]);
-  });
-
   it("fills text and then submits, and fills a secret slot without returning its value", async () => {
     h.elements = [elem({ labelText: "Name", selector: "#name" })];
     const { session_id } = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
@@ -9092,16 +8965,8 @@ describe("flat operator verbs", () => {
     expect(JSON.stringify(result)).not.toContain("private-slot-value");
   });
 
-  it("does not submit after a manual-card refusal or a stale target", async () => {
+  it("does not submit after a stale target", async () => {
     const { session_id } = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-    const result = await operateTypeTool.handler(
-      { session_id, ref: "Card", text: "5555555555554444", submit: true },
-      null,
-    );
-    expect(result).toMatchObject({
-      status: "manual_card_entry_refused",
-      safe_alternative: "operate_pay",
-    });
     await operateTypeTool
       .handler({ session_id, ref: "@e:missing", text: "Ada", submit: true }, null)
       .catch(() => undefined);
@@ -9109,7 +8974,7 @@ describe("flat operator verbs", () => {
     expect(h.pressedKeys).toEqual([]);
   });
 
-  it("clicks, presses keys, and exposes viewport scrolling as its own verb", async () => {
+  it("clicks, presses keys, scrolls, and waits through generic verbs", async () => {
     h.elements = [elem({ role: "button", visibleText: "Continue", selector: "#continue" })];
     const { session_id } = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
     await operateClickTool.handler({ session_id, ref: "Continue" }, null);
@@ -9118,6 +8983,11 @@ describe("flat operator verbs", () => {
     expect(h.pressedKeys).toEqual(["Tab"]);
     await operateScrollTool.handler({ session_id, direction: "bottom" }, null);
     expect(h.scrolls).toEqual(["bottom"]);
+    const waited = (await operateWaitTool.handler({ session_id, milliseconds: 0 }, null)) as Record<
+      string,
+      unknown
+    >;
+    expect(waited.session_id).toBe(session_id);
   });
 
   it("uses guarded DOM fallback only for a pre-dispatch pointer interception", async () => {

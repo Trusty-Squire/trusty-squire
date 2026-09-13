@@ -15,197 +15,47 @@
 </p>
 
 <p align="center"><strong>Empower agents with auth and payments.</strong></p>
-<p align="center">MCP tools to automate auth and pay — your keys and card never leave the vault.</p>
+<p align="center">MCP tools to automate auth and pay — your keys and card stay out of agent context.</p>
 
 Trusty Squire is an **MCP server that lets Claude Code, Codex, Cursor, OpenCode, Goose, and other coding agents sign up, provision, and purchase on your behalf**. It opens a real browser, works through signup, sign-in, setup, and checkout flows one step at a time, clears the bot-detection and email-verification steps that make operator tools stall, and hands the job back to a person only when one is actually required. That covers wiring up OAuth and API keys for the app you're building as much as it covers paying a checkout, sending a gift, or booking something — the same operator primitives drive all of it.
 
 Provider secrets and payment cards are write-only: the agent's credential tools return references and authenticated results, never stored plaintext. The raw secret never needs to enter the agent's context, so it can't be pasted into a commit, leaked in a log, or read back out over chat. When a task genuinely needs the plaintext somewhere the agent controls, `fetch_credential` releases it — for one credential, once, and only after you sign that exact request with your passkey. Backend access is a host-scoped, rate-limited, independently revocable grant, so a leaked token is killed without rotating the provider key — and you connect Google or GitHub yourself in a real browser, so the agent never types your password. Full [threat model below](#security-and-threat-model).
 
-## One prompt
+## Direct payment observation
 
-```text
-Add Google OAuth to this app in one prompt: create the OAuth client, save the client secret, and wire it in without putting the raw key in chat, code, or .env.
-```
+The agent drives the live checkout from ordinary browser evidence. It reads the
+amount, currency, DCC choice, card controls, validation errors, requests, and
+rendered state with `operate_observe`, `operate_network`, and
+`operate_screenshot`, then uses the ordinary click, type, select, press, scroll,
+and wait loop to advance the purchase. A spinner is evidence; the operator does
+not translate it into a payment stage.
 
-Your coding agent plans the job. Trusty Squire operates the website, stores the generated key, and can issue your backend a scoped grant. The backend calls the provider through Trusty Squire, which injects the provider key on the server side.
+When saved-card fields are ready, call `list_payment_cards` and then
+`inject_card` with the addressed session, the purchase terms, the selected
+`card_ref`, and an observation ref for each field to fill. `inject_card` uses the
+existing single human approval for that purchase, verifies the signed release,
+and opens the card only inside the operator. A pending approval is resumed with
+the returned `approval_id`; retries may supply changed field refs under that same
+still-valid approval. The primitive fills only the named fields and returns a
+per-field `filled`, `not_found`, `detached`, or `native_error` result. It never
+searches for a provider, chooses a saved-card UI, rereads the total, submits,
+clears fields, or diagnoses the checkout.
 
-Other useful asks:
+Before the first card write, the operator installs a session-lifetime output
+mask for that released PAN and security code. Normal DOM/AX observations, raw
+attribute/subtree reads, network headers and bodies, errors, console evidence,
+and screenshots replace or cover those complete values. Merchant last4, brand,
+name, expiry, billing address, amounts, currency/DCC, HTTP errors, API keys, and
+3-D Secure controls remain visible. The agent re-observes partial fills, retries
+targets if needed, selects currency, clicks place order, and follows 3-D Secure
+from the same generic evidence stream. There is no `operate_payment_status` or
+operator-owned submit/outcome state machine.
 
-- “Set up Stripe payments for this app and keep the API key out of this conversation.”
-- “Create a Render API key for deployment automation and keep it out of this conversation.”
-- “Pay this checkout with my saved work card and ask me to approve it on my phone.”
-- “Send a gift to my friend without sharing their address with me.”
-- “Book this dinner reservation for me.”
-- “That app grant leaked. Revoke it without rotating the provider key.”
-
-For supported card checkouts, save a card in the Vault from a passkey-capable
-device or let your first `operate_pay` approval link collect one just in time.
-When no card is specified, Trusty Squire uses the only saved card, starts the
-add-card ceremony if none exists, or asks you to choose when several exist. The
-new card is encrypted in your browser with a passkey-derived key and bound to
-that purchase before approval; if you add it but do not approve in time, it
-remains saved for a faster retry.
-
-Recognized Visa, Mastercard, Amex, Discover, Diners Club, and JCB cards show
-their network mark in the Vault while keeping the full bank/network label. Open
-a card row to see its masked number; `reveal` runs the passkey ceremony in your
-browser before showing the number, name, expiry, and billing address. The CVV is
-never shown, even after reveal. The Activity page also records card additions
-and removals, payments, and app-grant changes without storing a PAN or CVV.
-
-`operate_pay` requires a non-empty item and reason (calls that omit either
-receive a validation error). On a single-page checkout it prefers a machine-read
-checkout total, sends you a short-lived approval link, and submits only after you
-approve the purchase. A clean visible labeled total wins; when none is readable,
-strict schema.org `Order`/`Invoice.totalPaymentDue` structured data can supply the
-amount and currency. If neither source exposes a total, caller-supplied
-`amount_cents` and `currency` become the authoritative approval amount; an omitted
-merchant name falls back to the checkout URL's hostname. Product and offer prices
-never qualify as machine-read checkout totals. An unambiguous ISO currency on the
-page remains authoritative. A notation that cannot identify one ISO currency by
-itself, such as a shared currency symbol or an FX-preview selector, falls through to
-the currency already selected or approved for the purchase instead of refusing the
-checkout. Any live amount or currency drift still fails closed; the authoritative
-binding contract lives in the [security model](SECURITY.md#client-encrypted-card-data).
-Approval, 3-D Secure, Activity, and notification amounts use the currency's minor-unit
-precision (for example, whole yen for JPY and two decimals for USD). After you
-sign in, the owner-only approval page shows the merchant, checkout origin, amount
-and currency, item, and reason directly from the short-lived server record before
-one passkey ceremony authorizes those canonical payment values. You also see the
-requesting MCP client (for example, Hermes) and the bound card's label plus last
-four digits (or its label alone for a legacy card) before clicking **Approve
-payment** to relay the operator-sealed final authorization. Before submitting that
-authorization, you can instead choose **Deny payment**; a denial closes that
-approval attempt and prevents any later operator confirmation. When the pre-submission
-checkout can be machine-read, the payment is refused if its merchant, origin, amount,
-or currency has changed since approval. If that resume read cannot recover a total,
-Trusty Squire reuses the original mandate-bound checkout values. Card entry requires the PAN,
-expiry, and CVV fields; cardholder name and other explicitly labeled billing fields
-are filled best-effort, so a missing name field does not abort the payment. Sealing
-and cleanup touch only those selected payment controls; merchant shipping address and
-country controls remain untouched. If the checkout has a selected merchant-saved card
-alongside the newly filled card, Trusty Squire selects the sole unambiguous new-card
-radio and verifies both that choice and the filled fields again immediately before
-submission; ambiguous choices, selected saved-card options, and failed verification
-are refused with `payment_card_selection_ambiguous`. A charge is treated as
-dispatched only after the browser observes a concrete charge/order request, a
-terminal merchant outcome, or genuine 3-D Secure evidence; native form validation
-alone does not claim a dispatch. A submit is reported as `payment_submitted` only
-after the checkout reaches a new merchant order-confirmation URL with a substantive
-order or receipt identity. The browser completes 3-D Secure natively, including
-out-of-band bank-app challenges — Trusty Squire never manipulates or intercepts the
-challenge; it uses read-only checks while polling for that same order-confirmation
-signal. At that last observable boundary, a mismatch between the released card and
-issuer, network, or last-four evidence rendered by the 3-D Secure issuer/app is
-returned as a structured `warning` with `kind: "payment_instrument_mismatch"` and
-expected-versus-observed evidence. The warning persists through resumable
-`operate_payment_status` calls; it neither changes the payment status nor cancels,
-approves, or modifies the challenge, so the cardholder retains the decision whether
-to continue. A dispatched attempt with no confirmed merchant outcome and no genuine
-3-D Secure evidence remains `payment_outcome_unknown`, including across resumable
-status checks; Trusty Squire never relabels that uncertainty as 3-D Secure. A detected
-challenge that remains unresolved on timeout stays `payment_3ds_required` with
-`needs_user.wall: "3ds"`, handing control back for user completion. Neither status is
-success or permits blind resubmission: manually check the merchant's order state
-before any retry.
-
-`operate_pay` surfaces the approval link before its bounded server-side wait.
-Approval creation and linked-Telegram delivery failures surface as errors; see the
-[payment approval API contract](apps/api/README.md#endpoints).
-It
-may wait up to one minute for approval, denial, or expiry; if it returns
-`approval_pending` first, call `operate_pay` again with the same arguments. That
-call resumes the same approval and one-passkey boundary instead of creating a new
-link. `operate_payment_status` is a non-charging alternative for inspecting the
-pre-charge approval and is the continuation tool for an already-submitted unknown
-or 3-D Secure outcome. Its `wait_seconds` accepts 0-60 (default 0) to bound-wait
-instead of taking an instant peek. After `operate_pay` reports
-`payment_approval_denied` or `payment_approval_timeout`, call it again to start a
-new attempt with a new approval and a new human passkey tap in the same live
-session, preserving the checkout page. If `operate_payment_status` observed the
-terminal approval first, the next `operate_pay` reports it before a subsequent
-call starts the new attempt. This applies to both single-page and `fill_card`
-approvals when no card fields were released, or when cleanup verified they were
-cleared. If card fields were filled and cleanup failed, payment operations remain
-blocked; use `operate_finish` and start a fresh session. Stuck or ambiguous
-attempts likewise retain their existing finish-and-restart recovery.
-
-Every payment response includes its `session_id`. Pass that same ID to every
-follow-up payment call. Omitting `session_id` remains compatible only while this
-MCP process has exactly one session; it never selects a newest or arbitrary checkout.
-
-Some split checkouts collect the card before the final order-confirmation step. On the
-card-entry page, `operate_pay { phase: "fill_card" }` first reads the live total. A
-subtotal qualifies as that payable amount only when the same order summary says
-shipping is free; recommendation and related-product prices are excluded. If that
-page exposes no total, caller-supplied `amount_cents` and `currency` take precedence
-as the approval amount. If they are omitted, Trusty Squire may use the most recent real
-total observed earlier in the same browser session, such as the cart subtotal, only
-when the checkout origin still matches. One phone approval
-binds that amount and releases the card; Trusty Squire fills the card without
-submitting. It fills only the merchant's own
-HTTPS frames or recognized payment-provider frames. The card stays in the page as
-filled fields while the agent advances to the review step and places the order;
-those fields are ordinary page content in `operate_observe` and
-`operate_screenshot`, not masked. Verify the live final total against the approved
-`amount_cents`/currency yourself before placing the order; Trusty Squire no longer
-re-reads the total or submits anything. For `operate_click`, a control whose
-label looks like pay/place-order may fire only once for that approval. A second
-recognized attempt is refused and requires a fresh `operate_pay` approval in a new
-session. Non-charge-labeled clicks, key presses, and OAuth controls remain ungated.
-After a recognized click dispatches, Trusty Squire best-effort records a secret-free
-`payment_place_order_attempted` Activity event bound to the approval, optional
-mandate, approved amount/currency, merchant, and opaque card reference. This records
-an attempt, not a verified charge outcome.
-
-After a recognized split-checkout charge click, Trusty Squire passively checks for
-3-D Secure. `operate_payment_status` can then poll the same attempt for up to
-twenty minutes, reporting and auditing its terminal outcome. It compares receipt
-evidence against the pre-submit card-fill page.
-
-`operate_pay { phase: "confirm" }` releases the session's pending-fill lock and
-reports the approved terms back. After a recognized charge attempt it also makes
-a passive challenge check, without consuming a terminal outcome: use
-`operate_payment_status` to retrieve that outcome even if authentication completed
-before confirmation. Confirm never charges. It can be called any time after the fill — it does not
-need to happen before you place the order, and it never reads a total or verifies an
-amount. If a payment gets stuck or a card is declined, recover with `operate_finish`
-and start a fresh session; `operate_pay` does not support refilling a different card
-mid-session.
-
-`operate_pay` supports cross-origin hosted card entry, including Braintree Hosted
-Fields and Stripe Elements, through the existing saved-card approval and fill flow.
-Wallet-only PayPal, Apple Pay, and Google Pay surfaces require you to select a
-credit-card form or complete the wallet payment yourself. A separate express button
-does not block supported card entry. Trusty Squire does not sign in to PayPal or use
-vaulted PayPal credentials. See the [payment contract](SECURITY.md#client-encrypted-card-data)
-for wallet detection and card-field selection details.
-After a single-page submit that has not yet reached a confirmed
-order, Trusty Squire waits 180 seconds by default for native completion, including
-out-of-band bank-app approval. A linked Telegram chat receives one best-effort
-challenge notification on first detection, whether during submission, the initial
-wait, a recognized split-checkout charge click, confirmation, or status polling.
-Repeated polls do not send another notification for that attempt. The cardholder
-may need to open their bank app after this nudge; a bank push is not guaranteed.
-Notification delivery never delays or gates native authentication.
-
-Detection recognizes visible cross-processor signals, including CardinalCommerce,
-Stripe, SBPS/EMV-TDS hosts and `/credit3d2/` challenge routes, SBPS authentication
-forms, and Japanese 本人認証 text. Hidden 3-D Secure Method pre-authentication,
-captcha-hosted frames, and an ordinary Shopify PCI card-field host alone do not
-count as a challenge. Terminal authentication failure, including
-本人認証に失敗しました, is reported as failure without a new challenge nudge.
-SBPS step-up auto-progression remains [deferred pending a live reproduction](docs/investigations/sbps-three-ds-method-handshake.md).
-
-`three_ds_wait_seconds` accepts whole seconds from 0 to 600; set it to `0` on
-`operate_pay` to take an immediate outcome check without waiting. A detected
-challenge still triggers the notification; a challenge appearing later can be
-picked up by `operate_payment_status`.
-
-Connect Telegram under Vault Settings to receive secret-free alerts for
-credential, card, payment, and app-grant lifecycle changes. Routine credential
-retrieval and proxy access stay in Activity instead of sending a push for every
-request.
+This is a narrow ordinary-checkout boundary, not hostile-page information-flow
+containment. Ordinary forms and reachable hosted fields such as Braintree,
+Stripe, and Amazon APX are covered. A hostile page can split, encode, or
+canvas-render a card value so it no longer matches the released value; the
+operator does not add a broad secret scanner or claim to defeat that page.
 
 ## Install
 
@@ -306,11 +156,14 @@ The result contains a host-scoped egress `base_url` and a `token`, not the Clerk
   the final total itself. See the split-checkout guidance above for passive outcome
   tracking. The API
   temporarily relays only operator-sealed card ciphertext and its signed mandate.
-  Trusty Squire's API and the coding-agent model never receive plaintext PAN or
-  CVV. See the
+  Trusty Squire's API never receives plaintext PAN or CVV. The normal operator
+  read path masks the released complete PAN and security code before model-facing
+  output; hostile transformed page output is outside that narrow boundary. See the
   [security model](https://github.com/trusty-squire/trusty-squire/blob/main/SECURITY.md#client-encrypted-card-data)
   for the signed mandate's binding contract.
-- Browser screenshots and diagnostics can contain whatever a website visibly rendered. Treat diagnostic artifacts as sensitive and do not ask an agent to re-observe a page after a secret is shown.
+- Browser screenshots and diagnostics remain verbatim except for the released
+  card's complete PAN/security-code mask. Treat all other rendered values as
+  potentially sensitive.
 - Trusty Squire does not bypass phone verification, hard CAPTCHAs, 3-D Secure,
   payment authorization, or decisions that belong to a person. It stops for
   human input.
@@ -325,22 +178,20 @@ for the system and data flows.
 The default MCP registry exposes 29 tools (31 when maintainer diagnostics are
 enabled). The 18-tool operator driving surface uses flat, single-purpose verbs:
 `operate_start`, `operate_finish`, `operate_observe`, `operate_screenshot`,
-`operate_navigate`, `operate_click`, `operate_type`, `operate_select`,
-`operate_press`, `operate_scroll`, `operate_allow_host`, `operate_login`,
-`operate_fill_credential`, `operate_extract`, `operate_pay`,
-`operate_payment_status`, `list_credentials`, and `list_payment_cards`.
+`operate_network`, `operate_navigate`, `operate_click`, `operate_type`, `operate_select`,
+`operate_press`, `operate_scroll`, `operate_wait`, `operate_login`,
+`operate_fill_credential`, `operate_extract`, `inject_card`, `list_credentials`,
+and `list_payment_cards`.
 Recipe and vault/account tools remain separate surfaces. The complete migration
 table and input contracts are in [operator-tool-surface.md](docs/operator-tool-surface.md).
 The evidence required to qualify an operator build is in
 [operator-acceptance-runbook.md](docs/operator-acceptance-runbook.md).
-Continue a pending pre-charge approval by re-calling
-`operate_pay` with the same arguments; use
-`operate_payment_status(wait_seconds)` as a non-charging alternative and for
-post-submit outcome checks. `operate_screenshot(session_id,
+Continue a pending card release by re-calling `inject_card` with its returned
+`approval_id`. `operate_screenshot(session_id,
 frame_index?, frame_url_contains?, full_page?)` is a read-only debugging capture
 (page or one isolated frame, e.g. a cross-origin 3-D Secure/captcha challenge)
-returned as an actual MCP image. It returns the page's real pixels: there is no
-redaction pass and no refusal when the page is showing a secret or a card value.
+returned as an actual MCP image. It returns real pixels, with only injected
+PAN/security-code controls and identified ordinary copies covered after card release.
 For controls visible only in the image, see
 [screenshot-coordinate clicks](docs/operator-tool-surface.md#clicking-a-screenshot-visible-control).
 The maintainer-only `list_extract_failures` → `get_extract_failure`
@@ -354,9 +205,9 @@ button, link, textbox, select, checkbox, radio, tab, menuitem, and file
 control, including those outside the viewport. Non-control markup and page text
 are absent from that shape by construction, never redacted. Use `query`,
 `role`, or `cursor` to filter or page the same map, then scroll or act on a
-returned ref. Use `format:"full"` only when the unchanged, verbatim
-`browser-use-dom` tree is needed for page text, attributes, or layout context;
-neither format masks or screens emitted content. The authoritative observation
+returned ref. Use `format:"full"` only when the DOM tree is needed for page
+text, attributes, or layout context. Both formats are otherwise verbatim, with
+the same narrow released-card value mask. The authoritative observation
 contract is [observation-model.md](docs/observation-model.md), and the detailed
 full-DOM structure is in
 [browser-use-serializer-port.md](docs/browser-use-serializer-port.md). A browser action can
@@ -446,11 +297,9 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   [OAuth error and recovery contract](docs/operator-tool-surface.md#using-the-rest-of-the-surface).
   If an observation races the transition, it reports `oauth.state: "in_progress"`
   and directs the host to observe again.
-- Observed card controls are marked `payment_field` and
-  `interaction: "vaulted_card_only"`, with `operate_pay { phase: "fill_card" }`
-  as the recommended action. Typing a Luhn-valid, card-number-shaped value
-  manually through `operate_type` is refused with `safe_alternative: "operate_pay"`
-  and the missing prerequisite `verified_cart_total`.
+- Call `inject_card` with the exact observed refs for the saved-card fields.
+  It fills only those refs under the existing purchase approval; the agent
+  observes partial results and drives every later checkout action itself.
 - `operate_finish` closes the session with a flat `outcome` enum — never a
   nested union. `none` only closes; `credentials` requires `store` and preserves
   credential extraction and vault storage; `result` requires `summary` or
@@ -475,19 +324,10 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   navigation and continues with cold driving. On one ordinary missed step,
   replay returns a local repair point and can continue in the same session.
   Older name-only recipes remain planning hints.
-- `list_payment_cards` returns saved-card labels and opaque references;
-  `operate_pay` accepts an explicit `session_id` and `phase` of `"single"`
-  (the default, also implied by omitting phase), `"fill_card"`, or `"confirm"`.
-  It can use a selected card, the only card on file, or a just-in-time
-  add-card approval. The single-page flow fills the checkout and applies the
-  post-submit outcome wait described above before handing back unresolved
-  outcomes. Split checkouts use the `fill_card` then `confirm` flow described
-  above.
-  `operate_payment_status` follows the [payment guide](#one-prompt) bounded-wait
-  contract. It returns the session ID and includes it in every follow-up tool
-  hint, so an approval or submitted outcome is always observed in its originating
-  browser. Malformed calls return normal `invalid_arguments` handling, including a safe resolution
-  when `card_ref` and `card_label` conflict.
+- `list_payment_cards` returns saved-card labels and opaque references.
+  `inject_card` takes one explicit `card_ref`, purchase terms, and per-field
+  refs. It creates or resumes the single approval and returns per-field browser
+  outcomes plus approval metadata and last4; it never returns PAN/CVV or submits.
 - `list_credentials` and `use_credential` find saved credentials and make authenticated API calls without returning raw values.
   Before provisioning, call `list_credentials` with
   `{"service":["exa","groq","cartesia"],"fields":"summary"}` to check for

@@ -16,7 +16,7 @@ export const SLOW_POST_MERGE_FILES = [
 
 // Operator behavior suites that MUST gate every pull request (via test:fast,
 // alongside REQUIRED_PAYMENT_SAFETY_FILES). These exercise the operator's
-// fail-closed session/OAuth/payment/observation surfaces; deferring them to a
+// fail-closed session/OAuth/observation surfaces; deferring them to a
 // post-merge workflow let PRs merge green without their behavior tests ever
 // running. They run whole files — never select or shard individual test
 // names — same contract as REQUIRED_PAYMENT_SAFETY_FILES. The nightly full
@@ -54,22 +54,20 @@ export const REQUIRED_BEHAVIOR_FILES = [
 ];
 
 // Every file here gates every release. Run whole files: never select or shard
-// individual test names. This makes card sealing, approval, 3DS, credential
-// dispatch, and payment outcome coverage obvious and fail-closed.
+// individual test names. This keeps the narrow released-card output mask,
+// single purchase approval, targeted injection, and credential dispatch in the
+// required tier.
 export const REQUIRED_PAYMENT_SAFETY_FILES = [
   "src/__tests__/tools.test.ts",
   "src/bot/__tests__/card-value-output-mask.test.ts",
   "src/bot/__tests__/browser-inject-card.test.ts",
-  "src/bot/__tests__/browser-decoupled-3ds.test.ts",
-  "src/bot/__tests__/browser-payment.test.ts",
+  "src/bot/__tests__/operator-evidence.test.ts",
   "src/bot/__tests__/browser-screenshot.test.ts",
-  "src/bot/__tests__/checkout-operator-fixes.test.ts",
+  "src/bot/__tests__/card-release-approval.test.ts",
   "src/bot/__tests__/credential-shape.test.ts",
-  "src/bot/__tests__/manual-card-entry-guard.test.ts",
-  "src/bot/__tests__/pay-operator.test.ts",
   "src/tools/__tests__/credential-tools.test.ts",
 ];
 
 // Pre-existing quarantine owned by vitest.config.ts. It is intentionally not
 // silently promoted into either release tier until its tracked OOM is fixed.
-export const QUARANTINED_FILES = ["src/bot/__tests__/pay-mandate-web-seam.test.ts"];
+export const QUARANTINED_FILES: string[] = [];

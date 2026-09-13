@@ -32,6 +32,14 @@ class DeliveredPreDispatchFailure {
   constructor(readonly error: "stale_ref") {}
 }
 
+function maskSessionOutput<T>(
+  session: { browser: { maskOperatorOutput?: (value: T) => T } },
+  value: T,
+): T {
+  const mask = session.browser.maskOperatorOutput;
+  return typeof mask === "function" ? mask.call(session.browser, value) : value;
+}
+
 const capabilitySchema = z
   .object({
     cellId: z.string(),
@@ -113,6 +121,10 @@ function brokerCommandDispatchTracked(name: string): boolean {
   );
 }
 
+function isOperatorCommand(name: string): boolean {
+  return name.startsWith("operate_") || name === "inject_card";
+}
+
 async function withBrokerAuditContext<T>(
   api: ApiClient,
   taskId: string,
@@ -127,22 +139,21 @@ export function reconciliationOutcome(
   result: unknown,
 ): ReconciledDispatchOutcome {
   if (result !== null && typeof result === "object" && "write_id" in result && "stored" in result) {
-      const stored = "stored_credential" in result ? result.stored_credential : undefined;
-      const capture = captureEvidenceSchema.safeParse({
-        write_id: result.write_id,
-        stored: result.stored,
-        storage:
-          result.stored === true ? "stored" : "storage" in result ? result.storage : "unknown",
-        ...(stored !== null && typeof stored === "object" && "reference" in stored
-          ? { reference: stored.reference }
-          : {}),
-      });
-      if (capture.success && capture.data.storage === "not_attempted")
-        return { status: "not_dispatched", error: "pre_dispatch_failure", capture: capture.data };
-      if (capture.success)
-        return result.stored === true
-          ? { status: "completed", capture: capture.data }
-          : { status: "unknown", reason: "execution_error", capture: capture.data };
+    const stored = "stored_credential" in result ? result.stored_credential : undefined;
+    const capture = captureEvidenceSchema.safeParse({
+      write_id: result.write_id,
+      stored: result.stored,
+      storage: result.stored === true ? "stored" : "storage" in result ? result.storage : "unknown",
+      ...(stored !== null && typeof stored === "object" && "reference" in stored
+        ? { reference: stored.reference }
+        : {}),
+    });
+    if (capture.success && capture.data.storage === "not_attempted")
+      return { status: "not_dispatched", error: "pre_dispatch_failure", capture: capture.data };
+    if (capture.success)
+      return result.stored === true
+        ? { status: "completed", capture: capture.data }
+        : { status: "unknown", reason: "execution_error", capture: capture.data };
   }
   return { status: "completed" };
 }
@@ -293,7 +304,7 @@ export class OperatorBroker implements BrokerTransportPort {
     if (method !== "tool") throw new BrokerRefusal("unknown_method", "Unknown broker method");
     const input = callSchema.parse(params);
     const tool = findTool(input.name, this.tools);
-    if (tool === null || !tool.name.startsWith("operate_"))
+    if (tool === null || !isOperatorCommand(tool.name))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
     if (tool.name === "operate_finish" && typeof args.session_id === "string") {
@@ -559,7 +570,10 @@ export class OperatorBroker implements BrokerTransportPort {
                   });
                 }
                 if (mutating) {
-                  const message = error instanceof Error ? error.message : String(error);
+                  const message = maskSessionOutput(
+                    session,
+                    error instanceof Error ? error.message : String(error),
+                  );
                   const code =
                     error instanceof BrokerRefusal ? error.code : "tool_execution_failed";
                   const recovery = knownNotDispatched
@@ -581,7 +595,7 @@ export class OperatorBroker implements BrokerTransportPort {
                     ...(captureEvidence ? { capture: captureEvidence } : {}),
                   },
                 });
-              return remapSession(result, internalId, id);
+              return maskSessionOutput(session, remapSession(result, internalId, id));
             },
             close: async (reason) => {
               const forwarderId = journalForwarderId(principal);
@@ -705,7 +719,7 @@ export class OperatorBroker implements BrokerTransportPort {
   } | null> {
     const input = recoverySchema.parse(params);
     const tool = findTool(input.name, this.tools);
-    if (tool === null || !tool.name.startsWith("operate_"))
+    if (tool === null || !isOperatorCommand(tool.name))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
     const explicitFailure = input.preDispatchFailure;

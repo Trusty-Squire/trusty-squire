@@ -178,112 +178,33 @@ and transferred secrets are not returned to the agent.
 ## Payment Flow
 
 ```text
-cart and checkout observations expose a best-effort checkout state
-  -> the agent adds items through the observed cart UI with operate_click,
-     then re-observes before proceeding
-  -> checkout state is informational only; it is never a charge input
-  -> observed card controls direct the agent to operate_pay, while model-supplied
-     PAN-shaped entry remains refused; operate_pay establishes the approval amount
-     without exposing the vaulted card to the model
-agent starts operate_pay in the addressed checkout session
-  -> operate_pay accepts that session_id; omission is compatible only when the
-     MCP process has exactly one session and never selects a newest session
-  -> agent supplies a non-empty item and reason
-  -> a single-page checkout prefers merchant, origin, and payable total from the
-     live page; when the total is unreadable, caller-supplied amount_cents and
-     currency become the approval amount and an omitted merchant falls back to
-     the checkout hostname
-  -> every session observation best-effort captures the most recent real checkout
-     total, replacing the prior value after a successful read and preserving it
-     when a later page has no total; the value remains scoped to its page origin
-  -> split fill_card first reads the live card-entry total; when none is readable,
-     caller-supplied amount_cents and currency take precedence, otherwise it may
-     use that same session's captured total after re-checking the current origin.
-     Subtotal and recommendation-price qualification follows the payment contract
-     in [SECURITY.md](../SECURITY.md)
-  -> card readiness and unsupported-wallet detection follow the payment contract
-     in [SECURITY.md](../SECURITY.md#client-encrypted-card-data)
-  -> an explicit card is used; otherwise one saved card is selected automatically,
-     no saved cards starts add-card, and multiple cards require a user choice
-  -> operator creates an ephemeral key; API creates a short-lived approval relay
-     and attaches the requesting MCP host's initialize clientInfo.name
-  -> operate_pay surfaces that approval link, then waits server-side for up to
-     one minute; an approval_pending result is resumed by calling operate_pay
-     again with the same arguments, never by minting another approval
-  -> if the approval has no card, the user adds one and the API binds that saved
-     card to the still-pending approval
-  -> the approval page displays the canonical purchase details from the ceremony
-     response (apps/api/README.md); authentication follows SECURITY.md
-  -> the user reviews that intent and one passkey ceremony signs the canonical
-     payload, unlocks the card, and seals it to the ephemeral operator
-  -> before submitting approval, the user may instead deny the pending request;
-     denial atomically clears staged candidates, and later confirmation fails
-  -> the API stages that opaque candidate in an account-scoped Postgres relay with
-     a 15-second TTL so another API worker can deliver it to the waiting operator
-  -> operate_payment_status is an optional non-charging pre-charge status view and
-     the required continuation for a post-submit outcome; its 0-60-second bound
-     is implemented as repeated short server waits within one tool call
-  -> payment calls resolve the same session once at tool entry and return its
-     session_id in their result and every follow-up hint
-  -> observed denial or expiry scrubs the operator private key; subsequent
-     attempt recovery follows the README payment guide ("One prompt")
-  -> the operator verifies the final JWS, opens the card, and confirms the exact
-     candidate fingerprint; successful confirmation clears the JWS and ciphertext
-  -> single-page add-card attempts to re-read every signed checkout field; a
-     successful read must still match, while an unreadable total reuses the
-     original mandate-bound checkout
-  -> split fill_card requires the current origin to match its amount-bound mandate
-     and fills without submitting; only the main frame,
-     same-registrable-domain HTTPS frames, and curated HTTPS payment-provider frames
-     can receive card data
-  -> PAN, expiry, and CVV are required; cardholder name and other billing fields
-     are filled best-effort, so a missing name field does not abort the payment
-  -> before a single-page submit, a competing merchant-saved card radio is switched
-     only when there is one unambiguous new-card choice; the choice and sealed values
-     are rechecked immediately before dispatch, and every ambiguous state fails closed
-  -> the raw card is zeroed; the filled page fields remain (marked for cleanup and
-     saved-card resolution, NOT masked — observations and screenshots show them),
-     while session state retains only approval/mandate and card-reference metadata
-  -> the caller verifies the live final total against the approved amount itself
-     and places the order through operate_click. For an operate_click, the session's
-     fill-time approval snapshot permits at most one dispatch to a control matching
-     the shared pay/place-order label heuristic; a repeat is refused and requires a
-     fresh approval in a fresh session. Non-charge-labeled clicks, key presses, and
-     OAuth controls remain ungated. Card VALUES are visible in observations and
-     screenshots once filled — the operator masks no read (owner's order,
-     2026-09-05); the money-fence is the phone approval and the one-shot charge
-     click, not concealment
-  -> a dispatched recognized place-order click best-effort records one metadata-only
-     `vault.payment_executed` event with `payment_place_order_attempted` status,
-     bound to the approval, optional mandate, approved amount/currency, merchant,
-     and opaque card reference. It records an attempt, never a verified charge outcome
-  -> split confirmation and passive outcome tracking follow the README payment
-     guide ("One prompt"); confirmation releases the pending-fill lease into a
-     sealed state without clearing the filled fields. There is no same-session
-     refill; operate_finish + a fresh session recovers a stuck or declined payment
-  -> the addressed session owns and serializes payment entry and confirmation;
-     another session cannot observe or resume that approval (the contract lives
-     in SECURITY.md)
-  -> only the single-page (phase="single") flow still submits and enters the
-     bounded authentication/outcome wait below; notification behavior for both
-     payment paths is owned by the README payment guide ("One prompt")
-  -> the browser completes authentication natively while the operator polls for a new
-     merchant terminal route with a substantive order or receipt identity and passively
-     compares ACS issuer/network/last-four evidence with the released card. A mismatch
-     is a persistent structured warning, not a challenge mutation or second approval;
-     captcha-hosted frames are excluded from challenge and failure-text classification
-  -> a visible decline is payment_declined; a genuine unresolved challenge is
-     payment_3ds_required, while an attempt without merchant-terminal or 3-D
-     Secure evidence remains payment_outcome_unknown across status checks
-  -> the post-wait metadata-only payment status is audited
-  -> operate_finish closes that session's admission gate, drains calls that already
-     entered, clears any remaining payment state, and closes without a payment-state veto;
-     payment-sensitive profiles are destroyed rather than pooled
+agent observes checkout DOM/AX, pixels, console, and network evidence
+  -> amount, currency, DCC, errors, frames, and 3-D Secure controls stay visible
+agent calls inject_card with purchase terms, card_ref, and exact field refs
+  -> existing single human purchase approval is created or resumed
+  -> phone decrypts and seals the selected card to the local operator
+  -> operator verifies the signed release
+  -> released PAN/CVV output mask is installed before the first write
+  -> only the named same-origin or reachable cross-origin fields are filled
+  -> per-field browser outcomes and approval metadata return; PAN/CVV do not
+agent re-observes and drives the checkout with generic browser actions
+  -> partial fills can be retried under the same still-valid approval
+  -> agent chooses currency, clicks place order, waits, and handles 3-D Secure
+  -> operator does not guess submit controls, validate totals, clear fields,
+     arbitrate saved cards, or keep post-submit payment custody
 ```
 
-The detailed cryptographic checks and card-data boundary live in
-[`SECURITY.md`](../SECURITY.md#client-encrypted-card-data); the API route
-reference lives in [`apps/api/README.md`](../apps/api/README.md#endpoints).
+The normal read path is the masked snapshot. DOM/AX values and attributes,
+subtree/query/compact/full observations, console and exception evidence, network
+headers and bodies, errors, diagnostics, and viewport/full/frame screenshots all
+pass through the released-card mask. The mask is narrow: complete PAN and the
+released security code only. All other checkout evidence remains verbatim.
+
+Raw browser evaluation remains internal. Ordinary forms and reachable hosted
+fields are covered; a hostile page can transform, split, encode, or draw a value
+so it no longer matches. The architecture does not claim adversarial
+information-flow containment and adds no broad scanner, host allowlist, payment
+validation gate, rate limit, or second approval.
 
 ## Skill Lifecycle
 

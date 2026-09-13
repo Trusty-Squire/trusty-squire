@@ -53,20 +53,6 @@ const PRODUCT_URL = `data:text/html,${encodeURIComponent(`
 
 let browser: Browser;
 
-const PAYMENT_FIXTURE_CARD = {
-  pan: "4242424242424242",
-  exp_month: "12",
-  exp_year: "30",
-  cvv: "123",
-  name: "Synthetic Cardholder",
-  billing: {
-    line1: "123 Synthetic Street",
-    city: "Testville",
-    postal_code: "10001",
-    country: "US",
-  },
-};
-
 async function controllerForProduct(): Promise<{ controller: BrowserController; product: Page }> {
   const context = await browser.newContext();
   const product = await context.newPage();

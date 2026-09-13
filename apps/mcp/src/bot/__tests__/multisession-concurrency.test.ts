@@ -170,8 +170,6 @@ import {
   finishProvisionSession,
   closeAllProvisionSessions,
 } from "../provision-session.js";
-import type { Session } from "../provision-session.js";
-import { sessionForCall } from "../session/lifecycle.js";
 
 let profileDir: string;
 

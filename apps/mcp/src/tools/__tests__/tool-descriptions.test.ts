@@ -12,7 +12,6 @@ import { describe, expect, it } from "vitest";
 import {
   OPERATE_TOOLS,
   operateLoginTool,
-  operateTypeTool,
   provisionScreenshotTool,
   operateFillCredentialTool,
   provisionStartTool,
@@ -116,10 +115,7 @@ describe("still-true contracts survive the cleanup", () => {
 
   it("inject_card guidance is present in its tool and the operator surface", () => {
     expect(injectCardTool.description).toContain("single human purchase approval");
-    // The money fence on `type` is a WRITE refusal that still exists; #663
-    // removed read seals, not this.
-    expect(operateTypeTool.description).toContain("card-number-shaped text is refused");
-    expect(operateTypeTool.description).toContain("inject_card");
+    expect(injectCardTool.description).toContain("fill only the supplied observation refs");
     expect(provisionStartTool.description).toContain("inject_card");
   });
 });

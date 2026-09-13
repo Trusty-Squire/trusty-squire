@@ -1,7 +1,6 @@
 import { captureBoundScreenshot, type ScreenshotBinding } from "./screenshot-click.js";
 import { captureBrowserUseDOM, type BrowserUseCapture } from "./browser-use-capture.js";
 import {
-  CARD_MASK_ATTRIBUTE,
   CardValueOutputMask,
   compositePngCardMasks,
   type CardMaskKind,
@@ -50,7 +49,6 @@ import {
   type StealthProfile,
 } from "./browser-process-runtime.js";
 
-import { isSameRecipeDomain } from "@trusty-squire/recipe-schema";
 import { type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
@@ -555,35 +553,6 @@ function classifyCheckoutCurrencyToken(token: string | undefined): string | unde
   return resolveCheckoutCurrencyToken(token);
 }
 
-const AMBIGUOUS_CONFIRM_CURRENCY_NOTATIONS = new Set(["$", "¥", "￥"]);
-const CONFIRM_DOLLAR_PREFIX_CURRENCIES: Readonly<Record<string, string>> = {
-  A: "AUD",
-  AU: "AUD",
-  C: "CAD",
-  CA: "CAD",
-  HK: "HKD",
-  MX: "MXN",
-  NZ: "NZD",
-  SG: "SGD",
-  US: "USD",
-};
-
-function classifyCheckoutConfirmCurrencyToken(token: string | undefined): string | undefined {
-  if (token === undefined) return undefined;
-  const upper = token.toUpperCase();
-  if (upper.endsWith("$") && upper.length > 1) {
-    const prefix = upper.slice(0, -1);
-    const currency = CHECKOUT_CURRENCY_CODES.has(prefix)
-      ? prefix
-      : CONFIRM_DOLLAR_PREFIX_CURRENCIES[prefix];
-    if (currency !== undefined) return currency;
-  }
-  if (AMBIGUOUS_CONFIRM_CURRENCY_NOTATIONS.has(upper)) {
-    return undefined;
-  }
-  return classifyCheckoutCurrencyToken(token);
-}
-
 // A lone separator with three trailing digits is ambiguous: it can be either a
 // group ("1,000") or, for a three-minor-unit currency, a fraction ("1.000").
 // Preserve the existing parser's handling of that case. Shorter trailing groups
@@ -665,35 +634,6 @@ function parseCheckoutAmountResult(
     }
   }
   return null;
-}
-
-// The already-approved/selected currency (captured at fill_card time) is
-// passed as fallbackCurrency so a page notation that can't be pinned to one
-// ISO currency on its own (a bare "$" shared by USD/CAD/AUD/…, an FX-preview
-// module's secondary total, …) resolves against it instead of blocking the
-// confirm read. Retains every match instead of returning on the first, so a
-// currency-selector/FX-conversion widget positioned above the real order
-// summary — its own stray "total"-labeled line included — never wins over the
-// final payable total that follows it in reading order.
-function parseCheckoutConfirmAmountResult(
-  texts: readonly string[],
-  fallbackCurrency?: string,
-): CheckoutAmount | null {
-  let amount: CheckoutAmount | null = null;
-  for (const text of texts) {
-    checkoutTotalPattern.lastIndex = 0;
-    for (const match of text.matchAll(checkoutTotalPattern)) {
-      if (match[0].startsWith("小計")) continue;
-      const parsed = parseCheckoutAmountMatch(
-        text,
-        match,
-        fallbackCurrency,
-        classifyCheckoutConfirmCurrencyToken,
-      );
-      if (parsed !== null) amount = parsed;
-    }
-  }
-  return amount;
 }
 
 export function parseCheckoutAmount(
@@ -1080,37 +1020,6 @@ function extractCheckoutSummaryText(): string {
   }
 }
 
-function extractCheckoutConfirmSummaryText(): string {
-  const body = document.body;
-  if (!body) return "";
-  const excluded: Array<{ el: HTMLElement | SVGElement; style: string | null }> = [];
-  try {
-    for (const el of Array.from(body.querySelectorAll("*"))) {
-      if (!(el instanceof HTMLElement || el instanceof SVGElement)) continue;
-      const style = window.getComputedStyle(el);
-      const tagName = el.tagName.toLowerCase();
-      const struck =
-        tagName === "del" ||
-        tagName === "s" ||
-        tagName === "strike" ||
-        style.textDecorationLine.split(/\s+/).includes("line-through");
-      if (!struck && Number.parseFloat(style.opacity) > 0) continue;
-      excluded.push({ el, style: el.getAttribute("style") });
-      el.style.setProperty("display", "none", "important");
-    }
-    return body.innerText ?? "";
-  } finally {
-    for (const { el, style } of excluded.reverse()) {
-      if (style === null) {
-        el.style.removeProperty("display");
-        if (el.getAttribute("style") === "") el.removeAttribute("style");
-      } else {
-        el.setAttribute("style", style);
-      }
-    }
-  }
-}
-
 function extractObservationVisibleText(): string {
   const body = document.body;
   if (!body) return "";
@@ -1136,85 +1045,6 @@ function extractObservationVisibleText(): string {
     }
   }
   return text;
-}
-
-function elementHasEffectiveVisibleRect(element: Element): boolean {
-  if (!element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
-  const view = element.ownerDocument.defaultView;
-  if (view === null) return false;
-  const rect = element.getBoundingClientRect();
-  let left = Math.max(rect.left, 0);
-  let top = Math.max(rect.top, 0);
-  let right = Math.min(rect.right, view.innerWidth);
-  let bottom = Math.min(rect.bottom, view.innerHeight);
-  const clips = (overflow: string): boolean =>
-    /^(?:auto|clip|hidden|overlay|scroll)$/.test(overflow);
-  let ancestor = element.parentElement;
-  while (ancestor !== null) {
-    const style = view.getComputedStyle(ancestor);
-    const clipsX = clips(style.overflowX);
-    const clipsY = clips(style.overflowY);
-    if (clipsX || clipsY) {
-      const ancestorRect = ancestor.getBoundingClientRect();
-      const clientLeft = ancestor instanceof HTMLElement ? ancestor.clientLeft : 0;
-      const clientTop = ancestor instanceof HTMLElement ? ancestor.clientTop : 0;
-      const clipLeft = ancestorRect.left + clientLeft;
-      const clipTop = ancestorRect.top + clientTop;
-      const clipRight =
-        clipLeft + (ancestor instanceof HTMLElement ? ancestor.clientWidth : ancestorRect.width);
-      const clipBottom =
-        clipTop + (ancestor instanceof HTMLElement ? ancestor.clientHeight : ancestorRect.height);
-      if (clipsX) {
-        left = Math.max(left, clipLeft);
-        right = Math.min(right, clipRight);
-      }
-      if (clipsY) {
-        top = Math.max(top, clipTop);
-        bottom = Math.min(bottom, clipBottom);
-      }
-    }
-    ancestor = ancestor.parentElement;
-  }
-  return right - left >= 4 && bottom - top >= 4;
-}
-
-const PAYMENT_PAN_MAX_SPAN_CHARS = 96;
-
-function passesPaymentLuhn(digits: string): boolean {
-  let sum = 0;
-  let double = false;
-  for (let index = digits.length - 1; index >= 0; index -= 1) {
-    let digit = Number(digits[index]);
-    if (double) {
-      digit *= 2;
-      if (digit > 9) digit -= 9;
-    }
-    sum += digit;
-    double = !double;
-  }
-  return sum % 10 === 0;
-}
-
-function containsLuhnPanSpan(text: string): boolean {
-  const digitPositions = Array.from(text.matchAll(/\d/g), (match) => match.index);
-  for (let start = 0; start + 13 <= digitPositions.length; start += 1) {
-    const maxLength = Math.min(19, digitPositions.length - start);
-    for (let length = 13; length <= maxLength; length += 1) {
-      const positions = digitPositions.slice(start, start + length);
-      if (positions[positions.length - 1]! - positions[0]! + 1 > PAYMENT_PAN_MAX_SPAN_CHARS) {
-        break;
-      }
-      const digits = positions.map((position) => text[position]).join("");
-      if (passesPaymentLuhn(digits)) return true;
-    }
-  }
-  return false;
-}
-
-function containsVisiblePaymentMaterial(text: string): boolean {
-  return (
-    containsLuhnPanSpan(text) || /\b(?:cvv|cvc|security\s+code)\s*[:#-]?\s*\d{3,4}\b/iu.test(text)
-  );
 }
 
 function merchantFromPage(title: string, siteName: string, url: string): string {
@@ -1861,6 +1691,10 @@ export class BrowserController {
     return this.cardValueOutputMask.maskValue(value);
   }
 
+  private logOperatorDiagnostic(message: string): void {
+    console.error(this.cardValueOutputMask.maskText(message));
+  }
+
   readOperatorEvidence(since = 0, requestId?: string) {
     return this.operatorEvidence.read(since, requestId);
   }
@@ -2083,7 +1917,7 @@ export class BrowserController {
       void (async () => {
         if (trace) {
           const before = await frame.evaluate(RENDERER_PROBE).catch(() => "eval-fail");
-          console.error(`[captcha-fp] ${cfHost} renderer BEFORE spoof: ${before}`);
+          this.logOperatorDiagnostic(`[captcha-fp] ${cfHost} renderer BEFORE spoof: ${before}`);
         }
         // Retry until the spoof STICKS. The first framenavigated commonly
         // eval-fails (frame mid-commit, or a throwaway about:blank hCaptcha
@@ -2099,7 +1933,7 @@ export class BrowserController {
           else await new Promise((res) => setTimeout(res, 150));
         }
         if (trace) {
-          console.error(
+          this.logOperatorDiagnostic(
             `[captcha-fp] ${cfHost} renderer AFTER spoof:  ${landed ? "Intel (landed)" : "FAILED to land in budget"}`,
           );
         }
@@ -2139,7 +1973,7 @@ export class BrowserController {
             // body may be evicted; ignore
           }
         }
-        console.error(
+        this.logOperatorDiagnostic(
           `[captcha-trace] ${status} ${url}${
             bodyPreview ? "\n  body: " + bodyPreview.replace(/\n/g, "\\n") : ""
           }`,
@@ -2148,7 +1982,7 @@ export class BrowserController {
       page.on("console", (msg) => {
         const text = msg.text();
         if (!/turnstile|cloudflare|challenge|recaptcha/i.test(text)) return;
-        console.error(`[captcha-trace] console.${msg.type()}: ${text}`);
+        this.logOperatorDiagnostic(`[captcha-trace] console.${msg.type()}: ${text}`);
       });
     }
   }
@@ -2249,7 +2083,7 @@ export class BrowserController {
         // Routing race / already-handled — never let a decision crash nav.
       }
     });
-    console.error(
+    this.logOperatorDiagnostic(
       "[operator] resource blocking ON (image/media/font aborted; captcha/CSS/JS allowed)",
     );
   }
@@ -2402,7 +2236,7 @@ export class BrowserController {
       // Any step in the chain failing leaves us at *some* page (the
       // search results, the marketing site, an error page) — that's
       // still better than a cold landing on /sign_up. Log and proceed.
-      console.error(
+      this.logOperatorDiagnostic(
         `[operator] referrer-chain prewarm partial failure (non-fatal): ${
           err instanceof Error ? err.message : String(err)
         }`,
@@ -2456,9 +2290,8 @@ export class BrowserController {
     await page.waitForSelector(selector, { state: "visible", timeout: 10000 });
     await markOperatorMutationDispatchAttempted();
     const locator = page.locator(selector);
-    // The marker is payment machinery — the card-clearing and saved-card
-    // resolution passes find the fields they filled through it. It is not a
-    // read seal: nothing masks or refuses a read because of it.
+    // Internal secret writers may retain this provenance marker. It is not a
+    // generic read seal and never refuses an observation or browser action.
     if (sealed) {
       await locator.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
     }
@@ -3476,12 +3309,7 @@ export class BrowserController {
     });
     return Array.from(
       new Set(
-        [
-          signals.ariaLabel,
-          signals.inputValue,
-          signals.textContent,
-          ...signals.labelTexts,
-        ]
+        [signals.ariaLabel, signals.inputValue, signals.textContent, ...signals.labelTexts]
           .map((label) => label?.trim() ?? "")
           .filter((label) => label.length > 0),
       ),
@@ -5372,9 +5200,9 @@ export class BrowserController {
           out.touchPoints = navigator.maxTouchPoints;
           return out;
         });
-        console.error("[fingerprint] " + JSON.stringify(fp));
+        this.logOperatorDiagnostic("[fingerprint] " + JSON.stringify(fp));
       } catch (err) {
-        console.error(
+        this.logOperatorDiagnostic(
           "[fingerprint] probe failed: " + (err instanceof Error ? err.message : String(err)),
         );
       }
@@ -6530,80 +6358,95 @@ export class BrowserController {
         }
       }
       const local = await frame
-        .evaluate(({ pans, cvvs }) => {
-          const found: Array<{ x: number; y: number; width: number; height: number }> = [];
-          const roots: Array<Document | ShadowRoot> = [document];
-          const nativeShadowRoot = Object.getOwnPropertyDescriptor(
-            Element.prototype,
-            "shadowRoot",
-          )?.get;
-          for (let index = 0; index < roots.length; index += 1) {
-            for (const element of Array.from(roots[index]!.querySelectorAll("*"))) {
-              const shadow = nativeShadowRoot?.call(element) as ShadowRoot | null | undefined;
-              if (shadow !== null && shadow !== undefined) roots.push(shadow);
+        .evaluate(
+          ({ pans, cvvs, targets }) => {
+            const found: Array<{ x: number; y: number; width: number; height: number }> = [];
+            const roots: Array<Document | ShadowRoot> = [document];
+            const nativeShadowRoot = Object.getOwnPropertyDescriptor(
+              Element.prototype,
+              "shadowRoot",
+            )?.get;
+            for (let index = 0; index < roots.length; index += 1) {
+              for (const element of Array.from(roots[index]!.querySelectorAll("*"))) {
+                const shadow = nativeShadowRoot?.call(element) as ShadowRoot | null | undefined;
+                if (shadow !== null && shadow !== undefined) roots.push(shadow);
+              }
             }
-          }
-          const pushControlValue = (element: Element): void => {
-            const box = element.getBoundingClientRect();
-            if (box.width <= 0 || box.height <= 0) return;
-            const insetX = Math.min(8, box.width * 0.08);
-            const insetY = Math.min(6, box.height * 0.2);
-            found.push({
-              x: box.x + insetX,
-              y: box.y + insetY,
-              width: Math.max(1, box.width - insetX * 2),
-              height: Math.max(1, box.height - insetY * 2),
-            });
-          };
-          const cvvLabel = /\b(?:cvv|cvc|cid|csc|security\s*code)\b/i;
-          for (const root of roots) {
-            root
-              .querySelectorAll('[data-ts-card-mask="pan"],[data-ts-card-mask="cvv"]')
-              .forEach(pushControlValue);
-            const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-            let current: Node | null;
-            while ((current = walker.nextNode()) !== null) {
-              const value = current.nodeValue ?? "";
-              const patterns = pans.map(
-                (pan) =>
-                  new RegExp(
-                    `(?<!\\d)${[...pan]
-                      .map((digit) => `${digit}[\\s-]*`)
-                      .join("")
-                      .replace(/\[\\s-\]\*$/, "")}(?!\\d)`,
-                    "g",
-                  ),
-              );
-              let labelledCvvCopy = false;
-              let ancestor = current.parentElement;
-              for (let depth = 0; ancestor !== null && depth < 3; depth += 1) {
-                const ancestorText = ancestor.textContent ?? "";
-                if (ancestorText.length <= 160 && cvvLabel.test(ancestorText)) {
-                  labelledCvvCopy = true;
-                  break;
+            const pushControlValue = (element: Element): void => {
+              const box = element.getBoundingClientRect();
+              if (box.width <= 0 || box.height <= 0) return;
+              const insetX = Math.min(8, box.width * 0.08);
+              const insetY = Math.min(6, box.height * 0.2);
+              found.push({
+                x: box.x + insetX,
+                y: box.y + insetY,
+                width: Math.max(1, box.width - insetX * 2),
+                height: Math.max(1, box.height - insetY * 2),
+              });
+            };
+            const cvvLabel = /\b(?:cvv|cvc|cid|csc|security\s*code)\b/i;
+            for (const root of roots) {
+              root
+                .querySelectorAll('[data-ts-card-mask="pan"],[data-ts-card-mask="cvv"]')
+                .forEach(pushControlValue);
+              for (const target of targets) {
+                try {
+                  root.querySelectorAll(target.selector).forEach(pushControlValue);
+                } catch {
+                  // A stale or browser-specific selector is an ordinary miss.
                 }
-                ancestor = ancestor.parentElement;
               }
-              if (labelledCvvCopy) {
-                for (const cvv of cvvs) patterns.push(new RegExp(`(?<!\\d)${cvv}(?!\\d)`, "g"));
-              }
-              for (const pattern of patterns) {
-                for (const match of value.matchAll(pattern)) {
-                  if (match.index === undefined) continue;
-                  const range = document.createRange();
-                  range.setStart(current, match.index);
-                  range.setEnd(current, match.index + match[0].length);
-                  for (const box of Array.from(range.getClientRects())) {
-                    if (box.width > 0 && box.height > 0) {
-                      found.push({ x: box.x, y: box.y, width: box.width, height: box.height });
+              const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+              let current: Node | null;
+              while ((current = walker.nextNode()) !== null) {
+                const value = current.nodeValue ?? "";
+                const patterns = pans.map(
+                  (pan) =>
+                    new RegExp(
+                      `(?<!\\d)${[...pan]
+                        .map((digit) => `${digit}[\\s-]*`)
+                        .join("")
+                        .replace(/\[\\s-\]\*$/, "")}(?!\\d)`,
+                      "g",
+                    ),
+                );
+                let labelledCvvCopy = false;
+                let ancestor = current.parentElement;
+                for (let depth = 0; ancestor !== null && depth < 3; depth += 1) {
+                  const ancestorText = ancestor.textContent ?? "";
+                  if (ancestorText.length <= 160 && cvvLabel.test(ancestorText)) {
+                    labelledCvvCopy = true;
+                    break;
+                  }
+                  ancestor = ancestor.parentElement;
+                }
+                if (labelledCvvCopy) {
+                  for (const cvv of cvvs) patterns.push(new RegExp(`(?<!\\d)${cvv}(?!\\d)`, "g"));
+                }
+                for (const pattern of patterns) {
+                  for (const match of value.matchAll(pattern)) {
+                    if (match.index === undefined) continue;
+                    const range = document.createRange();
+                    range.setStart(current, match.index);
+                    range.setEnd(current, match.index + match[0].length);
+                    for (const box of Array.from(range.getClientRects())) {
+                      if (box.width > 0 && box.height > 0) {
+                        found.push({ x: box.x, y: box.y, width: box.width, height: box.height });
+                      }
                     }
                   }
                 }
               }
             }
-          }
-          return found;
-        }, needles)
+            return found;
+          },
+          {
+            ...needles,
+            targets: this.cardValueOutputMask.screenshotTargets(
+              frame === page.mainFrame() ? null : this.framePath(frame),
+            ),
+          },
+        )
         .catch(() => []);
       for (const rect of local) {
         rects.push({ ...rect, x: rect.x + offset.x, y: rect.y + offset.y });
@@ -8708,8 +8551,7 @@ export class BrowserController {
   // The DOM-walk + extraction logic, generalized to run against ANY frame
   // context (the main page or a child <iframe>'s own Frame) — Playwright's
   // Frame.evaluate reaches a cross-origin frame's main world at the CDP level,
-  // the same primitive isPayPalHostedCheckout/fillAndSubmitCheckout/
-  // detectThreeDsChallenge already use to read/fill cross-origin PSP fields.
+  // the same primitive direct frame-targeted actions use for hosted fields.
   // Pulled out of extractInteractiveElements (below) so that method can call
   // it once for the main frame and once per child frame, tagging each result
   // with where it came from.
@@ -9720,8 +9562,8 @@ export class BrowserController {
   // the escape hatch for a control missing from the main-frame inventory.
   // Plain Playwright locator actions cover the money-path case this exists
   // for (a merchant's own same-domain checkout options rendered in an
-  // iframe), the same primitives fillAndSubmitCheckout already relies on for
-  // cross-origin PSP fields.
+  // iframe), using the same cross-origin frame resolution as other direct
+  // frame-targeted actions.
   async clickInFrame(
     target: FrameTarget,
     selector: string,
@@ -9923,6 +9765,13 @@ export class BrowserController {
         continue;
       }
       const element = target.element;
+      if (field === "pan" || field === "cvv") {
+        this.cardValueOutputMask.registerTarget({
+          kind: field,
+          selector: element.selector,
+          framePath: element.framePath ?? null,
+        });
+      }
       let handle: ElementHandle<Element> | null = null;
       try {
         handle =
@@ -9996,15 +9845,11 @@ export class BrowserController {
     }));
 
     // Cross-frame support — surface elements inside child <iframe>s (same- AND
-    // cross-origin), each tagged with the frame's own origin/url so a caller
-    // can apply domain-lock/secret-fill guards against the ELEMENT's real
-    // origin, never the top page's (see frameTargetAllowed in
-    // provision-session.ts — the load-bearing reason this tag exists at
-    // all). Nothing is flattened away: every frame element keeps its origin.
+    // cross-origin), each tagged with the frame's own origin/url so direct
+    // observation and action can address the correct document. Nothing is
+    // flattened away: every frame element keeps its origin.
     // page.frames() is already flat (it includes nested frames, not just
-    // direct children) — the same primitive isPayPalHostedCheckout/
-    // fillAndSubmitCheckout/detectThreeDsChallenge use to reach cross-origin
-    // frame content.
+    // direct children) and reaches cross-origin hosted-field content.
     const framedElements: Array<Omit<InteractiveElement, "index">> = [];
     for (const frame of page.frames()) {
       if (frame === page.mainFrame() || frame.isDetached()) continue;
@@ -11012,10 +10857,10 @@ export class BrowserController {
     try {
       cdp = await this.context.newCDPSession(this.page);
       await cdp.send("FedCm.enable", { disableRejectionDelay: true });
-      console.error("[operator] FedCm.enable ok — listening for dialogShown");
+      this.logOperatorDiagnostic("[operator] FedCm.enable ok — listening for dialogShown");
       cdp.on("FedCm.dialogShown", (ev: unknown) => {
         const e = ev as { dialogId?: string; dialogType?: string; accounts?: unknown[] };
-        console.error(
+        this.logOperatorDiagnostic(
           `[operator] FedCm.dialogShown type=${e.dialogType ?? "?"} accounts=${
             Array.isArray(e.accounts) ? e.accounts.length : "?"
           }`,
@@ -11065,7 +10910,7 @@ export class BrowserController {
       });
     } catch (err) {
       cdp = null; // FedCm domain unavailable — the popup path still works
-      console.error(
+      this.logOperatorDiagnostic(
         `[operator] FedCm.enable failed (${
           err instanceof Error ? err.message : String(err)
         }) — FedCM path disabled, relying on popup`,
@@ -11147,7 +10992,7 @@ export class BrowserController {
       }
       return { ok: true, via: "fedcm" };
     }
-    console.error(
+    this.logOperatorDiagnostic(
       `[operator] GSI resolved via none — fedcmEnabled=${cdp !== null} ` +
         `fedcmResolved=${fedcmResolved} pages=${this.context.pages().length}`,
     );
@@ -11795,7 +11640,7 @@ export class BrowserController {
             .filter((t) => t.length > 0);
         })
         .catch(() => [] as string[]);
-      console.error(
+      this.logOperatorDiagnostic(
         `[operator] GitHub advanceOAuthConsent failed — visible buttons: ` +
           `${seen.length === 0 ? "<none>" : seen.map((s) => JSON.stringify(s)).join(", ")}`,
       );
@@ -11969,7 +11814,7 @@ export class BrowserController {
           .filter((t) => t.length > 0);
       })
       .catch(() => [] as string[]);
-    console.error(
+    this.logOperatorDiagnostic(
       `[operator] Google advanceOAuthConsent failed — visible buttons: ` +
         `${seen.length === 0 ? "<none>" : seen.map((s) => JSON.stringify(s)).join(", ")}`,
     );
