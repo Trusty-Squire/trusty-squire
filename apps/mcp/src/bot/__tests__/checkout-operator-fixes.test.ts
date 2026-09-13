@@ -1,5 +1,6 @@
 import { BrowserController } from "../browser.js";
 import { recognizedPaymentProviderFrame, scopedOrderSummaryText } from "../browser.js";
+import { chromium } from "playwright";
 import { describe, expect, it, vi } from "vitest";
 
 // ── Defect B ────────────────────────────────────────────────────────────────
