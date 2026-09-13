@@ -4,6 +4,7 @@ import {
   currentOperatorOperationId,
   markOperatorMutationDispatchAttempted,
   operatorMutationDispatchPhase,
+  reconcileOperatorMutationNotDispatched,
   persistOperatorCaptureEvidence,
   throwIfOperatorRequestCancelled,
 } from "../bot/request-cancellation.js";
@@ -1729,6 +1730,7 @@ export const operateClickTool: Tool<z.infer<typeof clickSchema>> = {
       target: args.ref ?? "<screenshot-point>",
       ...(args.screenshot ? { screenshot: args.screenshot } : {}),
     };
+    const phaseBeforeClick = operatorMutationDispatchPhase();
     try {
       const result = await runAction(args.session_id, action, args.format ?? "compact");
       return args.screenshot
@@ -1766,6 +1768,7 @@ export const operateClickTool: Tool<z.infer<typeof clickSchema>> = {
         !/intercepts pointer events/.test(error.message)
       )
         throw error;
+      reconcileOperatorMutationNotDispatched(phaseBeforeClick);
       return await runAction(
         args.session_id,
         { ...action, kind: "js_click" },

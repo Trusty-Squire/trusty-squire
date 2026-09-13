@@ -6656,17 +6656,65 @@ export class BrowserController {
   }
 
   /** Canonical tree capture, with the existing whole-document action bindings. */
-  async extractBrowserUseObservation(page: Page | null = this.page): Promise<BrowserUseCapture> {
+  async extractBrowserUseObservation(
+    page: Page | null = this.page,
+    settlePage = false,
+  ): Promise<BrowserUseCapture> {
     if (page === null) throw new Error("Browser not started");
-    const elements = await this.extractInteractiveElements(page);
-    return this.cardValueOutputMask.maskCapture(
-      await captureBrowserUseDOM(
+    let settled = true;
+    if (settlePage) {
+      // A load event alone precedes SPA hydration. Network quiet plus bounded
+      // DOM quiet gives pending scripts/frames time to install their controls.
+      // Busy analytics/animations must never make observation wait indefinitely.
+      await page.waitForLoadState("networkidle", { timeout: 1_500 }).catch(() => undefined);
+      settled = await page
+        .evaluate(
+          () =>
+            new Promise<boolean>((resolve) => {
+              let quiet: ReturnType<typeof setTimeout>;
+              const finish = (settled: boolean) => {
+                clearTimeout(quiet);
+                clearTimeout(deadline);
+                observer.disconnect();
+                resolve(settled);
+              };
+              const observer = new MutationObserver(() => {
+                clearTimeout(quiet);
+                quiet = setTimeout(() => finish(true), 500);
+              });
+              const deadline = setTimeout(() => finish(false), 2_000);
+              observer.observe(document, {
+                subtree: true,
+                childList: true,
+                attributes: true,
+                characterData: true,
+              });
+              quiet = setTimeout(() => finish(true), 500);
+            }),
+        )
+        .catch(() => false);
+    }
+    const bindingDeadline = Date.now() + 1_000;
+    for (;;) {
+      const elements = await this.extractInteractiveElements(page);
+      const capture = await captureBrowserUseDOM(
         page,
         elements,
         (frame) => this.framePath(frame),
         (frame) => this.frameSecurity(frame),
-      ),
-    );
+      );
+      if (
+        !capture.omissions.some((omission) => omission.kind === "frame_binding_failed") ||
+        Date.now() >= bindingDeadline
+      ) {
+        // Persistent omissions remain explicit; every attempt uses fresh trees
+        // and bindings, and every returned path retains the card-value mask.
+        if (!settled)
+          capture.omissions.push({ kind: "dom_settle_timeout", framePath: null, url: page.url() });
+        return this.cardValueOutputMask.maskCapture(capture);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
   }
 
   /**

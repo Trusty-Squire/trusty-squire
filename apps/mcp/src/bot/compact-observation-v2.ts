@@ -216,7 +216,13 @@ export class StableObservationRefs {
   private identities = new Map<string, string>();
   private anchors = new Map<
     string,
-    { intent: string; ownership: string | undefined; ref: string; adoptionKey: string | undefined }
+    {
+      intent: string;
+      ownership: string | undefined;
+      ref: string;
+      adoptionKey: string | undefined;
+      semanticKey: string | undefined;
+    }
   >();
   private aliases = new Map<string, string>();
   private aliasOwners = new Map<string, string>();
@@ -248,18 +254,45 @@ export class StableObservationRefs {
         el.screenPath,
       ]);
     };
+    // Structural adoption remains first choice. A unique named control can
+    // also survive hydration changing its surrounding layout, but never its
+    // frame document or full material intent (name/role/destination/form).
+    const semanticKey = (el: InteractiveElement): string | undefined => {
+      const documentIdentity = el.observationIdentity?.match(/^([^:]+:[^:]+):[^:]+$/)?.[1];
+      const name =
+        el.compactNames?.accessibleName || el.ariaLabel || el.labelText || el.visibleText;
+      if (!documentIdentity || !name || el.observationIntent === undefined) return;
+      return JSON.stringify([
+        documentIdentity,
+        elementFingerprints([el]).get(el),
+        el.observationIntent,
+        name,
+      ]);
+    };
+    const retiredSemantic = new Map<string, string | null>();
     const retired = new Map<string, string | null>();
     for (const [identity, anchor] of this.anchors) {
       if (present.has(identity)) continue;
       this.anchors.delete(identity);
+      if (anchor.semanticKey !== undefined) {
+        retiredSemantic.set(
+          anchor.semanticKey,
+          retiredSemantic.has(anchor.semanticKey) ? null : anchor.ref,
+        );
+      }
       if (anchor.adoptionKey !== undefined) {
         retired.set(anchor.adoptionKey, retired.has(anchor.adoptionKey) ? null : anchor.ref);
       }
     }
     const keys = new Map(elements.map((el) => [el, adoptionKey(el)]));
+    const semanticKeys = new Map(elements.map((el) => [el, semanticKey(el)]));
+    const semanticCounts = new Map<string, number>();
     const keyCounts = new Map<string, number>();
     const counts = new Map<string, number>();
     for (const el of elements) {
+      const semantic = semanticKeys.get(el);
+      if (semantic !== undefined)
+        semanticCounts.set(semantic, (semanticCounts.get(semantic) ?? 0) + 1);
       const key = keys.get(el);
       if (key !== undefined) keyCounts.set(key, (keyCounts.get(key) ?? 0) + 1);
       if (el.observationIdentity)
@@ -279,19 +312,25 @@ export class StableObservationRefs {
         anchor.intent !== el.observationIntent ||
         anchor.ownership !== el.observationOwnership
       ) {
+        const semantic = semanticKeys.get(el);
         const recovered =
-          anchor === undefined && key !== undefined && keyCounts.get(key) === 1
-            ? retired.get(key)
+          anchor === undefined
+            ? ((key !== undefined && keyCounts.get(key) === 1 ? retired.get(key) : undefined) ??
+              (semantic !== undefined && semanticCounts.get(semantic) === 1
+                ? retiredSemantic.get(semantic)
+                : undefined))
             : undefined;
         anchor = {
           intent: el.observationIntent,
           ownership: el.observationOwnership,
           ref: recovered ?? this.get(document, `action:${randomBytes(32).toString("base64url")}`),
           adoptionKey: key,
+          semanticKey: semanticKeys.get(el),
         };
         this.anchors.set(identity, anchor);
       } else {
         anchor.adoptionKey = key;
+        anchor.semanticKey = semanticKeys.get(el);
       }
       handles.set(el, anchor.ref);
     }

@@ -61,6 +61,18 @@ export function operatorMutationDispatchPhase(): MutationDispatchPhase | "unknow
   return contexts.getStore()?.phase ?? "unknown";
 }
 
+/** Only call after executor evidence proves the attempt had no effect. Keep
+ * earlier mutations uncertain and leave the durable journal conservative until
+ * the terminal receipt; a fallback must checkpoint its own dispatch again. */
+export function reconcileOperatorMutationNotDispatched(
+  phaseBeforeAttempt: MutationDispatchPhase | "unknown",
+): void {
+  const context = contexts.getStore();
+  if (context !== undefined && phaseBeforeAttempt === "prepared") {
+    context.phase = "prepared";
+  }
+}
+
 /** Node 20.0 supports AbortController but not AbortSignal.any. Dispose listeners
  * when the actual operation settles, never merely when delivery times out. */
 export function composeOperatorSignals(signals: readonly AbortSignal[]): {

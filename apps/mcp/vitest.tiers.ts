@@ -51,6 +51,7 @@ export const REQUIRED_BEHAVIOR_FILES = [
   "src/bot/__tests__/observe-jp-mojibake.test.ts",
   "src/bot/__tests__/operate-session-flow.test.ts",
   "src/bot/__tests__/operator-click-fallback.test.ts",
+  "src/bot/__tests__/operator-ref-recovery-flow.test.ts",
   "src/bot/__tests__/phone-country-widget.test.ts",
   "src/bot/__tests__/screenshot-click.test.ts",
   "src/bot/__tests__/screenshot-target-diagnostic.test.ts",

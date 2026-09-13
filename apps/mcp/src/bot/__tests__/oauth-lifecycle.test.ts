@@ -1885,7 +1885,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         await session.context.close();
       }
     }
-  });
+  }, 15_000); // Three sessions include bounded start/post-action settling and a queued login.
 
   it("rejects a compact OAuth target replaced during recovery-page setup", async () => {
     const context = await browser.newContext();

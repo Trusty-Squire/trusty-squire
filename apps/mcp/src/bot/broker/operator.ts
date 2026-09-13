@@ -533,7 +533,7 @@ export class OperatorBroker implements BrokerTransportPort {
                 // cancellation that arrived while the handler was settling.
               } catch (error) {
                 const preDispatch = provenPreDispatchMutationFailure(error);
-                if (mutating && name === "operate_login" && preDispatch !== null) {
+                if (mutating && !dispatchAttempted && preDispatch !== null) {
                   await this.journal?.record(id, commandId, "observed_result", {
                     ...commandDispatch,
                     outcome: { status: "not_dispatched", error: preDispatch.code },
