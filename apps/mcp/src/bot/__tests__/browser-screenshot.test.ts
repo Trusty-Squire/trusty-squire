@@ -1,10 +1,7 @@
-// operate_screenshot's browser implementation. There is no redaction pass and no
-// sealed-context refusal any more (owner's decision, 2026-09-05: ALL seals out),
-// so these tests pin the opposite of what they used to: the scenarios that
-// previously masked pixels or threw `screenshot_unavailable_sealed_context` must
-// now return the page's real pixels. The read-only property (no navigation, no
-// DOM mutation, no page-visible byte handling) and frame targeting are unchanged
-// and still covered here. Real-Chromium, mirroring browser-payment.test.ts's
+// operate_screenshot's browser implementation. Ordinary sessions still return
+// real pixels. Once a card is released, the narrow PAN/CVV output mask composites
+// over value-bearing pixels while preserving the live DOM. Real-Chromium, mirroring
+// browser-payment.test.ts's
 // harness pattern — a screenshot is inherently about actual rendering, not
 // something a mocked page can meaningfully stand in for.
 import { existsSync } from "node:fs";
@@ -62,6 +59,14 @@ function isValidJpegBase64(base64: string): boolean {
   return buffer.length > 100 && buffer[0] === 0xff && buffer[1] === 0xd8;
 }
 
+function isValidPngBase64(base64: string): boolean {
+  const buffer = Buffer.from(base64, "base64");
+  return (
+    buffer.length > 100 &&
+    buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+  );
+}
+
 // Decode the captured JPEG with the browser already at hand (Image + canvas —
 // a real decode of the produced bytes) and sample one RGBA pixel per point.
 // The canvas is never attached to the DOM.
@@ -90,8 +95,15 @@ async function samplePixels(
         ),
       );
     },
-    { dataUrl: `data:image/jpeg;base64,${base64}`, samplePoints: points.map((p) => [...p]) },
+    {
+      dataUrl: `data:${isValidPngBase64(base64) ? "image/png" : "image/jpeg"};base64,${base64}`,
+      samplePoints: points.map((p) => [...p]),
+    },
   );
+}
+
+function isCompositeGray(pixel: readonly number[]): boolean {
+  return [pixel[0], pixel[1], pixel[2]].every((value) => Math.abs((value ?? 0) - 232) <= 2);
 }
 
 // The old redaction painted #FF00FF over every masked box. Nothing paints it now,
@@ -304,6 +316,54 @@ describe("operate_screenshot returns unmasked pixels (real browser)", () => {
       await browser.close();
     }
   });
+});
+
+describe("operate_screenshot card-value output mask (real browser)", () => {
+  it.skipIf(!chromiumAvailable)(
+    "composites PAN/CVV controls and mirrored PAN text without changing the checkout DOM",
+    async () => {
+      const browser = await launchIsolatedTestBrowser();
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <style>body{font:24px sans-serif} input{display:block;width:420px;height:44px;margin:8px}</style>
+          <input id="pan" data-ts-card-mask="pan" value="4111 1111 1111 1111">
+          <input id="cvv" data-ts-card-mask="cvv" value="123">
+          <div id="mirror" style="display:inline-block">4111-1111-1111-1111</div>
+          <div id="total" style="display:inline-block">Total: 123 JPY</div>
+          <div id="three-ds" style="display:inline-block">Enter your bank OTP</div>
+        `);
+        const controller = BrowserController.fromHarnessPage(page);
+        controller.registerCardValueOutputMask({ pan: "4111111111111111", cvv: "123" });
+        const before = await page.content();
+
+        const viewport = await controller.screenshotForOperator();
+        const full = await controller.screenshotForOperator({ fullPage: true });
+
+        expect(viewport.mimeType).toBe("image/png");
+        expect(isValidPngBase64(viewport.base64)).toBe(true);
+        expect(isValidPngBase64(full.base64)).toBe(true);
+        const points = await Promise.all(
+          ["#pan", "#cvv", "#mirror", "#total", "#three-ds"].map(
+            async (selector) => await centerOf(page, selector),
+          ),
+        );
+        const [pan, cvv, mirror, total, threeDs] = await samplePixels(
+          page,
+          viewport.base64,
+          points,
+        );
+        expect(isCompositeGray(pan ?? [])).toBe(true);
+        expect(isCompositeGray(cvv ?? [])).toBe(true);
+        expect(isCompositeGray(mirror ?? [])).toBe(true);
+        expect(isCompositeGray(total ?? [])).toBe(false);
+        expect(isCompositeGray(threeDs ?? [])).toBe(false);
+        expect(await page.content()).toBe(before);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
 });
 
 describe("operate_screenshot frame targeting (real browser)", () => {

@@ -22,6 +22,8 @@ import {
   startProvisionSession,
   observe,
   captureScreenshot,
+  readOperatorEvidence,
+  observeSubtree,
   observeQuery,
   act,
   formSelectMany,
@@ -429,6 +431,8 @@ const observeSchema = z.object({
     .describe("Emitted control role, including literal roles such as slider or generic")
     .optional(),
   format: z.enum(["compact", "full"]).optional(),
+  subtree_ref: z.string().min(1).max(512).optional(),
+  raw_attributes: z.boolean().optional(),
 });
 
 export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
@@ -455,9 +459,14 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
         pattern: "^[a-z][a-z0-9-]*$",
       },
       format: { type: "string", enum: ["compact", "full"] },
+      subtree_ref: { type: "string" },
+      raw_attributes: { type: "boolean" },
     },
   },
   async handler(args) {
+    if (args.subtree_ref !== undefined) {
+      return await observeSubtree(args.session_id, args.subtree_ref, args.raw_attributes === true);
+    }
     if (args.query !== undefined || args.cursor !== undefined || args.role !== undefined) {
       return await observeQuery(args.session_id, args.query ?? "", args.role, args.cursor);
     }
@@ -532,6 +541,32 @@ export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
         : {}),
       ...(args.full_page !== undefined ? { fullPage: args.full_page } : {}),
     });
+  },
+};
+
+const networkSchema = z.object({
+  session_id: z.string().min(1),
+  since: z.number().int().min(0).optional(),
+  request_id: z.string().min(1).max(256).optional(),
+});
+
+export const provisionNetworkTool: Tool<z.infer<typeof networkSchema>> = {
+  name: "operate_network",
+  description:
+    "Read raw browser evidence collected since session start: requests, responses, pending/completed/failed state, HTTP status, loading failures, CORS/blocked reasons, console messages, exceptions, and screenshot events. Pass the returned cursor as since for an incremental read, or request_id for one request. This surface does not diagnose payment stages. Released card PAN/CVV copies are masked; status bodies and all unrelated values remain visible.",
+  inputSchema: networkSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id"],
+    properties: {
+      session_id: { type: "string" },
+      since: { type: "integer", minimum: 0 },
+      request_id: { type: "string" },
+    },
+  },
+  annotations: { readOnlyHint: true },
+  async handler(args) {
+    return readOperatorEvidence(args.session_id, args.since ?? 0, args.request_id);
   },
 };
 
@@ -2041,6 +2076,7 @@ export const OPERATE_TOOLS: Tool[] = [
   operateFinishTool,
   provisionObserveTool,
   provisionScreenshotTool,
+  provisionNetworkTool,
   operateNavigateTool,
   operateClickTool,
   operateTypeTool,

@@ -1,5 +1,14 @@
 import { captureBoundScreenshot, type ScreenshotBinding } from "./screenshot-click.js";
 import { captureBrowserUseDOM, type BrowserUseCapture } from "./browser-use-capture.js";
+import {
+  CARD_MASK_ATTRIBUTE,
+  CardValueOutputMask,
+  compositePngCardMasks,
+  type CardMaskKind,
+  type CardMaskRegistration,
+  type PixelMaskRect,
+} from "./card-value-output-mask.js";
+import { OperatorEvidenceCollector } from "./operator-evidence.js";
 // Browser automation wrapper for universal signup bot
 // Provides simple interface for AI agent to control browser.
 //
@@ -106,6 +115,18 @@ export interface FrameTarget {
   frameOrigin: string;
   frameUrl: string;
   frameOpaque?: boolean;
+}
+
+export type InjectCardField = "pan" | "cvv" | "exp_month" | "exp_year" | "exp" | "name";
+export type InjectCardFieldResult =
+  | { status: "filled" }
+  | { status: "not_found" | "detached" }
+  | { status: "native_error"; error: string };
+
+export interface InjectCardResolvedTarget {
+  element?: InteractiveElement;
+  missing?: "not_found" | "detached";
+  format?: string | undefined;
 }
 
 export type ResolvedPageTarget =
@@ -2778,6 +2799,8 @@ export class BrowserController {
   }
 
   private checkoutCardGroupScope: CheckoutCardGroupScope | undefined;
+  private readonly cardValueOutputMask = new CardValueOutputMask();
+  private readonly operatorEvidence = new OperatorEvidenceCollector(this.cardValueOutputMask);
   private checkoutOutcomeBaseline: CheckoutOutcomeBaseline | undefined;
   private paymentInstrumentExpectation: PaymentInstrumentExpectation | undefined;
   private observedPaymentInstrumentMismatch: PaymentInstrumentMismatch | undefined;
@@ -2805,6 +2828,19 @@ export class BrowserController {
   // along a continuous path (humans don't teleport between clicks).
   private mouseX = 100;
   private mouseY = 100;
+
+  /** Install the session-lifetime output mask before the first secret write. */
+  registerCardValueOutputMask(card: CardMaskRegistration): void {
+    this.cardValueOutputMask.register(card);
+  }
+
+  maskOperatorOutput<T>(value: T): T {
+    return this.cardValueOutputMask.maskValue(value);
+  }
+
+  readOperatorEvidence(since = 0, requestId?: string) {
+    return this.operatorEvidence.read(since, requestId);
+  }
 
   async brokerTargetId(): Promise<string> {
     if (this.context === null || this.page === null) throw new Error("Browser not started");
@@ -2969,6 +3005,7 @@ export class BrowserController {
   // fingerprint normalization a page gets; a satellite's page
   // (attachOwnPage) must therefore go through it too.
   private async installPageNormalization(page: Page, remoteMode: boolean): Promise<void> {
+    await this.operatorEvidence.attach(page);
     // In baseline mode addInitScript covers document-start page JS, but
     // Playwright's page.evaluate utility execution can run in a separate realm.
     // Install the same no-op helper there with a STRING evaluate (tsx cannot
@@ -3127,7 +3164,8 @@ export class BrowserController {
     return controller;
   }
   private trackOpenedTabs(page: Page): void {
-    return this.pageDriver.trackOpenedTabs(page);
+    this.pageDriver.trackOpenedTabs(page);
+    void this.operatorEvidence.attach(page).catch(() => undefined);
   }
   operatorBrowserMarker(): string {
     return this.processOwner.operatorBrowserMarker();
@@ -7452,9 +7490,100 @@ export class BrowserController {
     return null;
   }
 
-  // Read-only pixel capture for operate_screenshot. It never navigates, clicks,
-  // types, focuses, or mutates the DOM — and it never masks anything. What the
-  // page renders is what the driving agent gets back.
+  private async cardMaskPixelRects(page: Page): Promise<PixelMaskRect[]> {
+    if (!this.cardValueOutputMask.active) return [];
+    const needles = this.cardValueOutputMask.screenshotNeedles();
+    const rects: PixelMaskRect[] = [];
+    for (const frame of page.frames()) {
+      if (frame.isDetached()) continue;
+      let offset = { x: 0, y: 0 };
+      if (frame !== page.mainFrame()) {
+        const frameElement = await frame.frameElement().catch(() => null);
+        if (frameElement === null) continue;
+        try {
+          const box = await frameElement.boundingBox();
+          if (box === null) continue;
+          offset = { x: box.x, y: box.y };
+        } finally {
+          await frameElement.dispose().catch(() => undefined);
+        }
+      }
+      const local = await frame
+        .evaluate(({ pans, cvvs }) => {
+          const found: Array<{ x: number; y: number; width: number; height: number }> = [];
+          const roots: Array<Document | ShadowRoot> = [document];
+          const nativeShadowRoot = Object.getOwnPropertyDescriptor(
+            Element.prototype,
+            "shadowRoot",
+          )?.get;
+          for (let index = 0; index < roots.length; index += 1) {
+            for (const element of Array.from(roots[index]!.querySelectorAll("*"))) {
+              const shadow = nativeShadowRoot?.call(element) as ShadowRoot | null | undefined;
+              if (shadow !== null && shadow !== undefined) roots.push(shadow);
+            }
+          }
+          const pushControlValue = (element: Element): void => {
+            const box = element.getBoundingClientRect();
+            if (box.width <= 0 || box.height <= 0) return;
+            const insetX = Math.min(8, box.width * 0.08);
+            const insetY = Math.min(6, box.height * 0.2);
+            found.push({
+              x: box.x + insetX,
+              y: box.y + insetY,
+              width: Math.max(1, box.width - insetX * 2),
+              height: Math.max(1, box.height - insetY * 2),
+            });
+          };
+          const cvvLabel = /\b(?:cvv|cvc|cid|csc|security\s*code)\b/i;
+          for (const root of roots) {
+            root
+              .querySelectorAll('[data-ts-card-mask="pan"],[data-ts-card-mask="cvv"]')
+              .forEach(pushControlValue);
+            const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+            let current: Node | null;
+            while ((current = walker.nextNode()) !== null) {
+              const value = current.nodeValue ?? "";
+              const patterns = pans.map(
+                (pan) =>
+                  new RegExp(
+                    `(?<!\\d)${[...pan]
+                      .map((digit) => `${digit}[\\s-]*`)
+                      .join("")
+                      .replace(/\[\\s-\]\*$/, "")}(?!\\d)`,
+                    "g",
+                  ),
+              );
+              const parentText = current.parentElement?.parentElement?.textContent ?? value;
+              if (cvvLabel.test(parentText)) {
+                for (const cvv of cvvs) patterns.push(new RegExp(`(?<!\\d)${cvv}(?!\\d)`, "g"));
+              }
+              for (const pattern of patterns) {
+                for (const match of value.matchAll(pattern)) {
+                  if (match.index === undefined) continue;
+                  const range = document.createRange();
+                  range.setStart(current, match.index);
+                  range.setEnd(current, match.index + match[0].length);
+                  for (const box of Array.from(range.getClientRects())) {
+                    if (box.width > 0 && box.height > 0) {
+                      found.push({ x: box.x, y: box.y, width: box.width, height: box.height });
+                    }
+                  }
+                }
+              }
+            }
+          }
+          return found;
+        }, needles)
+        .catch(() => []);
+      for (const rect of local) {
+        rects.push({ ...rect, x: rect.x + offset.x, y: rect.y + offset.y });
+      }
+    }
+    return rects;
+  }
+
+  // Read-only pixel capture for operate_screenshot. Once card output masking is
+  // active, compositing changes only the returned image bytes, never the page.
   async captureOperatorScreenshot(
     opts: {
       frameIndex?: number;
@@ -7464,6 +7593,7 @@ export class BrowserController {
     page: Page | null = this.page,
   ): Promise<{
     base64: string;
+    mimeType: "image/jpeg" | "image/png";
     frameUrl: string | null;
     frameCount: number;
     clickBinding?: ScreenshotBinding;
@@ -7480,12 +7610,14 @@ export class BrowserController {
     page: Page | null = this.page,
   ): Promise<{
     base64: string;
+    mimeType: "image/jpeg" | "image/png";
     frameUrl: string | null;
     frameCount: number;
     clickBinding?: ScreenshotBinding;
   }> {
     if (!page) throw new Error("Browser not started");
     const targetFrame = this.resolveOperatorScreenshotFrame(opts, page);
+    const maskRects = await this.cardMaskPixelRects(page);
     const cdp = await page.context().newCDPSession(page);
     try {
       // caret:"initial" is not needed here — the CDP capture never runs
@@ -7514,8 +7646,8 @@ export class BrowserController {
               height: box.height,
             };
             const result = await cdp.send("Page.captureScreenshot", {
-              format: "jpeg",
-              quality: 80,
+              format: this.cardValueOutputMask.active ? "png" : "jpeg",
+              ...(this.cardValueOutputMask.active ? {} : { quality: 80 }),
               fromSurface: true,
               captureBeyondViewport: true,
               clip: {
@@ -7537,8 +7669,8 @@ export class BrowserController {
           }));
           rect = { x: 0, y: 0, width: size.width, height: size.height };
           const result = await cdp.send("Page.captureScreenshot", {
-            format: "jpeg",
-            quality: 80,
+            format: this.cardValueOutputMask.active ? "png" : "jpeg",
+            ...(this.cardValueOutputMask.active ? {} : { quality: 80 }),
             fromSurface: true,
             captureBeyondViewport: true,
             clip: { x: 0, y: 0, width: size.width, height: size.height, scale: 1 },
@@ -7546,16 +7678,56 @@ export class BrowserController {
           base64 = result.data;
         } else {
           const result = await cdp.send("Page.captureScreenshot", {
-            format: "jpeg",
-            quality: 80,
+            format: this.cardValueOutputMask.active ? "png" : "jpeg",
+            ...(this.cardValueOutputMask.active ? {} : { quality: 80 }),
             fromSurface: true,
           });
           base64 = result.data;
         }
         return { base64, rect };
       });
+      let output = captured.base64;
+      if (this.cardValueOutputMask.active) {
+        const scroll = await page.evaluate(() => ({ x: window.scrollX, y: window.scrollY }));
+        const targetBox =
+          targetFrame !== null && targetFrame !== page.mainFrame()
+            ? await targetFrame
+                .frameElement()
+                .then(async (handle) => {
+                  try {
+                    return await handle.boundingBox();
+                  } finally {
+                    await handle.dispose().catch(() => undefined);
+                  }
+                })
+                .catch(() => null)
+            : null;
+        const translated = maskRects.map((rect) => ({
+          ...rect,
+          x:
+            targetBox !== null
+              ? rect.x - targetBox.x
+              : opts.fullPage === true
+                ? rect.x + scroll.x
+                : rect.x,
+          y:
+            targetBox !== null
+              ? rect.y - targetBox.y
+              : opts.fullPage === true
+                ? rect.y + scroll.y
+                : rect.y,
+        }));
+        output = compositePngCardMasks(output, translated);
+      }
+      this.operatorEvidence.recordScreenshot({
+        url: page.url(),
+        frame_url: targetFrame?.url() ?? null,
+        full_page: opts.fullPage === true,
+      });
       return {
         ...captured,
+        base64: output,
+        mimeType: this.cardValueOutputMask.active ? "image/png" : "image/jpeg",
         frameUrl: targetFrame?.url() ?? null,
         frameCount: page.frames().length,
       };
@@ -7610,18 +7782,20 @@ export class BrowserController {
   // extractText() and must stay byte-identical, so this is purely additive.
   async extractVisibleText(page: Page | null = this.page): Promise<string> {
     if (page === null) throw new Error("Browser not started");
-    return await page.evaluate(extractObservationVisibleText);
+    return this.cardValueOutputMask.maskText(await page.evaluate(extractObservationVisibleText));
   }
 
   /** Canonical tree capture, with the existing whole-document action bindings. */
   async extractBrowserUseObservation(page: Page | null = this.page): Promise<BrowserUseCapture> {
     if (page === null) throw new Error("Browser not started");
     const elements = await this.extractInteractiveElements(page);
-    return captureBrowserUseDOM(
-      page,
-      elements,
-      (frame) => this.framePath(frame),
-      (frame) => this.frameSecurity(frame),
+    return this.cardValueOutputMask.maskCapture(
+      await captureBrowserUseDOM(
+        page,
+        elements,
+        (frame) => this.framePath(frame),
+        (frame) => this.frameSecurity(frame),
+      ),
     );
   }
 
@@ -12823,6 +12997,7 @@ export class BrowserController {
         occludedBy: string | null;
         autocomplete: string | null;
         dataRole: string | null;
+        cardMaskKind: CardMaskKind | null;
       }> = [];
       for (const el of collected) {
         if (seen.has(el)) continue;
@@ -12928,6 +13103,11 @@ export class BrowserController {
           dataRole:
             (el.getAttribute("data-field-role") ?? el.getAttribute("data-role") ?? "").trim() ||
             null,
+          cardMaskKind:
+            el.getAttribute("data-ts-card-mask") === "pan" ||
+            el.getAttribute("data-ts-card-mask") === "cvv"
+              ? (el.getAttribute("data-ts-card-mask") as CardMaskKind)
+              : null,
           value:
             el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
               ? el.value
@@ -13423,6 +13603,107 @@ export class BrowserController {
     }
   }
 
+  async injectCardIntoTargets(
+    card: CheckoutCard,
+    targets: Partial<Record<InjectCardField, InjectCardResolvedTarget>>,
+    page: Page | null = this.page,
+  ): Promise<Record<InjectCardField, InjectCardFieldResult>> {
+    if (page === null) throw new Error("Browser not started");
+    // The mask is session-persistent and must exist before the first field write.
+    this.registerCardValueOutputMask(card);
+    const results = {} as Record<InjectCardField, InjectCardFieldResult>;
+    const valueFor = (field: InjectCardField, format?: string): string => {
+      switch (field) {
+        case "pan":
+          return format === "groups4" ? card.pan.replace(/(.{4})(?=.)/g, "$1 ") : card.pan;
+        case "cvv":
+          return card.cvv;
+        case "exp_month":
+          return format === "number" ? String(Number(card.exp_month)) : card.exp_month;
+        case "exp_year":
+          return format === "two_digit" ? card.exp_year.slice(-2) : card.exp_year;
+        case "exp": {
+          const year =
+            format === "mm/yyyy" ? card.exp_year.padStart(4, "20") : card.exp_year.slice(-2);
+          return format === "mmyy" ? `${card.exp_month}${year}` : `${card.exp_month}/${year}`;
+        }
+        case "name":
+          return card.name;
+      }
+    };
+    for (const field of ["pan", "cvv", "exp_month", "exp_year", "exp", "name"] as const) {
+      const target = targets[field];
+      if (target === undefined) {
+        results[field] = { status: "not_found" };
+        continue;
+      }
+      if (target.element === undefined) {
+        results[field] = { status: target.missing ?? "not_found" };
+        continue;
+      }
+      const element = target.element;
+      let handle: ElementHandle<Element> | null = null;
+      try {
+        handle =
+          element.framePath === null || element.framePath === undefined
+            ? await page
+                .locator(element.selector)
+                .elementHandle({ timeout: 3_000 })
+                .catch(() => null)
+            : await this.resolveFrameElement(
+                {
+                  framePath: element.framePath,
+                  frameOrigin: element.frameOrigin ?? "null",
+                  frameUrl: element.frameUrl ?? "",
+                  ...(element.frameOpaque ? { frameOpaque: true } : {}),
+                },
+                element.selector,
+                0,
+                page,
+              );
+        if (handle === null) {
+          results[field] = { status: "detached" };
+          continue;
+        }
+        await markOperatorMutationDispatchAttempted();
+        if (field === "pan" || field === "cvv") {
+          await handle.evaluate(
+            (node, value) => node.setAttribute("data-ts-card-mask", value),
+            field,
+          );
+        }
+        const value = valueFor(field, target.format);
+        const tag = await handle.evaluate((node) => node.tagName.toLowerCase());
+        if (tag === "select") {
+          const locator = handle.asElement()!;
+          const owner = await handle.ownerFrame();
+          if (owner === null) throw new Error("target has no owning frame");
+          const selector = element.selector;
+          const select = owner.locator(selector);
+          try {
+            await select.selectOption({ value }, { timeout: 3_000 });
+          } catch {
+            await select.selectOption({ label: value }, { timeout: 3_000 });
+          }
+          void locator;
+        } else {
+          await handle.fill(value, { timeout: 8_000 });
+        }
+        results[field] = { status: "filled" };
+      } catch (error) {
+        results[field] = {
+          status: "native_error",
+          error: this.cardValueOutputMask.maskText(
+            error instanceof Error ? error.message : String(error),
+          ),
+        };
+      } finally {
+        await handle?.dispose().catch(() => undefined);
+      }
+    }
+    return results;
+  }
+
   async extractInteractiveElements(page: Page | null = this.page): Promise<InteractiveElement[]> {
     if (page === null) throw new Error("Browser not started");
     const mainRaw = await this.extractElementsFromContext(page);
@@ -13478,7 +13759,9 @@ export class BrowserController {
 
     // T38 index is assigned ONCE, after merging, so it stays a stable,
     // collision-free ordinal across the whole combined set.
-    return [...mainElements, ...framedElements].map((e, i) => ({ ...e, index: i }));
+    return this.cardValueOutputMask.maskInteractiveElements(
+      [...mainElements, ...framedElements].map((e, i) => ({ ...e, index: i })),
+    );
   }
 
   // replay-per-leg-signature — the checkout-leg shape signature (see
@@ -15818,6 +16101,8 @@ export interface InteractiveElement {
   // Site-authored stable role: data-field-role or data-role. Fallback when
   // autocomplete is absent.
   dataRole?: string | null;
+  /** Operator-authored provenance for the narrow PAN/CVV output mask. */
+  cardMaskKind?: CardMaskKind | null;
   // F15 — nearest HTML5 landmark ancestor: header | main | footer |
   // nav | aside | article | section, or null when the element is
   // outside any landmark. The agent's inventory renderer uses this to

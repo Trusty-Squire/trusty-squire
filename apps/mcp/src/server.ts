@@ -39,6 +39,7 @@ import { startOwnerProcessReaper } from "./bot/owner-process-reaper.js";
 import {
   activeSessionCount,
   closeAllProvisionSessions,
+  maskOperatorSessionOutput,
   withProvisionSessionCall,
 } from "./bot/provision-session.js";
 import {
@@ -99,7 +100,7 @@ export function shouldIdleExit(
 // the right credential tool without the user spelling it out.
 export const SERVER_INSTRUCTIONS = `This is Trusty Squire — it drives a real browser through signup, provisioning,
 and checkout flows on the user's behalf (\`operate_start\`/\`operate_observe\`/
-\`operate_click\`/\`operate_type\`/\`operate_pay\`/\`operate_finish\`, plus recipe replay), and backs it
+\`operate_click\`/\`operate_type\`/\`inject_card\`/\`operate_finish\`, plus recipe replay), and backs it
 with a write-only credential vault.
 The user's secrets (API keys, tokens, passwords) live in the vault encrypted;
 they are NOT in the conversation context. Reading one back is possible but
@@ -304,8 +305,7 @@ export async function buildServer(
           ? 4_500
           : 15_000;
     const budgetTimer =
-      tool.name.startsWith("operate_") &&
-      !["operate_pay", "operate_payment_status"].includes(tool.name)
+      tool.name.startsWith("operate_") && !["inject_card"].includes(tool.name)
         ? setTimeout(
             () =>
               budget.abort(
@@ -414,7 +414,9 @@ export async function buildServer(
       // Tool handlers await independently.  A finish must therefore close the
       // admission gate and drain calls that already entered before it snapshots
       // eligible state and closes the browser. `operate_finish*` owns that transition.
-      const forwarded = operatorForwarder !== undefined && tool.name.startsWith("operate_");
+      const forwarded =
+        operatorForwarder !== undefined &&
+        (tool.name.startsWith("operate_") || tool.name === "inject_card");
       const work = forwarded
         ? operatorForwarder.invoke(
             tool.name,
@@ -433,9 +435,15 @@ export async function buildServer(
         composed.signal,
         tool.name === "operate_finish" ? 500 : 2_000,
       );
-      return toolResultContent(result);
+      return toolResultContent(
+        sessionId === undefined ? result : maskOperatorSessionOutput(sessionId, result),
+      );
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const rawMessage = err instanceof Error ? err.message : String(err);
+      const sessionId =
+        typeof parsed.data.session_id === "string" ? parsed.data.session_id : undefined;
+      const message =
+        sessionId === undefined ? rawMessage : maskOperatorSessionOutput(sessionId, rawMessage);
       const loginSession =
         tool.name === "operate_login" &&
         "provider" in parsed.data &&

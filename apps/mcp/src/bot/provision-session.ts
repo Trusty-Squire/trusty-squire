@@ -48,7 +48,11 @@ import {
   type BrowserController,
   type ClickDispatchStatus,
   type CheckoutSummary,
+  type CheckoutCard,
   type FrameTarget,
+  type InjectCardField,
+  type InjectCardFieldResult,
+  type InjectCardResolvedTarget,
   type InteractiveElement,
   type OAuthCompletionEvidence,
   type PageTargetSafetySignals,
@@ -2391,8 +2395,8 @@ export interface ScreenshotCapture {
   image: { mime_type: string; data_base64: string };
 }
 
-// operate_screenshot's session-level entry point. The capture is the page's real
-// pixels — there is no redaction pass and no sealed-context refusal.
+// operate_screenshot's session-level entry point. Once a card has been released,
+// the controller composites over PAN/CVV value pixels before this output seam.
 export async function captureScreenshot(
   sessionId: string,
   opts: { frameIndex?: number; frameUrlContains?: string; fullPage?: boolean } = {},
@@ -2407,7 +2411,115 @@ export async function captureScreenshot(
     frame_url: captured.frameUrl,
     frame_count: captured.frameCount,
     ...(captured.clickBinding ? { click_binding: captured.clickBinding } : {}),
-    image: { mime_type: "image/jpeg", data_base64: captured.base64 },
+    image: { mime_type: captured.mimeType, data_base64: captured.base64 },
+  };
+}
+
+export function readOperatorEvidence(
+  sessionId: string,
+  since = 0,
+  requestId?: string,
+): ReturnType<BrowserController["readOperatorEvidence"]> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  return session.browser.readOperatorEvidence(since, requestId);
+}
+
+export function maskOperatorSessionOutput<T>(sessionId: string, value: T): T {
+  const session = sessionForCall(sessionId);
+  return session === undefined ? value : session.browser.maskOperatorOutput(value);
+}
+
+export async function injectCardIntoSessionTargets(
+  sessionId: string,
+  card: CheckoutCard,
+  targets: Partial<
+    Record<InjectCardField, { ref: string; format?: string | undefined } | undefined>
+  >,
+): Promise<Record<InjectCardField, InjectCardFieldResult>> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const page = operationPageForSession(session);
+  const fresh = await session.browser.extractInteractiveElements(page);
+  const resolved: Partial<Record<InjectCardField, InjectCardResolvedTarget>> = {};
+  for (const field of ["pan", "cvv", "exp_month", "exp_year", "exp", "name"] as const) {
+    const target = targets[field];
+    if (target === undefined) continue;
+    const legacy = session.compactV2Active ? session.compactV2Refs.get(target.ref) : target.ref;
+    if (legacy === undefined) {
+      resolved[field] = { missing: "not_found", format: target.format };
+      continue;
+    }
+    const previouslyPresent = resolveTarget(session.lastElements, legacy) !== null;
+    const element = resolveTarget(fresh, legacy);
+    resolved[field] =
+      element === null
+        ? { missing: previouslyPresent ? "detached" : "not_found", format: target.format }
+        : { element, format: target.format };
+  }
+  return await session.browser.injectCardIntoTargets(card, resolved, page);
+}
+
+export async function observeSubtree(
+  sessionId: string,
+  target: string,
+  rawAttributes = false,
+): Promise<Record<string, unknown>> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const page = operationPageForSession(session);
+  const capture = await session.browser.extractBrowserUseObservation(page);
+  const legacy = session.compactV2Active ? session.compactV2Refs.get(target) : target;
+  if (legacy === undefined) throw new Error("stale_ref");
+  const element = resolveTarget(capture.elements, legacy);
+  if (element === null) throw new Error("stale_ref");
+  const entry = [...capture.nodeElements].find(
+    ([, candidate]) => candidate.observationIdentity === element.observationIdentity,
+  );
+  if (entry === undefined) throw new Error("observation_subtree_unavailable");
+  const findNode = (
+    root: BrowserUseCapture["root"],
+    id: string,
+  ): BrowserUseCapture["root"] | null => {
+    if (root.id === id) return root;
+    for (const child of root.children) {
+      const found = findNode(child, id);
+      if (found !== null) return found;
+    }
+    return root.contentDocument === null ? null : findNode(root.contentDocument, id);
+  };
+  const root = findNode(capture.root, entry[0]);
+  if (root === null) throw new Error("observation_subtree_unavailable");
+  let remaining = 1_000;
+  const project = (node: BrowserUseCapture["root"]): Record<string, unknown> => {
+    remaining -= 1;
+    const children = remaining <= 0 ? [] : node.children.map(project);
+    const contentDocument =
+      remaining <= 0 || node.contentDocument === null ? null : project(node.contentDocument);
+    return {
+      node_id: node.id,
+      node_type: node.nodeType,
+      tag: node.nodeName.toLowerCase(),
+      value: node.value,
+      ...(rawAttributes ? { attributes: node.attributes } : {}),
+      visible: node.visible,
+      rendered: node.rendered ?? null,
+      bounds: node.bounds,
+      ax_role: node.axRole,
+      ax_properties: node.axProperties,
+      shadow_type: node.shadowType,
+      children,
+      content_document: contentDocument,
+      ...(remaining <= 0 ? { capture_truncated: true } : {}),
+    };
+  };
+  return {
+    format: "browser-use-subtree",
+    session_id: session.id,
+    url: page?.url() ?? session.browser.currentUrl(),
+    target,
+    subtree: project(root),
+    ...(capture.omissions.length === 0 ? {} : { capture_omissions: capture.omissions }),
   };
 }
 
@@ -4683,7 +4795,10 @@ function compactV2Observation(
     }
     if (compactMapEmitted && page.payload.overflow === undefined)
       session.compactV2Previous.compactMapEmitted = true;
-    return page.payload as unknown as Observation;
+    return {
+      ...page.payload,
+      ...(capture.omissions.length === 0 ? {} : { capture_omissions: capture.omissions }),
+    } as unknown as Observation;
   }
   const removed = sameDocument
     ? (previous.renderedRefs ?? []).filter((ref) => !rendered.refs.includes(ref))
@@ -4698,6 +4813,7 @@ function compactV2Observation(
     ...(removed.length ? { removed } : {}),
     more_above: capture.moreAbove,
     more_below: capture.moreBelow,
+    ...(capture.omissions.length === 0 ? {} : { capture_omissions: capture.omissions }),
     ...(startMetadata?.hintPages?.[0] ? { hint: startMetadata.hintPages[0] } : {}),
     ...(startMetadata?.userEmail ? { user_email: startMetadata.userEmail } : {}),
     ...(session.compactV2HintPages.length > 1 && startMetadata

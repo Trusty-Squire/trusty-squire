@@ -58,6 +58,8 @@ export const REQUIRED_BEHAVIOR_FILES = [
 // dispatch, and payment outcome coverage obvious and fail-closed.
 export const REQUIRED_PAYMENT_SAFETY_FILES = [
   "src/__tests__/tools.test.ts",
+  "src/bot/__tests__/card-value-output-mask.test.ts",
+  "src/bot/__tests__/browser-inject-card.test.ts",
   "src/bot/__tests__/browser-decoupled-3ds.test.ts",
   "src/bot/__tests__/browser-payment.test.ts",
   "src/bot/__tests__/browser-screenshot.test.ts",

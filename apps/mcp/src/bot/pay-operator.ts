@@ -83,6 +83,7 @@ export interface PendingCardFill {
   card_ref: string;
   last4: string;
   mandate_id?: string;
+  deadline?: number;
 }
 
 // Post-submit outcome resumability: the card was already released and the
@@ -1473,6 +1474,7 @@ export async function executeOperatePay(
         checkout,
         card_ref: cardRef,
         last4,
+        deadline,
         ...(mandateId !== undefined ? { mandate_id: mandateId } : {}),
       });
       return {

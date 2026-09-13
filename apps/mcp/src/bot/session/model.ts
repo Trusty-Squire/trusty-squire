@@ -14,7 +14,7 @@
 // the tool layer passed none.
 import { randomBytes } from "node:crypto";
 import type { Buffer } from "node:buffer";
-import type { BrowserController, InteractiveElement } from "../browser.js";
+import type { BrowserController, CheckoutCard, InteractiveElement } from "../browser.js";
 import type {
   CartCheckoutObservation,
   PendingApprovalWait,
@@ -208,6 +208,16 @@ export interface Session {
     | { status: "sealed" }
     | null;
   paymentFieldSealActive: boolean;
+  /** Internal card released by the existing purchase approval; never serialized. */
+  releasedPaymentCard: {
+    approvalId: string;
+    approvalUrl: string;
+    checkout: { merchant: string; checkout_origin: string; amount_cents: number; currency: string };
+    cardRef: string;
+    last4: string;
+    deadline: number;
+    card: CheckoutCard;
+  } | null;
   // A completed operate_pay single-page submit whose post-submit outcome wait
   // exhausted its budget with no terminal signal. Deliberately NOT part of
   // activePayment: the card is already released and the charge already
@@ -319,6 +329,7 @@ export function createSession(input: CreateSessionInput): Session {
     replayState: null,
     activePayment: null,
     paymentFieldSealActive: false,
+    releasedPaymentCard: null,
     pendingThreeDs: null,
     paymentDispatchHandoff: null,
     placeOrderApproval: null,

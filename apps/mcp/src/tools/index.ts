@@ -18,7 +18,9 @@ import { grantAppAccessTool } from "./grant-app-access.js";
 import { revokeAppAccessTool, listAppAccessTool } from "./revoke-app-access.js";
 import { auditLogTool } from "./audit-log.js";
 import { OPERATE_TOOLS } from "./provision-drive.js";
-import { listPaymentCardsTool, operatePayTool, operatePaymentStatusTool } from "./operate-pay.js";
+import { listPaymentCardsTool } from "./operate-pay.js";
+import { operatePayTool, operatePaymentStatusTool } from "./operate-pay.js";
+import { injectCardTool } from "./inject-card.js";
 import { deleteCredentialTool, editCredentialTool } from "./credential-mutations.js";
 import { fetchCredentialTool } from "./fetch-credential.js";
 
@@ -95,10 +97,7 @@ export function buildToolRegistry(env: NodeJS.ProcessEnv = process.env): Tool[] 
     auditLogTool,
     ...(diagnosticsProfileEnabled(env) ? diagnosticsTools : []),
     listPaymentCardsTool,
-    operatePayTool,
-    // Non-charging bounded status for pre-charge approval and post-submit
-    // outcomes; operate_pay owns approval continuation and charge execution.
-    operatePaymentStatusTool,
+    injectCardTool,
     // Interactive host-driven provisioning through discoverable flat verbs,
     // plus the unchanged recipe save/run tools.
     ...OPERATE_TOOLS,
@@ -132,6 +131,8 @@ export {
   listExtractFailuresTool,
   getExtractFailureTool,
   listPaymentCardsTool,
+  injectCardTool,
+  // Compatibility exports only; these orchestration tools are no longer registered.
   operatePayTool,
   operatePaymentStatusTool,
 };
