@@ -271,7 +271,7 @@ interface CheckoutFrameDescriptor {
 // the vaulted card into. This mirrors the vault's egress model: the card may
 // travel to a surface we can confidently attribute to a legitimate payment
 // processor, never to an arbitrary third-party iframe (a possible rogue/
-// phishing frame) that merely appears on an in-scope page. Entries are host
+// phishing frame) that merely appears on a checkout page. Entries are host
 // suffixes: a domain is listed at the registrable level only when the whole
 // domain IS the processor (everything under stripe.com is Stripe); a
 // mixed-purpose domain is pinned to its payment platform subdomain
@@ -15829,12 +15829,9 @@ export interface InteractiveElement {
   // <iframe> this element was extracted from, when it lives inside a child
   // frame (same- or cross-origin). null/undefined for an ordinary main-frame
   // element — every pre-existing element keeps this shape unchanged. This is
-  // the load-bearing security signal for frame targets: a guard checks THIS
-  // origin, never the top page's, so a rogue or third-party iframe embedded
-  // on an otherwise in-scope page can't be acted on (or typed into) just
-  // because the outer page passed its own domain check. See
-  // frameTargetAllowed / assertSecretFrameTargetAllowed in
-  // provision-session.ts.
+  // the origin used for frame control-plane checks and credential-injection
+  // boundaries, independently of the top page's origin. See
+  // frameTargetAllowed / assertSecretFrameTargetAllowed in provision-session.ts.
   frameOrigin?: string | null;
   frameUrl?: string | null;
   framePath?: string | null;

@@ -1,12 +1,13 @@
 # SBPS card checkout investigation
 
-Status: the CVV fix and the captain-approved payment-window network relaxation
-are implemented. This enables merchant/issuer JavaScript to run native 3DS.
+Status: historical investigation of the CVV fix and payment-window relaxation.
+The subsequent egress removal supersedes the network allowance and its deferred
+terminal-revocation follow-up; current behavior is owned by the
+[operator egress contract](../operator-tool-surface.md#browser-egress-is-unrestricted).
 **SBPS AuthenticateInit completion remains UNVERIFIED.** The captain deferred
 real-checkout acceptance to a human-in-loop payment with Firstmate after
 deployment. Synthetic testing did not establish that the relaxation resolves
-the AuthenticateInit error. This PR enables native 3DS to run; it does not claim
-to fix the 3DS wall or complete a real payment.
+the AuthenticateInit error or completes a real payment.
 
 ## Evidence ledger — 2026-09-12
 
@@ -92,9 +93,8 @@ not inject `autocomplete`, expose real card values, or change approval logic.
 Existing form ambiguity, non-card exclusions, and sealed-field cleanup remain.
 
 The captain approved the held payment-window relaxation on 2026-09-12 (inbox
-005), following the earlier hold. The implemented network allowance and its
-expiry/revocation limits are defined in the
-[operator scope contract](../operator-tool-surface.md#scope-is-declared-at-session-start).
+005), following the earlier hold. That allowance has since been superseded;
+see the current contract above.
 
 No forced method-result submit, ACS mutation, additional human approval,
 browser workaround, or alternative payment method is added. It remains unknown
@@ -103,10 +103,9 @@ The original report says it also failed after those hosts were admitted; that
 is evidence against assuming the host fix alone resolves it, but supplies no
 request/response trace that would prove a separate root cause.
 
-The captain explicitly deferred terminal-reporting integration to avoid
-re-blocking in-flight authentication. Follow-up hardening is tracked as
-`ts-payment-window-terminal-revocation` in `TODOS.md`. PR delivery must retain
-the UNVERIFIED status and the deferred real-payment acceptance stated above.
+The original change deferred terminal-reporting integration to avoid
+re-blocking in-flight authentication. That follow-up was retired with the
+egress removal; the real-payment evidence gap above remains.
 
 ## Validation
 
@@ -115,13 +114,15 @@ Historical CVV-only validation (before removing the bare `security` alias):
 reported `253 passed (253)`, including all seven SBPS cases. MCP typecheck,
 ESLint on both changed files, and diff checks passed.
 
-The payment-window regressions exercise real browser request routing in local
-and broker modes. Before applying the approved patch both fail with expected
-`method complete`, received `blocked`. Coverage includes method and fingerprint
+At the historical payment-window checkpoint, regressions exercised real browser
+request routing in local and broker modes. Before applying the approved patch
+both failed with expected
+`method complete`, received `blocked`. Coverage included method and fingerprint
 requests, an unlisted issuer, a method iframe's requests, other-page exclusion,
 inconclusive-wait retention, deadline expiry, terminal-failure revocation, and
-preservation of the separate PAN destination restriction. All seven tests in
-`browser-decoupled-3ds.test.ts` pass with the patch; MCP typecheck also passes.
+preservation of the separate PAN destination restriction. At that checkpoint,
+all seven tests in `browser-decoupled-3ds.test.ts` passed with the patch; MCP
+typecheck also passed.
 
 The required project-memory helper was run. It refused because both AGENTS.md
 and CLAUDE.md are distinct real files; neither was overwritten or reconciled as

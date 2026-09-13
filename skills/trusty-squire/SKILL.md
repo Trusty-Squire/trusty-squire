@@ -85,11 +85,9 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
 - `operate_start`, `operate_observe`, `operate_click`, `operate_type`,
   `operate_select`, `operate_press`, `operate_scroll`, and `operate_navigate`
   open the real website and drive it one step at a time. Use `operate_login` for
-  OAuth and the username/password lifecycle. Declare every non-provider host a
-  task needs in `allowed_hosts` at `operate_start`: host authority is exact-host
-  entitlement. `operate_allow_host` can activate only a host already declared
-  in that session's startup scope; it cannot broaden a session to a sibling or
-  unrelated host. Start a new session when another host is needed.
+  OAuth and the username/password lifecycle. For browser host behavior and legacy
+  parameter compatibility, see the
+  [operator egress contract](https://github.com/Trusty-Squire/trusty-squire/blob/main/docs/operator-tool-surface.md#browser-egress-is-unrestricted).
 - When a Compact V2 observation does not render the control you need, call
   `operate_observe` with `query`. The query searches the whole live document,
   including below the viewport, and returns actionable refs; use

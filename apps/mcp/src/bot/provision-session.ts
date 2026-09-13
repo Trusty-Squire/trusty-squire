@@ -201,7 +201,7 @@ export interface ObservedElement {
   // e.g. "https://checkout.merchant.com". Absent for an ordinary main-frame
   // element — every pre-existing observation shape is unchanged. Load-bearing
   // signal, not decoration: operate_act re-derives which frame to act in (and
-  // which domain-lock guard applies) from this, never from the top page's URL.
+  // which credential-injection guard applies) from this, never from the top page's URL.
   frame_origin?: string | null;
   // PCI controls are deliberately still observable, but they are never ordinary
   // planner inputs: only operate_pay may fill a vaulted card into them.
@@ -1006,7 +1006,7 @@ function baseIdentityFields(el: InteractiveElement): string[] {
     // stableElementId below) is only unique within its own document, so a
     // same-shaped selector in two different frames (or a frame vs. the main
     // page) could hash to the SAME ref and let an act resolve to the wrong
-    // frame's element. Load-bearing for the frame domain-lock: the ref
+    // frame's element. Load-bearing for frame identity: the ref
     // itself must be frame-scoped, not just the guard that later reads it.
     el.frameOrigin ?? "",
     el.framePath ?? "",
@@ -1760,7 +1760,7 @@ function assertSecretFrameTargetAllowed(
 // frame element's `selector` on the MAIN page could silently act on an
 // unrelated element that happens to share the same structural selector (a
 // real risk for positional/nth-of-type selectors) rather than the intended
-// frame element — a correctness and domain-lock hazard, not just a missing
+// frame element — a correctness and credential-injection hazard, not just a missing
 // feature. Refuse explicitly instead.
 function assertNoFrameTarget(el: InteractiveElement, kind: string): void {
   if (el.framePath === undefined || el.framePath === null) return;
@@ -7352,8 +7352,7 @@ async function settleAfterStateChange(browser: BrowserController, page?: Page): 
 
 // Persist the session's action trace as a keyed, replayable operator-recipe.
 // Sealed secrets become SLOT references (stored:false) — never values. The
-// recipe's scope = start + auto_widen hosts (mid_session crossings replay via
-// the trace's own allow_host steps).
+// recipe's host metadata = start + auto_widen hosts; allow_host is a legacy no-op.
 function verifiedEmailSources(
   session: Session,
   inputs: KnownRecipeInputs,

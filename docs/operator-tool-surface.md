@@ -14,7 +14,7 @@ The named operator surface contains 18 tools: the 14 driving verbs in
 | Start and finish | `operate_start`, `operate_finish` |
 | Read the page | `operate_observe`, `operate_screenshot` |
 | Drive ordinary UI | `operate_navigate`, `operate_click`, `operate_type`, `operate_select`, `operate_press`, `operate_scroll` |
-| Scope and login | `operate_allow_host`, `operate_login` |
+| Compatibility and login | `operate_allow_host`, `operate_login` |
 | Vault-aware browser work | `operate_fill_credential`, `operate_extract` |
 | Payments and vault lists | `operate_pay`, `operate_payment_status`, `list_credentials`, `list_payment_cards` |
 
@@ -110,7 +110,7 @@ When combined with `capture`, the vault capture result retains the click receipt
 storage success does not establish the provider outcome. Screenshot clicks use
 the same [picker and popup return rules](#pickers-and-popup-return).
 
-Coordinate clicks use the session's existing domain and payment predicates and
+Coordinate clicks use the session's existing control-plane and payment predicates and
 are not promoted into replay recipes. They do not change vault storage,
 credential capture, payment approval, or 3-D Secure behavior. Local regression
 fixtures prove pointer mechanics; they do not guarantee Cloudflare clearance.

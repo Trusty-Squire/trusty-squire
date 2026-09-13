@@ -1,4 +1,6 @@
 import { chromium, type Browser } from "playwright";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { BrowserController } from "../browser.js";
 import { installBrokerBrowserCustody } from "../broker/custody.js";
@@ -99,6 +101,20 @@ describe("operator egress", () => {
         ),
       ).toBe(true);
       expect(delivered).toContain("https://another-issuer.test/fingerprint");
+      const evidenceDirectory = process.env.EGRESS_EVIDENCE_DIR;
+      if (evidenceDirectory) {
+        await mkdir(evidenceDirectory, { recursive: true });
+        await writeFile(
+          join(evidenceDirectory, "operator-egress.json"),
+          JSON.stringify({
+            fixture: "Real Chromium operator session with intercepted synthetic HTTP responses",
+            merchantUrl: page.url(),
+            deliveredRequests: delivered,
+            sdkExecuted: await page.evaluate("window.sdkLoaded"),
+            providerFrameUrl: frame.url(),
+          }, null, 2),
+        );
+      }
     } finally {
       if (sessionId !== undefined) await finishProvisionSession(sessionId);
       vi.restoreAllMocks();

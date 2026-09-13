@@ -661,13 +661,9 @@ post-submit outcome labels in those owners rather than copying them here.
 
 ### Browser egress is unrestricted
 
-The operator has no request host allowlist or payment-network exception window.
-Legacy host declarations are ignored; see
-[`docs/operator-tool-surface.md`](docs/operator-tool-surface.md#browser-egress-is-unrestricted).
-`browser-unrestricted-egress.test.ts` covers arbitrary third-party fetch/XHR,
-SDK loading, and 3DS frame traffic. `browser-decoupled-3ds.test.ts` covers ACS
-polling and CRes completion. Payment frame recognition remains a card-fill
-boundary, independent of networking.
+See the [operator egress contract](docs/operator-tool-surface.md#browser-egress-is-unrestricted)
+and the [acceptance runbook](docs/operator-acceptance-runbook.md#deterministic-acceptance)
+for behavior and regression coverage.
 
 ### Positive new-card selection supersedes #572's saved-card refusal
 

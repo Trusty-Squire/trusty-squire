@@ -766,6 +766,11 @@ describe("native screenshot/click tool contract on an isolated session", () => {
       expect(mouse).toHaveBeenCalledOnce();
       await f.page.waitForURL("http://undeclared.test/destination");
       expect(f.page.url()).toBe("http://undeclared.test/destination");
+      await evidence("undeclared-host-navigation.png", await f.page.screenshot());
+      await evidence(
+        "undeclared-host-navigation.json",
+        JSON.stringify({ request: screenshot, result, finalUrl: f.page.url() }, null, 2),
+      );
       expect(
         await operateClickTool.handler({ session_id: started.session_id, screenshot }, null),
       ).toMatchObject({ status: "stale_screenshot" });
