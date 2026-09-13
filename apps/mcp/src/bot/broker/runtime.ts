@@ -84,6 +84,7 @@ export class BrokerRuntime implements BrokerBrowserCustody {
       } finally {
         this.recycling = false;
       }
+      if (this.closing) throw new BrokerRefusal("maintenance", "Identity cell is draining");
     }
     const admissionId = brokerAdmissionId();
     if (admissionId !== undefined)

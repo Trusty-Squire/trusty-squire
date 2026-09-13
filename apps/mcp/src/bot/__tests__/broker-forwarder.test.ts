@@ -866,12 +866,13 @@ it("reconciles benign unsettled dispatched work in-band and admits a fresh start
     boundAccountId: () => "account",
   };
   const forwarder = new OperatorForwarder(path, guard, credential("b"));
+  let click: Promise<unknown> = Promise.resolve();
   try {
     const first = (await forwarder.invoke("operate_start", {}, "start-1")) as {
       session_id: string;
     };
     const abort = new AbortController();
-    const click = forwarder
+    click = forwarder
       .invoke(
         "operate_click",
         { session_id: first.session_id, ref: "@e:x" },
@@ -893,9 +894,11 @@ it("reconciles benign unsettled dispatched work in-band and admits a fresh start
     // connectOrLaunchBroker performs one health handshake plus one bound
     // connection; a reconnect for start-2 would double that count.
     expect(authentications).toBe(2);
-    await click;
   } finally {
+    // The broker never answers the click; only closing the connection settles
+    // it (broker_lost), which the swallowed promise absorbs.
     await forwarder.close();
+    await click;
     await broker.close();
     await rm(root, { recursive: true, force: true });
   }

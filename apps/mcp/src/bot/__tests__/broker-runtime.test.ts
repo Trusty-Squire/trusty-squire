@@ -208,6 +208,31 @@ it("refuses to recycle when the previous browser does not close", async () => {
   expect(state.start).toHaveBeenCalledTimes(1);
 });
 
+it("refuses the recycled start when maintenance drains the cell mid-recycle", async () => {
+  state.attach.mockResolvedValue({ closeOwnPagesOnly: vi.fn(async () => "closed") });
+  const runtime = new BrokerRuntime("account");
+  const first = await runtime.acquire({ profileDir: root });
+  await runtime.release(first.browser);
+  let closed!: (state: string) => void;
+  state.close.mockImplementationOnce(
+    () =>
+      new Promise<string>((resolve) => {
+        closed = resolve;
+      }),
+  );
+
+  const recycled = runtime.acquire({ profileDir: root, proxyUrl: "http://proxy.test:8080" });
+  await Promise.resolve();
+  const maintenance = runtime.close();
+  closed("closed");
+
+  expect(await maintenance).toBe(true);
+  await expect(recycled).rejects.toThrow(/draining/);
+  // The drained cell must not be handed a fresh Chrome behind maintenance's back.
+  expect(state.start).toHaveBeenCalledTimes(1);
+  runtime.resume();
+});
+
 it("persists every concurrent terminal hook before releasing target custody", async () => {
   let close!: (state: string) => void;
   const browser = {
