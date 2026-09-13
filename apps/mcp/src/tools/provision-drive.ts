@@ -1643,7 +1643,7 @@ const navigateSchema = z.object({ ...sessionShape, url: z.string().url() });
 export const operateNavigateTool: Tool<z.infer<typeof navigateSchema>> = {
   name: "operate_navigate",
   description:
-    "Navigate to a URL within this session's allowed hosts. On a scope refusal, the error names the host and remedy.",
+    "Navigate to a URL without session host restrictions. Squire control-plane destinations remain refused.",
   inputSchema: navigateSchema,
   jsonInputSchema: {
     type: "object",
