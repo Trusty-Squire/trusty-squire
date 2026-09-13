@@ -107,6 +107,19 @@ binding. Browser epoch changes invalidate earlier capabilities.
   erase-and-retry recovery for uncertain payments. Reconciliation keeps a
   confirmed payment submission as `done`, distinct from 3-D Secure-required and
   unknown outcomes.
+- Lineage-scoped fresh-work admission clears in-band only for provably benign
+  cancelled browsing (click/type/select/press/navigate/fill_credential):
+  such uncertainty never wedges a lineage behind a fence whose only escape was
+  replacing the MCP client credential. Payment-grade custody still fences both
+  browser replacement and same-lineage admission: `inject_card`, recipe runs
+  (which may embed payment steps), logins (which mutate account identity),
+  records with no known operation, and captures whose storage is unknown.
+  `dispatch-journal.ts` owns that predicate (`lineageAdmitsFreshWork`);
+  `broker-journal.test.ts` and `broker-operator.test.ts` pin it. On the
+  forwarder side, a dispatched-but-never-settled call registers per lineage;
+  a fresh start races its settled promise against a bounded grace (2.5s) and
+  clears the map only when every remaining entry is benign
+  (`forwarder.ts` `reconcileUnsettledForFreshStart`).
 - When a client retaining the original lineage credential loses an operator reply,
   its reconciliation request must set MCP request metadata `"trusty-squire/recover": true`. This explicitly asks the
   broker to reconcile its authenticated lineage's newest matching durable

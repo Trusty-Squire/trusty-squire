@@ -31,6 +31,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+/** How long a fresh start waits for this lineage's own unsettled dispatched
+ * work to settle before reconciling it in-band. Just above the MCP server's
+ * 2s settlement window so ordinary cancellations settle on their own. */
+const UNSETTLED_WORK_GRACE_MS = 2_500;
+
+interface UnsettledDispatch {
+  paymentCapable: boolean;
+  settled: Promise<void>;
+}
+
 /** The MCP process holds only opaque capabilities. Never reconnect/replay a
  * dispatched request after transport loss: its side effect may have happened. */
 export class OperatorForwarder {
@@ -38,6 +48,7 @@ export class OperatorForwarder {
   private client: BrokerClient | undefined;
   private connecting = false;
   private readonly sessions = new Map<string, TabCapability>();
+  private readonly unsettledDispatches = new Map<string, UnsettledDispatch>();
   private readonly lineageCredential: string;
   private readonly invocationNamespace = randomUUID();
   constructor(
@@ -112,6 +123,31 @@ export class OperatorForwarder {
   ): Promise<void> {
     await client.confirmStartDelivery(capability);
   }
+  /** A dispatched-but-never-settled forwarded call wedges this lineage: the
+   * broker never replies (cancelled benign browsing whose reply was lost with
+   * the old broker), the MCP response already surfaced outcome_unknown, and
+   * every fresh start on the same credential would stay fenced until the
+   * client process itself is replaced. That escape hatch is only justified
+   * for genuinely uncertain PAYMENT custody. When the lineage's only
+   * unsettled work is benign non-payment browsing, reconcile the fence
+   * in-band and admit the fresh start without a client reconnect. */
+  private async reconcileUnsettledForFreshStart(): Promise<void> {
+    if (this.unsettledDispatches.size === 0) return;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        Promise.all([...this.unsettledDispatches.values()].map((entry) => entry.settled)),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, UNSETTLED_WORK_GRACE_MS);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+    if ([...this.unsettledDispatches.values()].some((entry) => entry.paymentCapable)) return;
+    // Benign cancelled browsing only: reconcile the lineage fence in-band.
+    this.unsettledDispatches.clear();
+  }
   private isCapability(value: unknown): value is TabCapability {
     if (value === null || typeof value !== "object") return false;
     const capability = value as Record<string, unknown>;
@@ -130,6 +166,7 @@ export class OperatorForwarder {
     const callerRequestHash = this.callerRequestHash(requestId);
     const idempotencyKey = this.idempotencyKey(callerRequestHash);
     let dispatchedClient: BrokerClient | undefined;
+    let settleDispatch: (() => void) | undefined;
     const checkCancelled = (): void => {
       if (signal?.aborted)
         throw signal.reason ?? new BrokerRefusal("cancelled", "Request cancelled before dispatch");
@@ -196,10 +233,19 @@ export class OperatorForwarder {
         throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
       if (!starting && name !== "operate_finish" && capability !== undefined)
         await awaitOperatorPreparation(this.confirmStartDelivery(client, capability), signal);
+      if (starting)
+        await awaitOperatorPreparation(this.reconcileUnsettledForFreshStart(), signal);
       if (recovery.recover)
         throw new BrokerRefusal("recovery_not_found", "No matching durable outcome is available");
       checkCancelled();
       dispatchedClient = client;
+      let settle!: () => void;
+      const dispatchSettled = new Promise<void>((resolve) => (settle = resolve));
+      settleDispatch = settle;
+      this.unsettledDispatches.set(idempotencyKey, {
+        paymentCapable: name === "inject_card" || "capture" in args,
+        settled: dispatchSettled,
+      });
       const brokerCall = client.call(
         "tool",
         {
@@ -302,6 +348,8 @@ export class OperatorForwarder {
         this.sessions.delete(id);
       return reply.result;
     } finally {
+      settleDispatch?.();
+      this.unsettledDispatches.delete(idempotencyKey);
       signal?.removeEventListener("abort", cancel);
     }
   }

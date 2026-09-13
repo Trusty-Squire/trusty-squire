@@ -41,9 +41,10 @@ describe("broker dispatch custody", () => {
         dispatchTracked: true,
         outcome: { status: "unknown", reason: "execution_error" },
       });
-      await expect(new DispatchJournal(path).assertReconciled()).rejects.toThrow(
-        "lost mutation custody",
-      );
+      // Facet C: benign cancelled browsing no longer fences the lineage at all
+      // — neither browser replacement nor same-lineage admission.
+      await expect(new DispatchJournal(path).assertReconciled()).resolves.toBeUndefined();
+      expect(await new DispatchJournal(path).hasOutstanding(undefined, "lineage")).toBe(false);
 
       // The session then closed in an orderly terminal teardown.
       await journal.recordTerminalReceipt("lineage", {
@@ -58,6 +59,67 @@ describe("broker dispatch custody", () => {
       const restarted = new DispatchJournal(path);
       await expect(restarted.assertReconciled()).resolves.toBeUndefined();
       expect(await restarted.hasOutstanding(undefined, "lineage")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("settles benign cancelled browsing in-band: the lineage admits a fresh start without a reconnect", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-journal-benign-"));
+    const path = join(root, "dispatch.jsonl");
+    try {
+      const journal = new DispatchJournal(path);
+      await journal.record("session", "click", "dispatch_attempted", {
+        forwarderId: "lineage",
+        operation: "operate_click",
+        inputHash: "input",
+        dispatchTracked: true,
+      });
+      await journal.record("session", "click", "unknown", {
+        forwarderId: "lineage",
+        operation: "operate_click",
+        inputHash: "input",
+        dispatchTracked: true,
+        outcome: { status: "unknown", reason: "cancelled" },
+      });
+      const restarted = new DispatchJournal(path);
+      // Startup replacement is admitted...
+      await expect(restarted.assertReconciled()).resolves.toBeUndefined();
+      // ...and the same lineage is admitted for fresh work (the daemon gate
+      // is lineage-scoped), while the session-scoped fence still reports the
+      // uncertain entry for recovery purposes.
+      expect(await restarted.hasOutstanding(undefined, "lineage")).toBe(false);
+      expect(await restarted.hasOutstanding("session")).toBe(true);
+      // A different lineage was never fenced.
+      expect(await restarted.hasOutstanding(undefined, "other-lineage")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the lineage fence for capture-unknown custody even without payment operations", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-journal-capture-"));
+    const path = join(root, "dispatch.jsonl");
+    try {
+      const journal = new DispatchJournal(path);
+      await journal.record("session", "click", "observed_result", {
+        forwarderId: "lineage",
+        operation: "operate_click",
+        inputHash: "input",
+        dispatchTracked: true,
+        outcome: {
+          status: "unknown",
+          reason: "execution_error",
+          capture: {
+            write_id: "write",
+            stored: false,
+            storage: "unknown",
+          },
+        },
+      });
+      const restarted = new DispatchJournal(path);
+      await expect(restarted.assertReconciled()).rejects.toThrow("lost mutation custody");
+      expect(await restarted.hasOutstanding(undefined, "lineage")).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
