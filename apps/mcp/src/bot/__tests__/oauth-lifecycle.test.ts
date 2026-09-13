@@ -523,7 +523,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const context = product.context();
     const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
     const previousCooldown = process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
-    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1000";
+    // The fixture never confirms OAuth completion, so the action deadline still
+    // produces awaiting_human. Leave enough time for the popup click under load.
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "8000";
     process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
     const providerReturned = product.waitForEvent("popup").then(async (popup) => {
       await popup.goto("data:text/html,provider-token-exchange");
@@ -560,7 +562,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       if (sessionId !== null) await finishProvisionSession(sessionId).catch(() => undefined);
       await context.close().catch(() => undefined);
     }
-  }, 20_000);
+  }, 60_000);
 
   it("keeps a delayed popup dispatch pending without a return destination", async () => {
     const context = await browser.newContext();
