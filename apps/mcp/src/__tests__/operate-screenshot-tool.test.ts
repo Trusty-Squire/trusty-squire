@@ -224,7 +224,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
     }
   });
 
-  it("captures during an active card fill — a fill in progress is not a refusal", async () => {
+  it("captures checkout pixels without a content refusal", async () => {
     const url = "https://operator-screenshot.test/checkout";
     const browser = {
       goto: vi.fn().mockResolvedValue(undefined),
@@ -248,8 +248,6 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
     const client = await connectedClient();
 
     try {
-      paymentSession(started.session_id).paymentFieldSealActive = true;
-
       const result = await client.callTool({
         name: "operate_screenshot",
         arguments: { session_id: started.session_id },

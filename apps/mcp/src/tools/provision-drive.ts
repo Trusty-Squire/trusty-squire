@@ -381,7 +381,7 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
     'Use `format:"full"` only when the page DOM and text are needed. A released card\'s complete PAN and security code are masked; all other emitted content stays verbatim. ' +
     DOM_OBSERVATION_CONTRACT +
     "YOU are the planner — read the observation, then drive the signup, setup, or " +
-    "checkout with operate_click, operate_type, operate_select, operate_navigate, operate_scroll, and operate_login (operate_pay for a purchase), re-read with " +
+    "checkout with operate_click, operate_type, operate_select, operate_navigate, operate_scroll, and operate_login (inject_card releases a saved card into named fields), re-read with " +
     "operate_observe, and call operate_extract " +
     "when you reach the credentials. Always operate_finish when done. The " +
     "browser has unrestricted egress. If the " +
@@ -1656,8 +1656,7 @@ async function runAction(
       return {
         status: "manual_card_entry_refused",
         reason,
-        safe_alternative: "operate_pay",
-        missing_prerequisite: "verified_cart_total",
+        safe_alternative: "inject_card",
       };
   }
   try {
@@ -1709,7 +1708,7 @@ export const operateClickTool: Tool<z.infer<typeof clickSchema>> = {
   name: "operate_click",
   description:
     ACTION_FORMAT_NOTE +
-    "Prefer a current observation ref or unique @label. If a screenshot-visible control has no usable ref, pass screenshot:{screenshot_id,x,y} from operate_screenshot.click_binding, in original image pixels. Provide exactly one of ref or screenshot. target_unresolved means the label was never issued in this document; stale_ref means its reference or alias expired. stale_screenshot requires a new image. Each image binding permits one attempt; after an uncertain click, observe before deciding any new action. Dispatch does not guarantee challenge clearance. Card charges require operate_pay. A pointer-interception failure may use guarded DOM dispatch internally only when the executor proves no click was dispatched.",
+    "Prefer a current observation ref or unique @label. If a screenshot-visible control has no usable ref, pass screenshot:{screenshot_id,x,y} from operate_screenshot.click_binding, in original image pixels. Provide exactly one of ref or screenshot. target_unresolved means the label was never issued in this document; stale_ref means its reference or alias expired. stale_screenshot requires a new image. Each image binding permits one attempt; after an uncertain click, observe before deciding any new action. Dispatch does not guarantee challenge clearance. Use inject_card for saved-card field entry. A pointer-interception failure may use guarded DOM dispatch internally only when the executor proves no click was dispatched.",
   inputSchema: clickSchema,
   jsonInputSchema: {
     type: "object",
@@ -1803,7 +1802,7 @@ export const operateTypeTool: Tool<z.infer<typeof typeSchema>> = {
   name: "operate_type",
   description:
     ACTION_FORMAT_NOTE +
-    "Fill a control with text, or a session slot returned by operate_login, operate_fill_credential, or operate_extract. Provide exactly one of text or slot. submit presses Enter after a successful fill. Model-supplied card-number-shaped text is refused; use operate_pay.",
+    "Fill a control with text, or a session slot returned by operate_login, operate_fill_credential, or operate_extract. Provide exactly one of text or slot. submit presses Enter after a successful fill. Model-supplied card-number-shaped text is refused; use inject_card.",
   inputSchema: typeSchema,
   jsonInputSchema: {
     type: "object",

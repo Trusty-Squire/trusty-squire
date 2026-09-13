@@ -18,8 +18,7 @@ import { grantAppAccessTool } from "./grant-app-access.js";
 import { revokeAppAccessTool, listAppAccessTool } from "./revoke-app-access.js";
 import { auditLogTool } from "./audit-log.js";
 import { OPERATE_TOOLS } from "./provision-drive.js";
-import { listPaymentCardsTool } from "./operate-pay.js";
-import { operatePayTool, operatePaymentStatusTool } from "./operate-pay.js";
+import { listPaymentCardsTool } from "./list-payment-cards.js";
 import { injectCardTool } from "./inject-card.js";
 import { deleteCredentialTool, editCredentialTool } from "./credential-mutations.js";
 import { fetchCredentialTool } from "./fetch-credential.js";
@@ -132,7 +131,4 @@ export {
   getExtractFailureTool,
   listPaymentCardsTool,
   injectCardTool,
-  // Compatibility exports only; these orchestration tools are no longer registered.
-  operatePayTool,
-  operatePaymentStatusTool,
 };

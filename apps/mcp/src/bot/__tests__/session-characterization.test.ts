@@ -161,7 +161,6 @@ import {
   finishProvisionSession,
   closeAllProvisionSessions,
   activeSessionCount,
-  setActivePendingThreeDs,
   type Session,
   type Observation,
 } from "../provision-session.js";
@@ -314,18 +313,9 @@ describe("characterization: Session construction", () => {
       id: expect.any(String),
       initializing: true,
       lastActivityAt: expect.any(Number),
-      lastCartCheckout: null,
       lastCartMutation: null,
       lastElements: { kind: "Array", length: 0 },
       observeSnapshotFile: null,
-      paymentCallCount: 0,
-      paymentCallDrainWaiters: { kind: "Set", size: 0 },
-      paymentDispatchClosed: false,
-      paymentDispatchHandoff: null,
-      paymentFieldSealActive: false,
-      placeOrderApproval: null,
-      placeOrderAttempted: false,
-      pendingThreeDs: null,
       prevObserve: null,
       recipeRejectionReason: null,
       recordedValues: { kind: "Array", length: 0 },
@@ -404,18 +394,9 @@ describe("characterization: Session construction", () => {
       id: expect.any(String),
       initializing: true,
       lastActivityAt: expect.any(Number),
-      lastCartCheckout: null,
       lastCartMutation: null,
       lastElements: { kind: "Array", length: 0 },
       observeSnapshotFile: null,
-      paymentCallCount: 0,
-      paymentCallDrainWaiters: { kind: "Set", size: 0 },
-      paymentDispatchClosed: false,
-      paymentDispatchHandoff: null,
-      paymentFieldSealActive: false,
-      placeOrderApproval: null,
-      placeOrderAttempted: false,
-      pendingThreeDs: null,
       prevObserve: null,
       recipeRejectionReason: null,
       recordedValues: { kind: "Array", length: 0 },
@@ -601,50 +582,6 @@ describe("characterization: session lifecycle facade", () => {
     }
   });
 
-  it("audits a pending 3-D Secure outcome before closing the browser, then clears the session", async () => {
-    const auditPayment = vi.fn().mockImplementation(async () => {
-      h.terminalOrder.push("3ds_audit");
-      return { id: "evt_characterization" };
-    });
-    let session: Session | null = null;
-    h.onFirstGoto = () => {
-      session = paymentSession();
-    };
-    const started = await startHarnessProvisionSession({
-      serviceUrl: "https://shop.example.com/checkout",
-      browser: new BrowserController({}),
-      api: { auditPayment } as unknown as ApiClient,
-    });
-    const live = session as Session | null;
-    expect(live).not.toBeNull();
-    live!.secretSlots.set("slot_1", "value");
-    setActivePendingThreeDs({
-      approval_id: "appr_characterization",
-      approval_url: "https://web.test/vault/pay/appr_characterization",
-      checkout: {
-        merchant: "Shop",
-        checkout_origin: "https://shop.example.com",
-        amount_cents: 100,
-        currency: "USD",
-      },
-      last4: "4242",
-      deadline: Date.now() + 60_000,
-      outcome: "three_ds",
-    });
-
-    await finishProvisionSession(started.session_id);
-
-    expect(h.terminalOrder).toEqual(["3ds_audit", "browser_close"]);
-    expect(auditPayment).toHaveBeenCalledWith(
-      expect.objectContaining({ status: "payment_3ds_unresolved" }),
-    );
-    // Artifacts cleared and the exact session dropped from the registry.
-    expect(live!.secretSlots.size).toBe(0);
-    expect(live!.prevObserve).toBeNull();
-    expect(live!.observeSnapshotFile).toBeNull();
-    expect(live!.pendingThreeDs).toBeNull();
-    expect(activeSessionCount()).toBe(0);
-  });
 });
 
 describe("characterization: agent-facing observation payload shapes", () => {

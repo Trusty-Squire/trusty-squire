@@ -74,8 +74,8 @@ const DEFAULT_REGISTRY_BASE =
 // terminal teardown can close Chrome and destroy its private profile. Hence two
 // bounds: a short one when idle with no session (routine), and a longer one
 // when a session is still open — wide enough that no real in-flight flow
-// (operate_pay's approval wait is bounded to one minute; post-submit outcome
-// checks are bounded in the minutes) should ever cross it, so crossing it is a reliable
+// (inject_card's approval wait is bounded to one minute) should ever cross it,
+// so crossing it is a reliable
 // abandoned-session signal, not a false kill of live work.
 //
 // The bounds themselves live in server-instance-registry.ts, because the

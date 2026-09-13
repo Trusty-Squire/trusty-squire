@@ -2,10 +2,8 @@ import { z } from "zod";
 import type { ApiClient } from "../api-client.js";
 import type {
   CheckoutCard,
-  CheckoutSubmitResult,
   InjectCardField,
   InjectCardFieldResult,
-  ThreeDsResolution,
 } from "../bot/browser.js";
 import {
   injectCardIntoSessionTargets,
@@ -13,11 +11,11 @@ import {
   type Session,
 } from "../bot/provision-session.js";
 import {
-  executeOperatePay,
-  type PaymentBrowser,
+  executeCardReleaseApproval,
+  type CardReleaseBrowser,
   type PendingApprovalWait,
-  type PendingCardFill,
-} from "../bot/pay-operator.js";
+  type ReleasedCardApproval,
+} from "../bot/card-release-approval.js";
 import { assertApi, type Tool } from "./index.js";
 
 const APPROVAL_WAIT_MS = 60_000;
@@ -170,36 +168,17 @@ export const injectCardTool: Tool<InjectCardInput> = {
           ? session.activePayment.state
           : undefined;
       const controller = session.browser;
-      const checkoutOrigin = new URL(controller.currentUrl()).origin;
       let releasedCard: CheckoutCard | null = null;
       let fieldResults: Record<InjectCardField, InjectCardFieldResult> | null = null;
-      let filled: PendingCardFill | null = null;
-      const paymentBrowser: PaymentBrowser = {
-        isPayPalHostedCheckout: async () => false,
-        readCheckoutSummary: async () => ({
-          merchant: args.merchant,
-          checkout_origin: checkoutOrigin,
-          amount_cents: args.amount_cents,
-          currency: args.currency.toUpperCase(),
-        }),
-        readCheckoutConfirmSummary: async () => {
-          throw new Error("inject_card never reads a confirmation total");
-        },
-        fillAndSubmitCheckout: async (): Promise<CheckoutSubmitResult> => {
-          throw new Error("inject_card never submits checkout");
-        },
+      let filled: ReleasedCardApproval | null = null;
+      const releaseBrowser: CardReleaseBrowser = {
         fillCheckoutCardFields: async (card) => {
           releasedCard = cloneCard(card);
           fieldResults = await injectCardIntoSessionTargets(session.id, card, args.fields);
         },
-        submitFilledCheckout: async () => {
-          throw new Error("inject_card never submits checkout");
-        },
-        clearSealedPaymentFields: async () => undefined,
-        waitForThreeDsResolution: async (): Promise<ThreeDsResolution> => "timeout",
         currentUrl: () => controller.currentUrl(),
       };
-      const result = await executeOperatePay(
+      const result = await executeCardReleaseApproval(
         {
           merchant: args.merchant,
           amount_cents: args.amount_cents,
@@ -207,10 +186,9 @@ export const injectCardTool: Tool<InjectCardInput> = {
           item: args.item,
           reason: args.reason,
           card_ref: args.card_ref,
-          phase: "fill_card",
         },
         api as ApiClient,
-        paymentBrowser,
+        releaseBrowser,
         {
           ...(resumeFrom === undefined ? {} : { resumeFrom }),
           pollBudgetMs: context?.paymentApprovalWaitMs ?? APPROVAL_WAIT_MS,
@@ -233,7 +211,7 @@ export const injectCardTool: Tool<InjectCardInput> = {
       if (releasedCard === null || fieldResults === null || filled === null) {
         return pendingResult(session, result);
       }
-      const approved = filled as PendingCardFill;
+      const approved = filled as ReleasedCardApproval;
       session.releasedPaymentCard = {
         approvalId: approved.approval_id,
         approvalUrl: approved.approval_url,

@@ -292,61 +292,6 @@ describe("TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION on", () => {
     expect(primaryRecord!.closeOwnPagesOnlyCalls).toBe(0);
   });
 
-  it("closes the shared Chrome exactly once when a forced shutdown preempts the last session's graceful finish", async () => {
-    const first = await startProvisionSession({
-      serviceUrl: "https://app.example.com",
-      profileDir,
-    });
-    const second = await startProvisionSession({
-      serviceUrl: "https://other.example.com",
-      profileDir,
-    });
-    const [primaryRecord, satelliteRecord] = h.instances;
-    await finishProvisionSession(first.session_id);
-    expect(primaryRecord!.closeOwnPagesOnlyCalls).toBe(1);
-
-    // Park the satellite's graceful finish INSIDE its terminal 3DS audit —
-    // past its own forced check, before it releases the browser — by giving
-    // it a pending 3DS outcome whose audit call only returns when told to.
-    const session = sessionForCall(second.session_id);
-    if (session === undefined) throw new Error("satellite session missing");
-    let parked!: () => void;
-    const audited = new Promise<void>((resolve) => (parked = resolve));
-    let release!: () => void;
-    const released = new Promise<void>((resolve) => (release = resolve));
-    session.api = {
-      auditPayment: async () => {
-        parked();
-        await released;
-      },
-    } as unknown as NonNullable<Session["api"]>;
-    session.pendingThreeDs = {
-      approval_id: "approval",
-      approval_url: "https://trustysquire.ai/vault/approve/approval",
-      checkout: {},
-      last4: "4242",
-      deadline: Date.now() + 60_000,
-      outcome: "unknown",
-    } as unknown as Session["pendingThreeDs"];
-
-    const graceful = finishProvisionSession(second.session_id);
-    await audited;
-    // The transport disconnects: shutdown force-terminates the same session
-    // while its graceful finish is still parked in the audit.
-    const shutdown = closeAllProvisionSessions();
-    while (session.terminalTeardownOwner?.forced !== true) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    }
-    release();
-    await Promise.allSettled([graceful, shutdown]);
-
-    // The group empties exactly once and the real close runs on the primary
-    // — the shared Chrome is never orphaned by the race.
-    expect(primaryRecord!.closeCalls).toBe(1);
-    expect(satelliteRecord!.closeCalls).toBe(0);
-    expect(satelliteRecord!.closeOwnPagesOnlyCalls).toBe(1);
-  });
-
   it("refuses to join while the last session's teardown is already closing the shared Chrome", async () => {
     const first = await startProvisionSession({
       serviceUrl: "https://app.example.com",

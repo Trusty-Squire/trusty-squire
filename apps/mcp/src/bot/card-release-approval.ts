@@ -15,68 +15,29 @@ import {
 } from "../api-client.js";
 import type {
   CheckoutCard,
-  CheckoutSubmitResult,
   CheckoutSummary,
-  PaymentInstrumentMismatch,
-  ThreeDsResolution,
-} from "./browser.js";
-import {
-  PaymentCardFillCleanupError,
-  PaymentSubmitOutcomeUnknownError,
-  UnrecognizedPaymentFrameError,
 } from "./browser.js";
 import { generateOperatorKeypair, openSealed, type OperatorKeypair } from "./payment-hpke.js";
 
-export interface OperatePayArgs {
-  merchant?: string;
-  amount_cents?: number;
-  currency?: string;
-  // Absent = JIT add-card ceremony: the approval is minted card-less and the
-  // card the user adds is bound SERVER-SIDE. On resume the operator reads that
-  // bound card_ref back from the approval — never args.card_ref, which does not
-  // exist in the JIT branch.
-  card_ref?: string;
+export interface InjectCardApprovalArgs {
+  merchant: string;
+  amount_cents: number;
+  currency: string;
+  card_ref: string;
   item: string;
   reason: string;
-  three_ds_wait_seconds?: number;
-  card_label?: string;
-  card_network?: string;
-  card_issuer?: string;
-  // "fill_card" = split-checkout card entry: a SINGLE amount-bound approval
-  // (one human passkey tap) releases the vaulted card, then fills payment
-  // fields WITHOUT submitting. The caller verifies the final total and
-  // places the order itself; confirm only closes out this approval
-  // afterward — never a second tap.
-  // Absent = the single-page fill+charge.
-  phase?: "fill_card";
 }
 
 export type TerminalPaymentApprovalStatus = "denied" | "expired" | "payment_confirmation_failed";
 
-export interface PaymentBrowser {
-  isPayPalHostedCheckout(): Promise<boolean>;
-  readCheckoutSummary(fallbackCurrency?: string): Promise<CheckoutSummary>;
-  readCheckoutConfirmSummary(approvedCurrency?: string): Promise<CheckoutSummary>;
-  fillAndSubmitCheckout(
-    card: CheckoutCard,
-    options?: { onSubmitDispatched?: () => void; beforeSubmitDispatch?: () => void | number },
-  ): Promise<CheckoutSubmitResult>;
+export interface CardReleaseBrowser {
   fillCheckoutCardFields(card: CheckoutCard, options?: { deadline?: number }): Promise<void>;
-  submitFilledCheckout(): Promise<CheckoutSubmitResult>;
-  clearSealedPaymentFields(): Promise<void>;
-  clearCheckoutCardFields?(): Promise<void>;
-  waitForThreeDsResolution(
-    timeoutMs: number,
-    onThreeDsDetected?: () => void,
-  ): Promise<ThreeDsResolution>;
-  paymentInstrumentMismatch?(): PaymentInstrumentMismatch | undefined;
   currentUrl(): string;
 }
 
-// Everything the confirm step needs from a completed fill_card step. Held by
-// the session layer (never the model): the raw card is NOT here — it was
-// zeroed after the fill; the page holds the only copy until the charge.
-export interface PendingCardFill {
+// Approved terms and card identity returned after the operator opens the card.
+// The raw card is handed to the browser callback and never appears here.
+export interface ReleasedCardApproval {
   approval_id: string;
   approval_url: string;
   checkout: CheckoutSummary;
@@ -86,32 +47,7 @@ export interface PendingCardFill {
   deadline?: number;
 }
 
-// Post-submit outcome resumability: the card was already released and the
-// charge already submitted — this is NEVER a new authorization, just a
-// pointer to an already-in-flight one. A decoupled/out-of-band
-// challenge's real-world completion time routinely exceeds one bounded wait,
-// but missing challenge evidence must remain outcome="unknown" rather than
-// being relabeled as 3-D Secure. `deadline` bounds how long
-// operate_payment_status can keep checking the SAME live browser.
-export interface PendingThreeDsWait {
-  approval_id: string;
-  approval_url: string;
-  checkout: CheckoutSummary;
-  last4: string;
-  payment_instrument_mismatch?: PaymentInstrumentMismatch;
-  mandate_id?: string;
-  deadline: number;
-  outcome: "three_ds" | "unknown";
-  challengeNotification?: { sent?: boolean };
-}
-
-export interface CartCheckoutObservation {
-  checkout: CheckoutSummary;
-  url: string;
-  observedAt: number;
-}
-
-// Resumable approval state: everything a later operate_pay call needs to
+// Resumable approval state: everything a later inject_card call needs to
 // validate and continue the SAME approval after a bounded wait. Held by the
 // session layer only (never the model) — it carries the operator keypair's
 // PRIVATE half. A live resumed approval must reuse that keypair because its
@@ -137,11 +73,9 @@ export interface PendingApprovalWait {
   item: string;
   reason: string;
   cardRef?: string;
-  phase?: "fill_card";
-  three_ds_wait_seconds?: number;
 }
 
-interface PayDependencies {
+interface CardReleaseDependencies {
   fetch: typeof fetch;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
@@ -153,16 +87,8 @@ interface PayDependencies {
   pollIntervalMs: number;
   surfaceApprovalUrl: (url: string) => void | Promise<void>;
   onCardResolved: (cardRef: string) => void;
-  // fill_card only: hands the session layer what the later confirm step needs.
-  onCardFilled: (pending: PendingCardFill) => void;
-  onCardFillCleanupFailed: () => void;
-  onSubmitStarted: () => void;
-  // fill_card only, and only consulted when the live card-entry page itself
-  // has no readable total and amount_cents plus currency were not supplied.
-  // The most recent successfully-parsed checkout total observed earlier in
-  // THIS session (the cart page), scoped to the same origin. Caller-supplied
-  // amount_cents plus currency take precedence when the page total is unreadable.
-  cartFallbackCheckout?: CartCheckoutObservation;
+  // Hands the session layer the approved card identity and terms.
+  onCardFilled: (pending: ReleasedCardApproval) => void;
   // [P0] Resume a previously-created, still-pending approval instead of
   // minting a new one. Set by the MCP tool layer from session state when a
   // prior call on this checkout already returned approval_pending. When
@@ -174,7 +100,7 @@ interface PayDependencies {
   // wait for approval before giving up and returning approval_pending,
   // bounded by the overall approval deadline. Undefined = the legacy
   // behavior of waiting for the full approval/JIT timeout (used by direct
-  // executeOperatePay callers, e.g. unit tests). The MCP tool layer passes a
+  // executeCardReleaseApproval callers, e.g. unit tests). The MCP tool layer passes a
   // bounded human-response window so approval detection belongs to the system,
   // while an exhausted client call can resume this same approval cleanly.
   pollBudgetMs?: number;
@@ -187,14 +113,6 @@ interface PayDependencies {
     state: PendingApprovalWait,
     terminalStatus: TerminalPaymentApprovalStatus,
   ) => void;
-  onThreeDsHandoffArmed: (state: PendingThreeDsWait) => void;
-  coordinateThreeDsAudit: (state: PendingThreeDsWait, audit: () => Promise<void>) => Promise<void>;
-  // Fired when the submit-time outcome wait exhausts its budget with no
-  // terminal signal so the session layer can persist either genuine 3-D
-  // Secure or still-unknown state for operate_payment_status to recheck in
-  // the SAME live browser.
-  onThreeDsPending: (state: PendingThreeDsWait) => void;
-  onThreeDsCleared: (state: PendingThreeDsWait) => void;
 }
 
 const cardSchema = z.object({
@@ -516,7 +434,7 @@ function cardRequiredResult(
       wall: "card_required",
       reason,
       message: `No payment card is on file — ${reason}. Re-run the payment to get a fresh add-card link.`,
-      resume: "operate_pay",
+      resume: "inject_card",
     },
   };
 }
@@ -556,123 +474,7 @@ function isPaymentApprovalDeniedError(error: unknown): boolean {
   return error instanceof ApiCallError && error.code === "payment_approval_denied";
 }
 
-// Total additional time (beyond this call's own bounded wait) that a
-// resumed, still-pending decoupled/out-of-band 3DS challenge stays
-// checkable via operate_payment_status before handing back an accurate
-// unresolved status. Generous — a real cardholder needs to notice, unlock
-// their phone, open the banking app, and approve — but bounded, matching
-// the rest of this file's "wait, but never forever" posture.
-export const THREE_DS_RESUME_WINDOW_MS = 20 * 60 * 1000;
 const PAYMENT_APPROVAL_RESPONSE_RESERVE_MS = 500;
-
-// The cardholder normally sees the website's 3-D Secure challenge and then
-// opens their bank app to approve it; the bank does not reliably push that
-// prompt itself. Because the operator's browser is headless, fire the Telegram
-// nudge WITHOUT awaiting it (a slow/unresolved Telegram call must never delay
-// the 3DS wait loop) while still tracking whether it actually went out.
-export function markPendingThreeDsChallenge(api: ApiClient, state: PendingThreeDsWait): void {
-  state.outcome = "three_ds";
-  if (state.challengeNotification !== undefined) return;
-  const notification: { sent?: boolean } = {};
-  state.challengeNotification = notification;
-  void api.notifyThreeDs(state.approval_id, "detected_challenge").then(
-    (result) => {
-      notification.sent = result.sent;
-    },
-    () => {
-      notification.sent = false;
-    },
-  );
-}
-
-function threeDsChallengeMessage(telegramSent: boolean | undefined): string {
-  if (telegramSent === false) {
-    return (
-      "The issuer requires 3-D Secure authentication, approved from the cardholder's bank app. " +
-      "The Telegram nudge could not be delivered — link Telegram under Vault Settings, or check " +
-      "the bank app directly."
-    );
-  }
-  if (telegramSent === true) {
-    return (
-      "The issuer requires 3-D Secure authentication. A Telegram nudge was sent — approve the " +
-      "charge in the bank app to continue."
-    );
-  }
-  return "The issuer requires 3-D Secure authentication, approved from the cardholder's bank app.";
-}
-
-function threeDsOutOfBandMessage(telegramSent: boolean | undefined): string {
-  if (telegramSent === false) {
-    return (
-      "No order confirmation or on-page 3-D Secure challenge appeared. The Telegram nudge could " +
-      "not be delivered — check the cardholder's bank app directly, then resume checkout."
-    );
-  }
-  if (telegramSent === true) {
-    return (
-      "No order confirmation or on-page 3-D Secure challenge appeared. A Telegram nudge was sent " +
-      "— check the cardholder's bank app for an approval request, then resume checkout."
-    );
-  }
-  return (
-    "No order confirmation or on-page 3-D Secure challenge appeared. Check the cardholder's bank " +
-    "app for an approval request, then resume checkout."
-  );
-}
-
-function threeDsHandoffMessage(
-  submitResult: CheckoutSubmitResult,
-  telegramSent: boolean | undefined,
-): string {
-  return submitResult.three_ds_required || submitResult.challenge_url !== undefined
-    ? threeDsChallengeMessage(telegramSent)
-    : threeDsOutOfBandMessage(telegramSent);
-}
-
-function statusAfterThreeDsResolution(
-  currentStatus: string,
-  resolution: ThreeDsResolution,
-): string {
-  switch (resolution) {
-    case "succeeded":
-      return "payment_submitted";
-    case "failed":
-      return "payment_declined";
-    case "challenge_pending":
-      return "payment_3ds_required";
-    case "timeout":
-      return currentStatus;
-  }
-}
-
-// [P1] A bare payment_checkout_total_not_found left the host with no next
-// step (friction audit finding). Name the exact safe action instead — go
-// observe the page that shows the payable total — never a bare error string.
-// This never substitutes a fallback amount itself; it only fires when no
-// fallback was usable, so it changes the ERROR SHAPE, not what gets approved.
-function needsCartTotalResult(
-  phase: "fill_card" | undefined,
-  cartUrl?: string,
-): Record<string, unknown> {
-  return {
-    status: "needs_cart_total",
-    reason: "checkout_total_not_on_page",
-    next: {
-      tool: "operate_observe",
-      ...(cartUrl !== undefined ? { url: cartUrl } : {}),
-      hint:
-        phase === "fill_card"
-          ? "No cart total has been observed yet this session for this checkout's origin. " +
-            "Navigate to the cart or order-summary page that shows the payable total, call " +
-            'operate_observe there, then retry operate_pay with phase="fill_card".'
-          : "This checkout page has no readable total. If this is a split checkout (a separate " +
-            "card-entry step whose total was shown earlier, e.g. on the cart page), retry with " +
-            'phase="fill_card" after observing that total. Otherwise navigate to the page that ' +
-            "shows the payable total and observe it first.",
-    },
-  };
-}
 
 function isLiveResumableApproval(
   approval: PaymentApproval,
@@ -697,7 +499,7 @@ function isLiveResumableApproval(
   );
 }
 
-function defaultDependencies(): PayDependencies {
+function defaultDependencies(): CardReleaseDependencies {
   return {
     fetch,
     sleep: async (ms) => await new Promise((resolve) => setTimeout(resolve, ms)),
@@ -715,14 +517,8 @@ function defaultDependencies(): PayDependencies {
     },
     onCardResolved: () => undefined,
     onCardFilled: () => undefined,
-    onCardFillCleanupFailed: () => undefined,
-    onSubmitStarted: () => undefined,
     onApprovalPending: () => undefined,
     onApprovalTerminal: () => undefined,
-    onThreeDsHandoffArmed: () => undefined,
-    coordinateThreeDsAudit: async (_state, audit) => await audit(),
-    onThreeDsPending: () => undefined,
-    onThreeDsCleared: () => undefined,
   };
 }
 
@@ -747,25 +543,11 @@ function logPaymentCandidateLifecycle(
   );
 }
 
-/** The signed-payment drift check, reusable before the approval ceremony begins. */
-export function checkoutSummaryMatches(
-  expected: CheckoutSummary,
-  observed: CheckoutSummary | undefined,
-): boolean {
-  return (
-    observed !== undefined &&
-    observed.amount_cents === expected.amount_cents &&
-    observed.currency === expected.currency &&
-    observed.merchant === expected.merchant &&
-    observed.checkout_origin === expected.checkout_origin
-  );
-}
-
-export async function executeOperatePay(
-  args: OperatePayArgs,
+export async function executeCardReleaseApproval(
+  args: InjectCardApprovalArgs,
   api: ApiClient,
-  browser: PaymentBrowser,
-  overrides: Partial<PayDependencies> = {},
+  browser: CardReleaseBrowser,
+  overrides: Partial<CardReleaseDependencies> = {},
 ): Promise<Record<string, unknown>> {
   const deps = { ...defaultDependencies(), ...overrides };
   let resume = deps.resumeFrom;
@@ -838,10 +620,6 @@ export async function executeOperatePay(
       }
     }
 
-    const threeDsWaitSeconds =
-      resume !== undefined ? resume.three_ds_wait_seconds : args.three_ds_wait_seconds;
-    const threeDsWaitMs = Math.min(Math.max(threeDsWaitSeconds ?? 180, 0), 600) * 1000;
-
     let checkout: CheckoutSummary;
     let item: string;
     let reason: string;
@@ -854,7 +632,6 @@ export async function executeOperatePay(
     let deadline: number;
     let boundCardRef: string | null;
     const cardRefArg = resume !== undefined ? resume.cardRef : args.card_ref;
-    const phaseArg = resume !== undefined ? resume.phase : args.phase;
 
     if (resume !== undefined) {
       checkout = resume.checkout;
@@ -869,41 +646,20 @@ export async function executeOperatePay(
       deadline = resume.deadline;
       boundCardRef = resume.boundCardRef;
     } else {
-      try {
-        checkout = await browser.readCheckoutSummary(args.currency);
-      } catch (error) {
-        if (error instanceof Error && error.message === "payment_checkout_total_not_found") {
-          if (args.amount_cents !== undefined && args.currency !== undefined) {
-            const checkoutUrl = new URL(browser.currentUrl());
-            checkout = {
-              merchant: args.merchant ?? checkoutUrl.hostname.replace(/^www\./, ""),
-              checkout_origin: checkoutUrl.origin,
-              amount_cents: args.amount_cents,
-              currency: args.currency.toUpperCase(),
-            };
-          } else if (args.phase === "fill_card" && deps.cartFallbackCheckout !== undefined) {
-            // Rakuten-style split checkouts show no total on the card-entry page
-            // itself. For fill_card, fall back to the most recent total this
-            // SAME session actually read from a real page (the cart step).
-            checkout = deps.cartFallbackCheckout.checkout;
-          } else {
-            return needsCartTotalResult(args.phase, deps.cartFallbackCheckout?.url);
-          }
-        } else {
-          throw error;
-        }
-      }
+      checkout = {
+        merchant: args.merchant,
+        checkout_origin: new URL(browser.currentUrl()).origin,
+        amount_cents: args.amount_cents,
+        currency: args.currency.toUpperCase(),
+      };
 
       item = args.item;
       reason = args.reason;
-      // JIT add-card ceremony: no card on file, so mint the approval card-less
-      // and read the SERVER-BOUND card_ref back on resume. The has-card path
-      // (args.card_ref present) is entirely untouched by this flag.
-      jit = args.card_ref === undefined;
+      jit = false;
 
       const created = await api.createPaymentApproval({
         ...checkout,
-        ...(args.card_ref !== undefined ? { card_ref: args.card_ref } : {}),
+        card_ref: args.card_ref,
         operator_pubkey: keypair.publicKey,
         item,
         reason,
@@ -919,7 +675,7 @@ export async function executeOperatePay(
       const waitBudgetMs = jit ? deps.jitApprovalTimeoutMs : deps.approvalTimeoutMs;
       const serverDeadline = Date.parse(created.expires_at);
       deadline = Number.isFinite(serverDeadline) ? serverDeadline : deps.now() + waitBudgetMs;
-      boundCardRef = args.card_ref ?? null;
+      boundCardRef = args.card_ref;
     }
 
     resumableState = () => ({
@@ -938,8 +694,6 @@ export async function executeOperatePay(
       item,
       reason,
       ...(cardRefArg !== undefined ? { cardRef: cardRefArg } : {}),
-      ...(phaseArg === "fill_card" ? { phase: "fill_card" as const } : {}),
-      ...(threeDsWaitSeconds !== undefined ? { three_ds_wait_seconds: threeDsWaitSeconds } : {}),
     });
     await deps.surfaceApprovalUrl(approvalUrl);
 
@@ -1285,18 +1039,17 @@ export async function executeOperatePay(
           approval_id: approvalId,
           approval_url: approvalUrl,
           expires_at: new Date(deadline).toISOString(),
-          phase: phaseArg ?? null,
           approved_amount_cents: checkout.amount_cents,
           currency: checkout.currency,
           merchant: checkout.merchant,
           candidate_kind: "review",
           ready_to_charge: false,
           next: {
-            tool: "operate_pay",
+            tool: "inject_card",
             message:
               "The review signature was verified, but final payment approval is still required. " +
               "Refresh the approval page if it does not advance to the final approval prompt, " +
-              "then call operate_pay again with the same arguments; it resumes this approval and waits.",
+              "then call inject_card again with the same arguments; it resumes this approval and waits.",
           },
         };
       }
@@ -1309,16 +1062,15 @@ export async function executeOperatePay(
           approval_id: approvalId,
           approval_url: approvalUrl,
           expires_at: new Date(deadline).toISOString(),
-          phase: phaseArg ?? null,
           approved_amount_cents: checkout.amount_cents,
           currency: checkout.currency,
           merchant: checkout.merchant,
           candidate_kind: "none",
           ready_to_charge: false,
           next: {
-            tool: "operate_pay",
+            tool: "inject_card",
             message:
-              "The bounded server wait ended before the human responded. Call operate_pay again " +
+              "The bounded server wait ended before the human responded. Call inject_card again " +
               "with the same arguments; it resumes this approval and continues waiting without " +
               "creating another approval.",
           },
@@ -1359,377 +1111,30 @@ export async function executeOperatePay(
           : typeof claims.jti === "string"
             ? claims.jti
             : undefined;
-    // [#13][P1] JIT nearly doubles the window between reading the checkout and
-    // filling it, so a mid-ceremony navigation could swap the merchant, origin,
-    // or total out from under the signed mandate. Re-read the live checkout
-    // immediately before filling (smallest possible time-of-check→time-of-use
-    // gap). When the read succeeds, refuse if any signed field the mandate binds
-    // — merchant, origin, amount, currency — drifted. If the total is no longer
-    // machine-readable, continue under the original mandate-bound checkout. The
-    // card was opened above but is never submitted on a detected mismatch; the
-    // outer finally zeroes it. Fresh has-card calls retain their prior behavior;
-    // resumed has-card calls recheck too.
-    if (phaseArg !== "fill_card" && (jit || resume !== undefined)) {
-      let live: CheckoutSummary | undefined;
-      try {
-        live = await browser.readCheckoutSummary(args.currency);
-      } catch {
-        live = undefined;
-      }
-      if (live !== undefined && !checkoutSummaryMatches(checkout, live)) {
-        return {
-          status: "payment_amount_mismatch",
-          approval_url: approvalUrl,
-          merchant: checkout.merchant,
-          mandate_amount_cents: checkout.amount_cents,
-          mandate_currency: checkout.currency,
-          ...(live !== undefined
-            ? {
-                live_amount_cents: live.amount_cents,
-                live_currency: live.currency,
-                live_merchant: live.merchant,
-                live_checkout_origin: live.checkout_origin,
-              }
-            : {}),
-        };
-      }
-    }
-
-    // Split-checkout card entry (phase="fill_card"): the human approval above
-    // is a SINGLE amount-bound approval (one passkey tap) that releases the
-    // card here. The caller verifies the final total and places the order
-    // itself; confirm only closes out this approval afterward, never a
-    // second one. The live check still needed here (the ceremony can take
-    // minutes, and the fill targets the CURRENT page) is that the browser
-    // remains on the origin the approval was signed for.
-    if (phaseArg === "fill_card") {
-      let liveOrigin: string | null;
-      try {
-        liveOrigin = new URL(browser.currentUrl()).origin;
-      } catch {
-        liveOrigin = null;
-      }
-      if (liveOrigin !== checkout.checkout_origin) {
-        return {
-          status: "payment_checkout_origin_mismatch",
-          approval_url: approvalUrl,
-          mandate_checkout_origin: checkout.checkout_origin,
-          ...(liveOrigin !== null ? { live_checkout_origin: liveOrigin } : {}),
-        };
-      }
-      if (approvalExpired()) return expiredApprovalResult();
-      deps.onCardResolved(cardRef);
-      try {
-        await browser.fillCheckoutCardFields(card, { deadline });
-      } catch (error) {
-        if (error instanceof Error && error.message === "payment_approval_expired") {
-          if (error instanceof PaymentCardFillCleanupError) deps.onCardFillCleanupFailed();
-          return {
-            ...expiredApprovalResult(),
-            payment_fields_cleared: !(error instanceof PaymentCardFillCleanupError),
-          };
-        }
-        const frameOrigin =
-          error instanceof UnrecognizedPaymentFrameError
-            ? error.frameOrigin
-            : error instanceof PaymentCardFillCleanupError
-              ? error.frameOrigin
-              : undefined;
-        if (error instanceof PaymentCardFillCleanupError) {
-          deps.onCardFillCleanupFailed();
-        }
-        if (frameOrigin !== undefined) {
-          return {
-            status: "payment_frame_not_recognized",
-            frame_origin: frameOrigin,
-            approval_url: approvalUrl,
-            ...(error instanceof PaymentCardFillCleanupError
-              ? { payment_fields_cleared: false }
-              : {}),
-            reason:
-              "The card fields live in a cross-origin frame that is not a recognized " +
-              "payment-provider surface; the vaulted card is never filled into an " +
-              "unrecognized frame.",
-          };
-        }
-        return {
-          status: "payment_card_fill_failed",
-          approval_url: approvalUrl,
-          ...(error instanceof PaymentCardFillCleanupError
-            ? { payment_fields_cleared: false }
-            : {}),
-          reason:
-            error instanceof Error && /^payment_[a-z_]+(?::[a-z_]+)?$/.test(error.message)
-              ? error.message
-              : "payment_card_fill_failed",
-        };
-      } finally {
-        cardBytes?.fill(0);
-        cardBytes = undefined;
-        card = undefined;
-      }
-      deps.onCardFilled({
-        approval_id: approvalId,
-        approval_url: approvalUrl,
-        checkout,
-        card_ref: cardRef,
-        last4,
-        deadline,
-        ...(mandateId !== undefined ? { mandate_id: mandateId } : {}),
-      });
-      return {
-        status: "payment_card_filled",
-        approval_url: approvalUrl,
-        merchant: checkout.merchant,
-        amount_cents: checkout.amount_cents,
-        currency: checkout.currency,
-        last4,
-        next:
-          "Nothing was charged. Drive the checkout to the order-confirmation step, verify the " +
-          "live final total there matches the approved amount_cents/currency above, then place " +
-          "the order yourself via operate_act and handle any 3-D Secure challenge directly — " +
-          "Trusty Squire never re-reads the total or clicks the pay/place-order control. Call " +
-          'operate_pay {phase:"confirm"} any time after this fill to close out the approval; it ' +
-          "does not need to happen before you place the order.",
-      };
-    }
-
     if (approvalExpired()) return expiredApprovalResult();
     deps.onCardResolved(cardRef);
-    const pendingThreeDsHandoff: PendingThreeDsWait = {
-      approval_id: approvalId,
-      approval_url: approvalUrl,
-      checkout,
-      last4,
-      ...(mandateId !== undefined ? { mandate_id: mandateId } : {}),
-      deadline: deps.now() + THREE_DS_RESUME_WINDOW_MS,
-      outcome: "unknown",
-    };
-    const notifyDetectedChallenge = (): void => {
-      markPendingThreeDsChallenge(api, pendingThreeDsHandoff);
-      submitResult.three_ds_required = true;
-    };
-    deps.onThreeDsHandoffArmed(pendingThreeDsHandoff);
-    let retainedPendingThreeDs: PendingThreeDsWait | null = null;
-    const retainPendingThreeDs = (): void => {
-      const firstRetention = retainedPendingThreeDs === null;
-      if (retainedPendingThreeDs === null) {
-        retainedPendingThreeDs = pendingThreeDsHandoff;
-      }
-      if (submitResult.payment_instrument_mismatch !== undefined) {
-        retainedPendingThreeDs.payment_instrument_mismatch =
-          submitResult.payment_instrument_mismatch;
-      }
-      if (firstRetention) deps.onThreeDsPending(retainedPendingThreeDs);
-    };
-    const clearPendingThreeDs = (): void => {
-      if (retainedPendingThreeDs === null) return;
-      deps.onThreeDsCleared(retainedPendingThreeDs);
-      retainedPendingThreeDs = null;
-    };
-    const pendingOutcomeNext = (): Record<string, unknown> => ({
-      tool: "operate_payment_status",
-      wait_seconds: 15,
-      hint:
-        pendingThreeDsHandoff.outcome === "three_ds"
-          ? "The 3-D Secure challenge has not resolved. Call operate_payment_status to keep " +
-            "checking the same submitted charge — this does not re-release the card or create a " +
-            "new approval."
-          : "The submitted payment has no confirmed merchant outcome or 3-D Secure evidence. " +
-            "Call operate_payment_status to keep checking the same attempt; its outcome remains " +
-            "unknown until terminal merchant or authentication evidence appears.",
-    });
-    let paymentStatus = "payment_submitted";
-    let submitResult: CheckoutSubmitResult = { three_ds_required: false, order_confirmed: false };
     try {
-      submitResult = await browser.fillAndSubmitCheckout(
-        {
-          ...card,
-          ...(args.card_label !== undefined ? { label: args.card_label } : {}),
-          ...(args.card_network !== undefined ? { network: args.card_network } : {}),
-          ...(args.card_issuer !== undefined
-            ? { issuer: args.card_issuer, issuer_source: "bin_metadata" as const }
-            : {}),
-        },
-        {
-          onSubmitDispatched: retainPendingThreeDs,
-          beforeSubmitDispatch: () => {
-            if (approvalExpired()) throw new Error("payment_approval_expired");
-            return deadline - deps.now();
-          },
-        },
-      );
-      if (submitResult.three_ds_required) paymentStatus = "payment_3ds_required";
-      else if (!submitResult.order_confirmed) paymentStatus = "payment_outcome_unknown";
-      if (submitResult.three_ds_required) notifyDetectedChallenge();
-    } catch (error) {
-      if (error instanceof Error && error.message === "payment_approval_expired") {
-        clearPendingThreeDs();
-        if (error instanceof PaymentCardFillCleanupError) deps.onCardFillCleanupFailed();
-        return {
-          ...expiredApprovalResult(),
-          payment_fields_cleared: !(error instanceof PaymentCardFillCleanupError),
-        };
-      }
-      const outcomeUnknown = error instanceof PaymentSubmitOutcomeUnknownError;
-      paymentStatus = outcomeUnknown ? "payment_outcome_unknown" : "payment_checkout_failed";
-      let terminalSubmitOutcome = false;
-      if (outcomeUnknown) {
-        const resolution = await browser
-          .waitForThreeDsResolution(0, notifyDetectedChallenge)
-          .catch(() => undefined);
-        if (resolution !== undefined) {
-          paymentStatus = statusAfterThreeDsResolution(paymentStatus, resolution);
-          terminalSubmitOutcome = resolution === "succeeded" || resolution === "failed";
-          if (resolution === "challenge_pending") {
-            notifyDetectedChallenge();
-          }
-        }
-        const mismatch = browser.paymentInstrumentMismatch?.();
-        if (mismatch !== undefined) submitResult.payment_instrument_mismatch = mismatch;
-      }
-      let audit_recorded = true;
-      try {
-        const recordAudit = async (): Promise<void> => {
-          await api.auditPayment({
-            ...checkout,
-            last4,
-            status: paymentStatus,
-            ...(mandateId !== undefined ? { mandate_id: mandateId } : {}),
-          });
-        };
-        if (retainedPendingThreeDs === null) await recordAudit();
-        else await deps.coordinateThreeDsAudit(retainedPendingThreeDs, recordAudit);
-      } catch {
-        audit_recorded = false;
-      }
-      if (outcomeUnknown && !terminalSubmitOutcome && retainedPendingThreeDs !== null) {
-        retainPendingThreeDs();
-      } else {
-        clearPendingThreeDs();
-      }
-      return {
-        status: paymentStatus,
-        audit_recorded,
-        ...(!terminalSubmitOutcome
-          ? {
-              reason: outcomeUnknown
-                ? paymentStatus === "payment_3ds_required"
-                  ? "payment_3ds_required"
-                  : "payment_submit_outcome_unknown"
-                : error instanceof Error && /^payment_[a-z_]+(?::[a-z_]+)?$/.test(error.message)
-                  ? error.message
-                  : "payment_checkout_failed",
-            }
-          : {}),
-        approval_url: approvalUrl,
-        ...(submitResult.payment_instrument_mismatch !== undefined
-          ? { warning: submitResult.payment_instrument_mismatch }
-          : {}),
-        ...(outcomeUnknown && !terminalSubmitOutcome && retainedPendingThreeDs !== null
-          ? { next: pendingOutcomeNext() }
-          : {}),
-        ...(paymentStatus === "payment_3ds_required"
-          ? {
-              needs_user: {
-                wall: "3ds",
-                message: threeDsHandoffMessage(submitResult, undefined),
-                resume: "checkout",
-              },
-            }
-          : {}),
-        ...(paymentStatus === "payment_submitted"
-          ? {
-              merchant: checkout.merchant,
-              amount_cents: checkout.amount_cents,
-              currency: checkout.currency,
-            }
-          : {}),
-      };
+      await browser.fillCheckoutCardFields(card, { deadline });
     } finally {
       cardBytes?.fill(0);
       cardBytes = undefined;
       card = undefined;
     }
-
-    if (submitResult.payment_instrument_mismatch === undefined && !submitResult.order_confirmed) {
-      const resolution = await browser.waitForThreeDsResolution(
-        threeDsWaitMs,
-        notifyDetectedChallenge,
-      );
-      const mismatch = browser.paymentInstrumentMismatch?.();
-      if (mismatch !== undefined) submitResult.payment_instrument_mismatch ??= mismatch;
-      paymentStatus = statusAfterThreeDsResolution(paymentStatus, resolution);
-      if (resolution === "challenge_pending") {
-        notifyDetectedChallenge();
-      }
-    }
-
-    let auditRecorded = true;
-    try {
-      await deps.coordinateThreeDsAudit(pendingThreeDsHandoff, async () => {
-        await api.auditPayment({
-          ...checkout,
-          last4,
-          status: paymentStatus,
-          ...(mandateId !== undefined ? { mandate_id: mandateId } : {}),
-        });
-      });
-    } catch {
-      auditRecorded = false;
-    }
-    if (paymentStatus === "payment_3ds_required" || paymentStatus === "payment_outcome_unknown") {
-      retainPendingThreeDs();
-      return {
-        status: paymentStatus,
-        audit_recorded: auditRecorded,
-        approval_url: approvalUrl,
-        ...(submitResult.challenge_url !== undefined
-          ? { challenge_url: submitResult.challenge_url }
-          : {}),
-        ...(submitResult.payment_instrument_mismatch !== undefined
-          ? { warning: submitResult.payment_instrument_mismatch }
-          : {}),
-        ...(paymentStatus === "payment_3ds_required"
-          ? {
-              needs_user: {
-                wall: "3ds",
-                message: threeDsHandoffMessage(
-                  submitResult,
-                  pendingThreeDsHandoff.challengeNotification?.sent,
-                ),
-                resume: "checkout",
-                ...(submitResult.challenge_url !== undefined
-                  ? { url: submitResult.challenge_url }
-                  : {}),
-              },
-            }
-          : {}),
-        next: pendingOutcomeNext(),
-      };
-    }
-    if (paymentStatus === "payment_declined") {
-      clearPendingThreeDs();
-      return {
-        status: paymentStatus,
-        audit_recorded: auditRecorded,
-        approval_url: approvalUrl,
-        ...(submitResult.payment_instrument_mismatch !== undefined
-          ? { warning: submitResult.payment_instrument_mismatch }
-          : {}),
-      };
-    }
-    clearPendingThreeDs();
-    return {
-      status: paymentStatus,
-      audit_recorded: auditRecorded,
+    deps.onCardFilled({
+      approval_id: approvalId,
       approval_url: approvalUrl,
-      ...(submitResult.payment_instrument_mismatch !== undefined
-        ? { warning: submitResult.payment_instrument_mismatch }
-        : {}),
-      merchant: checkout.merchant,
-      amount_cents: checkout.amount_cents,
-      currency: checkout.currency,
+      checkout,
+      card_ref: cardRef,
+      last4,
+      deadline,
+      ...(mandateId !== undefined ? { mandate_id: mandateId } : {}),
+    });
+    return {
+      status: "card_released",
+      approval_id: approvalId,
+      approval_url: approvalUrl,
+      approved_terms: checkout,
+      last4,
     };
   } catch (error) {
     if (resumableState !== undefined) {
@@ -1747,29 +1152,4 @@ export async function executeOperatePay(
       keypair = { publicKey: "", privateKey: "" };
     }
   }
-}
-
-// The close-out half of a split checkout: the card was filled by
-// phase="fill_card" and that SAME fill-time approval already authorized a
-// charge up to checkout.amount_cents. confirm no longer re-reads the live
-// total and no longer clicks the pay/place-order control — the caller drives
-// the checkout to its order-confirmation step, verifies the live final total
-// against the approved amount_cents/currency itself, and places the order via
-// operate_act. confirm makes no browser call and records no audit event (it
-// never charges) — it only reports the approved terms back so the pending
-// card-fill lease can be released.
-export async function executeOperatePayConfirm(
-  pending: PendingCardFill,
-): Promise<Record<string, unknown>> {
-  const checkout = pending.checkout;
-  return {
-    status: "payment_ready_to_place",
-    approval_url: pending.approval_url,
-    merchant: checkout.merchant,
-    amount_cents: checkout.amount_cents,
-    currency: checkout.currency,
-    next:
-      "Trusty Squire closed out the fill-time approval and released the pending-fill lease. " +
-      "It did not inspect, submit, or otherwise change the checkout.",
-  };
 }

@@ -283,10 +283,9 @@ export async function runBrokerDaemon(): Promise<void> {
           (await journal.hasOutstanding(undefined, principal.forwarderId)) &&
           !(
             method === "tool" &&
-            (params.name === "operate_finish" ||
-              (await operator.canReconcileCapture(principal, params)) ||
-              (await operator.canContinueAfterCapture(principal, params)) ||
-              (await operator.canContinuePaymentStatus(principal, params)))
+              (params.name === "operate_finish" ||
+                (await operator.canReconcileCapture(principal, params)) ||
+              (await operator.canContinueAfterCapture(principal, params)))
           )
         )
           throw new BrokerRefusal(
@@ -442,7 +441,7 @@ export async function runBrokerDaemon(): Promise<void> {
         cleanupRunning = false;
       });
   }, 5000);
-  // This timer keeps quarantined payment/outcome custody alive after sockets close.
+  // Keep quarantined mutation custody alive after sockets close.
   process.once("SIGINT", () => {
     void requestDrain();
   });

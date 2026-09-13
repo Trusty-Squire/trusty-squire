@@ -43,16 +43,9 @@ const phaseHasDeliverableOutcome = (record: DispatchRecord): boolean =>
 
 export interface ReconciledDispatchOutcome {
   capture?: CaptureEvidence;
-  status:
-    | "completed"
-    | "done"
-    | "payment_3ds_required"
-    | "payment_outcome_unknown"
-    | "unknown"
-    | "not_dispatched";
+  status: "completed" | "done" | "unknown" | "not_dispatched";
   error?: "stale_ref" | "cancelled" | "pre_dispatch_failure";
   reason?: "cancelled" | "execution_error";
-  next?: { tool: "operate_payment_status"; wait_seconds: number };
 }
 
 export interface PendingDispatchOutcome {
@@ -92,21 +85,13 @@ function validOutcome(value: unknown): value is ReconciledDispatchOutcome {
   if (value === null || typeof value !== "object") return false;
   const outcome = value as Record<string, unknown>;
   if (
-    ![
-      "completed",
-      "done",
-      "payment_3ds_required",
-      "payment_outcome_unknown",
-      "unknown",
-      "not_dispatched",
-    ].includes(String(outcome.status)) ||
+    !["completed", "done", "unknown", "not_dispatched"].includes(String(outcome.status)) ||
     !Object.keys(outcome).every((key) =>
-      ["status", "next", "error", "reason", "capture"].includes(key),
+      ["status", "error", "reason", "capture"].includes(key),
     ) ||
     (outcome.capture !== undefined && !captureEvidenceSchema.safeParse(outcome.capture).success) ||
     (outcome.status === "not_dispatched"
       ? !["stale_ref", "cancelled", "pre_dispatch_failure"].includes(String(outcome.error)) ||
-        outcome.next !== undefined ||
         outcome.reason !== undefined
       : outcome.error !== undefined) ||
     (outcome.status === "unknown"
@@ -114,16 +99,7 @@ function validOutcome(value: unknown): value is ReconciledDispatchOutcome {
       : outcome.reason !== undefined)
   )
     return false;
-  if (outcome.next === undefined) return true;
-  if (outcome.next === null || typeof outcome.next !== "object") return false;
-  const next = outcome.next as Record<string, unknown>;
-  return (
-    next.tool === "operate_payment_status" &&
-    typeof next.wait_seconds === "number" &&
-    Number.isSafeInteger(next.wait_seconds) &&
-    next.wait_seconds >= 0 &&
-    Object.keys(next).every((key) => key === "tool" || key === "wait_seconds")
-  );
+  return true;
 }
 
 /** Minimal write-ahead custody, never arguments, credentials or card values.
@@ -173,11 +149,6 @@ export class DispatchJournal {
         if (record.phase === "recovered") continue;
         const key = JSON.stringify([record.sessionId, record.requestId]);
         const prior = states.get(key);
-        if (
-          ["outcome", "observed_result"].includes(record.phase) &&
-          prior?.outcome?.status === "payment_outcome_unknown"
-        )
-          continue;
         if (prior?.outcome?.capture && !record.outcome?.capture) {
           record.outcome = { ...(record.outcome ?? prior.outcome), capture: prior.outcome.capture };
         }
@@ -299,64 +270,6 @@ export class DispatchJournal {
         record.start === true &&
         ["acknowledged", "delivery_acknowledged"].includes(record.phase),
     );
-  }
-
-  async hasOnlyPaymentCustody(sessionId: string, forwarderId: string): Promise<boolean> {
-    const outstanding = [...(await this.states()).values()].filter(
-      (record) =>
-        record.sessionId === sessionId &&
-        record.forwarderId === forwarderId &&
-        phaseHasOutstandingCustody(record),
-    );
-    return (
-      outstanding.length > 0 &&
-      outstanding.every(
-        (record) => record.requestId === "payment-custody" && record.phase === "entered",
-      )
-    );
-  }
-
-  async hasOnlyDetachedPaymentUncertainty(
-    sessionId: string,
-    forwarderId: string,
-  ): Promise<boolean> {
-    const outstanding = [...(await this.states()).values()].filter(
-      (record) =>
-        record.sessionId === sessionId &&
-        record.forwarderId === forwarderId &&
-        phaseHasOutstandingCustody(record),
-    );
-    return (
-      outstanding.length > 0 &&
-      outstanding.every(
-        (record) =>
-          record.operation === "operate_pay" &&
-          ["outcome", "observed_result", "delivery_acknowledged"].includes(record.phase) &&
-          record.outcome?.status === "payment_outcome_unknown",
-      )
-    );
-  }
-
-  async recordDetachedPaymentUncertainty(sessionId: string, forwarderId: string): Promise<boolean> {
-    const payments = [...(await this.states()).values()].filter(
-      (record) =>
-        record.sessionId === sessionId &&
-        record.forwarderId === forwarderId &&
-        record.operation === "operate_pay" &&
-        record.phase === "entered",
-    );
-    await Promise.all(
-      payments.map(
-        async (record) =>
-          await this.record(record.sessionId, record.requestId, "outcome", {
-            forwarderId,
-            ...(record.operation === undefined ? {} : { operation: record.operation }),
-            ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
-            outcome: { status: "payment_outcome_unknown" },
-          }),
-      ),
-    );
-    return payments.length > 0;
   }
 
   async hasCompleted(forwarderId: string, requestId: string): Promise<boolean> {

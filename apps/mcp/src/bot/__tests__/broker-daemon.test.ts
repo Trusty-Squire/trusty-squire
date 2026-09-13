@@ -108,14 +108,14 @@ it("exposes recovery-only startup solely for the authorized retained Xata record
 
     await exact.record("other-session", "other-request", "entered", {
       forwarderId: "other-forwarder",
-      operation: "operate_pay",
+      operation: "inject_card",
       inputHash: "other-input",
     });
     await exact.record("other-session", "other-request", "outcome", {
       forwarderId: "other-forwarder",
-      operation: "operate_pay",
+      operation: "inject_card",
       inputHash: "other-input",
-      outcome: { status: "payment_outcome_unknown" },
+      outcome: { status: "unknown", reason: "execution_error" },
     });
     await expect(exact.hasOnlyAuthorizedPreDispatchFailure(authorization!)).resolves.toBe(false);
     await expect(exact.assertReconciled()).rejects.toThrow("lost mutation custody");
@@ -132,14 +132,14 @@ it("exposes recovery-only startup solely for the authorized retained Xata record
     const unrelatedOutcome = new DispatchJournal(join(root, "unrelated-outcome.jsonl"));
     await unrelatedOutcome.record("session", "request", "entered", {
       forwarderId: "forwarder",
-      operation: "operate_pay",
+      operation: "inject_card",
       inputHash: "input",
     });
     await unrelatedOutcome.record("session", "request", "outcome", {
       forwarderId: "forwarder",
-      operation: "operate_pay",
+      operation: "inject_card",
       inputHash: "input",
-      outcome: { status: "payment_outcome_unknown" },
+      outcome: { status: "unknown", reason: "execution_error" },
     });
     expect(await unrelatedOutcome.retainedXataPreDispatchAuthorization()).toBeUndefined();
     await expect(unrelatedOutcome.assertReconciled()).resolves.toBeUndefined();
@@ -189,9 +189,9 @@ it("keeps a draining recovery endpoint reachable while refusing mutations", asyn
         );
       if (method === "recover")
         return {
-          requestId: "payment-request",
+          requestId: "mutation-request",
           result: {
-            reconciliation: { operation: "operate_pay", status: "payment_outcome_unknown" },
+            reconciliation: { operation: "inject_card", status: "unknown" },
           },
         };
       return {};
@@ -209,13 +209,13 @@ it("keeps a draining recovery endpoint reachable while refusing mutations", asyn
     ).toBe(false);
     expect(runtimeCloseAttempts).toBe(0);
     client = await BrokerClient.connect(socket, "token", credential);
-    await expect(client.call("recover", { name: "operate_pay", args: {} })).resolves.toEqual({
-      requestId: "payment-request",
+    await expect(client.call("recover", { name: "inject_card", args: {} })).resolves.toEqual({
+      requestId: "mutation-request",
       result: {
-        reconciliation: { operation: "operate_pay", status: "payment_outcome_unknown" },
+        reconciliation: { operation: "inject_card", status: "unknown" },
       },
     });
-    await expect(client.call("tool", { name: "operate_pay", args: {} })).rejects.toMatchObject({
+    await expect(client.call("tool", { name: "inject_card", args: {} })).rejects.toMatchObject({
       code: "broker_draining",
     });
     await expect(lstat(socket)).resolves.toBeDefined();
@@ -336,20 +336,20 @@ itWithChromium(
       }
       if (browserPid === undefined)
         throw new Error("real broker browser was not registered with its reaper");
-      const paymentArgs = {
+      const mutationArgs = {
         session_id: sessionId,
         item: "fixture purchase",
         reason: "drain recovery",
       };
-      await journal.record(sessionId, "stuck-payment", "outcome", {
+      await journal.record(sessionId, "stuck-mutation", "outcome", {
         forwarderId: forwarderId(credential),
-        operation: "operate_pay",
+        operation: "inject_card",
         inputHash: createHmac("sha256", createHash("sha256").update(credential).digest())
           .update(
-            `{"args":{"item":"fixture purchase","reason":"drain recovery","session_id":"${sessionId}"},"name":"operate_pay"}`,
+            `{"args":{"item":"fixture purchase","reason":"drain recovery","session_id":"${sessionId}"},"name":"inject_card"}`,
           )
           .digest("hex"),
-        outcome: { status: "payment_outcome_unknown" },
+        outcome: { status: "unknown", reason: "execution_error" },
       });
       process.kill(browserPid, "SIGSTOP");
       await initial.close();
@@ -371,17 +371,17 @@ itWithChromium(
       );
       await expect(
         within(
-          client.call("recover", { name: "operate_pay", args: paymentArgs }),
+          client.call("recover", { name: "inject_card", args: mutationArgs }),
           5_000,
           "draining broker recovery",
         ),
       ).resolves.toEqual({
-        requestId: "stuck-payment",
+        requestId: "stuck-mutation",
         result: {
           reconciliation: {
-            request_id: "stuck-payment",
-            operation: "operate_pay",
-            status: "payment_outcome_unknown",
+            request_id: "stuck-mutation",
+            operation: "inject_card",
+            status: "unknown",
           },
         },
       });
