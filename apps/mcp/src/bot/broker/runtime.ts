@@ -33,6 +33,7 @@ export class BrokerRuntime implements BrokerBrowserCustody {
   private leaseProfile: string | undefined;
   private owner: BrowserController | undefined;
   private closing = false;
+  private recycling = false;
   private pending = 0;
 
   constructor(private readonly accountId: string) {}
@@ -60,72 +61,92 @@ export class BrokerRuntime implements BrokerBrowserCustody {
     if ((process.env.BOT_CDP_ENDPOINT ?? "").trim() !== "")
       throw new BrokerRefusal("incompatible_runtime", "Broker requires a locally owned browser");
     const profileDir = profilePathIdentity(options.profileDir ?? CHROME_PROFILE_DIR);
+    const settings = {
+      profileDir,
+      ...(options.proxyUrl === undefined ? {} : { proxyUrl: options.proxyUrl }),
+    };
+    if (this.recycling || this.runtimeIdentity.requestsIncompatibleIdentity(settings)) {
+      if (this.recycling)
+        throw new BrokerRefusal(
+          "incompatible_runtime",
+          "A proxy/identity recycle is already in progress; retry operate_start",
+        );
+      if (this.sessions.size > 0 || this.pending > 0)
+        throw new BrokerRefusal(
+          "incompatible_runtime",
+          "A proxy or identity change requires no other active sessions on the broker " +
+            "profile. Finish or close every active session first, then retry with the " +
+            "new proxy; the shared Chrome is recycled in-band without killing the broker.",
+        );
+      this.recycling = true;
+      try {
+        await this.recycleIdentity();
+      } finally {
+        this.recycling = false;
+      }
+      if (this.closing) throw new BrokerRefusal("maintenance", "Identity cell is draining");
+    }
     const admissionId = brokerAdmissionId();
     if (admissionId !== undefined)
       this.pendingAdmissions.set(admissionId, (this.pendingAdmissions.get(admissionId) ?? 0) + 1);
     this.pending++;
     try {
-      const acquired = await this.runtimeIdentity.acquire(
-        { profileDir, ...(options.proxyUrl === undefined ? {} : { proxyUrl: options.proxyUrl }) },
-        async (settings) => {
-          this.claimProfile(settings.profileDir);
+      const acquired = await this.runtimeIdentity.acquire(settings, async (settings) => {
+        this.claimProfile(settings.profileDir);
+        try {
+          if (!(await waitForProfileFree(settings.profileDir, { deadlineMs: 0 })))
+            throw new BrokerRefusal("profile_busy", "Profile is already open");
+          await mkdir(settings.profileDir, { recursive: true, mode: 0o700 });
+          const bindingPath = join(settings.profileDir, "trusty-squire-broker-account.json");
           try {
-            if (!(await waitForProfileFree(settings.profileDir, { deadlineMs: 0 })))
-              throw new BrokerRefusal("profile_busy", "Profile is already open");
-            await mkdir(settings.profileDir, { recursive: true, mode: 0o700 });
-            const bindingPath = join(settings.profileDir, "trusty-squire-broker-account.json");
-            try {
-              await writeFile(
-                bindingPath,
-                JSON.stringify({ version: 1, accountId: this.accountId }),
-                { flag: "wx", mode: 0o600 },
-              );
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-              const binding = JSON.parse(await readFile(bindingPath, "utf8")) as {
-                version: number;
-                accountId: string;
-              };
-              if (binding.version !== 1 || binding.accountId !== this.accountId)
-                throw new BrokerRefusal(
-                  "account_mismatch",
-                  "Profile is enrolled to a different account",
-                );
-            }
-            const owner = new BrowserController(settings);
-            this.owner = owner;
-            let timer: ReturnType<typeof setTimeout> | undefined;
-            try {
-              await Promise.race([
-                owner.start(),
-                new Promise<never>((_resolve, reject) => {
-                  timer = setTimeout(
-                    () =>
-                      reject(
-                        new BrokerRefusal("launch_timeout", "Broker browser launch timed out"),
-                      ),
-                    Number(process.env.BOT_START_TIMEOUT_MS) || 600_000,
-                  );
-                }),
-              ]);
-            } finally {
-              if (timer !== undefined) clearTimeout(timer);
-            }
-            return owner;
+            await writeFile(
+              bindingPath,
+              JSON.stringify({ version: 1, accountId: this.accountId }),
+              { flag: "wx", mode: 0o600 },
+            );
           } catch (error) {
-            const closed =
-              this.owner === undefined ||
-              (await this.owner.close({ cancelStart: true }).catch(() => "unknown")) === "closed";
-            if (closed) {
-              this.lease?.release();
-              this.lease = undefined;
-              this.leaseProfile = undefined;
-              this.owner = undefined;
-            } else this.closing = true;
-            throw error;
+            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+            const binding = JSON.parse(await readFile(bindingPath, "utf8")) as {
+              version: number;
+              accountId: string;
+            };
+            if (binding.version !== 1 || binding.accountId !== this.accountId)
+              throw new BrokerRefusal(
+                "account_mismatch",
+                "Profile is enrolled to a different account",
+              );
           }
-        },
-      );
+          const owner = new BrowserController(settings);
+          this.owner = owner;
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([
+              owner.start(),
+              new Promise<never>((_resolve, reject) => {
+                timer = setTimeout(
+                  () =>
+                    reject(new BrokerRefusal("launch_timeout", "Broker browser launch timed out")),
+                  Number(process.env.BOT_START_TIMEOUT_MS) || 600_000,
+                );
+              }),
+            ]);
+          } finally {
+            if (timer !== undefined) clearTimeout(timer);
+          }
+          return owner;
+        } catch (error) {
+          const closed =
+            this.owner === undefined ||
+            (await this.owner.close({ cancelStart: true }).catch(() => "unknown")) === "closed";
+          if (closed) {
+            this.lease?.release();
+            this.lease = undefined;
+            this.leaseProfile = undefined;
+            this.owner = undefined;
+          } else this.closing = true;
+          throw error;
+        }
+      });
       let browser: BrowserController;
       try {
         if (this.closing) throw new BrokerRefusal("maintenance", "Identity cell is draining");
@@ -145,6 +166,34 @@ export class BrokerRuntime implements BrokerBrowserCustody {
         else this.pendingAdmissions.set(admissionId, count);
       }
     }
+  }
+
+  /** Clean IN-BAND identity recycle for a compatible-profile settings change
+   * (notably a new proxy): prove the live Chrome closed, release the profile
+   * lease, then forget so the next acquire launches fresh. The broker process
+   * stays up; the persistent profile — enrollment and Google login cookies —
+   * lives on disk and survives the close. Callers must have proven no other
+   * active sessions first; recycling under live siblings would yank the
+   * shared Chrome out from under them. */
+  private async recycleIdentity(): Promise<void> {
+    if (this.owner !== undefined) {
+      const closed = await this.owner.close().catch(() => "unknown" as const);
+      if (closed !== "closed") {
+        const forced = await this.owner
+          .forceCloseOwnedProcessTree()
+          .catch(() => "unknown" as const);
+        if (forced !== "closed")
+          throw new BrokerRefusal(
+            "cleanup_unknown",
+            "Previous broker browser did not close; the proxy/identity change was not applied",
+          );
+      }
+    }
+    this.lease?.release();
+    this.lease = undefined;
+    this.leaseProfile = undefined;
+    this.owner = undefined;
+    this.runtimeIdentity.forgetAfterShutdown();
   }
 
   async cleanupAdmission(sessionId: string): Promise<boolean> {
@@ -219,6 +268,12 @@ export class BrokerRuntime implements BrokerBrowserCustody {
     return (
       this.owner !== undefined && !this.runtimeIdentity.isLaunching() && !this.owner.isConnected()
     );
+  }
+
+  // Active tab families on the shared Chrome. A proxy/identity recycle is only
+  // safe while this is zero.
+  activeSessionCount(): number {
+    return this.sessions.size;
   }
 
   resume(): void {

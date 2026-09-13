@@ -75,6 +75,14 @@ test (`identity-runtime.test.ts` exercises it against a fake handle).
   (e.g. a different proxy) throws `IncompatibleIdentityRuntimeSettingsError`
   rather than mutating the shared context. The only sanctioned path to
   different settings is close → `forgetAfterShutdown()` → `acquire()` again.
+- **In-band recycle at the broker layer.** `BrokerRuntime.acquire()` turns
+  that sanctioned path into an automatic one for a settings change (notably a
+  new `proxy` from `operate_start`): when no other session is active on the
+  shared profile, it closes the live Chrome through the ordinary owner-close
+  path, releases the profile lease, calls `forgetAfterShutdown()`, and
+  relaunches with the requested settings — no broker-process kill. With other
+  active sessions it refuses instead of yanking the shared Chrome; the
+  persistent profile, enrollment, and Google login all survive the recycle.
 
 `broker/runtime.ts` owns the identity runtime and physical profile lease.
 `session/lifecycle.ts` acquires and releases session pages through broker custody;

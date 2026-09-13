@@ -9,6 +9,7 @@ const state = vi.hoisted(() => ({
   attach: vi.fn(),
   guard: vi.fn(),
   connected: true,
+  constructed: [] as Array<{ profileDir: string; proxyUrl?: string }>,
 }));
 vi.mock("../browser.js", () => ({
   BrowserController: class {
@@ -17,6 +18,9 @@ vi.mock("../browser.js", () => ({
     forceCloseOwnedProcessTree = state.close;
     isConnected = () => state.connected;
     static attachSessionPage = state.attach;
+    constructor(settings: { profileDir: string; proxyUrl?: string }) {
+      state.constructed.push(settings);
+    }
   },
 }));
 vi.mock("../profile.js", () => ({
@@ -35,6 +39,7 @@ beforeEach(async () => {
   state.close.mockResolvedValue("closed");
   state.guard.mockReturnValue({ release: state.release });
   state.connected = true;
+  state.constructed.length = 0;
 });
 afterEach(async () => {
   vi.useRealTimers();
@@ -145,6 +150,87 @@ it("refuses another account on a previously enrolled profile before launching", 
   const second = new BrokerRuntime("second-account");
   await expect(second.acquire({ profileDir: root })).rejects.toThrow("different account");
   expect(state.start).toHaveBeenCalledTimes(1);
+});
+
+it("recycles a differing proxy in-band when no other session is active", async () => {
+  state.attach.mockResolvedValue({ closeOwnPagesOnly: vi.fn(async () => "closed") });
+  const runtime = new BrokerRuntime("account");
+  const first = await runtime.acquire({ profileDir: root });
+  expect(state.start).toHaveBeenCalledTimes(1);
+  expect(state.constructed[0]).toEqual({ profileDir: root });
+  await runtime.release(first.browser);
+
+  const second = await runtime.acquire({
+    profileDir: root,
+    proxyUrl: "http://proxy.test:8080",
+  });
+
+  // Clean in-band recycle: the previous Chrome was closed through the ordinary
+  // owner-close path, then a fresh identity launched with the requested proxy.
+  // No broker-process kill, and the persistent profile directory is preserved.
+  expect(state.close).toHaveBeenCalledTimes(1);
+  expect(state.start).toHaveBeenCalledTimes(2);
+  expect(state.constructed[1]).toEqual({ profileDir: root, proxyUrl: "http://proxy.test:8080" });
+  expect(second.profileDir).toBe(root);
+
+  await runtime.release(second.browser);
+  expect(await runtime.close()).toBe(true);
+});
+
+it("refuses a differing proxy while another session is active on the shared profile", async () => {
+  state.attach.mockResolvedValue({ closeOwnPagesOnly: vi.fn(async () => "closed") });
+  const runtime = new BrokerRuntime("account");
+  const first = await runtime.acquire({ profileDir: root });
+
+  await expect(
+    runtime.acquire({ profileDir: root, proxyUrl: "http://proxy.test:8080" }),
+  ).rejects.toThrow(/proxy or identity change requires no other active sessions/);
+
+  // The live Chrome was neither killed nor relaunched for the refused request.
+  expect(state.close).not.toHaveBeenCalled();
+  expect(state.start).toHaveBeenCalledTimes(1);
+  expect(runtime.activeSessionCount()).toBe(1);
+
+  await runtime.release(first.browser);
+  expect(await runtime.close()).toBe(true);
+});
+
+it("refuses to recycle when the previous browser does not close", async () => {
+  state.attach.mockResolvedValue({ closeOwnPagesOnly: vi.fn(async () => "closed") });
+  const runtime = new BrokerRuntime("account");
+  const first = await runtime.acquire({ profileDir: root });
+  await runtime.release(first.browser);
+  state.close.mockResolvedValue("unknown");
+
+  await expect(
+    runtime.acquire({ profileDir: root, proxyUrl: "http://proxy.test:8080" }),
+  ).rejects.toThrow(/did not close/);
+  expect(state.start).toHaveBeenCalledTimes(1);
+});
+
+it("refuses the recycled start when maintenance drains the cell mid-recycle", async () => {
+  state.attach.mockResolvedValue({ closeOwnPagesOnly: vi.fn(async () => "closed") });
+  const runtime = new BrokerRuntime("account");
+  const first = await runtime.acquire({ profileDir: root });
+  await runtime.release(first.browser);
+  let closed!: (state: string) => void;
+  state.close.mockImplementationOnce(
+    () =>
+      new Promise<string>((resolve) => {
+        closed = resolve;
+      }),
+  );
+
+  const recycled = runtime.acquire({ profileDir: root, proxyUrl: "http://proxy.test:8080" });
+  await Promise.resolve();
+  const maintenance = runtime.close();
+  closed("closed");
+
+  expect(await maintenance).toBe(true);
+  await expect(recycled).rejects.toThrow(/draining/);
+  // The drained cell must not be handed a fresh Chrome behind maintenance's back.
+  expect(state.start).toHaveBeenCalledTimes(1);
+  runtime.resume();
 });
 
 it("persists every concurrent terminal hook before releasing target custody", async () => {

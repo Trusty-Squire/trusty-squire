@@ -45,6 +45,42 @@ const phaseHasDeliverableOutcome = (record: DispatchRecord): boolean =>
     record.phase,
   );
 
+// A terminal receipt (operate_finish, closed) for the same session proves the
+// session ended in an orderly terminal teardown AFTER the entry was written.
+// It supersedes a dispatchTracked entry's uncertain custody: a browsing action
+// already settled by its session's terminal close must not block browser
+// replacement or startup. Without such a receipt — e.g. a genuinely
+// unreconciled uncertain payment outcome — the no-replay fence holds.
+const terminallyReconciled = (record: DispatchRecord, records: DispatchRecord[]): boolean =>
+  record.dispatchTracked === true &&
+  records.some(
+    (receipt) =>
+      receipt.sessionId === record.sessionId &&
+      receipt.requestId === "terminal-receipt" &&
+      receipt.terminalReceipt?.closed === true &&
+      receipt.at >= record.at,
+  );
+
+// The lineage fence clears in-band ONLY for provably benign cancelled
+// browsing (click/type/select/press/navigate/fill_credential). Everything
+// else keeps the fence: genuinely dispatched payment mutations (inject_card),
+// recipe runs (which may embed payment steps), logins (which mutate account
+// identity), records with no known operation, and captures whose storage is
+// unknown. Without this, a wedged lineage could only be escaped by replacing
+// the whole MCP client credential.
+const benignBrowsingOperations = new Set([
+  "operate_click",
+  "operate_type",
+  "operate_select",
+  "operate_press",
+  "operate_navigate",
+  "operate_fill_credential",
+]);
+const lineageAdmitsFreshWork = (record: DispatchRecord): boolean =>
+  record.operation !== undefined &&
+  benignBrowsingOperations.has(record.operation) &&
+  record.outcome?.capture?.storage !== "unknown";
+
 export interface ReconciledDispatchOutcome {
   capture?: CaptureEvidence;
   status: "completed" | "done" | "unknown" | "not_dispatched";
@@ -183,11 +219,17 @@ export class DispatchJournal {
       records.some(
         (record) =>
           record.outcome?.status !== "not_dispatched" &&
-          (record.phase === "entered" ||
-            record.phase === "dispatch_attempted" ||
-            record.phase === "unknown" ||
-            (record.phase === "prepared" && record.dispatchTracked !== true) ||
-            record.outcome?.status === "unknown"),
+          !terminallyReconciled(record, records) &&
+          // A start-delivery record still owes its caller an outcome, and
+          // genuinely uncertain payment custody must never be waved through.
+          // Benign cancelled browsing settles by policy: it must not require
+          // a process kill or a client reconnect to recover from.
+          ((record.phase === "prepared" && record.dispatchTracked !== true) ||
+            (!lineageAdmitsFreshWork(record) &&
+              (record.phase === "entered" ||
+                record.phase === "dispatch_attempted" ||
+                record.phase === "unknown" ||
+                record.outcome?.status === "unknown"))),
       )
     )
       throw new BrokerRefusal(
@@ -241,11 +283,20 @@ export class DispatchJournal {
   }
 
   async hasOutstanding(sessionId?: string, forwarderId?: string): Promise<boolean> {
-    return [...(await this.states()).values()].some(
+    const records = [...(await this.states()).values()];
+    return records.some(
       (record) =>
         (sessionId === undefined || record.sessionId === sessionId) &&
         (forwarderId === undefined || record.forwarderId === forwarderId) &&
-        phaseHasOutstandingCustody(record),
+        phaseHasOutstandingCustody(record) &&
+        // A session's terminal receipt settles its own uncertain entries;
+        // without it the no-replay fence holds.
+        !terminallyReconciled(record, records) &&
+        // A lineage-level fence (sessionId undefined) may only be kept for
+        // genuinely uncertain PAYMENT custody. Benign cancelled browsing
+        // settles in-band so a fresh operate_start on the same lineage never
+        // needs an MCP client reconnect to escape the fence.
+        (sessionId !== undefined || !lineageAdmitsFreshWork(record)),
     );
   }
 

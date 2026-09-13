@@ -19,9 +19,14 @@ have mode 0700. The default private parent is created automatically.
 `operate_start` accepts `proxy` as an HTTP or HTTPS URL (optional credentials)
 or an unauthenticated SOCKS5 URL. It configures the shared browser at launch,
 not an individual tab family. Concurrent sessions must request compatible proxy
-settings; incompatible settings are refused rather than applied to the live
-browser. Omitting it requests direct egress. The value is sensitive and is not
-returned in session status, action traces, or saved recipes.
+settings; incompatible settings are never applied to the live browser. When no
+other session is active on the profile, a different proxy recycles the shared
+Chrome in-band (close, release the lease, relaunch) without restarting the
+broker; with other active sessions it is refused with `incompatible_runtime`
+until they finish. The recycle mechanics live in
+[`browser-process-page-boundary.md`](browser-process-page-boundary.md). Omitting
+it requests direct egress. The value is sensitive and is not returned in
+session status, action traces, or saved recipes.
 
 Each operator process generates a fresh random forwarder credential, held only in
 memory. There is no credential persistence or slot reuse. By default, a restarted
@@ -107,6 +112,19 @@ binding. Browser epoch changes invalidate earlier capabilities.
   erase-and-retry recovery for uncertain payments. Reconciliation keeps a
   confirmed payment submission as `done`, distinct from 3-D Secure-required and
   unknown outcomes.
+- Lineage-scoped fresh-work admission clears in-band only for provably benign
+  cancelled browsing (click/type/select/press/navigate/fill_credential):
+  such uncertainty never wedges a lineage behind a fence whose only escape was
+  replacing the MCP client credential. Payment-grade custody still fences both
+  browser replacement and same-lineage admission: `inject_card`, recipe runs
+  (which may embed payment steps), logins (which mutate account identity),
+  records with no known operation, and captures whose storage is unknown.
+  `dispatch-journal.ts` owns that predicate (`lineageAdmitsFreshWork`);
+  `broker-journal.test.ts` and `broker-operator.test.ts` pin it. On the
+  forwarder side, a dispatched-but-never-settled call registers per lineage;
+  a fresh start races its settled promise against a bounded grace (2.5s) and
+  clears the map only when every remaining entry is benign
+  (`forwarder.ts` `reconcileUnsettledForFreshStart`).
 - When a client retaining the original lineage credential loses an operator reply,
   its reconciliation request must set MCP request metadata `"trusty-squire/recover": true`. This explicitly asks the
   broker to reconcile its authenticated lineage's newest matching durable
