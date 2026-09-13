@@ -322,8 +322,13 @@ jobs:
           node-version: 20.11.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Install Chromium for browser-backed MCP tests
-        if: needs.secret-scan.outputs.mcp == 'true'
+      # Chromium is needed ONLY by the frozen-corpus replay gate below: the
+      # replay harness launches a headless browser against frozen HARs (no
+      # live network, deterministic). The real-browser test tier does NOT run
+      # on PRs (see vitest.tiers.ts REAL_BROWSER_FILES) and needs no browser
+      # install here.
+      - name: Install Chromium for the frozen-corpus replay gate
+        if: needs.secret-scan.outputs.replay_eval == 'true'
         run: pnpm --filter '@trusty-squire/mcp' exec playwright install --with-deps chromium
       # Registry's Prisma client must be generated before its tests. NOT vault
       # (apps/api owns an isolated client; vault's src/tests don't import one)
@@ -342,12 +347,16 @@ jobs:
         if: needs.secret-scan.outputs.replay_eval == 'true'
         run: pnpm -F @trusty-squire/mcp test replay-harness
       # Per-package test over every package whose suite passes locally. MCP's
-      # required tier keeps all payment/card-sealing coverage AND the operator
-      # behavior suites (operate-session-flow, oauth-lifecycle, etc. via
-      # vitest.tiers.ts REQUIRED_BEHAVIOR_FILES), so behavior breakage fails
-      # the PR before merge. Only genuinely slow non-behavioral files (corpus
-      # evals, packaging smoke, replay harness) defer to the post-merge/nightly
-      # workflow in mcp-slow-tests.yml.
+      # required tier keeps all non-browser payment/card-sealing coverage AND
+      # the non-browser operator behavior suites (via vitest.tiers.ts
+      # REQUIRED_BEHAVIOR_FILES minus REAL_BROWSER_FILES), so behavior
+      # breakage fails the PR before merge. The real-browser tests (tests that
+      # launch Chromium/Chrome — see vitest.tiers.ts REAL_BROWSER_FILES) do NOT
+      # run on PRs: they are slow and flaky. They run post-merge in
+      # mcp-slow-tests.yml and gate a stable/`latest` release in release.yml.
+      # Only genuinely slow non-behavioral files (corpus evals, packaging
+      # smoke, replay harness) defer to the post-merge/nightly workflow in
+      # mcp-slow-tests.yml.
       # (registry + vault were historically excluded; the registry "prisma
       # drift" failures are resolved — both are green and now run here.)
       - name: Test (green packages)

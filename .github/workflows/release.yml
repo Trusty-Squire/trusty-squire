@@ -5,10 +5,14 @@ name: Release mcp
 # Single-branch model: `main` is the only release branch.
 #   - push to main:      apps/mcp/package.json must hold a PRERELEASE
 #                        (e.g. 1.1.14-rc.1). Publishes the `next` tag.
+#                        Test gate: the fast NON-browser tier only.
 #   - workflow_dispatch: an explicit, on-demand STABLE promotion of main HEAD.
 #                        The operator supplies the stable X.Y.Z; it must equal
 #                        the package.json version with its prerelease suffix
 #                        stripped. Publishes the `latest` tag.
+#                        Test gate: fast tier + the FULL real-browser suite
+#                        (tests that launch Chromium/Chrome — see
+#                        apps/mcp/vitest.tiers.ts REAL_BROWSER_FILES).
 #
 # Source of truth for an rc is apps/mcp/package.json `version`. A stable
 # promotion publishes the same tree under the operator-supplied stable version
@@ -109,7 +113,13 @@ jobs:
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "is_promotion=$IS_PROMOTION" >> "$GITHUB_OUTPUT"
-          echo "Resolved release version: $VERSION (promotion=$IS_PROMOTION)"
+          # Early semver prerelease detection (anything after a `-`). Drives
+          # which test tiers gate this run below: the real-browser tier runs
+          # ONLY for a stable/`latest` release. The read step recomputes the
+          # same predicate for the publish decision.
+          if [[ "$VERSION" == *"-"* ]]; then IS_PRE=true; else IS_PRE=false; fi
+          echo "is_prerelease=$IS_PRE" >> "$GITHUB_OUTPUT"
+          echo "Resolved release version: $VERSION (promotion=$IS_PROMOTION, prerelease=$IS_PRE)"
 
       # Most matching pushes are lockfile/workflow edits or retries of a version
       # that is already live. Decide before installs, builds, or Chromium setup;
@@ -158,13 +168,15 @@ jobs:
         # Explicitly list mcp's workspace deps (keep in sync with apps/mcp/package.json).
         run: pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/recipe-schema' build
 
-      # The mcp suite includes real-Chromium tests (locator-fallback,
-      # phone-country-widget, widget-corpus-eval) that chromium.launch() at
-      # collect time — without a browser install the verify gate fails with
+      # The stable (`latest`) release gate includes the real-browser tier —
+      # tests that launch Chromium/Chrome (see vitest.tiers.ts
+      # REAL_BROWSER_FILES). Without a browser install the tier fails with
       # "Executable doesn't exist" and publish is skipped (bit 1.1.5; the rc
-      # publish only survived on a warm runner cache). Mirrors ci.yml.
+      # publish only survived on a warm runner cache). Prereleases skip both
+      # this step and the tier below — the fast non-browser tier is their
+      # entire test gate.
       - name: Install Chromium for browser-backed MCP tests
-        if: steps.fast_path.outputs.already_released != 'true'
+        if: steps.fast_path.outputs.already_released != 'true' && steps.resolve.outputs.is_prerelease == 'false'
         run: pnpm --filter '@trusty-squire/mcp' exec playwright install --with-deps chromium
 
       # NOTE: lint + typecheck are intentionally NOT gating this pipeline yet.
@@ -184,6 +196,15 @@ jobs:
         env:
           MCP_SKIP_PACK_SMOKE: "1"
         run: pnpm --filter @trusty-squire/mcp test:fast
+
+      # Real-browser tier: every test that launches Chromium/Chrome. Slow and
+      # flaky, so it gates ONLY a stable/`latest` release. A prerelease (rc →
+      # `next`) is gated by the fast non-browser tier alone above.
+      - name: Test (MCP real-browser tier, stable release only)
+        if: steps.fast_path.outputs.already_released != 'true' && steps.resolve.outputs.is_prerelease == 'false'
+        env:
+          MCP_SKIP_PACK_SMOKE: "1"
+        run: pnpm --filter @trusty-squire/mcp test:real-browser
 
       # Preflight: refuse to publish mcp unless the exact skill-schema version
       # its tarball will use exists on npm and exports every runtime symbol MCP

@@ -479,17 +479,28 @@ completion is the install claim plus explicit Finish callback, not a disk-cookie
 probe. See `apps/mcp/src/bot/google-login.ts` and
 `docs/DESIGN-warm-browser-reuse.md`.
 
-### 14. MCP tests have required-fast and post-merge-slow tiers
+### 14. MCP tests have fast, real-browser, and post-merge-slow tiers
 
-`apps/mcp/vitest.tiers.ts` is the static tier manifest. The required `test`
-check and `release.yml` run `test:fast`; `.github/workflows/mcp-slow-tests.yml`
-runs the named integration files after merges and the complete suite nightly.
-Card-value masking files and operator behavior files (session fail-closed,
-OAuth lifecycle, observation — `REQUIRED_BEHAVIOR_FILES`) are explicitly listed
-in the required tier and run whole, without generated test-name filters. Never
-move card-sealing, payment-safety, or operator behavior coverage to the slow
-tier; slow is reserved for genuinely slow non-behavioral files (corpus evals,
-packaging smoke, replay harness).
+`apps/mcp/vitest.tiers.ts` is the static tier manifest. Tiers run whole files —
+never select or shard individual test names.
+
+- **fast (`test:fast`)** — gates every PR (ci.yml) and every publish
+  (`release.yml` verify, rc and stable alike). Non-browser only: real-browser
+  files are excluded via `REAL_BROWSER_FILES`.
+- **real-browser (`test:real-browser`)** — every test that launches
+  Chromium/Chrome (`REAL_BROWSER_FILES`, incl. the browser halves of
+  `REQUIRED_BEHAVIOR_FILES`/`REQUIRED_PAYMENT_SAFETY_FILES`). Runs post-merge
+  in `.github/workflows/mcp-slow-tests.yml` and gates ONLY a stable/`latest`
+  release (release.yml dispatch; skipped for rc/`next` prereleases and PRs).
+  Never re-add these files to a PR or prerelease gate — they are the slow,
+  flaky tail that made rc cuts painful.
+- **slow (`test:slow`)** — genuinely slow NON-behavioral files only (corpus
+  evals, packaging smoke, replay harness). Never move non-browser
+  card-sealing, payment-safety, or operator behavior coverage here.
+
+The nightly full suite (`vitest run`) remains the partition-drift backstop.
+When adding a test that launches a browser, list it in `REAL_BROWSER_FILES`;
+when adding non-browser behavior coverage, list it in the REQUIRED_* files.
 
 ### 15. Operator browser lifetime is owner-bound
 

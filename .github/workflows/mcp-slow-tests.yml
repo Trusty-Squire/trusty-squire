@@ -1,11 +1,13 @@
 name: MCP slow tests
 
 # Genuinely slow non-behavioral suites (corpus evals, packaging smoke, replay
-# harness) stay live without blocking release PRs. Operator behavior suites are
-# NOT here: they are in vitest.tiers.ts REQUIRED_BEHAVIOR_FILES and gate every
-# pull request via ci.yml's test:fast. Every merge that can affect MCP runs the
-# slow partition; the nightly run executes the complete suite as a
-# partition-drift backstop.
+# harness) plus the real-browser tier (tests that launch Chromium/Chrome — see
+# vitest.tiers.ts REAL_BROWSER_FILES) stay live without blocking release PRs.
+# The non-browser halves of the operator behavior/payment tiers still gate
+# every pull request via ci.yml's test:fast; their real-browser halves run
+# here after merge and gate a stable release in release.yml. Every merge that
+# can affect MCP runs the slow + real-browser partitions; the nightly run
+# executes the complete suite as a partition-drift backstop.
 on:
   push:
     branches: [main]
@@ -48,6 +50,11 @@ jobs:
         env:
           MCP_SKIP_PACK_SMOKE: "1"
         run: pnpm --filter @trusty-squire/mcp test:slow
+      - name: Run real-browser tier after merge
+        if: github.event_name == 'push'
+        env:
+          MCP_SKIP_PACK_SMOKE: "1"
+        run: pnpm --filter @trusty-squire/mcp test:real-browser
       - name: Run complete MCP suite nightly
         if: github.event_name != 'push'
         env:
