@@ -71,6 +71,7 @@ it("reclaims a verified stale endpoint before the plain login lifecycle", async 
       profileDir: profile,
       inode: socket.ino,
       device: socket.dev,
+      supervised: false,
     }),
   );
   vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", path);
@@ -114,6 +115,7 @@ it("reclaims a verified endpoint after its hello response is lost", async () => 
       profileDir: profile,
       inode: socket.ino,
       device: socket.dev,
+      supervised: false,
     }),
   );
   vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", path);
@@ -156,6 +158,7 @@ it("refuses stale-endpoint reclamation while its broker owner is live", async ()
         profileDir: profile,
         inode: socket.ino,
         device: socket.dev,
+        supervised: false,
       }),
     );
     const { withBrokerMaintenance: recoverMaintenance } = await import("../broker/maintenance.js");

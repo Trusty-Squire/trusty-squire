@@ -16,15 +16,19 @@ and starts or attaches the elected broker. `TRUSTY_SQUIRE_BROKER_SOCKET` optiona
 overrides that endpoint; its parent must exist, belong to the current user, and
 have mode 0700. The default private parent is created automatically.
 
-Each MCP process generates an independent random forwarder credential. Launchers
-that need session recovery across process restarts can supply a stable random
-base64url `TRUSTY_SQUIRE_FORWARDER_CREDENTIAL` (at least 32 random bytes), retained
-only for that lineage and never shared with sibling clients. Generated credentials
-support connection recovery within that process; a fresh process without a retained
-credential cannot reclaim its predecessor's sessions.
+Default forwarder credentials are retained in private leased slots under the
+canonical profile's `trusty-squire-forwarders` directory. Live MCP processes hold
+independent slots; a replacement process reuses the first free slot and its retained
+journal identity. Credentials survive process exit, including a crash, while stale
+slot leases are reclaimed using the existing process-birth proof. Launchers can
+still supply a stable base64url `TRUSTY_SQUIRE_FORWARDER_CREDENTIAL` (at least 32
+random bytes) for a particular lineage. Never share that override between siblings.
 
 Set `TRUSTY_SQUIRE_BROKER_SUPERVISED=1` for a separately managed foreground service.
 In that mode a missing broker is an error and zero clients never releases the lease.
+The endpoint owner record retains supervision, including authenticated `supervise`
+upgrades. Ordinary clients never retire or reclaim a supervised or unproven owner;
+its supervisor remains responsible for replacement.
 Otherwise automatic startup applies and `TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS`
 defaults to five minutes, clamped to a minimum of one minute. Idle shutdown never
 changes the fact that the next operator call must attach or start a broker.

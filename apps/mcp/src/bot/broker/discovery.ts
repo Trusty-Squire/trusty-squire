@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, lstatSync } from "node:fs";
+import { mkdirSync, lstatSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { lstat, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -23,6 +23,7 @@ interface EndpointOwner {
   profileDir: string;
   inode: number;
   device: number;
+  supervised: boolean;
 }
 
 const BROKER_CONNECT_TIMEOUT_MS = 10_000;
@@ -130,9 +131,46 @@ export async function publishEndpointOwner(path: string): Promise<void> {
       profileDir: profilePathIdentity(CHROME_PROFILE_DIR),
       inode: socket.ino,
       device: socket.dev,
+      supervised: brokerIsSupervised(),
     } satisfies EndpointOwner),
     { mode: 0o600, flag: "wx" },
   );
+}
+
+export function retainBrokerSupervision(path: string): void {
+  const profileDir = profilePathIdentity(CHROME_PROFILE_DIR);
+  const root = brokerLaunchRoot(profileDir);
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  const lease = acquireProfileOperationGuard(profileDir, root);
+  try {
+    const owner = JSON.parse(readFileSync(`${path}.owner.json`, "utf8")) as EndpointOwner;
+    const socket = lstatSync(path);
+    if (
+      owner.version !== 1 ||
+      owner.pid !== process.pid ||
+      owner.profileDir !== profileDir ||
+      processBirthIdentityState(owner) !== "matching" ||
+      owner.inode !== socket.ino ||
+      owner.device !== socket.dev
+    )
+      throw new BrokerRefusal("ownership_unknown", "Cannot prove supervised broker ownership");
+    const temporary = `${path}.owner.pending`;
+    writeFileSync(temporary, JSON.stringify({ ...owner, supervised: true }), {
+      mode: 0o600,
+      flush: true,
+    });
+    renameSync(temporary, `${path}.owner.json`);
+  } finally {
+    lease.release();
+  }
+}
+
+function assertUnsupervisedOwner(owner: EndpointOwner): void {
+  if (owner.supervised !== false)
+    throw new BrokerRefusal(
+      "broker_unavailable",
+      "Broker supervision is retained or unknown; its supervisor must replace it",
+    );
 }
 
 export async function reclaimDeadBrokerEndpoint(path: string): Promise<void> {
@@ -155,6 +193,7 @@ export async function reclaimDeadBrokerEndpoint(path: string): Promise<void> {
   ) {
     throw new BrokerRefusal("broker_unavailable", "Endpoint belongs to a live or unproven broker");
   }
+  assertUnsupervisedOwner(owner);
   const lease = acquireProfileOperationGuard(
     profileDir,
     await prepareBrokerElectionRoot(profileDir),
@@ -207,6 +246,7 @@ export async function retireUnresponsiveBroker(path: string, token: string): Pro
     owner.device !== endpoint.dev
   )
     throw new BrokerRefusal("ownership_unknown", "Cannot prove unresponsive broker ownership");
+  assertUnsupervisedOwner(owner);
   const waitForDeath = async (ms: number) => {
     const deadline = Date.now() + ms;
     while (processBirthIdentityState(owner) === "matching" && Date.now() < deadline)

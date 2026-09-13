@@ -1,5 +1,10 @@
 import { resolveBrokerSocket } from "./discovery.js";
-import { brokerElectionRoot, brokerIsSupervised, publishEndpointOwner } from "./discovery.js";
+import {
+  brokerElectionRoot,
+  brokerIsSupervised,
+  publishEndpointOwner,
+  retainBrokerSupervision,
+} from "./discovery.js";
 import { DispatchJournal } from "./dispatch-journal.js";
 import { lstat, unlink, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -213,6 +218,7 @@ export async function runBrokerDaemon(): Promise<void> {
     maintenanceOwner = undefined;
     maintenanceReady = false;
   };
+  let endpointPublished: Promise<void>;
   const listener = await listenBroker(path, {
     authenticate: async (token, agentId, lineageCredential, supervisor) =>
       await operator.authenticate(token, agentId, lineageCredential, supervisor),
@@ -251,6 +257,8 @@ export async function runBrokerDaemon(): Promise<void> {
         if (method === "supervise") {
           if (!principal.supervisor)
             throw new BrokerRefusal("unauthorized", "Supervisor identity is required");
+          await endpointPublished;
+          retainBrokerSupervision(path);
           idleTimeout = undefined;
           return { state: "supervised" };
         }
@@ -279,7 +287,15 @@ export async function runBrokerDaemon(): Promise<void> {
           return {};
         }
         if (
-          (await journal.hasOutstanding(undefined, principal.forwarderId)) &&
+          (await journal.hasOutstanding(
+            undefined,
+            method === "tool" &&
+              (params.name === "operate_start" ||
+                (params.name === "operate_recipe_run" &&
+                  (params.args as Record<string, unknown> | undefined)?.session_id === undefined))
+              ? undefined
+              : principal.forwarderId,
+          )) &&
           !(
             method === "tool" &&
               (params.name === "operate_finish" ||
@@ -357,7 +373,8 @@ export async function runBrokerDaemon(): Promise<void> {
       scheduleShutdownIfIdle();
     },
   });
-  await publishEndpointOwner(path);
+  endpointPublished = publishEndpointOwner(path);
+  await endpointPublished;
   function scheduleShutdownIfIdle(): void {
     if (idleTimer !== undefined) clearTimeout(idleTimer);
     idleTimer = undefined;
