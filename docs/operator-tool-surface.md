@@ -16,14 +16,15 @@ The named operator surface contains 18 tools: the 14 driving verbs in
 | Drive ordinary UI | `operate_navigate`, `operate_click`, `operate_type`, `operate_select`, `operate_press`, `operate_scroll` |
 | Compatibility and login | `operate_allow_host`, `operate_login` |
 | Vault-aware browser work | `operate_fill_credential`, `operate_extract` |
-| Payments and vault lists | `operate_pay`, `operate_payment_status`, `list_credentials`, `list_payment_cards` |
+| Payments and vault lists | `inject_card`, `list_credentials`, `list_payment_cards` |
 
 Use an action `ref` from the current observation. `operate_start` and
 `operate_observe` default to `format: "compact"`, a paged control map;
-`format: "full"` is the explicit, verbatim-DOM view. Neither observation mode
-masks, seals, or refuses page content. `operate_screenshot` likewise returns
-the page’s actual pixels and is not a secret-redaction surface. Payment approval,
-3-D Secure, and vault write-only boundaries remain separate safety controls.
+`format: "full"` is the explicit DOM view. After `inject_card` releases a card,
+both modes replace that card's complete PAN and security code while leaving all
+other content verbatim. `operate_screenshot` composites covers over only the
+injected controls and identified ordinary displayed copies that contain those
+two values. Payment approval and vault write-only boundaries remain separate.
 
 ## Pickers and popup return
 

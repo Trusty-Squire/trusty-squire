@@ -7553,8 +7553,17 @@ export class BrowserController {
                     "g",
                   ),
               );
-              const parentText = current.parentElement?.parentElement?.textContent ?? value;
-              if (cvvLabel.test(parentText)) {
+              let labelledCvvCopy = false;
+              let ancestor = current.parentElement;
+              for (let depth = 0; ancestor !== null && depth < 3; depth += 1) {
+                const ancestorText = ancestor.textContent ?? "";
+                if (ancestorText.length <= 160 && cvvLabel.test(ancestorText)) {
+                  labelledCvvCopy = true;
+                  break;
+                }
+                ancestor = ancestor.parentElement;
+              }
+              if (labelledCvvCopy) {
                 for (const cvv of cvvs) patterns.push(new RegExp(`(?<!\\d)${cvv}(?!\\d)`, "g"));
               }
               for (const pattern of patterns) {
@@ -13675,7 +13684,6 @@ export class BrowserController {
         const value = valueFor(field, target.format);
         const tag = await handle.evaluate((node) => node.tagName.toLowerCase());
         if (tag === "select") {
-          const locator = handle.asElement()!;
           const owner = await handle.ownerFrame();
           if (owner === null) throw new Error("target has no owning frame");
           const selector = element.selector;
@@ -13685,7 +13693,6 @@ export class BrowserController {
           } catch {
             await select.selectOption({ label: value }, { timeout: 3_000 });
           }
-          void locator;
         } else {
           await handle.fill(value, { timeout: 8_000 });
         }

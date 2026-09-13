@@ -366,7 +366,7 @@ const CONTROL_QUERY_CONTRACT =
 
 const ACTION_FORMAT_NOTE =
   "The action response is the compact `browser-use-control-query` control map by default: after a compact map on the same document, `delta:true` carries changed/new controls in `safe_table` and departed refs in `removed`, never the verbatim DOM. " +
-  'Pass `format:"full"` to receive the verbatim `browser-use-dom` tree instead. Nothing is redacted in either format. ';
+  'Pass `format:"full"` to receive the `browser-use-dom` tree instead. After inject_card releases a card, its complete PAN and security code are replaced in every normal observation; all other emitted content stays verbatim. ';
 
 const ACTION_FORMATS = ["compact", "full"] as const;
 const actionFormatSchema = z.enum(ACTION_FORMATS);
@@ -378,7 +378,7 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
     "Begin an interactive website task: opens a browser on the " +
     "user's machine at service_url and returns the initial page observation. " +
     CONTROL_QUERY_CONTRACT +
-    'Use `format:"full"` only when the verbatim page DOM and text are needed. Nothing is redacted in either format. ' +
+    'Use `format:"full"` only when the page DOM and text are needed. A released card\'s complete PAN and security code are masked; all other emitted content stays verbatim. ' +
     DOM_OBSERVATION_CONTRACT +
     "YOU are the planner — read the observation, then drive the signup, setup, or " +
     "checkout with operate_click, operate_type, operate_select, operate_navigate, operate_scroll, and operate_login (operate_pay for a purchase), re-read with " +
@@ -440,7 +440,7 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
   description:
     "Re-read the current page of an operate session. " +
     CONTROL_QUERY_CONTRACT +
-    'Use `format:"full"` only when the verbatim page DOM and text are needed. Nothing is redacted in either format. ' +
+    'Use `format:"full"` only when the page DOM and text are needed. A released card\'s complete PAN and security code are masked; all other emitted content stays verbatim. ' +
     DOM_OBSERVATION_CONTRACT +
     "Supplying query, role, or cursor always selects the compact control-map path, regardless of format. " +
     "Explicit legacy sessions (TRUSTY_SQUIRE_OBSERVE_V2=off or shadow) return legacy observations.",
@@ -505,7 +505,7 @@ export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
     "selected V1 session, isn't enough to tell what state " +
     "a stuck page is actually in — a challenge that never advances, an unexpected layout, a captcha you " +
     "need to SEE. Read-only: never navigates, clicks, types, submits, or steals focus; it only reads " +
-    "pixels. The image is the page's real pixels, whatever the page is showing. When click_binding is present, its screenshot_id and original image width/height authorize one operate_click screenshot point for 60 seconds. Navigation, viewport/scroll or frame geometry changes invalidate it. An absent binding means this image is read-only; capture again for a coordinate click.",
+    "pixels. After inject_card releases a card, pixels containing that card's complete PAN or security code in injected controls and identified ordinary displayed copies are covered in the returned image; borders, labels, errors, and all other pixels remain unchanged. When click_binding is present, its screenshot_id and original image width/height authorize one operate_click screenshot point for 60 seconds. Navigation, viewport/scroll or frame geometry changes invalidate it. An absent binding means this image is read-only; capture again for a coordinate click.",
   inputSchema: screenshotSchema,
   jsonInputSchema: {
     type: "object",

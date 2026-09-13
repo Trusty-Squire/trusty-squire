@@ -55,13 +55,16 @@ function cloneCard(card: CheckoutCard): CheckoutCard {
   };
 }
 
-function fieldSummary(results: Record<InjectCardField, InjectCardFieldResult>): {
+function fieldSummary(
+  results: Record<InjectCardField, InjectCardFieldResult>,
+  targets: InjectCardInput["fields"],
+): {
   complete: boolean;
   fields: Record<InjectCardField, InjectCardFieldResult>;
 } {
   return {
-    complete: Object.values(results).every(
-      (result) => result.status === "filled" || result.status === "not_found",
+    complete: (Object.keys(targets) as InjectCardField[]).every(
+      (field) => results[field].status === "filled",
     ),
     fields: results,
   };
@@ -82,7 +85,7 @@ async function injectReleasedCard(session: Session, args: InjectCardInput) {
     approval_url: released.approvalUrl,
     approved_terms: released.checkout,
     last4: released.last4,
-    ...fieldSummary(results),
+    ...fieldSummary(results, args.fields),
   };
 }
 
@@ -248,7 +251,7 @@ export const injectCardTool: Tool<InjectCardInput> = {
         approval_url: approved.approval_url,
         approved_terms: approved.checkout,
         last4: approved.last4,
-        ...fieldSummary(fieldResults),
+        ...fieldSummary(fieldResults, args.fields),
       };
     });
   },
