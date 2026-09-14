@@ -598,6 +598,31 @@ Three things about it are load-bearing; do not "simplify" any of them:
 Contract: [`SECURITY.md`](SECURITY.md#security-model); implementation map:
 [`CLAUDE.md`](CLAUDE.md).
 
+### 19. Frame attachment is decided by layout, never viewport visibility — and a failed OOPIF probe must still emit an omission
+
+Shopify's hosted card fields (`checkout.pci.shopifyinc.com` iframes on
+`/checkout`) render BELOW the fold. `attachFrames`
+(`apps/mcp/src/bot/browser-use-capture.ts`) gated on the iframe node's
+viewport `visible` flag, so every offscreen OOPIF was skipped silently — no
+elements from the frame AND no `capture_omissions` entry (#778's frame map
+was fine; this second gate hid its work). Two invariants in that file:
+
+- **Attachment gates on `rendered` + `bounds`, not `visible`.** A rendered
+  iframe with real bounds is capturable wherever it sits; only
+  display:none / never-laid-out frames stay unattached (hidden content is
+  collapsed by the serializer, not reported).
+- **Any qualifying rendered iframe whose child document never reached the
+  capture and whose frame could not be resolved yields `frame_attach_failed`.**
+  A failed `outOfProcessFramesByCdpId` probe stores no frameId on the node,
+  so the old `meta?.frameId !== undefined` condition silently swallowed
+  probe failures too. Compact map and omissions must never both be empty for
+  a rendered card frame.
+
+Regression: `apps/mcp/src/bot/__tests__/browser-oopif-observation.test.ts`
+(the iframe is rendered out of the initial viewport on purpose — keep it that
+way). Live repro: `apps/mcp/scripts/oopif-live-diagnostics.ts` (manual
+diagnostics, never a test; hits the real whitejade checkout, never orders).
+
 ## Final note
 
 You are reading this file because a prior agent burned four version numbers, confused users, and forced a human to intervene. The agent was not malicious. It was not lazy. It was pattern-matching on its own prose instead of on tool output.

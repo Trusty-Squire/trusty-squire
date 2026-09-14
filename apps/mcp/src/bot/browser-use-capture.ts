@@ -1240,10 +1240,17 @@ export async function captureBrowserUseDOM(
     const root = await capture(cdp, "main:", page.mainFrame());
     const visited = new Set<Frame>([page.mainFrame()]);
     const attachFrames = async (n: BrowserUseNode, depth = 0): Promise<void> => {
+      // Attachment is decided by layout, not viewport visibility. Shopify's
+      // hosted card fields render below the fold at /checkout; clipping to the
+      // viewport here silently dropped every offscreen OOPIF (no elements, no
+      // omissions). A rendered iframe with real bounds is capturable wherever
+      // it sits; only display:none / never-laid-out frames (rendered === false
+      // or bounds null) stay unattached, and hidden content is collapsed by
+      // the serializer rather than reported as an observation omission.
       if (
         ["IFRAME", "FRAME"].includes(n.nodeName) &&
         !n.contentDocument &&
-        n.visible &&
+        n.rendered !== false &&
         n.bounds &&
         n.bounds.width >= 10 &&
         n.bounds.height >= 10 &&
@@ -1266,10 +1273,11 @@ export async function captureBrowserUseDOM(
             });
             n.contentDocument = null;
           }
-        } else if (frame === undefined && meta?.frameId !== undefined) {
-          // A rendered iframe whose child document never reached the capture:
-          // its CDP frame could not be resolved from either the local frame
-          // tree or the out-of-process frame map. Never a silent drop.
+        } else if (frame === undefined) {
+          // A rendered iframe whose child document never reached the capture
+          // and whose CDP frame could not be resolved — the OOPIF probe
+          // failed, so no frameId was ever bound to this node (a failed probe
+          // and a failed attach must both land here; never a silent drop).
           omissions.push({
             kind: "frame_attach_failed",
             framePath: null,
