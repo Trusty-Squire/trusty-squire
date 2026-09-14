@@ -1403,24 +1403,6 @@ export function withPreparedOAuthLoginTarget<T>(
   return preparedOAuthLoginTarget.run(prepared, operation);
 }
 
-/**
- * The parts of an observed row that carry what the agent CHOSE the control for.
- * `state`, `visibility` and `choice` legitimately churn on a live form and are
- * excluded, so a ref stays actionable across a re-render; role, intent, field
- * class, frame and label are not — a control whose label went from "Continue"
- * to "Delete account" is no longer the control the agent reasoned about, even
- * though its fingerprint (its DOM id) never moved.
- */
-function sameCompactV2Intent(left: SafeControlV2, right: SafeControlV2): boolean {
-  return (
-    left.role === right.role &&
-    left.action === right.action &&
-    left.field === right.field &&
-    left.frame === right.frame &&
-    left.label === right.label
-  );
-}
-
 /** Wire-visible equality for the action response's changed-control delta. */
 function sameCompactV2Control(left: SafeControlV2, right: SafeControlV2): boolean {
   return (
@@ -1489,10 +1471,12 @@ function resolveCompactV2Label(
 
 /**
  * Re-resolve an authorized ref against LIVE elements. The handle is minted from
- * the element's physical node identity and material intent under the document epoch, so this
- * survives a re-render between two acts (the whole point of the identity model)
- * while a replaced document, a removed control, or a control that changed role
- * under the same node identity all fail closed.
+ * the element's physical node identity under the document epoch, so a ref
+ * resolves across a benign re-render (the whole point of the identity model)
+ * and fails closed only when that element is genuinely gone or its document
+ * epoch changed. Matching is by the durable handle alone — never by the row's
+ * role/label/field, which a legitimate re-render may change (and which would
+ * otherwise re-run the redundant intent gate this replaced).
  */
 function resolveAuthorizedCompactV2Target(
   session: Session,
@@ -1510,7 +1494,6 @@ function resolveAuthorizedCompactV2Target(
   // means a broken invariant rather than an addressable ambiguity: refuse either way.
   if (matches.length !== 1) throwCompactV2StaleRef();
   const liveRow = matches[0]!;
-  if (!sameCompactV2Intent(liveRow, authorization.row)) throwCompactV2StaleRef();
   const legacy = live.byRef.get(liveRow.ref);
   const resolved = legacy === undefined ? null : resolveTarget(elements, legacy);
   if (resolved === null) throwCompactV2StaleRef();

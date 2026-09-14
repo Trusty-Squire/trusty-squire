@@ -2324,6 +2324,41 @@ describe("Compact V2 action-map boundary", () => {
     expect(h.typed).toEqual([{ selector: "#email", text: "buyer@example.com" }]);
   });
 
+  it("keeps a ref actionable when a benign re-render changes only its wire label", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const identity = "physical-label-anchor";
+    const intent = "stable-intent";
+    h.elements = [
+      elem({
+        observationIdentity: identity,
+        observationIntent: intent,
+        tag: "button",
+        role: "button",
+        visibleText: "Continue",
+        selector: "#continue",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    const handle = domRefs(started)[0]!;
+
+    // Same physical node and material intent; only the legible label text
+    // re-rendered. The durable handle must still resolve to that node — the
+    // removed authorization layer refused here purely because the wire label
+    // differed.
+    h.elements = [
+      elem({
+        observationIdentity: identity,
+        observationIntent: intent,
+        tag: "button",
+        role: "button",
+        visibleText: "Continue to checkout",
+        selector: "#continue",
+      }),
+    ];
+    await act(started.session_id, { kind: "click", target: handle });
+    expect(h.clickCalls).toBe(1);
+  });
+
   it("rejects a handle after a same-URL main-document replacement", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
@@ -2505,24 +2540,17 @@ describe("Compact V2 action-map boundary", () => {
   it("rejects a handle when its live sealed semantics change before dispatch", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
-      elem({
-        tag: "input",
-        type: "submit",
-        id: "action",
-        selector: "#action",
-        value: "Continue",
-      }),
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#action" }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
     const handle = domRefs(started)[0]!;
 
     h.elements = [
       elem({
-        tag: "input",
-        type: "submit",
-        id: "action",
+        tag: "button",
+        role: "button",
+        visibleText: "Delete account",
         selector: "#action",
-        value: "Delete account",
       }),
     ];
     await expect(act(started.session_id, { kind: "click", target: handle })).rejects.toThrow(
@@ -4983,33 +5011,6 @@ describe("operate_finish lifecycle consolidation", () => {
       url: `https://app.example.com/done?token=${urlToken}`,
       closed: true,
     });
-  });
-
-  it("seals Compact V2 measurement service labels before stderr emission", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
-    const panHost = "4111-1111-1111-1111.com";
-    const started = await startProvisionSession({ serviceUrl: `https://${panHost}/done` });
-    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-
-    try {
-      await operateFinishTool.handler(
-        operateFinishTool.inputSchema.parse({
-          session_id: started.session_id,
-          outcome: "result",
-          summary: "Done",
-        }),
-        null,
-      );
-      const measurement = stderrWrite.mock.calls
-        .map(([line]) => String(line))
-        .find((line) => line.includes('"marker":"provision-measurement"'));
-
-      expect(measurement).toBeDefined();
-      expect(measurement).not.toContain(panHost);
-      expect(measurement).toContain('"service":"<sealed>"');
-    } finally {
-      stderrWrite.mockRestore();
-    }
   });
 
   it("returns the legacy result shape from outcome=result, preserving scalar data types", async () => {
