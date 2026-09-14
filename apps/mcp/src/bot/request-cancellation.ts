@@ -139,8 +139,6 @@ export async function persistOperatorCaptureEvidence(
   recovery = false,
 ): Promise<void> {
   const persist = contexts.getStore()?.onCapture;
-  if (recovery && persist === undefined)
-    throw new Error("capture recovery requires recorded write identity");
   await persist?.(evidence, recovery);
 }
 

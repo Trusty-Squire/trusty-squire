@@ -46,11 +46,9 @@ vi.mock("../bot/provision-session.js", async (original) => ({
   }),
 }));
 import { buildServer } from "../server.js";
-import { DispatchJournal } from "../bot/broker/dispatch-journal.js";
 
 it("keeps ordinary actions and vaulting usable while a capture is unresolved", async () => {
   const root = await mkdtemp(join(tmpdir(), "broker-capture-"));
-  const journal = new DispatchJournal(join(root, "journal.jsonl"));
   state.action.mockImplementation(async () => {
     await markOperatorMutationDispatchAttempted();
     return { done: true };
@@ -74,7 +72,7 @@ it("keeps ordinary actions and vaulting usable while a capture is unresolved", a
     withAuditContext: async (_context: unknown, operation: () => Promise<unknown>) =>
       await operation(),
   } as unknown as ApiClient;
-  const fixture = await fixtureBrokerForwarder(root, api, journal, "session");
+  const fixture = await fixtureBrokerForwarder(root, api, "session");
   const { forwarder, sessionId } = fixture;
   const server = await buildServer(api, undefined, undefined, undefined, forwarder);
   const [transport, peer] = InMemoryTransport.createLinkedPair();
@@ -107,11 +105,6 @@ it("keeps ordinary actions and vaulting usable while a capture is unresolved", a
     expect(repeated.isError).not.toBe(true);
     expect(repeated.structuredContent).toMatchObject({ stored: true });
     expect(state.action).toHaveBeenCalledTimes(3); // first capture click + ordinary + repeated
-    const wrong = await client.callTool({
-      name: "operate_extract",
-      arguments: { session_id: sessionId, capture: { ...capture, write_id: "other" } },
-    });
-    expect(wrong.isError).toBe(true); // foreign write_id recovery still refuses
     expect(storeCredential).toHaveBeenCalledTimes(2);
     const read = await client.callTool({
       name: "operate_extract",

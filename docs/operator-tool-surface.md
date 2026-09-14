@@ -175,9 +175,8 @@ Its allowed values are `execution: completed | cancelled | pending | unknown`,
 only when closure is positively established. A bounded finish can return
 `execution: "pending"`, `cleanup: "closing"`, and `closed: false` while the
 lifecycle retains ownership and drains work. Repeat finish to obtain closure
-proof; do not replay a mutation. Broker closure proof survives delivery
-acknowledgement and restart within its five-minute retention window and remains
-bound to the original forwarder lineage. Missing proof is unknown, never an
+proof; do not replay a mutation. That closure proof lives with the live session:
+ending the broker connection ends it. Missing proof is unknown, never an
 inferred `already_closed`. Clients should feature-detect the output schema in
 `tools/list` when talking to older installed servers.
 

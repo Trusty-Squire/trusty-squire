@@ -1,15 +1,15 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createServer, createConnection, type Server, type Socket } from "node:net";
 import { chmod, lstat, unlink } from "node:fs/promises";
-import { randomUUID, randomBytes } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { BrokerRefusal } from "./refusal.js";
-import {
-  FORWARDER_HANDOFF_TIMEOUT_MS,
-  type BrokerPrincipal,
-} from "./authority.js";
+import type { BrokerPrincipal } from "./authority.js";
 
 const MAX_FRAME = 8 * 1024 * 1024;
+/** How many request results one connection retains so a retried request id gets
+ * its stored result instead of a re-execution. */
+const RETAINED_RESULTS_PER_CONNECTION = 512;
 const requestSchema = z
   .object({
     version: z.literal(1),
@@ -58,19 +58,15 @@ function frames(socket: Socket, receive: (value: unknown) => void): void {
 }
 function send(socket: Socket, value: unknown): void {
   const frame = JSON.stringify(value) + "\n";
-  if (Buffer.byteLength(frame) > MAX_FRAME || socket.writableLength > MAX_FRAME * 2) {
-    socket.destroy(new Error("Broker transport capacity exceeded"));
+  if (Buffer.byteLength(frame) > MAX_FRAME) {
+    socket.destroy(new Error("Broker frame exceeds the transport limit"));
     return;
   }
   socket.write(frame);
 }
 
 export interface BrokerTransportPort {
-  authenticate(
-    token: string,
-    agentId?: string,
-    lineageCredential?: string,
-  ): Promise<Omit<BrokerPrincipal, "clientId"> | null>;
+  authenticate(token: string, agentId?: string): Promise<Omit<BrokerPrincipal, "clientId"> | null>;
   connected?(principal: BrokerPrincipal): Promise<void> | void;
   call(
     principal: BrokerPrincipal,
@@ -154,7 +150,7 @@ export async function listenBroker(
     let principal: BrokerPrincipal | undefined;
     let authenticating = false;
     let closed = false;
-    const replies = new Map<string, { input: string; result: Promise<unknown> }>();
+    const replies = new Map<string, Promise<unknown>>();
     let explicitClose = false;
     const disconnect = (owner: BrokerPrincipal) => {
       const task = port.disconnect(owner, explicitClose).catch(() => undefined);
@@ -178,13 +174,9 @@ export async function listenBroker(
         authenticating = true;
         const agentId =
           typeof request.params.agentId === "string" ? request.params.agentId : "local-agent";
-        const lineageCredential =
-          typeof request.params.lineageCredential === "string"
-            ? request.params.lineageCredential
-            : undefined;
         if (agentId.length === 0 || agentId.length > 128)
           throw new BrokerRefusal("unauthorized", "Invalid agent identity");
-        const identity = await port.authenticate(request.params.token, agentId, lineageCredential);
+        const identity = await port.authenticate(request.params.token, agentId);
         if (identity === null) throw new BrokerRefusal("unauthorized", "Invalid broker credential");
         const candidate = { ...identity, clientId: randomUUID() };
         await port.connected?.(candidate);
@@ -219,19 +211,19 @@ export async function listenBroker(
         return;
       }
       const request = parsed.data;
-      const input = JSON.stringify([request.method, request.params]);
       const previous = replies.get(request.id);
       let result: Promise<unknown>;
       if (previous !== undefined) {
-        result =
-          previous.input === input
-            ? previous.result
-            : Promise.reject(
-                new BrokerRefusal("request_id_reused", "Request ID has different input"),
-              );
+        result = previous;
       } else {
         result = dispatch(request);
-        replies.set(request.id, { input, result });
+        replies.set(request.id, result);
+        // Drop only the oldest retained result; the newest request is never
+        // refused or evicted because of the bound.
+        if (replies.size > RETAINED_RESULTS_PER_CONNECTION) {
+          const oldest = replies.keys().next().value;
+          if (oldest !== undefined && oldest !== request.id) replies.delete(oldest);
+        }
       }
       void result.then(
         (data) => {
@@ -315,24 +307,17 @@ export class BrokerClient {
       }
     });
   }
-  static async connect(
-    path: string,
-    token: string,
-    lineageCredential?: string,
-  ): Promise<BrokerClient> {
+  static async connect(path: string, token: string): Promise<BrokerClient> {
     const socket = createConnection(path);
     const client = new BrokerClient(socket);
     let handshakeTimeout: BrokerRefusal | undefined;
-    const deadline = setTimeout(
-      () => {
-        handshakeTimeout = new BrokerRefusal(
-          "broker_handshake_timeout",
-          "Broker hello handshake timed out",
-        );
-        socket.destroy(handshakeTimeout);
-      },
-      lineageCredential === undefined ? 5_000 : FORWARDER_HANDOFF_TIMEOUT_MS + 5_000,
-    );
+    const deadline = setTimeout(() => {
+      handshakeTimeout = new BrokerRefusal(
+        "broker_handshake_timeout",
+        "Broker hello handshake timed out",
+      );
+      socket.destroy(handshakeTimeout);
+    }, 5_000);
     try {
       await new Promise<void>((resolve, reject) => {
         socket.once("connect", resolve);
@@ -341,9 +326,6 @@ export class BrokerClient {
       await client.call("hello", {
         token,
         agentId: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "local-agent",
-        // Health probes use a fresh identity, so they never wait for or reclaim
-        // an existing forwarder lineage. All connections use the same authentication.
-        lineageCredential: lineageCredential ?? randomBytes(32).toString("base64url"),
       });
       return client;
     } catch (error) {
@@ -381,9 +363,6 @@ export class BrokerClient {
         ...(notifyUser ? { notifications: true } : {}),
       });
     });
-  }
-  async acknowledge(requestId: string): Promise<void> {
-    await this.call("acknowledge", { requestId });
   }
   isConnected(): boolean {
     return !this.ended && !this.socket.destroyed;

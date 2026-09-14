@@ -1,5 +1,4 @@
 import { lstat } from "node:fs/promises";
-import { randomBytes } from "node:crypto";
 import { createSessionGuard } from "../../session-guard.js";
 import { BrokerClient } from "./transport.js";
 import { BrokerRefusal } from "./refusal.js";
@@ -21,11 +20,7 @@ export async function withBrokerMaintenance<T>(operation: () => Promise<T>): Pro
     throw new BrokerRefusal("unauthorized", "Broker maintenance requires the enrolled account");
   let client: BrokerClient;
   try {
-    client = await BrokerClient.connect(
-      path,
-      session.agent_session_token,
-      randomBytes(32).toString("base64url"),
-    );
+    client = await BrokerClient.connect(path, session.agent_session_token);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== "ECONNREFUSED" && code !== "broker_lost") throw error;
@@ -35,15 +30,8 @@ export async function withBrokerMaintenance<T>(operation: () => Promise<T>): Pro
   }
   let ready = false;
   try {
-    const deadline = Date.now() + 120000;
-    do {
-      const result = (await client.call("maintenance", {})) as { state: string };
-      if (result.state === "ready") {
-        ready = true;
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    } while (Date.now() < deadline);
+    const result = (await client.call("maintenance", {})) as { state: string };
+    ready = result.state === "ready";
     if (!ready)
       throw new BrokerRefusal(
         "maintenance",

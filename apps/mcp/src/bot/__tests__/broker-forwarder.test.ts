@@ -4,744 +4,204 @@ import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { ForwardedResultError, OperatorForwarder } from "../broker/forwarder.js";
 import { listenBroker } from "../broker/transport.js";
-import type { BrokerClient } from "../broker/transport.js";
+import { BrokerRefusal } from "../broker/refusal.js";
 import type { SessionGuard } from "../../session-guard.js";
 import { ProvenPreDispatchMutationError } from "../mutation-dispatch-evidence.js";
 
-const credential = (character: string) => character.repeat(43);
+const guard = {
+  bind: async () => ({
+    account_id: "account",
+    agent_session_token: "test",
+    api_base_url: "http://unused.test",
+    saved_at: "",
+  }),
+  inspect: async () => ({ problem: null }),
+  boundAccountId: () => "account",
+} as unknown as SessionGuard;
 
-describe("MCP broker forwarding", () => {
-  it("recovers a valid session result when the first broker reply omits it", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-forward-start-shape-"));
-    const path = join(root, "b.sock");
-    const capability = "recoverable-session";
-    const broker = await listenBroker(path, {
-      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
-      call: async (_principal, method, params) => {
-        if (method === "reclaim") return { capabilities: [] };
-        if (method === "acknowledge") return {};
-        if (method === "recover") {
-          expect(params.requestId).toEqual(expect.any(String));
-          return {
-            requestId: params.requestId,
-            capability,
-            result: { session_id: capability, broker: { targetId: "target" } },
-          };
-        }
-        if (params.name === "operate_start") return { capability };
-        throw new Error(`Unexpected ${method}`);
-      },
-      disconnect: async () => undefined,
-    });
-    const guard: SessionGuard = {
-      bind: async () => ({
-        account_id: "account",
-        agent_session_token: "test",
-        api_base_url: "http://unused.test",
-        saved_at: "",
-      }),
-      inspect: async () => ({ problem: null }),
-      boundAccountId: () => "account",
-    };
-    const forwarder = new OperatorForwarder(path, guard, credential("a"));
-    try {
-      await expect(forwarder.invoke("operate_start", {}, "start")).resolves.toEqual({
-        session_id: capability,
-        broker: { targetId: "target" },
-      });
-      expect(forwarder.sessionCount()).toBe(1);
-    } finally {
-      await forwarder.close();
-      await broker.close();
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("does not recover or acknowledge an older identical start as the current malformed reply", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-forward-start-request-"));
-    const path = join(root, "b.sock");
-    const olderCapability = "older-session";
-    const acknowledgements: string[] = [];
-    let currentRequestId = "";
-    const broker = await listenBroker(path, {
-      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
-      call: async (_principal, method, params, requestId) => {
-        if (method === "reclaim") return { capabilities: [] };
-        if (method === "acknowledge") {
-          acknowledgements.push(String(params.requestId));
-          return {};
-        }
-        if (method === "recover") {
-          expect(params.requestId).toBe(currentRequestId);
-          return {
-            requestId: "older-unacknowledged-request",
-            capability: olderCapability,
-            result: { session_id: olderCapability },
-          };
-        }
-        if (params.name === "operate_start") {
-          currentRequestId = requestId;
-          return {};
-        }
-        throw new Error(`Unexpected ${method}`);
-      },
-      disconnect: async () => undefined,
-    });
-    const guard: SessionGuard = {
-      bind: async () => ({
-        account_id: "account",
-        agent_session_token: "test",
-        api_base_url: "http://unused.test",
-        saved_at: "",
-      }),
-      inspect: async () => ({ problem: null }),
-      boundAccountId: () => "account",
-    };
-    const forwarder = new OperatorForwarder(path, guard, credential("a"));
-    try {
-      await expect(
-        forwarder.invoke("operate_start", { service_url: "https://same.test" }, "current"),
-      ).rejects.toMatchObject({ code: "invalid_broker_result" });
-      expect(currentRequestId).not.toBe("");
-      expect(acknowledgements).not.toContain("older-unacknowledged-request");
-      expect(forwarder.sessionCount()).toBe(0);
-    } finally {
-      await forwarder.close();
-      await broker.close();
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("retains a recovered live capability before acknowledging its result", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-forward-start-ack-"));
-    const path = join(root, "b.sock");
-    const capability = "retained-session";
-    const broker = await listenBroker(path, {
-      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
-      call: async (_principal, method, params) => {
-        if (method === "reclaim") return { capabilities: [] };
-        if (method === "acknowledge") throw new Error("acknowledgement unavailable");
-        if (method === "recover")
-          return {
-            requestId: params.requestId,
-            capability,
-            result: { session_id: capability },
-          };
-        if (params.name === "operate_start") return {};
-        throw new Error(`Unexpected ${method}`);
-      },
-      disconnect: async () => undefined,
-    });
-    const guard: SessionGuard = {
-      bind: async () => ({
-        account_id: "account",
-        agent_session_token: "test",
-        api_base_url: "http://unused.test",
-        saved_at: "",
-      }),
-      inspect: async () => ({ problem: null }),
-      boundAccountId: () => "account",
-    };
-    const forwarder = new OperatorForwarder(path, guard, credential("a"));
-    try {
-      await expect(forwarder.invoke("operate_start", {}, "start")).rejects.toThrow(
-        "acknowledgement unavailable",
-      );
-      expect(forwarder.sessionCount()).toBe(1);
-    } finally {
-      await forwarder.close();
-      await broker.close();
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("retains a recoverable session identity when malformed startup recovery is unavailable", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-forward-start-custody-"));
-    const path = join(root, "b.sock");
-    const capability = "recoverable-session";
-    const broker = await listenBroker(path, {
-      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
-      call: async (_principal, method, params) => {
-        if (method === "reclaim") return { capabilities: [] };
-        if (method === "recover") return null;
-        if (method === "acknowledge") return {};
-        if (params.name === "operate_start") return { capability, result: null };
-        throw new Error(`Unexpected ${method}`);
-      },
-      disconnect: async () => undefined,
-    });
-    const guard: SessionGuard = {
-      bind: async () => ({
-        account_id: "account",
-        agent_session_token: "test",
-        api_base_url: "http://unused.test",
-        saved_at: "",
-      }),
-      inspect: async () => ({ problem: null }),
-      boundAccountId: () => "account",
-    };
-    const forwarder = new OperatorForwarder(path, guard, credential("a"));
-    try {
-      const error = await forwarder.invoke("operate_start", {}, "start").catch((value) => value);
-      expect(error).toBeInstanceOf(ForwardedResultError);
-      expect(error).toMatchObject({
-        code: "invalid_broker_result",
-        detail: {
-          session_id: capability,
-          cleanup: "open",
-          closed: false,
-          recovery: { tool: "operate_finish", session_id: capability },
-        },
-      });
-      expect(forwarder.sessionCount()).toBe(1);
-    } finally {
-      await forwarder.close();
-      await broker.close();
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it.each(["connect", "reclaim", "recover"])(
-    "never dispatches when cancelled during %s",
-    async (barrier) => {
-      const root = await mkdtemp(join(tmpdir(), "ts-forward-cancel-"));
-      const capability = "session";
-      let release!: () => void;
-      let enter!: () => void;
-      const gate = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      const entered = new Promise<void>((resolve) => {
-        enter = resolve;
-      });
-      const pause = async () => {
-        enter();
-        await gate;
-      };
-      let dispatches = 0;
-      const broker = await listenBroker(join(root, "b.sock"), {
-        authenticate: async () => ({ accountId: "account", agentId: "agent" }),
-        call: async (_principal, method) => {
-          if (method === barrier) await pause();
-          if (method === "reclaim") return { capabilities: [capability] };
-          if (method === "recover") return null;
-          if (method === "acknowledge") return {};
-          dispatches++;
-          return { result: {} };
-        },
-        disconnect: async () => undefined,
-      });
-      const guard: SessionGuard = {
-        bind: async () => {
-          if (barrier === "connect") await pause();
-          return {
-            account_id: "account",
-            agent_session_token: "test",
-            api_base_url: "http://unused.test",
-            saved_at: "",
-          };
-        },
-        inspect: async () => ({ problem: null }),
-        boundAccountId: () => "account",
-      };
-      const forwarder = new OperatorForwarder(join(root, "b.sock"), guard, credential("a"));
-      const controller = new AbortController();
-      try {
-        const pending = forwarder.invoke(
-          "operate_click",
-          { session_id: "session", ref: "@continue" },
-          "cancelled",
-          { recover: barrier === "recover" },
-          controller.signal,
-        );
-        const rejected = expect(pending).rejects.toThrow("cancelled");
-        await entered;
-        controller.abort(new Error("cancelled"));
-        release();
-        await rejected;
-        expect(dispatches).toBe(0);
-      } finally {
-        release();
-        await forwarder.close();
-        await broker.close();
-        await rm(root, { recursive: true, force: true });
-      }
-    },
-  );
-
-  it("acknowledges a delivered pre-dispatch failure before rejecting it", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-forward-pre-dispatch-"));
-    const path = join(root, "b.sock");
-    const acknowledgements: string[] = [];
-    const capability = "session";
-    const broker = await listenBroker(path, {
-      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
-      call: async (_principal, method, params, requestId) => {
-        if (method === "reclaim") return { capabilities: [] };
-        if (method === "acknowledge") {
-          acknowledgements.push(String(params.requestId));
-          return {};
-        }
-        if (params.name === "operate_start")
-          return { capability, result: { session_id: capability } };
-        if (params.name === "operate_login")
-          return {
-            preDispatchFailure: { error: "stale_ref", dispatch: "not_dispatched" },
-          };
-        if (params.name === "operate_observe") return { result: { dom: "still available" } };
-        throw new Error(`Unexpected ${method}:${requestId}`);
-      },
-      disconnect: async () => undefined,
-    });
-    const guard: SessionGuard = {
-      bind: async () => ({
-        account_id: "account",
-        agent_session_token: "test",
-        api_base_url: "http://unused.test",
-        saved_at: "",
-      }),
-      inspect: async () => ({ problem: null }),
-      boundAccountId: () => "account",
-    };
-    const forwarder = new OperatorForwarder(path, guard, credential("a"));
-    try {
-      await forwarder.invoke("operate_start", {}, "start");
-      await expect(
-        forwarder.invoke(
-          "operate_login",
-          { session_id: "session", provider: "google", ref: "@e:changed" },
-          "login",
-        ),
-      ).rejects.toBeInstanceOf(ProvenPreDispatchMutationError);
-      expect(acknowledgements).toHaveLength(2);
-      await expect(
-        forwarder.invoke("operate_observe", { session_id: "session" }, "observe"),
-      ).resolves.toEqual({ dom: "still available" });
-    } finally {
-      await forwarder.close();
-      await broker.close();
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("waits for broker acknowledgement before resolving a forwarded call", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-forward-ack-"));
-    const path = join(root, "b.sock");
-    let release!: () => void;
-    let acknowledged = false;
-    const persisted = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const broker = await listenBroker(path, {
-      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
-      call: async (_principal, method) => {
-        if (method === "recover") return null;
-        if (method === "acknowledge") {
-          acknowledged = true;
-          await persisted;
-          return {};
-        }
-        return { result: { accepted: true } };
-      },
-      disconnect: async () => undefined,
-    });
-    const guard: SessionGuard = {
-      bind: async () => ({
-        account_id: "account",
-        agent_session_token: "test",
-        api_base_url: "http://unused.test",
-        saved_at: "",
-      }),
-      inspect: async () => ({ problem: null }),
-      boundAccountId: () => "account",
-    };
-    const forwarder = new OperatorForwarder(path, guard, credential("a"));
-    try {
-      let settled = false;
-      const invocation = forwarder.invoke("operate_recipe_run", {}, "request").then((result) => {
-        settled = true;
-        return result;
-      });
-      await expect.poll(() => acknowledged).toBe(true);
-      expect(settled).toBe(false);
-      release();
-      await expect(invocation).resolves.toEqual({ accepted: true });
-    } finally {
-      await forwarder.close();
-      await broker.close();
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("requires an explicit recovery signal before reusing a reset request ID", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-forward-explicit-recovery-"));
-    const path = join(root, "b.sock");
-    const capability = "session";
-    let recoveries = 0;
-    let dispatches = 0;
-    const broker = await listenBroker(path, {
-      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
-      call: async (_principal, method, params) => {
-        if (method === "reclaim") return { capabilities: [capability] };
-        if (method === "acknowledge") return {};
-        if (method === "recover") {
-          recoveries++;
-          expect(params).not.toHaveProperty("callerRequestHash");
-          return {
-            requestId: "prior-broker-request",
-            result: {
-              reconciliation: {
-                request_id: "prior-broker-request",
-                operation: "operate_click",
-                status: "completed",
-              },
-            },
-          };
-        }
-        dispatches++;
-        expect(params).toMatchObject({ name: "operate_click", capability });
-        return { result: { dispatched: true } };
-      },
-      disconnect: async () => undefined,
-    });
-    const guard: SessionGuard = {
-      bind: async () => ({
-        account_id: "account",
-        agent_session_token: "test",
-        api_base_url: "http://unused.test",
-        saved_at: "",
-      }),
-      inspect: async () => ({ problem: null }),
-      boundAccountId: () => "account",
-    };
-    const forwarder = new OperatorForwarder(path, guard, credential("a"));
-    try {
-      await expect(
-        forwarder.invoke("operate_click", { session_id: "session", ref: "@continue" }, "1"),
-      ).resolves.toEqual({ dispatched: true });
-      expect(recoveries).toBe(0);
-      expect(dispatches).toBe(1);
-      await expect(
-        forwarder.invoke(
-          "operate_click",
-          { session_id: "session", ref: "@continue" },
-          "reset-click-id",
-          { recover: true },
-        ),
-      ).resolves.toMatchObject({ reconciliation: { request_id: "prior-broker-request" } });
-      expect(recoveries).toBe(1);
-      expect(dispatches).toBe(1);
-    } finally {
-      await forwarder.close();
-      await broker.close();
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("recovers a lost start reply without opening another session", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-forward-start-recovery-"));
-    const path = join(root, "b.sock");
-    const capability = "session";
-    let starts = 0;
-    let startEntered!: () => void;
-    let releaseStart!: () => void;
-    const entered = new Promise<void>((resolve) => {
-      startEntered = resolve;
-    });
-    const released = new Promise<void>((resolve) => {
-      releaseStart = resolve;
-    });
-    const acknowledgements: string[] = [];
-    const broker = await listenBroker(path, {
-      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
-      call: async (_principal, method, params) => {
-        if (method === "reclaim") return { capabilities: starts === 0 ? [] : [capability] };
-        if (method === "acknowledge") {
-          acknowledgements.push(String(params.requestId));
-          return {};
-        }
-        if (method === "recover") {
-          expect(params).toMatchObject({ name: "operate_start", args: {} });
-          expect(params).not.toHaveProperty("callerRequestHash");
-          return {
-            requestId: "lost-start-request",
-            capability,
-            result: { session_id: "session", broker: { targetId: "target" } },
-          };
-        }
-        if (params.name === "operate_start") {
-          starts++;
-          startEntered();
-          await released;
-          return { capability, result: { session_id: "session" } };
-        }
-        if (params.name === "operate_observe")
-          return { result: { session_id: "session", dom: "ready" } };
-        throw new Error(`Unexpected ${method}`);
-      },
-      disconnect: async () => undefined,
-    });
-    const guard: SessionGuard = {
-      bind: async () => ({
-        account_id: "account",
-        agent_session_token: "test",
-        api_base_url: "http://unused.test",
-        saved_at: "",
-      }),
-      inspect: async () => ({ problem: null }),
-      boundAccountId: () => "account",
-    };
-    const forwarder = new OperatorForwarder(path, guard, credential("a"));
-    const restarted = new OperatorForwarder(path, guard, credential("a"));
-    try {
-      const lost = forwarder.invoke("operate_start", {}, "1");
-      await entered;
-      await (forwarder as unknown as { client?: BrokerClient }).client?.close();
-      releaseStart();
-      await expect(lost).rejects.toThrow("connection lost");
-      await expect(
-        restarted.invoke("operate_start", {}, "reset-start-id", { recover: true }),
-      ).resolves.toMatchObject({
-        session_id: "session",
-      });
-      await expect(
-        restarted.invoke("operate_observe", { session_id: "session" }, "2"),
-      ).resolves.toMatchObject({
-        dom: "ready",
-      });
-      expect(starts).toBe(1);
-      expect(restarted.sessionCount()).toBe(1);
-      expect(acknowledgements).toEqual(["lost-start-request", expect.any(String)]);
-    } finally {
-      await forwarder.close();
-      await restarted.close();
-      await broker.close();
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("replaces stale local sessions when a new broker reclaims none", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-forward-replacement-"));
-    const path = join(root, "b.sock");
-    let starts = 0;
-    const broker = await listenBroker(path, {
-      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
-      call: async (_principal, method, params) => {
-        if (method === "reclaim") return { capabilities: [] };
-        if (method === "acknowledge") return {};
-        if (params.name === "operate_start") {
-          starts += 1;
-          const sessionId = `session-${starts}`;
-          return {
-            capability: sessionId,
-            result: { session_id: sessionId },
-          };
-        }
-        if (params.name === "operate_observe") {
-          expect(params).toMatchObject({ args: { session_id: "session-2" } });
-          return { result: { dom: "second broker" } };
-        }
-        throw new Error(`Unexpected ${method}`);
-      },
-      disconnect: async () => undefined,
-    });
-    const guard: SessionGuard = {
-      bind: async () => ({
-        account_id: "account",
-        agent_session_token: "test",
-        api_base_url: "http://unused.test",
-        saved_at: "",
-      }),
-      inspect: async () => ({ problem: null }),
-      boundAccountId: () => "account",
-    };
-    const forwarder = new OperatorForwarder(path, guard, credential("a"));
-    try {
-      await forwarder.invoke("operate_start", {}, "first-start");
-      await (forwarder as unknown as { client?: BrokerClient }).client?.close();
-      await forwarder.invoke("operate_start", {}, "second-start");
-
-      expect(forwarder.sessionCount()).toBe(1);
-      await expect(forwarder.invoke("operate_observe", {}, "observe")).resolves.toEqual({
-        dom: "second broker",
-      });
-    } finally {
-      await forwarder.close();
-      await broker.close();
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("namespaces matching MCP request IDs across independent clients", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-forward-keys-"));
-    const path = join(root, "b.sock");
-    const requests = new Set<string>();
-    let dispatches = 0;
-    const broker = await listenBroker(path, {
-      authenticate: async () => ({ accountId: "account", agentId: "local-agent" }),
-      call: async (_principal, method, _params, requestId) => {
-        if (method === "recover") return null;
-        if (method === "acknowledge") return {};
-        if (method === "reclaim") return { capabilities: [] };
-        if (requests.has(requestId))
-          return {
-            result: {
-              reconciliation: { request_id: requestId, operation: "operate_recipe_run" },
-            },
-          };
-        requests.add(requestId);
-        dispatches++;
-        return { result: { dispatched: requestId } };
-      },
-      disconnect: async () => undefined,
-    });
-    const guard: SessionGuard = {
-      bind: async () => ({
-        account_id: "account",
-        agent_session_token: "test",
-        api_base_url: "http://unused.test",
-        saved_at: "",
-      }),
-      inspect: async () => ({ problem: null }),
-      boundAccountId: () => "account",
-    };
-    const forwarders = [
-      new OperatorForwarder(path, guard, credential("a")),
-      new OperatorForwarder(path, guard, credential("b")),
-      new OperatorForwarder(path, guard, credential("c")),
-    ];
-    try {
-      const results = await Promise.all(
-        forwarders.map(async (forwarder) => await forwarder.invoke("operate_recipe_run", {}, "7")),
-      );
-      expect(results).toHaveLength(3);
-      expect(dispatches).toBe(3);
-      expect(requests.size).toBe(3);
-    } finally {
-      await Promise.all(forwarders.map(async (forwarder) => await forwarder.close()));
-      await broker.close();
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("pins a connection's capabilities and forwards rendered secrets without masking", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-forward-"));
-    const path = join(root, "b.sock");
-    let calls = 0;
-    const clients = new Set<string>();
-    const broker = await listenBroker(path, {
-      authenticate: async (token) =>
-        token === "test" ? { accountId: "account", agentId: "agent" } : null,
-      call: async (principal, method, params) => {
-        if (method === "reclaim") return { capabilities: [] };
-        if (method === "acknowledge") return {};
-        calls++;
-        clients.add(principal.clientId);
-        if (params.name === "operate_start") {
-          const capability = principal.clientId;
-          return { capability, result: { session_id: principal.clientId } };
-        }
-        if (params.name === "operate_finish") return { result: { closed: true } };
-        return { result: { dom: "| Access Key: fixture-visible-value" } };
-      },
-      disconnect: async (principal) => {
-        clients.delete(principal.clientId);
-      },
-    });
-    const guard: SessionGuard = {
-      bind: async () => ({
-        account_id: "account",
-        agent_session_token: "test",
-        api_base_url: "http://unused.test",
-        saved_at: "",
-      }),
-      inspect: async () => ({ problem: null }),
-      boundAccountId: () => "account",
-    };
-    const a = new OperatorForwarder(path, guard, credential("a")),
-      b = new OperatorForwarder(path, guard, credential("b"));
-    let brokerClosed = false;
-    try {
-      const first = (await a.invoke("operate_start", {})) as { session_id: string };
-      const second = (await b.invoke("operate_start", {})) as { session_id: string };
-      expect(first.session_id).not.toBe(second.session_id);
-      const before = calls;
-      await expect(b.invoke("operate_observe", { session_id: first.session_id })).rejects.toThrow(
-        "not owned",
-      );
-      expect(calls).toBe(before);
-      expect(await a.invoke("operate_observe", { session_id: first.session_id })).toEqual({
-        dom: "| Access Key: fixture-visible-value",
-      });
-      await a.invoke("operate_finish", { session_id: first.session_id });
-      expect(a.sessionCount()).toBe(0);
-      expect(b.sessionCount()).toBe(1);
-      const rejected = new OperatorForwarder(
-        path,
-        {
-          ...guard,
-          bind: async () => null,
-        },
-        credential("c"),
-      );
-      await expect(rejected.invoke("operate_start", {})).rejects.toThrow("Connect before");
-      expect(rejected.connected()).toBe(false);
-      await expect(rejected.close()).resolves.toBeUndefined();
-      expect(a.connected()).toBe(true);
-      await broker.close();
-      brokerClosed = true;
-      await expect.poll(() => a.connected(), { timeout: 1_000 }).toBe(false);
-    } finally {
-      await a.close();
-      await b.close();
-      if (!brokerClosed) await broker.close();
-      expect(clients.size).toBe(0);
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-});
-
-it("retries finish for an already closing actor", async () => {
-  const root = await mkdtemp(join(tmpdir(), "late-finish-forward-"));
-  const capability = "session";
-  let finished = false;
-  const broker = await listenBroker(join(root, "b.sock"), {
+async function withBroker<T>(
+  prefix: string,
+  call: (params: Record<string, unknown>, method: string) => Promise<unknown>,
+  run: (path: string) => Promise<T>,
+): Promise<T> {
+  const root = await mkdtemp(join(tmpdir(), prefix));
+  const path = join(root, "b.sock");
+  const broker = await listenBroker(path, {
     authenticate: async () => ({ accountId: "account", agentId: "agent" }),
-    call: async (_principal, method) => {
-      if (method === "reclaim") return { capabilities: [capability] };
-      if (method === "acknowledge") return {};
-      return {
-        result: {
-          session_id: "session",
-          closed: finished,
-          cleanup: finished ? "already_closed" : "closing",
-        },
-      };
-    },
+    call: async (_principal, method, params) => await call(params, method),
     disconnect: async () => undefined,
   });
-  const guard: SessionGuard = {
-    bind: async () => ({
-      account_id: "account",
-      agent_session_token: "test",
-      api_base_url: "http://unused.test",
-      saved_at: "",
-    }),
-    inspect: async () => ({ problem: null }),
-    boundAccountId: () => "account",
-  };
-  const forwarder = new OperatorForwarder(join(root, "b.sock"), guard, credential("f"));
   try {
-    expect(
-      await forwarder.invoke("operate_finish", { session_id: "session" }, "first"),
-    ).toMatchObject({ closed: false });
-    finished = true;
-    expect(
-      await forwarder.invoke("operate_finish", { session_id: "session" }, "second"),
-    ).toMatchObject({ closed: true, cleanup: "already_closed" });
+    return await run(path);
   } finally {
-    await forwarder.close();
     await broker.close();
     await rm(root, { recursive: true, force: true });
   }
+}
+
+describe("MCP broker forwarding", () => {
+  it("forwards a start, tracks the session, and fills it into later calls", async () => {
+    const seen: Record<string, unknown>[] = [];
+    await withBroker(
+      "ts-forward-start-",
+      async (params) => {
+        seen.push(params);
+        if (params.name === "operate_start")
+          return { capability: "session-one", result: { session_id: "session-one" } };
+        return { result: { ok: true } };
+      },
+      async (path) => {
+        const forwarder = new OperatorForwarder(path, guard);
+        try {
+          expect(await forwarder.invoke("operate_start", {}, "start")).toEqual({
+            session_id: "session-one",
+          });
+          expect(forwarder.sessionCount()).toBe(1);
+          expect(await forwarder.invoke("operate_observe", {}, "observe")).toEqual({ ok: true });
+          expect(seen[1]).toMatchObject({
+            name: "operate_observe",
+            args: { session_id: "session-one" },
+            capability: "session-one",
+          });
+        } finally {
+          await forwarder.close();
+        }
+      },
+    );
+  });
+
+  it("refuses a session this connection does not own without contacting the broker", async () => {
+    let calls = 0;
+    await withBroker(
+      "ts-forward-foreign-",
+      async () => {
+        calls += 1;
+        return { result: {} };
+      },
+      async (path) => {
+        const forwarder = new OperatorForwarder(path, guard);
+        try {
+          await expect(
+            forwarder.invoke("operate_click", { session_id: "not-mine" }, "click"),
+          ).rejects.toMatchObject({ code: "stale_lease" });
+          expect(calls).toBe(0);
+        } finally {
+          await forwarder.close();
+        }
+      },
+    );
+  });
+
+  it("delivers a proven pre-dispatch failure as a retryable mutation error", async () => {
+    await withBroker(
+      "ts-forward-predispatch-",
+      async (params) =>
+        params.name === "operate_start"
+          ? { capability: "session-one", result: { session_id: "session-one" } }
+          : { preDispatchFailure: { error: "stale_ref", dispatch: "not_dispatched" } },
+      async (path) => {
+        const forwarder = new OperatorForwarder(path, guard);
+        try {
+          await forwarder.invoke("operate_start", {}, "start");
+          await expect(forwarder.invoke("operate_click", {}, "click")).rejects.toBeInstanceOf(
+            ProvenPreDispatchMutationError,
+          );
+        } finally {
+          await forwarder.close();
+        }
+      },
+    );
+  });
+
+  it("rejects a malformed startup reply", async () => {
+    await withBroker(
+      "ts-forward-badstart-",
+      async () => ({ capability: "session-one", result: { session_id: "other-session" } }),
+      async (path) => {
+        const forwarder = new OperatorForwarder(path, guard);
+        try {
+          await expect(forwarder.invoke("operate_start", {}, "start")).rejects.toBeInstanceOf(
+            ForwardedResultError,
+          );
+        } finally {
+          await forwarder.close();
+        }
+      },
+    );
+  });
+
+  it("keeps matching request ids on separate connections independent", async () => {
+    await withBroker(
+      "ts-forward-namespace-",
+      async (params) => ({
+        capability: "session-one",
+        result: { session_id: "session-one", service: params.name },
+      }),
+      async (path) => {
+        const first = new OperatorForwarder(path, guard);
+        const second = new OperatorForwarder(path, guard);
+        try {
+          const [a, b] = await Promise.all([
+            first.invoke("operate_start", {}, "same-id"),
+            second.invoke("operate_start", {}, "same-id"),
+          ]);
+          expect(a).toMatchObject({ session_id: "session-one" });
+          expect(b).toMatchObject({ session_id: "session-one" });
+        } finally {
+          await first.close();
+          await second.close();
+        }
+      },
+    );
+  });
+
+  it("drops a finished session and refuses to reuse it afterwards", async () => {
+    await withBroker(
+      "ts-forward-finish-",
+      async (params) =>
+        params.name === "operate_start"
+          ? { capability: "session-one", result: { session_id: "session-one" } }
+          : { result: { closed: true } },
+      async (path) => {
+        const forwarder = new OperatorForwarder(path, guard);
+        try {
+          await forwarder.invoke("operate_start", {}, "start");
+          await forwarder.invoke("operate_finish", { session_id: "session-one" }, "finish");
+          expect(forwarder.sessionCount()).toBe(0);
+          await expect(
+            forwarder.invoke("operate_observe", { session_id: "session-one" }, "observe"),
+          ).rejects.toBeInstanceOf(BrokerRefusal);
+        } finally {
+          await forwarder.close();
+        }
+      },
+    );
+  });
+
+  it("reports broker loss on an in-flight call without replaying it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-forward-lost-"));
+    const path = join(root, "b.sock");
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const broker = await listenBroker(path, {
+      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
+      call: async () => {
+        entered();
+        return await new Promise<never>(() => undefined);
+      },
+      disconnect: async () => undefined,
+    });
+    const forwarder = new OperatorForwarder(path, guard);
+    try {
+      const call = forwarder.invoke("operate_start", {}, "start");
+      await started;
+      await broker.close();
+      await expect(call).rejects.toMatchObject({ code: "broker_lost" });
+    } finally {
+      await forwarder.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

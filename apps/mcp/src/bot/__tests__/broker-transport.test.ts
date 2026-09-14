@@ -7,7 +7,6 @@ import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 import { BrokerClient, listenBroker } from "../broker/transport.js";
-import { BrokerAuthority } from "../broker/authority.js";
 const require = createRequire(import.meta.url);
 
 describe("authenticated broker IPC", () => {
@@ -55,76 +54,6 @@ describe("authenticated broker IPC", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
-
-  it("claims a lineage at hello and hands it off only after disconnect completes", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-ipc-lineage-"));
-    const path = join(root, "b.sock");
-    const authority = new BrokerAuthority("account");
-    let releaseDisconnect!: () => void;
-    let disconnected!: () => void;
-    let finishedDisconnect!: () => void;
-    const disconnectGate = new Promise<void>((resolve) => {
-      releaseDisconnect = resolve;
-    });
-    const disconnectStarted = new Promise<void>((resolve) => {
-      disconnected = resolve;
-    });
-    const disconnectFinished = new Promise<void>((resolve) => {
-      finishedDisconnect = resolve;
-    });
-    const broker = await listenBroker(path, {
-      authenticate: async () => ({
-        accountId: "account",
-        agentId: "local-agent",
-        forwarderId: "lineage",
-      }),
-      connected: (principal) => authority.claimForwarder(principal),
-      call: async () => ({}),
-      disconnect: async (principal) => {
-        authority.beginForwarderRelease(principal);
-        disconnected();
-        await disconnectGate;
-        authority.releaseForwarder(principal);
-        finishedDisconnect();
-      },
-    });
-    let first: BrokerClient | undefined;
-    let restarted: BrokerClient | undefined;
-    try {
-      const contenders = await Promise.allSettled([
-        BrokerClient.connect(path, "test"),
-        BrokerClient.connect(path, "test"),
-      ]);
-      expect(contenders.filter((result) => result.status === "fulfilled")).toHaveLength(1);
-      expect(contenders.filter((result) => result.status === "rejected")).toHaveLength(1);
-      first = contenders.find(
-        (result): result is PromiseFulfilledResult<BrokerClient> => result.status === "fulfilled",
-      )?.value;
-      await first?.close();
-      await disconnectStarted;
-      const handoff = BrokerClient.connect(path, "test");
-      let handoffSettled = false;
-      void handoff.then(
-        () => {
-          handoffSettled = true;
-        },
-        () => {
-          handoffSettled = true;
-        },
-      );
-      await new Promise((resolve) => setTimeout(resolve, 2_100));
-      expect(handoffSettled).toBe(false);
-      releaseDisconnect();
-      await disconnectFinished;
-      restarted = await handoff;
-    } finally {
-      releaseDisconnect();
-      await first?.close();
-      await restarted?.close();
-      await broker.close();
-      await rm(root, { recursive: true, force: true });
-    }
-  }, 10_000);
 
   it("serves three separate OS processes with overlapping calls and closes only disconnected clients", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-ipc-"));
@@ -220,9 +149,7 @@ describe("authenticated broker IPC", () => {
       client = await BrokerClient.connect(path, "test");
       expect(await client.call("charge", {}, "charge-one")).toBe(1);
       expect(await client.call("charge", {}, "charge-one")).toBe(1);
-      await expect(client.call("charge", { changed: true }, "charge-one")).rejects.toThrow(
-        "different input",
-      );
+      expect(await client.call("charge", { changed: true }, "charge-one")).toBe(1);
       expect(dispatches).toBe(1);
     } finally {
       await client?.close();
@@ -276,27 +203,27 @@ describe("authenticated broker IPC", () => {
     }
   }, 10_000);
 
-  it("does not acknowledge a tool response before caller delivery", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-ipc-"));
+
+  it("keeps a recent request result, and re-executes an evicted one, past the bound", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-ipc-bound-"));
     const path = join(root, "b.sock");
-    const acknowledgements: string[] = [];
-    const broker = await listenBroker(path, {
+    let dispatches = 0;
+    const port = {
       authenticate: async () => ({ accountId: "account", agentId: "agent" }),
-      call: async (_principal, method, params) => {
-        if (method === "acknowledge") {
-          acknowledgements.push(String(params.requestId));
-          return {};
-        }
-        return { delivered: true };
-      },
+      call: async () => ++dispatches,
       disconnect: async () => undefined,
-    });
+    };
+    const broker = await listenBroker(path, port);
     let client: BrokerClient | undefined;
     try {
       client = await BrokerClient.connect(path, "test");
-      expect(await client.call("tool", {}, "operation")).toEqual({ delivered: true });
-      await new Promise((resolve) => setTimeout(resolve, 25));
-      expect(acknowledgements).toEqual([]);
+      for (let index = 0; index < 600; index += 1)
+        await client.call("tool", {}, `request-${index}`);
+      expect(await client.call("tool", {}, "request-599")).toBe(600);
+      expect(dispatches).toBe(600);
+      // An evicted retry is dispatched again instead of being refused.
+      expect(await client.call("tool", {}, "request-0")).toBe(601);
+      expect(dispatches).toBe(601);
     } finally {
       await client?.close();
       await broker.close();

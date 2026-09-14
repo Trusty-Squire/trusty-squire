@@ -25,7 +25,6 @@ vi.mock("../bot/provision-session.js", async (original) => ({
   observedHostsForSession: () => ["groq-fixture.test"],
 }));
 import { buildServer } from "../server.js";
-import { DispatchJournal } from "../bot/broker/dispatch-journal.js";
 
 it("captures a created key through MCP and recovers an unchanged source without replaying creation", async () => {
   const root = await mkdtemp(join(tmpdir(), "postaction-e2e-"));
@@ -59,12 +58,7 @@ it("captures a created key through MCP and recovers an unchanged source without 
     withAuditContext: async (_context: unknown, operation: () => Promise<unknown>) =>
       await operation(),
   } as unknown as ApiClient;
-  const fixture = await fixtureBrokerForwarder(
-    root,
-    api,
-    new DispatchJournal(join(root, "journal.jsonl")),
-    "fixture",
-  );
+  const fixture = await fixtureBrokerForwarder(root, api, "fixture");
   const server = await buildServer(api, undefined, undefined, undefined, fixture.forwarder);
   const [transport, peer] = InMemoryTransport.createLinkedPair();
   await server.connect(peer);

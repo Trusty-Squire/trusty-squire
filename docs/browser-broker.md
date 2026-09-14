@@ -35,43 +35,27 @@ until they finish. The recycle mechanics live in
 it requests direct egress. The value is sensitive and is not returned in
 session status, action traces, or saved recipes.
 
-Each operator process generates a fresh random forwarder credential, held only in
-memory. There is no credential persistence or slot reuse. By default, a restarted
-operator process starts a new lineage and does not recover a predecessor's
-in-flight payment journal; multi-operator-per-profile restart-journal-recovery is
-a known limitation, tracked by `ts-broker-crash-hardening`. A fresh lineage cannot
-reclaim a predecessor's or sibling's sessions. Existing journal records
-remain intact; a fresh lineage does not reconcile them or authorize replay.
-
-The existing explicit `TRUSTY_SQUIRE_FORWARDER_CREDENTIAL` override still accepts a
-launcher-supplied base64url credential (at least 32 random bytes). Same-lineage
-recovery requires possession of that exact credential; it is never automatically
-persisted or assigned to another client. Never share that override between siblings.
-
 `TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS` defaults to five minutes, clamped to a
 minimum of one minute. Idle shutdown never
 changes the fact that the next operator call must attach or start a broker.
 The account must already be enrolled through `connect`; authentication reads its
 existing agent session token from session storage, never command-line token
-arguments. `connect` maintenance does not require an MCP lineage credential:
-after validating that enrolled token, it creates a one-use local identity solely
-to drain and resume maintenance. That identity cannot recover or reclaim MCP
-sessions.
+arguments. `connect` maintenance authenticates with that same enrolled token and
+does not hold a separate identity.
 
 The first client starts `node apps/mcp/dist/bin.js broker` when necessary.
 Socket mode is 0600. No CDP endpoint or browser
 handle crosses IPC. `TRUSTY_SQUIRE_AGENT_IDENTITY` supplies a connection's agent
-label. The lineage credential proves reconnect ownership independently of that
-label; a caller with only a session ID, agent label, or credential hash cannot
-reclaim another client's session.
+label, which carries no authority.
 
-`connect` requests maintenance over the existing socket, prevents new admissions,
-and waits for existing sessions and payment outcomes to drain. It closes Chrome
-with proof, then runs the existing separate plain Google login lifecycle with no
-CDP. Resume requires that plain browser to be closed and preserves account
-binding.
+`connect` requests maintenance over the existing socket. The broker closes the
+shared Chrome once no session admits or owns it, and refuses the request with
+`maintenance` while live sessions remain. `connect` then runs the existing
+separate plain Google login lifecycle with no CDP, and resumes the broker on the
+same account when the connection ends. Resume requires that plain browser to be
+closed and preserves account binding.
 
-## Ownership and recovery contracts
+## Ownership and contracts
 
 - A canonical-profile election lease prevents competing broker processes even
   when clients choose different socket paths or temporary directories. It stays
@@ -80,111 +64,47 @@ binding.
 - Default discovery is probe then unlink then bind: a socket path with no live
   listener is a dead predecessor's orphan and is removed and rebound. There is no
   owner record and no process signaling; a broker that still answers keeps the
-  endpoint. Neither recovery path replays a mutation.
+  endpoint. Neither path replays a mutation.
 - Each session owns a target family and a serialized command queue. A service
   URL does not reserve a site; one authenticated client drives the shared profile.
+  Several connections to the same profile attach at once, one per client process,
+  and each connection owns the sessions it opened. The opaque session id is the
+  only capability: a connection presenting another connection's session id is
+  refused with `stale_lease`, and a dropped connection's sessions close after a
+  five-second grace. A reconnecting client starts fresh and does not adopt them.
 - Browser egress is unrestricted for all targets. Session cleanup closes only that owned
-  family. At reconnect-grace expiry, a close that cannot be proven removes the
-  actor from broker inventory and releases its slot rather than retaining or
-  reusing it; the existing exact owner-process identity backstop remains the
-  only physical-process custody.
+  family. A close that cannot be proven leaves the broker alive holding physical
+  custody; it never refuses a later command or start. The existing exact
+  owner-process identity backstop remains the only physical-process custody.
 - Per-session approval, charge dispatch fences, and post-submit outcome custody
   continue in the existing handlers. Approval notifications travel over the
   originating request's IPC connection to its MCP client before the tool completes;
   clients without notification support receive the approval link in the result.
   Observation output follows the [narrow released-card mask policy](observation-model.md#45-narrow-released-card-output-mask-final-owners-order-2026-09-12).
-- Live sockets are mutation leases, not browser-custody leases. Disconnect
-  immediately fences queued commands and aborts the old connection lease, but
-  retains that lineage's actors for a five-minute authenticated reconnect grace.
-  Explicit client release or grace expiry closes only that client's sessions.
-  An expiry close that remains unproven is never reclaimable or capacity-bearing;
-  pending payment outcomes remain no-replay journal fences. The existing process
-  marker watchdog and owner-death reaper remain unchanged.
-- A bounded physical launch uses the existing cancellation/ownership machinery.
-  A failed admission has bounded cleanup. Once its reconnect grace expires, a
-  late port is never admitted. Duplicate release calls share one operation.
-- The profile-local dispatch journal fsyncs mutation entry and completion without
-  recording command arguments or credentials. A lost mutation response is never
-  replayed. Unsettled or malformed journal state refuses browser replacement and
-  requires reconciliation against actual outcomes; there is no automatic
-  erase-and-retry recovery for uncertain payments. Reconciliation keeps a
-  confirmed payment submission as `done`, distinct from 3-D Secure-required and
-  unknown outcomes.
-- When a client retaining the original lineage credential loses an operator reply,
-  its reconciliation request must set MCP request metadata `"trusty-squire/recover": true`. This explicitly asks the
-  broker to reconcile its authenticated lineage's newest matching durable
-  operation and input outcome; the retry may use a new JSON-RPC request ID.
-  Ordinary reset IDs without that metadata are fresh calls. A recovered start
-  returns its existing session ID without retaining page observations while its
-  broker remains alive. After broker loss, that same recovery returns only the
-  durable, scrubbed reconciliation record with `recovery.session_unavailable`;
-  it never invents a session, restarts work, or replays an uncertain payment.
-  The record gives the caller a reconciliation next step.
-- A code-proven pre-dispatch stale-ref failure on any mutating command
+- A live socket is the connection lease: dropping it aborts that connection's
+  in-flight starting sessions and queues no further work. There is no journal, no
+  reconnect grace for sessions, and no `recover`/`reclaim`/`acknowledge` RPC. A
+  lost connection surfaces `broker_lost` with an explicit do-not-replay warning;
+  an in-flight request whose outcome is unknown is reported in that call's own
+  error and blocks nothing later.
+- Each connection retains a bounded in-memory map (the most recent 512 request
+  ids) of request id to delivered result. A client that retries a request id it
+  already sent on that connection receives the stored result instead of a
+  re-execution, so a dispatched mutation is never replayed. Eviction past the
+  bound drops only the oldest result and never refuses a call.
+- A code-proven pre-dispatch stale-ref failure on a mutating command
   (`operate_login`, `operate_click` including its `js_click` fallback,
-  `operate_type` including slot-based secret typing, and `operate_select`) is
-  recorded as `status: not_dispatched, error: stale_ref`: ref resolution
-  precedes the dispatch boundary, and a failure after the attempt is marked
-  `dispatch_attempted` stays `unknown`. A recorded `not_dispatched` outcome
-  holds no session or lineage custody, even before delivery acknowledgement: it
-  never refuses browser replacement with `outcome_unknown` or fences later
-  commands. `dispatch-journal.ts` owns
-  that rule; `broker-journal.test.ts` and `broker-operator.test.ts` pin it.
-  Older retained `entered` records may be
-  reconciled only from independently preserved exact failure evidence by using
-  object metadata instead of the ordinary boolean:
-  `"trusty-squire/recover": {"request_id":"...","error":"stale_ref","dispatch":"not_dispatched"}`.
-  The broker accepts only the server-authorized retained Xata session/request
-  tuple and reconciliation-only argument locator, from its original
-  authenticated forwarder lineage. Before serving recovery, broker startup
-  snapshots the complete matching `entered` record as the one-record
-  authorization, including its stored forwarder and input hash. Settlement
-  requires that same complete record identity and preserves its input hash
-  verbatim; the caller's replacement arguments and error label are not
-  evidence. The broker fsyncs a `settled` lineage-preserving record and returns
-  the same result on an exact repeat without replaying the tool. Other records,
-  exceptions, operations, lineages, arguments, and ambiguous post-dispatch
-  failures stay fenced. A broker with retained startup custody serves this
-  recovery endpoint without launching a browser; all ordinary work remains
-  fenced until recovery. After settlement, broker restart snapshots that same
-  exact settled identity; repeating the command returns the recorded
-  reconciliation without appending to or changing the journal.
-
-  For the retained Xata record from the 2026-09-08 concurrency acceptance, do
-  not edit the canonical journal. After this change is merged and the MCP binary
-  running the broker contains it, with no canonical-profile Chrome/broker alive
-  and the journal still containing exactly that `entered` record with its
-  original forwarder and input hash, start the broker once so it snapshots that
-  identity, then issue exactly from the original forwarder lineage:
-
-  ```js
-  client.callTool({
-    name: "operate_login",
-    arguments: {
-      session_id: "546b6f5a-930e-4473-8aec-43fc355fd108",
-      provider: "google",
-      ref: "reconciliation-only:no-dispatch",
-    },
-    _meta: {
-      "trusty-squire/recover": {
-        request_id:
-          "4ae34aeb-e1b8-4457-a99b-72ac418600ca:4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce",
-        error: "stale_ref",
-        dispatch: "not_dispatched",
-      },
-    },
-  });
-  ```
-
-  The required response is a reconciliation with `status: not_dispatched` and
-  `error: stale_ref`. Before starting another canonical browser, independently
-  run the journal checker and require `DispatchJournal.assertReconciled()` to
-  return normally. These preconditions rely on the acceptance report's retained
-  tool output as the failure evidence; without it, leave the record fenced.
-- Idle shutdown requires zero connected clients and zero active,
-  admitting, or quarantined sessions for the configured minutes-scale bound.
-  Graceful Chrome closure precedes lease release. Socket recovery requires
-  process birth, endpoint inode, and old-profile-free evidence.
+  `operate_type` including slot-based secret typing, and `operate_select`)
+  is delivered as a retryable `stale_ref` not-dispatched failure: ref resolution
+  precedes the dispatch boundary. Anything after the attempt stays unknown and
+  is never replayed. `broker-operator.test.ts` and `broker-forwarder.test.ts`
+  pin both paths.
+- When the shared Chrome dies, the next `operate_start` proves the old process
+  closed, releases the profile lease, and relaunches on the same persistent
+  profile. Live sessions end with it; cookies and enrollment survive on disk.
+- Idle shutdown requires zero connected clients, zero live sessions, zero
+  in-flight admissions, and zero pending graceful session closes for the
+  configured minutes-scale bound. Graceful Chrome closure precedes lease release.
 
 MCP server-instance records use the hash of
 `TRUSTY_SQUIRE_SERVER_LINEAGE` (or the forwarder credential when present) to
@@ -193,7 +113,9 @@ record remains `draining` until cleanup completes or the configured
 `TRUSTY_SQUIRE_SERVER_SHUTDOWN_DEADLINE_MS` expires (30 seconds by default).
 
 Implementation entry points: `src/bot/broker/daemon.ts`, `discovery.ts`,
-`authority.ts`, `runtime.ts`, `operator.ts`, and `transport.ts` under `apps/mcp`.
+`authority.ts`, `runtime.ts`, `operator.ts`, `forwarder.ts`, and `transport.ts`
+under `apps/mcp`.
+
 
 ## Executed mechanical acceptance
 

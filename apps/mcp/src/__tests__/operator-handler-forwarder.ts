@@ -13,7 +13,6 @@ export function operatorHandlerForwarder(api: ApiClient): Pick<OperatorForwarder
       name,
       args,
       requestId = randomUUID(),
-      _recovery,
       signal = new AbortController().signal,
     ) => {
       const tool = findTool(name, buildToolRegistry());

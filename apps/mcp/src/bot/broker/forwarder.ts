@@ -1,15 +1,10 @@
 import { awaitOperatorPreparation } from "../request-cancellation.js";
 import { connectOrLaunchBroker } from "./discovery.js";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { SessionGuard } from "../../session-guard.js";
 import type { BrokerClient, BrokerNotifier } from "./transport.js";
 import { BrokerRefusal } from "./refusal.js";
-import { requireLineageCredential } from "./lineage.js";
 import { ProvenPreDispatchMutationError } from "../mutation-dispatch-evidence.js";
-
-export interface BrokerRecoveryRequest {
-  recover?: boolean;
-}
 
 export class ForwardedResultError extends BrokerRefusal {
   constructor(
@@ -25,25 +20,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-/** The MCP process holds only opaque capabilities. Never reconnect/replay a
+/** The MCP process holds only plain session ids. Never reconnect/replay a
  * dispatched request after transport loss: its side effect may have happened. */
 export class OperatorForwarder {
   private connection: Promise<BrokerClient> | undefined;
   private client: BrokerClient | undefined;
   private connecting = false;
   private readonly sessions = new Set<string>();
-  private readonly lineageCredential: string;
-  private readonly invocationNamespace = randomUUID();
   constructor(
     private readonly path: string,
     private readonly guard: SessionGuard,
-    credential?: string,
-  ) {
-    this.lineageCredential = credential ?? this.loadCredential();
-  }
-  private loadCredential(): string {
-    return requireLineageCredential();
-  }
+  ) {}
   private connect(): Promise<BrokerClient> {
     if (this.connection === undefined) {
       this.connecting = true;
@@ -51,11 +38,7 @@ export class OperatorForwarder {
         const session = await this.guard.bind();
         if (session?.agent_session_token === undefined)
           throw new BrokerRefusal("unauthorized", "Connect before using the broker");
-        const client = await connectOrLaunchBroker(
-          this.path,
-          session.agent_session_token,
-          this.lineageCredential,
-        );
+        const client = await connectOrLaunchBroker(this.path, session.agent_session_token);
         this.client = client;
         return client;
       })().finally(() => {
@@ -64,38 +47,6 @@ export class OperatorForwarder {
     }
     return this.connection;
   }
-  private async reclaim(client: BrokerClient): Promise<void> {
-    const reply = (await client.call("reclaim", {})) as { capabilities?: string[] };
-    for (const sessionId of reply.capabilities ?? []) this.sessions.add(sessionId);
-  }
-  private callerRequestHash(requestId: string): string {
-    return createHash("sha256").update(requestId).digest("hex");
-  }
-  private idempotencyKey(callerRequestHash: string): string {
-    return `${this.invocationNamespace}:${callerRequestHash}`;
-  }
-  private async recover(
-    client: BrokerClient,
-    name: string,
-    args: Record<string, unknown>,
-    sessionId: string | undefined,
-    recovery: BrokerRecoveryRequest,
-    requestId?: string,
-  ): Promise<{ requestId: string; result: unknown; capability?: string } | undefined> {
-    const reply = (await client.call("recover", {
-      name,
-      args,
-      ...(sessionId === undefined ? {} : { capability: sessionId }),
-      ...(requestId === undefined ? {} : { requestId }),
-    })) as { requestId?: unknown; result?: unknown; capability?: unknown } | null;
-    return typeof reply?.requestId === "string"
-      ? {
-          requestId: reply.requestId,
-          result: reply.result,
-          ...(typeof reply.capability === "string" ? { capability: reply.capability } : {}),
-        }
-      : undefined;
-  }
   private isSessionId(value: unknown): value is string {
     return typeof value === "string" && value.length > 0;
   }
@@ -103,26 +54,20 @@ export class OperatorForwarder {
     name: string,
     args: Record<string, unknown>,
     requestId: string = randomUUID(),
-    recovery: BrokerRecoveryRequest = {},
     signal?: AbortSignal,
     notifyUser?: BrokerNotifier,
   ): Promise<unknown> {
-    const callerRequestHash = this.callerRequestHash(requestId);
-    const idempotencyKey = this.idempotencyKey(callerRequestHash);
     let dispatchedClient: BrokerClient | undefined;
     const checkCancelled = (): void => {
       if (signal?.aborted)
         throw signal.reason ?? new BrokerRefusal("cancelled", "Request cancelled before dispatch");
     };
     const cancel = (): void => {
-      void dispatchedClient?.call("cancel", { requestId: idempotencyKey }).catch(() => undefined);
+      void dispatchedClient?.call("cancel", { requestId }).catch(() => undefined);
     };
     signal?.addEventListener("abort", cancel, { once: true });
     try {
       checkCancelled();
-      const starting =
-        name === "operate_start" ||
-        (name === "operate_recipe_run" && args.session_id === undefined);
       let reconnecting = false;
       if (this.connection !== undefined) {
         const existing = await awaitOperatorPreparation(
@@ -138,57 +83,32 @@ export class OperatorForwarder {
       }
       const client = await awaitOperatorPreparation(this.connect(), signal);
       checkCancelled();
+      // A fresh connection owns no sessions: its ids belong to the lost socket
+      // and the broker refuses them.
       if (reconnecting) this.sessions.clear();
-      await awaitOperatorPreparation(this.reclaim(client), signal);
-      checkCancelled();
-      if (!starting && args.session_id === undefined && this.sessions.size === 1)
+      if (name !== "operate_start" && args.session_id === undefined && this.sessions.size === 1)
         args = { ...args, session_id: this.sessions.values().next().value };
       const id = typeof args.session_id === "string" ? args.session_id : undefined;
-      const capability = id !== undefined && this.sessions.has(id) ? id : undefined;
-      const recovered = recovery.recover
-        ? await awaitOperatorPreparation(
-            this.recover(client, name, args, capability, recovery),
-            signal,
-          )
-        : undefined;
-      checkCancelled();
-      if (recovered !== undefined) {
-        if (recovered.capability !== undefined)
-          this.sessions.add(recovered.capability);
-        await client.acknowledge(recovered.requestId);
-        if (
-          name === "operate_finish" &&
-          id !== undefined &&
-          typeof recovered.result === "object" &&
-          recovered.result !== null &&
-          "closed" in recovered.result &&
-          recovered.result.closed === true
-        )
-          this.sessions.delete(id);
-        return recovered.result;
-      }
+      const sessionId = id !== undefined && this.sessions.has(id) ? id : undefined;
       if (
         name !== "operate_start" &&
         !(name === "operate_recipe_run" && id === undefined) &&
-        capability === undefined &&
+        sessionId === undefined &&
         name !== "operate_finish"
       )
         throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
-      if (recovery.recover)
-        throw new BrokerRefusal("recovery_not_found", "No matching durable outcome is available");
       checkCancelled();
       dispatchedClient = client;
-      const brokerCall = client.call(
+      const rawReply = await client.call(
         "tool",
         {
           name,
           args,
-          ...(capability === undefined ? {} : { capability }),
+          ...(sessionId === undefined ? {} : { capability: sessionId }),
         },
-        idempotencyKey,
+        requestId,
         notifyUser,
       );
-      const rawReply = await brokerCall;
       if (!isRecord(rawReply))
         throw new ForwardedResultError("Broker returned a non-object tool reply", {
           cleanup: "unknown",
@@ -201,10 +121,8 @@ export class OperatorForwarder {
       if (
         preDispatchFailure?.error === "stale_ref" &&
         preDispatchFailure.dispatch === "not_dispatched"
-      ) {
-        await client.acknowledge(idempotencyKey);
+      )
         throw new ProvenPreDispatchMutationError("stale_ref");
-      }
       const replyCapability = this.isSessionId(reply.capability) ? reply.capability : undefined;
       if (name === "operate_start") {
         const result = isRecord(reply.result) ? reply.result : undefined;
@@ -216,57 +134,16 @@ export class OperatorForwarder {
           (replyCapability !== undefined
             ? returnedSessionId === replyCapability
             : refusedStart);
-        if (!validStartResult) {
-          const recovered = await this.recover(
-            client,
-            name,
-            args,
-            undefined,
-            {
-              recover: true,
-            },
-            idempotencyKey,
-          ).catch(() => undefined);
-          const recoveredResult = isRecord(recovered?.result) ? recovered.result : undefined;
-          const recoveredSessionId = recoveredResult?.session_id;
-          const recoveredCapability = recovered?.capability;
-          if (
-            recovered !== undefined &&
-            recovered.requestId === idempotencyKey &&
-            recoveredCapability !== undefined &&
-            typeof recoveredSessionId === "string" &&
-            recoveredSessionId === recoveredCapability &&
-            (replyCapability === undefined || recoveredCapability === replyCapability)
-          ) {
-            this.sessions.add(recoveredCapability);
-            await client.acknowledge(recovered.requestId);
-            return recoveredResult;
-          }
-          if (replyCapability !== undefined) {
-            this.sessions.add(replyCapability);
-            throw new ForwardedResultError(
-              "Broker retained startup custody but did not return a valid startup result",
-              {
-                session_id: replyCapability,
-                cleanup: "open",
-                closed: false,
-                recovery: {
-                  tool: "operate_finish",
-                  session_id: replyCapability,
-                },
-              },
-            );
-          }
+        if (!validStartResult)
           throw new ForwardedResultError("Broker did not return a valid startup result", {
-            cleanup: "unknown",
+            ...(replyCapability === undefined ? {} : { session_id: replyCapability }),
+            cleanup: replyCapability === undefined ? "unknown" : "open",
             closed: false,
           });
-        }
         if (replyCapability !== undefined) this.sessions.add(replyCapability);
       } else if (replyCapability !== undefined) {
         this.sessions.add(replyCapability);
       }
-      await client.acknowledge(idempotencyKey);
       if (
         name === "operate_finish" &&
         id !== undefined &&

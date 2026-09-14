@@ -31,7 +31,6 @@ import {
 import { readServerInstanceRecord } from "../server-instance-registry.js";
 import { SessionStore } from "../session.js";
 import { listenBroker } from "../bot/broker/transport.js";
-import { forwarderId } from "../bot/broker/lineage.js";
 
 const require = createRequire(import.meta.url);
 const credential = "a".repeat(43);
@@ -108,18 +107,11 @@ describe("server shutdown call admission", () => {
       entered = resolve;
     });
     const listener = await listenBroker(socket, {
-      authenticate: async (token, _agentId, lineageCredential) =>
-        token === account.agent_session_token && lineageCredential !== undefined
-          ? {
-              accountId: account.account_id,
-              agentId: "registry-test",
-              forwarderId: forwarderId(lineageCredential),
-            }
+      authenticate: async (token, _agentId) =>
+        token === account.agent_session_token
+          ? { accountId: account.account_id, agentId: "registry-test" }
           : null,
       call: async (_principal, method) => {
-        if (method === "reclaim") return { capabilities: [] };
-        if (method === "recover") return null;
-        if (method === "acknowledge") return {};
         if (method === "tool") {
           entered();
           return await new Promise<never>(() => undefined);
