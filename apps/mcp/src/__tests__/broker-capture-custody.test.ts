@@ -17,6 +17,7 @@ vi.mock("../bot/session/lifecycle.js", async (original) => ({
       isConnected: () => true,
     },
     pendingThreeDs: null,
+    actionTrace: [],
   }),
   withProvisionSessionCall: async (_id: string, call: () => Promise<unknown>) => await call(),
 }));
@@ -28,11 +29,26 @@ vi.mock("../bot/provision-session.js", async (original) => ({
   captureCredentialSource: state.capture,
   extractCredentials: async () => ({ credentials: { api_key: "fixture-secret" } }),
   observedHostsForSession: () => ["example.test"],
+  finishProvisionSessionWithPreparation: async (
+    _sessionId: string,
+    prepare: () => Promise<unknown>,
+  ) => ({
+    finish: {
+      session_id: _sessionId,
+      operation_id: "fixture-finish",
+      execution: "completed",
+      mutation: "not_dispatched",
+      cleanup: "closed",
+      closed: true,
+      url: "https://example.test/",
+    },
+    prepared: await prepare(),
+  }),
 }));
 import { buildServer } from "../server.js";
 import { DispatchJournal } from "../bot/broker/dispatch-journal.js";
 
-it("keeps ordinary actions usable while a capture is unresolved, fencing only re-creation", async () => {
+it("keeps ordinary actions and vaulting usable while a capture is unresolved", async () => {
   const root = await mkdtemp(join(tmpdir(), "broker-capture-"));
   const journal = new DispatchJournal(join(root, "journal.jsonl"));
   state.action.mockImplementation(async () => {
@@ -82,48 +98,48 @@ it("keeps ordinary actions usable while a capture is unresolved, fencing only re
       arguments: { session_id: sessionId, ref: "@other" },
     });
     expect(ordinary.isError).not.toBe(true);
-    // Only a NEW vaulting attempt — a repeated key creation — is fenced.
+    // No custody fence: a repeated vaulting attempt proceeds like any other
+    // capture and vaults through the resolved store.
     const repeated = await client.callTool({
       name: "operate_click",
       arguments: { session_id: sessionId, ref: "@create", capture },
     });
-    expect(repeated.isError).toBe(true);
-    expect(state.action).toHaveBeenCalledTimes(2); // first capture click + ordinary click
-    const finish = await client.callTool({
-      name: "operate_finish",
-      arguments: { session_id: sessionId, outcome: "credentials", store: { service: "Example" } },
-    });
-    expect(finish.isError).toBe(true);
-    expect(storeCredential).toHaveBeenCalledOnce();
+    expect(repeated.isError).not.toBe(true);
+    expect(repeated.structuredContent).toMatchObject({ stored: true });
+    expect(state.action).toHaveBeenCalledTimes(3); // first capture click + ordinary + repeated
     const wrong = await client.callTool({
       name: "operate_extract",
       arguments: { session_id: sessionId, capture: { ...capture, write_id: "other" } },
     });
-    expect(wrong.isError).toBe(true);
-    expect(state.capture).toHaveBeenCalledOnce();
-    const newStore = await client.callTool({
-      name: "operate_extract",
-      arguments: { session_id: sessionId, store: capture.store },
-    });
-    expect(newStore.isError).toBe(true);
-    expect(storeCredential).toHaveBeenCalledOnce();
+    expect(wrong.isError).toBe(true); // foreign write_id recovery still refuses
+    expect(storeCredential).toHaveBeenCalledTimes(2);
     const read = await client.callTool({
       name: "operate_extract",
       arguments: { session_id: sessionId },
     });
     expect(read.isError, JSON.stringify(read)).not.toBe(true);
     expect(read.structuredContent).toMatchObject({ credentials: { api_key: "fixture-secret" } });
-    expect(storeCredential).toHaveBeenCalledOnce();
+    expect(storeCredential).toHaveBeenCalledTimes(2);
     const recovered = await client.callTool({
       name: "operate_extract",
       arguments: { session_id: sessionId, capture: { ...capture, write_id } },
     });
     expect(recovered.structuredContent).toMatchObject({ stored: true });
-    expect(storeCredential.mock.calls.map(([input]) => input.write_id)).toEqual([
-      write_id,
-      write_id,
-    ]);
-    expect(state.action).toHaveBeenCalledTimes(2);
+    // Store #1 = original capture (rejected, recovered later); #2 = the repeated
+    // capture's own write; #3 = the write_id recovery of the original.
+    const storeWriteIds = storeCredential.mock.calls.map(([input]) => input.write_id);
+    expect(storeWriteIds[0]).toBe(write_id);
+    expect(storeWriteIds[1]).not.toBe(write_id);
+    expect(storeWriteIds[2]).toBe(write_id);
+    expect(state.action).toHaveBeenCalledTimes(3);
+    // Finish is the terminal: it proceeds (no custody fence) and retires the
+    // session, so it must come last.
+    const finish = await client.callTool({
+      name: "operate_finish",
+      arguments: { session_id: sessionId, outcome: "credentials", store: { service: "Example" } },
+    });
+    expect(finish.isError).not.toBe(true);
+    expect(storeCredential).toHaveBeenCalledTimes(4); // + finish's own vault store
   } finally {
     await client.close();
     await server.close();

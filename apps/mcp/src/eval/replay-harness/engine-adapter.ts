@@ -25,7 +25,6 @@ export interface EngineReplayMeasurement {
     | "fallback_required"
     | "human_required"
     | "leg_fallback_required"
-    | "domain_lock_violation"
     | "unavailable";
   reason?: string;
   /** Exact production money-field guard failure, retained for eval diagnosis. */
@@ -238,12 +237,7 @@ export async function replayRecipeOnHarnessPage(args: {
           status: replay.status,
           turns,
           tokens,
-          ...(replay.status === "complete" || replay.status === "domain_lock_violation"
-            ? {}
-            : { reason: replay.reason }),
-          ...(replay.status === "domain_lock_violation"
-            ? { reason: `"${replay.host}" is outside recipe domain "${replay.recipe_domain}"` }
-            : {}),
+          ...(replay.status === "complete" ? {} : { reason: replay.reason }),
           ...(replay.status === "human_required" ? { field: replay.field } : {}),
         };
       }

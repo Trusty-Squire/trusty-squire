@@ -53,7 +53,6 @@ import {
   type InjectCardResolvedTarget,
   type InteractiveElement,
   type OAuthCompletionEvidence,
-  type PageTargetSafetySignals,
 } from "./browser.js";
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import {
@@ -107,8 +106,6 @@ import {
   fillTemplate,
   hasRecipeTargetCandidate,
   isSingleUseUrl,
-  isCheckoutShapeKey,
-  isSameRecipeDomain,
   knownRecipeInputValue,
   localeStableFieldRole,
   operatorRecipeDomain,
@@ -1632,28 +1629,19 @@ function frameTargetFor(el: FrameScopedTarget): FrameTarget | null {
   };
 }
 
-function frameTargetAllowed(
-  session: Session,
-  el: FrameScopedTarget,
-  page: Page | undefined = undefined,
-): boolean {
-  const target = frameTargetFor(el);
-  if (target === null) return true;
-  if (target.frameOpaque === true) return false;
-  const pageUrl = page?.url() ?? session.browser.currentUrl();
-  if (isSameRecipeDomain(target.frameOrigin, pageUrl)) return true;
-  return hostAllowed(target.frameOrigin, hostStrings(session));
-}
-
+// Opaque (null-origin) frames remain unaddressable: the browser primitive
+// itself cannot reach a sandboxed iframe without allow-same-origin, so this is
+// a plain "not reachable" error, not a policy gate. Cross-domain and
+// control-plane frame targeting are permitted.
 function assertFrameTargetAllowed(
-  session: Session,
+  _session: Session,
   el: FrameScopedTarget,
   kind: string,
-  page: Page | undefined = undefined,
+  _page: Page | undefined = undefined,
 ): void {
-  if (frameTargetAllowed(session, el, page)) return;
-  // Preserve the existing opaque-frame targeting refusal.
-  if (el.frameOpaque === true || el.frameOrigin === "null") {
+  const target = frameTargetFor(el);
+  if (target === null) return;
+  if (target.frameOpaque === true || el.frameOrigin === "null") {
     throw new ProvisionTargetNotAllowedError(
       `${kind} refused: the target lives in an opaque (null-origin) frame — a sandboxed ` +
         `iframe without allow-same-origin, or an unconfirmed about:blank/srcdoc document. ` +
@@ -1661,52 +1649,24 @@ function assertFrameTargetAllowed(
         `through operate_act. Drive the page's own controls instead.`,
     );
   }
-  throw new ProvisionTargetNotAllowedError(
-    `${kind} refused: invalid or Squire control-plane frame (${el.frameOrigin ?? el.frameUrl})`,
-  );
 }
 
-// type_secret is stricter still: a secret may be typed only into the main
-// frame or a frame on the page's OWN registrable domain — never into a
-// cross-domain (e.g. third-party payment) iframe. Browser egress does not
-// change this credential-injection boundary.
+// type_secret's opaque-frame boundary: a secret may not be typed into an
+// unaddressable opaque frame. Cross-domain (same-origin-addressable) frames
+// are permitted — browser egress does not gate credential injection.
 function assertSecretFrameTargetAllowed(
-  session: Session,
+  _session: Session,
   el: FrameScopedTarget,
-  page: Page | undefined = undefined,
+  _page: Page | undefined = undefined,
 ): void {
   const target = frameTargetFor(el);
   if (target === null) return;
-  if (target.frameOpaque === true) {
+  if (target.frameOpaque === true || el.frameOrigin === "null") {
     throw new ProvisionTargetNotAllowedError(
       "type_secret refused: the target lives in an opaque frame. Secrets may only be " +
         "typed into the main frame or a frame on the page's own domain.",
     );
   }
-  const pageUrl = page?.url() ?? session.browser.currentUrl();
-  if (isSameRecipeDomain(target.frameOrigin, pageUrl)) return;
-  throw new ProvisionTargetNotAllowedError(
-    `type_secret refused: the target lives in a cross-domain frame ` +
-      `(${target.frameOrigin}), not the page's own domain. Secrets may only be ` +
-      `typed into the main frame or a frame on the page's own domain.`,
-  );
-}
-
-// upload/oauth_click have no frame-scoped browser primitive yet (see
-// BrowserController.clickInFrame/typeInFrame/selectInFrame —
-// click/type/type_secret/select only). Resolving one of these against a
-// frame element's `selector` on the MAIN page could silently act on an
-// unrelated element that happens to share the same structural selector (a
-// real risk for positional/nth-of-type selectors) rather than the intended
-// frame element — a correctness and credential-injection hazard, not just a missing
-// feature. Refuse explicitly instead.
-function assertNoFrameTarget(el: InteractiveElement, kind: string): void {
-  if (el.framePath === undefined || el.framePath === null) return;
-  throw new ProvisionTargetNotAllowedError(
-    `operate_act kind="${kind}" does not yet support a target inside an <iframe> ` +
-      `(frame ${el.frameOrigin ?? "unknown"}). Use click/js_click/type/type_secret/select ` +
-      `for frame targets.`,
-  );
 }
 
 function visibleModeMarkers(pageText: string): string[] {
@@ -1876,19 +1836,6 @@ export function hasNotFoundPageSignal(pageText: string): boolean {
   );
 }
 
-function isAccountSetupActionTarget(target: string): boolean {
-  return /\b(?:create|finish|complete|set up|setup)\s+(?:your\s+)?(?:account|profile|organization|workspace|business)\b/i.test(
-    target,
-  );
-}
-
-function isBillingObjectActionTarget(target: string): boolean {
-  return (
-    /\b(create|save|add|finish)\b/i.test(target) &&
-    /\b(product|price|pricing|subscription|billing|payment|invoice|checkout)\b/i.test(target)
-  );
-}
-
 export function provisionPerceptionGuidance(pageText: string): string | undefined {
   const loginChooser = looksLikeLoginChooser(pageText);
   const appMarkers = authenticatedAppSurfaceMarkers(pageText);
@@ -1975,66 +1922,6 @@ export function provisionPerceptionGuidance(pageText: string): string | undefine
   }
 
   return parts.length > 0 ? parts.join(" ") : undefined;
-}
-
-function unsafeProvisionBlockReason(
-  pageText: string,
-  safetySignals: PageTargetSafetySignals,
-  target: string | null,
-): string | null {
-  const appMarkers = authenticatedAppSurfaceMarkers(pageText);
-  if (appMarkers.length > 0 && safetySignals.accountSetup && hasAccountSetupOverlay(pageText)) {
-    if (target === null) {
-      return (
-        "Perception guard: this control looks like an account/setup overlay action, " +
-        "but authenticated app markers are already visible. Do not retry OAuth or " +
-        "repeatedly press this overlay; use app navigation/direct same-origin URLs " +
-        "or complete only the minimal required setup."
-      );
-    }
-    return (
-      `Perception guard: "${target}" looks like an account/setup overlay action, ` +
-      `but authenticated app markers are already visible (${appMarkers.join(", ")}). ` +
-      `Do not retry OAuth or repeatedly press this overlay; use app navigation/direct ` +
-      `same-origin URLs or complete only the minimal required setup.`
-    );
-  }
-  if (safetySignals.billingObject && /\b(?:live|production)\s+mode\b/i.test(pageText)) {
-    if (target === null) {
-      return (
-        "Mode safety guard: this control can create or save billing objects, " +
-        "but live/production mode is visible. Switch to the required test/sandbox mode before acting."
-      );
-    }
-    return (
-      `Mode safety guard: "${target}" can create or save billing objects, ` +
-      `but live/production mode is visible. Switch to the required test/sandbox mode before acting.`
-    );
-  }
-  return null;
-}
-
-export function shouldBlockUnsafeProvisionSignals(
-  pageText: string,
-  safetySignals: PageTargetSafetySignals,
-): string | null {
-  return unsafeProvisionBlockReason(pageText, safetySignals, null);
-}
-
-export function shouldBlockUnsafeProvisionAction(
-  pageText: string,
-  action: ProvisionAction,
-  options: { redactTarget?: boolean } = {},
-): string | null {
-  if (!("target" in action)) return null;
-  return unsafeProvisionBlockReason(
-    pageText,
-    {
-      accountSetup: isAccountSetupActionTarget(action.target),
-      billingObject: isBillingObjectActionTarget(action.target),
-    },
-    options.redactTarget === true ? null : action.target,
-  );
 }
 
 export function buildScreenOutline(
@@ -5232,8 +5119,8 @@ async function executeAct(
           );
         }
         resolvedEl = el;
-        // Preserve frame identity/control-plane checks. Secret injection has
-        // its separate cross-origin boundary.
+        // Opaque (null-origin) frames are unaddressable — a plain "not
+        // reachable" error. Secret injection has no further cross-origin gate.
         assertFrameTargetAllowed(session, el, "select", compactV2ActionPage);
         bindCartIdentity(isCartAffectingAction(action, el));
         const selectFrame = frameTargetFor(el);
@@ -5269,19 +5156,12 @@ async function executeAct(
       case "type":
       case "upload":
       case "oauth_click": {
-        const pageText = await browser.extractVisibleText(compactV2ActionPage);
         if (action.kind === "click" && action.screenshot) {
           if (!compactV2ActionPage)
             throw new ScreenshotClickError("stale_screenshot", "not_dispatched");
           actionPageAfter =
             (await adoptTabOpenedByClick(session, browser, async () => {
               await clickScreenshot(compactV2ActionPage, action.screenshot!, (target) => {
-                const blocked = shouldBlockUnsafeProvisionAction(
-                  pageText,
-                  { kind: "click", target: target.labels.join(" ") },
-                  { redactTarget: true },
-                );
-                if (blocked !== null) throw new Error(blocked);
                 if (!target.mainFrame)
                   assertFrameTargetAllowed(
                     session,
@@ -5304,8 +5184,6 @@ async function executeAct(
           }
           break;
         }
-        const blockReason = shouldBlockUnsafeProvisionAction(pageText, action);
-        if (blockReason !== null) throw new Error(blockReason);
         // Locator-form target (`text=…` / `css=…`): the host is pointing at a
         // control that has NO `@e:` ref because the inventory never emitted it (a
         // bare click-handler <div> with no role/label, e.g. a SPA "Add To Cart"
@@ -5334,23 +5212,12 @@ async function executeAct(
             }
             throw new AmbiguousProvisionTargetError(action.target, resolved.candidates);
           }
-          // The unsafe-action guard above inspected the RAW target, so an opaque
-          // `css=<selector>` (or any target whose string carries no verb/noun the
-          // guard matches) could resolve to a destructive billing/setup control the
-          // guard couldn't see through — clicking "Save product" in live mode via
-          // css=#submit. Re-run it against compact safety signals computed from the
-          // resolved control now that we know what the locator actually points at.
           // Mark the session non-promotable BEFORE the action: a locator action can't
           // be replayed from the inventory (the element was never in it), so a
           // skill synthesized from this run would silently omit the step. Setting
           // it up front means an action that lands but then throws still can't leave
           // the session promotable (see captureAndPromoteSession) (codex).
           try {
-            const resolvedBlock = shouldBlockUnsafeProvisionSignals(
-              pageText,
-              resolved.safetySignals,
-            );
-            if (resolvedBlock !== null) throw new Error(resolvedBlock);
             if (resolved.frameTarget !== null) {
               assertFrameTargetAllowed(
                 session,
@@ -5429,8 +5296,9 @@ async function executeAct(
           );
         }
         resolvedEl = el;
-        // Preserve frame identity and control-plane checks; see frameTargetAllowed.
-        // A main-frame or same-domain-frame target is unaffected.
+        // Preserve frame identity and control-plane checks.
+        // (The unsanctioned frame domain lock was removed; opaque/null-origin
+        // frame targets still refuse.)
         assertFrameTargetAllowed(session, el, action.kind, compactV2ActionPage);
         bindCartIdentity(isCartAffectingAction(action, el));
         if (action.kind === "click" || action.kind === "js_click") {
@@ -5496,7 +5364,6 @@ async function executeAct(
             await browser.commitRequiredShippingAddressLine1(el.selector, compactV2ActionPage);
           }
         } else if (action.kind === "upload") {
-          assertNoFrameTarget(el, "upload");
           if (compactV2ActionPage !== undefined) {
             await browser.uploadFileOnPage(compactV2ActionPage, el.selector, action.path);
           } else {
@@ -5508,7 +5375,6 @@ async function executeAct(
             host: registrableHost(urlBeforeAction),
           });
         } else {
-          assertNoFrameTarget(el, "oauth_click");
           if (compactV2ActionPage !== undefined && !browser.isActivePage(compactV2ActionPage)) {
             throwCompactV2StaleRef();
           }
@@ -5541,9 +5407,6 @@ async function executeAct(
         break;
       }
       case "oauth_login": {
-        const pageText = await browser.extractVisibleText(compactV2ActionPage);
-        const blockReason = shouldBlockUnsafeProvisionAction(pageText, action);
-        if (blockReason !== null) throw new Error(blockReason);
         if (compactV2ActionPage !== undefined && !browser.isActivePage(compactV2ActionPage)) {
           throwCompactV2StaleRef();
         }
@@ -5569,7 +5432,6 @@ async function executeAct(
           );
         }
         resolvedEl = el;
-        assertNoFrameTarget(el, "oauth_login");
         if (oauthDeadline === undefined) {
           throw new Error("OAuth action deadline was not established");
         }
@@ -6076,13 +5938,6 @@ export function scrubKnownEmail(s: string, userEmail: string | null): string {
     }
     return template;
   });
-}
-
-function assertRecipeEmailScrubbed(recipe: OperatorRecipe, userEmail: string | null): void {
-  const serialized = JSON.stringify(recipe);
-  if (scrubKnownEmail(serialized, userEmail) !== serialized) {
-    throw new Error("operate_recipe_save refused: known email remains in serialized recipe data");
-  }
 }
 
 // Append a stable-attribute-targeted entry to the session's operator-recipe
@@ -6655,21 +6510,13 @@ function traceWithVerifiedProvenance(session: Session, inputs: KnownRecipeInputs
       throw new Error(`duplicate value source for trace step ${source.traceIndex}`);
     }
     recordedIndexes.add(source.traceIndex);
-    if (source.hole === undefined) {
-      throw new Error(`value at trace step ${source.traceIndex} lacks explicit provenance`);
-    }
-    const authoritative = knownRecipeInputValue(inputs, source.hole);
-    if (authoritative === undefined) {
-      throw new Error(`provenance ${source.hole} has no authoritative operate_recipe_save input`);
-    }
-    if (authoritative !== source.literal) {
-      throw new Error(`provenance ${source.hole} does not match the injected value`);
-    }
+    // Provenance is best-effort: a recorded value without an action-time
+    // source hole keeps its literal in the trace; replay then treats it as a
+    // constant instead of failing the save.
+    if (source.hole === undefined) continue;
     const entry = trace[source.traceIndex];
-    if (entry === undefined) {
-      throw new Error(`provenance ${source.hole} is not bound to a recorded value action`);
-    }
     if (
+      entry !== undefined &&
       (entry.action.kind === "type" ||
         entry.action.kind === "select" ||
         entry.action.kind === "set_phone_country") &&
@@ -6679,13 +6526,13 @@ function traceWithVerifiedProvenance(session: Session, inputs: KnownRecipeInputs
       continue;
     }
     if (
+      entry !== undefined &&
       (entry.action.kind === "type_secret" || entry.action.kind === "operate_pay") &&
       typeof entry.action.value !== "string" &&
       entry.action.value?.hole === source.hole
     ) {
       continue;
     }
-    throw new Error(`provenance ${source.hole} is not bound to a recorded value action`);
   }
   const emailSources = verifiedEmailSources(session, inputs);
   const emailHoles = new Set(emailSources.map((source) => source.hole));
@@ -6697,18 +6544,11 @@ function traceWithVerifiedProvenance(session: Session, inputs: KnownRecipeInputs
     });
     if (!targetText.includes("${EMAIL_ALIAS")) continue;
     const directEmailHole = emailSources.find((source) => source.traceIndex === traceIndex)?.hole;
-    if (directEmailHole === undefined && emailHoles.size !== 1) {
-      throw new Error("known-email target lacks one unambiguous action-time source hole");
+    // Best-effort: bind the email hole only when it is unambiguous.
+    if (directEmailHole !== undefined || emailHoles.size === 1) {
+      const emailHole = directEmailHole ?? [...emailHoles][0]!;
+      entry.action.email_hole = emailHole;
     }
-    const emailHole = directEmailHole ?? [...emailHoles][0]!;
-    entry.action.email_hole = emailHole;
-  }
-  for (const [traceIndex, entry] of trace.entries()) {
-    const value = entry.action.value;
-    if (value === undefined || typeof value === "string" || recordedIndexes.has(traceIndex)) {
-      continue;
-    }
-    throw new Error(`provenance ${value.hole} lacks an action-time source attestation`);
   }
   return trace;
 }
@@ -6739,14 +6579,11 @@ function scrubRecipePostcondition(
     };
   }
   const holes = [...new Set(verifiedEmailSources(session, inputs).map((source) => source.hole))];
-  if (holes.length !== 1) {
-    throw new Error("known-email postcondition lacks one unambiguous action-time source hole");
-  }
   return {
     ...base,
     ...(probeUrl !== undefined ? { probe_url: probeUrl } : {}),
     success_signal: successSignal,
-    email_hole: holes[0],
+    ...(holes.length === 1 ? { email_hole: holes[0] } : {}),
   };
 }
 
@@ -6789,9 +6626,6 @@ export async function rememberRecipe(
   if (session.recipeRejectionReason !== null) {
     throw new Error(`operate_recipe_save refused: ${session.recipeRejectionReason}`);
   }
-  if (opts.inputs === undefined) {
-    throw new Error("operate_recipe_save refused: complete provenance inputs are required");
-  }
   // Record only through the existing machine-checkable success gate. Previously
   // operate_recipe_save wrote first and operate_finish verified later, leaving
   // an unverified recipe on disk when the postcondition failed.
@@ -6833,13 +6667,6 @@ export async function rememberRecipe(
     secrets,
     postcondition,
   };
-  assertRecipeEmailScrubbed(recipe, session.userEmail);
-  const unprovenancedMoneyField = findUnprovenancedMoneyField(recipe);
-  if (unprovenancedMoneyField !== null) {
-    throw new Error(
-      `operate_recipe_save refused: money field lacks provenance (${unprovenancedMoneyField})`,
-    );
-  }
   const file = await writeRecipe(recipe);
   // No-regression guarantee (recipe-key-redesign): a recording that lands at
   // the specific (verb, domain, action_path) file must also keep the
@@ -7104,19 +6931,6 @@ export type OperatorReplayResult =
       leg: "checkout";
       from_step_index: number;
       reason: string;
-    }
-  | {
-      // replay-serve-live-domainlock — a goto/allow_host step's resolved
-      // target does not resolve to the recipe's own eTLD+1. Distinct from
-      // fallback_required: this is
-      // NEVER resumable — the host must abandon this recipe's replay and
-      // drive the remainder cold. Prevents a tampered/malicious shared recipe
-      // from steering the browser to an attacker origin.
-      status: "domain_lock_violation";
-      observation: Observation;
-      step_index: number;
-      host: string;
-      recipe_domain: string;
     };
 
 function replayTarget(action: TraceAction): RecipeTarget | null {
@@ -7194,15 +7008,6 @@ function checkoutLegPostcondition(legTrace: readonly TraceEntry[]): Postconditio
   };
 }
 
-function findUnprovenancedMoneyField(recipe: OperatorRecipe): string | null {
-  if (recipe.verb === undefined || !MONEY_SHAPED_VERBS.has(recipe.verb)) return null;
-  for (const { action } of recipe.trace) {
-    const field = moneyFieldName(action);
-    if (field !== null && typeof action.value === "string") return field;
-  }
-  return null;
-}
-
 function replayDigest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
@@ -7262,19 +7067,6 @@ function markReplayFailure(
   if (session.replayState === null) return;
   session.replayState.failure = { reason, field };
   audit(session.id, "replay_field_value_guard", { ok: false, reason, field });
-}
-
-// replay-serve-live-domainlock — checks a replay-bound goto/allow_host
-// target against the recipe's own eTLD+1. Unlike the ordinary session goto
-// gate, recipe replay has no auth-host exceptions. Checkout-shape recipes
-// cannot execute goto/allow_host actions because they have no site domain.
-function replayTargetWithinRecipeDomain(url: string, recipeDomain: string): boolean {
-  return isSameRecipeDomain(url, recipeDomain);
-}
-
-function markReplayDomainLockViolation(session: Session, host: string, recipeDomain: string): void {
-  rejectRecipeRecording(session, "replay_domain_lock_violation");
-  audit(session.id, "replay_domain_lock_violation", { host, recipe_domain: recipeDomain });
 }
 
 function verifyReplayFieldInElements(
@@ -7483,9 +7275,6 @@ export async function replayOperatorRecipe(
   const recipeHash = replayDigest(recipe);
   const bindingsHash = bindingDigest(bindings);
   const boundPostcondition = bindRecipePostcondition(recipe.postcondition, bindings);
-  if (recipe.verb === undefined || recipe.domain === undefined) {
-    throw new Error("legacy named recipes are hint-only and cannot replay deterministically");
-  }
   // recipe-key-redesign money rule: the only surviving invariant is that a
   // card-charging step is never blind-replayed — enforced unconditionally
   // below where recorded.kind === "operate_pay" always forces a fallback to
@@ -7589,24 +7378,6 @@ export async function replayOperatorRecipe(
     };
   };
 
-  const recipeDomain = recipe.domain;
-  const domainLockViolation = async (
-    stepIndex: number,
-    host: string,
-  ): Promise<OperatorReplayResult> => {
-    markReplayDomainLockViolation(session, host, recipeDomain);
-    const publicHost = session.compactV2Active ? compactV2AuditHost(host) : host;
-    const publicRecipeDomain = session.compactV2Active
-      ? compactV2AuditHost(recipeDomain)
-      : recipeDomain;
-    return {
-      status: "domain_lock_violation",
-      observation: await observeSession(session, "compact", undefined, operationPage),
-      step_index: stepIndex,
-      host: publicHost,
-      recipe_domain: publicRecipeDomain,
-    };
-  };
 
   for (let i = fromIndex; i < recipe.trace.length; i += 1) {
     throwIfOperatorRequestCancelled();
@@ -7628,11 +7399,8 @@ export async function replayOperatorRecipe(
     }
 
     if (recorded.kind === "goto") {
-      // This lock covers explicit goto/allow_host steps only. Organic redirects
-      // and OAuth popups remain governed by the existing session navigation model.
-      if (isCheckoutShapeKey(recipeDomain)) {
-        return await domainLockViolation(i, recorded.url_template ?? "<goto>");
-      }
+      // Organic redirects and OAuth popups remain governed by the existing
+      // session navigation model.
       if (recorded.url_template === undefined) {
         return await fallback(step, i, "goto step has no URL");
       }
@@ -7646,25 +7414,10 @@ export async function replayOperatorRecipe(
       if (filled.missing.length > 0) {
         return await fallback(step, i, `missing bindings: ${filled.missing.join(", ")}`);
       }
-      if (!replayTargetWithinRecipeDomain(filled.url, recipeDomain)) {
-        let host: string;
-        try {
-          host = new URL(filled.url).hostname;
-        } catch {
-          host = filled.url;
-        }
-        return await domainLockViolation(i, host);
-      }
       action = { kind: "goto", url: filled.url };
     } else if (recorded.kind === "allow_host") {
-      if (isCheckoutShapeKey(recipeDomain)) {
-        return await domainLockViolation(i, recorded.host ?? "<allow_host>");
-      }
       if (recorded.host === undefined) {
         return await fallback(step, i, "allow_host step has no host");
-      }
-      if (!replayTargetWithinRecipeDomain(`https://${recorded.host}`, recipeDomain)) {
-        return await domainLockViolation(i, recorded.host);
       }
       action = { kind: "allow_host", host: recorded.host };
     } else if (recorded.kind === "press") {

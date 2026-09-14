@@ -51,41 +51,11 @@ function resultText(result: Awaited<ReturnType<Client["callTool"]>>): string {
   return content.map((c) => c.text ?? "").join(" ");
 }
 
-it("accepts only the exact explicit stale-ref pre-dispatch recovery metadata", () => {
-  expect(
-    brokerRecoveryRequested({
-      "trusty-squire/recover": {
-        request_id: "broker-request",
-        error: "stale_ref",
-        dispatch: "not_dispatched",
-      },
-    }),
-  ).toEqual({
-    recover: true,
-    preDispatchFailure: {
-      requestId: "broker-request",
-      error: "stale_ref",
-      dispatch: "not_dispatched",
-    },
-  });
-  expect(
-    brokerRecoveryRequested({
-      "trusty-squire/recover": {
-        request_id: "broker-request",
-        error: "provider_timeout",
-        dispatch: "not_dispatched",
-      },
-    }),
-  ).toEqual({});
-  expect(
-    brokerRecoveryRequested({
-      "trusty-squire/recover": {
-        request_id: "broker-request",
-        error: "stale_ref",
-        dispatch: "unknown",
-      },
-    }),
-  ).toEqual({});
+it("accepts a boolean trusty-squire/recover meta flag as a recovery request", () => {
+  expect(brokerRecoveryRequested({ "trusty-squire/recover": true })).toEqual({ recover: true });
+  expect(brokerRecoveryRequested({ "trusty-squire/recover": {} })).toEqual({});
+  expect(brokerRecoveryRequested({ "trusty-squire/recover": null })).toEqual({});
+  expect(brokerRecoveryRequested({})).toEqual({});
 });
 
 describe("operate_* bad input is a per-call error, never a server failure", () => {
@@ -401,59 +371,38 @@ it("roundtrips flat finish schemas and typed receipts through the MCP SDK", asyn
   }
 });
 
-for (const [name, args, budget] of [
-  ["operate_navigate", { session_id: "session", url: "https://example.test/" }, 17_000],
-  ["operate_login", { session_id: "session", provider: "google", ref: "@login" }, 17_000],
-  ["operate_start", { service_url: "https://example.test/" }, 32_000],
-  ["operate_finish", { session_id: "session" }, 5_000],
-] as const)
-  it(`bounds forwarded ${name} delivery while retaining execution custody`, async () => {
-    const admission = createServerCallAdmission();
-    let release!: (value: unknown) => void;
-    let entered!: () => void;
-    let signal: AbortSignal | undefined;
-    const started = new Promise<void>((resolve) => {
-      entered = resolve;
-    });
-    const work = new Promise<unknown>((resolve) => {
-      release = resolve;
-    });
-    const forwarder = {
-      invoke: vi.fn(async (...input: unknown[]) => {
-        signal = input[4] as AbortSignal;
-        entered();
-        return await work;
-      }),
-    } as unknown as OperatorForwarder;
-    const server = await buildServer(
-      { setRequestingAgent: vi.fn() } as unknown as ApiClient,
-      admission,
+it("propagates client cancellation to the forwarded operator signal", async () => {
+  // The server-side work budget is gone: the ONLY thing that may abort
+  // forwarded operator work is the MCP client cancelling its own request.
+  const forwarder = {
+    invoke: vi.fn(async () => new Promise(() => {})),
+  } as unknown as OperatorForwarder;
+  const server = await buildServer(
+    { setRequestingAgent: vi.fn() } as unknown as ApiClient,
+    undefined,
+    undefined,
+    undefined,
+    forwarder,
+  );
+  const [transport, peer] = InMemoryTransport.createLinkedPair();
+  await server.connect(peer);
+  const client = new Client({ name: "cancel-test", version: "1" });
+  await client.connect(transport);
+  const controller = new AbortController();
+  try {
+    const response = client.callTool(
+      { name: "operate_navigate", arguments: { session_id: "session", url: "https://example.test/" } },
       undefined,
-      undefined,
-      forwarder,
+      { signal: controller.signal },
     );
-    const [transport, peer] = InMemoryTransport.createLinkedPair();
-    await server.connect(peer);
-    const client = new Client({ name: "deadline-test", version: "1" });
-    await client.connect(transport);
-    vi.useFakeTimers();
-    try {
-      const response = client.callTool({ name, arguments: args });
-      await started;
-      await vi.advanceTimersByTimeAsync(budget);
-      expect((await response).isError).toBe(true);
-      expect(signal?.aborted).toBe(true);
-      expect(admission.inFlightCount()).toBe(1);
-      release({ done: true });
-      await vi.advanceTimersByTimeAsync(0);
-      expect(admission.inFlightCount()).toBe(0);
-    } finally {
-      release({});
-      vi.useRealTimers();
-      await client.close();
-      await server.close();
-    }
-  });
+    await vi.waitFor(() => expect(forwarder.invoke).toHaveBeenCalledOnce());
+    controller.abort();
+    await expect(response).rejects.toThrow();
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
 
 it("publishes literal role constraints matching the observe runtime validator", async () => {
   const client = await connectedClient();

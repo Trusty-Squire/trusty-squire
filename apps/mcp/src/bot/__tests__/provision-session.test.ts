@@ -25,7 +25,6 @@ import {
   sanitizeExtractedCredentials,
   buildScreenOutline,
   provisionPerceptionGuidance,
-  shouldBlockUnsafeProvisionAction,
   maskSecretValue,
   googleSessionGate,
   isOnboardingOrOrgForm,
@@ -998,63 +997,11 @@ describe("provision perception guidance", () => {
     expect(guidance).toContain("Do not restart OAuth");
   });
 
-  it("guards billing creation actions when live mode is visible", () => {
-    const reason = shouldBlockUnsafeProvisionAction("Dashboard Products Live mode", {
-      kind: "click",
-      target: "Save product",
-    });
-
-    expect(reason).toContain("live/production mode is visible");
-  });
-
-  it("allows billing creation actions when test mode is visible", () => {
-    expect(
-      shouldBlockUnsafeProvisionAction("Dashboard Products Test mode", {
-        kind: "click",
-        target: "Save product",
-      }),
-    ).toBeNull();
-  });
-
   it("treats sandbox usage controls as a visible test/sandbox mode marker", () => {
     const text = "Settings Apps Sandbox usage Production usage";
     const guidance = provisionPerceptionGuidance(text);
 
     expect(guidance).toContain("Mode marker visible");
-    expect(
-      shouldBlockUnsafeProvisionAction(text, {
-        kind: "click",
-        target: "Save product",
-      }),
-    ).toBeNull();
-  });
-
-  it("blocks dead-end account overlay actions when authenticated app UI is visible", () => {
-    const reason = shouldBlockUnsafeProvisionAction(
-      "Finish creating your account Create account CP Cactus Practice Test mode Products",
-      { kind: "click", target: "Create account" },
-    );
-
-    expect(reason).toContain("Perception guard");
-    expect(reason).toContain("authenticated app markers");
-  });
-
-  it("does not guard unrelated non-creation clicks", () => {
-    expect(
-      shouldBlockUnsafeProvisionAction("Dashboard Products Live mode", {
-        kind: "click",
-        target: "Products",
-      }),
-    ).toBeNull();
-  });
-
-  it("does not mistake a single marketing nav word for an authenticated app", () => {
-    expect(
-      shouldBlockUnsafeProvisionAction("Products Pricing Docs Create account", {
-        kind: "click",
-        target: "Create account",
-      }),
-    ).toBeNull();
   });
 });
 

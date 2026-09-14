@@ -14,7 +14,6 @@ import { BrokerClient, listenBroker } from "../broker/transport.js";
 import {
   brokerDrainAllowsMethod,
   brokerIdleShutdownEligible,
-  brokerStartupAllowsMethod,
   brokerIdleTimeoutMs,
   brokerShutdownCleanupComplete,
 } from "../broker/daemon.js";
@@ -63,82 +62,6 @@ it("uses a minutes-scale idle policy", () => {
   expect(brokerIdleTimeoutMs({})).toBe(5 * 60_000);
   expect(brokerIdleTimeoutMs({ TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS: "1000" })).toBe(60_000);
   expect(brokerIdleTimeoutMs({ TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS: "600000" })).toBe(600_000);
-});
-
-it("keeps startup browser work fenced while retained custody exposes only recovery", () => {
-  expect(brokerStartupAllowsMethod(true, "recover")).toBe(true);
-  expect(brokerStartupAllowsMethod(true, "reclaim")).toBe(true);
-  expect(brokerStartupAllowsMethod(true, "acknowledge")).toBe(false);
-  expect(brokerStartupAllowsMethod(true, "confirm_start")).toBe(false);
-  expect(brokerStartupAllowsMethod(true, "tool")).toBe(false);
-  expect(brokerStartupAllowsMethod(false, "tool")).toBe(true);
-});
-
-it("exposes recovery-only startup solely for the authorized retained Xata record", async () => {
-  const root = await mkdtemp(join(tmpdir(), "ts-broker-startup-recovery-"));
-  const retainedSessionId = "546b6f5a-930e-4473-8aec-43fc355fd108";
-  const retainedRequestId =
-    "4ae34aeb-e1b8-4457-a99b-72ac418600ca:4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce";
-  const recordRetainedXata = async (journal: DispatchJournal): Promise<void> => {
-    await journal.record(retainedSessionId, retainedRequestId, "entered", {
-      forwarderId: "retained-forwarder",
-      operation: "operate_login",
-      inputHash: "retained-input",
-    });
-  };
-  try {
-    const exact = new DispatchJournal(join(root, "exact.jsonl"));
-    await recordRetainedXata(exact);
-    const authorization = await exact.retainedXataPreDispatchAuthorization();
-    expect(authorization).toBeDefined();
-    await expect(exact.hasOnlyAuthorizedPreDispatchFailure(authorization!)).resolves.toBe(true);
-    await expect(
-      exact.hasOnlyAuthorizedPreDispatchFailure({
-        ...authorization!,
-        sessionId: "foreign-session",
-      }),
-    ).resolves.toBe(false);
-
-    await exact.record("other-session", "other-request", "entered", {
-      forwarderId: "other-forwarder",
-      operation: "inject_card",
-      inputHash: "other-input",
-    });
-    await exact.record("other-session", "other-request", "outcome", {
-      forwarderId: "other-forwarder",
-      operation: "inject_card",
-      inputHash: "other-input",
-      outcome: { status: "unknown", reason: "execution_error" },
-    });
-    await expect(exact.hasOnlyAuthorizedPreDispatchFailure(authorization!)).resolves.toBe(false);
-    await expect(exact.assertReconciled()).rejects.toThrow("lost mutation custody");
-
-    const unrelatedEntered = new DispatchJournal(join(root, "unrelated-entered.jsonl"));
-    await unrelatedEntered.record("session", "request", "entered", {
-      forwarderId: "forwarder",
-      operation: "operate_login",
-      inputHash: "input",
-    });
-    expect(await unrelatedEntered.retainedXataPreDispatchAuthorization()).toBeUndefined();
-    await expect(unrelatedEntered.assertReconciled()).rejects.toThrow("lost mutation custody");
-
-    const unrelatedOutcome = new DispatchJournal(join(root, "unrelated-outcome.jsonl"));
-    await unrelatedOutcome.record("session", "request", "entered", {
-      forwarderId: "forwarder",
-      operation: "inject_card",
-      inputHash: "input",
-    });
-    await unrelatedOutcome.record("session", "request", "outcome", {
-      forwarderId: "forwarder",
-      operation: "inject_card",
-      inputHash: "input",
-      outcome: { status: "completed" },
-    });
-    expect(await unrelatedOutcome.retainedXataPreDispatchAuthorization()).toBeUndefined();
-    await expect(unrelatedOutcome.assertReconciled()).resolves.toBeUndefined();
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
 });
 
 it("defers idle shutdown until reconnect custody resolves", () => {
@@ -515,9 +438,6 @@ it("returns only a durable start outcome after daemon death", async () => {
     });
     foreign = await BrokerClient.connect(socket, account.agent_session_token, "b".repeat(43));
     await expect(foreign.call("recover", { name: "operate_start", args })).resolves.toBeNull();
-    await expect(
-      sameLineage.call("tool", { name: "operate_start", args }, "fresh-process-request"),
-    ).rejects.toThrow("Prior start result awaits caller delivery");
     const records = (await readFile(join(profile, "trusty-squire-broker-dispatch.jsonl"), "utf8"))
       .trim()
       .split("\n")

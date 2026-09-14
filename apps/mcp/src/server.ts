@@ -128,24 +128,7 @@ export interface ServerCallAdmission extends ServerCallLifecycle {
 export function brokerRecoveryRequested(meta: unknown): BrokerRecoveryRequest {
   if (meta === null || typeof meta !== "object") return {};
   const value = (meta as Record<string, unknown>)["trusty-squire/recover"];
-  if (value === true) return { recover: true };
-  if (value === null || typeof value !== "object") return {};
-  const evidence = value as Record<string, unknown>;
-  if (
-    typeof evidence.request_id !== "string" ||
-    evidence.error !== "stale_ref" ||
-    evidence.dispatch !== "not_dispatched" ||
-    !Object.keys(evidence).every((key) => ["request_id", "error", "dispatch"].includes(key))
-  )
-    return {};
-  return {
-    recover: true,
-    preDispatchFailure: {
-      requestId: evidence.request_id,
-      error: "stale_ref",
-      dispatch: "not_dispatched",
-    },
-  };
+  return value === true ? { recover: true } : {};
 }
 
 // `connect` may complete while the host's stdio server is already running.
@@ -284,28 +267,9 @@ export async function buildServer(
     if (callLifecycle !== undefined && !callLifecycle.started()) {
       return errorContent("server_unavailable", "server is shutting down");
     }
-    const budget = new AbortController();
-    const composed = composeOperatorSignals([extra.signal, budget.signal]);
-    const workBudgetMs =
-      tool.name === "operate_start" ||
-      (tool.name === "operate_recipe_run" && parsed.data.session_id === undefined)
-        ? 30_000
-        : tool.name === "operate_finish"
-          ? 4_500
-          : 15_000;
-    const budgetTimer =
-      tool.name.startsWith("operate_") && !["inject_card"].includes(tool.name)
-        ? setTimeout(
-            () =>
-              budget.abort(
-                new BrokerRefusal(
-                  "request_timeout",
-                  "Operator work budget expired; reconcile before repeating mutations",
-                ),
-              ),
-            workBudgetMs,
-          )
-        : undefined;
+    // Only the MCP client's own cancellation may cancel operator work — there
+    // is no server-side work budget.
+    const composed = composeOperatorSignals([extra.signal]);
     const sessionId =
       typeof parsed.data.session_id === "string" ? parsed.data.session_id : undefined;
     let lifecycleHeldByWork = false;
@@ -427,7 +391,6 @@ export async function buildServer(
                   },
           );
     } finally {
-      if (budgetTimer !== undefined) clearTimeout(budgetTimer);
       composed.dispose();
       if (!lifecycleHeldByWork) callLifecycle?.finished();
     }

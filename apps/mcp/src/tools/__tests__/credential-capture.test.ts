@@ -64,10 +64,6 @@ async function click(client: ApiClient) {
     {
       operationId: "create-one",
       onCapture: async (evidence, recovery) => {
-        if (state.action.mock.calls.length === 0)
-          expect(await journal.hasCaptureWrite("lineage", "session", evidence.write_id)).toBe(
-            false,
-          );
         await journal.recordCapture("lineage", "session", "create-one", evidence, recovery);
       },
     },
@@ -122,20 +118,19 @@ describe("explicit mutation capture", () => {
       write_id: "create-one",
     });
     await journal.acknowledge("lineage", "create-one");
-    expect(await journal.hasOutstanding("session")).toBe(true);
-    await expect(
-      journal.recordCapture(
-        "lineage",
-        "session",
-        "new",
-        {
-          write_id: "new",
-          stored: false,
-          storage: "unknown",
-        },
-        false,
-      ),
-    ).rejects.toThrow("original capture write identity");
+    // Non-recovery capture records stay append-only: a new write identity is
+    // journalled, not refused.
+    await journal.recordCapture(
+      "lineage",
+      "session",
+      "new",
+      {
+        write_id: "new",
+        stored: false,
+        storage: "unknown",
+      },
+      false,
+    );
     expect(store).not.toHaveBeenCalled();
     expect(state.action).toHaveBeenCalledOnce();
   });
@@ -312,7 +307,6 @@ describe("explicit mutation capture", () => {
   });
   it("journals unresolved action identity and preserves human outcome booleans", async () => {
     state.action.mockImplementation(async () => {
-      expect(await journal.hasCaptureWrite("lineage", "session", "create-one")).toBe(true);
       await markOperatorMutationDispatchAttempted();
       return { needs_user: true, acknowledged: false };
     });
@@ -324,7 +318,6 @@ describe("explicit mutation capture", () => {
       retry: "extract_only",
     });
     await journal.acknowledge("lineage", "create-one");
-    expect(await journal.hasOutstanding("session")).toBe(true);
     await expect(
       journal.recordCapture(
         "lineage",

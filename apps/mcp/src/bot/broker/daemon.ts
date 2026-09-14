@@ -29,14 +29,9 @@ const DRAIN_RECOVERY_METHODS = new Set([
   "confirm_start",
   "cancel",
 ]);
-const STARTUP_RECONCILIATION_METHODS = new Set(["recover", "reclaim"]);
 
 export function brokerDrainAllowsMethod(method: string): boolean {
   return DRAIN_RECOVERY_METHODS.has(method);
-}
-
-export function brokerStartupAllowsMethod(retainedCustody: boolean, method: string): boolean {
-  return !retainedCustody || STARTUP_RECONCILIATION_METHODS.has(method);
 }
 
 export async function brokerShutdownCleanupComplete(
@@ -111,15 +106,9 @@ export async function runBrokerDaemon(): Promise<void> {
   const journal = new DispatchJournal(
     join(profilePathIdentity(CHROME_PROFILE_DIR), "trusty-squire-broker-dispatch.jsonl"),
   );
-  await journal.expirePendingStartDeliveries();
-  const retainedXataPreDispatchAuthorization = await journal.retainedXataPreDispatchAuthorization();
-  // A retained `entered` record must not launch/adopt a browser, but the
-  // broker endpoint has to exist so an explicit durable recovery can repair
-  // it. Parsing states here still fails startup on a malformed journal.
-  let startupReconciliation =
-    retainedXataPreDispatchAuthorization !== undefined &&
-    (await journal.hasOnlyAuthorizedPreDispatchFailure(retainedXataPreDispatchAuthorization));
-  if (!startupReconciliation) await journal.assertReconciled();
+  // Startup normalization only: settle dispatch-tracked prepared records.
+  // Parsing states here still fails startup on a malformed journal.
+  await journal.assertReconciled();
   const operator = new OperatorBroker(
     {
       accountId: session.account_id,
@@ -129,7 +118,6 @@ export async function runBrokerDaemon(): Promise<void> {
     },
     cellId,
     journal,
-    retainedXataPreDispatchAuthorization,
   );
   const connected = new Set<string>();
   let closing = false;
@@ -193,18 +181,8 @@ export async function runBrokerDaemon(): Promise<void> {
             "Browser transport is lost; the pending start cannot be recovered",
           );
         if (method === "recover") {
-          const result = await operator.recover(principal, params);
-          if (startupReconciliation && retainedXataPreDispatchAuthorization !== undefined)
-            startupReconciliation = await journal.hasOnlyAuthorizedPreDispatchFailure(
-              retainedXataPreDispatchAuthorization,
-            );
-          return result;
+          return await operator.recover(principal, params);
         }
-        if (!brokerStartupAllowsMethod(startupReconciliation, method))
-          throw new BrokerRefusal(
-            "outcome_unknown",
-            "Prior broker lost mutation custody; only explicit reconciliation is available",
-          );
         if (method === "reclaim") return await operator.reclaim(principal);
         if (method === "acknowledge") {
           if (typeof params.requestId !== "string")
@@ -216,19 +194,6 @@ export async function runBrokerDaemon(): Promise<void> {
           await operator.confirmStartDelivery(principal, params);
           return {};
         }
-        if (
-          (await journal.hasOutstanding(undefined, principal.forwarderId)) &&
-          !(
-            method === "tool" &&
-            (params.name === "operate_finish" ||
-              (await operator.canReconcileCapture(principal, params)) ||
-              (await operator.canContinueAfterCapture(principal, params)))
-          )
-        )
-          throw new BrokerRefusal(
-            "outcome_unknown",
-            "Prior mutation outcome awaits reconciliation; reconnect without replaying it",
-          );
         if (method === "maintenance") {
           if (maintenanceOwner !== undefined && maintenanceOwner !== principal.clientId)
             throw new Error("Identity maintenance is already owned");
