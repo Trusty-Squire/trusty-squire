@@ -3,11 +3,10 @@ import { createServer, createConnection, type Server, type Socket } from "node:n
 import { chmod, lstat, unlink } from "node:fs/promises";
 import { randomUUID, randomBytes } from "node:crypto";
 import { z } from "zod";
-import { BrokerRefusal } from "./scheduler.js";
+import { BrokerRefusal } from "./refusal.js";
 import {
   FORWARDER_HANDOFF_TIMEOUT_MS,
   type BrokerPrincipal,
-  type TabCapability,
 } from "./authority.js";
 
 const MAX_FRAME = 8 * 1024 * 1024;
@@ -231,10 +230,6 @@ export async function listenBroker(
             : Promise.reject(
                 new BrokerRefusal("request_id_reused", "Request ID has different input"),
               );
-      } else if (replies.size >= 8192) {
-        result = Promise.reject(
-          new BrokerRefusal("capacity", "Connection command budget exhausted"),
-        );
       } else {
         result = dispatch(request);
         replies.set(request.id, { input, result });
@@ -371,8 +366,6 @@ export class BrokerClient {
       return Promise.reject(new BrokerRefusal("broker_lost", "Broker connection is closed"));
     if (this.pending.has(id))
       return Promise.reject(new BrokerRefusal("duplicate_pending", "Request is already pending"));
-    if (this.pending.size >= 64)
-      return Promise.reject(new BrokerRefusal("capacity", "Too many pending broker calls"));
     return new Promise((resolve, reject) => {
       this.pending.set(id, {
         method,
@@ -392,9 +385,6 @@ export class BrokerClient {
   }
   async acknowledge(requestId: string): Promise<void> {
     await this.call("acknowledge", { requestId });
-  }
-  async confirmStartDelivery(capability: TabCapability): Promise<void> {
-    await this.call("confirm_start", { capability });
   }
   isConnected(): boolean {
     return !this.ended && !this.socket.destroyed;

@@ -104,7 +104,7 @@ it("keeps an uncertain failed admission until its own tab cleanup succeeds", asy
   const closePage = vi.fn().mockResolvedValueOnce("unknown").mockResolvedValue("closed");
   state.attach.mockResolvedValue({ closeOwnPagesOnly: closePage });
   const runtime = new BrokerRuntime("account");
-  await withBrokerAdmission({ sessionId: "admission", reserve: () => undefined }, async () => {
+  await withBrokerAdmission({ sessionId: "admission" }, async () => {
     await runtime.acquire({ profileDir: root });
   });
   await expect(runtime.cleanupAdmission("admission")).rejects.toThrow("quarantined");
@@ -118,7 +118,7 @@ it("releases orphan tab bookkeeping without closing the owner browser", async ()
   state.attach.mockResolvedValue(browser);
   const runtime = new BrokerRuntime("account");
   const acquired = await withBrokerAdmission(
-    { sessionId: "admission", reserve: () => undefined },
+    { sessionId: "admission" },
     async () => await runtime.acquire({ profileDir: root }),
   );
 

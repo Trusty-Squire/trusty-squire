@@ -1,20 +1,12 @@
-import { withBrokerIdentityLane } from "./identity-lane.js";
 import { composeOperatorSignals } from "../request-cancellation.js";
 import { randomUUID } from "node:crypto";
-import { BrokerRefusal, ScopeScheduler } from "./scheduler.js";
+import { BrokerRefusal } from "./refusal.js";
 
 export interface BrokerPrincipal {
   accountId: string;
   agentId: string;
   forwarderId?: string;
   clientId: string;
-}
-export interface TabCapability {
-  cellId: string;
-  browserEpoch: string;
-  sessionId: string;
-  targetId: string;
-  leaseGeneration: string;
 }
 export interface BrokerSessionPort {
   targetId: string;
@@ -47,7 +39,7 @@ interface Admission {
 }
 interface Actor {
   principal: BrokerPrincipal;
-  capability: TabCapability;
+  sessionId: string;
   port: BrokerSessionPort;
   abort: AbortController;
   state: "active" | "detached" | "closing" | "quarantined";
@@ -61,37 +53,26 @@ interface Actor {
 }
 
 /** This object lives only in the broker. No Page, Browser or CDP handle crosses
- * the transport. A principal is established by authenticated connection setup. */
+ * the transport. A principal is established by authenticated connection setup.
+ * A session is named by a plain session id; there are no opaque capabilities or
+ * leases because one profile serves one authenticated client at a time. */
 export class BrokerAuthority {
-  private epochValue: string = randomUUID();
-  get epoch(): string {
-    return this.epochValue;
-  }
-  rotateEpoch(): void {
-    if (this.actors.size !== 0 || this.admissions.size !== 0)
-      throw new BrokerRefusal("maintenance", "Session custody has not drained");
-    this.epochValue = randomUUID();
-  }
   private readonly actors = new Map<string, Actor>();
   private readonly admissions = new Map<string, Admission>();
   private readonly expiredAdmissions = new Map<string, BrokerPrincipal>();
   private readonly forwarderConnections = new Map<string, ForwarderConnection>();
   private readonly fencedClients = new Set<string>();
-  private readonly scheduler = new ScopeScheduler();
-  private readonly lanes = new ScopeScheduler();
   private detachedExpiryHandler:
-    | ((capability: TabCapability, principal: BrokerPrincipal) => Promise<void> | void)
+    | ((sessionId: string, principal: BrokerPrincipal) => Promise<void> | void)
     | undefined;
 
   constructor(
     readonly accountId: string,
-    readonly cellId: string,
-    private readonly maxSessions = 3,
     private readonly detachedExpiryCloseTimeoutMs = DETACHED_EXPIRY_CLOSE_TIMEOUT_MS,
   ) {}
 
   setDetachedExpiryHandler(
-    handler: (capability: TabCapability, principal: BrokerPrincipal) => Promise<void> | void,
+    handler: (sessionId: string, principal: BrokerPrincipal) => Promise<void> | void,
   ): void {
     this.detachedExpiryHandler = handler;
   }
@@ -189,20 +170,12 @@ export class BrokerAuthority {
 
   async open(
     principal: BrokerPrincipal,
-    resources: readonly string[],
-    create: (
-      sessionId: string,
-      signal: AbortSignal,
-      reserve: (resources: readonly string[]) => void,
-    ) => Promise<BrokerSessionPort>,
+    create: (sessionId: string, signal: AbortSignal) => Promise<BrokerSessionPort>,
     cleanupFailedAdmission?: (sessionId: string) => Promise<boolean>,
     orphanFailedAdmission?: (sessionId: string) => Promise<void>,
     requestSignal?: AbortSignal,
-  ): Promise<TabCapability> {
+  ): Promise<string> {
     this.assertPrincipal(principal);
-    if (this.actors.size + this.admissions.size >= this.maxSessions) {
-      throw new BrokerRefusal("capacity", "Identity cell is at capacity");
-    }
     const id = randomUUID();
     const abort = new AbortController();
     const composed = composeOperatorSignals([
@@ -214,26 +187,18 @@ export class BrokerAuthority {
     let port: BrokerSessionPort | undefined;
     let creating = false;
     try {
-      await this.scheduler.reserve(id, resources, signal);
       if (this.expiredAdmissions.has(id))
         throw new BrokerRefusal("cancelled", "Admission reconnect grace expired");
       if (this.admissions.get(id)?.reconnectDeadline === undefined) this.assertPrincipal(principal);
       creating = true;
-      port = await create(id, signal, (resources) => this.scheduler.expand(id, resources));
+      port = await create(id, signal);
       if (this.expiredAdmissions.has(id)) {
         await this.disposeExpiredAdmission(port);
         throw new BrokerRefusal("cancelled", "Admission reconnect grace expired");
       }
-      const capability: TabCapability = {
-        cellId: this.cellId,
-        browserEpoch: this.epoch,
-        sessionId: id,
-        targetId: port.targetId,
-        leaseGeneration: randomUUID(),
-      };
       const actor: Actor = {
         principal: { ...principal },
-        capability,
+        sessionId: id,
         port,
         abort,
         state: "active",
@@ -251,7 +216,7 @@ export class BrokerAuthority {
         await this.closeActor(actor);
         throw new BrokerRefusal("cancelled", "Client disconnected during admission");
       }
-      return { ...capability };
+      return id;
     } catch (error) {
       if (this.expiredAdmissions.has(id)) {
         if (port === undefined && creating)
@@ -261,9 +226,7 @@ export class BrokerAuthority {
             cleanupFailedAdmission,
             orphanFailedAdmission,
           );
-        this.scheduler.release(id);
-      } else if (port === undefined && !creating) this.scheduler.release(id);
-      else if (port === undefined) {
+      } else if (port === undefined && creating) {
         const reconnectDeadline = this.admissions.get(id)?.reconnectDeadline;
         if (reconnectDeadline !== undefined) {
           await this.disposeExpiredAdmission(
@@ -272,17 +235,10 @@ export class BrokerAuthority {
             cleanupFailedAdmission,
             orphanFailedAdmission,
           );
-          this.scheduler.release(id);
         } else {
           const failed: Actor = {
             principal: { ...principal },
-            capability: {
-              cellId: this.cellId,
-              browserEpoch: this.epoch,
-              sessionId: id,
-              targetId: "unproven-admission",
-              leaseGeneration: randomUUID(),
-            },
+            sessionId: id,
             port: {
               targetId: "unproven-admission",
               invoke: async () => {
@@ -313,19 +269,15 @@ export class BrokerAuthority {
     }
   }
 
-  private resolve(principal: BrokerPrincipal, capability: TabCapability): Actor {
+  private resolve(principal: BrokerPrincipal, sessionId: string): Actor {
     this.assertPrincipal(principal);
-    const actor = this.actors.get(capability.sessionId);
+    const actor = this.actors.get(sessionId);
     if (
       actor === undefined ||
       actor.principal.forwarderId !== principal.forwarderId ||
-      actor.principal.agentId !== principal.agentId ||
-      capability.cellId !== this.cellId ||
-      capability.browserEpoch !== this.epoch ||
-      capability.leaseGeneration !== actor.capability.leaseGeneration ||
-      capability.targetId !== actor.capability.targetId
+      actor.principal.agentId !== principal.agentId
     ) {
-      throw new BrokerRefusal("stale_lease", "Capability does not name an owned live session");
+      throw new BrokerRefusal("stale_lease", "Session does not name an owned live session");
     }
     if (actor.state === "active" && actor.principal.clientId !== principal.clientId)
       throw new BrokerRefusal("forwarder_in_use", "Forwarder identity is already active");
@@ -333,7 +285,7 @@ export class BrokerAuthority {
     return actor;
   }
 
-  reclaim(principal: BrokerPrincipal): TabCapability[] {
+  reclaim(principal: BrokerPrincipal): string[] {
     this.assertPrincipal(principal);
     const owned = [...this.actors.values()].filter(
       (actor) =>
@@ -347,7 +299,7 @@ export class BrokerAuthority {
       throw new BrokerRefusal("forwarder_in_use", "Forwarder identity is already active");
     const now = Date.now();
     const displacedClients = new Set<string>();
-    const capabilities = owned.flatMap((actor) => {
+    const sessionIds = owned.flatMap((actor) => {
       if (actor.state === "detached" && (actor.reconnectDeadline ?? 0) <= now) return [];
       displacedClients.add(actor.principal.clientId);
       actor.principal = { ...principal };
@@ -362,13 +314,13 @@ export class BrokerAuthority {
         if (actor.closeReason === "disconnect") actor.abort = new AbortController();
         actor.state = "active";
       }
-      return [{ ...actor.capability }];
+      return [actor.sessionId];
     });
     for (const clientId of displacedClients) this.retireFencedClient(clientId);
-    return capabilities;
+    return sessionIds;
   }
 
-  recoverCapability(principal: BrokerPrincipal, sessionId: string): TabCapability | undefined {
+  recoverCapability(principal: BrokerPrincipal, sessionId: string): string | undefined {
     this.assertPrincipal(principal);
     const actor = this.actors.get(sessionId);
     if (
@@ -381,34 +333,18 @@ export class BrokerAuthority {
     const displacedClientId = actor.principal.clientId;
     actor.principal = { ...principal };
     this.retireFencedClient(displacedClientId);
-    return { ...actor.capability };
-  }
-
-  hasCapability(principal: BrokerPrincipal, capability: TabCapability): boolean {
-    this.assertPrincipal(principal);
-    const actor = this.actors.get(capability.sessionId);
-    return (
-      actor !== undefined &&
-      actor.state === "active" &&
-      actor.principal.clientId === principal.clientId &&
-      actor.principal.forwarderId === principal.forwarderId &&
-      actor.principal.agentId === principal.agentId &&
-      capability.cellId === this.cellId &&
-      capability.browserEpoch === this.epoch &&
-      capability.leaseGeneration === actor.capability.leaseGeneration &&
-      capability.targetId === actor.capability.targetId
-    );
+    return actor.sessionId;
   }
 
   busyReadReceipt(
     principal: BrokerPrincipal,
-    capability: TabCapability,
+    sessionId: string,
     requestId: string,
   ): Record<string, unknown> | undefined {
-    const actor = this.resolve(principal, capability);
+    const actor = this.resolve(principal, sessionId);
     if (actor.pending === 0 && actor.state === "active") return undefined;
     return {
-      session_id: capability.sessionId,
+      session_id: sessionId,
       operation_id: requestId,
       status: "session_busy",
       execution: actor.pending > 0 ? "pending" : "unknown",
@@ -420,18 +356,16 @@ export class BrokerAuthority {
 
   invoke(
     principal: BrokerPrincipal,
-    capability: TabCapability,
+    sessionId: string,
     requestId: string,
     name: string,
     args: Record<string, unknown>,
-    resources: readonly string[] = [],
-    lane?: "oauth" | "interactive",
     requestSignal?: AbortSignal,
   ): Promise<unknown> {
-    const actor = this.resolve(principal, capability);
+    const actor = this.resolve(principal, sessionId);
     if (["operate_observe", "operate_screenshot"].includes(name) && actor.pending > 0)
       return Promise.resolve({
-        session_id: capability.sessionId,
+        session_id: sessionId,
         status: "session_busy",
         execution: "pending",
         mutation: "unknown",
@@ -439,7 +373,7 @@ export class BrokerAuthority {
         closed: false,
       });
     if (actor.state !== "active") throw new BrokerRefusal("session_closing", "Session is fenced");
-    const input = JSON.stringify([name, args, resources, lane]);
+    const input = JSON.stringify([name, args]);
     // Capture this connection lease. A reconnect installs a fresh controller;
     // queued work from the lost socket must stay aborted rather than becoming
     // executable merely because the actor is active again.
@@ -450,10 +384,6 @@ export class BrokerAuthority {
       if (previous.input !== input)
         throw new BrokerRefusal("request_id_reused", "Request ID has different input");
       return previous.result;
-    }
-    // Never evict deduplication evidence and make an old submit executable again.
-    if (actor.replies.size >= 4096 || actor.pending >= 64) {
-      throw new BrokerRefusal("capacity", "Session command budget exhausted");
     }
     const composed = composeOperatorSignals([
       invocationLease.signal,
@@ -470,20 +400,10 @@ export class BrokerAuthority {
           });
     actor.pending += 1;
     const invokePrepared = async (prepared: unknown): Promise<unknown> => {
-      if (actor.state !== "active" || signal.aborted) {
+      if (actor.state !== "active" || signal.aborted)
         throw new BrokerRefusal("session_closing", "Command fenced before dispatch");
-      }
-      this.scheduler.expand(actor.capability.sessionId, resources);
-      const laneOwner = randomUUID();
-      if (lane !== undefined) await this.lanes.reserve(laneOwner, [lane], signal);
-      try {
-        if (signal.aborted) throw new BrokerRefusal("cancelled", "Command fenced before dispatch");
-        const execute = async () =>
-          await actor.port.invoke(name, args, signal, requestId, prepared);
-        return lane === "oauth" ? await withBrokerIdentityLane(execute, signal) : await execute();
-      } finally {
-        if (lane !== undefined) this.lanes.release(laneOwner);
-      }
+      if (signal.aborted) throw new BrokerRefusal("cancelled", "Command fenced before dispatch");
+      return await actor.port.invoke(name, args, signal, requestId, prepared);
     };
     const result =
       preparation === undefined
@@ -521,7 +441,7 @@ export class BrokerAuthority {
               timer = setTimeout(() => {
                 if (settled) return;
                 if (
-                  this.actors.get(capability.sessionId) === actor &&
+                  this.actors.get(sessionId) === actor &&
                   actor.abort === invocationLease &&
                   actor.state === "active"
                 )
@@ -550,11 +470,11 @@ export class BrokerAuthority {
    * It must never sit behind the mutation tail it is trying to cancel. */
   async finish(
     principal: BrokerPrincipal,
-    capability: TabCapability,
+    sessionId: string,
     requestId: string,
     args: Record<string, unknown>,
   ): Promise<unknown> {
-    const actor = this.resolve(principal, capability);
+    const actor = this.resolve(principal, sessionId);
     actor.state = "closing";
     actor.closeReason = "finish";
     actor.abort.abort(new BrokerRefusal("cancelled", "Session finishing"));
@@ -574,17 +494,16 @@ export class BrokerAuthority {
     )
       throw new BrokerRefusal("stale_lease", "Terminal completion does not own this closing actor");
     this.actors.delete(sessionId);
-    this.scheduler.release(sessionId);
     this.retireFencedClient(actor.principal.clientId);
   }
 
   async close(
     principal: BrokerPrincipal,
-    capability: TabCapability,
+    sessionId: string,
     terminalProven = false,
   ): Promise<boolean> {
-    if (terminalProven && !this.actors.has(capability.sessionId)) return true;
-    return await this.closeActor(this.resolve(principal, capability), "finish");
+    if (terminalProven && !this.actors.has(sessionId)) return true;
+    return await this.closeActor(this.resolve(principal, sessionId), "finish");
   }
 
   private closeActor(
@@ -603,8 +522,7 @@ export class BrokerAuthority {
         delete actor.closePromise;
         return false;
       }
-      this.actors.delete(actor.capability.sessionId);
-      this.scheduler.release(actor.capability.sessionId);
+      this.actors.delete(actor.sessionId);
       this.retireFencedClient(actor.principal.clientId);
       return true;
     })();
@@ -654,14 +572,13 @@ export class BrokerAuthority {
 
   private async orphanExpiredActor(actor: Actor): Promise<void> {
     await this.completeWithinDetachedExpiryTimeout(async () => await actor.port.orphan());
-    this.actors.delete(actor.capability.sessionId);
-    this.scheduler.release(actor.capability.sessionId);
+    this.actors.delete(actor.sessionId);
     this.retireFencedClient(actor.principal.clientId);
   }
 
   private async disposeExpiredActor(actor: Actor): Promise<void> {
     const handled = await this.completeWithinDetachedExpiryTimeout(async () => {
-      await this.detachedExpiryHandler?.(actor.capability, actor.principal);
+      await this.detachedExpiryHandler?.(actor.sessionId, actor.principal);
     });
     if (!handled.completed) {
       await this.orphanExpiredActor(actor);
@@ -671,8 +588,7 @@ export class BrokerAuthority {
       async () => await actor.port.close("expiry"),
     );
     if (closed.completed && closed.value) {
-      this.actors.delete(actor.capability.sessionId);
-      this.scheduler.release(actor.capability.sessionId);
+      this.actors.delete(actor.sessionId);
       this.retireFencedClient(actor.principal.clientId);
       return;
     }
@@ -721,7 +637,6 @@ export class BrokerAuthority {
       this.expiredAdmissions.set(id, { ...admission.principal });
       admission.abort.abort();
       this.admissions.delete(id);
-      this.scheduler.release(id);
     }
     const expired = [...this.actors.values()].filter(
       (actor) =>
@@ -770,13 +685,13 @@ export class BrokerAuthority {
 
   async retryQuarantined(
     shouldClose: (
-      capability: TabCapability,
+      sessionId: string,
       principal: BrokerPrincipal,
     ) => Promise<boolean> | boolean = () => true,
   ): Promise<void> {
     for (const actor of [...this.actors.values()]) {
       if (actor.state !== "quarantined") continue;
-      if (!(await shouldClose(actor.capability, actor.principal))) continue;
+      if (!(await shouldClose(actor.sessionId, actor.principal))) continue;
       await this.closeActor(actor, actor.closeReason ?? "disconnect");
     }
   }

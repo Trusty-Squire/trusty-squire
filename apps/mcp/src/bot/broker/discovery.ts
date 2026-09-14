@@ -15,7 +15,7 @@ import {
   type ProfileOperationLease,
 } from "../profile.js";
 import { BrokerClient } from "./transport.js";
-import { BrokerRefusal } from "./scheduler.js";
+import { BrokerRefusal } from "./refusal.js";
 interface EndpointOwner {
   version: 1;
   pid: number;

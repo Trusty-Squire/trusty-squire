@@ -1,6 +1,4 @@
 import { readFileSync } from "node:fs";
-import { BrokerAuthority } from "../src/bot/broker/authority.ts";
-import { siteResources } from "../src/bot/broker/scheduler.ts";
 import { describe, expect, it } from "vitest";
 import {
   validateAcceptanceManifest,
@@ -90,46 +88,6 @@ describe("native + concurrency acceptance manifest", () => {
     delete config.services[2].profileDir;
     config.services[2].allowedHosts = ["neon.test"];
     expect(() => validateAcceptanceManifest(config)).toThrow(/exactly one active/);
-  });
-
-  it("queues the duplicate provider until its active owner releases custody", async () => {
-    const config = manifest();
-    config.services.forEach((service) => {
-      service.url = `https://${service.provider === "resend" ? "resend.com" : "console.neon.tech"}/keys`;
-    });
-    const order = acceptanceSessionOrder(config);
-    const authority = new BrokerAuthority("account", "cell");
-    const principals = config.services.map((_, index) => ({
-      accountId: "account",
-      agentId: "agent",
-      clientId: `client-${index}`,
-    }));
-    const open = (index) =>
-      authority.open(principals[index], siteResources([config.services[index].url]), async () => ({
-        targetId: `target-${index}`,
-        invoke: async () => ({}),
-        close: async () => true,
-        orphan: async () => undefined,
-      }));
-    const sessions = [];
-    await Promise.all(
-      order.active.map(async (index) => {
-        sessions[index] = await open(index);
-      }),
-    );
-    let admitted = false;
-    const pending = open(order.queued).then((capability) => {
-      admitted = true;
-      return capability;
-    });
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(admitted).toBe(false);
-    expect(authority.inventory()).toMatchObject({ active: 2, admitting: 1 });
-    await authority.close(principals[order.release], sessions[order.release]);
-    sessions[order.queued] = await pending;
-    expect(authority.inventory()).toMatchObject({ active: 2, admitting: 0 });
-    expect(new Set(sessions.map((session) => session.targetId)).size).toBe(3);
-    await Promise.all([1, 2].map((index) => authority.close(principals[index], sessions[index])));
   });
 
   it("accepts the published single-profile manifest", () => {

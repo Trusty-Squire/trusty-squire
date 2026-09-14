@@ -52,7 +52,7 @@ it("never reassigns crashed sibling lineages or their capabilities to restarted 
   mkdirSync(oldSlot, { recursive: true });
   writeFileSync(join(oldSlot, "credential"), "z".repeat(43));
   const credentials = [restartedCredential(root, true), restartedCredential(root, true)];
-  const broker = new BrokerAuthority("account", "cell");
+  const broker = new BrokerAuthority("account");
   const journal = new DispatchJournal(join(root, "dispatch.jsonl"));
   const owners = credentials.map((credential, index) => ({
     accountId: "account",
@@ -63,14 +63,14 @@ it("never reassigns crashed sibling lineages or their capabilities to restarted 
   const capabilities = [];
   for (const owner of owners) {
     await broker.claimForwarder(owner);
-    const capability = await broker.open(owner, [`site:${owner.clientId}`], async () => ({
+    const capability = await broker.open(owner, async () => ({
       targetId: owner.clientId,
       invoke: async () => "owned",
       close: async () => true,
       orphan: async () => undefined,
     }));
     capabilities.push(capability);
-    await journal.record(capability.sessionId, owner.clientId, "entered", {
+    await journal.record(capability, owner.clientId, "entered", {
       forwarderId: owner.forwarderId,
       operation: "operate_pay",
       inputHash: "input",

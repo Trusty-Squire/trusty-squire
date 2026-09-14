@@ -19,7 +19,6 @@ beforeAll(async () => {
       await beforeRelease?.();
       await controller.closeOwnPagesOnly();
     },
-    identity: async (operation) => await operation(),
   });
 });
 afterAll(async () => {

@@ -3,8 +3,7 @@ import { connectOrLaunchBroker } from "./discovery.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { SessionGuard } from "../../session-guard.js";
 import type { BrokerClient, BrokerNotifier } from "./transport.js";
-import type { TabCapability } from "./authority.js";
-import { BrokerRefusal } from "./scheduler.js";
+import { BrokerRefusal } from "./refusal.js";
 import { requireLineageCredential } from "./lineage.js";
 import { ProvenPreDispatchMutationError } from "../mutation-dispatch-evidence.js";
 
@@ -32,7 +31,7 @@ export class OperatorForwarder {
   private connection: Promise<BrokerClient> | undefined;
   private client: BrokerClient | undefined;
   private connecting = false;
-  private readonly sessions = new Map<string, TabCapability>();
+  private readonly sessions = new Set<string>();
   private readonly lineageCredential: string;
   private readonly invocationNamespace = randomUUID();
   constructor(
@@ -66,9 +65,8 @@ export class OperatorForwarder {
     return this.connection;
   }
   private async reclaim(client: BrokerClient): Promise<void> {
-    const reply = (await client.call("reclaim", {})) as { capabilities?: TabCapability[] };
-    for (const capability of reply.capabilities ?? [])
-      this.sessions.set(capability.sessionId, capability);
+    const reply = (await client.call("reclaim", {})) as { capabilities?: string[] };
+    for (const sessionId of reply.capabilities ?? []) this.sessions.add(sessionId);
   }
   private callerRequestHash(requestId: string): string {
     return createHash("sha256").update(requestId).digest("hex");
@@ -80,36 +78,26 @@ export class OperatorForwarder {
     client: BrokerClient,
     name: string,
     args: Record<string, unknown>,
-    capability: TabCapability | undefined,
+    sessionId: string | undefined,
     recovery: BrokerRecoveryRequest,
     requestId?: string,
-  ): Promise<{ requestId: string; result: unknown; capability?: TabCapability } | undefined> {
+  ): Promise<{ requestId: string; result: unknown; capability?: string } | undefined> {
     const reply = (await client.call("recover", {
       name,
       args,
-      ...(capability === undefined ? {} : { capability }),
+      ...(sessionId === undefined ? {} : { capability: sessionId }),
       ...(requestId === undefined ? {} : { requestId }),
     })) as { requestId?: unknown; result?: unknown; capability?: unknown } | null;
     return typeof reply?.requestId === "string"
       ? {
           requestId: reply.requestId,
           result: reply.result,
-          ...(this.isCapability(reply.capability) ? { capability: reply.capability } : {}),
+          ...(typeof reply.capability === "string" ? { capability: reply.capability } : {}),
         }
       : undefined;
   }
-  private async confirmStartDelivery(
-    client: BrokerClient,
-    capability: TabCapability,
-  ): Promise<void> {
-    await client.confirmStartDelivery(capability);
-  }
-  private isCapability(value: unknown): value is TabCapability {
-    if (value === null || typeof value !== "object") return false;
-    const capability = value as Record<string, unknown>;
-    return ["cellId", "browserEpoch", "sessionId", "targetId", "leaseGeneration"].every(
-      (key) => typeof capability[key] === "string",
-    );
+  private isSessionId(value: unknown): value is string {
+    return typeof value === "string" && value.length > 0;
   }
   async invoke(
     name: string,
@@ -154,9 +142,9 @@ export class OperatorForwarder {
       await awaitOperatorPreparation(this.reclaim(client), signal);
       checkCancelled();
       if (!starting && args.session_id === undefined && this.sessions.size === 1)
-        args = { ...args, session_id: this.sessions.keys().next().value };
+        args = { ...args, session_id: this.sessions.values().next().value };
       const id = typeof args.session_id === "string" ? args.session_id : undefined;
-      const capability = id === undefined ? undefined : this.sessions.get(id);
+      const capability = id !== undefined && this.sessions.has(id) ? id : undefined;
       const recovered = recovery.recover
         ? await awaitOperatorPreparation(
             this.recover(client, name, args, capability, recovery),
@@ -166,7 +154,7 @@ export class OperatorForwarder {
       checkCancelled();
       if (recovered !== undefined) {
         if (recovered.capability !== undefined)
-          this.sessions.set(recovered.capability.sessionId, recovered.capability);
+          this.sessions.add(recovered.capability);
         await client.acknowledge(recovered.requestId);
         if (
           name === "operate_finish" &&
@@ -186,8 +174,6 @@ export class OperatorForwarder {
         name !== "operate_finish"
       )
         throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
-      if (!starting && name !== "operate_finish" && capability !== undefined)
-        await awaitOperatorPreparation(this.confirmStartDelivery(client, capability), signal);
       if (recovery.recover)
         throw new BrokerRefusal("recovery_not_found", "No matching durable outcome is available");
       checkCancelled();
@@ -219,7 +205,7 @@ export class OperatorForwarder {
         await client.acknowledge(idempotencyKey);
         throw new ProvenPreDispatchMutationError("stale_ref");
       }
-      const replyCapability = this.isCapability(reply.capability) ? reply.capability : undefined;
+      const replyCapability = this.isSessionId(reply.capability) ? reply.capability : undefined;
       if (name === "operate_start") {
         const result = isRecord(reply.result) ? reply.result : undefined;
         const returnedSessionId = result?.session_id;
@@ -228,7 +214,7 @@ export class OperatorForwarder {
           typeof returnedSessionId === "string" &&
           returnedSessionId.length > 0 &&
           (replyCapability !== undefined
-            ? returnedSessionId === replyCapability.sessionId
+            ? returnedSessionId === replyCapability
             : refusedStart);
         if (!validStartResult) {
           const recovered = await this.recover(
@@ -249,25 +235,24 @@ export class OperatorForwarder {
             recovered.requestId === idempotencyKey &&
             recoveredCapability !== undefined &&
             typeof recoveredSessionId === "string" &&
-            recoveredSessionId === recoveredCapability.sessionId &&
-            (replyCapability === undefined ||
-              recoveredCapability.sessionId === replyCapability.sessionId)
+            recoveredSessionId === recoveredCapability &&
+            (replyCapability === undefined || recoveredCapability === replyCapability)
           ) {
-            this.sessions.set(recoveredCapability.sessionId, recoveredCapability);
+            this.sessions.add(recoveredCapability);
             await client.acknowledge(recovered.requestId);
             return recoveredResult;
           }
           if (replyCapability !== undefined) {
-            this.sessions.set(replyCapability.sessionId, replyCapability);
+            this.sessions.add(replyCapability);
             throw new ForwardedResultError(
               "Broker retained startup custody but did not return a valid startup result",
               {
-                session_id: replyCapability.sessionId,
+                session_id: replyCapability,
                 cleanup: "open",
                 closed: false,
                 recovery: {
                   tool: "operate_finish",
-                  session_id: replyCapability.sessionId,
+                  session_id: replyCapability,
                 },
               },
             );
@@ -277,10 +262,9 @@ export class OperatorForwarder {
             closed: false,
           });
         }
-        if (replyCapability !== undefined)
-          this.sessions.set(replyCapability.sessionId, replyCapability);
+        if (replyCapability !== undefined) this.sessions.add(replyCapability);
       } else if (replyCapability !== undefined) {
-        this.sessions.set(replyCapability.sessionId, replyCapability);
+        this.sessions.add(replyCapability);
       }
       await client.acknowledge(idempotencyKey);
       if (
