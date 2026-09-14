@@ -95,11 +95,9 @@ export async function captureBrowserUseDOM(
   page: Page,
   existing: readonly InteractiveElement[],
   framePath: (frame: Frame) => string | null,
-  frameSecurity: (frame: Frame) => Promise<{ opaque: boolean }>,
 ): Promise<BrowserUseCapture> {
   const nodeElements = new Map<string, InteractiveElement>();
   const omissions: BrowserUseCapture["omissions"] = [];
-  const opaqueFrames = new Map<Frame, boolean>();
   const renderedNodes = new Map<string, boolean>();
   const frameViews = new Map<Frame, { width: number; height: number; x: number; y: number }>();
   const viewMetadata = new Map<
@@ -112,25 +110,10 @@ export async function captureBrowserUseDOM(
   >();
   let moreAbove = false,
     moreBelow = false;
-  const classifyFrame = async (frame: Frame): Promise<void> => {
-    if (frame === page.mainFrame()) {
-      opaqueFrames.set(frame, false);
-      return;
-    }
-    if (opaqueFrames.has(frame)) return;
-    try {
-      opaqueFrames.set(frame, (await frameSecurity(frame)).opaque);
-    } catch {
-      opaqueFrames.set(frame, true);
-    }
-  };
-  await Promise.all(page.frames().map(classifyFrame));
-  const opaqueFramePaths = new Set(
-    [...opaqueFrames].filter(([, opaque]) => opaque).map(([frame]) => framePath(frame)),
-  );
-  const inventory = existing
-    .filter((e) => e.frameOpaque !== true && !opaqueFramePaths.has(e.framePath ?? null))
-    .map((e) => ({ ...e }));
+  // Every frame Playwright can reach is captured; a frame is excluded only
+  // when its own CDP attach/accessibility capture fails below, and each such
+  // failure is recorded in `omissions` — never silently dropped.
+  const inventory = existing.map((e) => ({ ...e }));
   const elements: InteractiveElement[] = [];
   const cdp = await page.context().newCDPSession(page);
   const sessions: CDPSession[] = [cdp];
@@ -230,7 +213,6 @@ export async function captureBrowserUseDOM(
       }
     };
     bindFrames(frames.frameTree, owningFrame);
-    await Promise.all([...frameById.values()].map(classifyFrame));
     const forgetFrame = (frameId: string): void => {
       const frame = frameById.get(frameId);
       if (frame) unboundFrames.add(frame);
@@ -452,6 +434,12 @@ export async function captureBrowserUseDOM(
         for (const [backendNodeId, element] of frameBindings) bindings.set(backendNodeId, element);
         for (const backendNodeId of frameListeners) listeners.add(backendNodeId);
       } catch {
+        const failed = frameById.get(frameId);
+        omissions.push({
+          kind: "frame_accessibility_failed",
+          framePath: framePathById.get(frameId) ?? null,
+          url: failed?.url() ?? "",
+        });
         forgetFrame(frameId);
       }
     }
@@ -1031,7 +1019,6 @@ export async function captureBrowserUseDOM(
         frame !== null &&
         !isFrameUnbound(frame) &&
         !inClosedShadow &&
-        opaqueFrames.get(frame) === false &&
         n.nodeType === 1 &&
         ownsAction
       ) {

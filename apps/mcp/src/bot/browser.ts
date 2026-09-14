@@ -106,7 +106,6 @@ export interface FrameTarget {
   framePath: string;
   frameOrigin: string;
   frameUrl: string;
-  frameOpaque?: boolean;
 }
 
 export type InjectCardField = "pan" | "cvv" | "exp_month" | "exp_year" | "exp" | "name";
@@ -3110,12 +3109,10 @@ export class BrowserController {
       let frameTarget: FrameTarget | null = null;
       if (frame !== page.mainFrame()) {
         try {
-          const security = await this.frameSecurity(frame);
           frameTarget = {
             framePath: this.framePath(frame),
-            frameOrigin: security.origin,
+            frameOrigin: this.frameOrigin(frame),
             frameUrl: rawUrl,
-            ...(security.opaque ? { frameOpaque: true } : {}),
           };
         } catch {
           await resolved.handle.dispose().catch(() => undefined);
@@ -5974,8 +5971,8 @@ export class BrowserController {
     try {
       // caret:"initial" is not needed here — the CDP capture never runs
       // Playwright's caret-hiding pass, so element styles stay untouched.
-      const security = (frame: Frame) => this.frameSecurity(frame);
-      const captured = await captureBoundScreenshot(page, security, async () => {
+      const frameOrigin = (frame: Frame) => this.frameOrigin(frame);
+      const captured = await captureBoundScreenshot(page, frameOrigin, async () => {
         let base64: string;
         const metrics = await cdp.send("Page.getLayoutMetrics");
         const viewport = metrics.cssVisualViewport;
@@ -6178,12 +6175,7 @@ export class BrowserController {
     const bindingDeadline = Date.now() + 1_000;
     for (;;) {
       const elements = await this.extractInteractiveElements(page);
-      const capture = await captureBrowserUseDOM(
-        page,
-        elements,
-        (frame) => this.framePath(frame),
-        (frame) => this.frameSecurity(frame),
-      );
+      const capture = await captureBrowserUseDOM(page, elements, (frame) => this.framePath(frame));
       if (
         !capture.omissions.some((omission) => omission.kind === "frame_binding_failed") ||
         Date.now() >= bindingDeadline
@@ -8627,91 +8619,17 @@ export class BrowserController {
     return false;
   }
 
-  private async frameSecurity(frame: Frame): Promise<{ origin: string; opaque: boolean }> {
-    const url = frame.url();
-    if (url === "" || url === "about:blank" || url === "about:srcdoc") {
-      return { origin: "null", opaque: true };
-    }
-    const origin = new URL(url).origin;
-    if (origin === "null") return { origin: "null", opaque: true };
-    const activeOrigin = await this.frameActiveOrigin(frame);
-    if (activeOrigin === null || activeOrigin !== origin) return { origin: "null", opaque: true };
-    if (await this.frameSandboxedWithoutSameOrigin(frame)) return { origin: "null", opaque: true };
-    return { origin, opaque: false };
-  }
-
-  private async frameActiveOrigin(frame: Frame): Promise<string | null> {
-    const page = this.page;
-    if (page === null) return null;
-    const path = this.framePath(frame);
-    if (path === "") return null;
-    let cdp: CDPSession | null = null;
+  // The frame's own URL origin — plain metadata used for the x=s / x=x compact
+  // fact and for the stale-frame-target check in resolveFrameElement. A frame's
+  // origin never makes it unreachable: every frame captureBrowserUseDOM can
+  // attach to is captured and addressable, and the released-card output mask
+  // still covers every emitted value.
+  private frameOrigin(frame: Frame): string {
     try {
-      let frameSession = true;
-      try {
-        cdp = await page.context().newCDPSession(frame);
-      } catch {
-        frameSession = false;
-        cdp = await page.context().newCDPSession(page);
-      }
-      const { frameTree } = await cdp.send("Page.getFrameTree");
-      let currentTree = frameTree;
-      if (frameSession) {
-        const frameTreeUrl = `${currentTree.frame.url}${currentTree.frame.urlFragment ?? ""}`;
-        if (frameTreeUrl !== frame.url()) return null;
-      } else {
-        let currentFrame = page.mainFrame();
-        for (const part of path.split("/")) {
-          const index = Number.parseInt(part, 10);
-          const childFrame = currentFrame.childFrames()[index];
-          const childTree = currentTree.childFrames?.[index];
-          if (childFrame === undefined || childTree === undefined) return null;
-          const childTreeUrl = `${childTree.frame.url}${childTree.frame.urlFragment ?? ""}`;
-          if (childTreeUrl !== childFrame.url()) return null;
-          currentFrame = childFrame;
-          currentTree = childTree;
-        }
-        if (currentFrame !== frame) return null;
-      }
-      await cdp.send("Storage.getStorageKey", { frameId: currentTree.frame.id });
-      return currentTree.frame.securityOrigin || null;
+      return new URL(frame.url()).origin;
     } catch {
-      return null;
-    } finally {
-      await cdp?.detach().catch(() => undefined);
+      return "null";
     }
-  }
-
-  // A frame whose owning <iframe> carries a `sandbox` attribute WITHOUT the
-  // allow-same-origin token has an OPAQUE active origin per spec, no matter
-  // what its URL says — tagging it by URL would let the same-domain secret
-  // check trust a frame the browser itself treats as null-origin
-  // (nonblank-sandbox-origin-bypass). Sandbox flags propagate to nested
-  // browsing contexts, so every ancestor's owning iframe is checked too.
-  // This only ever ADDS a restriction: a failure to read the attribute fails
-  // closed (opaque), never grants trust.
-  private async frameSandboxedWithoutSameOrigin(frame: Frame): Promise<boolean> {
-    let current: Frame | null = frame;
-    while (current !== null && current.parentFrame() !== null) {
-      try {
-        const owner = await current.frameElement();
-        try {
-          const sandbox = await owner.getAttribute("sandbox");
-          if (
-            sandbox !== null &&
-            !sandbox.toLowerCase().split(/\s+/).includes("allow-same-origin")
-          ) {
-            return true;
-          }
-        } finally {
-          await owner.dispose().catch(() => undefined);
-        }
-      } catch {
-        return true;
-      }
-      current = current.parentFrame();
-    }
-    return false;
   }
 
   // Resolve a previously-tagged frame path back to its live Playwright Frame —
@@ -8750,13 +8668,9 @@ export class BrowserController {
       .catch(() => null);
     if (handle === null) return null;
     try {
-      const security = await this.frameSecurity(frame);
+      const origin = this.frameOrigin(frame);
       await handle.evaluate((element) => element.isConnected);
-      const expectedOpaque = target.frameOpaque === true || target.frameOrigin === "null";
-      const matches = expectedOpaque
-        ? security.opaque
-        : !security.opaque && security.origin === target.frameOrigin;
-      if (!matches) {
+      if (origin !== target.frameOrigin) {
         await handle.dispose().catch(() => undefined);
         return null;
       }
@@ -8998,7 +8912,6 @@ export class BrowserController {
                   framePath: element.framePath,
                   frameOrigin: element.frameOrigin ?? "null",
                   frameUrl: element.frameUrl ?? "",
-                  ...(element.frameOpaque ? { frameOpaque: true } : {}),
                 },
                 element.selector,
                 0,
@@ -9075,8 +8988,7 @@ export class BrowserController {
       if (this.frameWithinCaptcha(frame)) continue;
       try {
         const raw = await this.extractElementsFromContext(frame);
-        const security = await this.frameSecurity(frame);
-        const frameOrigin = security.origin;
+        const frameOrigin = this.frameOrigin(frame);
         const groups = assignCardRadioGroups(raw.clusterMeta);
         for (const [i, e] of raw.out.entries()) {
           framedElements.push({
@@ -9085,7 +8997,6 @@ export class BrowserController {
             frameOrigin,
             frameUrl,
             framePath: this.framePath(frame),
-            ...(security.opaque ? { frameOpaque: true } : {}),
           });
         }
       } catch {
@@ -11259,14 +11170,11 @@ export interface InteractiveElement {
   // <iframe> this element was extracted from, when it lives inside a child
   // frame (same- or cross-origin). null/undefined for an ordinary main-frame
   // element — every pre-existing element keeps this shape unchanged. This is
-  // the origin used for frame control-plane checks and credential-injection
-  // boundaries, independently of the top page's origin. See
-  // assertFrameTargetAllowed / assertSecretFrameTargetAllowed in
-  // provision-session.ts.
+  // the origin used for the x=s / x=x compact fact and for stale-target
+  // checks; it is metadata only, never a reachability gate.
   frameOrigin?: string | null;
   frameUrl?: string | null;
   framePath?: string | null;
-  frameOpaque?: boolean;
 }
 
 // T38 — pure clustering logic. Identifies card-radio groups from a
