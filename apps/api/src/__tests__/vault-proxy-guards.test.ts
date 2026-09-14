@@ -227,18 +227,4 @@ describe("HttpProxyExecutor.execute guards", () => {
     });
     expect(await asyncCode(executor.execute({ accountId: "a", http: { method: "GET", url: "https://x.com/" }, fields: ONE }))).toBe("unsupported_response_type");
   });
-
-  it("enforces a per-account concurrency cap", async () => {
-    let release!: () => void;
-    const gate = new Promise<void>((r) => { release = r; });
-    const executor = new HttpProxyExecutor({
-      concurrencyPerAccount: 1,
-      lookup: async () => ({ address: "203.0.113.5", family: 4 }),
-      dispatch: async () => { await gate; return { status: 200, headers: { "content-type": "text/plain" }, body: "ok", truncated: false }; },
-    });
-    const first = executor.execute({ accountId: "a", http: { method: "GET", url: "https://x.com/" }, fields: ONE });
-    expect(await asyncCode(executor.execute({ accountId: "a", http: { method: "GET", url: "https://x.com/" }, fields: ONE }))).toBe("concurrency_limit");
-    release();
-    await first;
-  });
 });

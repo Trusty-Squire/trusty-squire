@@ -16,7 +16,7 @@
 //   - https-only, hostname resolved once + IP pinned (no rebinding),
 //     post-resolution IP checked against private/link-local/CGNAT/NAT64
 //   - response Content-Length cap (pre-read + mid-stream), MIME allowlist,
-//     Set-Cookie stripped, per-account in-flight concurrency cap
+//     Set-Cookie stripped
 
 import { lookup as dnsLookup } from "node:dns";
 import { request as httpsRequest } from "node:https";
@@ -62,7 +62,6 @@ export type ProxyErrorCode =
   | "invalid_url"
   | "blocked_address"
   | "dns_failed"
-  | "concurrency_limit"
   | "response_too_large"
   | "unsupported_response_type"
   | "upstream_error"
@@ -269,7 +268,6 @@ export interface HttpProxyExecutorOptions {
   maxResponseBytes?: number;
   headersTimeoutMs?: number;
   bodyTimeoutMs?: number;
-  concurrencyPerAccount?: number;
 }
 
 export class HttpProxyExecutor {
@@ -280,8 +278,6 @@ export class HttpProxyExecutor {
   private readonly maxResponseBytes: number;
   private readonly headersTimeoutMs: number;
   private readonly bodyTimeoutMs: number;
-  private readonly concurrencyPerAccount: number;
-  private readonly inFlight = new Map<string, number>();
 
   constructor(opts: HttpProxyExecutorOptions = {}) {
     this.lookup = opts.lookup ?? defaultLookup;
@@ -291,7 +287,6 @@ export class HttpProxyExecutor {
     this.maxResponseBytes = opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
     this.headersTimeoutMs = opts.headersTimeoutMs ?? 5000;
     this.bodyTimeoutMs = opts.bodyTimeoutMs ?? 5000;
-    this.concurrencyPerAccount = opts.concurrencyPerAccount ?? 4;
   }
 
   async execute(input: {
@@ -330,30 +325,25 @@ export class HttpProxyExecutor {
 
     const { address, family } = await this.resolveAndPin(url.hostname);
 
-    const slot = this.acquire(input.accountId);
-    try {
-      const hasUserAgent = Object.keys(resolved.headers ?? {}).some(
-        (k) => k.toLowerCase() === "user-agent",
-      );
-      const dispatched = await this.dispatch({
-        method: resolved.method,
-        url,
-        headers: {
-          ...(hasUserAgent ? {} : { "User-Agent": DEFAULT_USER_AGENT }),
-          ...resolved.headers,
-          host: url.host,
-        },
-        body: resolved.body,
-        pinnedAddress: address,
-        family,
-        maxResponseBytes: this.maxResponseBytes,
-        headersTimeoutMs: this.headersTimeoutMs,
-        bodyTimeoutMs: this.bodyTimeoutMs,
-      });
-      return this.sanitiseResponse(dispatched);
-    } finally {
-      slot();
-    }
+    const hasUserAgent = Object.keys(resolved.headers ?? {}).some(
+      (k) => k.toLowerCase() === "user-agent",
+    );
+    const dispatched = await this.dispatch({
+      method: resolved.method,
+      url,
+      headers: {
+        ...(hasUserAgent ? {} : { "User-Agent": DEFAULT_USER_AGENT }),
+        ...resolved.headers,
+        host: url.host,
+      },
+      body: resolved.body,
+      pinnedAddress: address,
+      family,
+      maxResponseBytes: this.maxResponseBytes,
+      headersTimeoutMs: this.headersTimeoutMs,
+      bodyTimeoutMs: this.bodyTimeoutMs,
+    });
+    return this.sanitiseResponse(dispatched);
   }
 
   private async resolveAndPin(
@@ -396,25 +386,6 @@ export class HttpProxyExecutor {
       );
     }
     return { status: d.status, headers, body: d.body, truncated: d.truncated };
-  }
-
-  private acquire(accountId: string): () => void {
-    const current = this.inFlight.get(accountId) ?? 0;
-    if (current >= this.concurrencyPerAccount) {
-      throw new ProxyError(
-        "concurrency_limit",
-        `too many concurrent proxy calls for this account (max ${this.concurrencyPerAccount})`,
-      );
-    }
-    this.inFlight.set(accountId, current + 1);
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      const n = (this.inFlight.get(accountId) ?? 1) - 1;
-      if (n <= 0) this.inFlight.delete(accountId);
-      else this.inFlight.set(accountId, n);
-    };
   }
 }
 
