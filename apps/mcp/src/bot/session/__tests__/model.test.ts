@@ -56,8 +56,6 @@ describe("createSession", () => {
     }
 
     // Every overlay starts unset — no payment, replay, cart or teardown state.
-    expect(session.prevObserve).toBeNull();
-    expect(session.observeSnapshotFile).toBeNull();
     expect(session.compactV2Index).toBeNull();
     expect(session.compactV2Previous).toBeNull();
     expect(session.activePayment).toBeNull();

@@ -11,7 +11,6 @@ import {
   observe,
   observeQuery,
   observeSubtree,
-  parseElementsTable,
   paymentSession,
   startHarnessProvisionSession,
 } from "../provision-session.js";
@@ -71,7 +70,8 @@ describe("direct card injection and masked observation", () => {
           serviceUrl: topUrl,
         });
         sessionId = started.session_id;
-        const panRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+        const rows = started.safe_table as unknown as Array<[string, string, string?]>;
+        const panRef = rows.find(([, , facts]) => facts?.includes("f=card_number"))?.[0];
         if (panRef === undefined) throw new Error("missing public PAN field ref");
         paymentSession(sessionId).releasedPaymentCard = {
           approvalId: "approval_same_purchase",
@@ -166,7 +166,6 @@ describe("direct card injection and masked observation", () => {
         const started = await startHarnessProvisionSession({
           browser: controller,
           serviceUrl: topUrl,
-          format: "full",
           format: "full",
         });
         sessionId = started.session_id;
