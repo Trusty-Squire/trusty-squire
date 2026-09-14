@@ -9,8 +9,6 @@ import type { Buffer } from "node:buffer";
 import {
   CredentialSlotConflictError,
   VAULT_AUDIT_TYPES,
-  attributedVaultAuditPayload,
-  unattributedVaultAuditAttribution,
   type CredentialRecord,
   type CredentialStore,
 } from "@trusty-squire/vault";
@@ -175,25 +173,18 @@ export class PrismaCredentialStore implements CredentialStore {
       }
 
       for (const candidate of collapsed) {
-        const auditId = ulid();
         await tx.vaultAuditEvent.create({
           data: {
-            id: auditId,
+            id: ulid(),
             account_id: accountId,
             type: VAULT_AUDIT_TYPES.collapsed,
-            payload: attributedVaultAuditPayload(
-              {
-                reference: candidate.reference,
-                collapsed_into: survivor.reference,
-                requester: "system",
-                service: survivor.service,
-                label,
-                purpose: "credential.deduplicate",
-                attribution: unattributedVaultAuditAttribution("credential.deduplicate"),
-              },
-              VAULT_AUDIT_TYPES.collapsed,
-              auditId,
-            ),
+            payload: {
+              reference: candidate.reference,
+              collapsed_into: survivor.reference,
+              requester: "system",
+              service: survivor.service,
+              label,
+            },
             emitted_at: deletedAt,
           },
         });

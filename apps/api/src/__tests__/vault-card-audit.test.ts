@@ -78,11 +78,7 @@ describe("card / payment / grant events on the vault audit trail", () => {
     const create = await server.inject({
       method: "POST",
       url: "/v1/vault/e2e",
-      headers: {
-        cookie: webCookie,
-        "x-squire-task-id": "task-card-store",
-        "x-squire-invocation-id": "invoke-card-store",
-      },
+      headers: { cookie: webCookie },
       payload: {
         label: "Personal Visa",
         blob: '{ "ciphertext": "synthetic-sealed" }',
@@ -96,11 +92,7 @@ describe("card / payment / grant events on the vault audit trail", () => {
     const remove = await server.inject({
       method: "DELETE",
       url: `/v1/vault/e2e/${id}`,
-      headers: {
-        cookie: webCookie,
-        "x-squire-task-id": "task-card-delete",
-        "x-squire-invocation-id": "invoke-card-delete",
-      },
+      headers: { cookie: webCookie },
     });
     expect(remove.statusCode).toBe(204);
 
@@ -113,22 +105,12 @@ describe("card / payment / grant events on the vault audit trail", () => {
       label: "Personal Visa",
       brand: "Visa",
       last4: "4242",
-      attribution: {
-        task_id: "task-card-store",
-        invocation_id: "invoke-card-store",
-        purpose: "card.store",
-      },
     });
     expect(deleted).toMatchObject({
       reference: `card://${id}`,
       requester: "user",
       label: "Personal Visa",
       last4: "4242",
-      attribution: {
-        task_id: "task-card-delete",
-        invocation_id: "invoke-card-delete",
-        purpose: "card.delete",
-      },
     });
     // The sealed blob never reaches the audit trail.
     expect(JSON.stringify(events)).not.toContain("synthetic-sealed");
@@ -138,11 +120,7 @@ describe("card / payment / grant events on the vault audit trail", () => {
     const res = await server.inject({
       method: "POST",
       url: "/v1/vault/payments/audit",
-      headers: {
-        authorization: `Bearer ${agentToken}`,
-        "x-squire-task-id": "task-payment-audit",
-        "x-squire-invocation-id": "invoke-payment-audit",
-      },
+      headers: { authorization: `Bearer ${agentToken}` },
       payload: {
         merchant: "Synthetic Books",
         amountCents: 1234,
@@ -162,11 +140,6 @@ describe("card / payment / grant events on the vault audit trail", () => {
       currency: "USD",
       last4: "4242",
       payment_status: "approved",
-      attribution: {
-        task_id: "task-payment-audit",
-        invocation_id: "invoke-payment-audit",
-        purpose: "payment.audit",
-      },
     });
     expect(String(payment!.reference)).toMatch(/^pay:\/\//);
   });
@@ -264,11 +237,7 @@ describe("card / payment / grant events on the vault audit trail", () => {
     const mint = await server.inject({
       method: "POST",
       url: "/v1/egress/grants",
-      headers: {
-        authorization: `Bearer ${agentToken}`,
-        "x-squire-task-id": "task-grant-mint",
-        "x-squire-invocation-id": "invoke-grant-mint",
-      },
+      headers: { authorization: `Bearer ${agentToken}` },
       payload: { reference },
     });
     expect(mint.statusCode).toBe(201);
@@ -277,11 +246,7 @@ describe("card / payment / grant events on the vault audit trail", () => {
     const revoke = await server.inject({
       method: "DELETE",
       url: `/v1/egress/grants/${grantId}`,
-      headers: {
-        authorization: `Bearer ${agentToken}`,
-        "x-squire-task-id": "task-grant-revoke",
-        "x-squire-invocation-id": "invoke-grant-revoke",
-      },
+      headers: { authorization: `Bearer ${agentToken}` },
     });
     expect(revoke.statusCode).toBe(200);
 
@@ -290,23 +255,11 @@ describe("card / payment / grant events on the vault audit trail", () => {
       reference,
       requester: "agent",
       grant_id: grantId,
-      attribution: {
-        task_id: "task-grant-mint",
-        agent_identity: "synthetic-test-agent",
-        invocation_id: "invoke-grant-mint",
-        purpose: "egress.grant_mint",
-      },
     });
     expect(events.find((e) => e.type === "vault.grant_revoked")).toMatchObject({
       reference,
       requester: "agent",
       grant_id: grantId,
-      attribution: {
-        task_id: "task-grant-revoke",
-        agent_identity: "synthetic-test-agent",
-        invocation_id: "invoke-grant-revoke",
-        purpose: "egress.grant_revoke",
-      },
     });
     // The grant's bearer token never lands on the audit trail.
     const token = (mint.json() as { token: string }).token;

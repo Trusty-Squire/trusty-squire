@@ -184,10 +184,6 @@ interface CredentialMutationApprovalRow {
   nonce: string;
   agent: string;
   requester_kind: string;
-  audit_task_id: string | null;
-  audit_agent_identity: string | null;
-  audit_invocation_id: string | null;
-  audit_purpose: string | null;
   intent_hash: string;
   status: string;
   failure_code: string | null;
@@ -208,10 +204,6 @@ interface CredentialFetchApprovalRow {
   nonce: string;
   agent: string;
   requester_kind: string;
-  audit_task_id: string | null;
-  audit_agent_identity: string | null;
-  audit_invocation_id: string | null;
-  audit_purpose: string | null;
   intent_hash: string;
   status: string;
   failure_code: string | null;

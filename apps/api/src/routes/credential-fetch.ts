@@ -45,8 +45,8 @@ import { z } from "zod";
 import {
   CredentialFieldsChangedError,
   CredentialNotFoundError,
-  VAULT_REVEAL_PURPOSE,
   VaultRateLimitError,
+  unattributedVaultAuditAttribution,
 } from "@trusty-squire/vault";
 import type { ApiDeps } from "../services/deps.js";
 import { resolveCredentialForAccount } from "../services/credential-resolution.js";
@@ -63,7 +63,6 @@ import {
 } from "../services/approval-ceremony.js";
 import { sendTelegramMessage } from "../services/telegram.js";
 import { authenticatedRequester } from "../services/requesting-agent.js";
-import { requestAuditAttribution } from "../services/vault-audit-attribution.js";
 import {
   CREDENTIAL_FETCH_VOUCH_CONTEXT,
   createVouchMandateVerifier,
@@ -280,8 +279,6 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
 
     const agent = authenticatedRequester(auth);
     const requesterKind = auth.kind;
-    const auditPurpose = VAULT_REVEAL_PURPOSE;
-    const auditAttribution = requestAuditAttribution(req, "fetch_credential", auditPurpose);
     const intentHash = hashVouchPayload({
       agent,
       credential_reference: credential.reference,
@@ -310,8 +307,6 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
       nonce: randomBytes(16).toString("base64url"),
       agent,
       requesterKind,
-      auditAttribution,
-      auditPurpose,
       intentHash,
       expiresAt: new Date(now.getTime() + APPROVAL_TTL_MS),
     });
@@ -401,7 +396,7 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
           // carries. If approval on someone else's behalf is ever allowed, the
           // approver has to be persisted on the record and read from there.
           record.accountId,
-          record.auditAttribution,
+          unattributedVaultAuditAttribution("reveal"),
         );
       } catch (error) {
         // Everything below this point has already BURNED the single-use

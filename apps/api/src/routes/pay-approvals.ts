@@ -18,7 +18,6 @@ import {
 } from "../services/vouch-mandate.js";
 import { authenticatedRequester } from "../services/requesting-agent.js";
 import { VAULT_AUDIT_TYPES } from "@trusty-squire/vault";
-import { requestAuditAttribution } from "../services/vault-audit-attribution.js";
 
 // Web base for the approval link sent to Telegram. Reuses PWA_BASE_URL
 // (the same override server.ts's defaultPwaBaseUrl() reads) if set, else
@@ -348,11 +347,6 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         reference: `pay://${id}`,
         requester: "agent",
         purpose: "payment.approval.create",
-        attribution: requestAuditAttribution(
-          req,
-          "payment.approval.create",
-          "payment.approval.create",
-        ),
         approval_id: id,
         merchant: parsed.data.merchant,
         amount_cents: parsed.data.amount_cents,

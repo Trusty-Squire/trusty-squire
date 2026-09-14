@@ -14,7 +14,6 @@
 // and no value.
 
 import { ulid } from "ulid";
-import type { VaultAuditAttribution } from "@trusty-squire/vault";
 
 export type CredentialFetchApprovalStatus =
   | "pending"
@@ -36,18 +35,11 @@ export interface CredentialFetchApprovalInput {
   nonce: string;
   agent: string;
   requesterKind: CredentialFetchRequesterKind;
-  auditAttribution?: VaultAuditAttribution;
-  auditPurpose?: string;
   intentHash: string;
   expiresAt: Date;
 }
 
-export interface CredentialFetchApprovalRecord extends Omit<
-  CredentialFetchApprovalInput,
-  "auditAttribution" | "auditPurpose"
-> {
-  auditAttribution: VaultAuditAttribution;
-  auditPurpose: string;
+export interface CredentialFetchApprovalRecord extends CredentialFetchApprovalInput {
   id: string;
   accountId: string;
   status: CredentialFetchApprovalStatus;
@@ -111,12 +103,6 @@ export class InMemoryCredentialFetchApprovalStore implements CredentialFetchAppr
       id,
       accountId,
       ...cloneInput(input),
-      auditAttribution: approvalAuditAttribution(
-        input.auditAttribution,
-        input.agent,
-        input.auditPurpose ?? input.auditAttribution?.purpose ?? "reveal",
-      ),
-      auditPurpose: input.auditPurpose ?? input.auditAttribution?.purpose ?? "reveal",
       status: "pending",
       failureCode: null,
       mandateId: null,
@@ -219,21 +205,5 @@ function cloneRecord(record: CredentialFetchApprovalRecord): CredentialFetchAppr
     createdAt: new Date(record.createdAt),
     approvedAt: record.approvedAt === null ? null : new Date(record.approvedAt),
     deliveredAt: record.deliveredAt === null ? null : new Date(record.deliveredAt),
-  };
-}
-
-function approvalAuditAttribution(
-  attribution: VaultAuditAttribution | undefined,
-  agent: string,
-  purpose: string,
-): VaultAuditAttribution {
-  const taskId = attribution?.task_id ?? null;
-  const invocationId = attribution?.invocation_id ?? null;
-  return {
-    task_id: taskId,
-    agent_identity: attribution?.agent_identity ?? agent,
-    invocation_id: invocationId,
-    purpose: attribution?.purpose ?? purpose,
-    ...(taskId === null || invocationId === null ? { caller_missing: true } : {}),
   };
 }

@@ -19,6 +19,7 @@ import {
   CredentialNotFoundError,
   VAULT_AUDIT_TYPES,
   type CredentialRecord,
+  unattributedVaultAuditAttribution,
 } from "@trusty-squire/vault";
 import type { ApiDeps } from "../services/deps.js";
 import { HttpProxyExecutor, ProxyError } from "../services/http-proxy.js";
@@ -36,7 +37,6 @@ import {
   notifyVaultAuditAfterCommit,
   recordVaultAuditAfterPersist,
 } from "../services/vault-notify.js";
-import { requestAuditAttribution } from "../services/vault-audit-attribution.js";
 
 const mintBody = z
   .object({
@@ -249,8 +249,6 @@ export const registerEgressRoutes: FastifyPluginAsync<{
       payload: {
         reference: selected.reference,
         requester: "agent",
-        purpose: "egress.grant_mint",
-        attribution: requestAuditAttribution(req, "vault.egress.grant_mint", "egress.grant_mint"),
         grant_id: grant.id,
         label: selected.label,
         ...(typeof selected.metadata.service === "string"
@@ -325,12 +323,6 @@ export const registerEgressRoutes: FastifyPluginAsync<{
         payload: {
           reference: existing.credential_ref,
           requester: "agent",
-          purpose: "egress.grant_revoke",
-          attribution: requestAuditAttribution(
-            req,
-            "vault.egress.grant_revoke",
-            "egress.grant_revoke",
-          ),
           grant_id: req.params.id,
           ...(credential !== null ? { label: credential.label } : {}),
           ...(typeof credential?.metadata.service === "string"
@@ -506,14 +498,7 @@ export const registerEgressRoutes: FastifyPluginAsync<{
           {
             purpose: "egress_proxy",
             grant_id: grant.id,
-            attribution: {
-              task_id: null,
-              agent_identity: null,
-              invocation_id: grant.id,
-              grant_id: grant.id,
-              purpose: "egress_proxy",
-              caller_missing: true,
-            },
+            attribution: unattributedVaultAuditAttribution("egress_proxy"),
           },
         );
         reply.code(response.status).send(response.body);
