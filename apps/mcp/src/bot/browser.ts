@@ -150,6 +150,10 @@ export interface CheckoutSummary {
   checkout_origin: string;
   amount_cents: number;
   currency: string;
+  // Set when sibling checkout frames render a different total/currency than
+  // the one reported. A read-only report: the discrepancy is surfaced, never
+  // a refusal that could block the purchase.
+  total_conflict?: boolean;
 }
 
 export interface CheckoutReviewSummary extends CheckoutSummary {
@@ -6366,17 +6370,14 @@ export class BrowserController {
       .filter((amount): amount is NonNullable<typeof amount> => amount !== null);
     const amount = mainAmount ?? childAmounts[0] ?? null;
     if (amount === null) throw new Error("payment_checkout_total_not_found");
-    if (
-      childAmounts.some(
-        (child) => child.amount_cents !== amount.amount_cents || child.currency !== amount.currency,
-      )
-    ) {
-      throw new Error("payment_checkout_total_conflict");
-    }
+    const totalConflict = childAmounts.some(
+      (child) => child.amount_cents !== amount.amount_cents || child.currency !== amount.currency,
+    );
     return {
       merchant: merchantFromPage(identity.title, identity.siteName, page.url()),
       checkout_origin: new URL(page.url()).origin,
       ...amount,
+      ...(totalConflict ? { total_conflict: true } : {}),
     };
   }
 
