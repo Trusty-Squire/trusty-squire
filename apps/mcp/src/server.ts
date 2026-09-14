@@ -4,7 +4,6 @@ import { BrokerRefusal } from "./bot/broker/refusal.js";
 import {
   ForwardedResultError,
   OperatorForwarder,
-  type BrokerRecoveryRequest,
 } from "./bot/broker/forwarder.js";
 // MCP server: reads its account's session from the session file, sets up an ApiClient
 // against the configured API base URL, and exposes the registered tools
@@ -123,12 +122,6 @@ export interface ServerCallLifecycle {
 export interface ServerCallAdmission extends ServerCallLifecycle {
   closeAndDrain(): Promise<void>;
   inFlightCount(): number;
-}
-
-export function brokerRecoveryRequested(meta: unknown): BrokerRecoveryRequest {
-  if (meta === null || typeof meta !== "object") return {};
-  const value = (meta as Record<string, unknown>)["trusty-squire/recover"];
-  return value === true ? { recover: true } : {};
 }
 
 // `connect` may complete while the host's stdio server is already running.
@@ -318,7 +311,6 @@ export async function buildServer(
             tool.name,
             parsed.data,
             String(extra.requestId),
-            brokerRecoveryRequested((req.params as { _meta?: unknown })._meta),
             composed.signal,
             notifyUser,
           )

@@ -76,7 +76,6 @@ function isUnavailable(error: unknown): boolean {
 async function waitForBroker(
   path: string,
   token: string,
-  lineageCredential: string | undefined,
   failure?: () => Error | undefined,
 ): Promise<BrokerClient> {
   const deadline = Date.now() + BROKER_CONNECT_TIMEOUT_MS;
@@ -84,7 +83,7 @@ async function waitForBroker(
     const launchFailure = failure?.();
     if (launchFailure !== undefined) throw launchFailure;
     try {
-      return await BrokerClient.connect(path, token, lineageCredential);
+      return await BrokerClient.connect(path, token);
     } catch (error) {
       if (!isUnavailable(error)) throw error;
     }
@@ -97,21 +96,16 @@ async function waitForBroker(
 }
 
 export function brokerEnvironment(env: NodeJS.ProcessEnv, path: string): NodeJS.ProcessEnv {
-  const brokerEnv = { ...env };
-  delete brokerEnv.TRUSTY_SQUIRE_FORWARDER_CREDENTIAL;
-  return { ...brokerEnv, TRUSTY_SQUIRE_BROKER_SOCKET: path };
+  return { ...env, TRUSTY_SQUIRE_BROKER_SOCKET: path };
 }
 
 
 export async function connectOrLaunchBroker(
   path: string,
   token: string,
-  lineageCredential?: string,
 ): Promise<BrokerClient> {
   try {
-    const health = await BrokerClient.connect(path, token);
-    await health.close();
-    return await BrokerClient.connect(path, token, lineageCredential);
+    return await BrokerClient.connect(path, token);
   } catch (error) {
     // A socket with no live listener is a dead predecessor's orphan; the new
     // broker's own bind reclaims it (probe -> unlink -> bind).
@@ -119,26 +113,23 @@ export async function connectOrLaunchBroker(
   }
 
   const profileDir = profilePathIdentity(CHROME_PROFILE_DIR);
-  if (await brokerElectionIsHeld(profileDir))
-    return await waitForBroker(path, token, lineageCredential);
+  if (await brokerElectionIsHeld(profileDir)) return await waitForBroker(path, token);
   let launchLease: ProfileOperationLease;
   try {
     const launchRoot = brokerLaunchRoot(profileDir);
     await mkdir(launchRoot, { recursive: true, mode: 0o700 });
     launchLease = acquireProfileOperationGuard(profileDir, launchRoot);
   } catch (error) {
-    if (error instanceof ProfileBusyError)
-      return await waitForBroker(path, token, lineageCredential);
+    if (error instanceof ProfileBusyError) return await waitForBroker(path, token);
     throw error;
   }
   try {
     try {
-      return await BrokerClient.connect(path, token, lineageCredential);
+      return await BrokerClient.connect(path, token);
     } catch (error) {
       if (!isUnavailable(error)) throw error;
     }
-    if (await brokerElectionIsHeld(profileDir))
-      return await waitForBroker(path, token, lineageCredential);
+    if (await brokerElectionIsHeld(profileDir)) return await waitForBroker(path, token);
     const child = spawn(
       process.execPath,
       [fileURLToPath(new URL("../../bin.js", import.meta.url)), "broker"],
@@ -159,7 +150,7 @@ export async function connectOrLaunchBroker(
       );
     });
     child.unref();
-    return await waitForBroker(path, token, lineageCredential, () => failure);
+    return await waitForBroker(path, token, () => failure);
   } finally {
     launchLease.release();
   }

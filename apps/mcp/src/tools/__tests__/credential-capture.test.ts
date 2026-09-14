@@ -1,7 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DispatchJournal } from "../../bot/broker/dispatch-journal.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ProvisionSession from "../../bot/provision-session.js";
 import type { ApiClient } from "../../api-client.js";
@@ -24,10 +23,8 @@ const capture = {
   source: { role: "textbox", name: "API key", container: { role: "dialog" } },
 };
 let root: string;
-let journal: DispatchJournal;
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "capture-review-"));
-  journal = new DispatchJournal(join(root, "journal.jsonl"));
   state.action.mockReset();
   state.capture.mockReset();
   state.action.mockImplementation(async () => {
@@ -61,12 +58,7 @@ async function click(client: ApiClient) {
         client,
       ),
     undefined,
-    {
-      operationId: "create-one",
-      onCapture: async (evidence, recovery) => {
-        await journal.recordCapture("lineage", "session", "create-one", evidence, recovery);
-      },
-    },
+    { operationId: "create-one" },
   );
 }
 describe("explicit mutation capture", () => {
@@ -117,20 +109,6 @@ describe("explicit mutation capture", () => {
       candidate_count: 2,
       write_id: "create-one",
     });
-    await journal.acknowledge("lineage", "create-one");
-    // Non-recovery capture records stay append-only: a new write identity is
-    // journalled, not refused.
-    await journal.recordCapture(
-      "lineage",
-      "session",
-      "new",
-      {
-        write_id: "new",
-        stored: false,
-        storage: "unknown",
-      },
-      false,
-    );
     expect(store).not.toHaveBeenCalled();
     expect(state.action).toHaveBeenCalledOnce();
   });
@@ -157,11 +135,7 @@ describe("explicit mutation capture", () => {
           api(store),
         ),
       undefined,
-      {
-        operationId: "extract-retry",
-        onCapture: async (evidence, recovery) =>
-          await journal.recordCapture("lineage", "session", "extract-retry", evidence, recovery),
-      },
+      { operationId: "extract-retry" },
     );
     expect(retry).toMatchObject({ stored: true });
     expect(state.action).toHaveBeenCalledOnce();
@@ -227,11 +201,7 @@ describe("explicit mutation capture", () => {
           api(store),
         ),
       undefined,
-      {
-        operationId: "extract-retry",
-        onCapture: async (evidence, recovery) =>
-          await journal.recordCapture("lineage", "session", "extract-retry", evidence, recovery),
-      },
+      { operationId: "extract-retry" },
     );
     expect(state.capture).toHaveBeenLastCalledWith("session", source);
     expect(state.action).toHaveBeenCalledOnce();
@@ -305,7 +275,7 @@ describe("explicit mutation capture", () => {
       ),
     ).rejects.toThrow("extraction-only recovery");
   });
-  it("journals unresolved action identity and preserves human outcome booleans", async () => {
+  it("preserves human outcome booleans on an unresolved action identity", async () => {
     state.action.mockImplementation(async () => {
       await markOperatorMutationDispatchAttempted();
       return { needs_user: true, acknowledged: false };
@@ -317,30 +287,6 @@ describe("explicit mutation capture", () => {
       action_result: { needs_user: true, acknowledged: false },
       retry: "extract_only",
     });
-    await journal.acknowledge("lineage", "create-one");
-    await expect(
-      journal.recordCapture(
-        "lineage",
-        "session",
-        "recovery",
-        {
-          write_id: "create-one",
-          binding: "other-service",
-          stored: false,
-          storage: "unknown",
-        },
-        true,
-      ),
-    ).rejects.toThrow("original service-bound");
-    await expect(
-      provisionExtractTool.handler(
-        provisionExtractTool.inputSchema.parse({
-          session_id: "session",
-          capture: { ...capture, write_id: "guessed" },
-        }),
-        api(vi.fn()),
-      ),
-    ).rejects.toThrow("recorded write identity");
   });
   it("leaves ordinary action results unredacted", async () => {
     expect(await operateClickTool.handler({ session_id: "session", ref: "@create" }, null)).toEqual(

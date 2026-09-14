@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -10,32 +10,23 @@ import { withBrokerMaintenance } from "../broker/maintenance.js";
 import { BrokerClient, listenBroker } from "../broker/transport.js";
 
 describe("plain-login broker maintenance", () => {
-  it("drains before running plain login, retains the connection, and resumes even when login fails", async () => {
+  it("closes Chrome before plain login, retains the connection, and resumes even when login fails", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-maint-"));
     const path = join(root, "b.sock");
     const events: string[] = [];
-    const maintenanceCredentials: string[] = [];
-    let probes = 0;
     const broker = await listenBroker(path, {
-      authenticate: async (token, _agentId, lineageCredential) => {
-        if (token !== "test" || lineageCredential === undefined) return null;
-        maintenanceCredentials.push(lineageCredential);
-        return { accountId: "account", agentId: "connect" };
-      },
+      authenticate: async (token) => (token === "test" ? { accountId: "account", agentId: "connect" } : null),
       call: async (_principal, method) => {
         events.push(method);
-        return {
-          state: method === "maintenance" ? (++probes === 1 ? "draining" : "ready") : "resumed",
-        };
+        return { state: method === "maintenance" ? "ready" : "resumed" };
       },
       disconnect: async () => {
         events.push("disconnect");
       },
     });
     vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", path);
-    vi.stubEnv("TRUSTY_SQUIRE_FORWARDER_CREDENTIAL", undefined);
     try {
-      await expect(BrokerClient.connect(path, "invalid", "b".repeat(43))).rejects.toThrow(
+      await expect(BrokerClient.connect(path, "invalid")).rejects.toThrow(
         "Invalid broker credential",
       );
       await expect(
@@ -49,9 +40,34 @@ describe("plain-login broker maintenance", () => {
       await broker.close();
       await rm(root, { recursive: true, force: true });
     }
-    expect(events).toEqual(["maintenance", "maintenance", "plain-login", "resume", "disconnect"]);
-    expect(maintenanceCredentials).toHaveLength(1);
-    expect(maintenanceCredentials[0]).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(events).toEqual(["maintenance", "plain-login", "resume", "disconnect"]);
+  });
+
+  it("refuses plain login while live sessions still own the browser", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-maint-busy-"));
+    const path = join(root, "b.sock");
+    const events: string[] = [];
+    const broker = await listenBroker(path, {
+      authenticate: async () => ({ accountId: "account", agentId: "connect" }),
+      call: async (_principal, method) => {
+        events.push(method);
+        return { state: "draining" };
+      },
+      disconnect: async () => {
+        events.push("disconnect");
+      },
+    });
+    vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", path);
+    try {
+      await expect(withBrokerMaintenance(async () => "plain-login")).rejects.toThrow(
+        "Active workflows still own the browser",
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      await broker.close();
+      await rm(root, { recursive: true, force: true });
+    }
+    expect(events).toEqual(["maintenance", "disconnect"]);
   });
 });
 
@@ -72,7 +88,6 @@ it("runs plain login over an endpoint whose broker no longer answers", async () 
     });
   });
   vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", path);
-  vi.stubEnv("TRUSTY_SQUIRE_FORWARDER_CREDENTIAL", undefined);
   vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profile);
   try {
     vi.resetModules();
@@ -81,6 +96,18 @@ it("runs plain login over an endpoint whose broker no longer answers", async () 
   } finally {
     vi.unstubAllEnvs();
     server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("runs plain login without a broker endpoint", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ts-maint-none-"));
+  vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", join(root, "absent.sock"));
+  try {
+    expect(await lstat(join(root, "absent.sock")).catch(() => null)).toBeNull();
+    await expect(withBrokerMaintenance(async () => "plain-login")).resolves.toBe("plain-login");
+  } finally {
+    vi.unstubAllEnvs();
     await rm(root, { recursive: true, force: true });
   }
 });

@@ -1,12 +1,7 @@
 import { brokerNotifier } from "./transport.js";
-import { captureEvidenceSchema, type CaptureEvidence } from "../credential-capture.js";
 import { withBrokerAdmission } from "./admission-context.js";
 import { brokerBrowserCustody } from "./custody.js";
-import type {
-  DispatchJournal,
-  ReconciledDispatchOutcome,
-} from "./dispatch-journal.js";
-import { timingSafeEqual, createHash, createHmac } from "node:crypto";
+import { timingSafeEqual, createHash } from "node:crypto";
 import { z } from "zod";
 import { ApiClient, type ApiClientConfig } from "../../api-client.js";
 import { buildToolRegistry, findTool } from "../../tools/index.js";
@@ -24,7 +19,6 @@ import {
 import { BrokerAuthority, type BrokerPrincipal } from "./authority.js";
 import { BrokerRefusal } from "./refusal.js";
 import type { BrokerTransportPort } from "./transport.js";
-import { forwarderId } from "./lineage.js";
 import { provenPreDispatchMutationFailure } from "../mutation-dispatch-evidence.js";
 import { withOperatorRequestContext } from "../request-cancellation.js";
 
@@ -47,7 +41,6 @@ const callSchema = z
     capability: z.string().optional(),
   })
   .strict();
-const recoverySchema = callSchema.extend({ requestId: z.string().min(1).optional() });
 function remapSession(value: unknown, from: string, to: string): unknown {
   if (Array.isArray(value)) return value.map((item) => remapSession(item, from, to));
   if (value !== null && typeof value === "object")
@@ -58,47 +51,6 @@ function remapSession(value: unknown, from: string, to: string): unknown {
       ]),
     );
   return value;
-}
-
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (value !== null && typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    return `{${Object.keys(record)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
-}
-
-function journalForwarderId(principal: BrokerPrincipal): string {
-  if (principal.forwarderId === undefined)
-    throw new BrokerRefusal("unauthorized", "Forwarder lineage is required for journal custody");
-  return principal.forwarderId;
-}
-
-function dispatchDetail(
-  principal: BrokerPrincipal,
-  operation: string,
-  inputHashValue: string,
-  start = false,
-  dispatchTracked = false,
-) {
-  return {
-    forwarderId: journalForwarderId(principal),
-    ...(start ? { start: true as const } : {}),
-    operation,
-    inputHash: inputHashValue,
-    ...(dispatchTracked ? { dispatchTracked: true as const } : {}),
-  };
-}
-
-function brokerCommandDispatchTracked(name: string): boolean {
-  return (
-    name === "inject_card" ||
-    /^(?:operate_(?:login|click|type|select|press|navigate|fill_credential|recipe_run))$/.test(name)
-  );
 }
 
 function isOperatorCommand(name: string): boolean {
@@ -114,42 +66,10 @@ async function withBrokerAuditContext<T>(
   return await api.withAuditContext({ taskId, invocationId, purpose: taskId }, operation);
 }
 
-export function reconciliationOutcome(
-  _operation: string,
-  result: unknown,
-): ReconciledDispatchOutcome {
-  if (result !== null && typeof result === "object" && "write_id" in result && "stored" in result) {
-    const stored = "stored_credential" in result ? result.stored_credential : undefined;
-    const capture = captureEvidenceSchema.safeParse({
-      write_id: result.write_id,
-      stored: result.stored,
-      storage: result.stored === true ? "stored" : "storage" in result ? result.storage : "unknown",
-      ...(stored !== null && typeof stored === "object" && "reference" in stored
-        ? { reference: stored.reference }
-        : {}),
-    });
-    if (capture.success && capture.data.storage === "not_attempted")
-      return { status: "not_dispatched", error: "pre_dispatch_failure", capture: capture.data };
-    if (capture.success)
-      return result.stored === true
-        ? { status: "completed", capture: capture.data }
-        : { status: "unknown", reason: "execution_error", capture: capture.data };
-  }
-  return { status: "completed" };
-}
-
-export function brokerCommandMutates(name: string, args: Record<string, unknown>): boolean {
-  return (
-    !["operate_observe", "operate_screenshot", "operate_network"].includes(name) &&
-    !(name === "operate_extract" && args.store === undefined && args.capture === undefined)
-  );
-}
-
 /** Existing handlers run inside the broker with a pinned API client and capability. */
 export class OperatorBroker implements BrokerTransportPort {
   readonly authority: BrokerAuthority;
   private readonly apis = new Map<string, ApiClient>();
-  private readonly inputBindingKeys = new Map<string, Buffer>();
   private readonly tools = buildToolRegistry();
   private readonly requestControllers = new Map<
     string,
@@ -159,10 +79,7 @@ export class OperatorBroker implements BrokerTransportPort {
   // evict them for capacity: that could resurrect a cancelled queued mutation.
   private readonly pendingCancellations = new Map<string, Set<string>>();
   private token: Buffer;
-  constructor(
-    private readonly config: ApiClientConfig & { accountId: string },
-    private readonly journal?: DispatchJournal,
-  ) {
+  constructor(private readonly config: ApiClientConfig & { accountId: string }) {
     this.authority = new BrokerAuthority(config.accountId);
     this.token = createHash("sha256").update(config.agentSessionToken).digest();
   }
@@ -170,7 +87,7 @@ export class OperatorBroker implements BrokerTransportPort {
     if (session.account_id !== this.config.accountId || !session.agent_session_token)
       throw new BrokerRefusal("account_mismatch", "Reconnect must preserve the enrolled account");
     const inventory = this.authority.inventory();
-    if (inventory.active || inventory.quarantined || inventory.admitting)
+    if (inventory.sessions || inventory.closing || inventory.admitting)
       throw new BrokerRefusal("maintenance", "Credential refresh requires drained sessions");
     this.config.agentSessionToken = session.agent_session_token;
     this.token = createHash("sha256").update(session.agent_session_token).digest();
@@ -179,27 +96,12 @@ export class OperatorBroker implements BrokerTransportPort {
   async authenticate(
     token: string,
     agentId?: string,
-    lineageCredential?: string,
   ): Promise<Omit<BrokerPrincipal, "clientId"> | null> {
     if (!timingSafeEqual(createHash("sha256").update(token).digest(), this.token)) return null;
-    if (lineageCredential === undefined) return null;
-    const id = forwarderId(lineageCredential);
-    this.inputBindingKeys.set(id, createHash("sha256").update(lineageCredential).digest());
     return {
       accountId: this.config.accountId,
       agentId: agentId ?? this.config.agentIdentity ?? "local-agent",
-      forwarderId: id,
     };
-  }
-  private inputHash(principal: BrokerPrincipal, input: unknown): string {
-    const forwarder = principal.forwarderId;
-    const key = forwarder === undefined ? undefined : this.inputBindingKeys.get(forwarder);
-    if (key === undefined)
-      throw new BrokerRefusal("unauthorized", "Forwarder input binding is not authenticated");
-    return createHmac("sha256", key).update(canonicalJson(input)).digest("hex");
-  }
-  connected(principal: BrokerPrincipal): Promise<void> | void {
-    return this.authority.claimForwarder(principal);
   }
   async call(
     principal: BrokerPrincipal,
@@ -273,44 +175,9 @@ export class OperatorBroker implements BrokerTransportPort {
     if (tool === null || !isOperatorCommand(tool.name))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
-    if (tool.name === "operate_finish" && typeof args.session_id === "string") {
-      const terminal = await this.journal?.terminalReceipt(
-        journalForwarderId(principal),
-        args.session_id,
-      );
-      if (terminal !== undefined)
-        return { result: { ...terminal, cleanup: "already_closed", url: "" } };
-    }
     const starting =
       tool.name === "operate_start" ||
       (tool.name === "operate_recipe_run" && args.session_id === undefined);
-    const dispatch = dispatchDetail(
-      principal,
-      tool.name,
-      this.inputHash(
-        principal,
-        typeof args.session_id === "string"
-          ? { name: tool.name, args }
-          : { name: tool.name, args, capability: input.capability },
-      ),
-      starting,
-      tool.name === "operate_recipe_run",
-    );
-    const completed = await this.journal?.completedOutcome(
-      journalForwarderId(principal),
-      requestId,
-      dispatch,
-    );
-    if (completed !== undefined)
-      return {
-        result: {
-          reconciliation: {
-            request_id: completed.requestId,
-            operation: completed.operation,
-            ...completed.outcome,
-          },
-        },
-      };
     if (requestSignal.aborted) throw requestSignal.reason;
     let api = this.apis.get(principal.clientId);
     if (api === undefined) {
@@ -328,59 +195,25 @@ export class OperatorBroker implements BrokerTransportPort {
         principal,
         async (id, signal) => {
           if (signal.aborted) throw new BrokerRefusal("cancelled", "Start cancelled");
-          const mutationCapableStart = tool.name === "operate_recipe_run";
-          let startDispatchAttempted = false;
-          if (mutationCapableStart) await this.journal?.record(id, requestId, "prepared", dispatch);
-          try {
-            observation = await withOperatorRequestContext(
-              signal,
-              async () =>
-                await withBrokerAdmission(
-                  { sessionId: id },
-                  async () =>
-                    await withBrokerAuditContext(
-                      pinnedApi,
-                      tool.name,
-                      requestId,
-                      async () => await tool.handler(args, pinnedApi),
-                    ),
-                ),
-              mutationCapableStart
-                ? async () => {
-                    await this.journal?.record(id, requestId, "dispatch_attempted", dispatch);
-                    startDispatchAttempted = true;
-                  }
-                : undefined,
-            );
-            if (signal.aborted) throw signal.reason ?? new Error("operator_request_cancelled");
-          } catch (error) {
-            if (mutationCapableStart) {
-              await this.journal?.record(
-                id,
-                requestId,
-                startDispatchAttempted ? "unknown" : "observed_result",
-                {
-                  ...dispatch,
-                  outcome: startDispatchAttempted
-                    ? {
-                        status: "unknown",
-                        reason: signal.aborted ? "cancelled" : "execution_error",
-                      }
-                    : {
-                        status: "not_dispatched",
-                        error: signal.aborted ? "cancelled" : "pre_dispatch_failure",
-                      },
-                },
-              );
-            }
-            throw error;
-          }
+          observation = await withOperatorRequestContext(
+            signal,
+            async () =>
+              await withBrokerAdmission(
+                { sessionId: id },
+                async () =>
+                  await withBrokerAuditContext(
+                    pinnedApi,
+                    tool.name,
+                    requestId,
+                    async () => await tool.handler(args, pinnedApi),
+                  ),
+              ),
+          );
+          if (signal.aborted) throw signal.reason ?? new Error("operator_request_cancelled");
           internalId = String((observation as { session_id: string }).session_id);
           const session = sessionForCall(internalId);
           if (session === undefined) {
             await finishProvisionSession(internalId);
-            if (mutationCapableStart)
-              await this.journal?.record(id, requestId, "settled", dispatch);
             return {
               targetId: "no-page",
               invoke: async () => {
@@ -390,11 +223,6 @@ export class OperatorBroker implements BrokerTransportPort {
               orphan: async () => undefined,
             };
           }
-          if (mutationCapableStart)
-            await this.journal?.record(id, requestId, "observed_result", {
-              ...dispatch,
-              outcome: reconciliationOutcome(tool.name, observation),
-            });
           targetId = await session.browser.brokerTargetId();
           return {
             targetId,
@@ -433,122 +261,31 @@ export class OperatorBroker implements BrokerTransportPort {
                       prepared as PreparedOAuthLoginTarget,
                       executeHandler,
                     );
-              const mutating = brokerCommandMutates(name, commandArgs);
-              const commandDispatch = dispatchDetail(
-                principal,
-                name,
-                this.inputHash(principal, { name, args: commandArgs }),
-                false,
-                brokerCommandDispatchTracked(name),
-              );
-              if (mutating) await this.journal?.record(id, commandId, "prepared", commandDispatch);
               let dispatchAttempted = false;
-              let captureEvidence: CaptureEvidence | undefined;
               const executeOwned = async () =>
                 await withOperatorRequestContext(
                   signal,
                   execute,
-                  mutating
-                    ? async () => {
-                        await this.journal?.record(
-                          id,
-                          commandId,
-                          "dispatch_attempted",
-                          commandDispatch,
-                        );
-                        dispatchAttempted = true;
-                      }
-                    : undefined,
+                  async () => {
+                    dispatchAttempted = true;
+                  },
                   {
                     operationId: commandId,
-                    onCapture: async (capture, recovery) => {
-                      await this.journal?.recordCapture(
-                        journalForwarderId(principal),
-                        id,
-                        commandId,
-                        capture,
-                        recovery,
-                        commandDispatch,
-                      );
-                      captureEvidence = capture;
-                    },
-                    onTerminalSettled: () => this.authority.retireFinished(principal, id),
-                    onTerminal: async (receipt) => {
-                      await this.journal?.recordTerminalReceipt(journalForwarderId(principal), {
-                        ...receipt,
-                        session_id: id,
-                      });
-                    },
+                    onTerminalSettled: () => this.authority.retire(principal, id),
                   },
                 );
-              let result: unknown;
               try {
-                result =
+                const result =
                   name === "operate_finish"
                     ? await executeOwned()
                     : await withProvisionSessionCall(internalId, executeOwned, signal);
-                // The handler returns only after its post-action observation.
-                // That observed result is stronger outcome evidence than a
-                // cancellation that arrived while the handler was settling.
+                return maskSessionOutput(session, remapSession(result, internalId, id));
               } catch (error) {
                 const preDispatch = provenPreDispatchMutationFailure(error);
-                if (mutating && !dispatchAttempted && preDispatch !== null) {
-                  await this.journal?.record(id, commandId, "observed_result", {
-                    ...commandDispatch,
-                    outcome: { status: "not_dispatched", error: preDispatch.code },
-                  });
+                if (!dispatchAttempted && preDispatch !== null)
                   return new DeliveredPreDispatchFailure(preDispatch.code);
-                }
-                const knownNotDispatched =
-                  mutating &&
-                  commandDispatch.dispatchTracked === true &&
-                  !dispatchAttempted &&
-                  (signal.aborted || name === "operate_recipe_run");
-                if (knownNotDispatched) {
-                  await this.journal?.record(id, commandId, "observed_result", {
-                    ...commandDispatch,
-                    outcome: {
-                      status: "not_dispatched",
-                      error: signal.aborted ? "cancelled" : "pre_dispatch_failure",
-                    },
-                  });
-                } else if (mutating) {
-                  await this.journal?.record(id, commandId, "unknown", {
-                    ...commandDispatch,
-                    outcome: {
-                      status: "unknown",
-                      reason: signal.aborted ? "cancelled" : "execution_error",
-                      ...(captureEvidence === undefined ? {} : { capture: captureEvidence }),
-                    },
-                  });
-                }
-                if (mutating) {
-                  const message = maskSessionOutput(
-                    session,
-                    error instanceof Error ? error.message : String(error),
-                  );
-                  const code =
-                    error instanceof BrokerRefusal ? error.code : "tool_execution_failed";
-                  const recovery = knownNotDispatched
-                    ? "operate_observe_then_retry"
-                    : "repeat_same_arguments_with_trusty-squire/recover=true_do_not_replay";
-                  throw new BrokerRefusal(
-                    code,
-                    `${message}; session_id=${id}; operation=${name}; operation_id=${commandId}; ` +
-                      `mutation=${knownNotDispatched ? "not_dispatched" : "unknown"}; recovery=${recovery}`,
-                  );
-                }
                 throw error;
               }
-              if (mutating)
-                await this.journal?.record(id, commandId, "observed_result", {
-                  ...commandDispatch,
-                  outcome: {
-                    ...reconciliationOutcome(name, result),
-                    ...(captureEvidence ? { capture: captureEvidence } : {}),
-                  },
-                });
-              return maskSessionOutput(session, remapSession(result, internalId, id));
             },
             close: async (reason) => {
               if (sessionForCall(internalId) === undefined) {
@@ -583,17 +320,6 @@ export class OperatorBroker implements BrokerTransportPort {
       if (targetId === "no-page") {
         await this.authority.close(principal, sessionId);
         return { result: remapSession(observation, internalId, sessionId) };
-      }
-      if (tool.name === "operate_start") {
-        try {
-          await this.journal?.record(sessionId, requestId, "outcome", {
-            ...dispatch,
-            outcome: { status: "completed" },
-          });
-        } catch (error) {
-          await this.authority.close(principal, sessionId);
-          throw error;
-        }
       }
       const result = remapSession(observation, internalId, sessionId) as Record<
         string,
@@ -638,112 +364,13 @@ export class OperatorBroker implements BrokerTransportPort {
       await this.authority.close(principal, sessionId, true);
     return { result };
   }
-  async recover(
-    principal: BrokerPrincipal,
-    params: Record<string, unknown>,
-  ): Promise<{
-    requestId: string;
-    capability?: string;
-    result:
-      | {
-          reconciliation: ReconciledDispatchOutcome & { request_id: string; operation: string };
-        }
-      | Record<string, unknown>;
-  } | null> {
-    const input = recoverySchema.parse(params);
-    const tool = findTool(input.name, this.tools);
-    if (tool === null || !isOperatorCommand(tool.name))
-      throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
-    const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
-    const sessionId = typeof args.session_id === "string" ? args.session_id : undefined;
-    const inputHash = this.inputHash(
-      principal,
-      sessionId !== undefined
-        ? { name: tool.name, args }
-        : { name: tool.name, args, capability: input.capability },
-    );
-    const completed =
-      input.requestId !== undefined
-        ? await this.journal?.completedOutcome(journalForwarderId(principal), input.requestId, {
-            operation: tool.name,
-            inputHash,
-          })
-        : await this.journal?.recoveryOutcome(
-            journalForwarderId(principal),
-            sessionId !== undefined
-              ? {
-                  operation: tool.name,
-                  sessionId,
-                  inputHash,
-                }
-              : {
-                  operation: tool.name,
-                  inputHash,
-                },
-          );
-    if (completed === undefined) return null;
-    if (completed.alreadySettled !== true)
-      await this.journal?.recordRecovery(journalForwarderId(principal), completed);
-    if (completed.start === true) {
-      const sessionId = this.authority.recoverCapability(principal, completed.sessionId);
-      if (sessionId === undefined)
-        return {
-          requestId: completed.requestId,
-          result: {
-            reconciliation: {
-              request_id: completed.requestId,
-              operation: completed.operation,
-              ...completed.outcome,
-            },
-            recovery: {
-              status: "session_unavailable",
-              next_step:
-                "Broker restart ended the session; reconcile this recorded outcome before any new work.",
-            },
-          },
-        };
-      return {
-        requestId: completed.requestId,
-        capability: sessionId,
-        result: {
-          session_id: sessionId,
-          broker: { pid: process.pid },
-        },
-      };
-    }
-    return {
-      requestId: completed.requestId,
-      result: {
-        reconciliation: {
-          request_id: completed.requestId,
-          operation: completed.operation,
-          ...completed.outcome,
-        },
-      },
-    };
-  }
-  async reclaim(principal: BrokerPrincipal): Promise<{ capabilities: string[] }> {
-    return { capabilities: this.authority.reclaim(principal) };
-  }
-  async reap(now = Date.now()): Promise<void> {
-    await this.authority.expireDetached(now);
-    await this.authority.retryQuarantined();
-  }
-  async acknowledge(principal: BrokerPrincipal, requestId: string): Promise<void> {
-    if (await this.journal?.acknowledge(journalForwarderId(principal), requestId))
-      await this.authority.retryQuarantined();
-  }
-  busyReadResult(
-    principal: BrokerPrincipal,
-    params: Record<string, unknown>,
-    requestId: string,
-  ): unknown | undefined {
+  busyReadResult(principal: BrokerPrincipal, params: Record<string, unknown>): unknown | undefined {
     const parsed = callSchema.safeParse(params);
     if (!parsed.success || !["operate_observe", "operate_screenshot"].includes(parsed.data.name))
       return undefined;
     const { capability, args } = parsed.data;
     if (capability === undefined || args.session_id !== capability) return undefined;
-    const receipt = this.authority.busyReadReceipt(principal, capability, requestId);
+    const receipt = this.authority.busyReadReceipt(principal, capability);
     return receipt === undefined ? undefined : { result: receipt };
   }
 
@@ -754,10 +381,7 @@ export class OperatorBroker implements BrokerTransportPort {
       request.controller.abort(new BrokerRefusal("cancelled", "Connection retired"));
       this.requestControllers.delete(key);
     }
-    this.authority.beginForwarderRelease(principal);
-    if (!explicit) this.authority.detach(principal);
-    else await this.authority.disconnect(principal);
-    this.authority.releaseForwarder(principal);
+    await this.authority.disconnect(principal, explicit);
     this.apis.delete(principal.clientId);
   }
 }

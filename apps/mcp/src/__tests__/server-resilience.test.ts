@@ -22,7 +22,7 @@ import {
   operateTypeTool,
   provisionObserveTool,
 } from "../tools/provision-drive.js";
-import { brokerRecoveryRequested, buildServer } from "../server.js";
+import { buildServer } from "../server.js";
 import type { ApiClient } from "../api-client.js";
 import type { BrowserController } from "../bot/browser.js";
 import {
@@ -50,13 +50,6 @@ function resultText(result: Awaited<ReturnType<Client["callTool"]>>): string {
   const content = result.content as Array<{ type: string; text?: string }>;
   return content.map((c) => c.text ?? "").join(" ");
 }
-
-it("accepts a boolean trusty-squire/recover meta flag as a recovery request", () => {
-  expect(brokerRecoveryRequested({ "trusty-squire/recover": true })).toEqual({ recover: true });
-  expect(brokerRecoveryRequested({ "trusty-squire/recover": {} })).toEqual({});
-  expect(brokerRecoveryRequested({ "trusty-squire/recover": null })).toEqual({});
-  expect(brokerRecoveryRequested({})).toEqual({});
-});
 
 describe("operate_* bad input is a per-call error, never a server failure", () => {
   it.each([

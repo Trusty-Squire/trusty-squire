@@ -55,6 +55,10 @@ export class BrokerRuntime implements BrokerBrowserCustody {
     if (this.closing) throw new BrokerRefusal("maintenance", "Identity cell is draining");
     if ((process.env.BOT_CDP_ENDPOINT ?? "").trim() !== "")
       throw new BrokerRefusal("incompatible_runtime", "Broker requires a locally owned browser");
+    // A dead shared Chrome takes every live session with it. Forget the dead
+    // tab families and relaunch on the same persistent profile before serving
+    // the next start, instead of handing out pages from a dead browser.
+    if (this.browserLost()) await this.recycleLostBrowser();
     const profileDir = profilePathIdentity(options.profileDir ?? CHROME_PROFILE_DIR);
     const settings = {
       profileDir,
@@ -183,6 +187,30 @@ export class BrokerRuntime implements BrokerBrowserCustody {
             "Previous broker browser did not close; the proxy/identity change was not applied",
           );
       }
+    }
+    this.lease?.release();
+    this.lease = undefined;
+    this.leaseProfile = undefined;
+    this.owner = undefined;
+    this.runtimeIdentity.forgetAfterShutdown();
+  }
+
+  /** Drop the tab bookkeeping of a browser that died underneath its sessions
+   * and prove it is gone before the next launch may reclaim the profile. */
+  private async recycleLostBrowser(): Promise<void> {
+    for (const release of [...this.sessions.values()]) release();
+    this.sessions.clear();
+    this.admissionIds.clear();
+    if (this.owner !== undefined) {
+      const closed =
+        (await this.owner.close().catch(() => "unknown" as const)) === "closed" ||
+        (await this.owner.forceCloseOwnedProcessTree().catch(() => "unknown" as const)) ===
+          "closed";
+      if (!closed)
+        throw new BrokerRefusal(
+          "cleanup_unknown",
+          "Lost broker browser did not close; refusing to relaunch over the shared profile",
+        );
     }
     this.lease?.release();
     this.lease = undefined;
