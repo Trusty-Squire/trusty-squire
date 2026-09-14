@@ -18,7 +18,6 @@ import {
   StableObservationRefs,
 } from "../compact-observation-v2.js";
 let browser: Browser;
-const transparentFrameSecurity = async (): Promise<{ opaque: boolean }> => ({ opaque: false });
 const captureThroughController = async (page: Page) => {
   const controller = new BrowserController({ humanize: false });
   (controller as unknown as { page: Page }).page = page;
@@ -111,7 +110,7 @@ describe("interleaved observation DOM", () => {
         host.shadowRoot!.innerHTML +=
           '<label for="shadow-associated">Shadow email</label><input id="shadow-associated">';
       });
-      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const capture = await captureBrowserUseDOM(page, [], () => null);
       const handles = new Map(capture.elements.map((element) => [element, `@e:${element.index}`]));
       const rows = buildSafeControlsV2({
         elements: capture.elements,
@@ -193,13 +192,13 @@ describe("interleaved observation DOM", () => {
         }, dialog);
       };
       await mount(false);
-      const before = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const before = await captureBrowserUseDOM(page, [], () => null);
       const original = before.elements.find((el) => el.tag === "span")!;
       expect(original.screenPath).toBeTruthy();
       const held = refs.actions("doc", before.elements).get(original)!;
       expect(held).toBeTruthy();
       await mount(true);
-      const after = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const after = await captureBrowserUseDOM(page, [], () => null);
       const recreated = after.elements.find((el) => el.screenPath === original.screenPath)!;
       expect(recreated.observationIdentity).not.toBe(original.observationIdentity);
       const handles = refs.actions("doc", after.elements);
@@ -402,7 +401,7 @@ describe("interleaved observation DOM", () => {
     const page = await browser.newPage();
     const refs = new StableObservationRefs();
     const read = async () => {
-      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const capture = await captureBrowserUseDOM(page, [], () => null);
       const handles = refs.actions("doc", capture.elements);
       const controls = new Map(capture.elements.map((el) => [el.id, el]));
       return { capture, handles, controls };
@@ -486,7 +485,7 @@ describe("interleaved observation DOM", () => {
       const page = await browser.newPage();
       const refs = new StableObservationRefs();
       const read = async () => {
-        const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+        const capture = await captureBrowserUseDOM(page, [], () => null);
         const el = capture.elements.find((candidate) => candidate.id === "held")!;
         return { el, ref: refs.actions("doc", capture.elements).get(el)! };
       };
@@ -1229,7 +1228,7 @@ describe("interleaved observation DOM", () => {
       await page.setContent(
         '<!doctype html><html><body><p>Account overview</p><button><span>Continue signup</span></button><div style="height:1800px"></div><button id="below">Create workspace below</button></body></html>',
       );
-      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const capture = await captureBrowserUseDOM(page, [], () => null);
       const dom = serializeBrowserUseDOM(capture.root).dom;
       expect(dom).toContain("Account overview");
       expect(dom).toMatch(/\[main:\d+\]<button \/>\n\tContinue signup/);
@@ -1240,7 +1239,7 @@ describe("interleaved observation DOM", () => {
       expect(below?.visibleText).toContain("Create workspace below");
       expect(below?.inViewport).toBe(false);
       await page.locator(below!.selector).scrollIntoViewIfNeeded();
-      const after = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const after = await captureBrowserUseDOM(page, [], () => null);
       expect(serializeBrowserUseDOM(after.root).dom).toContain("Create workspace below");
       expect(after.moreAbove).toBe(true);
     } finally {
@@ -1256,7 +1255,7 @@ describe("interleaved observation DOM", () => {
       await frame!.setContent(
         `<section>Whole section context must not be inherited <div style="margin-top: 800px">${local}<span><button id="below"></button></span></div></section>`,
       );
-      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const capture = await captureBrowserUseDOM(page, [], () => null);
       const findFrame = (node: BrowserUseNode): BrowserUseNode | undefined =>
         node.nodeName === "IFRAME"
           ? node
@@ -1277,7 +1276,7 @@ describe("interleaved observation DOM", () => {
       await page.setContent(
         '<div>Notification preferences<div style="display:none">private tier</div><input type="checkbox"></div>',
       );
-      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const capture = await captureBrowserUseDOM(page, [], () => null);
       const dom = serializeBrowserUseDOM(capture.root).dom;
       const input = dom.split("\n").find((line) => line.includes("<input"));
       expect(input).toContain("context=Notification preferences");
@@ -1295,7 +1294,7 @@ describe("interleaved observation DOM", () => {
       await frame!.setContent(
         `<div style="margin-top: 800px">${broad}<span><button id="below"></button></span></div>`,
       );
-      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const capture = await captureBrowserUseDOM(page, [], () => null);
       const findFrame = (node: BrowserUseNode): BrowserUseNode | undefined =>
         node.nodeName === "IFRAME"
           ? node
@@ -1318,7 +1317,7 @@ describe("interleaved observation DOM", () => {
       await frame!.setContent(
         '<section><header><h2>Billing</h2></header><div style="margin-top: 800px"><span><button id="below"></button></span></div></section>',
       );
-      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const capture = await captureBrowserUseDOM(page, [], () => null);
       const findFrame = (node: BrowserUseNode): BrowserUseNode | undefined =>
         node.nodeName === "IFRAME"
           ? node
@@ -1340,7 +1339,7 @@ describe("interleaved observation DOM", () => {
       await frame!.setContent(
         '<div style="margin-top: 800px"><button id="below"><span style="display:none">private tier</span></button></div>',
       );
-      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const capture = await captureBrowserUseDOM(page, [], () => null);
       const findFrame = (node: BrowserUseNode): BrowserUseNode | undefined =>
         node.nodeName === "IFRAME"
           ? node
@@ -1366,7 +1365,7 @@ describe("interleaved observation DOM", () => {
         '<!doctype html><html><body><div style="height:1800px"></div><button id="below">Still below the fold</button><div style="height:1200px"></div></body></html>',
       );
       await page.evaluate(() => window.scrollTo(0, 600));
-      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const capture = await captureBrowserUseDOM(page, [], () => null);
       const below = capture.elements.find((element) => element.id === "below");
       expect(below?.inViewport).toBe(false);
       expect(serializeBrowserUseDOM(capture.root).dom).not.toContain("Still below the fold");
@@ -1458,7 +1457,7 @@ describe("interleaved observation DOM", () => {
         });
       let capture: Awaited<ReturnType<typeof captureBrowserUseDOM>>;
       try {
-        capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+        capture = await captureBrowserUseDOM(page, [], () => null);
       } finally {
         newCDPSession.mockRestore();
       }
@@ -1566,11 +1565,8 @@ describe("interleaved observation DOM", () => {
       const newCDPSession = vi.spyOn(context, "newCDPSession").mockResolvedValue(intercepted);
       let capture: Awaited<ReturnType<typeof captureBrowserUseDOM>>;
       try {
-        capture = await captureBrowserUseDOM(
-          page,
-          [staleChild],
-          (frame) => (frame === page.mainFrame() ? null : "0"),
-          transparentFrameSecurity,
+        capture = await captureBrowserUseDOM(page, [staleChild], (frame) =>
+          frame === page.mainFrame() ? null : "0",
         );
       } finally {
         newCDPSession.mockRestore();
@@ -1651,7 +1647,7 @@ describe("interleaved observation DOM", () => {
         });
       let capture: Awaited<ReturnType<typeof captureBrowserUseDOM>>;
       try {
-        capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+        capture = await captureBrowserUseDOM(page, [], () => null);
         expect(newCDPSession).toHaveBeenCalledTimes(2);
       } finally {
         newCDPSession.mockRestore();
@@ -1737,12 +1733,7 @@ describe("interleaved observation DOM", () => {
       };
       let capture: Awaited<ReturnType<typeof captureBrowserUseDOM>>;
       try {
-        capture = await captureBrowserUseDOM(
-          page,
-          [staleChild],
-          framePath,
-          transparentFrameSecurity,
-        );
+        capture = await captureBrowserUseDOM(page, [staleChild], framePath);
       } finally {
         newCDPSession.mockRestore();
       }
@@ -1777,7 +1768,7 @@ describe("interleaved observation DOM", () => {
       await page.close();
     }
   });
-  it("keeps a sandboxed synthesized control visible but outside action and query maps", async () => {
+  it("captures a sandboxed synthesized control from an attachable frame into the action and query maps", async () => {
     const server = createServer((request, response) => {
       response.setHeader("content-type", "text/html");
       response.end(
@@ -1811,16 +1802,15 @@ describe("interleaved observation DOM", () => {
       });
 
       expect(capture.elements.map((element) => element.id)).toEqual(
-        expect.arrayContaining(["same", "cross"]),
+        expect.arrayContaining(["same", "cross", "opaque"]),
       );
-      expect(capture.elements.some((element) => element.id === "opaque")).toBe(false);
+      expect(capture.elements.some((element) => element.id === "opaque")).toBe(true);
       expect(safe.rows.map((row) => row.ref)).toEqual([...safe.byRef.keys()]);
       expect(
         safe.rows.map(
           (row) => capture.elements.find((element) => handles.get(element) === row.ref)?.id,
         ),
-      ).toEqual(expect.arrayContaining(["same", "cross"]));
-      expect(output.dom).toContain("not-targetable=true");
+      ).toEqual(expect.arrayContaining(["same", "cross", "opaque"]));
       expect(output.dom).toContain("Opaque sandbox action");
       const sameFrame = page.frames().find((frame) => frame.url().endsWith("/same"));
       await sameFrame!.locator("#same").click();
@@ -1836,7 +1826,7 @@ describe("interleaved observation DOM", () => {
       );
     }
   });
-  it("keeps active-origin opaque controls visible but outside action and query maps", async () => {
+  it("captures active-origin controls from every attachable frame into the action and query maps", async () => {
     const server = createServer((request, response) => {
       response.setHeader("content-type", "text/html");
       response.end(
@@ -1872,14 +1862,13 @@ describe("interleaved observation DOM", () => {
       });
 
       expect(capture.elements.map((element) => element.id)).toContain("normal-action");
-      expect(capture.elements.some((element) => element.id === "opaque-action")).toBe(false);
+      expect(capture.elements.some((element) => element.id === "opaque-action")).toBe(true);
       expect(
         safe.rows.map(
           (row) => capture.elements.find((element) => handles.get(element) === row.ref)?.id,
         ),
-      ).toContain("normal-action");
+      ).toEqual(expect.arrayContaining(["normal-action", "opaque-action"]));
       expect(output.dom).toContain("Active-origin opaque action");
-      expect(output.dom).toContain("not-targetable=true");
       await page
         .frames()
         .find((frame) => frame.url().endsWith("/normal"))!
@@ -1892,7 +1881,7 @@ describe("interleaved observation DOM", () => {
       );
     }
   });
-  it("keeps null-origin frame controls visible but outside action and query maps", async () => {
+  it("captures null-origin frame controls into the action and query maps when CDP can attach", async () => {
     const page = await browser.newPage();
     try {
       const dataDocument = encodeURIComponent(
@@ -1929,18 +1918,17 @@ describe("interleaved observation DOM", () => {
         capture.elements.some((element) =>
           ["blank-action", "srcdoc-action", "data-action"].includes(element.id ?? ""),
         ),
-      ).toBe(false);
-      expect(safe.rows).not.toEqual(
+      ).toBe(true);
+      expect(safe.rows).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ text: expect.stringContaining("Blank opaque action") }),
-          expect.objectContaining({ text: expect.stringContaining("Srcdoc opaque action") }),
-          expect.objectContaining({ text: expect.stringContaining("Data opaque action") }),
+          expect.objectContaining({ label: "@blank-opaque-action" }),
+          expect.objectContaining({ label: "@srcdoc-opaque-action" }),
+          expect.objectContaining({ label: "@data-opaque-action" }),
         ]),
       );
       expect(output.dom).toContain("Blank opaque action");
       expect(output.dom).toContain("Srcdoc opaque action");
       expect(output.dom).toContain("Data opaque action");
-      expect(output.dom.match(/not-targetable=true/g)).toHaveLength(3);
     } finally {
       await page.close();
     }
@@ -1951,7 +1939,7 @@ describe("interleaved observation DOM", () => {
       await page.setContent(
         readFileSync(new URL("./fixtures/shadow-unbound.html", import.meta.url), "utf8"),
       );
-      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const capture = await captureBrowserUseDOM(page, [], () => null);
       const output = serializeBrowserUseDOM(capture.root, {
         ref: (node) => {
           const element = capture.nodeElements.get(node.id);
@@ -2333,7 +2321,7 @@ describe("interleaved observation DOM", () => {
       await page.setContent(
         `<div role="button" style="width:600px;height:300px"><span>Context text</span><input aria-label="Email"><span onclick="void 0">Separate action</span><span role="button" aria-label="Copy ${token}">Token ${token}</span></div>`,
       );
-      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const capture = await captureBrowserUseDOM(page, [], () => null);
       const ref = (node: { id: string }): string => `@e:f9a062f02fadf5_${node.id}`;
       const { dom } = serializeBrowserUseDOM(capture.root, { ref });
       expect(dom).toContain("Context text");

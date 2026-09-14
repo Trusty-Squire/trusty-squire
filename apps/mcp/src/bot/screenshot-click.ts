@@ -48,9 +48,9 @@ function occlusionIdentity(evidence: Occlusion, nodeKey: string): string {
   return JSON.stringify(regions);
 }
 
-type FrameSecurity = (frame: Frame) => Promise<{ origin: string; opaque: boolean }>;
+type FrameOrigin = (frame: Frame) => string;
 type Binding = {
-  frameSecurity: FrameSecurity;
+  frameOrigin: FrameOrigin;
   public: ScreenshotBinding;
   state: string;
   beforeOcclusion: Occlusion;
@@ -216,7 +216,7 @@ async function geometry(page: Page, cdp: CDPSession) {
 /** Existing pixel capture stays read-only. A failed binding never prevents the read. */
 export async function captureBoundScreenshot(
   page: Page,
-  frameSecurity: FrameSecurity,
+  frameOrigin: FrameOrigin,
   capture: () => Promise<{ base64: string; rect: Rect }>,
 ): Promise<{ base64: string; clickBinding?: ScreenshotBinding }> {
   bindings.delete(page);
@@ -233,7 +233,7 @@ export async function captureBoundScreenshot(
       coordinate_space: "image_pixels",
     };
     bindings.set(page, {
-      frameSecurity,
+      frameOrigin,
       public: publicBinding,
       state: after.state,
       beforeOcclusion: before.occlusion,
@@ -254,7 +254,6 @@ export interface ScreenshotClickTarget {
   labels: string[];
   frameUrl: string;
   frameOrigin: string;
-  frameOpaque: boolean;
   mainFrame: boolean;
 }
 
@@ -266,7 +265,7 @@ async function hitTarget(
   cdp: CDPSession,
   x: number,
   y: number,
-  frameSecurity: FrameSecurity,
+  frameOriginOf: FrameOrigin,
 ): Promise<ScreenshotClickTarget> {
   const hit = await cdp.send("DOM.getNodeForLocation", {
     x: Math.round(x),
@@ -308,10 +307,7 @@ async function hitTarget(
     };
     const frame = findFrame(root.frameTree, page.mainFrame());
     if (!frame) throw new ScreenshotClickError("stale_screenshot", "not_dispatched");
-    const security =
-      frame === page.mainFrame()
-        ? { origin: new URL(frame.url()).origin, opaque: false }
-        : await frameSecurity(frame);
+    const frameOrigin = frameOriginOf(frame);
     const node = await nodeSession.send("DOM.resolveNode", { backendNodeId: hit.backendNodeId });
     if (!node.object.objectId) throw new Error("screenshot_target_unavailable");
     try {
@@ -330,8 +326,7 @@ async function hitTarget(
         throw new Error("screenshot_target_unavailable");
       return {
         ...result.result.value,
-        frameOrigin: security.origin,
-        frameOpaque: security.opaque,
+        frameOrigin,
         nodeKey: `${hit.frameId}:${hit.backendNodeId}`,
         mainFrame: hit.frameId === root.frameTree.frame.id,
       } as ScreenshotClickTarget;
@@ -383,7 +378,7 @@ export async function clickScreenshot(
     );
     if (x < 0 || y < 0 || x >= current.viewport.clientWidth || y >= current.viewport.clientHeight)
       throw new ScreenshotClickError("invalid_screenshot_point", "not_dispatched");
-    const target = await hitTarget(page, cdp, x, y, binding.frameSecurity);
+    const target = await hitTarget(page, cdp, x, y, binding.frameOrigin);
     await markOperatorMutationDispatchAttempted();
     const final = await geometry(page, cdp);
     const originalNode = binding.beforeNodes.get(target.nodeKey);
