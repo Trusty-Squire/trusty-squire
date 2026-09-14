@@ -5,9 +5,6 @@
 import Fastify from "fastify";
 import { SKILL_SCHEMA_VERSION } from "@trusty-squire/skill-schema";
 import { registerSkillsRoute } from "./routes/skills.js";
-import { registerRecipesRoute } from "./routes/recipes.js";
-import { InMemoryOperatorRecipeStore } from "./recipe-store-memory.js";
-import type { OperatorRecipeStore } from "./recipe-store.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerAdminDashboardRoute } from "./routes/admin-dashboard.js";
 import { registerExtractFailuresRoute } from "./routes/extract-failures.js";
@@ -57,11 +54,6 @@ export interface BuildServerOpts {
   // Memory-overhaul Phase 4 — the drainable failure ledger. In-memory default;
   // production wires a Prisma store at boot.
   openIssueStore?: OpenIssueStore;
-  // Shared Operator Recipes (replay-serve-live-domainlock) — POST /recipes
-  // writes here directly and the write is immediately live; GET /recipes
-  // reads only this. In-memory default; production wires a Prisma-backed
-  // store at boot.
-  recipeStore?: OperatorRecipeStore;
   // Google SSO config for the dashboard. Defaults to adminAuthFromEnv()
   // when omitted; tests inject a config (or null for bearer-only).
   adminAuth?: AdminAuthConfig | null;
@@ -112,7 +104,6 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
   const provisionEventStore = opts.provisionEventStore ?? new InMemoryProvisionEventStore();
   const serviceStateStore = opts.serviceStateStore ?? new InMemoryServiceStateStore();
   const openIssueStore = opts.openIssueStore ?? new InMemoryOpenIssueStore();
-  const recipeStore = opts.recipeStore ?? new InMemoryOperatorRecipeStore();
   // Dev/test default: an ephemeral key pair. Production injects a
   // long-lived signer through opts.signer at boot. The signer is
   // used both for skill provenance (`signed_by` field on stored
@@ -162,10 +153,6 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
     ...(skillVerifyPublicKey !== undefined && skillVerifyPublicKey.length > 0
       ? { skillVerifyPublicKey }
       : {}),
-  });
-
-  await fastify.register(registerRecipesRoute, {
-    store: recipeStore,
   });
 
   await fastify.register(registerExtractFailuresRoute, {
@@ -327,10 +314,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       openIssueStore: await (
         await import("./prisma-open-issue-store.js")
       ).PrismaOpenIssueStore.fromEnv(),
-      // Shared Operator Recipes (replay-serve-live-domainlock).
-      recipeStore: await (
-        await import("./prisma-recipe-store.js")
-      ).PrismaOperatorRecipeStore.fromEnv(),
     };
   }
   const server = await buildServer(serverOpts);

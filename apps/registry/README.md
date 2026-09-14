@@ -1,6 +1,6 @@
 # registry
 
-Skill and Operator-Recipe registry service.
+Skill registry service.
 
 ## Local dev
 
@@ -17,6 +17,4 @@ The dev server listens on port `3001` by default; set `REGISTRY_API_PORT` to ove
 For the current contracts and operations, see:
 
 - [Skill schema](../../packages/skill-schema/src/skill.ts)
-- [Operator-Recipe schema](../../packages/recipe-schema/README.md)
-- [Shared registry and domain lock](../../docs/DESIGN-replay-engine.md#shared-registry-and-domain-lock)
 - [Registry deployment](../../docs/DEPLOY-registry.md)
