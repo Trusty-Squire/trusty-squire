@@ -102,11 +102,6 @@ export function contextInitScriptsFor(options: {
   ];
 }
 
-export interface PageTargetSafetySignals {
-  billingObject: boolean;
-  accountSetup: boolean;
-}
-
 export interface FrameTarget {
   framePath: string;
   frameOrigin: string;
@@ -132,7 +127,6 @@ export type ResolvedPageTarget =
       handle: ElementHandle<Element>;
       text: string;
       labels: string[];
-      safetySignals: PageTargetSafetySignals;
       frameTarget: FrameTarget | null;
     }
   | { ok: false; reason: "none" | "ambiguous"; candidates: string[] };
@@ -2850,7 +2844,6 @@ export class BrowserController {
         handle: ElementHandle<Element>;
         text: string;
         labels: string[];
-        safetySignals: PageTargetSafetySignals;
         documentOrigin: string;
       }
     | { ok: false; reason: "none" | "ambiguous"; candidates: string[] }
@@ -2871,41 +2864,6 @@ export class BrowserController {
           return (typeof it === "string" ? it : (el.textContent ?? "")).replace(/\s+/g, " ").trim();
         };
         const rendered = (el: Element): string => renderedRaw(el).toLowerCase();
-        const safetyMetadata = (value: string | null): string =>
-          (value ?? "")
-            .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-            .replace(/[_.\/-]+/g, " ")
-            .replace(/\s+/g, " ")
-            .trim()
-            .toLowerCase();
-        const safetySignalsFor = (el: Element): PageTargetSafetySignals => {
-          const safetyText = [
-            renderedRaw(el),
-            el.getAttribute("aria-label"),
-            el.getAttribute("title"),
-            el.getAttribute("alt"),
-            el.getAttribute("action-type"),
-            el.getAttribute("name"),
-            el.getAttribute("id"),
-            el.getAttribute("value"),
-          ]
-            .map((part) => safetyMetadata(part))
-            .filter((part) => part.length > 0)
-            .join(" ");
-          // Keep this signal-shape in sync with the safety-signal
-          // reporting in provision-session.ts.
-          return {
-            billingObject:
-              /\b(create|save|add|finish)\b/i.test(safetyText) &&
-              /\b(product|price|pricing|subscription|billing|payment|invoice|checkout)\b/i.test(
-                safetyText,
-              ),
-            accountSetup:
-              /\b(?:create|finish|complete|set up|setup)\s+(?:your\s+)?(?:account|profile|organization|workspace|business)\b/i.test(
-                safetyText,
-              ),
-          };
-        };
         // Visibility walks the ANCESTOR chain (crossing shadow-host boundaries):
         // opacity does not inherit, so a button under an opacity:0 wrapper keeps
         // its own computed opacity 1 and a self-only check would wrongly treat it
@@ -3025,7 +2983,6 @@ export class BrowserController {
               candidates: [] as string[],
               text: "",
               labels: [] as string[],
-              safetySignals: { billingObject: false, accountSetup: false },
               documentOrigin: location.origin,
             };
           }
@@ -3061,7 +3018,6 @@ export class BrowserController {
             candidates: pool.slice(0, 8).map((el) => renderedRaw(el).slice(0, 60)),
             text: "",
             labels: [] as string[],
-            safetySignals: { billingObject: false, accountSetup: false },
             documentOrigin: location.origin,
           };
         }
@@ -3093,8 +3049,6 @@ export class BrowserController {
           candidates,
           text: win !== null ? renderedRaw(win).slice(0, 120) : "",
           labels: win !== null ? effectiveLabels(win) : [],
-          safetySignals:
-            win !== null ? safetySignalsFor(win) : { billingObject: false, accountSetup: false },
           documentOrigin: location.origin,
         };
       },
@@ -3105,7 +3059,6 @@ export class BrowserController {
       candidates: r.candidates,
       text: r.text,
       labels: r.labels,
-      safetySignals: r.safetySignals,
       documentOrigin: r.documentOrigin,
     }));
     if (meta.count !== 1) {
@@ -3129,7 +3082,6 @@ export class BrowserController {
       handle: asElement,
       text: meta.text ?? "",
       labels: meta.labels ?? [],
-      safetySignals: meta.safetySignals ?? { billingObject: false, accountSetup: false },
       documentOrigin: meta.documentOrigin,
     };
   }
@@ -3145,7 +3097,6 @@ export class BrowserController {
       handle: ElementHandle<Element>;
       text: string;
       labels: string[];
-      safetySignals: PageTargetSafetySignals;
       frameTarget: FrameTarget | null;
     }> = [];
     const candidates: string[] = [];

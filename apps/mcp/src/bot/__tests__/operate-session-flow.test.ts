@@ -199,13 +199,11 @@ const h = vi.hoisted(() => ({
   locatorResolve: {
     ok: true,
     text: "Control",
-    safetySignals: { billingObject: false, accountSetup: false },
   } as
     | {
         ok: true;
         text: string;
         labels?: string[];
-        safetySignals: { billingObject: boolean; accountSetup: boolean };
         frameTarget?: {
           framePath: string;
           frameOrigin: string;
@@ -692,7 +690,6 @@ vi.mock("../browser.js", async (importOriginal) => ({
           handle: { dispose: () => Promise<void> };
           text: string;
           labels: string[];
-          safetySignals: { billingObject: boolean; accountSetup: boolean };
           frameTarget: {
             framePath: string;
             frameOrigin: string;
@@ -716,7 +713,6 @@ vi.mock("../browser.js", async (importOriginal) => ({
           },
           text: h.locatorResolve.text,
           labels: h.locatorResolve.labels ?? [h.locatorResolve.text],
-          safetySignals: h.locatorResolve.safetySignals,
           frameTarget: h.locatorResolve.frameTarget ?? null,
         };
       }
@@ -1174,7 +1170,6 @@ beforeEach(() => {
   h.locatorResolve = {
     ok: true,
     text: "Control",
-    safetySignals: { billingObject: false, accountSetup: false },
   };
   h.locatorResolveMissValues = [];
   h.locatorClickCalls = 0;
@@ -3787,7 +3782,6 @@ describe("operate_act — locator (text=/css=) resolution", () => {
     h.locatorResolve = {
       ok: true,
       text: "Add To Cart",
-      safetySignals: { billingObject: false, accountSetup: false },
     };
     const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
     await act(obs.session_id, { kind: "click", target: "css=#atc" }, "compact");
@@ -3798,7 +3792,6 @@ describe("operate_act — locator (text=/css=) resolution", () => {
     h.locatorResolve = {
       ok: true,
       text: "Pay",
-      safetySignals: { billingObject: false, accountSetup: false },
       frameTarget: {
         framePath: "0",
         frameOrigin: "https://evil-payments.test",
@@ -3815,7 +3808,6 @@ describe("operate_act — locator (text=/css=) resolution", () => {
     h.locatorResolve = {
       ok: true,
       text: "Promo code",
-      safetySignals: { billingObject: false, accountSetup: false },
       frameTarget: {
         framePath: "0",
         frameOrigin: "https://checkout.example.com",
@@ -3832,7 +3824,6 @@ describe("operate_act — locator (text=/css=) resolution", () => {
     h.locatorResolve = {
       ok: true,
       text: "Card number",
-      safetySignals: { billingObject: false, accountSetup: false },
       frameTarget: {
         framePath: "0",
         frameOrigin: "https://evil-payments.test",
@@ -3853,7 +3844,6 @@ describe("operate_act — locator (text=/css=) resolution", () => {
     h.locatorResolve = {
       ok: true,
       text: "Password",
-      safetySignals: { billingObject: false, accountSetup: false },
       frameTarget: {
         framePath: "0",
         frameOrigin: "null",
@@ -3873,7 +3863,6 @@ describe("operate_act — locator (text=/css=) resolution", () => {
     h.locatorResolve = {
       ok: true,
       text: "Password",
-      safetySignals: { billingObject: false, accountSetup: false },
       frameTarget: {
         framePath: "0",
         frameOrigin: "https://auth.example.com",

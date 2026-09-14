@@ -142,31 +142,9 @@ const WEAK_ANCESTOR_STRONG_CHILD_FIXTURE = `data:text/html,${encodeURIComponent(
   </script>
 </body></html>`)}`;
 
-const ICON_ONLY_SAVE_FIXTURE = `data:text/html,${encodeURIComponent(`
-<!doctype html><html><body style="margin:0;padding:0">
-  <button id="saveIcon" aria-label="saveProduct" title="PersistBillingProduct"
-    name="save-product" value="save" action-type="SAVE_PRODUCT"
-    style="width:40px;height:40px"></button>
-</body></html>`)}`;
-
 const INPUT_SUBMIT_FIXTURE = `data:text/html,${encodeURIComponent(`
 <!doctype html><html><body style="margin:0;padding:0">
   <input id="place-order" type="submit" value="Place order" style="width:200px;height:40px">
-</body></html>`)}`;
-
-const ACTION_TYPE_ONLY_SAVE_FIXTURE = `data:text/html,${encodeURIComponent(`
-<!doctype html><html><body style="margin:0;padding:0">
-  <button id="x" action-type="SAVE_PRODUCT" style="width:40px;height:40px"></button>
-</body></html>`)}`;
-
-const LARGE_VALUE_SAVE_FIXTURE = `data:text/html,${encodeURIComponent(`
-<!doctype html><html><body style="margin:0;padding:0">
-  <script>
-    const textarea = document.createElement("textarea");
-    textarea.style.cssText = "width:200px;height:40px";
-    textarea.setAttribute("value", "x".repeat(1000000) + "_SAVE_PRODUCT");
-    document.body.append(textarea);
-  </script>
 </body></html>`)}`;
 
 // Many visible divs — css=div must return ambiguous via the pool cap without
@@ -368,10 +346,6 @@ describe("resolvePageTarget (real Chromium)", () => {
       expect(resolved.ok).toBe(true);
       if (!resolved.ok) throw new Error("unreachable");
       expect(resolved.text).toBe("Add To Cart");
-      expect(resolved.safetySignals).toEqual({
-        billingObject: true,
-        accountSetup: false,
-      });
 
       await ctrl.clickHandle(resolved.handle);
       await resolved.handle.dispose();
@@ -448,24 +422,6 @@ describe("resolvePageTarget (real Chromium)", () => {
     }
   });
 
-  it("returns accessible safety signals separately from the visible audit label", async () => {
-    const { ctrl, page } = await pageFor(ICON_ONLY_SAVE_FIXTURE);
-    try {
-      const resolved = await ctrl.resolvePageTarget("css", "#saveIcon");
-      expect(resolved.ok).toBe(true);
-      if (!resolved.ok) throw new Error("unreachable");
-      expect(resolved.text).toBe("");
-      expect(resolved.labels).toEqual(["saveProduct"]);
-      expect(resolved.safetySignals).toEqual({
-        billingObject: true,
-        accountSetup: false,
-      });
-      await resolved.handle.dispose();
-    } finally {
-      await page.close();
-    }
-  });
-
   it("returns an input submit value as an effective locator label", async () => {
     const { ctrl, page } = await pageFor(INPUT_SUBMIT_FIXTURE);
     try {
@@ -481,38 +437,6 @@ describe("resolvePageTarget (real Chromium)", () => {
           method: "click",
         }),
       ).resolves.toBe("dispatched");
-      await resolved.handle.dispose();
-    } finally {
-      await page.close();
-    }
-  });
-
-  it("token-normalizes action-type safety metadata", async () => {
-    const { ctrl, page } = await pageFor(ACTION_TYPE_ONLY_SAVE_FIXTURE);
-    try {
-      const resolved = await ctrl.resolvePageTarget("css", "#x");
-      expect(resolved.ok).toBe(true);
-      if (!resolved.ok) throw new Error("unreachable");
-      expect(resolved.text).toBe("");
-      expect(resolved.safetySignals.billingObject).toBe(true);
-      await resolved.handle.dispose();
-    } finally {
-      await page.close();
-    }
-  });
-
-  it("returns compact safety signals for a megabyte-scale value", async () => {
-    const { ctrl, page } = await pageFor(LARGE_VALUE_SAVE_FIXTURE);
-    try {
-      const resolved = await ctrl.resolvePageTarget("css", "textarea");
-      expect(resolved.ok).toBe(true);
-      if (!resolved.ok) throw new Error("unreachable");
-      expect(resolved.safetySignals).toEqual({
-        billingObject: true,
-        accountSetup: false,
-      });
-      expect("safetyText" in resolved).toBe(false);
-      expect(JSON.stringify(resolved.safetySignals).length).toBeLessThan(100);
       await resolved.handle.dispose();
     } finally {
       await page.close();
