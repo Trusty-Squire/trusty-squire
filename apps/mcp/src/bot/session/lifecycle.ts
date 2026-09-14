@@ -898,7 +898,7 @@ async function closeFinishingProvisionSession(
 }
 
 // A failed close/persistence attempt may be retried without replaying finish
-// preparation (which can store a credential or publish a recipe).
+// preparation (which can store a credential).
 const finishCleanupRetries = new WeakMap<Session, () => Promise<FinishResult>>();
 
 export async function finishProvisionSessionWithPreparation<T>(

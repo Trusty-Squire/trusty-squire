@@ -9012,8 +9012,8 @@ export class BrowserController {
     );
   }
 
-  // replay-per-leg-signature — the checkout-leg shape signature (see
-  // checkoutFieldSetSignature in @trusty-squire/recipe-schema) is computed
+  // checkout-leg-signature — the checkout-leg shape signature
+  // (checkoutFieldSetSignature, formerly in @trusty-squire/recipe-schema) is computed
   // from a page's FULL field-name set, deliberately including `type=hidden`
   // fields — unlike extractInteractiveElements above (which deliberately
   // skips hidden/password inputs, since those aren't things a planner can

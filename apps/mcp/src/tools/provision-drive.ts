@@ -134,7 +134,7 @@ const startSchema = z.object({
   service_url: z.string().url(),
   format: z.enum(["compact", "full"]).optional(),
   // Sensitive: may include proxy credentials. It is launch-only and is never
-  // retained in the session state, action trail, status, or recipe.
+  // retained in the session state, action trail, or status.
   proxy: proxySchema.optional(),
   // Operate tasks that act AS the user (drive a gated app on an existing
   // account) set this so start fails closed to a connect hand-back if no live

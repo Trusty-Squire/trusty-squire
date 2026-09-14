@@ -92,7 +92,6 @@ export class OperatorForwarder {
       const sessionId = id !== undefined && this.sessions.has(id) ? id : undefined;
       if (
         name !== "operate_start" &&
-        !(name === "operate_recipe_run" && id === undefined) &&
         sessionId === undefined &&
         name !== "operate_finish"
       )

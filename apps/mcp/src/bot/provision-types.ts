@@ -1,5 +1,5 @@
 // provision-types.ts — the two shared result/step types the provision
-// pipeline passes between the capture, synthesis, replay, and telemetry
+// pipeline passes between the capture, synthesis, and telemetry
 // modules. Kept standalone so the live modules depend on these shapes
 // without pulling in the heavier bot internals.
 //
@@ -44,14 +44,6 @@ export interface SignupResult {
   // + webdriver tells) lowers block rate — see
   // docs/ARCHITECTURE.md.
   stealth_profile?: "baseline" | "cdp_hardened";
-
-  // Skill provenance: which path produced this result. Legacy field from the
-  // universal-bot era. The autonomous replay ENGINE was excised (signin-vault
-  // PR1), so the "skill" path is no longer produced in source; the field is
-  // retained for wire/registry compatibility and assessed for removal in PR4.
-  via?: "bot" | "skill";
-  skill_id?: string;
-  skill_version?: string;
 
   // Captcha encountered during the run. Populated only when the agent
   // hit at least one captcha widget — null/undefined otherwise. The
