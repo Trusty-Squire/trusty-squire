@@ -23,15 +23,42 @@ vi.mock("../bot/provision-session.js", async (original) => ({
   withProvisionSessionCall: async (_id: string, call: () => Promise<unknown>) => await call(),
   act: state.action,
   observedHostsForSession: () => ["groq-fixture.test"],
+  // Plain (non-recovery) extraction is stubbed: the store-bearing extract and
+  // credentials finish paths only need a candidate-free result here. Recovery
+  // through capture.write_id uses captureCredentialSource against the live page.
+  extractCredentials: async (sessionId: string) => ({
+    session_id: sessionId,
+    url: "https://groq-fixture.test/",
+    credentials: {},
+    candidate_count: 0,
+  }),
+  // Terminal teardown is stubbed: the fixture session is not registered in
+  // the real sessions map. The preparation (extract + vault) still runs.
+  finishProvisionSessionWithPreparation: async (
+    sessionId: string,
+    prepare: () => Promise<unknown>,
+  ) => ({
+    finish: {
+      session_id: sessionId,
+      operation_id: "fixture-finish",
+      execution: "completed",
+      mutation: "not_dispatched",
+      cleanup: "closed",
+      closed: true,
+      url: "https://groq-fixture.test/",
+    },
+    prepared: await prepare(),
+  }),
 }));
 import { buildServer } from "../server.js";
 
-it("captures a created key through MCP and recovers an unchanged source without replaying creation", async () => {
+it("captures a created key through MCP and recovers an unchanged source without a second vault write", async () => {
   const root = await mkdtemp(join(tmpdir(), "postaction-e2e-"));
   const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
   const page: Page = await browser.newPage();
   const session = vi.spyOn(lifecycle, "sessionForCall").mockReturnValue({
     pendingThreeDs: null,
+    actionTrace: [],
     browser: {
       activePage: () => page,
       waitForInteractiveDom: async () => undefined,
@@ -117,11 +144,22 @@ it("captures a created key through MCP and recovers an unchanged source without 
     const ordinary = await call("operate_click", { ref: "@create" });
     expect(ordinary.isError).not.toBe(true);
     expect(await page.locator("body").getAttribute("data-clicks")).toBe("2");
-    expect((await call("operate_click", { ref: "@create", capture })).isError).toBe(true);
-    expect((await call("operate_extract", { store: capture.store })).isError).toBe(true);
-    expect(
-      (await call("operate_finish", { outcome: "credentials", store: capture.store })).isError,
-    ).toBe(true);
+    // No custody fence: a repeated vaulting attempt dispatches like any
+    // capture — the unchanged source stays pre-action-only and no second
+    // vault write is attempted.
+    const repeated = await call("operate_click", { ref: "@create", capture });
+    expect(repeated.isError).not.toBe(true);
+    expect(repeated.structuredContent).toMatchObject({
+      stored: false,
+      error: "capture_pre_action_only",
+      retry: "extract_only",
+    });
+    expect(await page.locator("body").getAttribute("data-clicks")).toBe("3");
+    expect(storeCredential).toHaveBeenCalledTimes(1);
+    // A store-bearing extract without write_id proceeds and vaults nothing
+    // when the page has no credential candidate.
+    const extractOnly = await call("operate_extract", { store: capture.store });
+    expect(extractOnly.isError).not.toBe(true);
     expect(storeCredential).toHaveBeenCalledTimes(1);
     await page.setContent(
       '<h1>Delayed result ready for extraction</h1><label>API key <input value="gsk_fixture_recovered"></label>',
@@ -135,7 +173,13 @@ it("captures a created key through MCP and recovers an unchanged source without 
     expect(storeCredential).toHaveBeenLastCalledWith(
       expect.objectContaining({ value: "gsk_fixture_recovered", write_id }),
     );
-    expect(state.action).toHaveBeenCalledTimes(3);
+    expect(state.action).toHaveBeenCalledTimes(4);
+    // Finish is the terminal: it proceeds (no custody fence), vaults nothing
+    // on a candidate-free page, and retires the session — so it comes last.
+    await page.setContent("<h1>Done</h1>");
+    const finish = await call("operate_finish", { outcome: "credentials", store: capture.store });
+    expect(finish.isError, JSON.stringify(finish)).not.toBe(true);
+    expect(storeCredential).toHaveBeenCalledTimes(2);
     if (evidence)
       await writeFile(
         join(evidence, "mcp-capture-transcript.json"),
