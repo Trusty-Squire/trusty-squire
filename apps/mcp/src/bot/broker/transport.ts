@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createServer, createConnection, type Socket } from "node:net";
+import { createServer, createConnection, type Server, type Socket } from "node:net";
 import { chmod, lstat, unlink } from "node:fs/promises";
 import { randomUUID, randomBytes } from "node:crypto";
 import { z } from "zod";
@@ -82,8 +82,66 @@ export interface BrokerTransportPort {
   disconnect(principal: BrokerPrincipal, explicit?: boolean): Promise<void>;
 }
 
-/** Endpoint election is bind-exclusive. Never unlink an existing socket to win
- * election: its incumbent may still own Chrome, even if it is unresponsive. */
+const ORPHAN_PROBE_TIMEOUT_MS = 2_000;
+
+/** A stale Unix socket left behind by a SIGKILLed predecessor makes bind fail
+ * with EADDRINUSE even though nothing is listening. A successful client connect
+ * (or an unresolved probe) proves a live incumbent; a refused or missing
+ * connection proves an orphan that may be reclaimed. */
+export async function brokerEndpointHasLiveListener(path: string): Promise<boolean> {
+  return await new Promise<boolean>((resolve) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    const socket = createConnection(path);
+    const finish = (live: boolean): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      socket.destroy();
+      resolve(live);
+    };
+    timer = setTimeout(() => finish(true), ORPHAN_PROBE_TIMEOUT_MS);
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+  });
+}
+
+/** Bind, reclaiming a socket path whose only owner is a dead predecessor. A
+ * live incumbent still wins: the original EADDRINUSE is rethrown and no path is
+ * removed. */
+async function bindBrokerServer(server: Server, path: string): Promise<void> {
+  const attempt = async (): Promise<void> =>
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error): void => {
+        server.off("listening", onListening);
+        reject(error);
+      };
+      const onListening = (): void => {
+        server.off("error", onError);
+        resolve();
+      };
+      server.once("error", onError);
+      server.once("listening", onListening);
+      server.listen(path);
+    });
+  try {
+    await attempt();
+    return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
+    if (await brokerEndpointHasLiveListener(path)) throw error;
+    // The socket path exists but nothing answers: a SIGKILLed predecessor
+    // orphaned it. Unlink the socket and its owner proof, then bind normally.
+    await unlink(path).catch(() => undefined);
+    await unlink(`${path}.owner.json`).catch(() => undefined);
+    await attempt();
+  }
+}
+
+/** Endpoint election is bind-exclusive against a live incumbent: never unlink a
+ * socket another broker still answers on, even if that broker is unresponsive.
+ * A socket with no live listener is a dead predecessor's orphan and is
+ * reclaimed so a SIGKILL can never wedge startup. */
 export async function listenBroker(
   path: string,
   port: BrokerTransportPort,
@@ -198,13 +256,7 @@ export async function listenBroker(
       );
     });
   });
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(path, () => {
-      server.off("error", reject);
-      resolve();
-    });
-  });
+  await bindBrokerServer(server, path);
   await chmod(path, 0o600);
   const identity = await lstat(path);
   return {

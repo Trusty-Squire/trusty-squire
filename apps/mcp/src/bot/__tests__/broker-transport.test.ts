@@ -1,5 +1,5 @@
 import { createServer, type Socket } from "node:net";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +8,7 @@ import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 import { BrokerClient, listenBroker } from "../broker/transport.js";
 import { BrokerAuthority } from "../broker/authority.js";
+import { publishEndpointOwner } from "../broker/discovery.js";
 const require = createRequire(import.meta.url);
 
 describe("authenticated broker IPC", () => {
@@ -226,6 +227,71 @@ describe("authenticated broker IPC", () => {
       expect(dispatches).toBe(1);
     } finally {
       await client?.close();
+      await broker.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reclaims a socket and owner record orphaned by a dead broker, but still refuses a live one", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-ipc-orphan-"));
+    const path = join(root, "b.sock");
+    // A broker that binds then dies without its graceful close leaves the Unix
+    // socket file behind; only SIGKILL/orphaned exit can produce this state.
+    const script = `const net=require("node:net");const s=net.createServer();s.listen(${JSON.stringify(
+      path,
+    )},()=>process.stdout.write("ready"));`;
+    const child = spawn(process.execPath, ["-e", script], { stdio: ["ignore", "pipe", "inherit"] });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("exit", (code) => reject(new Error(`orphan broker exited early (${code})`)));
+        child.stdout.once("data", () => resolve());
+      });
+      child.kill("SIGKILL");
+      await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      expect((await stat(path)).isSocket()).toBe(true);
+      await writeFile(`${path}.owner.json`, JSON.stringify({ stale: true }));
+      const broker = await listenBroker(path, {
+        authenticate: async () => ({ accountId: "account", agentId: "agent" }),
+        call: async () => ({}),
+        disconnect: async () => undefined,
+      });
+      let client: BrokerClient | undefined;
+      try {
+        client = await BrokerClient.connect(path, "test");
+        expect(await client.call("ping", {})).toEqual({});
+        // The reclaim served this bind; a live incumbent still wins election.
+        await expect(
+          listenBroker(path, {
+            authenticate: async () => ({ accountId: "account", agentId: "agent" }),
+            call: async () => ({}),
+            disconnect: async () => undefined,
+          }),
+        ).rejects.toThrow("EADDRINUSE");
+      } finally {
+        await client?.close();
+        await broker.close();
+      }
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it("replaces a stale owner record for an endpoint this broker already bound", async () => {
+    const root = await mkdtemp(join(tmpdir(), "ts-ipc-owner-"));
+    const path = join(root, "b.sock");
+    const broker = await listenBroker(path, {
+      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
+      call: async () => ({}),
+      disconnect: async () => undefined,
+    });
+    try {
+      await writeFile(`${path}.owner.json`, JSON.stringify({ stale: true }));
+      await expect(publishEndpointOwner(path)).resolves.toBeUndefined();
+      const owner = JSON.parse(await readFile(`${path}.owner.json`, "utf8")) as { pid: number };
+      expect(owner.pid).toBe(process.pid);
+    } finally {
       await broker.close();
       await rm(root, { recursive: true, force: true });
     }
