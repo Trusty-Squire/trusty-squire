@@ -253,8 +253,6 @@ describe("characterization: registered operator tool surface", () => {
       "operate_login",
       "operate_fill_credential",
       "operate_extract",
-      "operate_recipe_save",
-      "operate_recipe_run",
     ]);
   });
 
@@ -508,7 +506,6 @@ const START_COMPACT_V2_KEYS = ["format", "safe_table", "session_id", "stage", "u
 const V1_COMPACT_KEYS = [
   "delta",
   "elements_total",
-  "guidance",
   "session_id",
   "snapshot_file",
   "text",
@@ -519,7 +516,6 @@ const V1_COMPACT_KEYS = [
 const V1_FULL_KEYS = [
   "accessibility",
   "elements",
-  "guidance",
   "screen",
   "session_id",
   "text",

@@ -12,7 +12,6 @@ export const MCP_TEST_INCLUDE_GLOBS = ["src/**/*.test.ts", "scripts/**/*.test.mj
 export const SLOW_POST_MERGE_FILES = [
   "src/__tests__/bin-smoke.test.ts",
   "src/bot/__tests__/widget-corpus-eval.test.ts",
-  "src/eval/replay-harness/__tests__/replay-harness.test.ts",
 ];
 
 // Test files that launch a real browser (Chromium via playwright/patchright

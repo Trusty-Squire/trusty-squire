@@ -155,7 +155,6 @@ import {
   isPlainChromeLink,
   startProvisionSession,
   observe,
-  verifyPostcondition,
   closeAllProvisionSessions,
   parseElementsTable,
   type Observation,
@@ -1887,20 +1886,6 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     const compact = await observe(sid, "compact");
     expect(compact.delta).toBe(false);
     expect(typeof compact.snapshot_file).toBe("string");
-  });
-
-  it("uses current full page text for internal postcondition checks", async () => {
-    h.elements = casetifyPage();
-    h.visibleText = "Workspace setup complete";
-    const start = await startProvisionSession({ serviceUrl: URL });
-
-    const result = await verifyPostcondition(start.session_id, {
-      kind: "execute_capability",
-      describe: "Workspace setup completed",
-      success_signal: { text_present: "Workspace setup complete" },
-    });
-
-    expect(result.confirmed).toBe(true);
   });
 
   it("INV-full-escape-hatch: detail:full is byte-equivalent and un-deltified regardless of delta history", async () => {
