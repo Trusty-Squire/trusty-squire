@@ -38,6 +38,7 @@ export const REAL_BROWSER_FILES = [
   "src/bot/__tests__/browser-document-identity.test.ts",
   "src/bot/__tests__/browser-frame-support.test.ts",
   "src/bot/__tests__/browser-inject-card.test.ts",
+  "src/bot/__tests__/browser-oopif-observation.test.ts",
   "src/bot/__tests__/browser-screenshot.test.ts",
   "src/bot/__tests__/browser-three-ds-method.test.ts",
   "src/bot/__tests__/browser-three-ds-notify.test.ts",
