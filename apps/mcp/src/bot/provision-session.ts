@@ -526,6 +526,7 @@ import {
   sessionForCall,
   startProvisionSession as startProvisionSessionInternal,
   startHarnessProvisionSession as startHarnessProvisionSessionInternal,
+  UnknownProvisionSessionError,
   withPaymentSessionCall,
   withProvisionSessionCall,
   type HarnessStartOptions,
@@ -542,6 +543,7 @@ export {
   finishProvisionSessionWithPreparation,
   googleSessionGate,
   paymentSession,
+  UnknownProvisionSessionError,
   withPaymentSessionCall,
   withProvisionSessionCall,
 };

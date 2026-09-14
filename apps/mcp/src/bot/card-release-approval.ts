@@ -25,8 +25,6 @@ export interface InjectCardApprovalArgs {
   reason: string;
 }
 
-export type TerminalPaymentApprovalStatus = "denied" | "expired" | "payment_confirmation_failed";
-
 export interface CardReleaseBrowser {
   injectCardFields(card: CheckoutCard, options?: { deadline?: number }): Promise<void>;
   currentUrl(): string;
@@ -48,8 +46,8 @@ export interface ReleasedCardApproval {
 // validate and continue the SAME approval after a bounded wait. Held by the
 // session layer only (never the model) — it carries the operator keypair's
 // PRIVATE half. A live resumed approval must reuse that keypair because its
-// sealed card was HPKE-encrypted to it; denial or expiry scrubs the key and
-// retains terminal custody instead of minting a replacement approval.
+// sealed card was HPKE-encrypted to it; a terminal outcome clears this state
+// so the next call mints a fresh approval rather than replaying a dead one.
 export interface PendingApprovalWait {
   approval_id: string;
   approval_url: string;
@@ -57,15 +55,11 @@ export interface PendingApprovalWait {
   agent: string;
   account_binding: string;
   checkout: CheckoutSummary;
-  jit: boolean;
   boundCardRef: string | null;
   // Absolute epoch ms — the OVERALL approval deadline, fixed at creation and
   // never extended on resume.
   deadline: number;
   rejectedCandidates: string[];
-  // True after a legacy review-bound candidate was cryptographically verified.
-  // It is resumable state only: review verification never authorizes a charge.
-  reviewVerified?: boolean;
   keypair: OperatorKeypair;
   item: string;
   reason: string;
@@ -80,8 +74,10 @@ interface CardReleaseDependencies {
   vouchflowApiBase: string;
   vouchflowExpectedAudience: string | undefined;
   approvalTimeoutMs: number;
-  jitApprovalTimeoutMs: number;
   pollIntervalMs: number;
+  // The MCP client's own cancellation. A cancelled inject_card stops waiting
+  // for approval; the approval itself stays resumable for the next call.
+  signal?: AbortSignal;
   surfaceApprovalUrl: (url: string) => void | Promise<void>;
   onCardResolved: (cardRef: string) => void;
   // Hands the session layer the approved card identity and terms.
@@ -101,15 +97,12 @@ interface CardReleaseDependencies {
   // bounded human-response window so approval detection belongs to the system,
   // while an exhausted client call can resume this same approval cleanly.
   pollBudgetMs?: number;
-  // [P0] Fired when a call ends still-pending (poll budget exhausted, human
-  // hasn't responded yet) so the session layer can persist resumable state.
+  // [P0] Fired when a call ends still-pending (poll budget exhausted or the
+  // client cancelled) so the session layer can persist resumable state.
   onApprovalPending: (state: PendingApprovalWait) => void;
-  // Terminal approval outcomes retain session custody so a later call cannot
-  // automatically mint another approval for the same attempt.
-  onApprovalTerminal: (
-    state: PendingApprovalWait,
-    terminalStatus: TerminalPaymentApprovalStatus,
-  ) => void;
+  // Fired on a terminal outcome so the session drops its resumable state and
+  // a later call mints a fresh approval instead of replaying this one.
+  onApprovalTerminal: () => void;
 }
 
 const cardSchema = z.object({
@@ -173,7 +166,6 @@ interface PaymentCandidateBindingTerms {
 interface PaymentCandidateBindingContext {
   kind: PaymentCandidateKind;
   approvalAad?: Uint8Array;
-  reviewAad?: Uint8Array;
 }
 
 function paymentCandidateBindingContext(
@@ -202,14 +194,6 @@ function paymentCandidateBindingContext(
     });
     if (canonical === undefined) return { kind: "invalid" };
     const approvalAad = new Uint8Array(createHash("sha256").update(canonical, "utf8").digest());
-    const reviewCanonical = canonicalize({
-      approval_id: terms.approvalId,
-      approval_payload_sha256: toBase64Url(approvalAad),
-      card_ref: terms.cardRef,
-      recipient_pubkey_hash: toBase64Url(recipientHash),
-    });
-    if (reviewCanonical === undefined) return { kind: "invalid" };
-    const reviewAad = new Uint8Array(createHash("sha256").update(reviewCanonical, "utf8").digest());
     let claimedPayloadHash: unknown;
     try {
       claimedPayloadHash =
@@ -223,10 +207,10 @@ function paymentCandidateBindingContext(
         sealedCard: candidate.sealed_card,
         claimedPayloadHash,
         approvalPayloadHash: candidateHash(approvalAad),
-        reviewPayloadHash: candidateHash(reviewAad),
+        // The retired review-bound protocol is never accepted here.
+        reviewPayloadHash: null,
       }),
       approvalAad,
-      reviewAad,
     };
   } catch {
     return { kind: "invalid" };
@@ -406,34 +390,11 @@ function safeFailureReason(error: unknown): string {
   return known.includes(message) ? message : "mandate_verification_failed";
 }
 
-// A card_ref counts as "bound" only when it is a non-blank string. Used for
-// both the timeout classification (no card → card_required) and the resume
-// guard (never canonicalize over an empty/whitespace ref), so the two agree.
+// A card_ref counts as "bound" only when it is a non-blank string. It is the
+// guard against canonicalizing over an empty/whitespace ref the server echoed
+// back as null.
 function hasBoundCard(ref: string | null | undefined): ref is string {
   return typeof ref === "string" && ref.trim().length > 0;
-}
-
-// Terminal for every JIT path that ends without a card on file (link expired
-// before a card was added, add-card failed, or abandoned before card entry).
-// Extends the host-facing needs_user.wall vocabulary with "card_required".
-function cardRequiredResult(
-  approvalUrl: string,
-  checkout: CheckoutSummary,
-  reason: string,
-): Record<string, unknown> {
-  return {
-    status: "payment_card_required",
-    approval_url: approvalUrl,
-    merchant: checkout.merchant,
-    amount_cents: checkout.amount_cents,
-    currency: checkout.currency,
-    needs_user: {
-      wall: "card_required",
-      reason,
-      message: `No payment card is on file — ${reason}. Re-run the payment to get a fresh add-card link.`,
-      resume: "inject_card",
-    },
-  };
 }
 
 function approvalDeniedResult(
@@ -454,17 +415,14 @@ function approvalDeniedResult(
 function approvalExpiredResult(
   approvalUrl: string,
   checkout: CheckoutSummary,
-  jit: boolean,
-  boundCardRef: string | null,
 ): Record<string, unknown> {
-  const base: Record<string, unknown> = {
+  return {
     status: "payment_approval_timeout",
     approval_url: approvalUrl,
     merchant: checkout.merchant,
     amount_cents: checkout.amount_cents,
     currency: checkout.currency,
   };
-  return jit && hasBoundCard(boundCardRef) ? { ...base, card_persisted: true } : base;
 }
 
 function isPaymentApprovalDeniedError(error: unknown): boolean {
@@ -505,7 +463,6 @@ function defaultDependencies(): CardReleaseDependencies {
     vouchflowApiBase: process.env.VOUCHFLOW_API_BASE ?? "https://api.vouchflow.dev",
     vouchflowExpectedAudience: process.env.VOUCHFLOW_EXPECTED_AUDIENCE?.trim() || undefined,
     approvalTimeoutMs: 5 * 60 * 1000,
-    jitApprovalTimeoutMs: 18 * 60 * 1000,
     pollIntervalMs: 3_000,
     surfaceApprovalUrl: (url) => {
       process.stderr.write(
@@ -517,10 +474,6 @@ function defaultDependencies(): CardReleaseDependencies {
     onApprovalPending: () => undefined,
     onApprovalTerminal: () => undefined,
   };
-}
-
-function logPaymentReviewLifecycle(event: Record<string, string>): void {
-  process.stderr.write(`${JSON.stringify(event)}\n`);
 }
 
 function logPaymentCandidateLifecycle(
@@ -553,7 +506,6 @@ export async function executeCardReleaseApproval(
   let cardBytes: Uint8Array | undefined;
   let card: CheckoutCard | undefined;
   const initialResume = resume;
-  let reviewVerified = resume?.reviewVerified ?? false;
   let resumableState: (() => PendingApprovalWait) | undefined =
     initialResume !== undefined ? () => initialResume : undefined;
   const rejectedCandidates = new Set<string>(resume?.rejectedCandidates ?? []);
@@ -585,17 +537,12 @@ export async function executeCardReleaseApproval(
               ? "expired"
               : null;
         if (terminalStatus !== null) {
-          deps.onApprovalTerminal(resume, terminalStatus);
+          deps.onApprovalTerminal();
           resumableState = undefined;
           keypairHandedOff = false;
           return terminalStatus === "denied"
             ? approvalDeniedResult(resume.approval_id, resume.approval_url, resume.checkout)
-            : approvalExpiredResult(
-                resume.approval_url,
-                resume.checkout,
-                resume.jit,
-                resume.boundCardRef,
-              );
+            : approvalExpiredResult(resume.approval_url, resume.checkout);
         }
         reusable = isLiveResumableApproval(live, resume, deps.now());
       } catch (error) {
@@ -613,14 +560,12 @@ export async function executeCardReleaseApproval(
         keypairHandedOff = false;
         resumableState = undefined;
         rejectedCandidates.clear();
-        reviewVerified = false;
       }
     }
 
     let checkout: CheckoutSummary;
     let item: string;
     let reason: string;
-    let jit: boolean;
     let approvalId: string;
     let nonce: string;
     let agent: string;
@@ -634,7 +579,6 @@ export async function executeCardReleaseApproval(
       checkout = resume.checkout;
       item = resume.item;
       reason = resume.reason;
-      jit = resume.jit;
       approvalId = resume.approval_id;
       nonce = resume.nonce;
       agent = resume.agent;
@@ -652,7 +596,6 @@ export async function executeCardReleaseApproval(
 
       item = args.item;
       reason = args.reason;
-      jit = false;
 
       const created = await api.createPaymentApproval({
         ...checkout,
@@ -669,9 +612,10 @@ export async function executeCardReleaseApproval(
       agent = created.agent;
       accountBinding = created.account_binding;
       approvalUrl = `${deps.webBase.replace(/\/+$/, "")}/vault/pay/${encodeURIComponent(created.id)}`;
-      const waitBudgetMs = jit ? deps.jitApprovalTimeoutMs : deps.approvalTimeoutMs;
       const serverDeadline = Date.parse(created.expires_at);
-      deadline = Number.isFinite(serverDeadline) ? serverDeadline : deps.now() + waitBudgetMs;
+      deadline = Number.isFinite(serverDeadline)
+        ? serverDeadline
+        : deps.now() + deps.approvalTimeoutMs;
       boundCardRef = args.card_ref;
     }
 
@@ -682,11 +626,9 @@ export async function executeCardReleaseApproval(
       agent,
       account_binding: accountBinding,
       checkout,
-      jit,
       boundCardRef,
       deadline,
       rejectedCandidates: [...rejectedCandidates],
-      ...(reviewVerified ? { reviewVerified: true } : {}),
       keypair,
       item,
       reason,
@@ -701,6 +643,10 @@ export async function executeCardReleaseApproval(
         : Math.min(deadline, deps.now() + deps.pollBudgetMs);
     let budgetExhausted = false;
     const shouldKeepPolling = (): boolean => {
+      if (deps.signal?.aborted === true) {
+        budgetExhausted = true;
+        return false;
+      }
       const now = deps.now();
       if (now >= deadline) return false;
       if (now >= callDeadline) {
@@ -710,30 +656,16 @@ export async function executeCardReleaseApproval(
       return true;
     };
 
-    // A JIT approval that expires before binding still needs a card; a bound
-    // card remains stored even though the approval itself is terminal.
-    const timeoutResult = (): Record<string, unknown> => {
-      if (jit && !hasBoundCard(boundCardRef)) {
-        return cardRequiredResult(
-          approvalUrl,
-          checkout,
-          "the add-card link expired before a card was added",
-        );
-      }
-      return approvalExpiredResult(approvalUrl, checkout, jit, boundCardRef);
-    };
     const approvalExpired = (): boolean => deps.now() >= deadline;
-    let terminalApprovalState: PendingApprovalWait | undefined;
     const terminalApprovalResult = (
       terminalStatus: "denied" | "expired",
     ): Record<string, unknown> => {
-      const state = resumableState?.() ?? terminalApprovalState;
-      if (state !== undefined) deps.onApprovalTerminal(state, terminalStatus);
+      deps.onApprovalTerminal();
       resumableState = undefined;
       keypairHandedOff = false;
       return terminalStatus === "denied"
         ? approvalDeniedResult(approvalId, approvalUrl, checkout)
-        : timeoutResult();
+        : approvalExpiredResult(approvalUrl, checkout);
     };
     const expiredApprovalResult = (): Record<string, unknown> => terminalApprovalResult("expired");
 
@@ -741,10 +673,8 @@ export async function executeCardReleaseApproval(
     let claims: JWTPayload | undefined;
     // Always make one live read; later iterations recheck the budget after sleep.
     let iteration = 0;
-    let immediateReviewFollowup = false;
     while (true) {
-      if (iteration > 0 && !immediateReviewFollowup && !shouldKeepPolling()) break;
-      immediateReviewFollowup = false;
+      if (iteration > 0 && !shouldKeepPolling()) break;
       iteration++;
       const remainingPollMs = Math.max(Math.min(callDeadline, deadline) - deps.now(), 0);
       const candidateRead = remainingPollMs > 0 ? true : "immediate";
@@ -832,9 +762,7 @@ export async function executeCardReleaseApproval(
                 approval_url: approvalUrl,
               };
             }
-            const candidateAad =
-              binding.kind === "review" ? binding.reviewAad : binding.approvalAad;
-            if (candidateAad === undefined) {
+            if (binding.approvalAad === undefined) {
               logPaymentCandidateLifecycle(
                 approvalId,
                 binding.kind,
@@ -848,6 +776,7 @@ export async function executeCardReleaseApproval(
                 approval_url: approvalUrl,
               };
             }
+            const candidateAad = binding.approvalAad;
             let verifiedClaims: JWTPayload;
             try {
               verifiedClaims = await verifyMandate(
@@ -865,20 +794,6 @@ export async function executeCardReleaseApproval(
                 "verification_failed",
                 failureReason,
               );
-              if (binding.kind === "review") {
-                logPaymentReviewLifecycle({
-                  event: "review_candidate_rejected",
-                  approval_id: approvalId,
-                  candidate_fingerprint: candidateKey,
-                  failure_code: failureReason,
-                });
-                return {
-                  status: "payment_review_verification_failed",
-                  reason: failureReason,
-                  candidate_kind: "review",
-                  approval_url: approvalUrl,
-                };
-              }
               return {
                 status:
                   approval.status === "approved"
@@ -906,77 +821,16 @@ export async function executeCardReleaseApproval(
               candidateCardBytes?.fill(0);
               logPaymentCandidateLifecycle(
                 approvalId,
-                binding.kind,
+                "approval",
                 "card_open_failed",
                 "card_open_failed",
               );
-              if (binding.kind === "review") {
-                logPaymentReviewLifecycle({
-                  event: "review_candidate_rejected",
-                  approval_id: approvalId,
-                  candidate_fingerprint: candidateKey,
-                  failure_code: "card_open_failed",
-                });
-                return {
-                  status: "payment_review_verification_failed",
-                  reason: "card_open_failed",
-                  candidate_kind: "review",
-                  approval_url: approvalUrl,
-                };
-              }
               return {
                 status: "payment_card_open_failed",
                 reason: "card_open_failed",
                 candidate_kind: "approval",
                 approval_url: approvalUrl,
               };
-            }
-
-            if (binding.kind === "review") {
-              try {
-                const confirmation = await api.confirmPaymentApproval(approvalId, candidate);
-                if (confirmation.status !== "verified") {
-                  throw new Error("review_confirmation_failed");
-                }
-              } catch (error) {
-                candidateCardBytes.fill(0);
-                if (isPaymentApprovalDeniedError(error)) {
-                  return terminalApprovalResult("denied");
-                }
-                const failureReason =
-                  error instanceof Error && /404|409/.test(error.message)
-                    ? "confirm_status"
-                    : "confirm_failed";
-                logPaymentCandidateLifecycle(
-                  approvalId,
-                  "review",
-                  "confirmation_failed",
-                  failureReason,
-                );
-                logPaymentReviewLifecycle({
-                  event: "review_candidate_rejected",
-                  approval_id: approvalId,
-                  candidate_fingerprint: candidateKey,
-                  failure_code: failureReason,
-                });
-                return {
-                  status: "payment_review_verification_failed",
-                  reason: failureReason,
-                  candidate_kind: "review",
-                  approval_url: approvalUrl,
-                };
-              }
-              reviewVerified = true;
-              logPaymentCandidateLifecycle(approvalId, "review", "verified_final_required");
-              logPaymentReviewLifecycle({
-                event: "review_candidate_verified",
-                approval_id: approvalId,
-                candidate_fingerprint: candidateKey,
-                failure_code: "ok",
-              });
-              candidateCardBytes.fill(0);
-              immediateReviewFollowup = true;
-              continue;
             }
 
             if (approval.status === "pending") {
@@ -992,8 +846,7 @@ export async function executeCardReleaseApproval(
                   error instanceof Error && /404|409/.test(error.message)
                     ? "confirm_status"
                     : "confirm_failed";
-                const state = resumableState();
-                deps.onApprovalTerminal(state, "payment_confirmation_failed");
+                deps.onApprovalTerminal();
                 resumableState = undefined;
                 keypairHandedOff = false;
                 logPaymentCandidateLifecycle(
@@ -1027,29 +880,6 @@ export async function executeCardReleaseApproval(
       await deps.sleep(deps.pollIntervalMs);
     }
     if (approved === undefined) {
-      if (reviewVerified && budgetExhausted) {
-        const state = resumableState();
-        keypairHandedOff = true;
-        deps.onApprovalPending(state);
-        return {
-          status: "approval_pending_final_signature",
-          approval_id: approvalId,
-          approval_url: approvalUrl,
-          expires_at: new Date(deadline).toISOString(),
-          approved_amount_cents: checkout.amount_cents,
-          currency: checkout.currency,
-          merchant: checkout.merchant,
-          candidate_kind: "review",
-          ready_to_charge: false,
-          next: {
-            tool: "inject_card",
-            message:
-              "The review signature was verified, but final payment approval is still required. " +
-              "Refresh the approval page if it does not advance to the final approval prompt, " +
-              "then call inject_card again with the same arguments; it resumes this approval and waits.",
-          },
-        };
-      }
       if (budgetExhausted) {
         const state = resumableState();
         keypairHandedOff = true;
@@ -1073,21 +903,14 @@ export async function executeCardReleaseApproval(
           },
         };
       }
-      if (jit) {
-        try {
-          const final = await api.getPaymentApproval(approvalId);
-          boundCardRef = final.card_ref;
-        } catch {}
-      }
       return expiredApprovalResult();
     }
 
     if (claims === undefined || card === undefined) {
       resumableState = undefined;
       keypairHandedOff = false;
-      return timeoutResult();
+      return approvalExpiredResult(approvalUrl, checkout);
     }
-    terminalApprovalState = resumableState?.();
     resumableState = undefined;
     keypairHandedOff = false;
 

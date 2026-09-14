@@ -28,7 +28,7 @@ import {
   composeOperatorSignals,
   withOperatorRequestContext,
 } from "./bot/request-cancellation.js";
-import { maskOperatorSessionOutput } from "./bot/provision-session.js";
+import { maskOperatorSessionOutput, UnknownProvisionSessionError } from "./bot/provision-session.js";
 import {
   heartbeatIntervalMs,
   idleCheckIntervalMs,
@@ -344,11 +344,7 @@ export async function buildServer(
           ? { session_id: parsed.data.session_id }
           : undefined;
       const brokerUnavailable = err instanceof BrokerRefusal && err.code === "broker_unavailable";
-      const serverUnavailable =
-        brokerUnavailable ||
-        /unknown provision session|requires one active operate_start browser session/i.test(
-          message,
-        );
+      const serverUnavailable = brokerUnavailable || err instanceof UnknownProvisionSessionError;
       if (message.startsWith("operator_session_busy:"))
         return errorContent(
           "session_busy",
@@ -361,7 +357,6 @@ export async function buildServer(
           "Cancelled work has not settled; retain the session and use finish. Do not repeat a mutation.",
           loginSession,
         );
-      const malformedAction = /^operate_act kind=.* requires /i.test(message);
       const retryableRead = tool.name === "operate_observe" || tool.name === "operate_screenshot";
       return serverUnavailable
         ? errorContent(
@@ -373,11 +368,7 @@ export async function buildServer(
             },
           )
         : errorContent(
-            err instanceof BrokerRefusal
-              ? err.code
-              : malformedAction
-                ? "invalid_arguments"
-                : "tool_execution_failed",
+            err instanceof BrokerRefusal ? err.code : "tool_execution_failed",
             message,
             err instanceof ForwardedResultError
               ? err.detail
