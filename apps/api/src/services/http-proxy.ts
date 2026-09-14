@@ -149,6 +149,7 @@ function substituteAll(s: string, fields: Record<string, string>): string {
 export function substituteSecret(
   http: ProxyHttpRequest,
   fields: Record<string, string>,
+  opts: { bodyVerbatim?: boolean } = {},
 ): ProxyHttpRequest {
   for (const v of Object.values(fields)) {
     if (/[\r\n\0]/.test(v)) {
@@ -192,7 +193,9 @@ export function substituteSecret(
     url: http.url,
     headers,
     ...(query !== undefined ? { query } : {}),
-    ...(http.body !== undefined ? { body: substituteAll(http.body, fields) } : {}),
+    ...(http.body !== undefined
+      ? { body: opts.bodyVerbatim === true ? http.body : substituteAll(http.body, fields) }
+      : {}),
   };
 }
 
@@ -295,8 +298,15 @@ export class HttpProxyExecutor {
     accountId: string;
     http: ProxyHttpRequest;
     fields: Record<string, string>;
+    // Egress-grant forwarding only: the body is the client workload's opaque
+    // application payload (e.g. an LLM chat body), not an agent-authored
+    // ${SECRET} template — it must reach upstream byte-for-byte, never
+    // scanned or substituted. use_credential leaves this unset.
+    bodyVerbatim?: boolean;
   }): Promise<ProxyResult> {
-    const resolved = substituteSecret(input.http, input.fields);
+    const resolved = substituteSecret(input.http, input.fields, {
+      ...(input.bodyVerbatim !== undefined ? { bodyVerbatim: input.bodyVerbatim } : {}),
+    });
 
     let url: URL;
     try {

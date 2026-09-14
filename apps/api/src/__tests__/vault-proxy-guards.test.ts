@@ -82,6 +82,24 @@ describe("substituteSecret (single + multi field)", () => {
     expect(JSON.parse(out.body!)).toEqual({ k: 'a"b\\c' });
   });
 
+  it("bodyVerbatim: true forwards a body containing ${SECRET} / ${SECRET.field} unchanged and does not throw", () => {
+    const body = JSON.stringify({
+      messages: [{ role: "user", content: 'docs say to use "${SECRET}" or "${SECRET.access_key}"' }],
+    });
+    const out = substituteSecret({ ...base, body }, ONE, { bodyVerbatim: true });
+    expect(out.body).toBe(body);
+  });
+
+  it("bodyVerbatim: true does not throw secret_field_missing for an unresolvable field in the body", () => {
+    const body = '{"prompt":"${SECRET.no_such_field}"}';
+    expect(syncCode(() => substituteSecret({ ...base, body }, ONE, { bodyVerbatim: true }))).toBe("(no throw)");
+  });
+
+  it("bodyVerbatim unset (default) still substitutes the body, matching use_credential today", () => {
+    const out = substituteSecret({ ...base, body: '{"k":"${SECRET}"}' }, ONE);
+    expect(out.body).toBe('{"k":"sk-123"}');
+  });
+
   it("rejects placeholders in url / method / header-key", () => {
     expect(syncCode(() => substituteSecret({ method: "GET", url: "https://x/${SECRET}" }, ONE))).toBe("secret_in_url");
     expect(syncCode(() => substituteSecret({ method: "${SECRET}", url: "https://x" }, ONE))).toBe("secret_in_method");
@@ -181,6 +199,19 @@ describe("HttpProxyExecutor.execute guards", () => {
     expect(u.searchParams.get("api_key")).toBe("fred-key");
     expect(u.searchParams.get("series_id")).toBe("DFF"); // pre-existing query preserved
     expect(u.searchParams.get("file_type")).toBe("json");
+  });
+
+  it("bodyVerbatim: true forwards a body containing ${SECRET.field} unchanged and still injects the auth header", async () => {
+    const { executor, dispatched } = exec();
+    const body = JSON.stringify({ prompt: "the docs say ${SECRET.access_key}" });
+    await executor.execute({
+      accountId: "a",
+      http: { method: "POST", url: "https://openrouter.ai/api/v1/chat/completions", headers: { authorization: "Bearer ${SECRET}" }, body },
+      fields: { value: "sk-9" },
+      bodyVerbatim: true,
+    });
+    expect(dispatched[0]!.body).toBe(body);
+    expect(dispatched[0]!.headers.authorization).toBe("Bearer sk-9");
   });
 
   it("strips Set-Cookie", async () => {
