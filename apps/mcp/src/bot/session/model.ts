@@ -184,6 +184,8 @@ export interface Session {
     last4: string;
     deadline: number;
     card: CheckoutCard;
+    /** True once the operator has nudged the cardholder about a 3-D Secure challenge. */
+    threeDsNotified?: boolean;
   } | null;
   // Per-line idempotency records are local to the one active browser/cart. A
   // retry must inspect this before it ever reaches a merchant add button.

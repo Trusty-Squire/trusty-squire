@@ -42,6 +42,7 @@ export const REAL_BROWSER_FILES = [
   "src/bot/__tests__/browser-inject-card.test.ts",
   "src/bot/__tests__/browser-screenshot.test.ts",
   "src/bot/__tests__/browser-three-ds-method.test.ts",
+  "src/bot/__tests__/browser-three-ds-notify.test.ts",
   "src/bot/__tests__/browser-unrestricted-egress.test.ts",
   "src/bot/__tests__/credential-capture-browser.test.ts",
   "src/bot/__tests__/locator-fallback.test.ts",
@@ -122,6 +123,7 @@ export const REQUIRED_PAYMENT_SAFETY_FILES = [
   "src/bot/__tests__/operator-evidence.test.ts",
   "src/bot/__tests__/browser-screenshot.test.ts",
   "src/bot/__tests__/card-release-approval.test.ts",
+  "src/bot/__tests__/browser-three-ds-notify.test.ts",
   "src/bot/__tests__/credential-shape.test.ts",
   "src/tools/__tests__/credential-tools.test.ts",
 ];

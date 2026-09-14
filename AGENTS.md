@@ -433,6 +433,13 @@ for providers, chooses a saved/new card, submits, re-reads totals, clears fields
 or claims a payment outcome. Do not restore payment status stages, submitter
 guessing, post-submit custody, or checkout cleanup sweeps.
 
+3-D Secure is notification-only. After a card release, the operator detects a
+rendered challenge on the next observation or action result, nudges the
+cardholder once through the API notify path, and reports `three_ds`
+(`observedThreeDsChallenge` in `apps/mcp/src/bot/provision-session.ts`). It never
+blocks, waits on, gates, or takes custody of the challenge; the human completes
+it in their bank app and the agent keeps observing.
+
 ### 11. Released PAN and security code have one narrow output boundary
 
 Before the first card write, register the released PAN and CVV/CVC/CID plus the

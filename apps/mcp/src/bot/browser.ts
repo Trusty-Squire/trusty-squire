@@ -9181,6 +9181,41 @@ export class BrowserController {
     return indexes.join("/");
   }
 
+  /**
+   * A rendered 3-D Secure challenge, or null. URL/ACS markers plus frame and
+   * rendered-text signals; captcha frames are fraud checks, never
+   * authentication. Detection is read-only — it never clears, advances, waits
+   * on, or takes custody of the challenge.
+   */
+  async detectThreeDsChallenge(page: Page | null = this.page): Promise<{ url: string } | null> {
+    if (page === null) return null;
+    // Cross-processor markers (CardinalCommerce backs many processors, not
+    // just Stripe): the URL/ACS path, the structural forms/frames, and the
+    // rendered challenge copy.
+    const urlPattern =
+      /(?:https?:\/\/(?:[^/]+\.)*cardinalcommerce\.com\/(?:v\d+\/)?cruise\/stepup(?:[/?#]|$)|https?:\/\/hooks\.stripe\.com\/3d_secure|https?:\/\/(?:[^/]+\.)*emvtds(?:[-.][^/]*)?(?:\/|$)|3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/(?:emvtds|emv-?3ds)(?:[-_/]|$)|\/3ds(?:2)?\/|\/acs\/|\/credit3d2\/Fep(?:ChargePaymentInfo|BridgeAuthority)[^/?#]*\.do(?:[?#]|$))/i;
+    const challengeText =
+      /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i;
+    for (const frame of page.frames()) {
+      if (this.frameWithinCaptcha(frame)) continue;
+      const url = frame.url();
+      if (urlPattern.test(url)) return { url };
+      const structural = await frame
+        .locator(
+          'iframe[title*="3d secure" i],form[action*="acs" i],form:has(input[name="creq" i]),form[name="credit3d2FepBuyAuthenticateActionForm" i],form:has(input[name="md" i]):has([name="resSumbitButtonId" i],#resSumbitButtonId)',
+        )
+        .first()
+        .isVisible()
+        .catch(() => false);
+      if (structural) return { url: url || page.url() };
+      const text = await frame.evaluate(extractObservationVisibleText).catch(() => "");
+      if (challengeText.test(text) || /本人認証/u.test(text)) {
+        return { url: url || page.url() };
+      }
+    }
+    return null;
+  }
+
   private frameWithinCaptcha(frame: Frame): boolean {
     let current: Frame | null = frame;
     while (current !== null) {

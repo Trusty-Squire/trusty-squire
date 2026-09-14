@@ -45,8 +45,10 @@ Hosted-field providers can render decoy autofill or focus-helper inputs beside
 the actual field (notably Braintree and Stripe). Choose the ref for the visible
 card control, not a helper input. Before placing the order, re-observe and
 confirm that no competing merchant-saved-card radio or option remains selected.
-If a 3-D Secure challenge appears, immediately notify the cardholder in chat and
-ask them to complete it, then continue observing the live checkout.
+If a 3-D Secure challenge appears, the operator detects it on the next
+observation or action result, notifies the cardholder once through the purchase
+notification path, and reports `three_ds`; keep observing the live checkout
+while the cardholder completes it.
 
 Before the first card write, the operator installs a session-lifetime output
 mask for that released PAN and security code. Normal DOM/AX observations, raw
@@ -307,9 +309,10 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   It fills only those refs under the existing purchase approval; the agent
   observes partial results and drives every later checkout action itself. Pick
   the real visible field rather than a hosted-provider autofill/focus helper;
-  before placing the order, re-observe for a competing selected saved card. If
-  3-D Secure appears, notify the cardholder in chat immediately and ask them to
-  complete it.
+  before placing the order, re-observe for a competing selected saved card. A
+  rendered 3-D Secure challenge is detected by the operator, which notifies the
+  cardholder once and reports `three_ds`; keep observing while the cardholder
+  completes it.
 - `operate_finish` closes the session with a flat `outcome` enum — never a
   nested union. `none` only closes; `credentials` requires `store` and preserves
   credential extraction and vault storage; `result` requires `summary` or
