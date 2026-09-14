@@ -69,8 +69,6 @@ it("keeps ordinary actions and vaulting usable while a capture is unresolved", a
   const api = {
     setRequestingAgent: vi.fn(),
     storeCredential,
-    withAuditContext: async (_context: unknown, operation: () => Promise<unknown>) =>
-      await operation(),
   } as unknown as ApiClient;
   const fixture = await fixtureBrokerForwarder(root, api, "session");
   const { forwarder, sessionId } = fixture;

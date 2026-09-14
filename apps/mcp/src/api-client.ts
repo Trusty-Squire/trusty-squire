@@ -4,8 +4,6 @@
 // is the only thing the MCP tools touch — tests inject a mock to
 // keep their behaviour deterministic without spinning up HTTP.
 
-import { AsyncLocalStorage } from "node:async_hooks";
-
 export class MissingSessionError extends Error {
   constructor() {
     super(
@@ -44,12 +42,6 @@ export interface ApiClientConfig {
   // a paired account; the registry falls back to "anonymous"
   // when this header is missing.
   accountId?: string;
-}
-
-export interface ApiAuditContext {
-  taskId: string;
-  invocationId: string;
-  purpose: string;
 }
 
 export interface ProvisionInput {
@@ -199,7 +191,6 @@ export interface HeightenedAuthNotificationResult {
 export class ApiClient {
   private readonly fetchImpl: typeof fetch;
   private requestingAgent: string | undefined;
-  private readonly auditContext = new AsyncLocalStorage<ApiAuditContext>();
 
   constructor(private readonly config: ApiClientConfig) {
     this.fetchImpl = config.fetch ?? fetch;
@@ -208,10 +199,6 @@ export class ApiClient {
   setRequestingAgent(name: string): void {
     const normalized = name.trim();
     this.requestingAgent = normalized.length > 0 ? normalized : "unknown-agent";
-  }
-
-  async withAuditContext<T>(context: ApiAuditContext, fn: () => Promise<T>): Promise<T> {
-    return await this.auditContext.run(context, fn);
   }
 
   // ── Runs / provision / approvals ───────────────────────────
@@ -654,12 +641,6 @@ export class ApiClient {
     const agentIdentity = this.requestingAgent ?? this.config.agentIdentity;
     if (agentIdentity !== undefined) {
       h["X-Squire-Agent-Identity"] = agentIdentity;
-    }
-    const auditContext = this.auditContext.getStore();
-    if (auditContext !== undefined) {
-      h["X-Squire-Task-Id"] = auditContext.taskId;
-      h["X-Squire-Invocation-Id"] = auditContext.invocationId;
-      h["X-Squire-Purpose"] = auditContext.purpose;
     }
     // The registry scopes its reads to `x-account-id`. Main API
     // ignores unknown headers, so it's safe to always send.

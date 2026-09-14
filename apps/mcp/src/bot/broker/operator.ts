@@ -57,15 +57,6 @@ function isOperatorCommand(name: string): boolean {
   return name.startsWith("operate_") || name === "inject_card";
 }
 
-async function withBrokerAuditContext<T>(
-  api: ApiClient,
-  taskId: string,
-  invocationId: string,
-  operation: () => Promise<T>,
-): Promise<T> {
-  return await api.withAuditContext({ taskId, invocationId, purpose: taskId }, operation);
-}
-
 /** Existing handlers run inside the broker with a pinned API client and capability. */
 export class OperatorBroker implements BrokerTransportPort {
   readonly authority: BrokerAuthority;
@@ -198,13 +189,7 @@ export class OperatorBroker implements BrokerTransportPort {
             async () =>
               await withBrokerAdmission(
                 { sessionId: id },
-                async () =>
-                  await withBrokerAuditContext(
-                    pinnedApi,
-                    tool.name,
-                    requestId,
-                    async () => await tool.handler(args, pinnedApi),
-                  ),
+                async () => await tool.handler(args, pinnedApi),
               ),
           );
           if (signal.aborted) throw signal.reason ?? new Error("operator_request_cancelled");
@@ -246,12 +231,10 @@ export class OperatorBroker implements BrokerTransportPort {
               const translated = { ...commandArgs, session_id: internalId };
               const notifyUser = brokerNotifier();
               const executeHandler = async () =>
-                await withBrokerAuditContext(pinnedApi, name, commandId, async () =>
-                  command.handler(translated, pinnedApi, {
-                    signal,
-                    ...(notifyUser ? { notifyUser } : {}),
-                  }),
-                );
+                await command.handler(translated, pinnedApi, {
+                  signal,
+                  ...(notifyUser ? { notifyUser } : {}),
+                });
               const execute = async () =>
                 prepared === undefined
                   ? await executeHandler()

@@ -288,20 +288,7 @@ export async function buildServer(
           undefined,
           { operationId },
         );
-      const invoke = async () => {
-        // Some embedders provide a narrow ApiClient test double. Production
-        // clients always install the async-local audit context.
-        const withAuditContext = callApi.withAuditContext?.bind(callApi);
-        if (withAuditContext === undefined) return await invokeHandler();
-        return await withAuditContext(
-          {
-            taskId: tool.name,
-            invocationId: String(extra.requestId),
-            purpose: tool.name,
-          },
-          invokeHandler,
-        );
-      };
+      const invoke = invokeHandler;
       // Tool handlers await independently.  A finish must therefore close the
       // admission gate and drain calls that already entered before it snapshots
       // eligible state and closes the browser. `operate_finish*` owns that transition.

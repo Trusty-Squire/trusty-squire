@@ -82,8 +82,6 @@ it("captures a created key through MCP and recovers an unchanged source without 
   const api = {
     setRequestingAgent: vi.fn(),
     storeCredential,
-    withAuditContext: async (_context: unknown, operation: () => Promise<unknown>) =>
-      await operation(),
   } as unknown as ApiClient;
   const fixture = await fixtureBrokerForwarder(root, api, "fixture");
   const server = await buildServer(api, undefined, undefined, undefined, fixture.forwarder);

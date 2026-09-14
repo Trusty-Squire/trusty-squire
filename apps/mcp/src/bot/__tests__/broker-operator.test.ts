@@ -63,8 +63,6 @@ function tool(name: string, handler: Tool["handler"]): Tool {
 
 function api(): ApiClient {
   return {
-    withAuditContext: async (_context: unknown, operation: () => Promise<unknown>) =>
-      await operation(),
   } as unknown as ApiClient;
 }
 
