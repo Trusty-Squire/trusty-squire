@@ -86,8 +86,6 @@ function proxyErrorStatus(code: ProxyError["code"]): number {
     case "not_https":
     case "blocked_address":
       return 403;
-    case "concurrency_limit":
-      return 429;
     case "timeout":
       return 504;
     default:
