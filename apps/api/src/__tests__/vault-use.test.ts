@@ -16,6 +16,8 @@ import { buildServer } from "../server.js";
 import { HttpProxyExecutor } from "../services/http-proxy.js";
 
 const SESSION_SECRET = "dev-test-secret-do-not-use-anywhere-else";
+const CUSTOMER_ID = "ts-test";
+
 interface Harness {
   server: FastifyInstance;
   deps: ApiDeps;
@@ -39,18 +41,13 @@ function fakeExecutor(): HttpProxyExecutor {
 }
 
 async function setup(): Promise<Harness> {
-  const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET });
+  const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET});
   const server = await buildServer({ deps, proxyExecutor: fakeExecutor() });
   return { server, deps };
 }
 
 async function webCookie(deps: ApiDeps, accountId: string): Promise<string> {
-  const { record, jwt } = issueSession({
-    account_id: accountId,
-    ip: null,
-    user_agent: null,
-    now: new Date(),
-  });
+  const { record, jwt } = issueSession({ account_id: accountId, ip: null, user_agent: null, now: new Date() });
   await deps.sessionStore.insert(record);
   return `${SESSION_COOKIE_NAME}=${signSessionJwt(jwt, SESSION_SECRET)}`;
 }
@@ -137,13 +134,7 @@ describe("POST /v1/vault/use", () => {
     const res = await h.server.inject({
       method: "POST",
       url: "/v1/vault/use",
-      headers: {
-        authorization: `Bearer ${token}`,
-        "content-type": "application/json",
-        "x-squire-task-id": "task-proxy-42",
-        "x-squire-invocation-id": "invoke-proxy-7",
-        "x-squire-purpose": "inspect provider models",
-      },
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
       payload: {
         reference,
         http: {
@@ -160,18 +151,6 @@ describe("POST /v1/vault/use", () => {
     expect(seen[0]!.auth).toBe("Bearer sk-the-real-secret");
     // The agent's response body does NOT contain the secret.
     expect(body.response.body).not.toContain("sk-the-real-secret");
-    const [audit] = await h.deps.vaultAuditStore.list(account.id, {
-      type: "vault.proxy_executed",
-      reference,
-    });
-    expect(audit?.payload).toMatchObject({
-      purpose: "inspect provider models",
-      attribution: {
-        task_id: "task-proxy-42",
-        agent_identity: "claude-code",
-        invocation_id: "invoke-proxy-7",
-      },
-    });
   });
 
   it("HARD-REJECTS an off-allowlist host with 403 (no upstream dispatch)", async () => {
@@ -211,11 +190,7 @@ describe("POST /v1/vault/use", () => {
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
       payload: {
         service: "openai",
-        http: {
-          method: "GET",
-          url: "https://api.openai.com/v1/models",
-          headers: { authorization: "Bearer ${SECRET}" },
-        },
+        http: { method: "GET", url: "https://api.openai.com/v1/models", headers: { authorization: "Bearer ${SECRET}" } },
       },
     });
     expect(res.statusCode).toBe(200);
@@ -232,10 +207,7 @@ describe("POST /v1/vault/use", () => {
       method: "POST",
       url: "/v1/vault/use",
       headers: { authorization: `Bearer ${tokenB}`, "content-type": "application/json" },
-      payload: {
-        reference: refA,
-        http: { method: "GET", url: "https://api.openai.com/v1/models", headers: {} },
-      },
+      payload: { reference: refA, http: { method: "GET", url: "https://api.openai.com/v1/models", headers: {} } },
     });
     expect(res.statusCode).toBe(404);
   });
@@ -245,6 +217,8 @@ describe("POST /v1/vault/use", () => {
     const cookie = await webCookie(h.deps, account.id);
     const token = await agentToken(h.deps, account.id);
     const reference = await storeLoginCred(h, cookie, "Example", ["app.example.com"]);
+    const keys = fillKeyPair();
+
     const res = await h.server.inject({
       method: "POST",
       url: "/v1/vault/use",
@@ -349,12 +323,7 @@ describe("POST /v1/vault/browser-fill", () => {
       method: "POST",
       url: "/v1/vault/browser-fill",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      payload: {
-        reference,
-        current_host: "api.example.com",
-        fields: ["login"],
-        encrypted_response_public_key: keys.publicKey,
-      },
+      payload: { reference, current_host: "api.example.com", fields: ["login"], encrypted_response_public_key: keys.publicKey },
     });
 
     expect(res.statusCode).toBe(403);
@@ -372,30 +341,16 @@ describe("POST /v1/vault/browser-fill", () => {
       method: "POST",
       url: "/v1/vault/browser-fill",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      payload: {
-        reference,
-        current_host: "login.example.com",
-        fields: ["login"],
-        encrypted_response_public_key: keys.publicKey,
-      },
+      payload: { reference, current_host: "login.example.com", fields: ["login"], encrypted_response_public_key: keys.publicKey },
     });
     expect(subdomain.statusCode).toBe(200);
-    expect(
-      keys.decrypt(
-        (subdomain.json() as { encrypted_fields: Record<string, string> }).encrypted_fields.login!,
-      ),
-    ).toBe("ada@example.test");
+    expect(keys.decrypt((subdomain.json() as { encrypted_fields: Record<string, string> }).encrypted_fields.login!)).toBe("ada@example.test");
 
     const apex = await h.server.inject({
       method: "POST",
       url: "/v1/vault/browser-fill",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      payload: {
-        reference,
-        current_host: "example.com",
-        fields: ["login"],
-        encrypted_response_public_key: keys.publicKey,
-      },
+      payload: { reference, current_host: "example.com", fields: ["login"], encrypted_response_public_key: keys.publicKey },
     });
     expect(apex.statusCode).toBe(403);
     expect((apex.json() as { error: string }).error).toBe("login_host_not_allowed");

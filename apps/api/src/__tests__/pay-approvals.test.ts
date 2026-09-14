@@ -344,10 +344,6 @@ describe("payment approval relay", () => {
       merchant: "Synthetic Books",
       amount_cents: 2599,
       currency: "USD",
-      attribution: {
-        agent_identity: "synthetic-payment-test-agent",
-        purpose: "payment.approval.create",
-      },
     });
     expect(audit.json().events[0]).not.toHaveProperty("operator_pubkey");
     expect(audit.json().events[0]).not.toHaveProperty("sealed_card");

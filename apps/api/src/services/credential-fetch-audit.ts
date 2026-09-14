@@ -17,7 +17,6 @@ import {
   VAULT_AUDIT_TYPES,
   VAULT_REVEAL_PURPOSE,
   type VaultAuditStore,
-  type VaultAuditAttribution,
 } from "@trusty-squire/vault";
 
 /** Terminal fetch outcomes settled OUTSIDE the vault's decrypt path. */
@@ -36,8 +35,6 @@ export interface CredentialFetchAuditSubject {
   credentialService: string | null;
   credentialLabel: string;
   requesterKind: "web" | "agent";
-  auditAttribution: VaultAuditAttribution;
-  auditPurpose: string;
 }
 
 export async function recordCredentialFetchOutcome(
@@ -55,8 +52,7 @@ export async function recordCredentialFetchOutcome(
     payload: {
       reference: subject.credentialReference,
       requester: subject.requesterKind === "web" ? "user" : "agent",
-      purpose: subject.auditPurpose || VAULT_REVEAL_PURPOSE,
-      attribution: subject.auditAttribution,
+      purpose: VAULT_REVEAL_PURPOSE,
       outcome,
       approval_id: subject.id,
       label: subject.credentialLabel,

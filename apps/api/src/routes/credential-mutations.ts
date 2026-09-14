@@ -21,7 +21,6 @@ import {
 import { sendTelegramMessage } from "../services/telegram.js";
 import { notifyVaultAuditAfterCommit } from "../services/vault-notify.js";
 import { authenticatedRequester } from "../services/requesting-agent.js";
-import { requestAuditAttribution } from "../services/vault-audit-attribution.js";
 import {
   CREDENTIAL_MUTATION_VOUCH_CONTEXT,
   createVouchMandateVerifier,
@@ -233,8 +232,6 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
       const credential = resolution.credential;
       const agent = authenticatedRequester(auth);
       const requesterKind = auth.kind;
-      const auditPurpose = `credential.${parsed.data.operation}`;
-      const auditAttribution = requestAuditAttribution(req, auditPurpose, auditPurpose);
       const before = editableMetadata(credential);
       let after = null;
       if (parsed.data.operation === "edit") {
@@ -283,8 +280,6 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
         nonce: randomBytes(16).toString("base64url"),
         agent,
         requesterKind,
-        auditAttribution,
-        auditPurpose,
         intentHash,
         expiresAt: new Date(now.getTime() + 10 * 60 * 1000),
       });
