@@ -102,11 +102,6 @@ export function contextInitScriptsFor(options: {
   ];
 }
 
-export interface PageTargetSafetySignals {
-  billingObject: boolean;
-  accountSetup: boolean;
-}
-
 export interface FrameTarget {
   framePath: string;
   frameOrigin: string;
@@ -132,7 +127,6 @@ export type ResolvedPageTarget =
       handle: ElementHandle<Element>;
       text: string;
       labels: string[];
-      safetySignals: PageTargetSafetySignals;
       frameTarget: FrameTarget | null;
     }
   | { ok: false; reason: "none" | "ambiguous"; candidates: string[] };
@@ -156,6 +150,10 @@ export interface CheckoutSummary {
   checkout_origin: string;
   amount_cents: number;
   currency: string;
+  // Set when sibling checkout frames render a different total/currency than
+  // the one reported. A read-only report: the discrepancy is surfaced, never
+  // a refusal that could block the purchase.
+  total_conflict?: boolean;
 }
 
 export interface CheckoutReviewSummary extends CheckoutSummary {
@@ -641,21 +639,6 @@ export function parseCheckoutAmount(
   fallbackCurrency?: string,
 ): { amount_cents: number; currency: string } | null {
   return parseCheckoutAmountResult(texts, fallbackCurrency);
-}
-
-/**
- * Like parseCheckoutAmount but returns every parseable currency/amount match
- * instead of the first — checkout review pages can show a pre-shipping
- * subtotal before the final labeled total, so the caller needs the full
- * sequence to pick the settled one. Reuses the same regex and currency
- * helpers as parseCheckoutAmountResult, just without the single-result early
- * return.
- */
-export function parseCheckoutAmounts(
-  texts: readonly string[],
-  fallbackCurrency?: string,
-): Array<{ amount_cents: number; currency: string }> {
-  return parseCheckoutAmountsResult(texts, fallbackCurrency).amounts;
 }
 
 interface CheckoutAmountsParseResult {
@@ -2516,11 +2499,28 @@ export class BrowserController {
     page: Page | null = this.page,
   ): Promise<T> {
     if (page === null) throw new Error("Browser not started");
+    const handle = await page.$(selector).catch(() => null);
+    if (handle === null) return await fn(false);
+    try {
+      return await this.neutralizeModalInert(handle, page, fn);
+    } finally {
+      await handle.dispose().catch(() => undefined);
+    }
+  }
+
+  // Single Page|Frame implementation shared by withModalInertNeutralized
+  // (main frame, by selector) and clickInFrame (a handle inside an iframe).
+  // The target is always an ElementHandle; the restore sweep always runs
+  // against the document the handle actually lives in.
+  private async neutralizeModalInert<T>(
+    handle: ElementHandle<Element>,
+    scope: Page | Frame,
+    fn: (modalActive: boolean) => Promise<T>,
+  ): Promise<T> {
     const marker = "data-ts-inert-neutralized";
     const anchorMarker = "data-ts-inert-region-anchor";
-    const modalActive = await page
-      .$eval(
-        selector,
+    const modalActive = await handle
+      .evaluate(
         (el, markers) => {
           const { marker, anchorMarker } = markers;
           const composedParent = (node: Node): Element | null => {
@@ -2560,7 +2560,7 @@ export class BrowserController {
     try {
       return await fn(modalActive);
     } finally {
-      await page
+      await scope
         .evaluate(
           (markers) => {
             const { marker, anchorMarker } = markers;
@@ -2801,17 +2801,6 @@ export class BrowserController {
     await this.humanClick(selector);
   }
 
-  // Force-click bypasses Playwright's actionability + interception checks — for a
-  // button that is visible / enabled / stable but whose pointer events are eaten
-  // by a modal-dialog backdrop layered over it (MUI `<div class="MuiDialog-
-  // container">`, e.g. deepinfra's new-API-key dialog). A normal click() there
-  // times out with "intercepts pointer events"; force dispatches at the element.
-  async clickForce(selector: string, index = 0): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    const safeIndex = Math.max(0, Math.floor(index));
-    await this.page.locator(selector).nth(safeIndex).click({ force: true, timeout: 8000 });
-  }
-
   // Resolve a locator-form operate_act target (`text=…` / `css=…`) DIRECTLY
   // against a live page/frame document, bypassing the extracted-inventory list.
   // This is the escape hatch for a control the inventory never emitted: a bare
@@ -2850,7 +2839,6 @@ export class BrowserController {
         handle: ElementHandle<Element>;
         text: string;
         labels: string[];
-        safetySignals: PageTargetSafetySignals;
         documentOrigin: string;
       }
     | { ok: false; reason: "none" | "ambiguous"; candidates: string[] }
@@ -2871,41 +2859,6 @@ export class BrowserController {
           return (typeof it === "string" ? it : (el.textContent ?? "")).replace(/\s+/g, " ").trim();
         };
         const rendered = (el: Element): string => renderedRaw(el).toLowerCase();
-        const safetyMetadata = (value: string | null): string =>
-          (value ?? "")
-            .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-            .replace(/[_.\/-]+/g, " ")
-            .replace(/\s+/g, " ")
-            .trim()
-            .toLowerCase();
-        const safetySignalsFor = (el: Element): PageTargetSafetySignals => {
-          const safetyText = [
-            renderedRaw(el),
-            el.getAttribute("aria-label"),
-            el.getAttribute("title"),
-            el.getAttribute("alt"),
-            el.getAttribute("action-type"),
-            el.getAttribute("name"),
-            el.getAttribute("id"),
-            el.getAttribute("value"),
-          ]
-            .map((part) => safetyMetadata(part))
-            .filter((part) => part.length > 0)
-            .join(" ");
-          // Keep this signal-shape in sync with the safety-signal
-          // reporting in provision-session.ts.
-          return {
-            billingObject:
-              /\b(create|save|add|finish)\b/i.test(safetyText) &&
-              /\b(product|price|pricing|subscription|billing|payment|invoice|checkout)\b/i.test(
-                safetyText,
-              ),
-            accountSetup:
-              /\b(?:create|finish|complete|set up|setup)\s+(?:your\s+)?(?:account|profile|organization|workspace|business)\b/i.test(
-                safetyText,
-              ),
-          };
-        };
         // Visibility walks the ANCESTOR chain (crossing shadow-host boundaries):
         // opacity does not inherit, so a button under an opacity:0 wrapper keeps
         // its own computed opacity 1 and a self-only check would wrongly treat it
@@ -3025,7 +2978,6 @@ export class BrowserController {
               candidates: [] as string[],
               text: "",
               labels: [] as string[],
-              safetySignals: { billingObject: false, accountSetup: false },
               documentOrigin: location.origin,
             };
           }
@@ -3061,7 +3013,6 @@ export class BrowserController {
             candidates: pool.slice(0, 8).map((el) => renderedRaw(el).slice(0, 60)),
             text: "",
             labels: [] as string[],
-            safetySignals: { billingObject: false, accountSetup: false },
             documentOrigin: location.origin,
           };
         }
@@ -3093,8 +3044,6 @@ export class BrowserController {
           candidates,
           text: win !== null ? renderedRaw(win).slice(0, 120) : "",
           labels: win !== null ? effectiveLabels(win) : [],
-          safetySignals:
-            win !== null ? safetySignalsFor(win) : { billingObject: false, accountSetup: false },
           documentOrigin: location.origin,
         };
       },
@@ -3105,7 +3054,6 @@ export class BrowserController {
       candidates: r.candidates,
       text: r.text,
       labels: r.labels,
-      safetySignals: r.safetySignals,
       documentOrigin: r.documentOrigin,
     }));
     if (meta.count !== 1) {
@@ -3129,7 +3077,6 @@ export class BrowserController {
       handle: asElement,
       text: meta.text ?? "",
       labels: meta.labels ?? [],
-      safetySignals: meta.safetySignals ?? { billingObject: false, accountSetup: false },
       documentOrigin: meta.documentOrigin,
     };
   }
@@ -3145,7 +3092,6 @@ export class BrowserController {
       handle: ElementHandle<Element>;
       text: string;
       labels: string[];
-      safetySignals: PageTargetSafetySignals;
       frameTarget: FrameTarget | null;
     }> = [];
     const candidates: string[] = [];
@@ -3462,42 +3408,6 @@ export class BrowserController {
       .catch(() => undefined);
   }
 
-  async clickNth(selector: string, index: number): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    const safeIndex = Math.max(0, Math.floor(index));
-    const locator = this.page.locator(selector).nth(safeIndex);
-    await locator.click({ timeout: 8000 });
-  }
-
-  // Click a link/button by its visible text. Used for one-off
-  // dismissibles where the bot knows the literal label text and
-  // doesn't need full inventory ranking (e.g. GitHub's "skip 2FA
-  // verification at this moment" link on the post-handshake 2FA
-  // sanity page). Case-insensitive substring match — GitHub
-  // occasionally tweaks capitalization on the same link.
-  //
-  // Returns true on successful click, false when the text isn't on
-  // the page within the timeout. Doesn't throw on miss — caller
-  // decides whether to fall back to abort.
-  async clickLinkByText(text: string, timeoutMs = 3000): Promise<boolean> {
-    if (!this.page) throw new Error("Browser not started");
-    try {
-      // Escape regex metacharacters in the user-supplied label text so
-      // a literal "(2FA)" or "." doesn't get interpreted as a pattern.
-      const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const locator = this.page.getByText(new RegExp(escaped, "i")).first();
-      await locator.waitFor({ state: "visible", timeout: timeoutMs });
-      if (this.humanize) {
-        await this.humanClickLocator(locator);
-      } else {
-        await locator.click();
-      }
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
   // Click the form's submit button, disambiguating when the planned
   // selector matches several elements. Signup pages routinely render
   // OAuth buttons ("Continue with Google" / "GitHub") as
@@ -3726,9 +3636,8 @@ export class BrowserController {
     // frame) must never fail the parent submit — return nothing.
     try {
       return await this.page.evaluate(() => {
-        // These two regexes MUST stay byte-identical with
-        // AGREEMENT_TEXT_RE / MARKETING_TEXT_RE in this module — the
-        // page realm can't import, so they're inlined here.
+        // The page realm can't import module code, so these regexes are
+        // inlined here.
         const agreementRe =
           /terms|tos\b|privacy|consent|policy|i agree|agree to|acknowledge|gdpr|age|18\+|18 years|certif/i;
         const marketingRe =
@@ -3940,161 +3849,6 @@ export class BrowserController {
       else window.scrollBy(0, step);
     }, direction);
     await page.waitForTimeout(350);
-  }
-
-  async scrollToEndOfTOS(selector?: string): Promise<{
-    scrolled: boolean;
-    container: string | null;
-    reason: "ok" | "no_container" | "already_at_bottom";
-  }> {
-    if (!this.page) throw new Error("Browser not started");
-
-    // 1. Find the container.
-    const target = await this.page.evaluate((sel: string | null) => {
-      const scrollableOf = (el: Element): boolean => {
-        const s = window.getComputedStyle(el);
-        const overflowY = s.overflowY;
-        if (overflowY !== "auto" && overflowY !== "scroll") return false;
-        return el.scrollHeight > el.clientHeight + 20;
-      };
-      const visibleArea = (el: Element): number => {
-        const r = el.getBoundingClientRect();
-        const vw = window.innerWidth;
-        const vh = window.innerHeight;
-        const w = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
-        const h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
-        return w * h;
-      };
-      const describe = (
-        el: Element,
-      ): { rect: DOMRect; scrollTop: number; scrollHeight: number; clientHeight: number } => ({
-        rect: el.getBoundingClientRect(),
-        scrollTop: el.scrollTop,
-        scrollHeight: el.scrollHeight,
-        clientHeight: el.clientHeight,
-      });
-      if (sel !== null) {
-        const explicit = document.querySelector(sel);
-        if (explicit === null) return null;
-        return describe(explicit);
-      }
-      // Auto-detect: largest visible scrollable element.
-      const all = Array.from(document.querySelectorAll<HTMLElement>("*"));
-      const candidates = all.filter(scrollableOf).map((el) => ({
-        el,
-        area: visibleArea(el),
-      }));
-      candidates.sort((a, b) => b.area - a.area);
-      const winner = candidates[0];
-      if (winner === undefined || winner.area < 100) return null;
-      return describe(winner.el);
-    }, selector ?? null);
-
-    if (target === null) {
-      return { scrolled: false, container: null, reason: "no_container" };
-    }
-
-    // Already at the bottom on entry — a no-op scroll. Surface this
-    // so the executor can hint the planner that whatever is gating
-    // the disabled button is NOT scroll position (Railway iter ≥2 on
-    // the second ToS modal: planner kept asking for scroll when the
-    // form was actually waiting on something else).
-    if (target.scrollTop + target.clientHeight >= target.scrollHeight - 4) {
-      return {
-        scrolled: false,
-        container: selector ?? "auto-detected",
-        reason: "already_at_bottom",
-      };
-    }
-
-    const { rect } = target;
-    const cx = rect.x + rect.width / 2;
-    const cy = rect.y + rect.height / 2;
-
-    // 2. Move the mouse over the container, then wheel down repeatedly.
-    if (this.humanize) {
-      await this.bezierMouseTo(cx, cy);
-      await this.sleep(rand(80, 200));
-    } else {
-      await this.page.mouse.move(cx, cy);
-    }
-
-    const deltaPerStep = Math.max(200, Math.floor(rect.height * 0.7));
-    const maxSteps = 30;
-    for (let i = 0; i < maxSteps; i++) {
-      await this.page.mouse.wheel(0, deltaPerStep);
-      await this.sleep(this.humanize ? rand(60, 180) : 30);
-      const atBottom = await this.page.evaluate(
-        ({ sel, autoDetected }: { sel: string | null; autoDetected: boolean }) => {
-          let el: Element | null;
-          if (sel !== null) {
-            el = document.querySelector(sel);
-          } else {
-            // Re-resolve the same way we picked it the first time —
-            // the modal we wheeled may have re-rendered (virtualized
-            // list mounting new rows), so cache-by-reference would go
-            // stale.
-            const all = Array.from(document.querySelectorAll<HTMLElement>("*"));
-            const overflowing = all.filter((node) => {
-              const s = window.getComputedStyle(node);
-              if (s.overflowY !== "auto" && s.overflowY !== "scroll") return false;
-              return node.scrollHeight > node.clientHeight + 20;
-            });
-            const visibleArea = (n: Element): number => {
-              const r = n.getBoundingClientRect();
-              const vw = window.innerWidth;
-              const vh = window.innerHeight;
-              const w = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
-              const h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
-              return w * h;
-            };
-            overflowing.sort((a, b) => visibleArea(b) - visibleArea(a));
-            el = overflowing[0] ?? null;
-          }
-          if (el === null) return true;
-          void autoDetected;
-          return el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
-        },
-        { sel: selector ?? null, autoDetected: selector === undefined },
-      );
-      if (atBottom) break;
-    }
-
-    // 3. JS fallback: pin scrollTop to the end and fire a synthetic
-    //    scroll event for handlers that only react on the final
-    //    position. No-op if the wheel loop already reached the bottom.
-    await this.page.evaluate((sel: string | null) => {
-      let el: Element | null;
-      if (sel !== null) {
-        el = document.querySelector(sel);
-      } else {
-        const all = Array.from(document.querySelectorAll<HTMLElement>("*"));
-        const overflowing = all.filter((node) => {
-          const s = window.getComputedStyle(node);
-          if (s.overflowY !== "auto" && s.overflowY !== "scroll") return false;
-          return node.scrollHeight > node.clientHeight + 20;
-        });
-        const visibleArea = (n: Element): number => {
-          const r = n.getBoundingClientRect();
-          const vw = window.innerWidth;
-          const vh = window.innerHeight;
-          const w = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
-          const h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
-          return w * h;
-        };
-        overflowing.sort((a, b) => visibleArea(b) - visibleArea(a));
-        el = overflowing[0] ?? null;
-      }
-      if (el === null) return;
-      el.scrollTop = el.scrollHeight;
-      el.dispatchEvent(new Event("scroll", { bubbles: true }));
-    }, selector ?? null);
-
-    return {
-      scrolled: true,
-      container: selector ?? "auto-detected",
-      reason: "ok",
-    };
   }
 
   // Pick a valid option for either a native <select> OR a custom
@@ -4757,7 +4511,7 @@ export class BrowserController {
     // elements. For a click that's harmless: every match is the same visual
     // affordance. Narrow to the first match (Playwright's documented
     // disambiguation for clicks) when the selector isn't already unique,
-    // matching what clickSubmit/clickLinkByText already do.
+    // matching what clickSubmit already does.
     const locator = this.page.locator(selector);
     const count = await locator.count().catch(() => 1);
     await this.humanClickLocator(pickClickLocator(locator, count));
@@ -5898,109 +5652,6 @@ export class BrowserController {
     }
   }
 
-  async solveVisibleHcaptchaChallengeWithCoordinates(
-    solve: (input: {
-      imageBase64: string;
-      comment?: string;
-      minClicks?: number;
-      maxClicks?: number;
-    }) => Promise<TwoCaptchaCoordinatesResult>,
-  ): Promise<HcaptchaCoordinateSolveResult> {
-    if (!this.page) throw new Error("Browser not started");
-
-    const challenge = await this.findVisibleHcaptchaChallengeFrame();
-    if (challenge === null) {
-      return { found: false, solved: false, reason: "no_visible_challenge" };
-    }
-
-    let shot: Buffer;
-    try {
-      shot = await challenge.locator.screenshot({ type: "png", timeout: 8_000 });
-    } catch (err) {
-      return {
-        found: true,
-        solved: false,
-        reason: `screenshot_failed:${err instanceof Error ? err.message : String(err)}`,
-        clicks: 0,
-      };
-    }
-
-    const dims = pngDimensions(shot);
-    if (dims === null || dims.width <= 0 || dims.height <= 0) {
-      return {
-        found: true,
-        solved: false,
-        reason: "invalid_challenge_screenshot",
-        clicks: 0,
-      };
-    }
-
-    const solveRes = await solve({
-      imageBase64: shot.toString("base64"),
-      comment:
-        "hCaptcha challenge screenshot. Click all matching image targets requested by the prompt. If a Verify or Submit button is visible, click it after selecting targets.",
-      minClicks: 1,
-      maxClicks: 12,
-    });
-    if (solveRes.kind !== "ok") {
-      return {
-        found: true,
-        solved: false,
-        reason: `2captcha_${solveRes.kind}` + ("reason" in solveRes ? `:${solveRes.reason}` : ""),
-        clicks: 0,
-        ...("durationMs" in solveRes ? { durationMs: solveRes.durationMs } : {}),
-      };
-    }
-
-    let clicks = 0;
-    for (const point of solveRes.coordinates) {
-      const box = await challenge.locator.boundingBox({ timeout: 1_500 }).catch(() => null);
-      if (box === null || box.width <= 0 || box.height <= 0) break;
-      const x = box.x + (point.x / dims.width) * box.width;
-      const y = box.y + (point.y / dims.height) * box.height;
-      await this.bezierMouseTo(x, y);
-      await this.sleep(rand(100, 260));
-      await this.page.mouse.click(x, y);
-      this.mouseX = x;
-      this.mouseY = y;
-      clicks += 1;
-    }
-
-    await this.sleep(650);
-    let settled = await this.waitForCaptchaChallengeToSettle(2_500).catch(() => false);
-    if (!settled && clicks > 0) {
-      const box = await challenge.locator.boundingBox({ timeout: 1_500 }).catch(() => null);
-      if (box !== null && box.width > 0 && box.height > 0) {
-        const verifyX = box.x + Math.min(box.width - 32, Math.max(32, box.width * 0.84));
-        const verifyY = box.y + Math.min(box.height - 24, Math.max(24, box.height * 0.92));
-        await this.bezierMouseTo(verifyX, verifyY);
-        await this.sleep(rand(120, 320));
-        await this.page.mouse.click(verifyX, verifyY);
-        this.mouseX = verifyX;
-        this.mouseY = verifyY;
-      }
-      settled = await this.waitForCaptchaChallengeToSettle(10_000).catch(() => false);
-    }
-
-    const responsePresent = await this.page
-      .evaluate(() => {
-        const ta = document.querySelector(
-          'textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"]',
-        ) as HTMLTextAreaElement | null;
-        return ta !== null && ta.value.length > 0;
-      })
-      .catch(() => false);
-
-    const out: HcaptchaCoordinateSolveResult = {
-      found: true,
-      solved: settled || responsePresent,
-      clicks,
-      durationMs: solveRes.durationMs,
-    };
-    if (!out.solved) out.reason = "challenge_still_visible";
-    return out;
-  }
-
   private async findVisibleHcaptchaChallengeFrame(): Promise<{
     locator: Locator;
     box: { x: number; y: number; width: number; height: number };
@@ -6492,38 +6143,37 @@ export class BrowserController {
     settlePage = false,
   ): Promise<BrowserUseCapture> {
     if (page === null) throw new Error("Browser not started");
-    let settled = true;
     if (settlePage) {
       // A load event alone precedes SPA hydration. Network quiet plus bounded
       // DOM quiet gives pending scripts/frames time to install their controls.
       // Busy analytics/animations must never make observation wait indefinitely.
       await page.waitForLoadState("networkidle", { timeout: 1_500 }).catch(() => undefined);
-      settled = await page
+      await page
         .evaluate(
           () =>
-            new Promise<boolean>((resolve) => {
+            new Promise<void>((resolve) => {
               let quiet: ReturnType<typeof setTimeout>;
-              const finish = (settled: boolean) => {
+              const finish = () => {
                 clearTimeout(quiet);
                 clearTimeout(deadline);
                 observer.disconnect();
-                resolve(settled);
+                resolve();
               };
               const observer = new MutationObserver(() => {
                 clearTimeout(quiet);
-                quiet = setTimeout(() => finish(true), 500);
+                quiet = setTimeout(finish, 500);
               });
-              const deadline = setTimeout(() => finish(false), 2_000);
+              const deadline = setTimeout(finish, 2_000);
               observer.observe(document, {
                 subtree: true,
                 childList: true,
                 attributes: true,
                 characterData: true,
               });
-              quiet = setTimeout(() => finish(true), 500);
+              quiet = setTimeout(finish, 500);
             }),
         )
-        .catch(() => false);
+        .catch(() => undefined);
     }
     const bindingDeadline = Date.now() + 1_000;
     for (;;) {
@@ -6540,8 +6190,6 @@ export class BrowserController {
       ) {
         // Persistent omissions remain explicit; every attempt uses fresh trees
         // and bindings, and every returned path retains the card-value mask.
-        if (!settled)
-          capture.omissions.push({ kind: "dom_settle_timeout", framePath: null, url: page.url() });
         return this.cardValueOutputMask.maskCapture(capture);
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -6722,17 +6370,14 @@ export class BrowserController {
       .filter((amount): amount is NonNullable<typeof amount> => amount !== null);
     const amount = mainAmount ?? childAmounts[0] ?? null;
     if (amount === null) throw new Error("payment_checkout_total_not_found");
-    if (
-      childAmounts.some(
-        (child) => child.amount_cents !== amount.amount_cents || child.currency !== amount.currency,
-      )
-    ) {
-      throw new Error("payment_checkout_total_conflict");
-    }
+    const totalConflict = childAmounts.some(
+      (child) => child.amount_cents !== amount.amount_cents || child.currency !== amount.currency,
+    );
     return {
       merchant: merchantFromPage(identity.title, identity.siteName, page.url()),
       checkout_origin: new URL(page.url()).origin,
       ...amount,
+      ...(totalConflict ? { total_conflict: true } : {}),
     };
   }
 
@@ -6961,63 +6606,6 @@ export class BrowserController {
     return undefined;
   }
 
-  async extractGoogleApiKeyFromCredentials(projectId: string): Promise<string | null> {
-    if (!this.page) throw new Error("Browser not started");
-    const KEY_RE = /AIzaSy[0-9A-Za-z_-]{33}/;
-    const url = `https://console.cloud.google.com/apis/credentials?project=${encodeURIComponent(projectId)}`;
-    await this.page.goto(url, { waitUntil: "domcontentloaded" }).catch(() => undefined);
-    // The credentials table renders async (heavy Angular console). Poll for it.
-    for (let i = 0; i < 12; i++) {
-      await this.wait(2.5);
-      const ready = await this.page
-        .evaluate(() =>
-          /Browser key|API Keys|Create credentials/i.test(document.body?.innerText ?? ""),
-        )
-        .catch(() => false);
-      if (ready) break;
-    }
-    // Locate the Firebase Browser-key row; return its AIzaSy if already shown,
-    // else click the row's "Show key" button to reveal it.
-    const readRowKey = (): Promise<string | null> =>
-      this.page!.evaluate(() => {
-        const rows = Array.from(document.querySelectorAll("tr"));
-        const row =
-          rows.find((r) => /browser key \(auto created by firebase\)/i.test(r.textContent ?? "")) ??
-          rows.find((r) => /browser key/i.test(r.textContent ?? ""));
-        if (row === undefined) return null;
-        const m = (row.textContent ?? "").match(/AIzaSy[0-9A-Za-z_-]{33}/);
-        if (m !== null) return m[0];
-        const btn = Array.from(row.querySelectorAll("button,a")).find((b) =>
-          /show key/i.test(b.textContent ?? ""),
-        );
-        if (btn !== undefined) (btn as HTMLElement).click();
-        return null;
-      }).catch(() => null);
-    const first = await readRowKey();
-    if (first !== null && KEY_RE.test(first)) return first;
-    // After the Show-key click, poll the row (reveal is async) and any dialog
-    // / readonly input the console may surface the value in.
-    for (let i = 0; i < 8; i++) {
-      await this.wait(1.5);
-      const revealed = await this.page
-        .evaluate(() => {
-          const rows = Array.from(document.querySelectorAll("tr"));
-          const row = rows.find((r) => /browser key/i.test(r.textContent ?? ""));
-          const inRow = (row?.textContent ?? "").match(/AIzaSy[0-9A-Za-z_-]{33}/);
-          if (inRow !== null) return inRow[0];
-          for (const inp of Array.from(document.querySelectorAll("input"))) {
-            const v = (inp as HTMLInputElement).value ?? "";
-            const m = v.match(/AIzaSy[0-9A-Za-z_-]{33}/);
-            if (m !== null) return m[0];
-          }
-          return null;
-        })
-        .catch(() => null);
-      if (revealed !== null && KEY_RE.test(revealed)) return revealed;
-    }
-    return null;
-  }
-
   // Deterministically satisfy required, currently-EMPTY combobox/listbox
   // selectors (cmdk / Radix / Headless UI multi-selects) that gate a disabled
   // submit. The dominant `oauth_onboarding_failed` blocker is a post-OAuth
@@ -7164,83 +6752,6 @@ export class BrowserController {
     return filled;
   }
 
-  // Satisfy an API-key/token creation form's required ACCESS-SCOPE controls when
-  // its submit is disabled. Distinct from fillRequiredComboboxes (cmdk/Radix/
-  // LeafyGreen survey selects): the "create a scoped credential" pattern gates
-  // submit behind (a) a segmented "All access" / "Full access" button group that
-  // starts unselected, and (b) a LemonSelect-style preset trigger
-  // (`button[aria-haspopup="true"]` showing "Select…/Choose…") whose options
-  // render in a body-portal Popover as `[role="menuitem"]` — NOT an
-  // aria listbox, so the combobox filler's role/listbox query never sees it.
-  // MEASURED 2026-06-24 (posthog /settings/user-api-keys "Create personal API
-  // key": an "Organization & project access" segmented control + a "Select
-  // preset" scopes dropdown both gate the aria-disabled "Create key"; picking
-  // "All access" on each enables it and mints a phx_ key). Prefers the broadest
-  // option so the resulting credential isn't dead-on-arrival. Idempotent and
-  // tightly gated (callers only invoke it on a disabled submit).
-  async satisfyScopePresets(): Promise<string[]> {
-    if (!this.page) throw new Error("Browser not started");
-    const page = this.page;
-    const done: string[] = [];
-    const dialog = page.locator('[role="dialog"]').first();
-    const root = (await dialog.count().catch(() => 0)) > 0 ? dialog : page.locator("body");
-
-    // (1) Segmented access-scope buttons that start unselected. Exclude select
-    // triggers (aria-haspopup) — those are handled in (2); a selected preset
-    // trigger can also read "All access" and we must not re-open it here.
-    try {
-      const allAccess = root.locator('button:not([aria-haspopup="true"])', {
-        hasText: /^(?:all access|full access|all scopes)$/i,
-      });
-      const n = Math.min(await allAccess.count().catch(() => 0), 3);
-      for (let i = 0; i < n; i += 1) {
-        const b = allAccess.nth(i);
-        if (!(await b.isVisible().catch(() => false))) continue;
-        await b.click({ timeout: 4000 }).catch(() => undefined);
-        done.push("access:all-access");
-        await page.waitForTimeout(300);
-      }
-    } catch {
-      // best-effort
-    }
-
-    // (2) LemonSelect-style preset triggers still showing a placeholder.
-    try {
-      const triggers = root.locator('button[aria-haspopup="true"]');
-      const n = Math.min(await triggers.count().catch(() => 0), 4);
-      for (let i = 0; i < n; i += 1) {
-        const t = triggers.nth(i);
-        if (!(await t.isVisible().catch(() => false))) continue;
-        const txt = ((await t.textContent().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
-        // Only act on an UNSELECTED select (a "Select…/Choose…/Pick…"
-        // placeholder) — never re-pick one that already holds a value.
-        if (!/^(?:please\s+)?(?:select|choose|pick)\b/i.test(txt)) continue;
-        await t.click({ timeout: 4000 }).catch(() => undefined);
-        await page.waitForTimeout(700);
-        const options = page.locator(
-          '.Popover [role="menuitem"], .Popover [role="option"], ' +
-            '[role="listbox"] [role="option"], .LemonDropdown [role="menuitem"]',
-        );
-        const broad = options.filter({ hasText: /all access|full access/i }).first();
-        const pick = (await broad.count().catch(() => 0)) > 0 ? broad : options.first();
-        if ((await pick.count().catch(() => 0)) > 0) {
-          const name = ((await pick.textContent().catch(() => "")) ?? "")
-            .replace(/\s+/g, " ")
-            .trim()
-            .slice(0, 30);
-          await pick.click({ timeout: 4000 }).catch(() => undefined);
-          done.push(`preset:${name}`);
-          await page.waitForTimeout(400);
-        } else {
-          await page.keyboard.press("Escape").catch(() => undefined);
-        }
-      }
-    } catch {
-      // best-effort
-    }
-    return done;
-  }
-
   // True when a visible advance/submit button (Next / Continue / Create /
   // Register / Submit / Get started / Finish) is currently DISABLED. The gate
   // for the deterministic combobox filler: only auto-satisfy a survey's
@@ -7272,115 +6783,6 @@ export class BrowserController {
     } catch {
       return false;
     }
-  }
-
-  async extractScopedRouteCandidates(prefix: string): Promise<string[]> {
-    if (!this.page) throw new Error("Browser not started");
-    return await this.page.evaluate(async (rawPrefix) => {
-      const prefix = String(rawPrefix ?? "")
-        .replace(/^\/+|\/+$/g, "")
-        .toLowerCase();
-      const candidates: string[] = [];
-      const seen = new Set<string>();
-      const add = (value: unknown) => {
-        if (typeof value !== "string") return;
-        const trimmed = value.trim();
-        if (!/^[A-Za-z0-9][A-Za-z0-9_-]{1,127}$/.test(trimmed)) return;
-        if (seen.has(trimmed)) return;
-        seen.add(trimmed);
-        candidates.push(trimmed);
-      };
-      const pathSegments = (href: string): string[] => {
-        try {
-          return new URL(href, location.origin).pathname.split("/").filter(Boolean);
-        } catch {
-          return [];
-        }
-      };
-
-      for (const anchor of Array.from(document.querySelectorAll("a[href]"))) {
-        const segs = pathSegments(anchor.getAttribute("href") ?? "");
-        if ((segs[0] ?? "").toLowerCase() === prefix) add(segs[1]);
-      }
-
-      const walk = (value: unknown) => {
-        if (Array.isArray(value)) {
-          for (const item of value) walk(item);
-          return;
-        }
-        if (value === null || typeof value !== "object") return;
-        const record = value as Record<string, unknown>;
-        const preferredKeys =
-          prefix === "p" || prefix.startsWith("project")
-            ? ["slug", "projectSlug", "currentProjectSlug", "lastViewedProjectSlug", "id"]
-            : prefix.startsWith("org") || prefix.startsWith("organization")
-              ? ["slug", "orgSlug", "organizationSlug", "id"]
-              : prefix.startsWith("workspace")
-                ? ["slug", "workspaceSlug", "id"]
-                : ["slug", "id"];
-        for (const key of preferredKeys) add(record[key]);
-        for (const item of Object.values(record)) walk(item);
-      };
-
-      const inspectJsonText = (text: string) => {
-        try {
-          walk(JSON.parse(text));
-        } catch {
-          // Ignore non-JSON storage/API payloads.
-        }
-      };
-      try {
-        for (let i = 0; i < localStorage.length; i += 1) {
-          const key = localStorage.key(i);
-          if (key !== null) inspectJsonText(localStorage.getItem(key) ?? "");
-        }
-        for (let i = 0; i < sessionStorage.length; i += 1) {
-          const key = sessionStorage.key(i);
-          if (key !== null) inspectJsonText(sessionStorage.getItem(key) ?? "");
-        }
-      } catch {
-        // Storage can be blocked in hardened contexts; DOM/API probes are enough.
-      }
-
-      const likelyListApi = (url: string): boolean => {
-        const lower = url.toLowerCase();
-        if (!lower.includes("api")) return false;
-        if (prefix === "p" || prefix.startsWith("project"))
-          return /projects?[\w.-]*list|list[\w.-]*projects?/.test(lower);
-        if (prefix.startsWith("org") || prefix.startsWith("organization"))
-          return /organi[sz]ations?[\w.-]*list|orgs?[\w.-]*list|list[\w.-]*(orgs?|organi[sz]ations?)/.test(
-            lower,
-          );
-        if (prefix.startsWith("workspace"))
-          return /workspaces?[\w.-]*list|list[\w.-]*workspaces?/.test(lower);
-        return /list/.test(lower);
-      };
-      const urls = Array.from(
-        new Set(
-          performance
-            .getEntriesByType("resource")
-            .map((entry) => entry.name)
-            .filter(likelyListApi),
-        ),
-      ).slice(-8);
-      for (const url of urls) {
-        try {
-          const controller = new AbortController();
-          const timeout = window.setTimeout(() => controller.abort(), 1_500);
-          const res = await fetch(url, {
-            credentials: "include",
-            signal: controller.signal,
-          });
-          window.clearTimeout(timeout);
-          if (!res.ok) continue;
-          inspectJsonText(await res.text());
-        } catch {
-          // Best-effort only; resolver falls back to text/href matching.
-        }
-      }
-
-      return candidates.slice(0, 20);
-    }, prefix);
   }
 
   // Discrete strings an API key might occupy — for credential
@@ -8881,7 +8283,7 @@ export class BrowserController {
         const MAX_CARDS = 16;
         const raw: Element[] = [];
         // Eligible tags: generic containers OR any custom element (hyphenated
-        // tag). Mirror of exported isBareClickableCardTag — keep in sync.
+        // tag).
         // 1inch onboarding renders each choice as a custom UI-kit element
         // (<uikit-internal-chip data-test-id="activity-chip-…">) with
         // cursor:pointer but no button/role/input semantics and no div/section
@@ -9369,104 +8771,6 @@ export class BrowserController {
     return target.frameOrigin;
   }
 
-  private async withModalInertNeutralizedInFrame<T>(
-    frame: Frame,
-    handle: ElementHandle<Element>,
-    fn: () => Promise<T>,
-  ): Promise<T> {
-    const marker = "data-ts-inert-neutralized";
-    const anchorMarker = "data-ts-inert-region-anchor";
-    await handle
-      .evaluate(
-        (el, markers) => {
-          const { marker, anchorMarker } = markers;
-          const composedParent = (node: Node): Element | null => {
-            const parent = node.parentNode;
-            if (parent === null) return null;
-            if (parent instanceof ShadowRoot) return parent.host;
-            return parent instanceof Element ? parent : null;
-          };
-          const isDialogElement = (element: Element): boolean =>
-            element.getAttribute("role") === "dialog" ||
-            element.tagName.toLowerCase() === "dialog" ||
-            element.getAttribute("aria-modal") === "true";
-          const nearestModalRegion = (element: Element): Element | null => {
-            let cur: Element | null = element;
-            while (cur !== null) {
-              if (isDialogElement(cur)) return cur;
-              cur = composedParent(cur);
-            }
-            return null;
-          };
-          const region = nearestModalRegion(el);
-          if (region === null) return;
-          region.setAttribute(anchorMarker, "1");
-          let cur: Element | null = el;
-          while (cur !== null) {
-            if (cur.hasAttribute("inert")) {
-              cur.removeAttribute("inert");
-              cur.setAttribute(marker, "1");
-            }
-            cur = composedParent(cur);
-          }
-        },
-        { marker, anchorMarker },
-      )
-      .catch(() => undefined);
-    try {
-      return await fn();
-    } finally {
-      await frame
-        .evaluate(
-          (markers) => {
-            const { marker, anchorMarker } = markers;
-            const isDialogElement = (element: Element): boolean =>
-              element.getAttribute("role") === "dialog" ||
-              element.tagName.toLowerCase() === "dialog" ||
-              element.getAttribute("aria-modal") === "true";
-            // Mirrors the main-frame restore: only an open/rendered dialog
-            // keeps the background locked — a closed <dialog> or hidden
-            // role="dialog" remnant does not.
-            const isRenderedDialog = (element: Element): boolean => {
-              if (!isDialogElement(element)) return false;
-              if (element instanceof HTMLDialogElement) return element.open;
-              if (typeof element.checkVisibility === "function")
-                return element.checkVisibility({ visibilityProperty: true });
-              if (element.hasAttribute("hidden")) return false;
-              const style = window.getComputedStyle(element);
-              return style.display !== "none" && style.visibility !== "hidden";
-            };
-            const subtreeHasDialog = (root: Element | ShadowRoot): boolean => {
-              if (root instanceof Element) {
-                if (isRenderedDialog(root)) return true;
-                if (root.shadowRoot !== null && subtreeHasDialog(root.shadowRoot)) return true;
-              }
-              for (const el of Array.from(root.querySelectorAll("*"))) {
-                if (isRenderedDialog(el)) return true;
-                if (el.shadowRoot !== null && subtreeHasDialog(el.shadowRoot)) return true;
-              }
-              return false;
-            };
-            const cleanupAndRestore = (root: Document | ShadowRoot): void => {
-              root
-                .querySelectorAll(`[${anchorMarker}]`)
-                .forEach((el) => el.removeAttribute(anchorMarker));
-              root.querySelectorAll(`[${marker}]`).forEach((el) => {
-                el.removeAttribute(marker);
-                if (subtreeHasDialog(el)) el.setAttribute("inert", "");
-              });
-              root.querySelectorAll("*").forEach((el) => {
-                if (el.shadowRoot !== null) cleanupAndRestore(el.shadowRoot);
-              });
-            };
-            cleanupAndRestore(document);
-          },
-          { marker, anchorMarker },
-        )
-        .catch(() => undefined);
-    }
-  }
-
   // Frame-scoped click. Deliberately simpler than click() above (no radio/
   // checkbox/aria-toggle special-casing) — it's the escape hatch for a
   // control that lives inside an <iframe>, mirroring how resolvePageTarget is
@@ -9495,9 +8799,7 @@ export class BrowserController {
       if (frame === null) {
         await handle.click({ timeout: 8000 });
       } else {
-        await this.withModalInertNeutralizedInFrame(frame, handle, () =>
-          handle.click({ timeout: 8000 }),
-        );
+        await this.neutralizeModalInert(handle, frame, () => handle.click({ timeout: 8000 }));
       }
     } finally {
       await handle.dispose().catch(() => undefined);
@@ -10710,42 +10012,6 @@ export class BrowserController {
     }
   }
 
-  // Does the page sign in with Google via Google Identity Services (GSI)
-  // rather than classic OAuth redirect? GSI renders its button in a
-  // cross-origin iframe (accounts.google.com/gsi/button) and/or exposes the
-  // `google.accounts.id` JS API; on use it raises a browser-native FedCM
-  // dialog or a popup and returns a JWT to a JS callback — there is NO
-  // redirect, so the classic startOAuth flow can't drive it. Detecting this
-  // is what lets the agent route to tryGoogleGsiLogin instead.
-  async hasGoogleGsiAffordance(): Promise<boolean> {
-    if (!this.page) return false;
-    try {
-      return await this.page.evaluate(() => {
-        if (document.querySelector('iframe[src*="accounts.google.com/gsi/"]') !== null) {
-          return true;
-        }
-        // On-demand One-Tap: the page loads the GSI client script but renders
-        // no static button and may not have initialized `google.accounts.id`
-        // yet (amplitude, clerk). A plain click on the in-page "Sign in with
-        // Google" affordance never redirects, so the bot used to falsely
-        // conclude "signed in" and bounce to login. Treat the loaded client
-        // script as a GSI affordance so the agent routes through
-        // tryGoogleGsiLogin, which now raises One-Tap programmatically.
-        if (document.querySelector('script[src*="accounts.google.com/gsi/client"]') !== null) {
-          return true;
-        }
-        const g = (
-          window as unknown as {
-            google?: { accounts?: { id?: unknown } };
-          }
-        ).google;
-        return typeof g?.accounts?.id !== "undefined";
-      });
-    } catch {
-      return false;
-    }
-  }
-
   // Drive a Google Identity Services / FedCM sign-in. Two variants are
   // handled:
   //   - FedCM: clicking the GSI widget raises a browser-NATIVE credential
@@ -10969,30 +10235,6 @@ export class BrowserController {
     return [...new Set(labels)];
   }
 
-  // Open obvious collapsed menus (hamburger / avatar / account / "Settings"
-  // toggles) so nav links hidden behind them mount in the DOM before the
-  // nav-search enumerates candidates (outside-voice #1: the keys link is often
-  // behind a menu, not in the rendered top nav). CONSERVATIVE: only clicks
-  // elements that ADVERTISE a popup menu (aria-haspopup=menu/true), capped at 3,
-  // short timeouts, best-effort — never a plain link, so it can't wander.
-  async expandLatentNav(): Promise<void> {
-    if (!this.page) return;
-    try {
-      const n = await this.page
-        .$$eval('[aria-haspopup="menu"], [aria-haspopup="true"]', (els) => {
-          const slice = els.slice(0, 3);
-          slice.forEach((e, i) => e.setAttribute("data-navsearch-toggle", String(i)));
-          return slice.length;
-        })
-        .catch(() => 0);
-      for (let i = 0; i < n; i++) {
-        await this.page.click(`[data-navsearch-toggle="${i}"]`, { timeout: 1200 }).catch(() => {});
-      }
-    } catch {
-      // best-effort — never fail the search over menu expansion
-    }
-  }
-
   // Fetch a URL's final response (following redirects) and return its
   // status, final URL, and body text — or null on any failure.
   //
@@ -11072,92 +10314,6 @@ export class BrowserController {
     this.oauthProductPage = null;
     this.oauthProviderPage = null;
     this.oauthProviderPageClosed = false;
-  }
-
-  // Drive a Google sign-in on the ACTIVE OAuth page (already sitting at
-  // accounts.google.com/.../identifier). The whole point: replay must not bail
-  // `needs_login` where the full discover bot would just type the password —
-  // a freshly-created robot account lands on the identifier page the first time
-  // a given relying party requests OAuth even with a live session, and the
-  // robot's credentials are available to the verifier. Drives the standard
-  // Google in-page steps (email → Enter → password →
-  // Enter → ToS/continue speedbumps) but operates on `this.page` instead of
-  // navigating to myaccount — in the OAuth flow the success terminus is the
-  // consent screen or the return to the relying party, NOT myaccount. Returns
-  // true when the flow progressed off the Google identifier/password screens
-  // (or the popup closed); false on any failure, so the caller can fall back to
-  // its existing needs_login path. Never logs the password.
-  async loginGoogleInline(email: string, password: string): Promise<boolean> {
-    const page = this.page;
-    if (page === null || page.isClosed()) return false;
-    const onIdentifierOrPwd = (): boolean =>
-      /\/signin\/(?:identifier|v\d+\/(?:identifier|challenge|signin)|challenge|pwd|password)/i.test(
-        page.url(),
-      );
-    try {
-      // Cookie-consent wall (EU surfaces) — best-effort.
-      await page
-        .evaluate(() => {
-          const want = /^(accept all|i agree|agree|accept|reject all)$/i;
-          for (const b of Array.from(document.querySelectorAll("button,[role=button]"))) {
-            if (want.test((b.textContent ?? "").trim())) {
-              (b as HTMLElement).click();
-              return;
-            }
-          }
-        })
-        .catch(() => undefined);
-      await page.waitForTimeout(1200);
-      // Email — #identifierId, never input[type=email] alone (Google uses a
-      // custom input). Only fill if the identifier field is actually present;
-      // a flow already past identifier (parked on the password screen) skips it.
-      const EMAIL = '#identifierId, input[name="identifier"], input[type="email"]';
-      const emailField = await page.$(EMAIL);
-      if (emailField !== null) {
-        await page.fill(EMAIL, email).catch(() => undefined);
-        await page.waitForTimeout(400);
-        await page.keyboard.press("Enter");
-        await page.waitForTimeout(6000);
-      }
-      // Password.
-      const PW = 'input[type="password"][name="Passwd"], input[type="password"]';
-      await page.waitForSelector(PW, { state: "visible", timeout: 15_000 });
-      await page.fill(PW, password).catch(() => undefined);
-      await page.waitForTimeout(400);
-      await page.keyboard.press("Enter");
-      await page.waitForTimeout(7000);
-      // New-account ToS speedbump + OAuth follow-ons — patient (renders late).
-      for (let i = 0; i < 8; i++) {
-        if (page.isClosed()) return true; // popup closed → handshake done
-        const clicked = await page
-          .evaluate(() => {
-            const want =
-              /^(not now|skip|confirm|i understand|i agree|accept|agree|got it|continue|allow|done|maybe later|next)$/i;
-            for (const b of Array.from(
-              document.querySelectorAll("button,[role=button],a,input[type=submit]"),
-            )) {
-              const t = (b.textContent ?? (b as HTMLInputElement).value ?? "").trim();
-              if (want.test(t)) {
-                (b as HTMLElement).click();
-                return t;
-              }
-            }
-            return null;
-          })
-          .catch(() => null);
-        if (clicked !== null) {
-          await page.waitForTimeout(3500);
-        } else {
-          if (!onIdentifierOrPwd()) break; // left the sign-in screens → progressed
-          await page.waitForTimeout(2500);
-        }
-      }
-      // Success = we are no longer parked on a Google identifier/password
-      // screen (moved to consent / back to the relying party / popup closed).
-      return page.isClosed() || !onIdentifierOrPwd();
-    } catch {
-      return false;
-    }
   }
 
   // Which OAuth providers have a live session in this profile's cookie jar.
@@ -11864,69 +11020,6 @@ export function pickClickLocator<L extends { first(): L }>(locator: L, count: nu
   return count > 1 ? locator.first() : locator;
 }
 
-// Reference implementation of the shadow-piercing inventory walk that runs
-// inside extractInteractiveElements' page.evaluate. Kept BYTE-FOR-BYTE in
-// lockstep with that inline walk's guard + traversal. Exported only so the
-// defensive guard (regression: #59 redis-cloud — a detached/closed root with
-// no querySelectorAll crashed the whole inventory) is unit-testable in plain
-// Node with fake roots. The production copy stays inline because a
-// page.evaluate body can't call module code, and injecting source via
-// new Function() would trip strict CSPs. If you change the inline walk's
-// guard or traversal, change this too.
-interface ShadowWalkRoot {
-  querySelectorAll(selectors: string): ArrayLike<ShadowWalkEl>;
-}
-interface ShadowWalkEl {
-  // `| undefined` mirrors the live DOM: `Element.shadowRoot` is typed
-  // `ShadowRoot | null`, but a detached/closed custom element yields
-  // `undefined` at runtime. The walk must survive that — see the guard.
-  readonly shadowRoot: ShadowWalkRoot | null | undefined;
-}
-export function collectAcrossShadowRoots(
-  root: ShadowWalkRoot | null | undefined,
-  selector: string,
-): ShadowWalkEl[] {
-  const collected: ShadowWalkEl[] = [];
-  const walk = (r: ShadowWalkRoot | null | undefined): void => {
-    // `== null` (not `=== null`) covers both null and undefined — the
-    // recursion below calls walk() on any non-null shadowRoot, so an
-    // `undefined` one reaches here and `typeof undefined.querySelectorAll`
-    // would throw before the typeof guard fired (#59 redis-cloud).
-    if (r == null || typeof r.querySelectorAll !== "function") return;
-    Array.from(r.querySelectorAll(selector)).forEach((n) => collected.push(n));
-    Array.from(r.querySelectorAll("*")).forEach((el) => {
-      if (el.shadowRoot !== null) walk(el.shadowRoot);
-    });
-  };
-  walk(root);
-  return collected;
-}
-
-// Tag eligibility for the "bare clickable card" pass in
-// extractInteractiveElements. A selectable onboarding choice that carries no
-// button/anchor/input/role semantics is collected only when it is a generic
-// container (div/li/article/section/label) OR a CUSTOM ELEMENT — any element
-// whose tag name contains a hyphen. 1inch's onboarding renders each activity
-// choice as `<uikit-internal-chip data-test-id="activity-chip-aiAgents">`; the
-// old div-only scan missed the custom tag, so the chip never entered the
-// planner's inventory and neither click nor js_click could resolve it (both
-// re-resolve against the inventory). Standard interactive/text tags are handled
-// by the SELECTOR walk and must NOT be re-collected here.
-// Kept in sync with the inline `isCardTag` inside extractInteractiveElements —
-// a page.evaluate body can't call module code, so the production copy is inline;
-// change both together.
-export function isBareClickableCardTag(tag: string): boolean {
-  const t = tag.toLowerCase();
-  return (
-    t === "div" ||
-    t === "li" ||
-    t === "article" ||
-    t === "section" ||
-    t === "label" ||
-    t.includes("-")
-  );
-}
-
 // ───────────── phone-country widget selection ─────────────
 //
 // International checkouts may back their phone-country picker with an
@@ -12022,47 +11115,6 @@ export function pickSubmitButtonIndex(texts: readonly string[]): number | null {
     }
   });
   return bestIndex;
-}
-
-// ───────────── required-agreement checkbox guard ─────────────
-
-// Patterns shared by the pure helper below and the in-page evaluate in
-// `checkRequiredAgreementBoxes`. The evaluate runs in the page realm and
-// can't import, so the same two regexes are inlined there verbatim —
-// keep them BYTE-IDENTICAL with these.
-const AGREEMENT_TEXT_RE =
-  /terms|tos\b|privacy|consent|policy|i agree|agree to|acknowledge|gdpr|age|18\+|18 years|certif/i;
-const MARKETING_TEXT_RE =
-  /newsletter|updates|offers|product tips|marketing|promotional|receive emails|opt[- ]?in to|subscribe/i;
-const SAFE_SIGNUP_CHOICE_TEXT_RE =
-  /digital products?|saas|software|developer tools?|apis?|mobile apps?|data|analytics/i;
-const RISKY_SIGNUP_CHOICE_TEXT_RE =
-  /gambling|financial services?|physical products?|marketplace|human services?|adult|weapons?|medical|restricted|crypto|payments?|banking/i;
-
-// True when a checkbox's associated text reads as a REQUIRED agreement
-// (terms/privacy/consent) and NOT as a marketing/newsletter opt-in.
-//
-// Why a deterministic check instead of trusting the LLM planner:
-// amplitude's signup renders the required TOS checkbox next to a pair of
-// data-storage-location card-radios; the planner mistook the whole
-// cluster for "ambiguous radios" and skipped the box, and amplitude's
-// submit isn't disabled when it's unticked — so the form silently
-// no-ops. We must never flip a marketing opt-in on the user's behalf,
-// hence the explicit marketing exclusion.
-export function isAgreementCheckboxText(text: string): boolean {
-  return AGREEMENT_TEXT_RE.test(text) && !MARKETING_TEXT_RE.test(text);
-}
-
-// True when a required signup-category choice is a low-risk default the bot can
-// select deterministically. Keep byte-identical with the in-page regexes in
-// `checkRequiredSignupChoiceBoxes`.
-export function isSafeSignupChoiceText(text: string): boolean {
-  return (
-    SAFE_SIGNUP_CHOICE_TEXT_RE.test(text) &&
-    !RISKY_SIGNUP_CHOICE_TEXT_RE.test(text) &&
-    !AGREEMENT_TEXT_RE.test(text) &&
-    !MARKETING_TEXT_RE.test(text)
-  );
 }
 
 // ───────────── element inventory (F3) ─────────────
@@ -12326,8 +11378,8 @@ export function scoreSignupButton(
   // Post-signup dashboards reveal the key behind a "Create API Key" /
   // "Add key" / "Generate key" / "Get API Key" CTA — the run's actual
   // goal once the account exists. These score 0 on signup vocabulary, so
-  // on a busy dashboard (dozens of nav/account buttons) rankAndCapInventory
-  // caps them out: the OpenRouter "Get API Key" + fal.ai "Add key"
+  // on a busy dashboard (dozens of nav/account buttons) the inventory's
+  // button cap drops them: the OpenRouter "Get API Key" + fal.ai "Add key"
   // suppression. Score them as a primary target so they survive ranking.
   if (
     /\b(?:add|create|generate|new|get|reveal|copy)\b[\s\w]{0,20}\b(?:api[\s-]?key|key|token|secret|credential)s?\b/.test(
@@ -12357,46 +11409,6 @@ export function scoreSignupButton(
   const hasAuthVerb = t.includes("sign in") || t.includes("log in") || t.includes("login");
   if (hasAuthVerb && !hasEmail) score -= 12;
   return score;
-}
-
-// Rank + cap the raw inventory before it goes to the planner. Every
-// input/textarea/select is kept — they are the load-bearing form
-// fields and a page has few. Only buttons/links/role elements are
-// ranked (by signup-relevance) and capped, since a marketing page
-// carries dozens of nav/footer buttons (F3 Issue 3 + Tension 2: a
-// flat cap could truncate the real email field). Re-indexes the kept
-// set and reports how many buttons were dropped.
-export function rankAndCapInventory(
-  elements: readonly InteractiveElement[],
-  buttonCap = 25,
-  oauthProviders?: readonly OAuthProviderId[],
-): { inventory: InteractiveElement[]; buttonsDropped: number } {
-  const isButtonish = (e: InteractiveElement): boolean =>
-    e.tag === "button" ||
-    e.tag === "a" ||
-    e.type === "submit" ||
-    e.type === "button" ||
-    e.type === "reset";
-  const fields = elements.filter((e) => !isButtonish(e));
-  const ranked = elements
-    .filter(isButtonish)
-    .map((e) => ({
-      e,
-      score: scoreSignupButton(
-        `${e.visibleText ?? ""} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`,
-        oauthProviders,
-      ),
-    }))
-    .sort((a, b) => b.score - a.score);
-  const keptButtons = ranked.slice(0, buttonCap).map((x) => x.e);
-  const inventory = [...fields, ...keptButtons].map((e, i) => ({
-    ...e,
-    index: i,
-  }));
-  return {
-    inventory,
-    buttonsDropped: Math.max(0, ranked.length - keptButtons.length),
-  };
 }
 
 export {

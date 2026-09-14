@@ -79,9 +79,9 @@ replacing a control's surrounding layout. Changed destinations, roles, names,
 form intent, or documents still refuse adoption. `operator-click-fallback.test.ts`
 exercises click, type and select through real browser re-renders.
 
-Observation waits for bounded network/load and DOM quiet, then retries transient
-frame-binding omissions. Persistent binding failures and `dom_settle_timeout`
-remain explicit in `capture_omissions`; continuous churn never blocks indefinitely.
+Observation waits for bounded network/load and retries transient frame-binding
+omissions. Persistent binding failures remain explicit in `capture_omissions`;
+continuous churn never blocks indefinitely.
 A ref that fails to resolve before dispatch is `not_dispatched`, never
 `unknown`; the broker journal contract in [browser-broker.md](browser-broker.md)
 owns what that evidence does and does not fence.
