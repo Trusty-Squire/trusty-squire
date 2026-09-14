@@ -1007,8 +1007,7 @@ describe("provision perception guidance", () => {
 
 describe("buildScreenOutline", () => {
   it("groups elements by DOM region and marks the foreground dialog", () => {
-    const outline = buildScreenOutline(
-      [
+    const outline = buildScreenOutline([
         el({
           visibleText: "Products",
           selector: "#products",
@@ -1028,11 +1027,9 @@ describe("buildScreenOutline", () => {
           topmost: true,
         }),
       ],
-      "Finish creating your account Test mode Products",
     );
 
     expect(outline?.foreground).toBe("dialog:finish-account");
-    expect(outline?.mode_markers).toEqual(["test/sandbox mode"]);
     expect(outline?.regions).toEqual(
       expect.arrayContaining([
         expect.objectContaining({

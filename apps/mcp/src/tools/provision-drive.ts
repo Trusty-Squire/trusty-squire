@@ -632,15 +632,13 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
   name: "operate_extract",
   description:
     "Reveal masked keys and extract credentials from the current page: returns " +
-    "{credentials, candidate_count, blocked_reason?}. credentials may include " +
+    "{credentials, candidate_count}. credentials may include " +
     "`api_key` (or `api_key_truncated` if only a masked display was reachable) " +
     "plus named fields for multi-credential services. Pass `store` to immediately " +
     "save the extracted credential into the Trusty Squire vault with the session's " +
     "observed hosts as allowed_hosts seed; when `store` is used, the response omits " +
-    "credential values and returns only vault metadata. If `blocked_reason` is set, " +
-    "the page is a login wall / anti-bot interstitial with NO credential present " +
-    "(do not treat the empty result as a real key) — drive an interactive login " +
-    "or hand back to the user. Call when you have navigated to the keys page. " +
+    "credential values and returns only vault metadata. " +
+    "Call when you have navigated to the keys page. " +
     "With `into_slot`, a value that still looks masked is ranked behind a fully " +
     "revealed sibling but never refused; pass " +
     '`secret_label` (e.g. "client secret") to pick the right one when the page ' +
@@ -737,7 +735,6 @@ export function storedExtractResult(
     session_id: extracted.session_id,
     url: extracted.url,
     candidate_count: extracted.candidate_count,
-    ...(extracted.blocked_reason !== undefined ? { blocked_reason: extracted.blocked_reason } : {}),
     stored_credential: stored,
   };
 }
@@ -780,16 +777,14 @@ async function handleFinishOutcome(
       if (outcome.kind === "credentials") {
         await markOperatorMutationDispatchAttempted();
         const extracted = await extractCredentials(sessionId);
-        const blocked = extracted.blocked_reason;
         const stored =
           Object.keys(extracted.credentials).length > 0
             ? await persistExtracted(sessionId, extracted.credentials, outcome.store, api)
             : null;
-        successfulOutcome = stored !== null && blocked === undefined;
+        successfulOutcome = stored !== null;
         return {
           kind: "credentials" as const,
           candidate_count: extracted.candidate_count,
-          ...(blocked !== undefined ? { blocked_reason: blocked } : {}),
           stored_credential: stored,
         };
       }

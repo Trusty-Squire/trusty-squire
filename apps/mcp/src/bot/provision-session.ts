@@ -196,7 +196,6 @@ export interface ScreenRegion {
 
 export interface ScreenOutline {
   foreground: string | null;
-  mode_markers: string[];
   regions: ScreenRegion[];
 }
 
@@ -1518,34 +1517,6 @@ function resolveAuthorizedCompactV2Target(
   return resolved;
 }
 
-// Squire's OWN control plane. The operator browser runs in the connect-seeded
-// profile, so it is authenticated as the user (a live Google session). It must
-// therefore NEVER be allowed to reach Squire's own web app / API: otherwise a
-// prompt-injected signup page could drive it to the user's vault UI, sign in
-// via that Google session, and read revealed secrets — defeating the
-// write-only model (a confused-deputy exfiltration path, confirmed 2026-07-21).
-// Explicit operator actions cannot reach these hosts. (Self-hosted
-// deployments on other domains should extend this list.)
-const SQUIRE_CONTROL_PLANE_HOSTS: readonly string[] = [
-  "trustysquire.ai",
-  "trustysquire.com",
-  "trusty-squire-api.fly.dev",
-];
-
-export function isSquireControlPlaneHost(host: string): boolean {
-  const h = host.trim().toLowerCase().replace(/\.$/, "");
-  if (h.length === 0) return false;
-  return SQUIRE_CONTROL_PLANE_HOSTS.some((d) => h === d || h.endsWith(`.${d}`));
-}
-
-// Preserve the existing control-plane boundary independently of browser egress.
-export function hostAllowed(url: string, _allowedHosts: readonly string[] = []): boolean {
-  try {
-    return !isSquireControlPlaneHost(new URL(url).hostname);
-  } catch {
-    return false;
-  }
-}
 
 type FrameScopedTarget = Pick<
   InteractiveElement,
@@ -1605,264 +1576,9 @@ function assertSecretFrameTargetAllowed(
   }
 }
 
-function visibleModeMarkers(pageText: string): string[] {
-  const text = pageText.replace(/\s+/g, " ").trim();
-  const markers: string[] = [];
-  if (
-    /\b(?:test|sandbox)\s+(?:mode|usage|environment|workspace)\b/i.test(text) ||
-    /\b(?:mode|environment|workspace)\s*[:=-]?\s*(?:test|sandbox)\b/i.test(text)
-  ) {
-    markers.push("test/sandbox mode");
-  }
-  if (
-    /\b(?:live|production)\s+mode\b/i.test(text) ||
-    /\b(?:mode|environment|workspace)\s*[:=-]?\s*(?:live|production)\b/i.test(text)
-  ) {
-    markers.push("live/production mode");
-  }
-  return markers;
-}
-
-function appSurfaceMarkers(pageText: string): string[] {
-  const text = pageText.replace(/\s+/g, " ").trim();
-  const markers: string[] = [];
-  const defs: Array<[string, RegExp]> = [
-    ["dashboard", /\bdashboard\b/i],
-    ["products", /\bproducts?\b/i],
-    ["customers", /\bcustomers?\b/i],
-    ["payments", /\bpayments?\b/i],
-    ["developers", /\bdevelopers?\b/i],
-    ["api keys", /\bapi\s+keys?\b/i],
-    ["settings", /\bsettings\b/i],
-    ["workspace", /\bworkspace\b/i],
-    ["project", /\bproject\b/i],
-    ["billing", /\bbilling\b/i],
-    ["usage", /\busage\b/i],
-    ["team", /\bteam\b/i],
-  ];
-  for (const [name, re] of defs) {
-    if (re.test(text)) markers.push(name);
-  }
-  for (const mode of visibleModeMarkers(text)) markers.push(mode);
-  return [...new Set(markers)].slice(0, 8);
-}
-
-// A login / OAuth-chooser page — an auth WALL, not the authenticated app surface.
-// Marketing/nav words on a login page ("developers", "api", "docs") otherwise
-// tripped authenticatedAppSurfaceMarkers into steering the agent to "prefer app
-// navigation" on an auth-gated page. MEASURED 2026-07-01 (Groq /authenticate:
-// "Create Account or Login … Continue with Google/GitHub/SSO/email").
-export function looksLikeLoginChooser(pageText: string): boolean {
-  const text = pageText.replace(/\s+/g, " ").trim();
-  const continueWith = (
-    text.match(/\bcontinue with (?:google|github|microsoft|sso|email|apple|gitlab)\b/gi) ?? []
-  ).length;
-  return (
-    continueWith >= 2 ||
-    /\bcreate account or (?:log|sign)\s?in\b/i.test(text) ||
-    /\b(?:log|sign)\s?in to (?:your account|continue)\b/i.test(text)
-  );
-}
-
-function authenticatedAppSurfaceMarkers(pageText: string): string[] {
-  if (looksLikeLoginChooser(pageText)) return []; // auth wall, not the app surface
-  const markers = appSurfaceMarkers(pageText);
-  const modeMarkers = visibleModeMarkers(pageText);
-  if (modeMarkers.length > 0) return markers;
-  return markers.length >= 2 ? markers : [];
-}
-
-function hasAccountSetupOverlay(pageText: string): boolean {
-  const text = pageText.replace(/\s+/g, " ").trim();
-  return (
-    /\b(?:finish|complete|set up|setup)\s+(?:creating\s+|setting\s+up\s+)?(?:your\s+)?(?:account|profile|organization|workspace|business)\b/i.test(
-      text,
-    ) ||
-    /\bcreate\s+(?:your\s+)?account\b/i.test(text) ||
-    /\btell us about (?:yourself|your business|your organization|your company)\b/i.test(text)
-  );
-}
-
-// An onboarding / org-or-workspace creation form that GATES the keys page. These
-// are NOT walls — the agent should fill the required fields with sensible
-// inferred values and submit to proceed. Broader than hasAccountSetupOverlay
-// (it also catches "create organization / you aren't part of an org yet").
-export function isOnboardingOrOrgForm(pageText: string): boolean {
-  const text = pageText.replace(/\s+/g, " ").trim();
-  if (hasAccountSetupOverlay(text)) return true;
-  return (
-    /\byou\s+(?:aren'?t|are not|do not|don'?t)\s+(?:part of|belong to|have)\b.*\borgani[sz]ation\b/i.test(
-      text,
-    ) ||
-    /\bcreate\s+(?:a\s+|your\s+|an\s+|new\s+)?(?:organi[sz]ation|org|workspace|team|project|company)\b/i.test(
-      text,
-    ) ||
-    /\bname\s+(?:your\s+)?(?:organi[sz]ation|workspace|team|project|company)\b/i.test(text) ||
-    /\b(?:what'?s|what is)\s+your\s+name\b/i.test(text) ||
-    /\bget\s+started\b.*\b(?:name|organi[sz]ation|workspace|team)\b/i.test(text)
-  );
-}
-
-// A "copy your key NOW — it won't be shown again" one-time reveal (Luma, many
-// console secrets). The value is on screen but vanishes on dismiss/navigate, so
-// the agent must extract it immediately (and name it with secret_label), not
-// click away first.
-export function hasOneTimeSecretModal(pageText: string): boolean {
-  const text = pageText.replace(/\s+/g, " ").trim();
-  return (
-    /\b(?:won'?t|will not|can'?t|cannot|never)\b[\s\w]{0,30}?\b(?:shown|displayed|see|view|retriev\w*|access\w*)\b[\s\w]{0,20}?\bagain\b/i.test(
-      text,
-    ) ||
-    /\b(?:only|last)\s+time\b.*\b(?:see|view|copy|shown)\b/i.test(text) ||
-    /\b(?:copy|save|store)\s+(?:and\s+save\s+)?(?:your\s+|this\s+|the\s+)?(?:secret|api\s*key|key|token|credential)\b.*\b(?:now|securely|somewhere|before)\b/i.test(
-      text,
-    ) ||
-    /\bmake\s+sure\s+to\s+(?:copy|save|store)\b/i.test(text)
-  );
-}
-
-// The operator acts as the user's REAL identity (not a fresh disposable alias
-// like the universal bot), so a service the user already has an account on
-// rejects a fresh signup — the page flips to a login form / "already
-// registered" / "invalid credentials". This is NOT a wall: the right move is to
-// LOG IN with the existing identity and read the EXISTING key, not retry signup.
-export function hasExistingAccountSignal(pageText: string): boolean {
-  const text = pageText.replace(/\s+/g, " ").trim();
-  return (
-    /\binvalid\s+(?:credentials|password|email\s+or\s+password|login)\b/i.test(text) ||
-    /\b(?:account|email|user(?:name)?)\s+(?:already\s+)?(?:exists|is\s+already\s+(?:registered|in\s+use|taken))\b/i.test(
-      text,
-    ) ||
-    /\b(?:email|account)\s+is\s+already\s+(?:registered|in\s+use|associated|taken)\b/i.test(text) ||
-    /\bthis\s+(?:email|account)\s+is\s+already\b/i.test(text) ||
-    /\ban?\s+account\s+(?:with\s+this\s+email\s+)?already\s+exists\b/i.test(text)
-  );
-}
-
-// An OAuth provider returned "account not found" — the user's Google/GitHub
-// identity is not a LINKED account on this service (Clerk-style: the OAuth
-// button is sign-IN only, signup is email-OTP). Retrying the OAuth button loops
-// forever; the fix is to switch to the email/OTP signup path.
-export function hasUnlinkedOAuthAccountSignal(pageText: string): boolean {
-  const text = pageText.replace(/\s+/g, " ").trim();
-  return (
-    /\bexternal\s+account\s+(?:was\s+)?not\s+found\b/i.test(text) ||
-    /\bno\s+(?:account|user)\s+(?:was\s+)?found\s+(?:for|with)\s+this\s+(?:google|github|oauth|external|account)\b/i.test(
-      text,
-    ) ||
-    /\b(?:couldn'?t|could\s+not|unable\s+to)\s+find\s+(?:an?\s+)?(?:account|user)\b[\s\w]{0,30}?\b(?:google|github|oauth|external)\b/i.test(
-      text,
-    )
-  );
-}
-
-// A stale/404 signup URL — the page is a "not found" shell, not a signup form.
-// Retrying the same URL loops; the fix is to recover the real signup entry. Guard
-// on length so a long app page that merely mentions "404" (an error-log widget, a
-// metrics tile) doesn't trip it — a real 404 page is sparse.
-export function hasNotFoundPageSignal(pageText: string): boolean {
-  const text = pageText.replace(/\s+/g, " ").trim();
-  if (text.length > 600) return false;
-  return (
-    /\b404\b/.test(text) ||
-    /\bpage not found\b/i.test(text) ||
-    /page (?:you(?:'re| are)? looking for )?(?:does\s?n'?t exist|not found|can'?t be found|could\s?n'?t be found)/i.test(
-      text,
-    )
-  );
-}
-
-export function provisionPerceptionGuidance(pageText: string): string | undefined {
-  const loginChooser = looksLikeLoginChooser(pageText);
-  const appMarkers = authenticatedAppSurfaceMarkers(pageText);
-  const modeMarkers = visibleModeMarkers(pageText);
-  // "Create Account or Login" on a login page false-matches the setup-overlay
-  // check; don't treat a login chooser as an authenticated setup surface.
-  const setupOverlay = !loginChooser && hasAccountSetupOverlay(pageText);
-  const parts: string[] = [];
-
-  // Stale signup URL — the page 404'd. Recover the real entry instead of looping
-  // on a dead URL (OpenRouter/Loops /signup both 404; the real forms are
-  // /register etc.). First so it leads when the page is just a not-found shell.
-  if (hasNotFoundPageSignal(pageText)) {
-    parts.push(
-      "Not-found page (404): this signup URL is stale — do NOT stop or report a wall. " +
-        "Recover the real signup entry: try another path on this host (/register, " +
-        "/sign-up, /join, /get-started), or navigate to the site's ROOT domain " +
-        "and click the 'Sign up' / 'Get started' / 'Register' link.",
-    );
-  }
-
-  // One-time secret reveal — extract NOW; it vanishes if you navigate away.
-  if (hasOneTimeSecretModal(pageText)) {
-    parts.push(
-      "One-time secret: the key/secret is shown HERE and will NOT be shown again. " +
-        'Extract it immediately with operate_act { kind: "extract" } (use secret_label to pick the ' +
-        "right field if several values are shown, and into_slot/store to capture it) " +
-        "BEFORE clicking anything that could dismiss this modal or navigate away.",
-    );
-  }
-
-  // Onboarding / org-creation form — fill it, don't treat it as a wall. NOT on a
-  // login chooser: "Create Account or Login" (Groq) false-matched as a setup form.
-  if (!loginChooser && isOnboardingOrOrgForm(pageText)) {
-    parts.push(
-      "Onboarding/setup form: this is NOT a wall and NOT a failure. It gates the " +
-        "keys/dashboard behind a setup step. Fill the required fields with sensible " +
-        "inferred values (your name; an organization/workspace/team name such as your " +
-        "name or 'Personal'; pick the smallest/free plan) and submit to continue. Do " +
-        "not stop or report a wall — drive through it to reach the keys page.",
-    );
-  }
-
-  // Existing-account signal — you act as the user's REAL identity, which may
-  // already be registered here. A fresh signup will keep failing.
-  if (hasExistingAccountSignal(pageText)) {
-    parts.push(
-      "Existing account: you are acting as the user's REAL identity, which " +
-        "already appears to have an account here (login form / 'already " +
-        "registered' / 'invalid credentials'). Do NOT retry signup. Switch to " +
-        "LOGGING IN — prefer the OAuth provider the user has a live session for, " +
-        "or a password reset — then navigate to the EXISTING API key and extract it.",
-    );
-  }
-
-  // Unlinked-OAuth signal — the OAuth identity isn't a linked account; the OAuth
-  // button is sign-in only. Stop clicking it; use the email/OTP signup path.
-  if (hasUnlinkedOAuthAccountSignal(pageText)) {
-    parts.push(
-      "Unlinked OAuth identity: the provider returned 'account not found' — your " +
-        "Google/GitHub identity is not a linked account here, so the OAuth button " +
-        "is sign-IN only. Do NOT keep clicking it. Switch to EMAIL signup/OTP " +
-        '(submit the email field, then operate_act { kind: "await_verification" } for the code) to ' +
-        "create the account, then continue to the keys page.",
-    );
-  }
-
-  if (modeMarkers.length > 0) {
-    parts.push(`Mode marker visible: ${modeMarkers.join(", ")}.`);
-  } else if (appMarkers.length > 0 || setupOverlay) {
-    parts.push(
-      "No test/sandbox/live mode marker is visible. For mode-sensitive tasks, do not create or save objects until the required mode is visible.",
-    );
-  }
-
-  if (setupOverlay && appMarkers.length > 0) {
-    parts.push(
-      `Screen perception: account/setup overlay text is present while authenticated app markers are also visible (${appMarkers.join(", ")}). This often means a foreground onboarding modal is blocking an already-authenticated app, not that OAuth failed. Do not restart OAuth or navigate to login solely because the overlay says create/finish account; either satisfy the minimal required setup once, or use same-origin app navigation/direct dashboard URLs toward the user's goal.`,
-    );
-  } else if (appMarkers.length > 0) {
-    parts.push(
-      `Screen perception: authenticated app markers are visible (${appMarkers.join(", ")}). Prefer app navigation over restarting OAuth unless the current URL is clearly an identity-provider login page.`,
-    );
-  }
-
-  return parts.length > 0 ? parts.join(" ") : undefined;
-}
 
 export function buildScreenOutline(
   elements: readonly InteractiveElement[],
-  pageText: string,
 ): ScreenOutline | undefined {
   if (elements.length === 0) return undefined;
   const byRegion = new Map<string, ScreenRegion>();
@@ -1906,7 +1622,6 @@ export function buildScreenOutline(
     null;
   return {
     foreground,
-    mode_markers: visibleModeMarkers(pageText),
     regions,
   };
 }
@@ -4379,7 +4094,6 @@ async function observeSession(
     const text = await session.browser.extractVisibleText(sourcePage);
     const normalizedFull = text.replace(/\s+/g, " ").trim();
     const normalizedText = normalizedFull.slice(0, 4000);
-    const guidance = provisionPerceptionGuidance(normalizedText);
     const url = sourcePage?.url() ?? session.browser.currentUrl();
     const liveCheckout = await captureCartCheckoutForFillCardFallback(session, url, sourcePage);
     const checkoutState = checkoutStateForObservation(
@@ -4401,7 +4115,6 @@ async function observeSession(
         url,
         text: normalizedText,
         textTruncated,
-        ...(guidance !== undefined ? { guidance } : {}),
         elements,
         prev: session.prevObserve,
       });
@@ -4433,7 +4146,6 @@ async function observeSession(
             session_id: session.id,
             url,
             text: normalizedText,
-            ...(guidance !== undefined ? { guidance } : {}),
             // Still a COMPACT response — carry the (uncollapsed) set as the columnar
             // table so the host parses it the same way as any other compact observe.
             ...emitElements([...built.fullByRef.values()], "columnar"),
@@ -4473,14 +4185,13 @@ async function observeSession(
       textTruncated,
       elements.map((el) => toCompactElement(el, refOf(el), true, false)),
     );
-    const screen = buildScreenOutline(elements, normalizedText);
+    const screen = buildScreenOutline(elements);
     const accessibility = buildAccessibilitySnapshot(elements);
     return withCheckoutState(
       {
         session_id: session.id,
         url,
         text: normalizedText,
-        ...(guidance !== undefined ? { guidance } : {}),
         ...(screen !== undefined ? { screen } : {}),
         ...(accessibility !== undefined ? { accessibility } : {}),
         elements: elements.map((el) => {
@@ -5672,11 +5383,6 @@ export interface ExtractResult {
   // How many labeled credential candidates the page presented — diagnostic so
   // the host can tell "found nothing" from "found masked values it couldn't read".
   candidate_count: number;
-  // Set when extraction failed CLOSED: the page is a login wall / anti-bot
-  // interstitial with no credential to give (Grok/X tombstone), so the extractor
-  // refused to surface junk. The host should drive an interactive login or hand
-  // back to the user rather than treat an empty result as "service issued none".
-  blocked_reason?: string;
 }
 
 const normLabelKey = (label: string): string =>
@@ -5686,40 +5392,6 @@ const normLabelKey = (label: string): string =>
     .toLowerCase()
     .slice(0, 40);
 
-// Credential-shape predicates (looksLikeCodeIdentifier, looksLikeCredentialValue,
-// isCredentialNoise, findCredentialTokens, looksLikeCredentialToken) live in
-// credential-shape.ts — imported above. detectExtractionBlock stays here: it's
-// page-state detection (a login-wall interstitial), not value-shape.
-
-// A credentials page that is actually a login wall / anti-bot interstitial has
-// no key to give — every token on it (CSRF cookie, asset hash, guest id) is
-// junk. Grok is the standing case: x.ai routes signup through X (Twitter) OAuth,
-// and X serves headless Chromium its "JavaScript is not available" tombstone, so
-// the extractor would otherwise scrape session tokens and hand one back as a
-// false-green key. Detect that state and fail CLOSED — return no credential plus
-// an explicit reason the host agent can act on (drive an interactive login),
-// rather than surfacing a bogus value. The phrases below are the load-bearing
-// markers of X's tombstone + the four anti-bot vendors waitForFormReady knows.
-const LOGIN_WALL_MARKERS: readonly RegExp[] = [
-  /javascript is not available/i,
-  /enable javascript/i,
-  /verifying you are human/i,
-  /checking your browser/i,
-  /just a moment/i,
-  /review the security of your connection/i,
-  /unusual (traffic|activity) (from|on)/i,
-];
-export function detectExtractionBlock(pageText: string): string | null {
-  // Require a SHORT page — a real keys page that merely mentions "enable
-  // JavaScript" in a footer is not a wall. A tombstone/interstitial is sparse.
-  if (pageText.trim().length > 600) return null;
-  for (const re of LOGIN_WALL_MARKERS) {
-    if (re.test(pageText)) {
-      return "login_wall: the page is an anti-bot/login interstitial (no credential present) — drive an interactive login or hand back to the user";
-    }
-  }
-  return null;
-}
 
 function firstTokenMatching(haystack: string, re: RegExp): string | null {
   const match = haystack.match(re);
@@ -6331,21 +6003,6 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   const inputs = await browser.extractAllInputValues(page);
   const nearCopy = await browser.extractCredentialsNearCopyButtons(page);
   const text = await browser.extractVisibleText(page);
-
-  // Fail CLOSED on a login wall / anti-bot interstitial: scraping it yields only
-  // session/CSRF/asset tokens, and handing one back is a false-green. Refuse,
-  // and tell the host why so it can drive an interactive login instead.
-  const blocked = detectExtractionBlock(text);
-  if (blocked !== null) {
-    audit(sessionId, "extract", { found: false, blocked_reason: blocked });
-    return {
-      session_id: sessionId,
-      url: page?.url() ?? browser.currentUrl(),
-      credentials: {},
-      candidate_count: 0,
-      blocked_reason: blocked,
-    };
-  }
 
   // Copy-only key surfaces (e.g. LangWatch's /settings/api-keys) never render
   // the value into the DOM — it goes to the clipboard on a "Copy" click. Read
