@@ -1025,7 +1025,6 @@ export function sealRetainedInteractiveElementsV2(
       typeof element.framePath === "string" && /^\d+(?:\/\d+)*$/.test(element.framePath)
         ? element.framePath
         : null,
-    frameOpaque: element.frameOpaque === true,
   }));
 }
 

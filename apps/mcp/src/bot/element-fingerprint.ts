@@ -30,9 +30,9 @@ import type { InteractiveElement } from "./browser.js";
 //
 // Every tier is frame-scoped. Without that, a same-shaped control in an
 // embedded frame could hash to the SAME fingerprint as one in the main page and
-// let an act resolve into the wrong document — the frame domain-lock
-// (assertSecretFrameTargetAllowed) must not be the only thing standing between
-// a secret and a rogue iframe.
+// let an act resolve into the wrong document — there is no separate cross-frame
+// trust gate, so frame-scoped fingerprints are what keep an act in its own
+// document.
 
 /** Unit separator: never present in a DOM id, name, role, or path. */
 const SEP = "\u001f";

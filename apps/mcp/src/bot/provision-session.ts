@@ -1500,11 +1500,7 @@ function resolveAuthorizedCompactV2Target(
   return resolved;
 }
 
-
-type FrameScopedTarget = Pick<
-  InteractiveElement,
-  "frameOrigin" | "frameUrl" | "framePath" | "frameOpaque"
->;
+type FrameScopedTarget = Pick<InteractiveElement, "frameOrigin" | "frameUrl" | "framePath">;
 
 function frameTargetFor(el: FrameScopedTarget): FrameTarget | null {
   if (el.framePath === undefined || el.framePath === null) return null;
@@ -1515,50 +1511,8 @@ function frameTargetFor(el: FrameScopedTarget): FrameTarget | null {
     framePath: el.framePath,
     frameOrigin: el.frameOrigin,
     frameUrl: el.frameUrl ?? "",
-    ...(el.frameOpaque === true ? { frameOpaque: true } : {}),
   };
 }
-
-// Opaque (null-origin) frames remain unaddressable: the browser primitive
-// itself cannot reach a sandboxed iframe without allow-same-origin, so this is
-// a plain "not reachable" error, not a policy gate. Cross-domain and
-// control-plane frame targeting are permitted.
-function assertFrameTargetAllowed(
-  _session: Session,
-  el: FrameScopedTarget,
-  kind: string,
-  _page: Page | undefined = undefined,
-): void {
-  const target = frameTargetFor(el);
-  if (target === null) return;
-  if (target.frameOpaque === true || el.frameOrigin === "null") {
-    throw new ProvisionTargetNotAllowedError(
-      `${kind} refused: the target lives in an opaque (null-origin) frame — a sandboxed ` +
-        `iframe without allow-same-origin, or an unconfirmed about:blank/srcdoc document. ` +
-        `No host declaration can ever permit a null origin; this control is not reachable ` +
-        `through operate_act. Drive the page's own controls instead.`,
-    );
-  }
-}
-
-// type_secret's opaque-frame boundary: a secret may not be typed into an
-// unaddressable opaque frame. Cross-domain (same-origin-addressable) frames
-// are permitted — browser egress does not gate credential injection.
-function assertSecretFrameTargetAllowed(
-  _session: Session,
-  el: FrameScopedTarget,
-  _page: Page | undefined = undefined,
-): void {
-  const target = frameTargetFor(el);
-  if (target === null) return;
-  if (target.frameOpaque === true || el.frameOrigin === "null") {
-    throw new ProvisionTargetNotAllowedError(
-      "type_secret refused: the target lives in an opaque frame. Secrets may only be " +
-        "typed into the main frame or a frame on the page's own domain.",
-    );
-  }
-}
-
 
 export function buildScreenOutline(
   elements: readonly InteractiveElement[],
@@ -4218,9 +4172,6 @@ async function executeAct(
             throw new AmbiguousProvisionTargetError(action.target, resolved.candidates);
           }
           try {
-            if (resolved.frameTarget !== null) {
-              assertSecretFrameTargetAllowed(session, resolved.frameTarget, compactV2ActionPage);
-            }
             await browser.typeHandle(resolved.handle, value, true);
           } finally {
             await resolved.handle.dispose().catch(() => undefined);
@@ -4253,11 +4204,6 @@ async function executeAct(
           if (stale !== null) throw stale;
           throw new Error(`type_secret: no element matched target "${action.target}".`);
         }
-        // Frame domain-lock (operator-frame-support) — never let a secret cross
-        // into a rogue/third-party (e.g. payment) iframe. See
-        // assertSecretFrameTargetAllowed; a main-frame or same-domain-frame
-        // target is unaffected.
-        assertSecretFrameTargetAllowed(session, el, compactV2ActionPage);
         // Type the REAL value into the page. It crosses only browser↔page; the
         // value is never returned to the host and never logged.
         const target = frameTargetFor(el);
@@ -4301,9 +4247,6 @@ async function executeAct(
                 .join(", "),
           );
         }
-        // Opaque (null-origin) frames are unaddressable — a plain "not
-        // reachable" error. Secret injection has no further cross-origin gate.
-        assertFrameTargetAllowed(session, el, "select", compactV2ActionPage);
         const selectFrame = frameTargetFor(el);
         const committedText =
           selectFrame !== null
@@ -4340,20 +4283,7 @@ async function executeAct(
             throw new ScreenshotClickError("stale_screenshot", "not_dispatched");
           actionPageAfter =
             (await adoptTabOpenedByClick(session, browser, async () => {
-              await clickScreenshot(compactV2ActionPage, action.screenshot!, (target) => {
-                if (!target.mainFrame)
-                  assertFrameTargetAllowed(
-                    session,
-                    {
-                      framePath: "screenshot",
-                      frameUrl: target.frameUrl,
-                      frameOrigin: target.frameOrigin,
-                      frameOpaque: target.frameOpaque,
-                    },
-                    "click",
-                    compactV2ActionPage,
-                  );
-              });
+              await clickScreenshot(compactV2ActionPage, action.screenshot!, () => undefined);
               onScreenshotDispatched?.();
             })) ?? actionPageAfter;
           await settleAfterStateChange(browser, compactV2ActionPage);
@@ -4396,14 +4326,6 @@ async function executeAct(
           // it up front means an action that lands but then throws still can't leave
           // the session promotable (see captureAndPromoteSession) (codex).
           try {
-            if (resolved.frameTarget !== null) {
-              assertFrameTargetAllowed(
-                session,
-                resolved.frameTarget,
-                action.kind,
-                compactV2ActionPage,
-              );
-            }
             if (action.kind === "click" || action.kind === "js_click") {
               const method = action.kind;
               if (compactV2ActionPage !== undefined && !browser.isActivePage(compactV2ActionPage)) {
@@ -4471,10 +4393,7 @@ async function executeAct(
                 .join(", "),
           );
         }
-        // Preserve frame identity and control-plane checks.
-        // (The unsanctioned frame domain lock was removed; opaque/null-origin
-        // frame targets still refuse.)
-        assertFrameTargetAllowed(session, el, action.kind, compactV2ActionPage);
+        // Preserve frame identity (origin + path) for the frame-scoped fill.
         if (action.kind === "click" || action.kind === "js_click") {
           const target = frameTargetFor(el);
           const sourcePageIsActive =
