@@ -2,7 +2,7 @@ import { lstat } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { createSessionGuard } from "../../session-guard.js";
 import { BrokerClient } from "./transport.js";
-import { BrokerRefusal } from "./scheduler.js";
+import { BrokerRefusal } from "./refusal.js";
 import { resolveBrokerSocket, reclaimDeadBrokerEndpoint } from "./discovery.js";
 
 /** Connect retains the maintenance connection throughout the existing plain,

@@ -21,8 +21,8 @@ import {
   withPreparedOAuthLoginTarget,
   type PreparedOAuthLoginTarget,
 } from "../provision-session.js";
-import { BrokerAuthority, type BrokerPrincipal, type TabCapability } from "./authority.js";
-import { BrokerRefusal, siteResources } from "./scheduler.js";
+import { BrokerAuthority, type BrokerPrincipal } from "./authority.js";
+import { BrokerRefusal } from "./refusal.js";
 import type { BrokerTransportPort } from "./transport.js";
 import { forwarderId } from "./lineage.js";
 import { provenPreDispatchMutationFailure } from "../mutation-dispatch-evidence.js";
@@ -40,24 +40,14 @@ function maskSessionOutput<T>(
   return typeof mask === "function" ? mask.call(session.browser, value) : value;
 }
 
-const capabilitySchema = z
-  .object({
-    cellId: z.string(),
-    browserEpoch: z.string(),
-    sessionId: z.string(),
-    targetId: z.string(),
-    leaseGeneration: z.string(),
-  })
-  .strict();
 const callSchema = z
   .object({
     name: z.string(),
     args: z.record(z.unknown()),
-    capability: capabilitySchema.optional(),
+    capability: z.string().optional(),
   })
   .strict();
 const recoverySchema = callSchema.extend({ requestId: z.string().min(1).optional() });
-const startConfirmationSchema = z.object({ capability: capabilitySchema }).strict();
 function remapSession(value: unknown, from: string, to: string): unknown {
   if (Array.isArray(value)) return value.map((item) => remapSession(item, from, to));
   if (value !== null && typeof value === "object")
@@ -171,10 +161,9 @@ export class OperatorBroker implements BrokerTransportPort {
   private token: Buffer;
   constructor(
     private readonly config: ApiClientConfig & { accountId: string },
-    cellId: string,
     private readonly journal?: DispatchJournal,
   ) {
-    this.authority = new BrokerAuthority(config.accountId, cellId);
+    this.authority = new BrokerAuthority(config.accountId);
     this.token = createHash("sha256").update(config.agentSessionToken).digest();
   }
   refreshCredentials(session: { account_id?: string; agent_session_token?: string }): void {
@@ -261,15 +250,11 @@ export class OperatorBroker implements BrokerTransportPort {
       active.controller.abort(new BrokerRefusal("cancelled", "Caller cancelled the request"));
       return true;
     }
-    let pending = this.pendingCancellations.get(principal.clientId);
+    const pending = this.pendingCancellations.get(principal.clientId);
     if (pending === undefined) {
-      if (this.pendingCancellations.size >= 128)
-        throw new BrokerRefusal("capacity", "Pending cancellation connection budget exhausted");
-      pending = new Set();
-      this.pendingCancellations.set(principal.clientId, pending);
+      this.pendingCancellations.set(principal.clientId, new Set([requestId]));
+      return true;
     }
-    if (!pending.has(requestId) && pending.size >= 8192)
-      throw new BrokerRefusal("capacity", "Pending cancellation budget exhausted");
     pending.add(requestId);
     return true;
   }
@@ -335,14 +320,13 @@ export class OperatorBroker implements BrokerTransportPort {
     const pinnedApi = api;
     if (starting) {
       if (input.capability !== undefined)
-        throw new BrokerRefusal("invalid_arguments", "Start takes no existing capability");
-      const hosts = [...(typeof args.service_url === "string" ? [args.service_url] : [])];
+        throw new BrokerRefusal("invalid_arguments", "Start takes no existing session");
       let observation: unknown;
       let internalId = "";
-      const capability = await this.authority.open(
+      let targetId = "no-page";
+      const sessionId = await this.authority.open(
         principal,
-        siteResources(hosts),
-        async (id, signal, reserve) => {
+        async (id, signal) => {
           if (signal.aborted) throw new BrokerRefusal("cancelled", "Start cancelled");
           const mutationCapableStart = tool.name === "operate_recipe_run";
           let startDispatchAttempted = false;
@@ -352,7 +336,7 @@ export class OperatorBroker implements BrokerTransportPort {
               signal,
               async () =>
                 await withBrokerAdmission(
-                  { sessionId: id, reserve },
+                  { sessionId: id },
                   async () =>
                     await withBrokerAuditContext(
                       pinnedApi,
@@ -411,7 +395,7 @@ export class OperatorBroker implements BrokerTransportPort {
               ...dispatch,
               outcome: reconciliationOutcome(tool.name, observation),
             });
-          const targetId = await session.browser.brokerTargetId();
+          targetId = await session.browser.brokerTargetId();
           return {
             targetId,
             prepare: async (name, commandArgs) => {
@@ -596,59 +580,45 @@ export class OperatorBroker implements BrokerTransportPort {
         },
         requestSignal,
       );
-      if (capability.targetId === "no-page") {
-        await this.authority.close(principal, capability);
-        return { result: observation };
+      if (targetId === "no-page") {
+        await this.authority.close(principal, sessionId);
+        return { result: remapSession(observation, internalId, sessionId) };
       }
       if (tool.name === "operate_start") {
         try {
-          await this.journal?.record(capability.sessionId, requestId, "outcome", {
+          await this.journal?.record(sessionId, requestId, "outcome", {
             ...dispatch,
             outcome: { status: "completed" },
           });
         } catch (error) {
-          await this.authority.close(principal, capability);
+          await this.authority.close(principal, sessionId);
           throw error;
         }
       }
-      const result = remapSession(observation, internalId, capability.sessionId) as Record<
+      const result = remapSession(observation, internalId, sessionId) as Record<
         string,
         unknown
       >;
       return {
-        capability,
+        capability: sessionId,
         result: {
           ...result,
-          broker: {
-            cellId: capability.cellId,
-            browserEpoch: capability.browserEpoch,
-            targetId: capability.targetId,
-            pid: process.pid,
-          },
+          broker: { targetId, pid: process.pid },
         },
       };
     }
-    const capability = input.capability;
-    if (capability === undefined || args.session_id !== capability.sessionId)
-      throw new BrokerRefusal("stale_lease", "An owned session capability is required");
-    const extra: string[] = [];
-    const lane =
-      tool.name === "operate_login"
-        ? "oauth"
-        : ["operate_extract", "operate_fill_credential", "inject_card"].includes(tool.name)
-          ? "interactive"
-          : undefined;
+    const sessionId = input.capability;
+    if (sessionId === undefined || args.session_id !== sessionId)
+      throw new BrokerRefusal("stale_lease", "An owned session is required");
     const result =
       tool.name === "operate_finish"
-        ? await this.authority.finish(principal, capability, requestId, args)
+        ? await this.authority.finish(principal, sessionId, requestId, args)
         : await this.authority.invoke(
             principal,
-            capability,
+            sessionId,
             requestId,
             tool.name,
             args,
-            extra,
-            lane,
             requestSignal,
           );
     if (result instanceof DeliveredPreDispatchFailure)
@@ -665,7 +635,7 @@ export class OperatorBroker implements BrokerTransportPort {
       "closed" in result &&
       result.closed === true
     )
-      await this.authority.close(principal, capability, true);
+      await this.authority.close(principal, sessionId, true);
     return { result };
   }
   async recover(
@@ -673,7 +643,7 @@ export class OperatorBroker implements BrokerTransportPort {
     params: Record<string, unknown>,
   ): Promise<{
     requestId: string;
-    capability?: TabCapability;
+    capability?: string;
     result:
       | {
           reconciliation: ReconciledDispatchOutcome & { request_id: string; operation: string };
@@ -715,8 +685,8 @@ export class OperatorBroker implements BrokerTransportPort {
     if (completed.alreadySettled !== true)
       await this.journal?.recordRecovery(journalForwarderId(principal), completed);
     if (completed.start === true) {
-      const capability = this.authority.recoverCapability(principal, completed.sessionId);
-      if (capability === undefined)
+      const sessionId = this.authority.recoverCapability(principal, completed.sessionId);
+      if (sessionId === undefined)
         return {
           requestId: completed.requestId,
           result: {
@@ -734,15 +704,10 @@ export class OperatorBroker implements BrokerTransportPort {
         };
       return {
         requestId: completed.requestId,
-        capability,
+        capability: sessionId,
         result: {
-          session_id: capability.sessionId,
-          broker: {
-            cellId: capability.cellId,
-            browserEpoch: capability.browserEpoch,
-            targetId: capability.targetId,
-            pid: process.pid,
-          },
+          session_id: sessionId,
+          broker: { pid: process.pid },
         },
       };
     }
@@ -757,17 +722,8 @@ export class OperatorBroker implements BrokerTransportPort {
       },
     };
   }
-  async reclaim(principal: BrokerPrincipal): Promise<{ capabilities: TabCapability[] }> {
+  async reclaim(principal: BrokerPrincipal): Promise<{ capabilities: string[] }> {
     return { capabilities: this.authority.reclaim(principal) };
-  }
-  async confirmStartDelivery(
-    principal: BrokerPrincipal,
-    params: Record<string, unknown>,
-  ): Promise<void> {
-    const { capability } = startConfirmationSchema.parse(params);
-    if (!this.authority.hasCapability(principal, capability))
-      throw new BrokerRefusal("stale_lease", "Capability does not name an owned live session");
-    await this.journal?.confirmStartDelivery(capability.sessionId, journalForwarderId(principal));
   }
   async reap(now = Date.now()): Promise<void> {
     await this.authority.expireDetached(now);
@@ -786,7 +742,7 @@ export class OperatorBroker implements BrokerTransportPort {
     if (!parsed.success || !["operate_observe", "operate_screenshot"].includes(parsed.data.name))
       return undefined;
     const { capability, args } = parsed.data;
-    if (capability === undefined || args.session_id !== capability.sessionId) return undefined;
+    if (capability === undefined || args.session_id !== capability) return undefined;
     const receipt = this.authority.busyReadReceipt(principal, capability, requestId);
     return receipt === undefined ? undefined : { result: receipt };
   }
@@ -799,12 +755,8 @@ export class OperatorBroker implements BrokerTransportPort {
       this.requestControllers.delete(key);
     }
     this.authority.beginForwarderRelease(principal);
-    const forwarder = principal.forwarderId;
     if (!explicit) this.authority.detach(principal);
-    else {
-      if (forwarder !== undefined) await this.journal?.settleExplicitStartDeliveries(forwarder);
-      await this.authority.disconnect(principal);
-    }
+    else await this.authority.disconnect(principal);
     this.authority.releaseForwarder(principal);
     this.apis.delete(principal.clientId);
   }

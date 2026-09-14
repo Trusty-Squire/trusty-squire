@@ -2,7 +2,7 @@ import { captureEvidenceSchema, type CaptureEvidence } from "../credential-captu
 import { operationReceiptSchema, type OperationReceipt } from "../operation-receipt.js";
 import { open, readFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { BrokerRefusal } from "./scheduler.js";
+import { BrokerRefusal } from "./refusal.js";
 
 type DispatchPhase =
   | "prepared"
@@ -15,7 +15,6 @@ type DispatchPhase =
   | "acknowledged"
   | "settled"
   | "recovered";
-export const START_DELIVERY_RETENTION_MS = 5 * 60_000;
 
 interface DispatchRecord {
   sessionId: string;
@@ -233,52 +232,6 @@ export class DispatchJournal {
     return outcomes.length > 0;
   }
 
-  async confirmStartDelivery(sessionId: string, forwarderId: string): Promise<boolean> {
-    const starts = [...(await this.states()).values()].filter(
-      (record) =>
-        record.sessionId === sessionId &&
-        record.forwarderId === forwarderId &&
-        record.start === true &&
-        ["acknowledged", "delivery_acknowledged"].includes(record.phase),
-    );
-    await Promise.all(
-      starts.map(
-        async (record) =>
-          await this.record(record.sessionId, record.requestId, "settled", {
-            forwarderId,
-            start: true,
-            ...(record.operation === undefined ? {} : { operation: record.operation }),
-            ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
-            ...(record.outcome === undefined ? {} : { outcome: record.outcome }),
-          }),
-      ),
-    );
-    return starts.length > 0;
-  }
-
-  async settleExplicitStartDeliveries(forwarderId: string): Promise<boolean> {
-    const starts = [...(await this.states()).values()].filter(
-      (record) =>
-        record.forwarderId === forwarderId &&
-        record.start === true &&
-        record.operation === "operate_start" &&
-        ["acknowledged", "delivery_acknowledged"].includes(record.phase),
-    );
-    await Promise.all(
-      starts.map(
-        async (record) =>
-          await this.record(record.sessionId, record.requestId, "settled", {
-            forwarderId,
-            start: true,
-            ...(record.operation === undefined ? {} : { operation: record.operation }),
-            ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
-            ...(record.outcome === undefined ? {} : { outcome: record.outcome }),
-          }),
-      ),
-    );
-    return starts.length > 0;
-  }
-
   async recordRecovery(forwarderId: string, completed: CompletedDispatchOutcome): Promise<void> {
     await this.record(completed.sessionId, completed.requestId, "recovered", {
       forwarderId,
@@ -344,7 +297,7 @@ export class DispatchJournal {
         candidate.forwarderId === forwarderId &&
         candidate.requestId === "terminal-receipt" &&
         candidate.terminalReceipt?.closed === true &&
-        Date.now() - candidate.at < START_DELIVERY_RETENTION_MS,
+        Date.now() - candidate.at < 5 * 60_000,
     );
     return record?.terminalReceipt;
   }

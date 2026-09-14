@@ -50,7 +50,6 @@ describe("broker dispatch custody", () => {
       orphanAdmission: async () => undefined,
       orphan: async () => undefined,
       release: async () => undefined,
-      identity: async (operation) => await operation(),
     });
     const journal = new DispatchJournal(path);
     const broker = new OperatorBroker(
@@ -60,7 +59,6 @@ describe("broker dispatch custody", () => {
         apiBaseUrl: "http://unused.test",
         registryBaseUrl: "http://unused.test",
       },
-      "cell",
       journal,
     );
     const failedTool = (name: "operate_start" | "operate_recipe_run"): Tool => ({
@@ -182,7 +180,6 @@ describe("broker dispatch custody", () => {
         apiBaseUrl: "http://unused.test",
         registryBaseUrl: "http://unused.test",
       },
-      "cell",
       journal,
     );
     const principal = await authenticate(broker, "restarted");
@@ -202,7 +199,7 @@ describe("broker dispatch custody", () => {
           } satisfies Tool,
         ],
       });
-      const capability = await broker.authority.open(principal, ["site:a"], async () => ({
+      const capability = await broker.authority.open(principal, async () => ({
         targetId: "target",
         invoke: async () => undefined,
         close: async () => true,
@@ -220,13 +217,13 @@ describe("broker dispatch custody", () => {
         outcome: { status: "completed" },
       } as const;
       await journal.record(
-        capability.sessionId,
+        capability,
         "forwarder:old-process:request",
         "outcome",
         startOutcome,
       );
       await journal.record(
-        capability.sessionId,
+        capability,
         "forwarder:current-process:request",
         "outcome",
         startOutcome,
@@ -256,7 +253,7 @@ describe("broker dispatch custody", () => {
       ).resolves.toMatchObject({
         requestId: "forwarder:current-process:request",
         capability,
-        result: { session_id: capability.sessionId, broker: { targetId: "target" } },
+        result: { session_id: capability, broker: { pid: expect.any(Number) } },
       });
       await expect(
         broker.recover(principal, {
@@ -291,7 +288,7 @@ describe("broker dispatch custody", () => {
       .digest("hex");
     let starts = 0;
     try {
-      const original = new OperatorBroker(config, "cell", journal);
+      const original = new OperatorBroker(config, journal);
       const originalPrincipal = await authenticate(original, "original");
       if (originalPrincipal.forwarderId === undefined)
         throw new Error("Test broker lineage is missing");
@@ -304,7 +301,7 @@ describe("broker dispatch custody", () => {
       });
       await journal.acknowledge(originalPrincipal.forwarderId, "old-process-request");
 
-      const restarted = new OperatorBroker(config, "cell", new DispatchJournal(path));
+      const restarted = new OperatorBroker(config, new DispatchJournal(path));
       Object.defineProperty(restarted, "tools", {
         value: [
           {

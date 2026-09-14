@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { BrokerRefusal } from "./scheduler.js";
+import { BrokerRefusal } from "./refusal.js";
 
 const CREDENTIAL = /^[A-Za-z0-9_-]{43,128}$/;
 

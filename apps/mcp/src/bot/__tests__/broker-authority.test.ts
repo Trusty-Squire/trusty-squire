@@ -4,7 +4,6 @@ import {
   type BrokerSessionPort,
   type BrokerPrincipal,
 } from "../broker/authority.js";
-import { ScopeScheduler, siteResources } from "../broker/scheduler.js";
 import { forwarderId } from "../broker/lineage.js";
 
 const principal = (clientId: string): BrokerPrincipal => ({
@@ -28,12 +27,12 @@ function port(
 
 describe("broker authority", () => {
   it("routes finish outside the active mutation tail and retains its lane until settlement", async () => {
-    const broker = new BrokerAuthority("account", "cell");
+    const broker = new BrokerAuthority("account");
     const owner = principal("finish-owner");
     const entered = deferred<void>();
     const release = deferred<void>();
     let cancelled = false;
-    const cap = await broker.open(owner, ["site:finish"], async () =>
+    const cap = await broker.open(owner, async () =>
       port("target", async (name, _args, signal) => {
         if (name === "operate_finish") return { closed: false, cleanup: "closing" };
         signal.addEventListener(
@@ -48,10 +47,10 @@ describe("broker authority", () => {
         return undefined;
       }),
     );
-    const mutation = broker.invoke(owner, cap, "mutation", "operate_click", {}, [], "oauth");
+    const mutation = broker.invoke(owner, cap, "mutation", "operate_click", {});
     await entered.promise;
     expect(broker.busyReadReceipt(owner, cap, "poll")).toMatchObject({
-      session_id: cap.sessionId,
+      session_id: cap,
       operation_id: "poll",
       status: "session_busy",
       execution: "pending",
@@ -77,14 +76,14 @@ describe("broker authority", () => {
   });
 
   it("runs three independent actors concurrently, preserving ownership and request deduplication", async () => {
-    const broker = new BrokerAuthority("account", "cell");
+    const broker = new BrokerAuthority("account");
     const entered: string[] = [];
     const release = deferred<void>();
     const owners = [principal("a"), principal("b"), principal("c")];
     const caps = await Promise.all(
       owners.map(
         async (owner) =>
-          await broker.open(owner, siteResources([`${owner.clientId}.test`]), async () =>
+          await broker.open(owner, async () =>
             port(owner.clientId, async () => {
               entered.push(owner.clientId);
               await release.promise;
@@ -100,9 +99,6 @@ describe("broker authority", () => {
     expect(() => broker.invoke(owners[1]!, caps[0]!, "bad", "read", {})).toThrow(
       "owned live session",
     );
-    expect(() =>
-      broker.invoke(owners[0]!, { ...caps[0]!, browserEpoch: "old" }, "bad", "read", {}),
-    ).toThrow("owned live session");
     release.resolve();
     expect(await Promise.all(calls)).toEqual(["a", "b", "c"]);
     await broker.disconnect(owners[0]!);
@@ -112,7 +108,7 @@ describe("broker authority", () => {
   });
 
   it("rejects concurrent forwarder reuse but restores a detached lineage", async () => {
-    const broker = new BrokerAuthority("account", "cell");
+    const broker = new BrokerAuthority("account");
     const first: BrokerPrincipal = {
       accountId: "account",
       agentId: "local-agent",
@@ -121,7 +117,7 @@ describe("broker authority", () => {
     };
     const second = { ...first, clientId: "second" };
     void broker.claimForwarder(first);
-    const capability = await broker.open(first, ["site:a"], async () => port("a"));
+    const capability = await broker.open(first, async () => port("a"));
 
     expect(() => broker.claimForwarder(second)).toThrow("Forwarder identity is already active");
     expect(() => broker.invoke(second, capability, "foreign", "read", {})).toThrow("not admitted");
@@ -134,7 +130,7 @@ describe("broker authority", () => {
   });
 
   it("fences lost-client mutations, reclaims within grace, and expires custody afterward", async () => {
-    const broker = new BrokerAuthority("account", "cell");
+    const broker = new BrokerAuthority("account");
     const first: BrokerPrincipal = {
       accountId: "account",
       agentId: "local-agent",
@@ -148,7 +144,7 @@ describe("broker authority", () => {
     const firstEntered = new Promise<void>((resolve) => {
       releaseFirst = resolve;
     });
-    const capability = await broker.open(first, ["site:a"], async () => ({
+    const capability = await broker.open(first, async () => ({
       ...port("a"),
       invoke: async (name) => {
         dispatches++;
@@ -179,12 +175,12 @@ describe("broker authority", () => {
   });
 
   it("releases a detached stuck actor only after expiry teardown closes it", async () => {
-    const broker = new BrokerAuthority("account", "cell", 1, 1);
+    const broker = new BrokerAuthority("account", 1);
     const owner = principal("stuck");
     const entered = deferred<void>();
     const release = deferred<void>();
     const closeReasons: Array<"finish" | "disconnect" | "expiry" | undefined> = [];
-    const capability = await broker.open(owner, ["site:a"], async () => ({
+    const capability = await broker.open(owner, async () => ({
       ...port("stuck"),
       invoke: async () => {
         entered.resolve();
@@ -203,7 +199,7 @@ describe("broker authority", () => {
 
     expect(closeReasons).toEqual(["expiry"]);
     expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
-    const replacement = await broker.open(principal("replacement"), ["site:a"], async () =>
+    const replacement = await broker.open(principal("replacement"), async () =>
       port("replacement"),
     );
     await broker.close(principal("replacement"), replacement);
@@ -214,12 +210,12 @@ describe("broker authority", () => {
   });
 
   it("hands unproven expiry cleanup to the owner backstop without retaining capacity", async () => {
-    const broker = new BrokerAuthority("account", "cell", 1, 1);
+    const broker = new BrokerAuthority("account", 1);
     const owner = principal("stuck");
     const entered = deferred<void>();
     const release = deferred<void>();
     let orphaned = 0;
-    const capability = await broker.open(owner, ["site:a"], async () => ({
+    const capability = await broker.open(owner, async () => ({
       ...port("stuck"),
       invoke: async () => {
         entered.resolve();
@@ -243,7 +239,7 @@ describe("broker authority", () => {
       "does not name an owned live session",
     );
     const replacementOwner = principal("replacement");
-    const replacement = await broker.open(replacementOwner, ["site:a"], async () =>
+    const replacement = await broker.open(replacementOwner, async () =>
       port("replacement"),
     );
     await broker.close(replacementOwner, replacement);
@@ -253,13 +249,13 @@ describe("broker authority", () => {
   });
 
   it("bounds a hung expiry close after owner-backstop handoff", async () => {
-    const broker = new BrokerAuthority("account", "cell", 2, 5);
+    const broker = new BrokerAuthority("account", 5);
     const owner = principal("stuck");
     const entered = deferred<void>();
     const neverFinishes = new Promise<boolean>(() => undefined);
     let closeAttempts = 0;
     let orphaned = 0;
-    const capability = await broker.open(owner, ["site:a"], async () => ({
+    const capability = await broker.open(owner, async () => ({
       ...port("stuck"),
       invoke: async () => {
         entered.resolve();
@@ -289,21 +285,21 @@ describe("broker authority", () => {
     expect(orphaned).toBe(1);
     expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
     const replacementOwner = principal("replacement");
-    const replacement = await broker.open(replacementOwner, ["site:b"], async () =>
+    const replacement = await broker.open(replacementOwner, async () =>
       port("replacement"),
     );
     const overflowOwner = principal("overflow");
-    const overflow = await broker.open(overflowOwner, ["site:c"], async () => port("overflow"));
+    const overflow = await broker.open(overflowOwner, async () => port("overflow"));
     await broker.close(replacementOwner, replacement);
     await broker.close(overflowOwner, overflow);
   });
 
   it("bounds a hung settled detached close after owner-backstop handoff", async () => {
-    const broker = new BrokerAuthority("account", "cell", 1, 5);
+    const broker = new BrokerAuthority("account", 5);
     const owner = principal("settled");
     let closeAttempts = 0;
     let orphaned = 0;
-    await broker.open(owner, ["site:a"], async () => ({
+    await broker.open(owner, async () => ({
       ...port("settled"),
       close: async () => {
         closeAttempts += 1;
@@ -327,7 +323,7 @@ describe("broker authority", () => {
     expect(orphaned).toBe(1);
     expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
     const replacementOwner = principal("replacement");
-    const replacement = await broker.open(replacementOwner, ["site:b"], async () =>
+    const replacement = await broker.open(replacementOwner, async () =>
       port("replacement"),
     );
     await broker.close(replacementOwner, replacement);
@@ -335,7 +331,7 @@ describe("broker authority", () => {
   });
 
   it("requires possession of a stable lineage credential to reclaim", async () => {
-    const broker = new BrokerAuthority("account", "cell");
+    const broker = new BrokerAuthority("account");
     const credential = "a".repeat(43);
     const owner: BrokerPrincipal = {
       accountId: "account",
@@ -349,7 +345,7 @@ describe("broker authority", () => {
       clientId: "forged",
     };
     void broker.claimForwarder(owner);
-    const capability = await broker.open(owner, ["site:a"], async () => port("a"));
+    const capability = await broker.open(owner, async () => port("a"));
 
     void broker.claimForwarder(forged);
     expect(broker.reclaim(forged)).toEqual([]);
@@ -365,14 +361,13 @@ describe("broker authority", () => {
     await expect(broker.invoke(restarted, capability, "resumed", "read", {})).resolves.toBe("a");
   });
 
-  it("retries failed admission cleanup without releasing site custody early", async () => {
-    const broker = new BrokerAuthority("account", "cell");
+  it("retries failed admission cleanup until closure is proven", async () => {
+    const broker = new BrokerAuthority("account");
     const owner = principal("failed");
     let cleanupProven = false;
     await expect(
       broker.open(
         owner,
-        ["site:a"],
         async () => {
           throw new Error("probe failed after opening a tab");
         },
@@ -380,31 +375,24 @@ describe("broker authority", () => {
       ),
     ).rejects.toThrow("probe failed");
     expect(broker.inventory()).toEqual({ active: 0, quarantined: 1, admitting: 0 });
-    let entered = false;
-    const waiting = broker.open(principal("next"), ["site:a"], async () => {
-      entered = true;
-      return port("next");
-    });
-    await Promise.resolve();
-    expect(entered).toBe(false);
     await broker.retryQuarantined();
-    expect(entered).toBe(false);
+    expect(broker.inventory()).toEqual({ active: 0, quarantined: 1, admitting: 0 });
     cleanupProven = true;
     await broker.retryQuarantined();
-    const next = await waiting;
-    expect(entered).toBe(true);
+    expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
+    const next = await broker.open(principal("next"), async () => port("next"));
     await broker.close(principal("next"), next);
     expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
   });
 
   it("fences queued mutations before closing and drains an entered call", async () => {
-    const broker = new BrokerAuthority("account", "cell");
+    const broker = new BrokerAuthority("account");
     const entered = deferred<void>();
     const release = deferred<void>();
     let invokes = 0,
       closed = false;
     const owner = principal("a");
-    const cap = await broker.open(owner, ["site:a"], async () => ({
+    const cap = await broker.open(owner, async () => ({
       ...port("a"),
       invoke: async () => {
         invokes++;
@@ -431,12 +419,12 @@ describe("broker authority", () => {
   });
 
   it("keeps actor serialization when queued preparation fails early", async () => {
-    const broker = new BrokerAuthority("account", "cell");
+    const broker = new BrokerAuthority("account");
     const owner = principal("a");
     const entered: string[] = [];
     const firstEntered = deferred<void>();
     const releaseFirst = deferred<void>();
-    const cap = await broker.open(owner, ["site:a"], async () => ({
+    const cap = await broker.open(owner, async () => ({
       ...port("a"),
       prepare: (name) => {
         if (name === "stale") throw new Error("stale_ref");
@@ -466,34 +454,26 @@ describe("broker authority", () => {
     expect(entered).toEqual(["first", "third"]);
   });
 
-  it("retains site custody when tab cleanup cannot be proved", async () => {
-    const broker = new BrokerAuthority("account", "cell");
-    const cap = await broker.open(principal("a"), ["site:a"], async () => ({
+  it("quarantines a session whose tab cleanup cannot be proved", async () => {
+    const broker = new BrokerAuthority("account");
+    const cap = await broker.open(principal("a"), async () => ({
       ...port("a"),
       close: async () => false,
     }));
     expect(await broker.close(principal("a"), cap)).toBe(false);
-    let created = false;
-    const pending = broker.open(principal("b"), ["site:a"], async () => {
-      created = true;
-      return port("b");
-    });
-    const rejected = expect(pending).rejects.toThrow("cancelled");
-    await Promise.resolve();
-    expect(created).toBe(false);
-    await broker.disconnect(principal("b"));
-    await rejected;
+    expect(broker.inventory()).toEqual({ active: 0, quarantined: 1, admitting: 0 });
+    await broker.disconnect(principal("a"));
     expect(broker.inventory().quarantined).toBe(1);
   });
 
   it("retains a late detached admission for same-lineage reclaim", async () => {
-    const broker = new BrokerAuthority("account", "cell");
+    const broker = new BrokerAuthority("account");
     const entered = deferred<void>(),
       release = deferred<void>();
     const owner = { ...principal("a"), forwarderId: "lineage-a" };
     const replacement = { ...owner, clientId: "replacement" };
     void broker.claimForwarder(owner);
-    const opening = broker.open(owner, ["site:a"], async () => {
+    const opening = broker.open(owner, async () => {
       entered.resolve();
       await release.promise;
       return {
@@ -516,7 +496,7 @@ describe("broker authority", () => {
   });
 
   it("does not reclaim a detached admission that fails before returning a port", async () => {
-    const broker = new BrokerAuthority("account", "cell", 1, 5);
+    const broker = new BrokerAuthority("account", 5);
     const entered = deferred<void>(),
       release = deferred<void>();
     const owner = { ...principal("a"), forwarderId: "lineage-a" };
@@ -526,7 +506,6 @@ describe("broker authority", () => {
     await broker.claimForwarder(owner);
     const opening = broker.open(
       owner,
-      ["site:a"],
       async () => {
         entered.resolve();
         await release.promise;
@@ -553,12 +532,12 @@ describe("broker authority", () => {
     expect(broker.reclaim(replacement)).toEqual([]);
     expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
 
-    const capability = await broker.open(replacement, ["site:a"], async () => port("replacement"));
+    const capability = await broker.open(replacement, async () => port("replacement"));
     await expect(broker.close(replacement, capability)).resolves.toBe(true);
   });
 
   it("does not reclaim a rejected portless admission after its client disconnects", async () => {
-    const broker = new BrokerAuthority("account", "cell", 1);
+    const broker = new BrokerAuthority("account");
     const owner = { ...principal("a"), forwarderId: "lineage-a" };
     const replacement = { ...owner, clientId: "replacement" };
     let cleanupProven = false;
@@ -568,7 +547,6 @@ describe("broker authority", () => {
     await expect(
       broker.open(
         owner,
-        ["site:a"],
         async () => {
           throw new Error("start failed before session port");
         },
@@ -590,17 +568,17 @@ describe("broker authority", () => {
     cleanupProven = true;
     await broker.retryQuarantined();
     expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
-    const capability = await broker.open(replacement, ["site:a"], async () => port("replacement"));
+    const capability = await broker.open(replacement, async () => port("replacement"));
     await expect(broker.close(replacement, capability)).resolves.toBe(true);
   });
 
   it("disposes a port returned after detached admission expiry without consuming capacity", async () => {
-    const broker = new BrokerAuthority("account", "cell", 1, 5);
+    const broker = new BrokerAuthority("account", 5);
     const owner = principal("late");
     const created = deferred<BrokerSessionPort>();
     const closeReasons: Array<"finish" | "disconnect" | "expiry" | undefined> = [];
     let orphaned = 0;
-    const opening = broker.open(owner, ["site:a"], async () => await created.promise);
+    const opening = broker.open(owner, async () => await created.promise);
     await Promise.resolve();
 
     const now = Date.now();
@@ -629,14 +607,14 @@ describe("broker authority", () => {
     expect(orphaned).toBe(1);
     expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
     const replacementOwner = principal("replacement");
-    const replacement = await broker.open(replacementOwner, ["site:a"], async () =>
+    const replacement = await broker.open(replacementOwner, async () =>
       port("replacement"),
     );
     await expect(broker.close(replacementOwner, replacement)).resolves.toBe(true);
   });
 
   it("hands expired failed admissions to bounded cleanup without consuming capacity", async () => {
-    const broker = new BrokerAuthority("account", "cell", 1, 5);
+    const broker = new BrokerAuthority("account", 5);
     const owner = principal("late-failure");
     const entered = deferred<void>();
     const release = deferred<void>();
@@ -644,7 +622,6 @@ describe("broker authority", () => {
     let orphaned = 0;
     const opening = broker.open(
       owner,
-      ["site:a"],
       async () => {
         entered.resolve();
         await release.promise;
@@ -670,14 +647,14 @@ describe("broker authority", () => {
     expect(orphaned).toBe(1);
     expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
     const replacementOwner = principal("replacement");
-    const replacement = await broker.open(replacementOwner, ["site:a"], async () =>
+    const replacement = await broker.open(replacementOwner, async () =>
       port("replacement"),
     );
     await expect(broker.close(replacementOwner, replacement)).resolves.toBe(true);
   });
 
   it("retires transferred transport fences without resuming stale commands", async () => {
-    const broker = new BrokerAuthority("account", "cell");
+    const broker = new BrokerAuthority("account");
     let owner: BrokerPrincipal = {
       accountId: "account",
       agentId: "local-agent",
@@ -685,7 +662,7 @@ describe("broker authority", () => {
       clientId: "client-0",
     };
     await broker.claimForwarder(owner);
-    const capability = await broker.open(owner, ["site:a"], async () => port("a"));
+    const capability = await broker.open(owner, async () => port("a"));
     const fencedClients = () => (broker as unknown as { fencedClients: Set<string> }).fencedClients;
 
     for (let index = 1; index <= 3; index++) {
@@ -711,10 +688,10 @@ describe("broker authority", () => {
   });
 
   it("expires a never-settling detached admission without retaining capacity", async () => {
-    const broker = new BrokerAuthority("account", "cell", 1);
+    const broker = new BrokerAuthority("account");
     const owner = principal("admission");
     const entered = deferred<void>();
-    void broker.open(owner, ["site:a"], async () => {
+    void broker.open(owner, async () => {
       entered.resolve();
       return await new Promise<BrokerSessionPort>(() => undefined);
     });
@@ -725,61 +702,10 @@ describe("broker authority", () => {
 
     expect(broker.hasReconnectGrace(now)).toBe(false);
     expect(broker.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
-    const replacement = await broker.open(principal("replacement"), ["site:a"], async () =>
+    const replacement = await broker.open(principal("replacement"), async () =>
       port("replacement"),
     );
     await expect(broker.close(principal("replacement"), replacement)).resolves.toBe(true);
   });
 
-  it("serializes the OAuth lane while unrelated operations continue", async () => {
-    const broker = new BrokerAuthority("account", "cell");
-    const release = deferred<void>();
-    const entered: string[] = [];
-    const owners = [principal("a"), principal("b"), principal("c")];
-    const caps = await Promise.all(
-      owners.map(
-        async (owner) =>
-          await broker.open(owner, [owner.clientId], async () =>
-            port(owner.clientId, async () => {
-              entered.push(owner.clientId);
-              if (owner.clientId === "a") await release.promise;
-            }),
-          ),
-      ),
-    );
-    const a = broker.invoke(owners[0]!, caps[0]!, "a", "login", {}, [], "oauth");
-    const b = broker.invoke(owners[1]!, caps[1]!, "b", "login", {}, [], "oauth");
-    const c = broker.invoke(owners[2]!, caps[2]!, "c", "read", {});
-    await c;
-    expect(entered.sort()).toEqual(["a", "c"]);
-    release.resolve();
-    await Promise.all([a, b]);
-    expect(entered).toContain("b");
-  });
-});
-
-describe("scope scheduler", () => {
-  it("groups registrable domains and separates hosted private suffix tenants", () => {
-    expect(siteResources(["https://api.shop.co.jp", "www.shop.co.jp"])).toEqual([
-      "site:shop.co.jp",
-    ]);
-    expect(siteResources(["a.github.io", "b.github.io"])).toEqual([
-      "site:a.github.io",
-      "site:b.github.io",
-    ]);
-  });
-  it("reserves multi-domain workflows atomically and refuses conflicting expansions", async () => {
-    const scheduler = new ScopeScheduler();
-    await scheduler.reserve("a", ["a"]);
-    let entered = false;
-    const b = scheduler.reserve("b", ["a", "b"]).then(() => {
-      entered = true;
-    });
-    await scheduler.reserve("c", ["c"]);
-    expect(() => scheduler.expand("c", ["b"])).toThrow("Scope is busy");
-    expect(entered).toBe(false);
-    scheduler.release("a");
-    await b;
-    expect(entered).toBe(true);
-  });
 });

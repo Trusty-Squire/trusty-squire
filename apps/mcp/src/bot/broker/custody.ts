@@ -11,7 +11,6 @@ export interface BrokerBrowserCustody {
   orphanAdmission(sessionId: string): Promise<void>;
   orphan(browser: BrowserController): Promise<void>;
   release(browser: BrowserController, beforeRelease?: () => Promise<void>): Promise<void>;
-  identity<T>(operation: () => Promise<T>): Promise<T>;
 }
 let custody: BrokerBrowserCustody | undefined;
 export function installBrokerBrowserCustody(value: BrokerBrowserCustody): void {

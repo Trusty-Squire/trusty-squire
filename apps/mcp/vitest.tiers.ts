@@ -85,7 +85,6 @@ export const REQUIRED_BEHAVIOR_FILES = [
   "src/bot/__tests__/broker-forwarder.test.ts",
   "src/bot/__tests__/broker-maintenance.test.ts",
   "src/bot/__tests__/broker-journal.test.ts",
-  "src/bot/__tests__/broker-qualification.test.ts",
   "src/bot/__tests__/broker-authority.test.ts",
   "src/bot/__tests__/broker-stdio-restart.test.ts",
   "src/bot/__tests__/broker-transport.test.ts",

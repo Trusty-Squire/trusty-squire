@@ -1,6 +1,6 @@
 import { resolveBrokerSocket } from "./bot/broker/discovery.js";
 import { randomUUID } from "node:crypto";
-import { BrokerRefusal } from "./bot/broker/scheduler.js";
+import { BrokerRefusal } from "./bot/broker/refusal.js";
 import {
   ForwardedResultError,
   OperatorForwarder,

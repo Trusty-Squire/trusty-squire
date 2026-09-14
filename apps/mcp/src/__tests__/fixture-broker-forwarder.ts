@@ -21,7 +21,6 @@ export async function fixtureBrokerForwarder(
       apiBaseUrl: "http://unused.test",
       registryBaseUrl: "http://unused.test",
     },
-    "cell",
     journal,
   );
   Object.defineProperty(broker, "tools", {
@@ -42,7 +41,6 @@ export async function fixtureBrokerForwarder(
       if (method === "reclaim") return await broker.reclaim(principal);
       if (method === "acknowledge")
         return await broker.acknowledge(principal, String(args.requestId));
-      if (method === "confirm_start") return await broker.confirmStartDelivery(principal, args);
       return await broker.call(principal, method, args, requestId);
     },
     disconnect: async (principal, explicit) => await broker.disconnect(principal, explicit),

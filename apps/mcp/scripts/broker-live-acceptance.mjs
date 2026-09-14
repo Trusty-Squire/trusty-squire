@@ -5,8 +5,8 @@
 import assert from "node:assert/strict";
 import { getDomain } from "tldts";
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
+import { randomBytes, randomUUID } from "node:crypto";
+import { readFile, writeFile, mkdir, readdir, unlink } from "node:fs/promises";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -28,6 +28,74 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 const EXECUTION_STATES = new Set(["completed", "cancelled", "pending", "unknown"]);
 const MUTATION_STATES = new Set(["not_dispatched", "dispatched", "unknown"]);
 const CLEANUP_STATES = new Set(["open", "closing", "closed", "already_closed", "unknown"]);
+
+// One small record, written beside the profile, that proves a real-auth
+// acceptance run reached the point of recording evidence and names the three
+// services it exercised.
+const BROKER_QUALIFICATION_FILE = "trusty-squire-broker-qualification.json";
+
+async function brokerQualificationFile(profileDir) {
+  const { profilePathIdentity } = await import("../dist/bot/profile.js");
+  return join(profilePathIdentity(profileDir), BROKER_QUALIFICATION_FILE);
+}
+
+export async function beginBrokerQualification(profileDir, accountId) {
+  const runId = randomUUID();
+  await writeFile(
+    await brokerQualificationFile(profileDir),
+    JSON.stringify({ version: 1, accountId, state: "qualifying", runId }),
+    { encoding: "utf8", mode: 0o600, flag: "wx" },
+  );
+  return runId;
+}
+
+export async function recordBrokerQualificationEvidence(
+  profileDir,
+  accountId,
+  runId,
+  evidencePath,
+  serviceHosts,
+) {
+  await readFile(evidencePath);
+  const file = await brokerQualificationFile(profileDir);
+  let record = null;
+  try {
+    record = JSON.parse(await readFile(file, "utf8"));
+  } catch {
+    record = null;
+  }
+  if (
+    record?.state !== "qualifying" ||
+    record.accountId !== accountId ||
+    record.runId !== runId ||
+    new Set(serviceHosts).size !== 3
+  )
+    throw new Error("Real-auth qualification record is not owned by this harness run");
+  await writeFile(
+    file,
+    JSON.stringify({
+      version: 1,
+      accountId,
+      state: "evidence_recorded",
+      completedAt: new Date().toISOString(),
+      evidencePath,
+      serviceHosts: [...serviceHosts],
+    }),
+    { encoding: "utf8", mode: 0o600 },
+  );
+}
+
+export async function abandonBrokerQualification(profileDir, accountId, runId) {
+  const file = await brokerQualificationFile(profileDir);
+  let record = null;
+  try {
+    record = JSON.parse(await readFile(file, "utf8"));
+  } catch {
+    return;
+  }
+  if (record?.state === "qualifying" && record.accountId === accountId && record.runId === runId)
+    await unlink(file);
+}
 
 export function validateClosureReceipt(receipt, sessionId) {
   assert.ok(receipt && typeof receipt === "object", "Finish closure receipt missing");
@@ -249,13 +317,11 @@ async function runClient(configPath, index) {
       initial_auth_state: providerBaseline.initial_auth_state,
       document_lineage: {
         initial: {
-          browser_epoch: initial.broker?.browserEpoch ?? null,
           target_id: initial.broker?.targetId ?? null,
           url: initial.url ?? null,
         },
         provisioned: {
           document_id: observed.document_id ?? observed.document?.id ?? null,
-          browser_epoch: observed.browser_epoch ?? initial.broker?.browserEpoch ?? null,
           target_id: observed.target_id ?? initial.broker?.targetId ?? null,
           url: observed.url,
         },
@@ -426,8 +492,7 @@ async function runConcurrencyAcceptance(configPath, config, nativeEvidence = nul
     config.accountId && config.configHome,
     "Pinned account and isolated session-store path are required",
   );
-  const qualification = await import("../dist/bot/broker/qualification.js");
-  const runId = await qualification.beginBrokerQualification(profile, config.accountId);
+  const runId = await beginBrokerQualification(profile, config.accountId);
   let evidenceRecorded = false;
   const lab = resolve(root, ".broker-acceptance", `live-${Date.now()}`);
   await mkdir(lab, { recursive: true, mode: 0o700 });
@@ -537,7 +602,6 @@ async function runConcurrencyAcceptance(configPath, config, nativeEvidence = nul
     assert.equal(new Set(ready.map((row) => row.mcpPid)).size, 3);
     assert.equal(new Set(ready.map((row) => row.sessionId)).size, 3);
     assert.equal(new Set(ready.map((row) => row.broker.targetId)).size, 3);
-    assert.equal(new Set(ready.map((row) => row.broker.browserEpoch)).size, 1);
     await Promise.all(
       clients.map(async (child, index) => {
         if (index === order.release) return;
@@ -565,7 +629,7 @@ async function runConcurrencyAcceptance(configPath, config, nativeEvidence = nul
     };
     const evidencePath = join(lab, "evidence.json");
     await writeFile(evidencePath, JSON.stringify(evidence, null, 2));
-    await qualification.recordBrokerQualificationEvidence(
+    await recordBrokerQualificationEvidence(
       profile,
       config.accountId,
       runId,
@@ -578,7 +642,7 @@ async function runConcurrencyAcceptance(configPath, config, nativeEvidence = nul
     for (const child of children) if (child.exitCode === null) child.kill("SIGTERM");
     await Promise.allSettled(children.map((child) => child.done));
     if (!evidenceRecorded)
-      await qualification.abandonBrokerQualification(profile, config.accountId, runId);
+      await abandonBrokerQualification(profile, config.accountId, runId);
   }
 }
 

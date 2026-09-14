@@ -54,13 +54,13 @@ vi.mock("../provision-session.js", () => ({
 
 import { brokerAdmissionId } from "../broker/admission-context.js";
 import { installBrokerBrowserCustody } from "../broker/custody.js";
-import { DispatchJournal, START_DELIVERY_RETENTION_MS } from "../broker/dispatch-journal.js";
+import { DispatchJournal } from "../broker/dispatch-journal.js";
 import { OperatorForwarder } from "../broker/forwarder.js";
 import { forwarderId } from "../broker/lineage.js";
 import { OperatorBroker } from "../broker/operator.js";
-import { BrokerRefusal } from "../broker/scheduler.js";
+import { BrokerRefusal } from "../broker/refusal.js";
 import { listenBroker } from "../broker/transport.js";
-import type { BrokerPrincipal, TabCapability } from "../broker/authority.js";
+import type { BrokerPrincipal } from "../broker/authority.js";
 import { ProvenPreDispatchMutationError } from "../mutation-dispatch-evidence.js";
 
 beforeEach(() => {
@@ -86,7 +86,6 @@ it("carries queued OAuth authority from broker admission through final dispatch"
       apiBaseUrl: "http://unused.test",
       registryBaseUrl: "http://unused.test",
     },
-    "cell",
     journal,
   );
   const internalIds = ["blocker", "unchanged", "changed"];
@@ -174,7 +173,7 @@ it("carries queued OAuth authority from broker admission through final dispatch"
 
   const clients: Array<{
     principal: BrokerPrincipal;
-    capability: TabCapability;
+    capability: string;
   }> = [];
   for (const [index] of internalIds.entries()) {
     const identity = await broker.authenticate("token", `agent-${index}`, String(index).repeat(43));
@@ -186,9 +185,8 @@ it("carries queued OAuth authority from broker admission through final dispatch"
       "tool",
       { name: "operate_start", args: {} },
       `start-${index}`,
-    )) as { capability: TabCapability };
+    )) as { capability: string };
     await broker.acknowledge(principal, `start-${index}`);
-    await broker.confirmStartDelivery(principal, { capability: started.capability });
     clients.push({ principal, capability: started.capability });
   }
 
@@ -196,7 +194,7 @@ it("carries queued OAuth authority from broker admission through final dispatch"
     const login = (index: number, requestId: string) => {
       const client = clients[index]!;
       const args = {
-        session_id: client.capability.sessionId,
+        session_id: client.capability,
         provider: "google" as const,
         ref: `@e:${internalIds[index]}`,
       };
@@ -253,7 +251,6 @@ it("keeps an ambiguous thrown mutation unrecoverable", async () => {
       apiBaseUrl: "http://unused.test",
       registryBaseUrl: "http://unused.test",
     },
-    "cell",
     journal,
   );
   const identity = await broker.authenticate("token", "agent", "a".repeat(43));
@@ -299,11 +296,10 @@ it("keeps an ambiguous thrown mutation unrecoverable", async () => {
       "tool",
       { name: "operate_start", args: {} },
       "start-request",
-    )) as { capability: TabCapability };
+    )) as { capability: string };
     await broker.acknowledge(principal, "start-request");
-    await broker.confirmStartDelivery(principal, { capability: started.capability });
     const args = {
-      session_id: started.capability.sessionId,
+      session_id: started.capability,
       provider: "google" as const,
       ref: "@e:possibly-dispatched",
     };
@@ -347,7 +343,6 @@ it("retains a replacement lineage binding through the old socket handoff", async
       apiBaseUrl: "http://unused.test",
       registryBaseUrl: "http://unused.test",
     },
-    "cell",
   );
   const identity = await broker.authenticate("token", "agent", "a".repeat(43));
   if (identity === null) throw new Error("Test broker authentication failed");
@@ -387,7 +382,6 @@ it("deregisters the lifecycle session when target discovery fails after start", 
     orphanAdmission: async () => undefined,
     orphan: async () => undefined,
     release: async () => undefined,
-    identity: async (operation) => await operation(),
   });
   const broker = new OperatorBroker(
     {
@@ -396,7 +390,6 @@ it("deregisters the lifecycle session when target discovery fails after start", 
       apiBaseUrl: "http://unused.test",
       registryBaseUrl: "http://unused.test",
     },
-    "cell",
   );
   const identity = await broker.authenticate("token", "agent", "a".repeat(43));
   if (identity === null) throw new Error("Test broker authentication failed");
@@ -450,7 +443,6 @@ it("attributes broker proxy calls to their originating operator commands", async
         });
       }) as typeof fetch,
     },
-    "cell",
   );
   const identity = await broker.authenticate("token", "audited-agent", "a".repeat(43));
   if (identity === null) throw new Error("Test broker authentication failed");
@@ -503,13 +495,13 @@ it("attributes broker proxy calls to their originating operator commands", async
     "tool",
     { name: "operate_start", args: {} },
     "start-request",
-  )) as { capability: TabCapability };
+  )) as { capability: string };
   await broker.call(
     principal,
     "tool",
     {
       name: "operate_click",
-      args: { session_id: started.capability.sessionId },
+      args: { session_id: started.capability },
       capability: started.capability,
     },
     "click-request",
@@ -549,7 +541,6 @@ it("settles no-page starts without retaining a recoverable mutation", async () =
       apiBaseUrl: "http://unused.test",
       registryBaseUrl: "http://unused.test",
     },
-    "cell",
     journal,
   );
   const identity = await broker.authenticate("token", "agent", "a".repeat(43));
@@ -603,7 +594,6 @@ it("closes an explicitly released client session immediately", async () => {
       apiBaseUrl: "http://unused.test",
       registryBaseUrl: "http://unused.test",
     },
-    "cell",
     journal,
   );
   const identity = await broker.authenticate("token", "agent", "a".repeat(43));
@@ -640,159 +630,17 @@ it("closes an explicitly released client session immediately", async () => {
       "tool",
       { name: "operate_start", args: {} },
       "start-request",
-    )) as { capability: TabCapability };
+    )) as { capability: string };
     await broker.acknowledge(principal, "start-request");
 
     await broker.disconnect(principal, true);
 
-    expect(started.capability.sessionId).toBeDefined();
+    expect(started.capability).toBeDefined();
     expect(state.finish).toHaveBeenCalledWith(internalId);
     expect(state.sessions.size).toBe(0);
     expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
   } finally {
     await rm(root, { recursive: true, force: true });
-  }
-});
-
-it("retains acknowledged start control until a same-lineage follow-up", async () => {
-  const guard: SessionGuard = {
-    bind: async () => ({
-      account_id: "account",
-      agent_session_token: "token",
-      api_base_url: "http://unused.test",
-      saved_at: "",
-    }),
-    inspect: async () => ({ problem: null }),
-    boundAccountId: () => "account",
-  };
-  for (const name of ["operate_start", "operate_recipe_run"] as const) {
-    const root = await mkdtemp(join(tmpdir(), `ts-broker-${name}-delivery-`));
-    const path = join(root, "broker.sock");
-    const journal = new DispatchJournal(join(root, "dispatch.jsonl"));
-    const broker = new OperatorBroker(
-      {
-        accountId: "account",
-        agentSessionToken: "token",
-        apiBaseUrl: "http://unused.test",
-        registryBaseUrl: "http://unused.test",
-      },
-      "cell",
-      journal,
-    );
-    const startTool: Tool = {
-      name,
-      description: "",
-      inputSchema: z.object({}).strict(),
-      jsonInputSchema: {},
-      handler: async () => {
-        const sessionId = brokerAdmissionId();
-        if (sessionId === undefined) throw new Error("Missing broker admission ID");
-        state.sessions.set(sessionId, {
-          browser: {
-            brokerTargetId: async () => "target",
-            isConnected: () => true,
-            waitForThreeDsResolution: async () => "succeeded",
-          },
-          pendingThreeDs: null,
-        });
-        return { session_id: sessionId };
-      },
-    };
-    const sessionTool = (toolName: "operate_observe" | "operate_finish"): Tool => ({
-      name: toolName,
-      description: "",
-      inputSchema: z.object({ session_id: z.string() }).strict(),
-      jsonInputSchema: {},
-      handler: async () =>
-        toolName === "operate_observe" ? { dom: "ready" } : { done: true, closed: true },
-    });
-    Object.defineProperty(broker, "tools", {
-      value: [startTool, sessionTool("operate_observe"), sessionTool("operate_finish")],
-    });
-    state.finish.mockImplementation(async (sessionId: string) => {
-      state.sessions.delete(sessionId);
-      return { session_id: sessionId, url: "", closed: true };
-    });
-    state.forceFinish.mockImplementation(async (sessionId: string) => {
-      state.sessions.delete(sessionId);
-      return true;
-    });
-    const listener = await listenBroker(path, {
-      authenticate: async (token, agentId, lineageCredential) =>
-        await broker.authenticate(token, agentId, lineageCredential),
-      connected: async (principal) => await broker.connected(principal),
-      call: async (principal, method, params, requestId) => {
-        if (method === "recover") return await broker.recover(principal, params);
-        if (method === "reclaim") return await broker.reclaim(principal);
-        if (method === "acknowledge") {
-          await broker.acknowledge(principal, String(params.requestId));
-          return {};
-        }
-        if (method === "confirm_start") {
-          await broker.confirmStartDelivery(principal, params);
-          return {};
-        }
-        return await broker.call(principal, method, params, requestId);
-      },
-      disconnect: async (principal, explicit) => await broker.disconnect(principal, explicit),
-    });
-    const original = new OperatorForwarder(path, guard, "a".repeat(43));
-    const foreign = new OperatorForwarder(path, guard, "b".repeat(43));
-    const restarted = new OperatorForwarder(path, guard, "a".repeat(43));
-    const expired = new OperatorForwarder(path, guard, "a".repeat(43));
-    try {
-      const started = (await original.invoke(name, {}, "original-start-id")) as {
-        session_id: string;
-      };
-      await original.close();
-      await expect
-        .poll(() => broker.authority.inventory())
-        .toEqual({
-          active: 0,
-          quarantined: 1,
-          admitting: 0,
-        });
-      await broker.reap(Date.now() + START_DELIVERY_RETENTION_MS - 1_000);
-      expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 1, admitting: 0 });
-      await expect(
-        foreign.invoke(name, {}, "foreign-recovery-id", { recover: true }),
-      ).rejects.toThrow("No matching durable outcome");
-      expect(state.sessions.size).toBe(1);
-      await expect(
-        restarted.invoke(name, {}, "recovery-id", { recover: true }),
-      ).resolves.toMatchObject({ session_id: started.session_id });
-      await expect(
-        restarted.invoke("operate_observe", { session_id: started.session_id }, "delivery-id"),
-      ).resolves.toEqual({ dom: "ready" });
-      await restarted.invoke("operate_finish", { session_id: started.session_id }, "finish-id");
-      expect(state.sessions.size).toBe(0);
-      expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
-      await restarted.invoke(name, {}, "expiring-start-id");
-      await restarted.close();
-      await expect
-        .poll(() => broker.authority.inventory())
-        .toEqual({
-          active: 0,
-          quarantined: 1,
-          admitting: 0,
-        });
-      await broker.reap(Date.now() + START_DELIVERY_RETENTION_MS);
-      expect(state.sessions.size).toBe(0);
-      expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
-      await expect(
-        expired.invoke(name, {}, "expired-recovery-id", { recover: true }),
-      ).resolves.toMatchObject({
-        reconciliation: { status: "completed" },
-        recovery: { status: "session_unavailable" },
-      });
-    } finally {
-      await original.close();
-      await foreign.close();
-      await restarted.close();
-      await expired.close();
-      await listener.close();
-      await rm(root, { recursive: true, force: true });
-    }
   }
 });
 
@@ -804,7 +652,6 @@ it("retains pre-registration cancellations without crossing connection identitie
       apiBaseUrl: "http://unused.test",
       registryBaseUrl: "http://unused.test",
     },
-    "cell",
   );
   const owner = { accountId: "account", agentId: "agent", clientId: "one" };
   const foreign = { ...owner, clientId: "two" };
@@ -821,23 +668,6 @@ it("retains pre-registration cancellations without crossing connection identitie
   );
 });
 
-it("bounds cancellation tombstones instead of evicting older cancellation evidence", async () => {
-  const broker = new OperatorBroker(
-    {
-      accountId: "account",
-      agentSessionToken: "token",
-      apiBaseUrl: "http://unused.test",
-      registryBaseUrl: "http://unused.test",
-    },
-    "cell",
-  );
-  const owner = { accountId: "account", agentId: "agent", clientId: "one" };
-  for (let i = 0; i < 8192; i++) broker.cancel(owner, String(i));
-  expect(() => broker.cancel(owner, "overflow")).toThrow("budget exhausted");
-  await expect(broker.call(owner, "wrong-method", {}, "0")).rejects.toThrow(
-    "cancelled before registration",
-  );
-});
 
 it("records cancelled navigation before its executor checkpoint as not dispatched", async () => {
   const root = await mkdtemp(join(tmpdir(), "navigate-checkpoint-"));
@@ -849,7 +679,6 @@ it("records cancelled navigation before its executor checkpoint as not dispatche
       apiBaseUrl: "http://unused.test",
       registryBaseUrl: "http://unused.test",
     },
-    "cell",
     journal,
   );
   let entered!: () => void;
@@ -904,14 +733,13 @@ it("records cancelled navigation before its executor checkpoint as not dispatche
       "tool",
       { name: "operate_start", args: {} },
       "start",
-    )) as { capability: TabCapability };
+    )) as { capability: string };
     await broker.acknowledge(principal, "start");
-    await broker.confirmStartDelivery(principal, { capability });
     const work = broker
       .call(
         principal,
         "tool",
-        { name: "operate_navigate", capability, args: { session_id: capability.sessionId } },
+        { name: "operate_navigate", capability, args: { session_id: capability } },
         "navigate",
       )
       .catch((error: unknown) => error);
@@ -951,7 +779,6 @@ it.each([
         apiBaseUrl: "http://unused.test",
         registryBaseUrl: "http://unused.test",
       },
-      "cell",
       journal,
     );
     let dispatched!: () => void;
@@ -1010,9 +837,8 @@ it.each([
         "tool",
         { name: "operate_start", args: {} },
         "start",
-      )) as { capability: TabCapability };
+      )) as { capability: string };
       await broker.acknowledge(principal, "start");
-      await broker.confirmStartDelivery(principal, { capability });
 
       const action = broker.call(
         principal,
@@ -1020,7 +846,7 @@ it.each([
         {
           name: "operate_click",
           capability,
-          args: { session_id: capability.sessionId, ref: "@e:continue" },
+          args: { session_id: capability, ref: "@e:continue" },
         },
         "continue",
       );
@@ -1054,7 +880,6 @@ it("retires a closing actor when terminal cleanup settles after delivery", async
       apiBaseUrl: "http://unused.test",
       registryBaseUrl: "http://unused.test",
     },
-    "cell",
     journal,
   );
   let release!: () => void;
@@ -1117,14 +942,13 @@ it("retires a closing actor when terminal cleanup settles after delivery", async
       "tool",
       { name: "operate_start", args: { service_url: "https://resend.com/" } },
       "start",
-    )) as { capability: TabCapability };
+    )) as { capability: string };
     await broker.acknowledge(principal, "start");
-    await broker.confirmStartDelivery(principal, { capability });
     expect(
       await broker.call(
         principal,
         "tool",
-        { name: "operate_finish", capability, args: { session_id: capability.sessionId } },
+        { name: "operate_finish", capability, args: { session_id: capability } },
         "finish",
       ),
     ).toMatchObject({ result: { closed: false } });
@@ -1136,7 +960,7 @@ it("retires a closing actor when terminal cleanup settles after delivery", async
       await broker.call(
         principal,
         "tool",
-        { name: "operate_finish", capability, args: { session_id: capability.sessionId } },
+        { name: "operate_finish", capability, args: { session_id: capability } },
         "retry",
       ),
     ).toMatchObject({ result: { closed: true, cleanup: "already_closed" } });
@@ -1169,7 +993,6 @@ it("delivers broker approval notifications to the originating MCP client before 
       apiBaseUrl: "http://unused.test",
       registryBaseUrl: "http://unused.test",
     },
-    "cell",
   );
   let release!: () => void;
   const waiting = new Promise<void>((resolve) => {
@@ -1218,10 +1041,6 @@ it("delivers broker approval notifications to the originating MCP client before 
       if (method === "reclaim") return broker.reclaim(principal);
       if (method === "acknowledge") {
         await broker.acknowledge(principal, String(params.requestId));
-        return {};
-      }
-      if (method === "confirm_start") {
-        await broker.confirmStartDelivery(principal, params);
         return {};
       }
       return broker.call(principal, method, params, id);
@@ -1329,7 +1148,6 @@ it("does not fence stale refs or reconciled not-dispatched outcomes on the same 
       apiBaseUrl: "http://unused.test",
       registryBaseUrl: "http://unused.test",
     },
-    "cell",
     journal,
   );
   let nextSession = 0;
@@ -1377,10 +1195,9 @@ it("does not fence stale refs or reconciled not-dispatched outcomes on the same 
       "tool",
       { name: "operate_start", args: {} },
       "start",
-    )) as { capability: TabCapability };
+    )) as { capability: string };
     await broker.acknowledge(principal, "start");
-    await broker.confirmStartDelivery(principal, { capability: started.capability });
-    const args = { session_id: started.capability.sessionId };
+    const args = { session_id: started.capability };
     await expect(
       broker.call(
         principal,

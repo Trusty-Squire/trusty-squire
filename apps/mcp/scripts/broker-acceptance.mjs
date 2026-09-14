@@ -48,7 +48,7 @@ async function childMain() {
       await import("../dist/bot/browser.js");
     setSelfManagedChromeTerminationSignalExitEnabled(false);
     const runtime = new BrokerRuntime("fixture-account");
-    const authority = new BrokerAuthority("fixture-account", "fixture-cell");
+    const authority = new BrokerAuthority("fixture-account");
     const sites = new Set();
     const listener = await listenBroker(socket, {
       authenticate: async (token) =>
@@ -58,7 +58,8 @@ async function childMain() {
       call: async (principal, method, args, requestId) => {
         if (method === "open") {
           sites.add(args.site);
-          return await authority.open(principal, [args.site], async () => {
+          let targetId = "unproven";
+          const sessionId = await authority.open(principal, async () => {
             const { browser } = await runtime.acquire({
               profileDir: process.env.TRUSTY_SQUIRE_PROFILE_DIR,
             });
@@ -69,7 +70,7 @@ async function childMain() {
               observationFormat: "browser-use-dom",
             });
             await browser.goto(`${args.site}/login`);
-            const targetId = await browser.brokerTargetId();
+            targetId = await browser.brokerTargetId();
             return {
               targetId,
               invoke: async (name) => {
@@ -95,9 +96,10 @@ async function childMain() {
               },
             };
           });
+          return { sessionId, targetId };
         }
-        if (method === "finish") return await authority.close(principal, args.cap);
-        return await authority.invoke(principal, args.cap, requestId, method, {});
+        if (method === "finish") return await authority.close(principal, args.cap.sessionId);
+        return await authority.invoke(principal, args.cap.sessionId, requestId, method, {});
       },
       disconnect: async (principal) => await authority.disconnect(principal),
     });
@@ -211,7 +213,6 @@ export async function runFixtureAcceptance(root = process.cwd(), crashFirst = fa
     const rows = await Promise.all(results);
     assert.equal(new Set(rows.map((r) => r.pid)).size, 3);
     assert.equal(new Set(rows.map((r) => r.cap.targetId)).size, 3);
-    assert.equal(new Set(rows.map((r) => r.cap.browserEpoch)).size, 1);
     assert.equal(new Set(rows.map((r) => r.sessionId)).size, 3);
     assert.ok(Math.max(...rows.map((r) => r.start)) < Math.min(...rows.map((r) => r.end)));
     // Finish one; remaining clients re-observe their original authenticated page.

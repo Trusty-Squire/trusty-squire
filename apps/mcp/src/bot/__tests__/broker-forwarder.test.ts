@@ -14,13 +14,7 @@ describe("MCP broker forwarding", () => {
   it("recovers a valid session result when the first broker reply omits it", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-forward-start-shape-"));
     const path = join(root, "b.sock");
-    const capability = {
-      cellId: "cell",
-      browserEpoch: "epoch",
-      sessionId: "recoverable-session",
-      targetId: "target",
-      leaseGeneration: "one",
-    };
+    const capability = "recoverable-session";
     const broker = await listenBroker(path, {
       authenticate: async () => ({ accountId: "account", agentId: "agent" }),
       call: async (_principal, method, params) => {
@@ -31,7 +25,7 @@ describe("MCP broker forwarding", () => {
           return {
             requestId: params.requestId,
             capability,
-            result: { session_id: capability.sessionId, broker: { targetId: "target" } },
+            result: { session_id: capability, broker: { targetId: "target" } },
           };
         }
         if (params.name === "operate_start") return { capability };
@@ -52,7 +46,7 @@ describe("MCP broker forwarding", () => {
     const forwarder = new OperatorForwarder(path, guard, credential("a"));
     try {
       await expect(forwarder.invoke("operate_start", {}, "start")).resolves.toEqual({
-        session_id: capability.sessionId,
+        session_id: capability,
         broker: { targetId: "target" },
       });
       expect(forwarder.sessionCount()).toBe(1);
@@ -66,13 +60,7 @@ describe("MCP broker forwarding", () => {
   it("does not recover or acknowledge an older identical start as the current malformed reply", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-forward-start-request-"));
     const path = join(root, "b.sock");
-    const olderCapability = {
-      cellId: "cell",
-      browserEpoch: "epoch",
-      sessionId: "older-session",
-      targetId: "older-target",
-      leaseGeneration: "one",
-    };
+    const olderCapability = "older-session";
     const acknowledgements: string[] = [];
     let currentRequestId = "";
     const broker = await listenBroker(path, {
@@ -88,7 +76,7 @@ describe("MCP broker forwarding", () => {
           return {
             requestId: "older-unacknowledged-request",
             capability: olderCapability,
-            result: { session_id: olderCapability.sessionId },
+            result: { session_id: olderCapability },
           };
         }
         if (params.name === "operate_start") {
@@ -127,13 +115,7 @@ describe("MCP broker forwarding", () => {
   it("retains a recovered live capability before acknowledging its result", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-forward-start-ack-"));
     const path = join(root, "b.sock");
-    const capability = {
-      cellId: "cell",
-      browserEpoch: "epoch",
-      sessionId: "retained-session",
-      targetId: "target",
-      leaseGeneration: "one",
-    };
+    const capability = "retained-session";
     const broker = await listenBroker(path, {
       authenticate: async () => ({ accountId: "account", agentId: "agent" }),
       call: async (_principal, method, params) => {
@@ -143,7 +125,7 @@ describe("MCP broker forwarding", () => {
           return {
             requestId: params.requestId,
             capability,
-            result: { session_id: capability.sessionId },
+            result: { session_id: capability },
           };
         if (params.name === "operate_start") return {};
         throw new Error(`Unexpected ${method}`);
@@ -176,13 +158,7 @@ describe("MCP broker forwarding", () => {
   it("retains a recoverable session identity when malformed startup recovery is unavailable", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-forward-start-custody-"));
     const path = join(root, "b.sock");
-    const capability = {
-      cellId: "cell",
-      browserEpoch: "epoch",
-      sessionId: "recoverable-session",
-      targetId: "target",
-      leaseGeneration: "one",
-    };
+    const capability = "recoverable-session";
     const broker = await listenBroker(path, {
       authenticate: async () => ({ accountId: "account", agentId: "agent" }),
       call: async (_principal, method, params) => {
@@ -211,10 +187,10 @@ describe("MCP broker forwarding", () => {
       expect(error).toMatchObject({
         code: "invalid_broker_result",
         detail: {
-          session_id: capability.sessionId,
+          session_id: capability,
           cleanup: "open",
           closed: false,
-          recovery: { tool: "operate_finish", session_id: capability.sessionId },
+          recovery: { tool: "operate_finish", session_id: capability },
         },
       });
       expect(forwarder.sessionCount()).toBe(1);
@@ -225,17 +201,11 @@ describe("MCP broker forwarding", () => {
     }
   });
 
-  it.each(["connect", "reclaim", "confirm_start", "recover"])(
+  it.each(["connect", "reclaim", "recover"])(
     "never dispatches when cancelled during %s",
     async (barrier) => {
       const root = await mkdtemp(join(tmpdir(), "ts-forward-cancel-"));
-      const capability = {
-        cellId: "cell",
-        browserEpoch: "epoch",
-        sessionId: "session",
-        targetId: "target",
-        leaseGeneration: "one",
-      };
+      const capability = "session";
       let release!: () => void;
       let enter!: () => void;
       const gate = new Promise<void>((resolve) => {
@@ -255,7 +225,7 @@ describe("MCP broker forwarding", () => {
           if (method === barrier) await pause();
           if (method === "reclaim") return { capabilities: [capability] };
           if (method === "recover") return null;
-          if (method === "confirm_start" || method === "acknowledge") return {};
+          if (method === "acknowledge") return {};
           dispatches++;
           return { result: {} };
         },
@@ -303,24 +273,17 @@ describe("MCP broker forwarding", () => {
     const root = await mkdtemp(join(tmpdir(), "ts-forward-pre-dispatch-"));
     const path = join(root, "b.sock");
     const acknowledgements: string[] = [];
-    const capability = {
-      cellId: "cell",
-      browserEpoch: "epoch",
-      sessionId: "session",
-      targetId: "target",
-      leaseGeneration: "one",
-    };
+    const capability = "session";
     const broker = await listenBroker(path, {
       authenticate: async () => ({ accountId: "account", agentId: "agent" }),
       call: async (_principal, method, params, requestId) => {
         if (method === "reclaim") return { capabilities: [] };
-        if (method === "confirm_start") return {};
         if (method === "acknowledge") {
           acknowledgements.push(String(params.requestId));
           return {};
         }
         if (params.name === "operate_start")
-          return { capability, result: { session_id: capability.sessionId } };
+          return { capability, result: { session_id: capability } };
         if (params.name === "operate_login")
           return {
             preDispatchFailure: { error: "stale_ref", dispatch: "not_dispatched" },
@@ -413,20 +376,13 @@ describe("MCP broker forwarding", () => {
   it("requires an explicit recovery signal before reusing a reset request ID", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-forward-explicit-recovery-"));
     const path = join(root, "b.sock");
-    const capability = {
-      cellId: "cell",
-      browserEpoch: "epoch",
-      sessionId: "session",
-      targetId: "target",
-      leaseGeneration: "one",
-    };
+    const capability = "session";
     let recoveries = 0;
     let dispatches = 0;
     const broker = await listenBroker(path, {
       authenticate: async () => ({ accountId: "account", agentId: "agent" }),
       call: async (_principal, method, params) => {
         if (method === "reclaim") return { capabilities: [capability] };
-        if (method === "confirm_start") return {};
         if (method === "acknowledge") return {};
         if (method === "recover") {
           recoveries++;
@@ -485,13 +441,7 @@ describe("MCP broker forwarding", () => {
   it("recovers a lost start reply without opening another session", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-forward-start-recovery-"));
     const path = join(root, "b.sock");
-    const capability = {
-      cellId: "cell",
-      browserEpoch: "epoch",
-      sessionId: "session",
-      targetId: "target",
-      leaseGeneration: "one",
-    };
+    const capability = "session";
     let starts = 0;
     let startEntered!: () => void;
     let releaseStart!: () => void;
@@ -506,7 +456,6 @@ describe("MCP broker forwarding", () => {
       authenticate: async () => ({ accountId: "account", agentId: "agent" }),
       call: async (_principal, method, params) => {
         if (method === "reclaim") return { capabilities: starts === 0 ? [] : [capability] };
-        if (method === "confirm_start") return {};
         if (method === "acknowledge") {
           acknowledgements.push(String(params.requestId));
           return {};
@@ -580,18 +529,11 @@ describe("MCP broker forwarding", () => {
       call: async (_principal, method, params) => {
         if (method === "reclaim") return { capabilities: [] };
         if (method === "acknowledge") return {};
-        if (method === "confirm_start") return {};
         if (params.name === "operate_start") {
           starts += 1;
           const sessionId = `session-${starts}`;
           return {
-            capability: {
-              cellId: "cell",
-              browserEpoch: "epoch",
-              sessionId,
-              targetId: sessionId,
-              leaseGeneration: "one",
-            },
+            capability: sessionId,
             result: { session_id: sessionId },
           };
         }
@@ -692,18 +634,11 @@ describe("MCP broker forwarding", () => {
         token === "test" ? { accountId: "account", agentId: "agent" } : null,
       call: async (principal, method, params) => {
         if (method === "reclaim") return { capabilities: [] };
-        if (method === "confirm_start") return {};
         if (method === "acknowledge") return {};
         calls++;
         clients.add(principal.clientId);
         if (params.name === "operate_start") {
-          const capability = {
-            cellId: "cell",
-            browserEpoch: "epoch",
-            sessionId: principal.clientId,
-            targetId: principal.clientId,
-            leaseGeneration: "one",
-          };
+          const capability = principal.clientId;
           return { capability, result: { session_id: principal.clientId } };
         }
         if (params.name === "operate_finish") return { result: { closed: true } };
@@ -766,21 +701,14 @@ describe("MCP broker forwarding", () => {
   });
 });
 
-it("retries finish without requiring an already closing actor to confirm start delivery", async () => {
+it("retries finish for an already closing actor", async () => {
   const root = await mkdtemp(join(tmpdir(), "late-finish-forward-"));
-  const capability = {
-    cellId: "cell",
-    browserEpoch: "epoch",
-    sessionId: "session",
-    targetId: "target",
-    leaseGeneration: "one",
-  };
+  const capability = "session";
   let finished = false;
   const broker = await listenBroker(join(root, "b.sock"), {
     authenticate: async () => ({ accountId: "account", agentId: "agent" }),
     call: async (_principal, method) => {
       if (method === "reclaim") return { capabilities: [capability] };
-      if (method === "confirm_start") throw new Error("actor is closing");
       if (method === "acknowledge") return {};
       return {
         result: {

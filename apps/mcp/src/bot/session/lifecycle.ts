@@ -4,7 +4,6 @@ import {
   settleOperatorTerminalReceipt,
 } from "../request-cancellation.js";
 import type { OperationReceipt } from "../operation-receipt.js";
-import { reserveBrokerAdmission } from "../broker/admission-context.js";
 import { brokerBrowserCustody } from "../broker/custody.js";
 // Phase 2 of the operator session-management restructure: the session
 // lifecycle, moved out of provision-session.ts as ONE transaction.
@@ -581,7 +580,7 @@ export async function startProvisionSession(
   opts: StartOptions,
   ports: SessionStartPorts,
 ): Promise<Observation> {
-  const id = reserveBrokerAdmission([opts.serviceUrl]) ?? randomUUID();
+  const id = randomUUID();
   const compactV2Mode = configuredCompactV2Mode();
   const requestedFormat = opts.format ?? (compactV2Mode === "on" ? "full" : "compact");
   let browser: BrowserController;
@@ -600,9 +599,7 @@ export async function startProvisionSession(
     };
     const custody = brokerBrowserCustody();
     liveProviders =
-      custody === undefined
-        ? await ensureProvisionPrimaryProviderSession(browser)
-        : await custody.identity(probe);
+      custody === undefined ? await ensureProvisionPrimaryProviderSession(browser) : await probe();
     assertProvisionStartAdmitted(acquired.shutdownGeneration);
     const gate = googleSessionGate(liveProviders);
     if (!gate.ok) {

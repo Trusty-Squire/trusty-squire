@@ -16,19 +16,13 @@ import {
 import { installBrokerBrowserCustody } from "./custody.js";
 import { BrokerRuntime } from "./runtime.js";
 import { OperatorBroker } from "./operator.js";
-import { BrokerRefusal } from "./scheduler.js";
+import { BrokerRefusal } from "./refusal.js";
 import { listenBroker } from "./transport.js";
 
 const MIN_BROKER_IDLE_TIMEOUT_MS = 60_000;
 const DEFAULT_BROKER_IDLE_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_BROKER_DRAIN_CLEANUP_TIMEOUT_MS = 3_000;
-const DRAIN_RECOVERY_METHODS = new Set([
-  "recover",
-  "reclaim",
-  "acknowledge",
-  "confirm_start",
-  "cancel",
-]);
+const DRAIN_RECOVERY_METHODS = new Set(["recover", "reclaim", "acknowledge", "cancel"]);
 
 export function brokerDrainAllowsMethod(method: string): boolean {
   return DRAIN_RECOVERY_METHODS.has(method);
@@ -116,7 +110,6 @@ export async function runBrokerDaemon(): Promise<void> {
       apiBaseUrl: session.api_base_url,
       registryBaseUrl: process.env.ADAPTER_REGISTRY_URL ?? "https://registry.trustysquire.ai",
     },
-    cellId,
     journal,
   );
   const connected = new Set<string>();
@@ -143,7 +136,6 @@ export async function runBrokerDaemon(): Promise<void> {
     operator.refreshCredentials(refreshed);
     runtime.resume();
     runtime.claimProfile();
-    operator.authority.rotateEpoch();
     maintenanceOwner = undefined;
     maintenanceReady = false;
   };
@@ -190,10 +182,6 @@ export async function runBrokerDaemon(): Promise<void> {
           await operator.acknowledge(principal, params.requestId);
           return {};
         }
-        if (method === "confirm_start") {
-          await operator.confirmStartDelivery(principal, params);
-          return {};
-        }
         if (method === "maintenance") {
           if (maintenanceOwner !== undefined && maintenanceOwner !== principal.clientId)
             throw new Error("Identity maintenance is already owned");
@@ -231,7 +219,6 @@ export async function runBrokerDaemon(): Promise<void> {
             if (!(await runtime.close())) throw new Error("Old browser cleanup is not proven");
             runtime.resume();
             runtime.claimProfile();
-            operator.authority.rotateEpoch();
           } else
             throw new Error(
               "browser_lost: old session outcomes remain in custody; do not replay mutations",

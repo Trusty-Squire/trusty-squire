@@ -20,7 +20,7 @@ import {
 import { brokerEnvironment } from "../broker/discovery.js";
 import { DispatchJournal } from "../broker/dispatch-journal.js";
 import { forwarderId } from "../broker/lineage.js";
-import { BrokerRefusal } from "../broker/scheduler.js";
+import { BrokerRefusal } from "../broker/refusal.js";
 const require = createRequire(import.meta.url);
 const sleep = async (ms: number) => await new Promise((r) => setTimeout(r, ms));
 async function within<T>(promise: Promise<T>, timeoutMs: number, description: string): Promise<T> {
@@ -220,9 +220,12 @@ itWithChromium(
       const started = (await initial.call("tool", {
         name: "operate_start",
         args: { service_url: serviceUrl },
-      })) as { capability?: { sessionId?: string; targetId?: string } };
-      const sessionId = started.capability?.sessionId;
-      if (typeof sessionId !== "string" || typeof started.capability?.targetId !== "string")
+      })) as {
+        capability?: string;
+        result?: { broker?: { targetId?: string } };
+      };
+      const sessionId = started.capability;
+      if (typeof sessionId !== "string" || typeof started.result?.broker?.targetId !== "string")
         throw new Error(`real browser session was not created: ${JSON.stringify(started)}`);
       for (let attempt = 0; attempt < 200; attempt++) {
         const launchPid = await readdir(reapers)

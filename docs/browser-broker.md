@@ -1,10 +1,10 @@
 # Cross-process identity browser broker
 
 The broker is the sole production path for MCP operator Chrome custody.
-Independent MCP servers retain opaque session capabilities and forward commands
+Independent MCP servers retain their session IDs and forward commands
 over authenticated local IPC. One broker owns one canonical profile, one Chrome,
-and the existing operator handlers and payment state. Admission is capped at three
-concurrent sessions. There is no direct-server browser launch or fallback.
+and the existing operator handlers and payment state. There is no direct-server
+browser launch or fallback.
 
 ## Configuration and operation
 
@@ -40,7 +40,7 @@ memory. There is no credential persistence or slot reuse. By default, a restarte
 operator process starts a new lineage and does not recover a predecessor's
 in-flight payment journal; multi-operator-per-profile restart-journal-recovery is
 a known limitation, tracked by `ts-broker-crash-hardening`. A fresh lineage cannot
-reclaim a predecessor's or sibling's session capabilities. Existing journal records
+reclaim a predecessor's or sibling's sessions. Existing journal records
 remain intact; a fresh lineage does not reconcile them or authorize replay.
 
 The existing explicit `TRUSTY_SQUIRE_FORWARDER_CREDENTIAL` override still accepts a
@@ -63,14 +63,13 @@ Socket mode is 0600. No CDP endpoint or browser
 handle crosses IPC. `TRUSTY_SQUIRE_AGENT_IDENTITY` supplies a connection's agent
 label. The lineage credential proves reconnect ownership independently of that
 label; a caller with only a session ID, agent label, or credential hash cannot
-reclaim another client's capability. The broker admits at most three concurrent
-sessions.
+reclaim another client's session.
 
 `connect` requests maintenance over the existing socket, prevents new admissions,
 and waits for existing sessions and payment outcomes to drain. It closes Chrome
 with proof, then runs the existing separate plain Google login lifecycle with no
 CDP. Resume requires that plain browser to be closed and preserves account
-binding. Browser epoch changes invalidate earlier capabilities.
+binding.
 
 ## Ownership and recovery contracts
 
@@ -85,18 +84,14 @@ binding. Browser epoch changes invalidate earlier capabilities.
   The existing owner reaper closes Chrome. Dead endpoint reclamation waits for
   that physical profile to become free, and preserves the dispatch journal.
   Neither recovery path replays a mutation or bypasses journal reconciliation.
-- Each session owns a target family, capability generation, serialized command
-  queue, and site reservations. The service URL reserves its site before page
-  acquisition. Conflicting site custody queues until the existing owner releases it.
-  Legacy host declarations do not extend those reservations.
+- Each session owns a target family and a serialized command queue. A service
+  URL does not reserve a site; one authenticated client drives the shared profile.
 - Browser egress is unrestricted for all targets. Session cleanup closes only that owned
   family. At reconnect-grace expiry, a close that cannot be proven removes the
   actor from broker inventory and releases its slot rather than retaining or
   reusing it; the existing exact owner-process identity backstop remains the
   only physical-process custody.
-- OAuth and live identity probes share a broker-wide lane. Clipboard-sensitive
-  extract, credential fill, and payment commands use an interactive lane.
-  Per-session approval, charge dispatch fences, and post-submit outcome custody
+- Per-session approval, charge dispatch fences, and post-submit outcome custody
   continue in the existing handlers. Approval notifications travel over the
   originating request's IPC connection to its MCP client before the tool completes;
   clients without notification support receive the approval link in the result.
@@ -109,9 +104,8 @@ binding. Browser epoch changes invalidate earlier capabilities.
   pending payment outcomes remain no-replay journal fences. The existing process
   marker watchdog and owner-death reaper remain unchanged.
 - A bounded physical launch uses the existing cancellation/ownership machinery.
-  A failed admission has bounded cleanup. Once its reconnect grace expires, its
-  scheduler capacity is permanently released; a late port is never admitted or
-  given a capability. Duplicate release calls share one operation.
+  A failed admission has bounded cleanup. Once its reconnect grace expires, a
+  late port is never admitted. Duplicate release calls share one operation.
 - The profile-local dispatch journal fsyncs mutation entry and completion without
   recording command arguments or credentials. A lost mutation response is never
   replayed. Unsettled or malformed journal state refuses browser replacement and
@@ -122,17 +116,13 @@ binding. Browser epoch changes invalidate earlier capabilities.
 - When a client retaining the original lineage credential loses an operator reply,
   its reconciliation request must set MCP request metadata `"trusty-squire/recover": true`. This explicitly asks the
   broker to reconcile its authenticated lineage's newest matching durable
-  operation, input, and capability outcome; the retry may use a new JSON-RPC
-  request ID. Ordinary reset IDs without that metadata are fresh calls. A
-  recovered start returns its existing session capability without retaining page
-  observations while its broker remains alive. Broker receipt alone does not
-  prove stdio delivery: an acknowledged start remains same-lineage recoverable
-  until a later capability-bearing command confirms caller control, for up to
-  five minutes. After broker loss, that same recovery returns only the durable,
-  scrubbed reconciliation record with `recovery.session_unavailable`; it never
-  invents a capability, restarts work, or replays an uncertain payment. The
-  record gives the caller a reconciliation next step and remains a no-replay
-  fence until that retention window expires.
+  operation and input outcome; the retry may use a new JSON-RPC request ID.
+  Ordinary reset IDs without that metadata are fresh calls. A recovered start
+  returns its existing session ID without retaining page observations while its
+  broker remains alive. After broker loss, that same recovery returns only the
+  durable, scrubbed reconciliation record with `recovery.session_unavailable`;
+  it never invents a session, restarts work, or replays an uncertain payment.
+  The record gives the caller a reconciliation next step.
 - A code-proven pre-dispatch stale-ref failure on any mutating command
   (`operate_login`, `operate_click` including its `js_click` fallback,
   `operate_type` including slot-based secret typing, and `operate_select`) is
@@ -140,8 +130,8 @@ binding. Browser epoch changes invalidate earlier capabilities.
   precedes the dispatch boundary, and a failure after the attempt is marked
   `dispatch_attempted` stays `unknown`. A recorded `not_dispatched` outcome
   holds no session or lineage custody, even before delivery acknowledgement: it
-  never refuses browser replacement with `outcome_unknown`, fences later
-  commands, or counts as a pending start delivery. `dispatch-journal.ts` owns
+  never refuses browser replacement with `outcome_unknown` or fences later
+  commands. `dispatch-journal.ts` owns
   that rule; `broker-journal.test.ts` and `broker-operator.test.ts` pin it.
   Older retained `entered` records may be
   reconciled only from independently preserved exact failure evidence by using
@@ -256,8 +246,8 @@ its cookies into the harness.
    TRUSTY_SQUIRE_PROFILE_DIR, and pinned TRUSTY_SQUIRE_ACCOUNT_ID values. A human
    must complete the account/passkey and real Google sign-in. Finish and close
    the plain login browser before running the acceptance arm.
-2. Supply three sessions across Resend and Neon: one of each runs concurrently,
-   then a duplicate-provider third session queues and is admitted after release. Reusing a provider, URL, account, and driver is
+2. Supply three sessions across Resend and Neon: one of each runs concurrently
+   with a duplicate provider. Reusing a provider, URL, account, and driver is
    expected; Xata is not a required live resource. Each driver exports
    `captureCredentialBaseline({ call, sessionId, initial, run })` and
    `provision({ call, sessionId, initial, run })`, using only MCP tool calls.
@@ -384,10 +374,8 @@ configured-host evidence must also validate; neither installed-command nor SDK
 concurrency substitutes for the actual configured native host connection.
 
 The concurrency arm launches three independent MCP stdio servers against one
-production broker and one enrolled profile. Resend and Neon run concurrently;
-the duplicate-provider third start remains pending while its site's owner is
-active, then is admitted within the start budget after that owner closes.
-Exclusive site custody and distinct mutable page ownership remain enforced.
+production broker and one enrolled profile. All three sessions run concurrently
+with distinct mutable page ownership.
 The harness requires actual Google admission, validates old and new keys
 with provider-specific read-only probes, checks overlap/isolation, and records
 every closure receipt. Preserve its evidence file and run the broader reviewed

@@ -1,7 +1,6 @@
 import { brokerAdmissionId } from "./admission-context.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { withBrokerIdentityLane } from "./identity-lane.js";
 import { BrowserController } from "../browser.js";
 import { IdentityRuntime } from "../identity-runtime.js";
 import {
@@ -12,7 +11,7 @@ import {
   type ProfileOperationLease,
 } from "../profile.js";
 import type { BrokerBrowserCustody } from "./custody.js";
-import { BrokerRefusal } from "./scheduler.js";
+import { BrokerRefusal } from "./refusal.js";
 
 interface Settings {
   profileDir: string;
@@ -47,10 +46,6 @@ export class BrokerRuntime implements BrokerBrowserCustody {
     }
     this.lease = acquireProfileOperationGuard(identity);
     this.leaseProfile = identity;
-  }
-
-  async identity<T>(operation: () => Promise<T>): Promise<T> {
-    return await withBrokerIdentityLane(operation);
   }
 
   async acquire(options: {

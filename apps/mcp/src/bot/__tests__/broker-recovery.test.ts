@@ -41,7 +41,7 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 async function stalled() {
-  const { BrokerRefusal } = await import("../broker/scheduler.js");
+  const { BrokerRefusal } = await import("../broker/refusal.js");
   const { BrokerClient } = await import("../broker/transport.js");
   vi.spyOn(BrokerClient, "connect").mockRejectedValue(
     new BrokerRefusal("broker_handshake_timeout", "Broker hello handshake timed out"),
