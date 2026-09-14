@@ -3762,10 +3762,7 @@ describe("operate_act — locator (text=/css=) resolution", () => {
       safetySignals: { billingObject: false, accountSetup: false },
     };
     const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
-    await act(obs.session_id, { kind: "click", target: "css=#atc" }, "compact", {
-      productIdentity: "sku:configured-product",
-      optionsHash: "variant=default",
-    });
+    await act(obs.session_id, { kind: "click", target: "css=#atc" }, "compact");
     expect(h.locatorClickCalls).toBe(1);
   });
 

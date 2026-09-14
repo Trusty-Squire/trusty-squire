@@ -3,7 +3,6 @@ import type { ApiClient } from "../api-client.js";
 import type * as ProvisionSession from "../bot/provision-session.js";
 
 const mocks = vi.hoisted(() => ({
-  cartAdd: vi.fn(),
   formSelectMany: vi.fn(),
   extractCredentials: vi.fn(),
   captchaGate: vi.fn(),
@@ -16,7 +15,6 @@ vi.mock("../bot/provision-session.js", async (importOriginal) => {
   const actual = await importOriginal<typeof ProvisionSession>();
   return {
     ...actual,
-    cartAdd: mocks.cartAdd,
     formSelectMany: mocks.formSelectMany,
     extractCredentials: mocks.extractCredentials,
     captchaGate: mocks.captchaGate,

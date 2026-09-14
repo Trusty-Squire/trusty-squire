@@ -1098,7 +1098,7 @@ async function runAction(
   compactMapEmitted = true,
 ) {
   try {
-    return await act(sessionId, action, "compact", undefined, outputFormat, compactMapEmitted);
+    return await act(sessionId, action, "compact", outputFormat, compactMapEmitted);
   } catch (error) {
     if (error instanceof TargetStaleError) return error.result;
     throw error;

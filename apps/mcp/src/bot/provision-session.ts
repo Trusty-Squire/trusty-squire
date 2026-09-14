@@ -440,7 +440,7 @@ export type ProvisionAction =
   | { kind: "upload"; target: string; path: string };
 
 export type { AllowedHostEntry, HostSource, Session } from "./session/model.js";
-import type { CartAddRecord, CartIdentityContext, CartMutation, Session } from "./session/model.js";
+import type { CartMutation, Session } from "./session/model.js";
 import { egressSeedHosts, hostStrings, registrableHost } from "./session/hosts.js";
 // Phase 2 — the lifecycle registry transaction moved to session/lifecycle.ts as
 // one unit (registry, real-profile lease, call leases and drains, watchdog,
@@ -2048,307 +2048,6 @@ export function isCompactV2ProvisionSession(sessionId: string): boolean {
   return sessionForCall(sessionId)?.compactV2Mode === "on";
 }
 
-export interface CartAddResult {
-  status: "added" | "already_in_cart";
-  cart_delta: "+1" | "0" | "unknown";
-  cart_url: string | null;
-  checkout_state: CheckoutState;
-  postcondition: { product_identity: string; options_hash: string; quantity: number | null };
-}
-
-function canonicalCartIdentity(value: string): string {
-  const trimmed = value.trim();
-  try {
-    const url = new URL(trimmed);
-    url.hash = "";
-    return url.toString();
-  } catch {
-    return trimmed;
-  }
-}
-
-function cartLineMatches(
-  line: { product_identities: string[]; option_signatures: string[] },
-  productIdentity: string,
-  optionsHash: string,
-): boolean {
-  const product = canonicalCartIdentity(productIdentity);
-  const options = canonicalCartIdentity(optionsHash);
-  return (
-    line.product_identities.some((candidate) => canonicalCartIdentity(candidate) === product) &&
-    line.option_signatures.some((candidate) => canonicalCartIdentity(candidate) === options)
-  );
-}
-
-async function cartLineQuantity(
-  session: Session,
-  productIdentity: string,
-  optionsHash: string,
-  page?: Page,
-): Promise<number | null> {
-  const lines = await session.browser.readCheckoutReviewLineItems(true, page);
-  const matching = lines.filter((line) => cartLineMatches(line, productIdentity, optionsHash));
-  if (matching.length !== 1) return null;
-  return matching[0]!.quantity;
-}
-
-function alreadyInCartResult(result: CartAddResult): CartAddResult {
-  return {
-    ...result,
-    status: "already_in_cart",
-    cart_delta: "0",
-    checkout_state: { ...result.checkout_state },
-  };
-}
-
-async function capturePrivateCheckoutState(
-  session: Session,
-  page?: Page,
-): Promise<CheckoutState | undefined> {
-  const elements = await session.browser.extractInteractiveElements(page);
-  retainSessionElements(session, elements);
-  const url = page?.url() ?? session.browser.currentUrl();
-  const text = await session.browser.extractVisibleText(page);
-  const liveCheckout = await captureCartCheckoutForFillCardFallback(session, url, page);
-  return checkoutStateForObservation(session, url, text.slice(0, 12_000), elements, liveCheckout);
-}
-
-async function reconcileReservedCartAdd(
-  session: Session,
-  record: CartAddRecord,
-  page?: Page,
-): Promise<CartAddResult> {
-  if (record.result !== null) return alreadyInCartResult(record.result);
-  if (record.promise !== null) {
-    try {
-      return alreadyInCartResult(await record.promise);
-    } catch (error) {
-      if (record.phase === "reserved")
-        return await cartAdd(
-          session.id,
-          record.productIdentity,
-          record.optionsHash,
-          record.idempotencyKey,
-        );
-      const pageAfterAction = page;
-      const quantity = await cartLineQuantity(
-        session,
-        record.productIdentity,
-        record.optionsHash,
-        pageAfterAction,
-      );
-      if (quantity === null) throw error;
-      session.lastCartMutation = {
-        productIdentity: record.productIdentity,
-        optionsHash: record.optionsHash,
-        cartDelta: "0",
-        origin: originForUrl(pageAfterAction?.url() ?? session.browser.currentUrl()) ?? "",
-      };
-      const checkoutState = await capturePrivateCheckoutState(session, pageAfterAction);
-      if (checkoutState === undefined) throw error;
-      const result: CartAddResult = {
-        status: "already_in_cart",
-        cart_delta: "0",
-        cart_url: checkoutState.cart_url,
-        checkout_state: { ...checkoutState, quantity },
-        postcondition: {
-          product_identity: record.productIdentity,
-          options_hash: record.optionsHash,
-          quantity,
-        },
-      };
-      record.phase = "complete";
-      record.result = result;
-      return result;
-    }
-  }
-  throw new Error("cart add reservation has no operation");
-}
-
-async function performCartAdd(
-  session: Session,
-  record: CartAddRecord,
-  page?: Page,
-): Promise<CartAddResult> {
-  const beforeQuantity = await cartLineQuantity(
-    session,
-    record.productIdentity,
-    record.optionsHash,
-    page,
-  );
-  if (beforeQuantity !== null && beforeQuantity > 0) {
-    session.lastCartMutation = {
-      productIdentity: record.productIdentity,
-      optionsHash: record.optionsHash,
-      cartDelta: "0",
-      origin: originForUrl(page?.url() ?? session.browser.currentUrl()) ?? "",
-    };
-    const checkoutState = await capturePrivateCheckoutState(session, page);
-    if (checkoutState === undefined) throw new Error("cart state was not observable");
-    return {
-      status: "already_in_cart",
-      cart_delta: "0",
-      cart_url: checkoutState.cart_url,
-      checkout_state: { ...checkoutState, quantity: beforeQuantity },
-      postcondition: {
-        product_identity: record.productIdentity,
-        options_hash: record.optionsHash,
-        quantity: beforeQuantity,
-      },
-    };
-  }
-
-  const addTargets = [
-    'text="Add to Cart"',
-    'text="Add to Bag"',
-    'text="かごに追加"',
-    'text="カートに追加"',
-  ];
-  let addError: unknown;
-  let actionResult: InternalActResult | null = null;
-  for (const target of addTargets) {
-    try {
-      actionResult = await actInternally(
-        session.id,
-        { kind: "click", target },
-        "compact",
-        {
-          productIdentity: record.productIdentity,
-          optionsHash: record.optionsHash,
-          onActionReady: () => {
-            record.phase = "click_started";
-          },
-        },
-        true,
-        undefined,
-        page,
-      );
-      addError = undefined;
-      break;
-    } catch (error) {
-      addError = error;
-      if (!(error instanceof ProvisionTargetMissingError)) {
-        throw error;
-      }
-    }
-  }
-  if (addError !== undefined || actionResult === null) throw addError;
-  const pageAfterAction = actionResult.operationPage ?? page;
-  const afterQuantity = await cartLineQuantity(
-    session,
-    record.productIdentity,
-    record.optionsHash,
-    pageAfterAction,
-  );
-  if (afterQuantity === null || afterQuantity <= 0) {
-    throw new Error("requested product/variant line was not observable after add");
-  }
-  const checkoutState = actionResult.outcome.checkoutState;
-  if (checkoutState === undefined) throw new Error("cart state was not observable after add");
-  const cartDelta =
-    beforeQuantity === null
-      ? afterQuantity === 1
-        ? "+1"
-        : "unknown"
-      : afterQuantity === beforeQuantity + 1
-        ? "+1"
-        : "unknown";
-  session.lastCartMutation = {
-    productIdentity: record.productIdentity,
-    optionsHash: record.optionsHash,
-    cartDelta,
-    origin: originForUrl(pageAfterAction?.url() ?? session.browser.currentUrl()) ?? "",
-  };
-  return {
-    status: "added",
-    cart_delta: cartDelta,
-    cart_url: checkoutState.cart_url,
-    checkout_state: { ...checkoutState, quantity: afterQuantity },
-    postcondition: {
-      product_identity: record.productIdentity,
-      options_hash: record.optionsHash,
-      quantity: afterQuantity,
-    },
-  };
-}
-
-export interface CartClearResult {
-  status: "cleared";
-  cart_url: string | null;
-  checkout_state?: CheckoutState;
-}
-
-// Deterministic cart-normalize affordance: empty the cart before a cart_add so
-// a run reaches a KNOWN quantity regardless of what accumulated in the shared
-// persistent-profile cart across earlier operate_start sessions. Drops the
-// local idempotency reservations too — a stale "already_in_cart" for a line
-// that no longer exists must not suppress a real add after the clear.
-export async function cartClear(sessionId: string): Promise<CartClearResult> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const operationPage = operationPageForSession(session);
-  const cleared = await session.browser.clearCart(operationPage);
-  if (!cleared) throw new Error("cart_clear failed to reach the cart-clear endpoint");
-  session.cartAdds.clear();
-  session.cartAddsByIdempotencyKey.clear();
-  session.lastCartMutation = null;
-  const observed = await observeSession(session, "compact", undefined, operationPage);
-  return {
-    status: "cleared",
-    cart_url: observed.checkout_state?.cart_url ?? null,
-    ...(observed.checkout_state !== undefined ? { checkout_state: observed.checkout_state } : {}),
-  };
-}
-
-export async function cartAdd(
-  sessionId: string,
-  productIdentity: string,
-  optionsHash: string,
-  idempotencyKey: string,
-): Promise<CartAddResult> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const operationPage = operationPageForSession(session);
-  const lineKey = `${productIdentity}\u0000${optionsHash}`;
-  const byIdempotencyKey = session.cartAddsByIdempotencyKey.get(idempotencyKey);
-  if (
-    byIdempotencyKey !== undefined &&
-    (byIdempotencyKey.productIdentity !== productIdentity ||
-      byIdempotencyKey.optionsHash !== optionsHash)
-  ) {
-    throw new Error("idempotency_key is already bound to a different product/variant");
-  }
-  const existing = byIdempotencyKey ?? session.cartAdds.get(lineKey);
-  if (existing !== undefined) {
-    session.cartAddsByIdempotencyKey.set(idempotencyKey, existing);
-    return await reconcileReservedCartAdd(session, existing, operationPage);
-  }
-
-  const record: CartAddRecord = {
-    productIdentity,
-    optionsHash,
-    idempotencyKey,
-    phase: "reserved",
-    promise: null,
-    result: null,
-  };
-  session.cartAdds.set(lineKey, record);
-  session.cartAddsByIdempotencyKey.set(idempotencyKey, record);
-  record.promise = performCartAdd(session, record, operationPage)
-    .then((result) => {
-      record.phase = "complete";
-      record.result = result;
-      return result;
-    })
-    .catch((error: unknown) => {
-      if (record.phase === "reserved") {
-        session.cartAdds.delete(lineKey);
-        session.cartAddsByIdempotencyKey.delete(idempotencyKey);
-      }
-      throw error;
-    });
-  return await record.promise;
-}
 
 // PR3c — the user's own email captured at login (the authoritative signup
 // address), or null when none was captured. The tool layer reads this to fill
@@ -3119,57 +2818,6 @@ function withCheckoutState(
     ...(state === undefined ? {} : { checkout_state: state }),
     ...(mutation === null ? {} : { cart_delta: mutation.cartDelta }),
   };
-}
-
-function isCartAffectingAction(
-  action: ProvisionAction,
-  el: InteractiveElement | null,
-  extraLabels: readonly string[] = [],
-): boolean {
-  const parts = [
-    "target" in action ? action.target : "",
-    el?.visibleText ?? "",
-    el?.ariaLabel ?? "",
-    el?.labelText ?? "",
-    el?.name ?? "",
-    el?.id ?? "",
-    el?.container ?? "",
-    el?.screenPath ?? "",
-    ...extraLabels,
-  ];
-  const target = parts.join(" ");
-  if (action.kind === "click" || action.kind === "js_click") {
-    if (
-      /(?:add\s+to\s+(?:cart|bag|basket)|remove\s+from\s+(?:cart|bag|basket)|update\s+(?:cart|bag|basket)|increase\s+quantity|decrease\s+quantity|かごに追加|カートに追加|カートから削除|数量を増やす|数量を減らす)/i.test(
-        target,
-      )
-    ) {
-      return true;
-    }
-    const hasQuantityContext =
-      /(?:\b(?:quantity|qty|cart|basket|bag)\b|数量|個数|カート|かご)/i.test(target);
-    if (hasQuantityContext && parts.some((part) => /^\s*(?:\+|[-−])\s*$/.test(part))) {
-      return true;
-    }
-    const rowContext = `${el?.container ?? ""} ${el?.screenPath ?? ""}`;
-    const actionLabels = [
-      "target" in action ? action.target : "",
-      el?.visibleText ?? "",
-      el?.ariaLabel ?? "",
-      el?.labelText ?? "",
-      el?.name ?? "",
-      el?.id ?? "",
-      ...extraLabels,
-    ];
-    return (
-      /(?:\b(?:cart|basket|bag)(?:\s+item|\s+line)?\b|カート|かご)/i.test(rowContext) &&
-      actionLabels.some((label) => /^\s*(?:(?:remove|delete|update)\b|削除|更新)/i.test(label))
-    );
-  }
-  return (
-    (action.kind === "type" || action.kind === "select") &&
-    /(?:\b(?:quantity|qty)\b|数量|個数)/i.test(target)
-  );
 }
 
 function retainSessionElements(session: Session, elements: InteractiveElement[]): void {
@@ -4202,7 +3850,6 @@ interface InternalActResult {
   operationPage?: Page;
   outcome: {
     selectedOption?: string;
-    checkoutState?: CheckoutState;
   };
 }
 
@@ -4299,8 +3946,6 @@ async function actInternally(
   sessionId: string,
   action: ProvisionAction,
   detail: ObserveDetail = "compact",
-  cartIdentity?: CartIdentityContext,
-  collectCheckoutState = false,
   compactV2Authorization?: CompactV2TargetAuthorization,
   operationPage?: Page,
 ): Promise<InternalActResult> {
@@ -4316,9 +3961,7 @@ async function actInternally(
           sessionId,
           action,
           detail,
-          cartIdentity,
           true,
-          collectCheckoutState,
           compactV2Authorization,
           deadline,
           capturedOperationPage,
@@ -4359,7 +4002,6 @@ export async function act(
   sessionId: string,
   action: ProvisionAction,
   detail: ObserveDetail = "compact",
-  cartIdentity?: CartIdentityContext,
   outputFormat: "compact" | "full" = "full",
   compactMapEmitted = true,
 ): Promise<Observation> {
@@ -4394,8 +4036,6 @@ export async function act(
           sessionId,
           action,
           detail,
-          cartIdentity,
-          false,
           false,
           queuedOAuthAuthorization,
           deadline,
@@ -4474,9 +4114,7 @@ async function executeAct(
   sessionId: string,
   action: ProvisionAction,
   detail: ObserveDetail,
-  cartIdentity: CartIdentityContext | undefined,
   internalAccess: boolean,
-  collectCheckoutState: boolean,
   internalAuthorization?: CompactV2TargetAuthorization,
   oauthDeadline?: OAuthActionDeadline,
   operationPage?: Page,
@@ -4491,15 +4129,6 @@ async function executeAct(
   const compactV2ActionPage = operationPage ?? operationPageForSession(session);
   let actionPageAfter = compactV2ActionPage;
   let completedAction: ProvisionAction = action;
-  let cartAffecting = false;
-  const bindCartIdentity = (affecting: boolean): void => {
-    // Generic operate_act cart controls stay usable without identity. Identity
-    // is a best-effort observation hint here; exact product/variant binding and
-    // retry suppression belong to operate_act { kind: "cart_add" }'s dedicated contract.
-    if (!affecting || cartIdentity === undefined) return;
-    cartAffecting = true;
-    cartIdentity.onActionReady?.();
-  };
   let resolutionTarget: string | undefined;
   let auditTarget: string | undefined;
   let compactV2Authorization = internalAuthorization;
@@ -4692,7 +4321,6 @@ async function executeAct(
         // Opaque (null-origin) frames are unaddressable — a plain "not
         // reachable" error. Secret injection has no further cross-origin gate.
         assertFrameTargetAllowed(session, el, "select", compactV2ActionPage);
-        bindCartIdentity(isCartAffectingAction(action, el));
         const selectFrame = frameTargetFor(el);
         const committedText =
           selectFrame !== null
@@ -4793,7 +4421,6 @@ async function executeAct(
                 compactV2ActionPage,
               );
             }
-            bindCartIdentity(isCartAffectingAction(action, null, resolved.labels));
             if (action.kind === "click" || action.kind === "js_click") {
               const method = action.kind;
               if (compactV2ActionPage !== undefined && !browser.isActivePage(compactV2ActionPage)) {
@@ -4865,7 +4492,6 @@ async function executeAct(
         // (The unsanctioned frame domain lock was removed; opaque/null-origin
         // frame targets still refuse.)
         assertFrameTargetAllowed(session, el, action.kind, compactV2ActionPage);
-        bindCartIdentity(isCartAffectingAction(action, el));
         if (action.kind === "click" || action.kind === "js_click") {
           const target = frameTargetFor(el);
           const sourcePageIsActive =
@@ -5032,27 +4658,15 @@ async function executeAct(
     actionPageAfter = returnFromClosedPicker(session, actionPageAfter);
   }
   const urlAfterAction = actionPageAfter?.url() ?? browser.currentUrl();
-  if (cartAffecting) {
-    session.lastCartMutation = {
-      productIdentity: cartIdentity!.productIdentity,
-      optionsHash: cartIdentity!.optionsHash,
-      cartDelta: "unknown",
-      origin: originForUrl(urlAfterAction) ?? "",
-    };
-  }
   // `detail:"none"` returns a minimal ack (the action ran; no perception emitted)
   // so multi-field fills don't each echo the page. The host must call
   // operate_observe before its next ref-targeted act (refs aren't refreshed here).
-  const checkoutState =
-    internalAccess && collectCheckoutState
-      ? await capturePrivateCheckoutState(session, actionPageAfter)
-      : undefined;
   const terminalOAuthCompletionUrl = browser.takeOAuthTerminalCompletionUrl();
   const actionObservationPage = actionPageAfter;
   const observation =
     terminalOAuthCompletionUrl !== null
       ? terminalOAuthCompletionObservation(session, terminalOAuthCompletionUrl)
-      : detail === "none" && !cartAffecting && action.kind !== "oauth_login"
+      : detail === "none" && action.kind !== "oauth_login"
         ? compactV2PublicObservation(
             session,
             () => ({
@@ -5103,7 +4717,6 @@ async function executeAct(
         : observationWithNavigation,
     outcome: {
       ...(completedAction.kind === "select" ? { selectedOption: completedAction.text } : {}),
-      ...(checkoutState === undefined ? {} : { checkoutState }),
     },
   };
 }
@@ -5161,8 +4774,6 @@ export async function formSelectMany(
         sessionId,
         { kind: "select", target, text: option },
         "none",
-        undefined,
-        false,
         authorization,
         operationPage,
       );

@@ -22,11 +22,10 @@ import type {
 } from "../compact-observation-v2.js";
 import type { ApiClient } from "../../api-client.js";
 import type { OperatorBrowserWatchdog } from "../operator-browser-watchdog.js";
-// Type-only, so no runtime cycle exists: these three field types still live in
-// the facade because they belong to regions later phases move (perception for
-// ObserveDeltaState, actions for CartAddResult, the payment bridge for
-// ActivePaymentLease). They follow this module when those phases land.
-import type { CartAddResult, ObserveDeltaState } from "../provision-session.js";
+// Type-only, so no runtime cycle exists: ObserveDeltaState still lives in the
+// facade because it belongs to the observation region. It follows this module
+// when that phase lands.
+import type { ObserveDeltaState } from "../provision-session.js";
 
 // Credential-egress seed provenance: start is the service host, auto_widen
 // is an observed same-base-domain redirect. mid_session is retained for legacy
@@ -38,26 +37,11 @@ export interface AllowedHostEntry {
   source: HostSource;
 }
 
-export interface CartAddRecord {
-  productIdentity: string;
-  optionsHash: string;
-  idempotencyKey: string;
-  phase: "reserved" | "click_started" | "complete";
-  promise: Promise<CartAddResult> | null;
-  result: CartAddResult | null;
-}
-
 export interface CartMutation {
   productIdentity: string | null;
   optionsHash: string | null;
   cartDelta: "+1" | "0" | "unknown";
   origin: string;
-}
-
-export interface CartIdentityContext {
-  productIdentity: string;
-  optionsHash: string;
-  onActionReady?: () => void;
 }
 
 export interface SessionTerminalTeardownOwner {
@@ -131,8 +115,6 @@ export interface Session {
   } | null;
   // Per-line idempotency records are local to the one active browser/cart. A
   // retry must inspect this before it ever reaches a merchant add button.
-  cartAdds: Map<string, CartAddRecord>;
-  cartAddsByIdempotencyKey: Map<string, CartAddRecord>;
   cartUrls: Map<string, string>;
   lastCartMutation: CartMutation | null;
   // A finish first flips this bit, then waits for outstanding call leases.  A
@@ -193,8 +175,6 @@ export function createSession(input: CreateSessionInput): Session {
     committedSelectValues: new Map(),
     activePayment: null,
     releasedPaymentCard: null,
-    cartAdds: new Map(),
-    cartAddsByIdempotencyKey: new Map(),
     cartUrls: new Map(),
     lastCartMutation: null,
     closing: false,

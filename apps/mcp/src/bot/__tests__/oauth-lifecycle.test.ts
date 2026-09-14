@@ -19,8 +19,6 @@ import {
 import {
   act,
   awaitVerification,
-  cartAdd,
-  cartClear,
   captureScreenshot,
   extractCredentials,
   finishProvisionSession,
@@ -2931,73 +2929,6 @@ describe("BrowserController OAuth popup lifecycle", () => {
       expect(await popup.locator("#opened-title").inputValue()).toBe("New tab title");
       expect(await product.locator("#opened-title").count()).toBe(0);
     } finally {
-      if (sessionId) await finishProvisionSession(sessionId);
-      await context.close();
-    }
-  });
-
-  it("keeps cart add bookkeeping on its adopted tab during a concurrent click", async () => {
-    const context = await browser.newContext();
-    const product = await context.newPage();
-    const productUrl = "https://product.test/cart-source";
-    const cartUrl = "https://product.test/cart";
-    const distractionUrl = "https://product.test/distraction";
-    await context.route("https://product.test/**", (route) => {
-      const url = route.request().url();
-      return route.fulfill({
-        contentType: "text/html",
-        body:
-          url === cartUrl
-            ? `<main>Cart</main><div id="line" data-testid="line-item"><a href="/products/popup" data-product-identity="popup-product">Popup product</a> <span>Quantity 1</span> <span data-options-hash="popup-options"></span></div><button id="distraction" onclick="window.open('${distractionUrl}')">Open distraction</button>`
-            : url === distractionUrl
-              ? "<main>Distraction</main>"
-              : `<button id="add" onclick="window.open('${cartUrl}')">Add to Cart</button>`,
-      });
-    });
-    await product.goto(productUrl);
-    const controller = BrowserController.fromHarnessPage(product);
-    const lineReader = controller as unknown as {
-      readCheckoutReviewLineItems: (...args: unknown[]) => Promise<unknown>;
-    };
-    const originalRead = lineReader.readCheckoutReviewLineItems;
-    let releaseCartRead: () => void = () => undefined;
-    const cartReadPaused = new Promise<void>((resolve) => {
-      let paused = false;
-      lineReader.readCheckoutReviewLineItems = async (...args) => {
-        const page = args[1] as Page | undefined;
-        if (!paused && page?.url() === cartUrl) {
-          paused = true;
-          resolve();
-          await new Promise<void>((release) => {
-            releaseCartRead = release;
-          });
-        }
-        return await originalRead.apply(controller, args);
-      };
-    });
-    let sessionId: string | undefined;
-    try {
-      const started = await startHarnessProvisionSession({
-        browser: controller,
-        serviceUrl: productUrl,
-      });
-      sessionId = started.session_id;
-      const adding = cartAdd(sessionId, "popup-product", "popup-options", "popup-cart");
-      await cartReadPaused;
-      const distraction = await act(sessionId, { kind: "click", target: "Open distraction" });
-      expect(distraction.url).toBe(distractionUrl);
-      releaseCartRead();
-      const added = await adding;
-      expect(added).toMatchObject({
-        status: "added",
-        cart_url: cartUrl,
-        postcondition: { quantity: 1 },
-      });
-      expect(product.url()).toBe(productUrl);
-      await expect(product.locator("text=Popup product").count()).resolves.toBe(0);
-    } finally {
-      releaseCartRead();
-      lineReader.readCheckoutReviewLineItems = originalRead;
       if (sessionId) await finishProvisionSession(sessionId);
       await context.close();
     }

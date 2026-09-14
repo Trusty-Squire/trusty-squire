@@ -44,8 +44,6 @@ describe("createSession", () => {
       session.secretSlots,
       session.compactV2Refs,
       session.committedSelectValues,
-      session.cartAdds,
-      session.cartAddsByIdempotencyKey,
       session.cartUrls,
     ]) {
       expect(collection).toBeInstanceOf(Map);
