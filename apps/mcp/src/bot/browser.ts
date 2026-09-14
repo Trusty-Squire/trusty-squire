@@ -637,21 +637,6 @@ export function parseCheckoutAmount(
   return parseCheckoutAmountResult(texts, fallbackCurrency);
 }
 
-/**
- * Like parseCheckoutAmount but returns every parseable currency/amount match
- * instead of the first — checkout review pages can show a pre-shipping
- * subtotal before the final labeled total, so the caller needs the full
- * sequence to pick the settled one. Reuses the same regex and currency
- * helpers as parseCheckoutAmountResult, just without the single-result early
- * return.
- */
-export function parseCheckoutAmounts(
-  texts: readonly string[],
-  fallbackCurrency?: string,
-): Array<{ amount_cents: number; currency: string }> {
-  return parseCheckoutAmountsResult(texts, fallbackCurrency).amounts;
-}
-
 interface CheckoutAmountsParseResult {
   amounts: CheckoutAmount[];
   payableAmounts: CheckoutAmount[];
@@ -3630,9 +3615,8 @@ export class BrowserController {
     // frame) must never fail the parent submit — return nothing.
     try {
       return await this.page.evaluate(() => {
-        // These two regexes MUST stay byte-identical with
-        // AGREEMENT_TEXT_RE / MARKETING_TEXT_RE in this module — the
-        // page realm can't import, so they're inlined here.
+        // The page realm can't import module code, so these regexes are
+        // inlined here.
         const agreementRe =
           /terms|tos\b|privacy|consent|policy|i agree|agree to|acknowledge|gdpr|age|18\+|18 years|certif/i;
         const marketingRe =
@@ -8284,7 +8268,7 @@ export class BrowserController {
         const MAX_CARDS = 16;
         const raw: Element[] = [];
         // Eligible tags: generic containers OR any custom element (hyphenated
-        // tag). Mirror of exported isBareClickableCardTag — keep in sync.
+        // tag).
         // 1inch onboarding renders each choice as a custom UI-kit element
         // (<uikit-internal-chip data-test-id="activity-chip-…">) with
         // cursor:pointer but no button/role/input semantics and no div/section
@@ -11121,69 +11105,6 @@ export function pickClickLocator<L extends { first(): L }>(locator: L, count: nu
   return count > 1 ? locator.first() : locator;
 }
 
-// Reference implementation of the shadow-piercing inventory walk that runs
-// inside extractInteractiveElements' page.evaluate. Kept BYTE-FOR-BYTE in
-// lockstep with that inline walk's guard + traversal. Exported only so the
-// defensive guard (regression: #59 redis-cloud — a detached/closed root with
-// no querySelectorAll crashed the whole inventory) is unit-testable in plain
-// Node with fake roots. The production copy stays inline because a
-// page.evaluate body can't call module code, and injecting source via
-// new Function() would trip strict CSPs. If you change the inline walk's
-// guard or traversal, change this too.
-interface ShadowWalkRoot {
-  querySelectorAll(selectors: string): ArrayLike<ShadowWalkEl>;
-}
-interface ShadowWalkEl {
-  // `| undefined` mirrors the live DOM: `Element.shadowRoot` is typed
-  // `ShadowRoot | null`, but a detached/closed custom element yields
-  // `undefined` at runtime. The walk must survive that — see the guard.
-  readonly shadowRoot: ShadowWalkRoot | null | undefined;
-}
-export function collectAcrossShadowRoots(
-  root: ShadowWalkRoot | null | undefined,
-  selector: string,
-): ShadowWalkEl[] {
-  const collected: ShadowWalkEl[] = [];
-  const walk = (r: ShadowWalkRoot | null | undefined): void => {
-    // `== null` (not `=== null`) covers both null and undefined — the
-    // recursion below calls walk() on any non-null shadowRoot, so an
-    // `undefined` one reaches here and `typeof undefined.querySelectorAll`
-    // would throw before the typeof guard fired (#59 redis-cloud).
-    if (r == null || typeof r.querySelectorAll !== "function") return;
-    Array.from(r.querySelectorAll(selector)).forEach((n) => collected.push(n));
-    Array.from(r.querySelectorAll("*")).forEach((el) => {
-      if (el.shadowRoot !== null) walk(el.shadowRoot);
-    });
-  };
-  walk(root);
-  return collected;
-}
-
-// Tag eligibility for the "bare clickable card" pass in
-// extractInteractiveElements. A selectable onboarding choice that carries no
-// button/anchor/input/role semantics is collected only when it is a generic
-// container (div/li/article/section/label) OR a CUSTOM ELEMENT — any element
-// whose tag name contains a hyphen. 1inch's onboarding renders each activity
-// choice as `<uikit-internal-chip data-test-id="activity-chip-aiAgents">`; the
-// old div-only scan missed the custom tag, so the chip never entered the
-// planner's inventory and neither click nor js_click could resolve it (both
-// re-resolve against the inventory). Standard interactive/text tags are handled
-// by the SELECTOR walk and must NOT be re-collected here.
-// Kept in sync with the inline `isCardTag` inside extractInteractiveElements —
-// a page.evaluate body can't call module code, so the production copy is inline;
-// change both together.
-export function isBareClickableCardTag(tag: string): boolean {
-  const t = tag.toLowerCase();
-  return (
-    t === "div" ||
-    t === "li" ||
-    t === "article" ||
-    t === "section" ||
-    t === "label" ||
-    t.includes("-")
-  );
-}
-
 // ───────────── phone-country widget selection ─────────────
 //
 // International checkouts may back their phone-country picker with an
@@ -11279,47 +11200,6 @@ export function pickSubmitButtonIndex(texts: readonly string[]): number | null {
     }
   });
   return bestIndex;
-}
-
-// ───────────── required-agreement checkbox guard ─────────────
-
-// Patterns shared by the pure helper below and the in-page evaluate in
-// `checkRequiredAgreementBoxes`. The evaluate runs in the page realm and
-// can't import, so the same two regexes are inlined there verbatim —
-// keep them BYTE-IDENTICAL with these.
-const AGREEMENT_TEXT_RE =
-  /terms|tos\b|privacy|consent|policy|i agree|agree to|acknowledge|gdpr|age|18\+|18 years|certif/i;
-const MARKETING_TEXT_RE =
-  /newsletter|updates|offers|product tips|marketing|promotional|receive emails|opt[- ]?in to|subscribe/i;
-const SAFE_SIGNUP_CHOICE_TEXT_RE =
-  /digital products?|saas|software|developer tools?|apis?|mobile apps?|data|analytics/i;
-const RISKY_SIGNUP_CHOICE_TEXT_RE =
-  /gambling|financial services?|physical products?|marketplace|human services?|adult|weapons?|medical|restricted|crypto|payments?|banking/i;
-
-// True when a checkbox's associated text reads as a REQUIRED agreement
-// (terms/privacy/consent) and NOT as a marketing/newsletter opt-in.
-//
-// Why a deterministic check instead of trusting the LLM planner:
-// amplitude's signup renders the required TOS checkbox next to a pair of
-// data-storage-location card-radios; the planner mistook the whole
-// cluster for "ambiguous radios" and skipped the box, and amplitude's
-// submit isn't disabled when it's unticked — so the form silently
-// no-ops. We must never flip a marketing opt-in on the user's behalf,
-// hence the explicit marketing exclusion.
-export function isAgreementCheckboxText(text: string): boolean {
-  return AGREEMENT_TEXT_RE.test(text) && !MARKETING_TEXT_RE.test(text);
-}
-
-// True when a required signup-category choice is a low-risk default the bot can
-// select deterministically. Keep byte-identical with the in-page regexes in
-// `checkRequiredSignupChoiceBoxes`.
-export function isSafeSignupChoiceText(text: string): boolean {
-  return (
-    SAFE_SIGNUP_CHOICE_TEXT_RE.test(text) &&
-    !RISKY_SIGNUP_CHOICE_TEXT_RE.test(text) &&
-    !AGREEMENT_TEXT_RE.test(text) &&
-    !MARKETING_TEXT_RE.test(text)
-  );
 }
 
 // ───────────── element inventory (F3) ─────────────
@@ -11583,8 +11463,8 @@ export function scoreSignupButton(
   // Post-signup dashboards reveal the key behind a "Create API Key" /
   // "Add key" / "Generate key" / "Get API Key" CTA — the run's actual
   // goal once the account exists. These score 0 on signup vocabulary, so
-  // on a busy dashboard (dozens of nav/account buttons) rankAndCapInventory
-  // caps them out: the OpenRouter "Get API Key" + fal.ai "Add key"
+  // on a busy dashboard (dozens of nav/account buttons) the inventory's
+  // button cap drops them: the OpenRouter "Get API Key" + fal.ai "Add key"
   // suppression. Score them as a primary target so they survive ranking.
   if (
     /\b(?:add|create|generate|new|get|reveal|copy)\b[\s\w]{0,20}\b(?:api[\s-]?key|key|token|secret|credential)s?\b/.test(
@@ -11614,46 +11494,6 @@ export function scoreSignupButton(
   const hasAuthVerb = t.includes("sign in") || t.includes("log in") || t.includes("login");
   if (hasAuthVerb && !hasEmail) score -= 12;
   return score;
-}
-
-// Rank + cap the raw inventory before it goes to the planner. Every
-// input/textarea/select is kept — they are the load-bearing form
-// fields and a page has few. Only buttons/links/role elements are
-// ranked (by signup-relevance) and capped, since a marketing page
-// carries dozens of nav/footer buttons (F3 Issue 3 + Tension 2: a
-// flat cap could truncate the real email field). Re-indexes the kept
-// set and reports how many buttons were dropped.
-export function rankAndCapInventory(
-  elements: readonly InteractiveElement[],
-  buttonCap = 25,
-  oauthProviders?: readonly OAuthProviderId[],
-): { inventory: InteractiveElement[]; buttonsDropped: number } {
-  const isButtonish = (e: InteractiveElement): boolean =>
-    e.tag === "button" ||
-    e.tag === "a" ||
-    e.type === "submit" ||
-    e.type === "button" ||
-    e.type === "reset";
-  const fields = elements.filter((e) => !isButtonish(e));
-  const ranked = elements
-    .filter(isButtonish)
-    .map((e) => ({
-      e,
-      score: scoreSignupButton(
-        `${e.visibleText ?? ""} ${e.ariaLabel ?? ""} ${e.labelText ?? ""}`,
-        oauthProviders,
-      ),
-    }))
-    .sort((a, b) => b.score - a.score);
-  const keptButtons = ranked.slice(0, buttonCap).map((x) => x.e);
-  const inventory = [...fields, ...keptButtons].map((e, i) => ({
-    ...e,
-    index: i,
-  }));
-  return {
-    inventory,
-    buttonsDropped: Math.max(0, ranked.length - keptButtons.length),
-  };
 }
 
 export {

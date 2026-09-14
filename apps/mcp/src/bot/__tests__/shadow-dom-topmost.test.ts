@@ -1,7 +1,7 @@
 // Regression test: the operator's DOM extractor must judge occlusion for an
 // element nested in an OPEN shadow root correctly. extractInteractiveElements
-// already recurses into open shadow roots (collectAcrossShadowRoots, PR #90),
-// so a shadow-DOM CTA IS surfaced. The residual defect this covers is that
+// already recurses into open shadow roots (PR #90), so a shadow-DOM CTA IS
+// surfaced. The residual defect this covers is that
 // topmostStatus hit-tested with document.elementFromPoint, which returns the
 // shadow HOST rather than the control inside the host's shadow root — so a
 // storefront that renders "Add To Cart" inside a web component (Casetify,
