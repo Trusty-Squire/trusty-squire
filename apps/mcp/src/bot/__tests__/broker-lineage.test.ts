@@ -92,11 +92,7 @@ it("never reassigns crashed sibling lineages or their capabilities to restarted 
       expect(() => broker.invoke(replacement, capability, "foreign", "read", {})).toThrow(
         "owned live session",
       );
-    expect(await journal.hasOutstanding(undefined, replacement.forwarderId)).toBe(false);
   }
-  for (const owner of owners)
-    expect(await journal.hasOutstanding(undefined, owner.forwarderId)).toBe(true);
-  expect(await journal.hasOutstanding()).toBe(true);
 });
 it("preserves an explicit restart credential and refuses malformed credentials", () => {
   vi.stubEnv("TRUSTY_SQUIRE_FORWARDER_CREDENTIAL", "a".repeat(43));

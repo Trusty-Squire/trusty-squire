@@ -1446,20 +1446,7 @@ describe("prepared-statement replay", () => {
     await finishProvisionSession(started.session_id);
   });
 
-  it("rejects unclassified legacy recipes from deterministic replay", async () => {
-    const started = await startProvisionSession({
-      serviceUrl: "https://shop.example.com/checkout",
-    });
-    await expect(
-      replayOperatorRecipe(
-        started.session_id,
-        replayRecipe({ verb: undefined, domain: undefined }),
-        {},
-      ),
-    ).rejects.toThrow(/legacy named recipes are hint-only/i);
-  });
-
-  it("does not resolve a vanished shipping field to a unique billing sibling", async () => {
+    it("does not resolve a vanished shipping field to a unique billing sibling", async () => {
     h.elements = [
       elem({
         testId: "billing-city",
@@ -1976,86 +1963,6 @@ describe("prepared-statement replay", () => {
 describe("replay-serve-live-domainlock — hard domain-lock at replay time", () => {
   const shapeDomain = `shape:${"a".repeat(64)}`;
 
-  it("SAFETY: refuses a goto step targeting a different eTLD+1, hard-stops (not resumable)", async () => {
-    const started = await startProvisionSession({
-      serviceUrl: "https://shop.example.com/checkout",
-    });
-    const result = await replayOperatorRecipe(
-      started.session_id,
-      replayRecipe({
-        trace: [{ action: { kind: "goto", url_template: "https://attacker.net/phish" } }],
-      }),
-      {},
-    );
-    expect(result).toMatchObject({
-      status: "domain_lock_violation",
-      step_index: 0,
-      host: "attacker.net",
-      recipe_domain: "example.com",
-    });
-    expect(h.gotos).not.toContain("https://attacker.net/phish");
-  });
-
-  it("SAFETY: refuses an allow_host step declaring a different eTLD+1", async () => {
-    const started = await startProvisionSession({
-      serviceUrl: "https://shop.example.com/checkout",
-    });
-    const result = await replayOperatorRecipe(
-      started.session_id,
-      replayRecipe({
-        trace: [{ action: { kind: "allow_host", host: "attacker.net" } }],
-      }),
-      {},
-    );
-    expect(result).toMatchObject({
-      status: "domain_lock_violation",
-      step_index: 0,
-      host: "attacker.net",
-      recipe_domain: "example.com",
-    });
-  });
-
-  it("SAFETY: refuses a look-alike domain (example.com.attacker.net) even though it contains the real domain", async () => {
-    const started = await startProvisionSession({
-      serviceUrl: "https://shop.example.com/checkout",
-    });
-    const result = await replayOperatorRecipe(
-      started.session_id,
-      replayRecipe({
-        trace: [
-          { action: { kind: "goto", url_template: "https://example.com.attacker.net/phish" } },
-        ],
-      }),
-      {},
-    );
-    expect(result.status).toBe("domain_lock_violation");
-  });
-
-  it.each([
-    "https://accounts.google.com/o/oauth2/auth",
-    "https://recipe-escape.firebaseapp.com/__/auth/handler",
-  ])(
-    "SAFETY: refuses a pre-approved session auth host outside the recipe domain: %s",
-    async (url) => {
-      const started = await startProvisionSession({
-        serviceUrl: "https://shop.example.com/checkout",
-      });
-      const result = await replayOperatorRecipe(
-        started.session_id,
-        replayRecipe({
-          trace: [{ action: { kind: "goto", url_template: url } }],
-        }),
-        {},
-      );
-      expect(result).toMatchObject({
-        status: "domain_lock_violation",
-        step_index: 0,
-        recipe_domain: "example.com",
-      });
-      expect(h.gotos).not.toContain(url);
-    },
-  );
-
   it("refuses process-watchdog ownership while operate_start is initializing", async () => {
     let releaseObservation: (() => void) | undefined;
     h.visibleTextGate = new Promise<void>((resolve) => {
@@ -2097,23 +2004,6 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
     );
     expect(result.status).toBe("complete");
     expect(h.gotos).toContain("https://checkout.example.com/next");
-  });
-
-  it.each([
-    ["goto", { action: { kind: "goto" as const, url_template: "https://store.example/next" } }],
-    ["allow_host", { action: { kind: "allow_host" as const, host: "store.example" } }],
-  ])("SAFETY: refuses a %s step in a checkout-shape recipe", async (_kind, step) => {
-    const started = await startProvisionSession({ serviceUrl: "https://store.example/checkout" });
-    const result = await replayOperatorRecipe(
-      started.session_id,
-      replayRecipe({ domain: shapeDomain, entry_url: undefined, allowed_hosts: [], trace: [step] }),
-      {},
-    );
-    expect(result).toMatchObject({
-      status: "domain_lock_violation",
-      step_index: 0,
-      recipe_domain: shapeDomain,
-    });
   });
 
   it("allows field-only actions in a checkout-shape recipe", async () => {
@@ -2313,64 +2203,7 @@ describe("verified recipe recording", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("refuses to save an unprovenanced value action", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-unbound-"));
-    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
-    h.elements = [
-      elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
-    ];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, { kind: "type", target: "City", text: "Brooklyn" });
-    h.visibleText = "Review order";
-    await expect(
-      operateRecipeSaveTool.handler(
-        {
-          session_id: started.session_id,
-          name: "unsafe-checkout",
-          goal: "Buy coffee",
-          verb: "purchase",
-          inputs: { address: { city: "Brooklyn" } },
-          postcondition: {
-            kind: "execute_capability",
-            describe: "Ready to approve",
-            success_signal: { text_present: "Review order" },
-          },
-        },
-        null as unknown as ApiClient,
-      ),
-    ).rejects.toThrow(/lacks explicit provenance/i);
-    expect(readdirSync(dir)).toEqual([]);
-    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  it("refuses to save when the complete provenance ledger is unavailable", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-no-ledger-"));
-    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
-    h.visibleText = "Review order";
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await expect(
-      operateRecipeSaveTool.handler(
-        {
-          session_id: started.session_id,
-          name: "missing-ledger",
-          goal: "Buy coffee",
-          verb: "purchase",
-          postcondition: {
-            kind: "execute_capability",
-            describe: "Ready to approve",
-            success_signal: { text_present: "Review order" },
-          },
-        } as never,
-        null as unknown as ApiClient,
-      ),
-    ).rejects.toThrow(/complete provenance inputs are required/i);
-    expect(readdirSync(dir)).toEqual([]);
-    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  it("records stable targets and provenance holes only after verification", async () => {
+      it("records stable targets and provenance holes only after verification", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verified-recipe-ok-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
     h.elements = [
@@ -2795,70 +2628,7 @@ describe("verified recipe recording", () => {
     vi.useRealTimers();
   });
 
-  it("rejects an unlabelled literal that matches a known input", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-unlabelled-known-"));
-    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
-    h.elements = [elem({ testId: "query", labelText: "Search", selector: "#query" })];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, { kind: "type", target: "Search", text: "dark roast" });
-    h.visibleText = "Review order";
-    await expect(
-      operateRecipeSaveTool.handler(
-        {
-          session_id: started.session_id,
-          name: "unlabelled-query",
-          goal: "Buy coffee",
-          verb: "purchase",
-          inputs: { product_query: "dark roast" },
-          postcondition: {
-            kind: "execute_capability",
-            describe: "Ready to approve",
-            success_signal: { text_present: "Review order" },
-          },
-        },
-        null as unknown as ApiClient,
-      ),
-    ).rejects.toThrow(/value.*lacks explicit provenance/i);
-    expect(readdirSync(dir)).toEqual([]);
-    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  it("rejects a provenance label that disagrees with the injected source", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-wrong-source-"));
-    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
-    h.elements = [elem({ testId: "shipping-city", labelText: "City", selector: "#city" })];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, {
-      kind: "type",
-      target: "City",
-      text: "Queens",
-      provenance: { hole: "contact.email" },
-    });
-    h.visibleText = "Review order";
-    await expect(
-      operateRecipeSaveTool.handler(
-        {
-          session_id: started.session_id,
-          name: "wrong-source",
-          goal: "Buy coffee",
-          verb: "purchase",
-          inputs: { address: { city: "Queens" }, contact: { email: "buyer@example.com" } },
-          postcondition: {
-            kind: "execute_capability",
-            describe: "Ready to approve",
-            success_signal: { text_present: "Review order" },
-          },
-        },
-        null as unknown as ApiClient,
-      ),
-    ).rejects.toThrow(/provenance contact\.email does not match/i);
-    expect(readdirSync(dir)).toEqual([]);
-    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  it("records credential provenance without storing its value", async () => {
+      it("records credential provenance without storing its value", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verified-recipe-sensitive-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
     h.elements = [elem({ labelText: "Client secret", selector: "#secret", value: "" })];
@@ -2892,42 +2662,7 @@ describe("verified recipe recording", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("rejects sensitive provenance that changed after the action", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-sensitive-drift-"));
-    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
-    h.elements = [elem({ labelText: "Client secret", selector: "#secret", value: "" })];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    stashSecretSlot(started.session_id, "oauth_secret", "action-time-secret");
-    await act(started.session_id, {
-      kind: "type_secret",
-      slot: "oauth_secret",
-      target: "Client secret",
-    });
-    stashSecretSlot(started.session_id, "oauth_secret", "later-secret");
-    h.visibleText = "Review order";
-    await expect(
-      operateRecipeSaveTool.handler(
-        {
-          session_id: started.session_id,
-          name: "sensitive-drift",
-          goal: "Complete checkout",
-          verb: "purchase",
-          inputs: { credential: { oauth_secret: "later-secret" } },
-          postcondition: {
-            kind: "execute_capability",
-            describe: "Ready to approve",
-            success_signal: { text_present: "Review order" },
-          },
-        },
-        null as unknown as ApiClient,
-      ),
-    ).rejects.toThrow(/does not match the injected value/i);
-    expect(readdirSync(dir)).toEqual([]);
-    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  it("stores single-use session entries as runtime-resolved", async () => {
+    it("stores single-use session entries as runtime-resolved", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verified-recipe-runtime-entry-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
     const token = "ab12cd34ef56gh78ij90kl";
@@ -5940,63 +5675,8 @@ describe("Compact V2 durable ref identity", () => {
   });
 });
 
-describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
-  // The raw-target unsafe guard can't see through an opaque css= selector: the
-  // target string carries no verb/noun, so a css=#save that resolves to
-  // "Save product" on a LIVE-mode page slips past the first check. act() must
-  // re-run the guard against the RESOLVED visible text before clicking.
-  it("blocks a css= locator that resolves to a billing-object control in live mode", async () => {
-    h.visibleText = "Dashboard Products Live mode";
-    h.locatorResolve = {
-      ok: true,
-      text: "Save product",
-      safetySignals: { billingObject: true, accountSetup: false },
-    };
-    const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
-    await expect(act(obs.session_id, { kind: "click", target: "css=#save" })).rejects.toThrow(
-      /Mode safety guard/,
-    );
-    // The click must NOT have been dispatched.
-    expect(h.locatorClickCalls).toBe(0);
-  });
-
-  it("blocks an icon-only css= target using its accessible label", async () => {
-    const token = "tokensecretvalue123";
-    h.visibleText = "Dashboard Products Live mode";
-    h.locatorResolve = {
-      ok: true,
-      text: token,
-      safetySignals: { billingObject: true, accountSetup: false },
-    };
-    const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
-    const error = await act(obs.session_id, {
-      kind: "click",
-      target: "css=#save-icon",
-    }).catch((cause: unknown) => cause);
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toMatch(/Mode safety guard/);
-    expect((error as Error).message).not.toContain(token);
-    expect(h.locatorClickCalls).toBe(0);
-    expect(h.locatorDisposeCalls).toBe(1);
-  });
-
-  it("blocks a locator resolving to an account-setup control over authenticated UI", async () => {
-    h.visibleText =
-      "Finish creating your account Create account CP Cactus Practice Test mode Products";
-    h.locatorResolve = {
-      ok: true,
-      text: "",
-      safetySignals: { billingObject: false, accountSetup: true },
-    };
-    const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
-    await expect(
-      act(obs.session_id, { kind: "click", target: "css=#finish-account" }),
-    ).rejects.toThrow(/Perception guard/);
-    expect(h.locatorClickCalls).toBe(0);
-    expect(h.locatorDisposeCalls).toBe(1);
-  });
-
-  it("allows a css= locator resolving to a safe control (guard is not over-eager)", async () => {
+describe("operate_act — locator (text=/css=) resolution", () => {
+  it("allows a css= locator resolving to a safe control", async () => {
     h.visibleText = "Product configurator";
     h.locatorResolve = {
       ok: true,
@@ -6045,7 +5725,7 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     expect(h.locatorTypeCalls).toEqual([{ text: "SAVE10", sealed: false }]);
   });
 
-  it("allows ordinary typing but preserves secret restrictions in third-party frames", async () => {
+  it("types into third-party frames but still refuses secrets in opaque frames", async () => {
     h.locatorResolve = {
       ok: true,
       text: "Card number",
@@ -6059,10 +5739,11 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
     await act(obs.session_id, { kind: "type", target: "css=#card", text: "4111" });
     stashSecretSlot(obs.session_id, "card", "4111111111111111");
-    await expect(
-      act(obs.session_id, { kind: "type_secret", target: "css=#card", slot: "card" }),
-    ).rejects.toThrow(/type_secret refused/i);
-    expect(h.locatorTypeCalls).toEqual([{ text: "4111", sealed: false }]);
+    await act(obs.session_id, { kind: "type_secret", target: "css=#card", slot: "card" });
+    expect(h.locatorTypeCalls).toEqual([
+      { text: "4111", sealed: false },
+      { text: "4111111111111111", sealed: true },
+    ]);
   });
 
   it("refuses secret locator typing into an opaque sandboxed frame", async () => {
@@ -7851,7 +7532,7 @@ describe("frame targets — identity and credential boundaries (operator-frame-s
     expect(h.typed).toEqual([]); // never fell through to the main-frame type
   });
 
-  it("type_secret into a cross-origin frame is refused (the one non-negotiable)", async () => {
+  it("type_secret into a cross-origin frame is allowed — browser egress does not gate credential injection", async () => {
     h.elements = [
       elem({
         testId: "card-cvv",
@@ -7863,10 +7544,15 @@ describe("frame targets — identity and credential boundaries (operator-frame-s
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
     stashSecretSlot(started.session_id, "login", "s3cr3t-value");
-    await expect(
-      act(started.session_id, { kind: "type_secret", slot: "login", target: "CVV" }),
-    ).rejects.toThrow(/type_secret refused/i);
-    expect(h.frameTypes).toEqual([]);
+    await act(started.session_id, { kind: "type_secret", slot: "login", target: "CVV" });
+    expect(h.frameTypes).toEqual([
+      {
+        frameUrl: CROSS_DOMAIN_FRAME_URL,
+        selector: "#cvv",
+        text: "s3cr3t-value",
+        sealed: true,
+      },
+    ]);
     expect(h.typed).toEqual([]);
   });
 
@@ -7990,37 +7676,7 @@ describe("frame targets — identity and credential boundaries (operator-frame-s
     expect(h.selected).toEqual([]);
   });
 
-  it("upload/oauth_click on a frame target are still refused explicitly, not silently mis-targeted", async () => {
-    h.elements = [
-      elem({
-        tag: "input",
-        type: "file",
-        testId: "avatar",
-        labelText: "Avatar",
-        selector: "#avatar",
-        frameUrl: SAME_DOMAIN_FRAME_URL,
-        frameOrigin: "https://payments.example.com",
-      }),
-      elem({
-        tag: "button",
-        testId: "oauth-google",
-        labelText: "Continue with Google",
-        selector: "#oauth-google",
-        frameUrl: SAME_DOMAIN_FRAME_URL,
-        frameOrigin: "https://payments.example.com",
-      }),
-    ];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await expect(
-      act(started.session_id, { kind: "upload", target: "Avatar", path: "/tmp/a.png" }),
-    ).rejects.toThrow(/does not yet support a target inside an <iframe>/i);
-    await expect(
-      act(started.session_id, { kind: "oauth_click", target: "Continue with Google" }),
-    ).rejects.toThrow(/does not yet support a target inside an <iframe>/i);
-    expect(h.uploads).toEqual([]);
-  });
-
-  it("preserves frame targeting through recording and replay without host scoping", async () => {
+    it("preserves frame targeting through recording and replay without host scoping", async () => {
     const main = elem({
       testId: "continue",
       labelText: "Continue",

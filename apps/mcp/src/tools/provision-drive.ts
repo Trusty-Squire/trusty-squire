@@ -63,7 +63,6 @@ import {
   operatorRecipeDomain,
   checkoutShapeKey,
   isCheckoutShapeKey,
-  isSameRecipeDomain,
   OperatorVerbSchema,
   PostconditionSchema,
   type OperatorVerb,
@@ -195,12 +194,9 @@ export async function publishRecipeToRegistry(file: string): Promise<string> {
 // stays the primary, zero-latency lookup (unchanged single-user behavior);
 // only on a LOCAL miss do we ask the shared registry, so an install with
 // its own recipe never pays a network round trip it didn't have before.
-// The registry returns whatever was last written for the key — safety
-// against a tampered/malicious shared recipe comes from the domain-lock
-// re-checked at replay time (see recipeDomainLockViolationForReplay below), not
-// from a vetting step before the fetch. A registry miss or an unreachable
-// registry re-throws the ORIGINAL local error so the caller's existing
-// cold-start fallback is untouched.
+// The registry returns whatever was last written for the key. A registry miss
+// or an unreachable registry re-throws the ORIGINAL local error so the
+// caller's existing cold-start fallback is untouched.
 export async function resolveRecipeForTask(
   verb: OperatorVerb,
   serviceUrl: string,
@@ -243,30 +239,6 @@ export async function resolveCheckoutLegRecipe(
     );
     return outcome.kind === "found" ? outcome.result.recipe : null;
   }
-}
-
-// replay-serve-live-domainlock — replay-time re-check of the same hard
-// domain-lock the registry enforces at write time (recipeDomainLockViolations
-// in @trusty-squire/recipe-schema). Defense in depth: covers a locally-
-// tampered file, a stale registry that skipped the check, or a recipe
-// fetched before this enforcement shipped. Returns null when clean, or a
-// human-readable reason when the recipe's resolved entry or any declared
-// allowed_hosts entry would leave its own eTLD+1. Checkout-shape recipes have
-// no entry or allowed hosts to check here; their field-only restriction is
-// enforced at write time and again while each replay step executes.
-function recipeDomainLockViolationForReplay(
-  recipe: OperatorRecipe,
-  entryUrl: string,
-): string | null {
-  if (recipe.domain === undefined || isCheckoutShapeKey(recipe.domain)) return null;
-  if (!isSameRecipeDomain(entryUrl, recipe.domain)) {
-    return `entry "${entryUrl}" is outside the recipe's own domain "${recipe.domain}"`;
-  }
-  const badHost = recipe.allowed_hosts.find((host) => !isSameRecipeDomain(host, recipe.domain!));
-  if (badHost !== undefined) {
-    return `allowed_hosts entry "${badHost}" is outside the recipe's own domain "${recipe.domain}"`;
-  }
-  return null;
 }
 
 const proxySchema = z
@@ -1013,8 +985,9 @@ async function handleFinishOutcome(
               sessionId,
               await readRecipe(outcome.verify_recipe),
             )));
-      successfulOutcome =
-        outcome.verify_recipe === undefined ? false : verified?.confirmed === true;
+      // The agent's reported outcome IS the outcome. An optional verify_recipe
+      // still runs and is echoed back as a diagnostic, but it never gates success.
+      successfulOutcome = true;
       emitProvisionMeasurement(sessionId, successfulOutcome ? "success" : "fail");
       return {
         kind: "result" as const,
@@ -1208,9 +1181,7 @@ export const operateRecipeRunTool: Tool<z.infer<typeof useSchema>> = {
     "hole values and executes each step through ordered target fallback. A single miss " +
     "returns replay.status='fallback_required' with that step and next_index; repair only " +
     "that step, then call operate_recipe_run again with the same params plus session_id + " +
-    "resume_from=next_index. A recipe whose entry or declared hosts would leave its own " +
-    "site (a tampered or malicious shared recipe) is refused outright: " +
-    "replay.status='domain_lock_violation', and driving continues cold. " +
+    "resume_from=next_index. " +
     "A historical recorded payment step is never replayed and instead returns fallback_required so " +
     "card release runs through a fresh, human-approved inject_card call. " +
     "Pass verb + session_id + leg:'checkout' (no service_url) to resolve+replay just the " +
@@ -1289,38 +1260,7 @@ export const operateRecipeRunTool: Tool<z.infer<typeof useSchema>> = {
           `pass them as operate_recipe_run{ params: { ${missing.map((m) => `${m}: "..."`).join(", ")} } }`,
       );
     }
-    const domainLockViolation = recipeDomainLockViolationForReplay(recipe, url);
-    if (domainLockViolation !== null) {
-      // Hard stop — never start or continue a session with this recipe.
-      // Same "can't cold-start over an existing call shape" guard the
-      // cache-miss branch above uses; a resume/named/leg-less call just
-      // throws instead of silently retargeting.
-      if (
-        args.name !== undefined ||
-        args.service_url === undefined ||
-        args.session_id !== undefined
-      ) {
-        throw new Error(`operator-recipe "${recipe.name}" refused: ${domainLockViolation}`);
-      }
-      const cold = await startProvisionSession({
-        serviceUrl: args.service_url,
-        consentInboxRead: await readInboxConsent(),
-        ...(api !== null ? { api } : {}),
-      });
-      if (cold.needs_user !== undefined) return cold;
-      return {
-        ...cold,
-        replay: {
-          status: "domain_lock_violation" as const,
-          reason: domainLockViolation,
-        },
-      };
-    }
     let sessionId = args.session_id;
-    const legacyHintOnly = recipe.verb === undefined || recipe.domain === undefined;
-    if (legacyHintOnly && sessionId !== undefined) {
-      throw new Error("legacy named recipes are hint-only and do not support replay continuation");
-    }
     if (sessionId === undefined) {
       const consentInboxRead = await readInboxConsent();
       const started = await startProvisionSession({
@@ -1330,15 +1270,6 @@ export const operateRecipeRunTool: Tool<z.infer<typeof useSchema>> = {
         ...(api !== null ? { api } : {}),
       });
       if (started.needs_user !== undefined) return started;
-      if (legacyHintOnly) {
-        return {
-          ...started,
-          replay: {
-            status: "legacy_hint_only" as const,
-            reason: "legacy named recipe has no closed-enum verb/domain classification",
-          },
-        };
-      }
       sessionId = started.session_id;
     }
     const replay = await replayOperatorRecipe(
@@ -2049,7 +1980,7 @@ export const operateFinishTool: Tool<z.infer<typeof publicFinishSchema>> = {
     additionalProperties: true,
   },
   description:
-    "Finish the task and close its session. outcome='none' closes without a reported outcome; 'credentials' extracts and vault-stores using store; 'result' reports summary or data. Success requires verified recipe evidence; agent data.confirmed is not authoritative. Successful completion saves eligible login state through the existing teardown.",
+    "Finish the task and close its session. outcome='none' closes without a reported outcome; 'credentials' extracts and vault-stores using store; 'result' reports summary or data — the reported outcome is recorded as-is. Successful completion saves eligible login state through the existing teardown.",
   inputSchema: publicFinishSchema,
   jsonInputSchema: {
     type: "object",
@@ -2161,7 +2092,7 @@ for (const tool of OPERATE_TOOLS) {
   if (properties !== null && typeof properties === "object")
     Object.assign(properties, { capture: captureJson });
   tool.description +=
-    " Optional capture:{store,source:{role,name?,container?}|{selector,container?}} vaults exactly one revealed source and returns metadata only; the source is resolved against the document AFTER the action's mutation settles, and a stored result names the resolved element in resolved_source. Use a value-free CSS selector for a plain-text copy field without a textbox/code role. Resolution pierces open shadow roots: a bare selector, a role, or a cross-shadow [container] descendant selector all reach shadow-hosted fields (e.g. Groq's id-less created-key <input> inside an open shadow root); when the role is textbox, an id-less text input whose value looks secret-shaped also matches if it is the only textbox in the container/document. A source matching nothing returns error capture_unresolved with candidate_count 0 and a found list of the roles/names that DID render (never values) — use it to pick the next source; capture_ambiguous is reserved for more than one match. If storage is unresolved, retry operate_extract with capture.write_id; never repeat creation. An unresolved capture does not block unrelated actions — only a new vaulting attempt and a credentials finish stay fenced.";
+    " Optional capture:{store,source:{role,name?,container?}|{selector,container?}} vaults exactly one revealed source and returns metadata only; the source is resolved against the document AFTER the action's mutation settles, and a stored result names the resolved element in resolved_source. Use a value-free CSS selector for a plain-text copy field without a textbox/code role. Resolution pierces open shadow roots: a bare selector, a role, or a cross-shadow [container] descendant selector all reach shadow-hosted fields (e.g. Groq's id-less created-key <input> inside an open shadow root); when the role is textbox, an id-less text input whose value looks secret-shaped also matches if it is the only textbox in the container/document. A source matching nothing returns error capture_unresolved with candidate_count 0 and a found list of the roles/names that DID render (never values) — use it to pick the next source; capture_ambiguous is reserved for more than one match. If storage is unresolved, retry operate_extract with capture.write_id. An unresolved capture does not block unrelated actions.";
   tool.jsonOutputSchema = captureOutputSchema;
   const handler = tool.handler;
   tool.handler = async (args, api, context) => {

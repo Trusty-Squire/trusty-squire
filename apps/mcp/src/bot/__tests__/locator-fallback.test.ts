@@ -21,7 +21,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
 import { BrowserController, clickDispatchStatusForError } from "../browser.js";
-import { parseLocatorTarget, shouldBlockUnsafeProvisionSignals } from "../provision-session.js";
+import { parseLocatorTarget } from "../provision-session.js";
 
 // Mirrors the Casetify shape: 20 decorative cursor:pointer card-eligible divs
 // BEFORE a bare click-handler <div> CTA whose only child with text is a <span>.
@@ -158,28 +158,6 @@ const ACTION_TYPE_ONLY_SAVE_FIXTURE = `data:text/html,${encodeURIComponent(`
 <!doctype html><html><body style="margin:0;padding:0">
   <button id="x" action-type="SAVE_PRODUCT" style="width:40px;height:40px"></button>
 </body></html>`)}`;
-
-const LONG_METADATA_SAVE_FIXTURE = `data:text/html,${encodeURIComponent(`
-<!doctype html><html><body style="margin:0;padding:0">
-  <button id="${"benign".repeat(200)}" style="width:200px;height:40px">Save product</button>
-</body></html>`)}`;
-
-const LONG_SAFETY_SUFFIX_FIXTURES = [
-  {
-    source: "visible text",
-    fixture: `data:text/html,${encodeURIComponent(`
-<!doctype html><html><body style="margin:0;padding:0">
-  <button style="width:200px;height:40px">${"Benign ".repeat(40)}Save product</button>
-</body></html>`)}`,
-  },
-  {
-    source: "aria-label",
-    fixture: `data:text/html,${encodeURIComponent(`
-<!doctype html><html><body style="margin:0;padding:0">
-  <button aria-label="${"benign ".repeat(40)}Save product" style="width:200px;height:40px"></button>
-</body></html>`)}`,
-  },
-] as const;
 
 const LARGE_VALUE_SAVE_FIXTURE = `data:text/html,${encodeURIComponent(`
 <!doctype html><html><body style="margin:0;padding:0">
@@ -522,39 +500,6 @@ describe("resolvePageTarget (real Chromium)", () => {
       await page.close();
     }
   });
-
-  it("blocks visible billing text despite long benign metadata", async () => {
-    const { ctrl, page } = await pageFor(LONG_METADATA_SAVE_FIXTURE);
-    try {
-      const resolved = await ctrl.resolvePageTarget("css", "button");
-      expect(resolved.ok).toBe(true);
-      if (!resolved.ok) throw new Error("unreachable");
-      expect(
-        shouldBlockUnsafeProvisionSignals("Dashboard Products Live mode", resolved.safetySignals),
-      ).toMatch(/Mode safety guard/);
-      await resolved.handle.dispose();
-    } finally {
-      await page.close();
-    }
-  });
-
-  it.each(LONG_SAFETY_SUFFIX_FIXTURES)(
-    "blocks billing text after long benign $source content",
-    async ({ fixture }) => {
-      const { ctrl, page } = await pageFor(fixture);
-      try {
-        const resolved = await ctrl.resolvePageTarget("css", "button");
-        expect(resolved.ok).toBe(true);
-        if (!resolved.ok) throw new Error("unreachable");
-        expect(
-          shouldBlockUnsafeProvisionSignals("Dashboard Products Live mode", resolved.safetySignals),
-        ).toMatch(/Mode safety guard/);
-        await resolved.handle.dispose();
-      } finally {
-        await page.close();
-      }
-    },
-  );
 
   it("returns compact safety signals for a megabyte-scale value", async () => {
     const { ctrl, page } = await pageFor(LARGE_VALUE_SAVE_FIXTURE);

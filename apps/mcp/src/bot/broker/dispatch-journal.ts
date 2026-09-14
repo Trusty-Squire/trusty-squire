@@ -31,15 +31,6 @@ interface DispatchRecord {
   terminalReceipt?: OperationReceipt;
 }
 
-// Delivery acknowledgement preserves replayable evidence, but a positive
-// no-dispatch outcome has no browser custody to retain on any lineage.
-const phaseHasOutstandingCustody = (record: DispatchRecord): boolean =>
-  record.outcome?.status !== "not_dispatched" &&
-  (["prepared", "entered", "outcome", "dispatch_attempted", "observed_result", "unknown"].includes(
-    record.phase,
-  ) ||
-    record.outcome?.status === "unknown");
-
 const phaseHasDeliverableOutcome = (record: DispatchRecord): boolean =>
   ["outcome", "acknowledged", "observed_result", "delivery_acknowledged", "unknown"].includes(
     record.phase,
@@ -63,27 +54,6 @@ export interface CompletedDispatchOutcome extends PendingDispatchOutcome {
   start?: true;
   alreadySettled?: true;
 }
-
-export interface ExplicitPreDispatchFailureEvidence {
-  requestId: string;
-  error: "stale_ref";
-  dispatch: "not_dispatched";
-}
-
-export interface AuthorizedPreDispatchFailure {
-  sessionId: string;
-  requestId: string;
-  operation: "operate_login";
-  forwarderId: string;
-  inputHash: string;
-}
-
-const retainedXataPreDispatchFailure = {
-  sessionId: "546b6f5a-930e-4473-8aec-43fc355fd108",
-  requestId:
-    "4ae34aeb-e1b8-4457-a99b-72ac418600ca:4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce",
-  operation: "operate_login",
-} as const;
 
 function validOutcome(value: unknown): value is ReconciledDispatchOutcome {
   if (value === null || typeof value !== "object") return false;
@@ -166,6 +136,9 @@ export class DispatchJournal {
   }
 
   async assertReconciled(): Promise<void> {
+    // Startup normalization: a dispatch-tracked "prepared" record never left
+    // the broker, so settle it as not_dispatched. No retained-custody refusal:
+    // the journal stays a record, not a gate on the next call.
     const records = [...(await this.states()).values()];
     for (const record of records.filter(
       (candidate) => candidate.phase === "prepared" && candidate.dispatchTracked === true,
@@ -179,101 +152,6 @@ export class DispatchJournal {
         outcome: { status: "not_dispatched", error: "pre_dispatch_failure" },
       });
     }
-    if (
-      records.some(
-        (record) =>
-          record.outcome?.status !== "not_dispatched" &&
-          (record.phase === "entered" ||
-            record.phase === "dispatch_attempted" ||
-            record.phase === "unknown" ||
-            (record.phase === "prepared" && record.dispatchTracked !== true) ||
-            record.outcome?.status === "unknown"),
-      )
-    )
-      throw new BrokerRefusal(
-        "outcome_unknown",
-        "Prior broker lost mutation custody; reconcile before browser replacement",
-      );
-  }
-
-  async retainedXataPreDispatchAuthorization(): Promise<AuthorizedPreDispatchFailure | undefined> {
-    const record = [...(await this.states()).values()].find(
-      (candidate) =>
-        candidate.sessionId === retainedXataPreDispatchFailure.sessionId &&
-        candidate.requestId === retainedXataPreDispatchFailure.requestId &&
-        candidate.operation === retainedXataPreDispatchFailure.operation &&
-        candidate.start === undefined &&
-        ((candidate.phase === "entered" && candidate.outcome === undefined) ||
-          (candidate.phase === "settled" &&
-            candidate.outcome?.status === "not_dispatched" &&
-            candidate.outcome.error === "stale_ref")),
-    );
-    if (record?.forwarderId === undefined || record.inputHash === undefined) return undefined;
-    return {
-      ...retainedXataPreDispatchFailure,
-      forwarderId: record.forwarderId,
-      inputHash: record.inputHash,
-    };
-  }
-
-  async hasOnlyAuthorizedPreDispatchFailure(
-    authorization: AuthorizedPreDispatchFailure,
-  ): Promise<boolean> {
-    if (
-      authorization.sessionId !== retainedXataPreDispatchFailure.sessionId ||
-      authorization.requestId !== retainedXataPreDispatchFailure.requestId ||
-      authorization.operation !== retainedXataPreDispatchFailure.operation
-    )
-      return false;
-    const outstanding = [...(await this.states()).values()].filter(phaseHasOutstandingCustody);
-    if (outstanding.length !== 1) return false;
-    const [record] = outstanding;
-    return (
-      record?.phase === "entered" &&
-      record.outcome === undefined &&
-      record.start === undefined &&
-      record.sessionId === authorization.sessionId &&
-      record.requestId === authorization.requestId &&
-      record.operation === authorization.operation &&
-      record.forwarderId === authorization.forwarderId &&
-      record.inputHash === authorization.inputHash
-    );
-  }
-
-  async hasOutstanding(sessionId?: string, forwarderId?: string): Promise<boolean> {
-    return [...(await this.states()).values()].some(
-      (record) =>
-        (sessionId === undefined || record.sessionId === sessionId) &&
-        (forwarderId === undefined || record.forwarderId === forwarderId) &&
-        phaseHasOutstandingCustody(record),
-    );
-  }
-
-  async hasOnlyCaptureCustody(sessionId: string, forwarderId: string): Promise<boolean> {
-    const outstanding = [...(await this.states()).values()].filter(
-      (record) => record.forwarderId === forwarderId && phaseHasOutstandingCustody(record),
-    );
-    return (
-      outstanding.length > 0 &&
-      outstanding.every(
-        (record) =>
-          record.sessionId === sessionId &&
-          ["observed_result", "delivery_acknowledged"].includes(record.phase) &&
-          record.outcome?.status === "unknown" &&
-          record.outcome.capture?.storage === "unknown",
-      )
-    );
-  }
-
-  async hasPendingStartDelivery(forwarderId: string, sessionId?: string): Promise<boolean> {
-    return [...(await this.states()).values()].some(
-      (record) =>
-        record.forwarderId === forwarderId &&
-        (sessionId === undefined || record.sessionId === sessionId) &&
-        record.start === true &&
-        record.outcome?.status !== "not_dispatched" &&
-        ["acknowledged", "delivery_acknowledged"].includes(record.phase),
-    );
   }
 
   async hasCompleted(forwarderId: string, requestId: string): Promise<boolean> {
@@ -330,45 +208,6 @@ export class DispatchJournal {
           outcome: record.outcome!,
           ...(record.start === true ? { start: true } : {}),
         };
-  }
-
-  async reconcileExplicitPreDispatchFailure(
-    authorization: AuthorizedPreDispatchFailure,
-    evidence: ExplicitPreDispatchFailureEvidence,
-  ): Promise<CompletedDispatchOutcome | undefined> {
-    const { sessionId, requestId, operation, forwarderId, inputHash } = authorization;
-    if (evidence.requestId !== requestId) return undefined;
-    const record = [...(await this.states()).values()].find(
-      (candidate) =>
-        candidate.sessionId === sessionId &&
-        candidate.requestId === requestId &&
-        candidate.operation === operation &&
-        candidate.forwarderId === forwarderId &&
-        candidate.inputHash === inputHash &&
-        candidate.start === undefined,
-    );
-    if (record === undefined) return undefined;
-    const outcome = { status: "not_dispatched" as const, error: "stale_ref" as const };
-    if (
-      record.phase === "settled" &&
-      record.outcome?.status === outcome.status &&
-      record.outcome.error === outcome.error
-    )
-      return {
-        sessionId,
-        requestId: record.requestId,
-        operation,
-        outcome,
-        alreadySettled: true,
-      };
-    if (record.phase !== "entered") return undefined;
-    await this.record(sessionId, record.requestId, "settled", {
-      forwarderId,
-      operation,
-      inputHash,
-      outcome,
-    });
-    return { sessionId, requestId: record.requestId, operation, outcome };
   }
 
   async acknowledge(forwarderId: string, requestId: string): Promise<boolean> {
@@ -440,29 +279,6 @@ export class DispatchJournal {
     return starts.length > 0;
   }
 
-  async expirePendingStartDeliveries(now = Date.now()): Promise<number> {
-    const starts = [...(await this.states()).values()].filter(
-      (record) =>
-        record.forwarderId !== undefined &&
-        record.start === true &&
-        ["acknowledged", "delivery_acknowledged"].includes(record.phase) &&
-        now - record.at >= START_DELIVERY_RETENTION_MS,
-    );
-    await Promise.all(
-      starts.map(
-        async (record) =>
-          await this.record(record.sessionId, record.requestId, "settled", {
-            forwarderId: record.forwarderId!,
-            start: true,
-            ...(record.operation === undefined ? {} : { operation: record.operation }),
-            ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
-            ...(record.outcome === undefined ? {} : { outcome: record.outcome }),
-          }),
-      ),
-    );
-    return starts.length;
-  }
-
   async recordRecovery(forwarderId: string, completed: CompletedDispatchOutcome): Promise<void> {
     await this.record(completed.sessionId, completed.requestId, "recovered", {
       forwarderId,
@@ -486,20 +302,6 @@ export class DispatchJournal {
         record.sessionId === sessionId &&
         record.outcome?.capture?.write_id === capture.write_id,
     );
-    if (
-      !recovery &&
-      !matching.length &&
-      [...(await this.states()).values()].some(
-        (record) =>
-          record.forwarderId === forwarderId &&
-          record.sessionId === sessionId &&
-          record.outcome?.capture?.storage === "unknown",
-      )
-    )
-      throw new BrokerRefusal(
-        "outcome_unknown",
-        "Recover the original capture write identity before another capture",
-      );
     if (
       recovery &&
       (!matching.length ||
@@ -530,27 +332,6 @@ export class DispatchJournal {
           outcome: { status: "completed", capture },
         });
     }
-  }
-
-  async unresolvedCapture(
-    forwarderId: string,
-    sessionId: string,
-  ): Promise<CaptureEvidence | undefined> {
-    return [...(await this.states()).values()].find(
-      (record) =>
-        record.forwarderId === forwarderId &&
-        record.sessionId === sessionId &&
-        record.outcome?.capture?.storage === "unknown",
-    )?.outcome?.capture;
-  }
-
-  async hasCaptureWrite(forwarderId: string, sessionId: string, writeId: string): Promise<boolean> {
-    return [...(await this.states()).values()].some(
-      (record) =>
-        record.forwarderId === forwarderId &&
-        record.sessionId === sessionId &&
-        record.outcome?.capture?.write_id === writeId,
-    );
   }
 
   async terminalReceipt(

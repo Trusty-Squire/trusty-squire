@@ -10,11 +10,6 @@ import { ProvenPreDispatchMutationError } from "../mutation-dispatch-evidence.js
 
 export interface BrokerRecoveryRequest {
   recover?: boolean;
-  preDispatchFailure?: {
-    requestId: string;
-    error: "stale_ref";
-    dispatch: "not_dispatched";
-  };
 }
 
 export class ForwardedResultError extends BrokerRefusal {
@@ -94,9 +89,6 @@ export class OperatorForwarder {
       args,
       ...(capability === undefined ? {} : { capability }),
       ...(requestId === undefined ? {} : { requestId }),
-      ...(recovery.preDispatchFailure === undefined
-        ? {}
-        : { preDispatchFailure: recovery.preDispatchFailure }),
     })) as { requestId?: unknown; result?: unknown; capability?: unknown } | null;
     return typeof reply?.requestId === "string"
       ? {

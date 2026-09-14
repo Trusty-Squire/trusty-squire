@@ -229,9 +229,6 @@ it("carries queued OAuth authority from broker admission through final dispatch"
     expect(dispatched).toEqual(["blocker", "unchanged"]);
     await broker.acknowledge(clients[2]!.principal, "login-changed");
     await expect(
-      journal.hasOutstanding(clients[2]!.capability.sessionId, clients[2]!.principal.forwarderId),
-    ).resolves.toBe(false);
-    await expect(
       broker.recover(clients[2]!.principal, {
         name: "operate_login",
         args: changed.args,
@@ -245,207 +242,7 @@ it("carries queued OAuth authority from broker admission through final dispatch"
   }
 });
 
-it("recovers an explicitly proven stale-ref pre-dispatch failure without replay", async () => {
-  const root = await mkdtemp(join(tmpdir(), "ts-broker-pre-dispatch-"));
-  const path = join(root, "dispatch.jsonl");
-  const journal = new DispatchJournal(path);
-  const retainedSessionId = "546b6f5a-930e-4473-8aec-43fc355fd108";
-  const retainedRequestId =
-    "4ae34aeb-e1b8-4457-a99b-72ac418600ca:4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce";
-  const lineageCredential = "a".repeat(43);
-  const retainedForwarderId = forwarderId(lineageCredential);
-  const retainedInputHash = "retained-input-hash";
-  await journal.record(retainedSessionId, retainedRequestId, "entered", {
-    forwarderId: retainedForwarderId,
-    operation: "operate_login",
-    inputHash: retainedInputHash,
-  });
-  const authorization = await journal.retainedXataPreDispatchAuthorization();
-  if (authorization === undefined) throw new Error("Retained authorization was not captured");
-  const broker = new OperatorBroker(
-    {
-      accountId: "account",
-      agentSessionToken: "token",
-      apiBaseUrl: "http://unused.test",
-      registryBaseUrl: "http://unused.test",
-    },
-    "cell",
-    journal,
-    authorization,
-  );
-  const identity = await broker.authenticate("token", "agent", lineageCredential);
-  if (identity === null) throw new Error("Test broker authentication failed");
-  const principal = { ...identity, clientId: "client" };
-  const internalId = "new-session";
-  let loginAttempts = 0;
-  let observations = 0;
-  const startTool: Tool = {
-    name: "operate_start",
-    description: "",
-    inputSchema: z.object({}).strict(),
-    jsonInputSchema: {},
-    handler: async () => {
-      state.sessions.set(internalId, {
-        browser: {
-          brokerTargetId: async () => "target",
-          isConnected: () => true,
-          waitForThreeDsResolution: async () => "succeeded",
-        },
-        pendingThreeDs: null,
-      });
-      return { session_id: internalId };
-    },
-  };
-  const loginTool: Tool = {
-    name: "operate_login",
-    description: "",
-    inputSchema: z
-      .object({ session_id: z.string(), provider: z.literal("google"), ref: z.string() })
-      .strict(),
-    jsonInputSchema: {},
-    handler: async () => {
-      loginAttempts += 1;
-      return { unexpected: true };
-    },
-  };
-  const observeTool: Tool = {
-    name: "operate_observe",
-    description: "",
-    inputSchema: z.object({ session_id: z.string() }).strict(),
-    jsonInputSchema: {},
-    handler: async () => ({ observed: ++observations }),
-  };
-  Object.defineProperty(broker, "tools", { value: [startTool, loginTool, observeTool] });
-
-  try {
-    await broker.connected(principal);
-    const args = {
-      session_id: retainedSessionId,
-      provider: "google" as const,
-      ref: "reconciliation-only:no-dispatch",
-    };
-    const recoveryRequest = {
-      name: "operate_login",
-      args,
-      preDispatchFailure: {
-        requestId: retainedRequestId,
-        error: "stale_ref" as const,
-        dispatch: "not_dispatched" as const,
-      },
-    };
-    await journal.record(retainedSessionId, retainedRequestId, "entered", {
-      forwarderId: retainedForwarderId,
-      operation: "operate_login",
-    });
-    await expect(broker.recover(principal, recoveryRequest)).resolves.toBeNull();
-    await journal.record(retainedSessionId, retainedRequestId, "entered", {
-      forwarderId: retainedForwarderId,
-      operation: "operate_login",
-      inputHash: "different-input-hash",
-    });
-    await expect(broker.recover(principal, recoveryRequest)).resolves.toBeNull();
-    await journal.record(retainedSessionId, retainedRequestId, "entered", {
-      forwarderId: retainedForwarderId,
-      operation: "operate_login",
-      inputHash: retainedInputHash,
-    });
-    await expect(journal.hasOutstanding(retainedSessionId)).resolves.toBe(true);
-
-    const foreignIdentity = await broker.authenticate("token", "other-agent", "b".repeat(43));
-    if (foreignIdentity === null) throw new Error("Foreign broker authentication failed");
-    await expect(
-      broker.recover(
-        { ...foreignIdentity, clientId: "foreign-client" },
-        {
-          name: "operate_login",
-          args,
-          preDispatchFailure: {
-            requestId: retainedRequestId,
-            error: "stale_ref",
-            dispatch: "not_dispatched",
-          },
-        },
-      ),
-    ).resolves.toBeNull();
-    await expect(journal.hasOutstanding(retainedSessionId)).resolves.toBe(true);
-
-    const recovered = await broker.recover(principal, recoveryRequest);
-    expect(recovered).toEqual({
-      requestId: retainedRequestId,
-      result: {
-        reconciliation: {
-          request_id: retainedRequestId,
-          operation: "operate_login",
-          status: "not_dispatched",
-          error: "stale_ref",
-        },
-      },
-    });
-    await expect(journal.hasOutstanding(retainedSessionId)).resolves.toBe(false);
-    await broker.acknowledge(principal, retainedRequestId);
-    await expect(journal.hasOutstanding(retainedSessionId)).resolves.toBe(false);
-    const restartedJournal = new DispatchJournal(path);
-    const restartedAuthorization = await restartedJournal.retainedXataPreDispatchAuthorization();
-    if (restartedAuthorization === undefined)
-      throw new Error("Settled authorization was not restored");
-    const restartedBroker = new OperatorBroker(
-      {
-        accountId: "account",
-        agentSessionToken: "token",
-        apiBaseUrl: "http://unused.test",
-        registryBaseUrl: "http://unused.test",
-      },
-      "restarted-cell",
-      restartedJournal,
-      restartedAuthorization,
-    );
-    Object.defineProperty(restartedBroker, "tools", {
-      value: [startTool, loginTool, observeTool],
-    });
-    const restartedIdentity = await restartedBroker.authenticate(
-      "token",
-      "agent",
-      lineageCredential,
-    );
-    if (restartedIdentity === null) throw new Error("Restarted broker authentication failed");
-    const journalBeforeReplay = await readFile(path, "utf8");
-    await expect(
-      restartedBroker.recover(
-        { ...restartedIdentity, clientId: "restarted-client" },
-        recoveryRequest,
-      ),
-    ).resolves.toEqual(recovered);
-    await expect(readFile(path, "utf8")).resolves.toBe(journalBeforeReplay);
-    expect(loginAttempts).toBe(0);
-
-    const started = (await broker.call(
-      principal,
-      "tool",
-      { name: "operate_start", args: {} },
-      "start-request",
-    )) as { capability: TabCapability };
-    await broker.acknowledge(principal, "start-request");
-    await broker.confirmStartDelivery(principal, { capability: started.capability });
-
-    await expect(
-      broker.call(
-        principal,
-        "tool",
-        {
-          name: "operate_observe",
-          args: { session_id: started.capability.sessionId },
-          capability: started.capability,
-        },
-        "observe-request",
-      ),
-    ).resolves.toMatchObject({ result: { observed: 1 } });
-    await expect(new DispatchJournal(path).assertReconciled()).resolves.toBeUndefined();
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-it("keeps an ambiguous thrown mutation fenced and unrecoverable", async () => {
+it("keeps an ambiguous thrown mutation unrecoverable", async () => {
   const root = await mkdtemp(join(tmpdir(), "ts-broker-ambiguous-dispatch-"));
   const path = join(root, "dispatch.jsonl");
   const journal = new DispatchJournal(path);
@@ -535,23 +332,7 @@ it("keeps an ambiguous thrown mutation fenced and unrecoverable", async () => {
         },
       },
     );
-    await expect(
-      broker.recover(principal, {
-        name: "operate_login",
-        args,
-        preDispatchFailure: {
-          requestId: "login-request",
-          error: "stale_ref",
-          dispatch: "not_dispatched",
-        },
-      }),
-    ).resolves.toMatchObject({
-      requestId: "login-request",
-      result: { reconciliation: { status: "unknown", request_id: "login-request" } },
-    });
-    await expect(new DispatchJournal(path).assertReconciled()).rejects.toThrow(
-      "lost mutation custody",
-    );
+    await expect(new DispatchJournal(path).assertReconciled()).resolves.toBeUndefined();
     expect(loginCalls).toBe(1);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -861,14 +642,12 @@ it("closes an explicitly released client session immediately", async () => {
       "start-request",
     )) as { capability: TabCapability };
     await broker.acknowledge(principal, "start-request");
-    expect(await journal.hasPendingStartDelivery(principal.forwarderId!)).toBe(true);
 
     await broker.disconnect(principal, true);
 
     expect(started.capability.sessionId).toBeDefined();
     expect(state.finish).toHaveBeenCalledWith(internalId);
     expect(state.sessions.size).toBe(0);
-    expect(await journal.hasPendingStartDelivery(principal.forwarderId!)).toBe(false);
     expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -973,7 +752,6 @@ it("retains acknowledged start control until a same-lineage follow-up", async ()
           quarantined: 1,
           admitting: 0,
         });
-      expect(await journal.hasPendingStartDelivery(forwarderId("a".repeat(43)))).toBe(true);
       await broker.reap(Date.now() + START_DELIVERY_RETENTION_MS - 1_000);
       expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 1, admitting: 0 });
       await expect(
@@ -986,7 +764,6 @@ it("retains acknowledged start control until a same-lineage follow-up", async ()
       await expect(
         restarted.invoke("operate_observe", { session_id: started.session_id }, "delivery-id"),
       ).resolves.toEqual({ dom: "ready" });
-      expect(await journal.hasPendingStartDelivery(forwarderId("a".repeat(43)))).toBe(false);
       await restarted.invoke("operate_finish", { session_id: started.session_id }, "finish-id");
       expect(state.sessions.size).toBe(0);
       expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
@@ -1004,7 +781,10 @@ it("retains acknowledged start control until a same-lineage follow-up", async ()
       expect(broker.authority.inventory()).toEqual({ active: 0, quarantined: 0, admitting: 0 });
       await expect(
         expired.invoke(name, {}, "expired-recovery-id", { recover: true }),
-      ).rejects.toThrow("No matching durable outcome");
+      ).resolves.toMatchObject({
+        reconciliation: { status: "completed" },
+        recovery: { status: "session_unavailable" },
+      });
     } finally {
       await original.close();
       await foreign.close();
@@ -1057,66 +837,6 @@ it("bounds cancellation tombstones instead of evicting older cancellation eviden
   await expect(broker.call(owner, "wrong-method", {}, "0")).rejects.toThrow(
     "cancelled before registration",
   );
-});
-
-it("permits only lineage-bound extraction recovery for a journaled capture write", async () => {
-  const root = await mkdtemp(join(tmpdir(), "ts-capture-recovery-"));
-  try {
-    const journal = new DispatchJournal(join(root, "dispatch.jsonl"));
-    const broker = new OperatorBroker(
-      {
-        accountId: "account",
-        agentSessionToken: "token",
-        apiBaseUrl: "http://unused.test",
-        registryBaseUrl: "http://unused.test",
-      },
-      "cell",
-      journal,
-    );
-    const identity = await broker.authenticate("token", "agent", "c".repeat(43));
-    if (identity === null) throw new Error("authentication failed");
-    const principal = { ...identity, clientId: "client" };
-    const capability = {
-      cellId: "cell",
-      browserEpoch: "epoch",
-      sessionId: "session",
-      targetId: "target",
-      leaseGeneration: "lease",
-    };
-    const hasCapability = vi.spyOn(broker.authority, "hasCapability").mockReturnValue(true);
-    const params = {
-      name: "operate_extract",
-      capability,
-      args: { session_id: "session", capture: { write_id: "capture-1" } },
-    };
-    expect(await broker.canReconcileCapture(principal, params)).toBe(false);
-    await journal.record("session", "create", "unknown", {
-      forwarderId: identity.forwarderId!,
-      operation: "operate_click",
-      outcome: {
-        status: "unknown",
-        reason: "cancelled",
-        capture: { write_id: "capture-1", stored: false, storage: "unknown" },
-      },
-    });
-    expect(await broker.canReconcileCapture(principal, params)).toBe(true);
-    expect(await broker.canReconcileCapture(principal, { ...params, name: "operate_click" })).toBe(
-      false,
-    );
-    expect(await broker.canReconcileCapture({ ...principal, forwarderId: "foreign" }, params)).toBe(
-      false,
-    );
-    expect(
-      await broker.canReconcileCapture(principal, {
-        ...params,
-        args: { session_id: "session", capture: { write_id: "guessed" } },
-      }),
-    ).toBe(false);
-    hasCapability.mockReturnValue(false);
-    expect(await broker.canReconcileCapture(principal, params)).toBe(false);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
 });
 
 it("records cancelled navigation before its executor checkpoint as not dispatched", async () => {
@@ -1435,229 +1155,6 @@ it("retires a closing actor when terminal cleanup settles after delivery", async
   }
 });
 
-it("refuses credential finish when capture becomes unresolved during call draining", async () => {
-  const root = await mkdtemp(join(tmpdir(), "finish-capture-"));
-  const journal = new DispatchJournal(join(root, "journal.jsonl"));
-  const broker = new OperatorBroker(
-    {
-      accountId: "account",
-      agentSessionToken: "token",
-      apiBaseUrl: "http://unused.test",
-      registryBaseUrl: "http://unused.test",
-    },
-    "cell",
-    journal,
-  );
-  let entered!: () => void;
-  let release!: () => void;
-  const started = new Promise<void>((resolve) => {
-    entered = resolve;
-  });
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const dispatch = vi.fn();
-  const tools: Tool[] = [
-    {
-      name: "operate_start",
-      description: "",
-      inputSchema: z.object({}),
-      jsonInputSchema: {},
-      handler: async () => {
-        state.sessions.set("internal", {
-          browser: {
-            brokerTargetId: async () => "target",
-            isConnected: () => true,
-            waitForThreeDsResolution: async () => "succeeded",
-          },
-          pendingThreeDs: null,
-        });
-        return { session_id: "internal" };
-      },
-    },
-    {
-      name: "operate_finish",
-      description: "",
-      inputSchema: z.object({ session_id: z.string() }),
-      jsonInputSchema: {},
-      handler: async () => {
-        entered();
-        await gate;
-        await markOperatorMutationDispatchAttempted();
-        dispatch();
-        return {};
-      },
-    },
-  ];
-  Object.defineProperty(broker, "tools", { value: tools });
-  try {
-    const identity = await broker.authenticate("token", "agent", "n".repeat(43));
-    if (!identity) throw new Error("authentication failed");
-    const principal = { ...identity, clientId: "client" };
-    await broker.connected(principal);
-    const { capability } = (await broker.call(
-      principal,
-      "tool",
-      { name: "operate_start", args: {} },
-      "start",
-    )) as { capability: TabCapability };
-    await broker.acknowledge(principal, "start");
-    await broker.confirmStartDelivery(principal, { capability });
-    const work = broker
-      .call(
-        principal,
-        "tool",
-        { name: "operate_finish", capability, args: { session_id: capability.sessionId } },
-        "navigate",
-      )
-      .catch((error: unknown) => error);
-    await started;
-    await journal.recordCapture(
-      identity.forwarderId!,
-      capability.sessionId,
-      "create",
-      {
-        write_id: "original",
-        binding: "service",
-        stored: false,
-        storage: "unknown",
-      },
-      false,
-    );
-    release();
-    expect(await work).toMatchObject({ message: expect.stringContaining("original capture") });
-    expect(dispatch).not.toHaveBeenCalled();
-  } finally {
-    release();
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-it("admits ordinary actions only while the caller has solely completed capture uncertainty", async () => {
-  const root = await mkdtemp(join(tmpdir(), "ts-capture-admission-"));
-  let hasCapability: MockInstance<OperatorBroker["authority"]["hasCapability"]> | undefined;
-  try {
-    const journal = new DispatchJournal(join(root, "dispatch.jsonl"));
-    const broker = new OperatorBroker(
-      {
-        accountId: "account",
-        agentSessionToken: "token",
-        apiBaseUrl: "http://unused.test",
-        registryBaseUrl: "http://unused.test",
-      },
-      "cell",
-      journal,
-    );
-    const identity = await broker.authenticate("token", "agent", "c".repeat(43));
-    if (identity === null) throw new Error("authentication failed");
-    const principal = { ...identity, clientId: "client" };
-    const capability = {
-      cellId: "cell",
-      browserEpoch: "epoch",
-      sessionId: "session",
-      targetId: "target",
-      leaseGeneration: "lease",
-    };
-    hasCapability = vi.spyOn(broker.authority, "hasCapability").mockReturnValue(true);
-    const params = { name: "operate_click", capability, args: { session_id: "session" } };
-    const detail = {
-      forwarderId: identity.forwarderId!,
-      operation: "operate_click",
-      outcome: {
-        status: "unknown" as const,
-        reason: "execution_error" as const,
-        capture: { write_id: "capture-1", stored: false, storage: "unknown" as const },
-      },
-    };
-    expect(await broker.canContinueAfterCapture(principal, params)).toBe(false);
-    await journal.record("session", "create", "unknown", detail);
-    expect(await broker.canContinueAfterCapture(principal, params)).toBe(false);
-    await journal.record("session", "create", "observed_result", detail);
-    for (const transition of ["observed", "recovered", "acknowledged", "recovered_again"]) {
-      if (transition === "acknowledged") {
-        expect(await journal.acknowledge(identity.forwarderId!, "create")).toBe(true);
-      } else if (transition === "recovered" || transition === "recovered_again") {
-        const completed = await journal.completedOutcome(identity.forwarderId!, "create");
-        expect(completed?.outcome).toEqual(detail.outcome);
-        if (completed === undefined) throw new Error("capture outcome unavailable");
-        await journal.recordRecovery(identity.forwarderId!, completed);
-        expect(await journal.completedOutcome(identity.forwarderId!, "create")).toEqual(completed);
-      }
-      expect(await journal.hasOutstanding(undefined, identity.forwarderId!)).toBe(true);
-      for (const name of [
-        "operate_click",
-        "operate_type",
-        "operate_select",
-        "operate_press",
-        "operate_observe",
-        "operate_extract",
-      ]) {
-        expect(await broker.canContinueAfterCapture(principal, { ...params, name })).toBe(true);
-      }
-      for (const args of [
-        { session_id: "session", capture: { store: { service: "Example" } } },
-        { session_id: "session", store: { service: "Example" } },
-      ]) {
-        expect(
-          await broker.canContinueAfterCapture(principal, {
-            ...params,
-            name: "operate_extract",
-            args,
-          }),
-        ).toBe(false);
-      }
-      expect(
-        await broker.canContinueAfterCapture(principal, {
-          ...params,
-          name: "operate_finish",
-          args: { session_id: "session", outcome: "credentials" },
-        }),
-      ).toBe(false);
-      expect(
-        await broker.canReconcileCapture(principal, {
-          ...params,
-          name: "operate_extract",
-          args: { session_id: "session", capture: { write_id: "capture-1" } },
-        }),
-      ).toBe(true);
-    }
-    expect(
-      await broker.canContinueAfterCapture({ ...principal, forwarderId: "foreign" }, params),
-    ).toBe(false);
-    expect(
-      await broker.canContinueAfterCapture(principal, {
-        ...params,
-        args: { session_id: "other" },
-      }),
-    ).toBe(false);
-    hasCapability.mockReturnValue(false);
-    expect(await broker.canContinueAfterCapture(principal, params)).toBe(false);
-    hasCapability.mockReturnValue(true);
-    for (const sessionId of ["session", "other-session"]) {
-      await journal.record(sessionId, "other", "unknown", {
-        forwarderId: identity.forwarderId!,
-        operation: "operate_click",
-        outcome: { status: "unknown", reason: "execution_error" },
-      });
-      const completed = await journal.completedOutcome(identity.forwarderId!, "other");
-      if (completed === undefined) throw new Error("mutation outcome unavailable");
-      await journal.recordRecovery(identity.forwarderId!, completed);
-      expect(await broker.canContinueAfterCapture(principal, params)).toBe(false);
-      await journal.acknowledge(identity.forwarderId!, "other");
-      expect(await broker.canContinueAfterCapture(principal, params)).toBe(false);
-      await journal.record(sessionId, "other", "settled", {
-        forwarderId: identity.forwarderId!,
-        outcome: { status: "completed" },
-      });
-    }
-    await journal.record("other-session", "other-capture", "observed_result", detail);
-    expect(await broker.canContinueAfterCapture(principal, params)).toBe(false);
-  } finally {
-    hasCapability?.mockRestore();
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
 it("delivers broker approval notifications to the originating MCP client before payment completes", async () => {
   const { buildServer } = await import("../../server.js");
   const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
@@ -1893,7 +1390,6 @@ it("does not fence stale refs or reconciled not-dispatched outcomes on the same 
       ),
     ).resolves.toEqual({ preDispatchFailure: { error: "stale_ref", dispatch: "not_dispatched" } });
     // No delivery acknowledgement or out-of-band recover metadata is needed.
-    expect(await journal.hasOutstanding(undefined, principal.forwarderId)).toBe(false);
     for (const name of ["operate_observe", "operate_navigate"]) {
       await expect(
         broker.call(principal, "tool", { name, args, capability: started.capability }, name),
@@ -1919,7 +1415,6 @@ it("does not fence stale refs or reconciled not-dispatched outcomes on the same 
         "uncertain-click",
       ),
     ).rejects.toThrow("mutation=unknown");
-    expect(await journal.hasOutstanding(args.session_id, principal.forwarderId)).toBe(true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

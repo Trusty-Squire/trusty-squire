@@ -2892,8 +2892,8 @@ export class BrowserController {
             .map((part) => safetyMetadata(part))
             .filter((part) => part.length > 0)
             .join(" ");
-          // Keep these predicates in sync with isBillingObjectActionTarget and
-          // isAccountSetupActionTarget in provision-session.ts.
+          // Keep this signal-shape in sync with the safety-signal
+          // reporting in provision-session.ts.
           return {
             billingObject:
               /\b(create|save|add|finish)\b/i.test(safetyText) &&
@@ -12174,7 +12174,8 @@ export interface InteractiveElement {
   // element — every pre-existing element keeps this shape unchanged. This is
   // the origin used for frame control-plane checks and credential-injection
   // boundaries, independently of the top page's origin. See
-  // frameTargetAllowed / assertSecretFrameTargetAllowed in provision-session.ts.
+  // assertFrameTargetAllowed / assertSecretFrameTargetAllowed in
+  // provision-session.ts.
   frameOrigin?: string | null;
   frameUrl?: string | null;
   framePath?: string | null;
