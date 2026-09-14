@@ -13,7 +13,7 @@ import {
   type ApiClient,
   type PaymentApproval,
 } from "../api-client.js";
-import type { CheckoutCard, CheckoutSummary } from "./browser.js";
+import type { CheckoutCard, CheckoutSummary } from "./checkout.js";
 import { generateOperatorKeypair, openSealed, type OperatorKeypair } from "./payment-hpke.js";
 
 export interface InjectCardApprovalArgs {
