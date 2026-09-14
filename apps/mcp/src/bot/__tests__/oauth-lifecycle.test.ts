@@ -112,7 +112,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         const started = await startHarnessProvisionSession({
           browser: controller,
           serviceUrl: productUrl,
-          observationFormat: "browser-use-dom",
+          format: "full",
         });
         sessionId = started.session_id;
         const ref = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
@@ -1250,7 +1250,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
           browser: controller,
           serviceUrl: "https://product.test/login",
           ...(format === "browser-use-dom"
-            ? { observationFormat: "browser-use-dom" as const }
+            ? { format: "full" as const }
             : {}),
         });
         sessionId = started.session_id;
@@ -1316,7 +1316,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
           browser: controller,
           serviceUrl: "https://product.test/login",
           ...(format === "browser-use-dom"
-            ? { observationFormat: "browser-use-dom" as const }
+            ? { format: "full" as const }
             : {}),
         });
         sessionId = started.session_id;
@@ -1462,7 +1462,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         const started = await startHarnessProvisionSession({
           browser: controller,
           serviceUrl: "https://product.test/login",
-          observationFormat: "browser-use-dom",
+          format: "full",
         });
         sessionId = started.session_id;
         const target = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
@@ -1559,7 +1559,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
           browser: controller,
           serviceUrl: "https://product.test/login",
           ...(format === "browser-use-dom"
-            ? { observationFormat: "browser-use-dom" as const }
+            ? { format: "full" as const }
             : {}),
         });
         sessionId = started.session_id;
@@ -1835,7 +1835,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const started = await startHarnessProvisionSession({
         browser: controller,
         serviceUrl: productUrl,
-        observationFormat: "browser-use-dom",
+        format: "full",
       });
       const ref = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
       expect(ref).toBeDefined();
@@ -1904,7 +1904,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const started = await startHarnessProvisionSession({
         browser: controller,
         serviceUrl: productUrl,
-        observationFormat: "browser-use-dom",
+        format: "full",
       });
       sessionId = started.session_id;
       const ref = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
@@ -1957,7 +1957,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const started = await startHarnessProvisionSession({
         browser: controller,
         serviceUrl: productUrl,
-        observationFormat: "browser-use-dom",
+        format: "full",
       });
       sessionId = started.session_id;
       const ref = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
@@ -2010,7 +2010,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const started = await startHarnessProvisionSession({
         browser: controller,
         serviceUrl: productUrl,
-        observationFormat: "browser-use-dom",
+        format: "full",
       });
       sessionId = started.session_id;
       const ref = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
@@ -3038,7 +3038,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
           browser: controller,
           serviceUrl: "https://product.test/login",
           ...(format === "browser-use-dom"
-            ? { observationFormat: "browser-use-dom" as const }
+            ? { format: "full" as const }
             : {}),
         });
         sessionId = started.session_id;

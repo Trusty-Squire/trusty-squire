@@ -11,8 +11,8 @@ import { mockBrowserUseCapture } from "./browser-use-test-capture.js";
 //      the harness start, snapshotted at the exact moment the two initializers
 //      finish (inside the first goto, while `initializing` is still true);
 //   3. the key lifecycle ordering around start/observe/finish;
-//   4. the exact agent-facing observation payloads — compact-v2, V1 compact,
-//      V1 full, and operate_observe_query — asserted as complete key sets so a
+//   4. the exact agent-facing observation payloads — compact, full, and
+//      operate_observe_query — asserted as complete key sets so a
 //      field that silently appears or disappears fails here.
 //
 // Everything asserted here is current behavior. If a later phase needs one of
@@ -322,7 +322,6 @@ describe("characterization: Session construction", () => {
       compactV2Active: false,
       compactV2HintPages: { kind: "Array", length: 0 },
       compactV2Index: null,
-      compactV2Mode: "on",
       compactV2Previous: null,
       compactV2Refs: { kind: "Map", size: 0 },
       compactV2Secret: { kind: "Buffer", length: 32 },
@@ -333,8 +332,6 @@ describe("characterization: Session construction", () => {
       lastActivityAt: expect.any(Number),
       lastCartMutation: null,
       lastElements: { kind: "Array", length: 0 },
-      observeSnapshotFile: null,
-      prevObserve: null,
       secretSlots: { kind: "Map", size: 0 },
       startUrl: "https://app.example.com/signup",
       startedAt: expect.any(Number),
@@ -377,7 +374,6 @@ describe("characterization: Session construction", () => {
     await startHarnessProvisionSession({
       serviceUrl: "https://shop.example.com/cart",
       browser,
-      observationFormat: "v1",
     });
 
     expect(constructed).toEqual({
@@ -393,8 +389,6 @@ describe("characterization: Session construction", () => {
       compactV2Active: false,
       compactV2HintPages: { kind: "Array", length: 0 },
       compactV2Index: null,
-      // harness start derives the mode from observationFormat, never the env.
-      compactV2Mode: "off",
       compactV2Previous: null,
       compactV2Refs: { kind: "Map", size: 0 },
       compactV2Secret: { kind: "Buffer", length: 32 },
@@ -405,8 +399,6 @@ describe("characterization: Session construction", () => {
       lastActivityAt: expect.any(Number),
       lastCartMutation: null,
       lastElements: { kind: "Array", length: 0 },
-      observeSnapshotFile: null,
-      prevObserve: null,
       secretSlots: { kind: "Map", size: 0 },
       startUrl: "https://shop.example.com/cart",
       startedAt: expect.any(Number),
@@ -499,24 +491,6 @@ const FULL_V2_DELTA_KEYS = [
   "url",
 ];
 const START_COMPACT_V2_KEYS = ["format", "safe_table", "session_id", "stage", "url"];
-const V1_COMPACT_KEYS = [
-  "delta",
-  "elements_total",
-  "session_id",
-  "snapshot_file",
-  "text",
-  "text_unchanged",
-  "unchanged",
-  "url",
-];
-const V1_FULL_KEYS = [
-  "accessibility",
-  "elements",
-  "screen",
-  "session_id",
-  "text",
-  "url",
-];
 const QUERY_KEYS = ["format", "safe_table", "session_id", "stage", "url"];
 
 function el(over: Partial<InteractiveElement>): InteractiveElement {
@@ -635,7 +609,6 @@ describe("characterization: agent-facing observation payload shapes", () => {
     const start = await startHarnessProvisionSession({
       serviceUrl: "https://app.example.com/signup",
       browser: new BrowserController({}),
-      observationFormat: "browser-use-dom",
       format: "compact",
     });
     expect(start.format).toBe("browser-use-control-query");
@@ -664,7 +637,6 @@ describe("characterization: agent-facing observation payload shapes", () => {
     const start = await startHarnessProvisionSession({
       serviceUrl: "https://app.example.com/signup",
       browser: new BrowserController({}),
-      observationFormat: "browser-use-dom",
       format: "full",
     });
     expect(start.format).toBe("browser-use-dom");
@@ -687,37 +659,10 @@ describe("characterization: agent-facing observation payload shapes", () => {
     expect(implicit.dom_unchanged).toBe(true);
   });
 
-  it("V1 compact operate_observe returns exactly these payload keys", async () => {
-    const start = await startHarnessProvisionSession({
-      serviceUrl: "https://app.example.com/signup",
-      browser: new BrowserController({}),
-      observationFormat: "v1",
-    });
-    expect(start.format).toBeUndefined();
-    const observation = await observe(start.session_id, "compact");
-    expect(observation.session_id).toBe(start.session_id);
-    expect(observation.url).toBe("https://app.example.com/signup");
-    expect(Object.keys(observation).sort()).toEqual(V1_COMPACT_KEYS);
-    expect(observation.safe_table).toBeUndefined();
-  });
-
-  it("V1 full operate_observe returns exactly these payload keys", async () => {
-    const start = await startHarnessProvisionSession({
-      serviceUrl: "https://app.example.com/signup",
-      browser: new BrowserController({}),
-      observationFormat: "v1",
-    });
-    const observation = await observe(start.session_id, "full");
-    expect(Object.keys(observation).sort()).toEqual(V1_FULL_KEYS);
-    expect(observation.elements?.length ?? 0).toBeGreaterThan(0);
-    expect(observation.safe_table).toBeUndefined();
-  });
-
   it("operate_observe_query returns exactly these sealed lookup payload keys", async () => {
     const start = await startHarnessProvisionSession({
       serviceUrl: "https://app.example.com/signup",
       browser: new BrowserController({}),
-      observationFormat: "browser-use-dom",
     });
     const result = await observeQuery(start.session_id, "sign up");
     expect(Object.keys(result).sort()).toEqual(QUERY_KEYS);

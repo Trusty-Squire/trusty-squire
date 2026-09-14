@@ -167,7 +167,7 @@ describe("direct card injection and masked observation", () => {
           browser: controller,
           serviceUrl: topUrl,
           format: "full",
-          observationFormat: "browser-use-dom",
+          format: "full",
         });
         sessionId = started.session_id;
         const elements = await controller.extractInteractiveElements();
@@ -297,7 +297,6 @@ describe("direct card injection and masked observation", () => {
         const started = await startHarnessProvisionSession({
           browser: controller,
           serviceUrl: topUrl,
-          observationFormat: "browser-use-dom",
           format: "compact",
         });
         sessionId = started.session_id;

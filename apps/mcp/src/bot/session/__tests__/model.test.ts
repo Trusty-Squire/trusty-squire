@@ -16,7 +16,6 @@ function input(over: Partial<CreateSessionInput> = {}): CreateSessionInput {
     id: "session-1",
     browser,
     allowedHosts: [{ host: "app.example.com", source: "start" }],
-    compactV2Mode: "on",
     startUrl: "https://app.example.com/signup",
     consentInboxRead: false,
     userEmail: null,
@@ -35,7 +34,6 @@ describe("createSession", () => {
     expect(session.allowedHosts).toEqual([{ host: "app.example.com", source: "start" }]);
     expect(session.generation).toBe(0);
     expect(session.startUrl).toBe("https://app.example.com/signup");
-    expect(session.compactV2Mode).toBe("on");
     expect(session.consentInboxRead).toBe(false);
     expect(session.userEmail).toBeNull();
 
@@ -109,7 +107,6 @@ describe("createSession", () => {
   it("carries the harness start's differing inputs without changing anything else", () => {
     const harness = createSession(
       input({
-        compactV2Mode: "off",
         startUrl: "https://shop.example.com/cart",
         consentInboxRead: false,
         userEmail: null,
@@ -117,12 +114,10 @@ describe("createSession", () => {
     );
     const normal = createSession(input({ consentInboxRead: true, userEmail: "u@example.com" }));
 
-    expect(harness.compactV2Mode).toBe("off");
     expect(normal.consentInboxRead).toBe(true);
     expect(normal.userEmail).toBe("u@example.com");
     // The two differ ONLY on the declared inputs.
     const varying = new Set([
-      "compactV2Mode",
       "startUrl",
       "consentInboxRead",
       "userEmail",

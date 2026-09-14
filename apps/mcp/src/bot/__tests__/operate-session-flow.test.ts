@@ -2684,7 +2684,7 @@ describe("Compact V2 action-map boundary", () => {
     h.prose = [`Your token ${token} was created.`];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
+      format: "full",
       serviceUrl: "https://app.example.com/dashboard",
     });
     expect(started).not.toHaveProperty("text");
@@ -2711,7 +2711,7 @@ describe("Compact V2 action-map boundary", () => {
     ];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
+      format: "full",
       serviceUrl: "https://app.example.com/dashboard",
     });
     const [first, second] = domRefs(started);
@@ -2749,7 +2749,7 @@ describe("Compact V2 action-map boundary", () => {
     h.captureOverride = capture;
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
+      format: "full",
       serviceUrl: "https://app.example.com/dashboard",
     });
     expect(started.dom).toContain("Complete surrounding page");
@@ -2791,7 +2791,7 @@ describe("Compact V2 action-map boundary", () => {
     ];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
+      format: "full",
       serviceUrl: "https://app.example.com/dashboard",
     });
     const original = domRefs(started)[0]!;
@@ -2816,7 +2816,7 @@ describe("Compact V2 action-map boundary", () => {
     h.prose = ["Waiting for the protection check"];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
+      format: "full",
       serviceUrl: "https://app.example.com/protect",
     });
     expect(started.dom).toContain("Waiting for the protection check");
@@ -2849,7 +2849,7 @@ describe("Compact V2 action-map boundary", () => {
     ];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
+      format: "full",
       serviceUrl: "https://app.example.com/protect",
     });
     // A Turnstile-style protect check: the click lands, the challenge frame
@@ -2889,7 +2889,7 @@ describe("Compact V2 action-map boundary", () => {
       ];
       const started = await startHarnessProvisionSession({
         browser: new BrowserController(),
-        observationFormat: "browser-use-dom",
+        format: "full",
         serviceUrl: "https://app.example.com/dashboard",
       });
       const ref = domRefs(started)[0]!;
@@ -2911,7 +2911,7 @@ describe("Compact V2 action-map boundary", () => {
     h.elements = [elem({ visibleText: "Continue", selector: "#continue" })];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
+      format: "full",
       serviceUrl: "https://app.example.com/protect?attempt=1",
     });
     const unchanged = await observe(started.session_id);
@@ -2941,7 +2941,7 @@ describe("Compact V2 action-map boundary", () => {
     h.captureOverride = before;
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
+      format: "full",
       serviceUrl: "https://app.example.com/dashboard",
     });
     const navRef = domRefs(started)[0]!;
@@ -3032,7 +3032,7 @@ describe("Compact V2 action-map boundary", () => {
     h.captureOverride = initial;
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
+      format: "full",
       serviceUrl: "https://app.example.com/protect",
     });
     expect(started.dom).toContain("Closed Shadow");
@@ -3073,7 +3073,7 @@ describe("Compact V2 action-map boundary", () => {
     h.elements = [elem({ visibleText: "Continue", selector: "#continue" })];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
+      format: "full",
       serviceUrl: "https://app.example.com/dashboard",
     });
     h.proseError = "DOMSnapshot.captureSnapshot failed";
@@ -3089,7 +3089,7 @@ describe("Compact V2 action-map boundary", () => {
     h.prose = ["Long readable content. ".repeat(600)];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
+      format: "full",
       serviceUrl: "https://app.example.com/dashboard",
     });
     expect(started.dom).toContain(h.prose[0]!.trim());
@@ -3118,7 +3118,7 @@ describe("Compact V2 action-map boundary", () => {
     const compact = await startHarnessProvisionSession({
       browser: new BrowserController(),
       serviceUrl: "https://shop.example.com/checkout",
-      observationFormat: "browser-use-dom",
+      format: "full",
     });
     expect(compact.format).toBe("browser-use-dom");
     expect(Buffer.byteLength(JSON.stringify(compact), "utf8")).toBeLessThanOrEqual(

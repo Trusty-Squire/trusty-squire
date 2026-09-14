@@ -508,7 +508,7 @@ describe("native screenshot/click tool contract on an isolated session", () => {
       browser: f.controller,
       serviceUrl: "http://parent.test/",
       extraAllowedHosts: ["child.test"],
-      observationFormat: "browser-use-dom",
+      format: "full",
     });
     try {
       const shot = await captureScreenshot(started.session_id);
@@ -553,7 +553,7 @@ describe("native screenshot/click tool contract on an isolated session", () => {
         browser: f.controller,
         serviceUrl: "http://parent.test/",
         extraAllowedHosts: ["child.test"],
-        observationFormat: "browser-use-dom",
+        format: "full",
       });
       try {
         if (nested)
@@ -604,7 +604,7 @@ describe("native screenshot/click tool contract on an isolated session", () => {
       const started = await startHarnessProvisionSession({
         browser: f.controller,
         serviceUrl: "http://parent.test/",
-        observationFormat: "browser-use-dom",
+        format: "full",
       });
       try {
         await f.page.evaluate(() => {
@@ -676,7 +676,7 @@ describe("native screenshot/click tool contract on an isolated session", () => {
         browser: f.controller,
         serviceUrl: "http://parent.test/",
         extraAllowedHosts: ["child.test"],
-        observationFormat: "browser-use-dom",
+        format: "full",
       });
       try {
         const shot = await captureScreenshot(started.session_id);
@@ -736,7 +736,7 @@ describe("native screenshot/click tool contract on an isolated session", () => {
     const started = await startHarnessProvisionSession({
       browser: f.controller,
       serviceUrl: "http://parent.test/",
-      observationFormat: "browser-use-dom",
+      format: "full",
     });
     try {
       await f.page.evaluate(() => {
@@ -775,7 +775,7 @@ describe("native screenshot/click tool contract on an isolated session", () => {
     const started = await startHarnessProvisionSession({
       browser: f.controller,
       serviceUrl: "http://parent.test/",
-      observationFormat: "browser-use-dom",
+      format: "full",
     });
     try {
       await expect(
