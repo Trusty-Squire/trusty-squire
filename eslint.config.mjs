@@ -32,9 +32,12 @@ export default [
     },
   },
   {
-    // This release-test manifest intentionally lives beside Vitest configs,
-    // outside apps/mcp's build/typecheck source root.
-    files: ["apps/mcp/vitest.tiers.ts"],
+    // These manifests intentionally live beside Vitest configs and manual
+    // diagnostics, outside apps/mcp's build/typecheck source root.
+    files: [
+      "apps/mcp/vitest.tiers.ts",
+      "apps/mcp/scripts/oopif-live-diagnostics.ts",
+    ],
     languageOptions: {
       parserOptions: {
         project: "./apps/mcp/tsconfig.eslint.json",

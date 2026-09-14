@@ -5,6 +5,15 @@
 // Page.getFrameTree on the page session does not list that child, so a frame
 // walk built only on the top session silently drops it.
 //
+// A second live shape (whitejade.xyz Shopify checkout, 2026-09-14) dropped
+// the SAME frames even after the frame map worked: attachFrames gated on the
+// iframe node's VIEWPORT visibility, and Shopify renders the card fields
+// below the fold — visible=false, bounds present, so neither attach nor the
+// omission branch fired and the drop stayed silent. The iframe here is
+// therefore rendered OUT OF the initial viewport, with Shopify's query-string
+// src shape (?identifier=&locationURL=), so the compact map can only contain
+// the card fields if attachment ignores viewport clipping.
+//
 // #772's "cross-origin" regression served the child from a second localhost
 // PORT — same site, same process — so it passed while real OOPIFs were still
 // dropped. This file maps two DIFFERENT registrable domains to loopback over a
@@ -63,7 +72,10 @@ beforeAll(async () => {
     if (host === PARENT_HOST) {
       res.end(
         '<!doctype html><html><body><main>Checkout</main>' +
-          `<iframe name="card-fields-number" src="http://${CHILD_HOST}:${port}${CHILD_PATH}" ` +
+          // Pushes the iframe below the fold: rendered with real bounds, but
+          // outside the initial viewport — the live whitejade failing shape.
+          '<div style="height:2000px"></div>' +
+          `<iframe name="card-fields-number" src="http://${CHILD_HOST}:${port}${CHILD_PATH}?identifier=&locationURL=" ` +
           'style="width:320px;height:200px;border:0"></iframe>' +
           "</body></html>",
       );
@@ -145,7 +157,7 @@ describe("out-of-process iframe observation (real Chromium, real HTTP)", () => {
       let sessionId: string | undefined;
       try {
         const topUrl = `http://${PARENT_HOST}:${port}/checkout`;
-        const childUrl = `http://${CHILD_HOST}:${port}${CHILD_PATH}`;
+        const childUrl = `http://${CHILD_HOST}:${port}${CHILD_PATH}?identifier=&locationURL=`;
         const controller = BrowserController.fromHarnessPage(isolated.page);
         const started = await startHarnessProvisionSession({
           browser: controller,
@@ -157,6 +169,13 @@ describe("out-of-process iframe observation (real Chromium, real HTTP)", () => {
 
         // Precondition: this is genuinely an OOPIF, not a same-process frame.
         expect(await childIsSeparateTarget(isolated.page)).toBe(true);
+        // Precondition: the card iframe is rendered but OUT OF the viewport —
+        // the shape whose silent drop shipped as 1.1.14-rc.23.
+        const iframeBox = await isolated.page
+          .locator('iframe[name="card-fields-number"]')
+          .boundingBox();
+        expect(iframeBox).not.toBeNull();
+        expect(iframeBox!.y).toBeGreaterThanOrEqual(720);
 
         const compact = (await observe(sessionId, "compact")) as unknown as Record<string, unknown>;
         const rows = compact.safe_table as Array<[string, string, string?]>;
@@ -240,7 +259,7 @@ describe("out-of-process iframe observation (real Chromium, real HTTP)", () => {
       let sessionId: string | undefined;
       try {
         const topUrl = `http://${PARENT_HOST}:${port}/checkout`;
-        const childUrl = `http://${CHILD_HOST}:${port}${CHILD_PATH}`;
+        const childUrl = `http://${CHILD_HOST}:${port}${CHILD_PATH}?identifier=&locationURL=`;
         const controller = BrowserController.fromHarnessPage(isolated.page);
         const started = await startHarnessProvisionSession({
           browser: controller,
