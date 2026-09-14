@@ -146,9 +146,10 @@ export interface BrowserState {
   screenshot: string; // base64
 }
 
-// Checkout data types moved to checkout.ts (design PR 5); re-exported so the
-// existing browser-side CheckoutCard importers are unchanged in this PR.
-export type { CheckoutCard, CheckoutSummary, CheckoutReviewSummary } from "./checkout.js";
+// Checkout data types moved to checkout.ts (design PR 5, where the caller-less
+// checkout parsing/reads were deleted); re-exported so the existing
+// browser-side CheckoutCard importers are unchanged in this PR.
+export type { CheckoutCard, CheckoutSummary } from "./checkout.js";
 
 export type ClickDispatchStatus = "not_dispatched" | "dispatched" | "unknown";
 

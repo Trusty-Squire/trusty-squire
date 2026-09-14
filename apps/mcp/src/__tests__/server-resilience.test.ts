@@ -139,7 +139,6 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
       currentUrl: vi.fn().mockReturnValue(url),
       activePage: vi.fn().mockReturnValue(null),
       takeOAuthTerminalCompletionUrl: vi.fn().mockReturnValue(null),
-      readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
       close: vi.fn().mockResolvedValue(undefined),
     } as unknown as BrowserController;
     const started = await startHarnessProvisionSession({ serviceUrl: url, browser });
@@ -308,7 +307,6 @@ it("roundtrips flat finish schemas and typed receipts through the MCP SDK", asyn
     currentUrl: () => "https://schema.test/",
     activePage: () => null,
     takeOAuthTerminalCompletionUrl: () => null,
-    readCheckoutSummary: vi.fn().mockRejectedValue(new Error("none")),
     close: vi.fn().mockResolvedValue("closed"),
   } as unknown as BrowserController;
   const started = await startHarnessProvisionSession({

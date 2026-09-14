@@ -151,9 +151,6 @@ vi.mock("../browser.js", async (importOriginal) => {
       async extractCheckoutFieldNames(): Promise<string[]> {
         return [];
       }
-      async readCheckoutSummary(): Promise<null> {
-        return null;
-      }
       async readCartLineItems(): Promise<unknown[]> {
         return [];
       }

@@ -141,40 +141,6 @@ const h = vi.hoisted(() => ({
   captureOverride: null as BrowserUseCapture | null,
   observationSemantics: { title: "", headings: [] as string[] },
   openFirstMailResult: false,
-  // fill_card cart-total-carry-forward (Session.lastCartCheckout): null means
-  // "no total on this page" (readCheckoutSummary rejects, the common case).
-  checkoutSummary: null as {
-    merchant: string;
-    checkout_origin: string;
-    amount_cents: number;
-    currency: string;
-  } | null,
-  cartLineItems: [] as Array<{
-    title: string;
-    quantity: number;
-    details?: string;
-    product_identities: string[];
-    option_signatures: string[];
-  }>,
-  cartLineItemsAfterClick: null as Array<{
-    title: string;
-    quantity: number;
-    details?: string;
-    product_identities: string[];
-    option_signatures: string[];
-  }> | null,
-  cartLineReadFailuresRemaining: 0,
-  failNextCartLineReadAfterClick: false,
-  clearCartResult: true,
-  clearCartCalls: 0,
-  clearCartItems: null as Array<{
-    title: string;
-    quantity: number;
-    details?: string;
-    product_identities: string[];
-    option_signatures: string[];
-  }> | null,
-  readCheckoutSummaryCalls: 0,
   focusedLabels: [] as string[],
   pressedKeys: [] as string[],
   scrolls: [] as string[],
@@ -390,40 +356,8 @@ vi.mock("../browser.js", async (importOriginal) => ({
     async readClipboard(): Promise<string> {
       return "";
     }
-    async readCheckoutSummary(): Promise<{
-      merchant: string;
-      checkout_origin: string;
-      amount_cents: number;
-      currency: string;
-    }> {
-      h.readCheckoutSummaryCalls += 1;
-      if (h.checkoutSummary === null) throw new Error("payment_checkout_total_not_found");
-      return h.checkoutSummary;
-    }
     paymentBrowser(): this {
       return this;
-    }
-    async readCheckoutReviewLineItems(): Promise<
-      Array<{
-        title: string;
-        quantity: number;
-        details?: string;
-        product_identities: string[];
-        option_signatures: string[];
-      }>
-    > {
-      if (h.cartLineReadFailuresRemaining > 0) {
-        h.cartLineReadFailuresRemaining -= 1;
-        throw new Error("cart line observation failed");
-      }
-      return h.cartLineItems.map((line) => ({ ...line, details: line.details ?? line.title }));
-    }
-    async clearCart(): Promise<boolean> {
-      h.clearCartCalls += 1;
-      if (h.clearCartResult) {
-        h.cartLineItems = h.clearCartItems ?? [];
-      }
-      return h.clearCartResult;
     }
     async openFirstMailResult(): Promise<boolean> {
       return h.openFirstMailResult;
@@ -724,11 +658,6 @@ vi.mock("../browser.js", async (importOriginal) => ({
           }
         }
       }
-      if (h.cartLineItemsAfterClick !== null) h.cartLineItems = h.cartLineItemsAfterClick;
-      if (h.failNextCartLineReadAfterClick) {
-        h.cartLineReadFailuresRemaining = 1;
-        h.failNextCartLineReadAfterClick = false;
-      }
     }
     async jsClickHandle(): Promise<void> {
       h.locatorClickCalls += 1;
@@ -846,26 +775,6 @@ vi.mock("../browser.js", async (importOriginal) => ({
   }) => (signals.ariaLabel || signals.inputValue || signals.textContent || "").trim(),
   clickDispatchStatusForError: (await importOriginal<typeof BrowserModule>())
     .clickDispatchStatusForError,
-  parseCheckoutAmount: (texts: readonly string[], fallbackCurrency?: string) => {
-    for (const text of texts) {
-      const match = text.match(
-        /^\s*(?:total\s+)?(?:([A-Z]{3})\s*)?([$¥￥])?\s*([0-9]+(?:[.,][0-9]+)?)\s*(円|[A-Z]{3})?\s*$/i,
-      );
-      if (match?.[3] === undefined) continue;
-      const currency = (
-        match[1] ??
-        match[4] ??
-        (match[2] === "$" ? "USD" : undefined) ??
-        fallbackCurrency
-      )
-        ?.replace("円", "JPY")
-        .toUpperCase();
-      if (currency === undefined) continue;
-      const amount = Number(match[3].replace(",", "."));
-      return { amount_cents: Math.round(amount * (currency === "JPY" ? 1 : 100)), currency };
-    }
-    return null;
-  },
   // Fix C — mirrors the real exports so provision-session.ts's honest
   // OAuth-timeout classification (never asserting an unverifiable cause) can
   // throw/catch these against this mocked module.
@@ -1138,15 +1047,6 @@ beforeEach(() => {
   h.captureOverride = null;
   h.observationSemantics = { title: "", headings: [] };
   h.openFirstMailResult = false;
-  h.checkoutSummary = null;
-  h.cartLineItems = [];
-  h.cartLineItemsAfterClick = null;
-  h.cartLineReadFailuresRemaining = 0;
-  h.failNextCartLineReadAfterClick = false;
-  h.clearCartResult = true;
-  h.clearCartCalls = 0;
-  h.clearCartItems = null;
-  h.readCheckoutSummaryCalls = 0;
   h.focusedLabels = [];
   h.pressedKeys = [];
   h.scrolls = [];

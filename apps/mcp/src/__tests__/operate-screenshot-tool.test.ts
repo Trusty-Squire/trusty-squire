@@ -53,7 +53,6 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       currentUrl: vi.fn().mockReturnValue(url),
       activePage: vi.fn().mockReturnValue({ isClosed: () => false, url: () => url }),
       takeOAuthTerminalCompletionUrl: vi.fn().mockReturnValue(null),
-      readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
       close: vi.fn().mockResolvedValue(undefined),
       captureOperatorScreenshot: vi.fn().mockResolvedValue({
         base64: TINY_JPEG_BASE64,
@@ -121,7 +120,6 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       currentUrl: vi.fn().mockReturnValue(url),
       activePage: vi.fn().mockReturnValue({ isClosed: () => false, url: () => url }),
       takeOAuthTerminalCompletionUrl: vi.fn().mockReturnValue(null),
-      readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
       close: vi.fn().mockResolvedValue(undefined),
       captureOperatorScreenshot: vi.fn().mockResolvedValue({
         base64: TINY_JPEG_BASE64,
@@ -172,7 +170,6 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       currentUrl: vi.fn().mockReturnValue(url),
       activePage: vi.fn().mockReturnValue({ isClosed: () => false, url: () => url }),
       takeOAuthTerminalCompletionUrl: vi.fn().mockReturnValue(null),
-      readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
       close: vi.fn().mockResolvedValue(undefined),
       captureOperatorScreenshot: vi.fn().mockResolvedValue({
         base64: TINY_JPEG_BASE64,
@@ -217,7 +214,6 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       currentUrl: vi.fn().mockReturnValue(url),
       activePage: vi.fn().mockReturnValue({ isClosed: () => false, url: () => url }),
       takeOAuthTerminalCompletionUrl: vi.fn().mockReturnValue(null),
-      readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
       close: vi.fn().mockResolvedValue(undefined),
       captureOperatorScreenshot: vi.fn().mockResolvedValue({
         base64: TINY_JPEG_BASE64,
@@ -259,7 +255,6 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       currentUrl: vi.fn().mockReturnValue(url),
       activePage: vi.fn().mockReturnValue({ isClosed: () => false, url: () => url }),
       takeOAuthTerminalCompletionUrl: vi.fn().mockReturnValue(null),
-      readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
       close: vi.fn().mockResolvedValue(undefined),
       captureOperatorScreenshot: vi.fn().mockResolvedValue({
         base64: TINY_JPEG_BASE64,
