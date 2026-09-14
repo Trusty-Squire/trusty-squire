@@ -2795,17 +2795,6 @@ export class BrowserController {
     await this.humanClick(selector);
   }
 
-  // Force-click bypasses Playwright's actionability + interception checks — for a
-  // button that is visible / enabled / stable but whose pointer events are eaten
-  // by a modal-dialog backdrop layered over it (MUI `<div class="MuiDialog-
-  // container">`, e.g. deepinfra's new-API-key dialog). A normal click() there
-  // times out with "intercepts pointer events"; force dispatches at the element.
-  async clickForce(selector: string, index = 0): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    const safeIndex = Math.max(0, Math.floor(index));
-    await this.page.locator(selector).nth(safeIndex).click({ force: true, timeout: 8000 });
-  }
-
   // Resolve a locator-form operate_act target (`text=…` / `css=…`) DIRECTLY
   // against a live page/frame document, bypassing the extracted-inventory list.
   // This is the escape hatch for a control the inventory never emitted: a bare
@@ -3413,42 +3402,6 @@ export class BrowserController {
       .catch(() => undefined);
   }
 
-  async clickNth(selector: string, index: number): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    const safeIndex = Math.max(0, Math.floor(index));
-    const locator = this.page.locator(selector).nth(safeIndex);
-    await locator.click({ timeout: 8000 });
-  }
-
-  // Click a link/button by its visible text. Used for one-off
-  // dismissibles where the bot knows the literal label text and
-  // doesn't need full inventory ranking (e.g. GitHub's "skip 2FA
-  // verification at this moment" link on the post-handshake 2FA
-  // sanity page). Case-insensitive substring match — GitHub
-  // occasionally tweaks capitalization on the same link.
-  //
-  // Returns true on successful click, false when the text isn't on
-  // the page within the timeout. Doesn't throw on miss — caller
-  // decides whether to fall back to abort.
-  async clickLinkByText(text: string, timeoutMs = 3000): Promise<boolean> {
-    if (!this.page) throw new Error("Browser not started");
-    try {
-      // Escape regex metacharacters in the user-supplied label text so
-      // a literal "(2FA)" or "." doesn't get interpreted as a pattern.
-      const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const locator = this.page.getByText(new RegExp(escaped, "i")).first();
-      await locator.waitFor({ state: "visible", timeout: timeoutMs });
-      if (this.humanize) {
-        await this.humanClickLocator(locator);
-      } else {
-        await locator.click();
-      }
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
   // Click the form's submit button, disambiguating when the planned
   // selector matches several elements. Signup pages routinely render
   // OAuth buttons ("Continue with Google" / "GitHub") as
@@ -3891,161 +3844,6 @@ export class BrowserController {
       else window.scrollBy(0, step);
     }, direction);
     await page.waitForTimeout(350);
-  }
-
-  async scrollToEndOfTOS(selector?: string): Promise<{
-    scrolled: boolean;
-    container: string | null;
-    reason: "ok" | "no_container" | "already_at_bottom";
-  }> {
-    if (!this.page) throw new Error("Browser not started");
-
-    // 1. Find the container.
-    const target = await this.page.evaluate((sel: string | null) => {
-      const scrollableOf = (el: Element): boolean => {
-        const s = window.getComputedStyle(el);
-        const overflowY = s.overflowY;
-        if (overflowY !== "auto" && overflowY !== "scroll") return false;
-        return el.scrollHeight > el.clientHeight + 20;
-      };
-      const visibleArea = (el: Element): number => {
-        const r = el.getBoundingClientRect();
-        const vw = window.innerWidth;
-        const vh = window.innerHeight;
-        const w = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
-        const h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
-        return w * h;
-      };
-      const describe = (
-        el: Element,
-      ): { rect: DOMRect; scrollTop: number; scrollHeight: number; clientHeight: number } => ({
-        rect: el.getBoundingClientRect(),
-        scrollTop: el.scrollTop,
-        scrollHeight: el.scrollHeight,
-        clientHeight: el.clientHeight,
-      });
-      if (sel !== null) {
-        const explicit = document.querySelector(sel);
-        if (explicit === null) return null;
-        return describe(explicit);
-      }
-      // Auto-detect: largest visible scrollable element.
-      const all = Array.from(document.querySelectorAll<HTMLElement>("*"));
-      const candidates = all.filter(scrollableOf).map((el) => ({
-        el,
-        area: visibleArea(el),
-      }));
-      candidates.sort((a, b) => b.area - a.area);
-      const winner = candidates[0];
-      if (winner === undefined || winner.area < 100) return null;
-      return describe(winner.el);
-    }, selector ?? null);
-
-    if (target === null) {
-      return { scrolled: false, container: null, reason: "no_container" };
-    }
-
-    // Already at the bottom on entry — a no-op scroll. Surface this
-    // so the executor can hint the planner that whatever is gating
-    // the disabled button is NOT scroll position (Railway iter ≥2 on
-    // the second ToS modal: planner kept asking for scroll when the
-    // form was actually waiting on something else).
-    if (target.scrollTop + target.clientHeight >= target.scrollHeight - 4) {
-      return {
-        scrolled: false,
-        container: selector ?? "auto-detected",
-        reason: "already_at_bottom",
-      };
-    }
-
-    const { rect } = target;
-    const cx = rect.x + rect.width / 2;
-    const cy = rect.y + rect.height / 2;
-
-    // 2. Move the mouse over the container, then wheel down repeatedly.
-    if (this.humanize) {
-      await this.bezierMouseTo(cx, cy);
-      await this.sleep(rand(80, 200));
-    } else {
-      await this.page.mouse.move(cx, cy);
-    }
-
-    const deltaPerStep = Math.max(200, Math.floor(rect.height * 0.7));
-    const maxSteps = 30;
-    for (let i = 0; i < maxSteps; i++) {
-      await this.page.mouse.wheel(0, deltaPerStep);
-      await this.sleep(this.humanize ? rand(60, 180) : 30);
-      const atBottom = await this.page.evaluate(
-        ({ sel, autoDetected }: { sel: string | null; autoDetected: boolean }) => {
-          let el: Element | null;
-          if (sel !== null) {
-            el = document.querySelector(sel);
-          } else {
-            // Re-resolve the same way we picked it the first time —
-            // the modal we wheeled may have re-rendered (virtualized
-            // list mounting new rows), so cache-by-reference would go
-            // stale.
-            const all = Array.from(document.querySelectorAll<HTMLElement>("*"));
-            const overflowing = all.filter((node) => {
-              const s = window.getComputedStyle(node);
-              if (s.overflowY !== "auto" && s.overflowY !== "scroll") return false;
-              return node.scrollHeight > node.clientHeight + 20;
-            });
-            const visibleArea = (n: Element): number => {
-              const r = n.getBoundingClientRect();
-              const vw = window.innerWidth;
-              const vh = window.innerHeight;
-              const w = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
-              const h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
-              return w * h;
-            };
-            overflowing.sort((a, b) => visibleArea(b) - visibleArea(a));
-            el = overflowing[0] ?? null;
-          }
-          if (el === null) return true;
-          void autoDetected;
-          return el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
-        },
-        { sel: selector ?? null, autoDetected: selector === undefined },
-      );
-      if (atBottom) break;
-    }
-
-    // 3. JS fallback: pin scrollTop to the end and fire a synthetic
-    //    scroll event for handlers that only react on the final
-    //    position. No-op if the wheel loop already reached the bottom.
-    await this.page.evaluate((sel: string | null) => {
-      let el: Element | null;
-      if (sel !== null) {
-        el = document.querySelector(sel);
-      } else {
-        const all = Array.from(document.querySelectorAll<HTMLElement>("*"));
-        const overflowing = all.filter((node) => {
-          const s = window.getComputedStyle(node);
-          if (s.overflowY !== "auto" && s.overflowY !== "scroll") return false;
-          return node.scrollHeight > node.clientHeight + 20;
-        });
-        const visibleArea = (n: Element): number => {
-          const r = n.getBoundingClientRect();
-          const vw = window.innerWidth;
-          const vh = window.innerHeight;
-          const w = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
-          const h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
-          return w * h;
-        };
-        overflowing.sort((a, b) => visibleArea(b) - visibleArea(a));
-        el = overflowing[0] ?? null;
-      }
-      if (el === null) return;
-      el.scrollTop = el.scrollHeight;
-      el.dispatchEvent(new Event("scroll", { bubbles: true }));
-    }, selector ?? null);
-
-    return {
-      scrolled: true,
-      container: selector ?? "auto-detected",
-      reason: "ok",
-    };
   }
 
   // Pick a valid option for either a native <select> OR a custom
@@ -4708,7 +4506,7 @@ export class BrowserController {
     // elements. For a click that's harmless: every match is the same visual
     // affordance. Narrow to the first match (Playwright's documented
     // disambiguation for clicks) when the selector isn't already unique,
-    // matching what clickSubmit/clickLinkByText already do.
+    // matching what clickSubmit already does.
     const locator = this.page.locator(selector);
     const count = await locator.count().catch(() => 1);
     await this.humanClickLocator(pickClickLocator(locator, count));
@@ -5849,109 +5647,6 @@ export class BrowserController {
     }
   }
 
-  async solveVisibleHcaptchaChallengeWithCoordinates(
-    solve: (input: {
-      imageBase64: string;
-      comment?: string;
-      minClicks?: number;
-      maxClicks?: number;
-    }) => Promise<TwoCaptchaCoordinatesResult>,
-  ): Promise<HcaptchaCoordinateSolveResult> {
-    if (!this.page) throw new Error("Browser not started");
-
-    const challenge = await this.findVisibleHcaptchaChallengeFrame();
-    if (challenge === null) {
-      return { found: false, solved: false, reason: "no_visible_challenge" };
-    }
-
-    let shot: Buffer;
-    try {
-      shot = await challenge.locator.screenshot({ type: "png", timeout: 8_000 });
-    } catch (err) {
-      return {
-        found: true,
-        solved: false,
-        reason: `screenshot_failed:${err instanceof Error ? err.message : String(err)}`,
-        clicks: 0,
-      };
-    }
-
-    const dims = pngDimensions(shot);
-    if (dims === null || dims.width <= 0 || dims.height <= 0) {
-      return {
-        found: true,
-        solved: false,
-        reason: "invalid_challenge_screenshot",
-        clicks: 0,
-      };
-    }
-
-    const solveRes = await solve({
-      imageBase64: shot.toString("base64"),
-      comment:
-        "hCaptcha challenge screenshot. Click all matching image targets requested by the prompt. If a Verify or Submit button is visible, click it after selecting targets.",
-      minClicks: 1,
-      maxClicks: 12,
-    });
-    if (solveRes.kind !== "ok") {
-      return {
-        found: true,
-        solved: false,
-        reason: `2captcha_${solveRes.kind}` + ("reason" in solveRes ? `:${solveRes.reason}` : ""),
-        clicks: 0,
-        ...("durationMs" in solveRes ? { durationMs: solveRes.durationMs } : {}),
-      };
-    }
-
-    let clicks = 0;
-    for (const point of solveRes.coordinates) {
-      const box = await challenge.locator.boundingBox({ timeout: 1_500 }).catch(() => null);
-      if (box === null || box.width <= 0 || box.height <= 0) break;
-      const x = box.x + (point.x / dims.width) * box.width;
-      const y = box.y + (point.y / dims.height) * box.height;
-      await this.bezierMouseTo(x, y);
-      await this.sleep(rand(100, 260));
-      await this.page.mouse.click(x, y);
-      this.mouseX = x;
-      this.mouseY = y;
-      clicks += 1;
-    }
-
-    await this.sleep(650);
-    let settled = await this.waitForCaptchaChallengeToSettle(2_500).catch(() => false);
-    if (!settled && clicks > 0) {
-      const box = await challenge.locator.boundingBox({ timeout: 1_500 }).catch(() => null);
-      if (box !== null && box.width > 0 && box.height > 0) {
-        const verifyX = box.x + Math.min(box.width - 32, Math.max(32, box.width * 0.84));
-        const verifyY = box.y + Math.min(box.height - 24, Math.max(24, box.height * 0.92));
-        await this.bezierMouseTo(verifyX, verifyY);
-        await this.sleep(rand(120, 320));
-        await this.page.mouse.click(verifyX, verifyY);
-        this.mouseX = verifyX;
-        this.mouseY = verifyY;
-      }
-      settled = await this.waitForCaptchaChallengeToSettle(10_000).catch(() => false);
-    }
-
-    const responsePresent = await this.page
-      .evaluate(() => {
-        const ta = document.querySelector(
-          'textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"]',
-        ) as HTMLTextAreaElement | null;
-        return ta !== null && ta.value.length > 0;
-      })
-      .catch(() => false);
-
-    const out: HcaptchaCoordinateSolveResult = {
-      found: true,
-      solved: settled || responsePresent,
-      clicks,
-      durationMs: solveRes.durationMs,
-    };
-    if (!out.solved) out.reason = "challenge_still_visible";
-    return out;
-  }
-
   private async findVisibleHcaptchaChallengeFrame(): Promise<{
     locator: Locator;
     box: { x: number; y: number; width: number; height: number };
@@ -6912,63 +6607,6 @@ export class BrowserController {
     return undefined;
   }
 
-  async extractGoogleApiKeyFromCredentials(projectId: string): Promise<string | null> {
-    if (!this.page) throw new Error("Browser not started");
-    const KEY_RE = /AIzaSy[0-9A-Za-z_-]{33}/;
-    const url = `https://console.cloud.google.com/apis/credentials?project=${encodeURIComponent(projectId)}`;
-    await this.page.goto(url, { waitUntil: "domcontentloaded" }).catch(() => undefined);
-    // The credentials table renders async (heavy Angular console). Poll for it.
-    for (let i = 0; i < 12; i++) {
-      await this.wait(2.5);
-      const ready = await this.page
-        .evaluate(() =>
-          /Browser key|API Keys|Create credentials/i.test(document.body?.innerText ?? ""),
-        )
-        .catch(() => false);
-      if (ready) break;
-    }
-    // Locate the Firebase Browser-key row; return its AIzaSy if already shown,
-    // else click the row's "Show key" button to reveal it.
-    const readRowKey = (): Promise<string | null> =>
-      this.page!.evaluate(() => {
-        const rows = Array.from(document.querySelectorAll("tr"));
-        const row =
-          rows.find((r) => /browser key \(auto created by firebase\)/i.test(r.textContent ?? "")) ??
-          rows.find((r) => /browser key/i.test(r.textContent ?? ""));
-        if (row === undefined) return null;
-        const m = (row.textContent ?? "").match(/AIzaSy[0-9A-Za-z_-]{33}/);
-        if (m !== null) return m[0];
-        const btn = Array.from(row.querySelectorAll("button,a")).find((b) =>
-          /show key/i.test(b.textContent ?? ""),
-        );
-        if (btn !== undefined) (btn as HTMLElement).click();
-        return null;
-      }).catch(() => null);
-    const first = await readRowKey();
-    if (first !== null && KEY_RE.test(first)) return first;
-    // After the Show-key click, poll the row (reveal is async) and any dialog
-    // / readonly input the console may surface the value in.
-    for (let i = 0; i < 8; i++) {
-      await this.wait(1.5);
-      const revealed = await this.page
-        .evaluate(() => {
-          const rows = Array.from(document.querySelectorAll("tr"));
-          const row = rows.find((r) => /browser key/i.test(r.textContent ?? ""));
-          const inRow = (row?.textContent ?? "").match(/AIzaSy[0-9A-Za-z_-]{33}/);
-          if (inRow !== null) return inRow[0];
-          for (const inp of Array.from(document.querySelectorAll("input"))) {
-            const v = (inp as HTMLInputElement).value ?? "";
-            const m = v.match(/AIzaSy[0-9A-Za-z_-]{33}/);
-            if (m !== null) return m[0];
-          }
-          return null;
-        })
-        .catch(() => null);
-      if (revealed !== null && KEY_RE.test(revealed)) return revealed;
-    }
-    return null;
-  }
-
   // Deterministically satisfy required, currently-EMPTY combobox/listbox
   // selectors (cmdk / Radix / Headless UI multi-selects) that gate a disabled
   // submit. The dominant `oauth_onboarding_failed` blocker is a post-OAuth
@@ -7115,83 +6753,6 @@ export class BrowserController {
     return filled;
   }
 
-  // Satisfy an API-key/token creation form's required ACCESS-SCOPE controls when
-  // its submit is disabled. Distinct from fillRequiredComboboxes (cmdk/Radix/
-  // LeafyGreen survey selects): the "create a scoped credential" pattern gates
-  // submit behind (a) a segmented "All access" / "Full access" button group that
-  // starts unselected, and (b) a LemonSelect-style preset trigger
-  // (`button[aria-haspopup="true"]` showing "Select…/Choose…") whose options
-  // render in a body-portal Popover as `[role="menuitem"]` — NOT an
-  // aria listbox, so the combobox filler's role/listbox query never sees it.
-  // MEASURED 2026-06-24 (posthog /settings/user-api-keys "Create personal API
-  // key": an "Organization & project access" segmented control + a "Select
-  // preset" scopes dropdown both gate the aria-disabled "Create key"; picking
-  // "All access" on each enables it and mints a phx_ key). Prefers the broadest
-  // option so the resulting credential isn't dead-on-arrival. Idempotent and
-  // tightly gated (callers only invoke it on a disabled submit).
-  async satisfyScopePresets(): Promise<string[]> {
-    if (!this.page) throw new Error("Browser not started");
-    const page = this.page;
-    const done: string[] = [];
-    const dialog = page.locator('[role="dialog"]').first();
-    const root = (await dialog.count().catch(() => 0)) > 0 ? dialog : page.locator("body");
-
-    // (1) Segmented access-scope buttons that start unselected. Exclude select
-    // triggers (aria-haspopup) — those are handled in (2); a selected preset
-    // trigger can also read "All access" and we must not re-open it here.
-    try {
-      const allAccess = root.locator('button:not([aria-haspopup="true"])', {
-        hasText: /^(?:all access|full access|all scopes)$/i,
-      });
-      const n = Math.min(await allAccess.count().catch(() => 0), 3);
-      for (let i = 0; i < n; i += 1) {
-        const b = allAccess.nth(i);
-        if (!(await b.isVisible().catch(() => false))) continue;
-        await b.click({ timeout: 4000 }).catch(() => undefined);
-        done.push("access:all-access");
-        await page.waitForTimeout(300);
-      }
-    } catch {
-      // best-effort
-    }
-
-    // (2) LemonSelect-style preset triggers still showing a placeholder.
-    try {
-      const triggers = root.locator('button[aria-haspopup="true"]');
-      const n = Math.min(await triggers.count().catch(() => 0), 4);
-      for (let i = 0; i < n; i += 1) {
-        const t = triggers.nth(i);
-        if (!(await t.isVisible().catch(() => false))) continue;
-        const txt = ((await t.textContent().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
-        // Only act on an UNSELECTED select (a "Select…/Choose…/Pick…"
-        // placeholder) — never re-pick one that already holds a value.
-        if (!/^(?:please\s+)?(?:select|choose|pick)\b/i.test(txt)) continue;
-        await t.click({ timeout: 4000 }).catch(() => undefined);
-        await page.waitForTimeout(700);
-        const options = page.locator(
-          '.Popover [role="menuitem"], .Popover [role="option"], ' +
-            '[role="listbox"] [role="option"], .LemonDropdown [role="menuitem"]',
-        );
-        const broad = options.filter({ hasText: /all access|full access/i }).first();
-        const pick = (await broad.count().catch(() => 0)) > 0 ? broad : options.first();
-        if ((await pick.count().catch(() => 0)) > 0) {
-          const name = ((await pick.textContent().catch(() => "")) ?? "")
-            .replace(/\s+/g, " ")
-            .trim()
-            .slice(0, 30);
-          await pick.click({ timeout: 4000 }).catch(() => undefined);
-          done.push(`preset:${name}`);
-          await page.waitForTimeout(400);
-        } else {
-          await page.keyboard.press("Escape").catch(() => undefined);
-        }
-      }
-    } catch {
-      // best-effort
-    }
-    return done;
-  }
-
   // True when a visible advance/submit button (Next / Continue / Create /
   // Register / Submit / Get started / Finish) is currently DISABLED. The gate
   // for the deterministic combobox filler: only auto-satisfy a survey's
@@ -7223,115 +6784,6 @@ export class BrowserController {
     } catch {
       return false;
     }
-  }
-
-  async extractScopedRouteCandidates(prefix: string): Promise<string[]> {
-    if (!this.page) throw new Error("Browser not started");
-    return await this.page.evaluate(async (rawPrefix) => {
-      const prefix = String(rawPrefix ?? "")
-        .replace(/^\/+|\/+$/g, "")
-        .toLowerCase();
-      const candidates: string[] = [];
-      const seen = new Set<string>();
-      const add = (value: unknown) => {
-        if (typeof value !== "string") return;
-        const trimmed = value.trim();
-        if (!/^[A-Za-z0-9][A-Za-z0-9_-]{1,127}$/.test(trimmed)) return;
-        if (seen.has(trimmed)) return;
-        seen.add(trimmed);
-        candidates.push(trimmed);
-      };
-      const pathSegments = (href: string): string[] => {
-        try {
-          return new URL(href, location.origin).pathname.split("/").filter(Boolean);
-        } catch {
-          return [];
-        }
-      };
-
-      for (const anchor of Array.from(document.querySelectorAll("a[href]"))) {
-        const segs = pathSegments(anchor.getAttribute("href") ?? "");
-        if ((segs[0] ?? "").toLowerCase() === prefix) add(segs[1]);
-      }
-
-      const walk = (value: unknown) => {
-        if (Array.isArray(value)) {
-          for (const item of value) walk(item);
-          return;
-        }
-        if (value === null || typeof value !== "object") return;
-        const record = value as Record<string, unknown>;
-        const preferredKeys =
-          prefix === "p" || prefix.startsWith("project")
-            ? ["slug", "projectSlug", "currentProjectSlug", "lastViewedProjectSlug", "id"]
-            : prefix.startsWith("org") || prefix.startsWith("organization")
-              ? ["slug", "orgSlug", "organizationSlug", "id"]
-              : prefix.startsWith("workspace")
-                ? ["slug", "workspaceSlug", "id"]
-                : ["slug", "id"];
-        for (const key of preferredKeys) add(record[key]);
-        for (const item of Object.values(record)) walk(item);
-      };
-
-      const inspectJsonText = (text: string) => {
-        try {
-          walk(JSON.parse(text));
-        } catch {
-          // Ignore non-JSON storage/API payloads.
-        }
-      };
-      try {
-        for (let i = 0; i < localStorage.length; i += 1) {
-          const key = localStorage.key(i);
-          if (key !== null) inspectJsonText(localStorage.getItem(key) ?? "");
-        }
-        for (let i = 0; i < sessionStorage.length; i += 1) {
-          const key = sessionStorage.key(i);
-          if (key !== null) inspectJsonText(sessionStorage.getItem(key) ?? "");
-        }
-      } catch {
-        // Storage can be blocked in hardened contexts; DOM/API probes are enough.
-      }
-
-      const likelyListApi = (url: string): boolean => {
-        const lower = url.toLowerCase();
-        if (!lower.includes("api")) return false;
-        if (prefix === "p" || prefix.startsWith("project"))
-          return /projects?[\w.-]*list|list[\w.-]*projects?/.test(lower);
-        if (prefix.startsWith("org") || prefix.startsWith("organization"))
-          return /organi[sz]ations?[\w.-]*list|orgs?[\w.-]*list|list[\w.-]*(orgs?|organi[sz]ations?)/.test(
-            lower,
-          );
-        if (prefix.startsWith("workspace"))
-          return /workspaces?[\w.-]*list|list[\w.-]*workspaces?/.test(lower);
-        return /list/.test(lower);
-      };
-      const urls = Array.from(
-        new Set(
-          performance
-            .getEntriesByType("resource")
-            .map((entry) => entry.name)
-            .filter(likelyListApi),
-        ),
-      ).slice(-8);
-      for (const url of urls) {
-        try {
-          const controller = new AbortController();
-          const timeout = window.setTimeout(() => controller.abort(), 1_500);
-          const res = await fetch(url, {
-            credentials: "include",
-            signal: controller.signal,
-          });
-          window.clearTimeout(timeout);
-          if (!res.ok) continue;
-          inspectJsonText(await res.text());
-        } catch {
-          // Best-effort only; resolver falls back to text/href matching.
-        }
-      }
-
-      return candidates.slice(0, 20);
-    }, prefix);
   }
 
   // Discrete strings an API key might occupy — for credential
@@ -10661,42 +10113,6 @@ export class BrowserController {
     }
   }
 
-  // Does the page sign in with Google via Google Identity Services (GSI)
-  // rather than classic OAuth redirect? GSI renders its button in a
-  // cross-origin iframe (accounts.google.com/gsi/button) and/or exposes the
-  // `google.accounts.id` JS API; on use it raises a browser-native FedCM
-  // dialog or a popup and returns a JWT to a JS callback — there is NO
-  // redirect, so the classic startOAuth flow can't drive it. Detecting this
-  // is what lets the agent route to tryGoogleGsiLogin instead.
-  async hasGoogleGsiAffordance(): Promise<boolean> {
-    if (!this.page) return false;
-    try {
-      return await this.page.evaluate(() => {
-        if (document.querySelector('iframe[src*="accounts.google.com/gsi/"]') !== null) {
-          return true;
-        }
-        // On-demand One-Tap: the page loads the GSI client script but renders
-        // no static button and may not have initialized `google.accounts.id`
-        // yet (amplitude, clerk). A plain click on the in-page "Sign in with
-        // Google" affordance never redirects, so the bot used to falsely
-        // conclude "signed in" and bounce to login. Treat the loaded client
-        // script as a GSI affordance so the agent routes through
-        // tryGoogleGsiLogin, which now raises One-Tap programmatically.
-        if (document.querySelector('script[src*="accounts.google.com/gsi/client"]') !== null) {
-          return true;
-        }
-        const g = (
-          window as unknown as {
-            google?: { accounts?: { id?: unknown } };
-          }
-        ).google;
-        return typeof g?.accounts?.id !== "undefined";
-      });
-    } catch {
-      return false;
-    }
-  }
-
   // Drive a Google Identity Services / FedCM sign-in. Two variants are
   // handled:
   //   - FedCM: clicking the GSI widget raises a browser-NATIVE credential
@@ -10920,30 +10336,6 @@ export class BrowserController {
     return [...new Set(labels)];
   }
 
-  // Open obvious collapsed menus (hamburger / avatar / account / "Settings"
-  // toggles) so nav links hidden behind them mount in the DOM before the
-  // nav-search enumerates candidates (outside-voice #1: the keys link is often
-  // behind a menu, not in the rendered top nav). CONSERVATIVE: only clicks
-  // elements that ADVERTISE a popup menu (aria-haspopup=menu/true), capped at 3,
-  // short timeouts, best-effort — never a plain link, so it can't wander.
-  async expandLatentNav(): Promise<void> {
-    if (!this.page) return;
-    try {
-      const n = await this.page
-        .$$eval('[aria-haspopup="menu"], [aria-haspopup="true"]', (els) => {
-          const slice = els.slice(0, 3);
-          slice.forEach((e, i) => e.setAttribute("data-navsearch-toggle", String(i)));
-          return slice.length;
-        })
-        .catch(() => 0);
-      for (let i = 0; i < n; i++) {
-        await this.page.click(`[data-navsearch-toggle="${i}"]`, { timeout: 1200 }).catch(() => {});
-      }
-    } catch {
-      // best-effort — never fail the search over menu expansion
-    }
-  }
-
   // Fetch a URL's final response (following redirects) and return its
   // status, final URL, and body text — or null on any failure.
   //
@@ -11023,92 +10415,6 @@ export class BrowserController {
     this.oauthProductPage = null;
     this.oauthProviderPage = null;
     this.oauthProviderPageClosed = false;
-  }
-
-  // Drive a Google sign-in on the ACTIVE OAuth page (already sitting at
-  // accounts.google.com/.../identifier). The whole point: replay must not bail
-  // `needs_login` where the full discover bot would just type the password —
-  // a freshly-created robot account lands on the identifier page the first time
-  // a given relying party requests OAuth even with a live session, and the
-  // robot's credentials are available to the verifier. Drives the standard
-  // Google in-page steps (email → Enter → password →
-  // Enter → ToS/continue speedbumps) but operates on `this.page` instead of
-  // navigating to myaccount — in the OAuth flow the success terminus is the
-  // consent screen or the return to the relying party, NOT myaccount. Returns
-  // true when the flow progressed off the Google identifier/password screens
-  // (or the popup closed); false on any failure, so the caller can fall back to
-  // its existing needs_login path. Never logs the password.
-  async loginGoogleInline(email: string, password: string): Promise<boolean> {
-    const page = this.page;
-    if (page === null || page.isClosed()) return false;
-    const onIdentifierOrPwd = (): boolean =>
-      /\/signin\/(?:identifier|v\d+\/(?:identifier|challenge|signin)|challenge|pwd|password)/i.test(
-        page.url(),
-      );
-    try {
-      // Cookie-consent wall (EU surfaces) — best-effort.
-      await page
-        .evaluate(() => {
-          const want = /^(accept all|i agree|agree|accept|reject all)$/i;
-          for (const b of Array.from(document.querySelectorAll("button,[role=button]"))) {
-            if (want.test((b.textContent ?? "").trim())) {
-              (b as HTMLElement).click();
-              return;
-            }
-          }
-        })
-        .catch(() => undefined);
-      await page.waitForTimeout(1200);
-      // Email — #identifierId, never input[type=email] alone (Google uses a
-      // custom input). Only fill if the identifier field is actually present;
-      // a flow already past identifier (parked on the password screen) skips it.
-      const EMAIL = '#identifierId, input[name="identifier"], input[type="email"]';
-      const emailField = await page.$(EMAIL);
-      if (emailField !== null) {
-        await page.fill(EMAIL, email).catch(() => undefined);
-        await page.waitForTimeout(400);
-        await page.keyboard.press("Enter");
-        await page.waitForTimeout(6000);
-      }
-      // Password.
-      const PW = 'input[type="password"][name="Passwd"], input[type="password"]';
-      await page.waitForSelector(PW, { state: "visible", timeout: 15_000 });
-      await page.fill(PW, password).catch(() => undefined);
-      await page.waitForTimeout(400);
-      await page.keyboard.press("Enter");
-      await page.waitForTimeout(7000);
-      // New-account ToS speedbump + OAuth follow-ons — patient (renders late).
-      for (let i = 0; i < 8; i++) {
-        if (page.isClosed()) return true; // popup closed → handshake done
-        const clicked = await page
-          .evaluate(() => {
-            const want =
-              /^(not now|skip|confirm|i understand|i agree|accept|agree|got it|continue|allow|done|maybe later|next)$/i;
-            for (const b of Array.from(
-              document.querySelectorAll("button,[role=button],a,input[type=submit]"),
-            )) {
-              const t = (b.textContent ?? (b as HTMLInputElement).value ?? "").trim();
-              if (want.test(t)) {
-                (b as HTMLElement).click();
-                return t;
-              }
-            }
-            return null;
-          })
-          .catch(() => null);
-        if (clicked !== null) {
-          await page.waitForTimeout(3500);
-        } else {
-          if (!onIdentifierOrPwd()) break; // left the sign-in screens → progressed
-          await page.waitForTimeout(2500);
-        }
-      }
-      // Success = we are no longer parked on a Google identifier/password
-      // screen (moved to consent / back to the relying party / popup closed).
-      return page.isClosed() || !onIdentifierOrPwd();
-    } catch {
-      return false;
-    }
   }
 
   // Which OAuth providers have a live session in this profile's cookie jar.
