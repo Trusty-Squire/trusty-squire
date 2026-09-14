@@ -43,16 +43,6 @@ export async function fixtureBrokerForwarder(
       if (method === "acknowledge")
         return await broker.acknowledge(principal, String(args.requestId));
       if (method === "confirm_start") return await broker.confirmStartDelivery(principal, args);
-      if (
-        (await journal.hasOutstanding(undefined, principal.forwarderId)) &&
-        !(
-          method === "tool" &&
-          (args.name === "operate_finish" ||
-            (await broker.canReconcileCapture(principal, args)) ||
-            (await broker.canContinueAfterCapture(principal, args)))
-        )
-      )
-        throw new Error("Prior mutation outcome awaits reconciliation");
       return await broker.call(principal, method, args, requestId);
     },
     disconnect: async (principal, explicit) => await broker.disconnect(principal, explicit),

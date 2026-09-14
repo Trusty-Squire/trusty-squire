@@ -33,53 +33,10 @@ interface DispatchRecord {
 
 // Delivery acknowledgement preserves replayable evidence, but a positive
 // no-dispatch outcome has no browser custody to retain on any lineage.
-const phaseHasOutstandingCustody = (record: DispatchRecord): boolean =>
-  record.outcome?.status !== "not_dispatched" &&
-  (["prepared", "entered", "outcome", "dispatch_attempted", "observed_result", "unknown"].includes(
-    record.phase,
-  ) ||
-    record.outcome?.status === "unknown");
-
 const phaseHasDeliverableOutcome = (record: DispatchRecord): boolean =>
   ["outcome", "acknowledged", "observed_result", "delivery_acknowledged", "unknown"].includes(
     record.phase,
   );
-
-// A terminal receipt (operate_finish, closed) for the same session proves the
-// session ended in an orderly terminal teardown AFTER the entry was written.
-// It supersedes a dispatchTracked entry's uncertain custody: a browsing action
-// already settled by its session's terminal close must not block browser
-// replacement or startup. Without such a receipt — e.g. a genuinely
-// unreconciled uncertain payment outcome — the no-replay fence holds.
-const terminallyReconciled = (record: DispatchRecord, records: DispatchRecord[]): boolean =>
-  record.dispatchTracked === true &&
-  records.some(
-    (receipt) =>
-      receipt.sessionId === record.sessionId &&
-      receipt.requestId === "terminal-receipt" &&
-      receipt.terminalReceipt?.closed === true &&
-      receipt.at >= record.at,
-  );
-
-// The lineage fence clears in-band ONLY for provably benign cancelled
-// browsing (click/type/select/press/navigate/fill_credential). Everything
-// else keeps the fence: genuinely dispatched payment mutations (inject_card),
-// recipe runs (which may embed payment steps), logins (which mutate account
-// identity), records with no known operation, and captures whose storage is
-// unknown. Without this, a wedged lineage could only be escaped by replacing
-// the whole MCP client credential.
-const benignBrowsingOperations = new Set([
-  "operate_click",
-  "operate_type",
-  "operate_select",
-  "operate_press",
-  "operate_navigate",
-  "operate_fill_credential",
-]);
-const lineageAdmitsFreshWork = (record: DispatchRecord): boolean =>
-  record.operation !== undefined &&
-  benignBrowsingOperations.has(record.operation) &&
-  record.outcome?.capture?.storage !== "unknown";
 
 export interface ReconciledDispatchOutcome {
   capture?: CaptureEvidence;
@@ -201,43 +158,6 @@ export class DispatchJournal {
     return states;
   }
 
-  async assertReconciled(): Promise<void> {
-    const records = [...(await this.states()).values()];
-    for (const record of records.filter(
-      (candidate) => candidate.phase === "prepared" && candidate.dispatchTracked === true,
-    )) {
-      await this.record(record.sessionId, record.requestId, "settled", {
-        ...(record.forwarderId === undefined ? {} : { forwarderId: record.forwarderId }),
-        ...(record.start === true ? { start: true } : {}),
-        ...(record.operation === undefined ? {} : { operation: record.operation }),
-        ...(record.inputHash === undefined ? {} : { inputHash: record.inputHash }),
-        dispatchTracked: true,
-        outcome: { status: "not_dispatched", error: "pre_dispatch_failure" },
-      });
-    }
-    if (
-      records.some(
-        (record) =>
-          record.outcome?.status !== "not_dispatched" &&
-          !terminallyReconciled(record, records) &&
-          // A start-delivery record still owes its caller an outcome, and
-          // genuinely uncertain payment custody must never be waved through.
-          // Benign cancelled browsing settles by policy: it must not require
-          // a process kill or a client reconnect to recover from.
-          ((record.phase === "prepared" && record.dispatchTracked !== true) ||
-            (!lineageAdmitsFreshWork(record) &&
-              (record.phase === "entered" ||
-                record.phase === "dispatch_attempted" ||
-                record.phase === "unknown" ||
-                record.outcome?.status === "unknown"))),
-      )
-    )
-      throw new BrokerRefusal(
-        "outcome_unknown",
-        "Prior broker lost mutation custody; reconcile before browser replacement",
-      );
-  }
-
   async retainedXataPreDispatchAuthorization(): Promise<AuthorizedPreDispatchFailure | undefined> {
     const record = [...(await this.states()).values()].find(
       (candidate) =>
@@ -256,64 +176,6 @@ export class DispatchJournal {
       forwarderId: record.forwarderId,
       inputHash: record.inputHash,
     };
-  }
-
-  async hasOnlyAuthorizedPreDispatchFailure(
-    authorization: AuthorizedPreDispatchFailure,
-  ): Promise<boolean> {
-    if (
-      authorization.sessionId !== retainedXataPreDispatchFailure.sessionId ||
-      authorization.requestId !== retainedXataPreDispatchFailure.requestId ||
-      authorization.operation !== retainedXataPreDispatchFailure.operation
-    )
-      return false;
-    const outstanding = [...(await this.states()).values()].filter(phaseHasOutstandingCustody);
-    if (outstanding.length !== 1) return false;
-    const [record] = outstanding;
-    return (
-      record?.phase === "entered" &&
-      record.outcome === undefined &&
-      record.start === undefined &&
-      record.sessionId === authorization.sessionId &&
-      record.requestId === authorization.requestId &&
-      record.operation === authorization.operation &&
-      record.forwarderId === authorization.forwarderId &&
-      record.inputHash === authorization.inputHash
-    );
-  }
-
-  async hasOutstanding(sessionId?: string, forwarderId?: string): Promise<boolean> {
-    const records = [...(await this.states()).values()];
-    return records.some(
-      (record) =>
-        (sessionId === undefined || record.sessionId === sessionId) &&
-        (forwarderId === undefined || record.forwarderId === forwarderId) &&
-        phaseHasOutstandingCustody(record) &&
-        // A session's terminal receipt settles its own uncertain entries;
-        // without it the no-replay fence holds.
-        !terminallyReconciled(record, records) &&
-        // A lineage-level fence (sessionId undefined) may only be kept for
-        // genuinely uncertain PAYMENT custody. Benign cancelled browsing
-        // settles in-band so a fresh operate_start on the same lineage never
-        // needs an MCP client reconnect to escape the fence.
-        (sessionId !== undefined || !lineageAdmitsFreshWork(record)),
-    );
-  }
-
-  async hasOnlyCaptureCustody(sessionId: string, forwarderId: string): Promise<boolean> {
-    const outstanding = [...(await this.states()).values()].filter(
-      (record) => record.forwarderId === forwarderId && phaseHasOutstandingCustody(record),
-    );
-    return (
-      outstanding.length > 0 &&
-      outstanding.every(
-        (record) =>
-          record.sessionId === sessionId &&
-          ["observed_result", "delivery_acknowledged"].includes(record.phase) &&
-          record.outcome?.status === "unknown" &&
-          record.outcome.capture?.storage === "unknown",
-      )
-    );
   }
 
   async hasPendingStartDelivery(forwarderId: string, sessionId?: string): Promise<boolean> {

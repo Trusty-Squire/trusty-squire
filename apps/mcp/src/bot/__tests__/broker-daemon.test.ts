@@ -14,7 +14,6 @@ import { BrokerClient, listenBroker } from "../broker/transport.js";
 import {
   brokerDrainAllowsMethod,
   brokerIdleShutdownEligible,
-  brokerStartupAllowsMethod,
   brokerIdleTimeoutMs,
   brokerShutdownCleanupComplete,
 } from "../broker/daemon.js";
@@ -65,16 +64,7 @@ it("uses a minutes-scale idle policy", () => {
   expect(brokerIdleTimeoutMs({ TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS: "600000" })).toBe(600_000);
 });
 
-it("keeps startup browser work fenced while retained custody exposes only recovery", () => {
-  expect(brokerStartupAllowsMethod(true, "recover")).toBe(true);
-  expect(brokerStartupAllowsMethod(true, "reclaim")).toBe(true);
-  expect(brokerStartupAllowsMethod(true, "acknowledge")).toBe(false);
-  expect(brokerStartupAllowsMethod(true, "confirm_start")).toBe(false);
-  expect(brokerStartupAllowsMethod(true, "tool")).toBe(false);
-  expect(brokerStartupAllowsMethod(false, "tool")).toBe(true);
-});
-
-it("exposes recovery-only startup solely for the authorized retained Xata record", async () => {
+it("offers explicit recovery solely for the authorized retained Xata record", async () => {
   const root = await mkdtemp(join(tmpdir(), "ts-broker-startup-recovery-"));
   const retainedSessionId = "546b6f5a-930e-4473-8aec-43fc355fd108";
   const retainedRequestId =
@@ -91,13 +81,6 @@ it("exposes recovery-only startup solely for the authorized retained Xata record
     await recordRetainedXata(exact);
     const authorization = await exact.retainedXataPreDispatchAuthorization();
     expect(authorization).toBeDefined();
-    await expect(exact.hasOnlyAuthorizedPreDispatchFailure(authorization!)).resolves.toBe(true);
-    await expect(
-      exact.hasOnlyAuthorizedPreDispatchFailure({
-        ...authorization!,
-        sessionId: "foreign-session",
-      }),
-    ).resolves.toBe(false);
 
     await exact.record("other-session", "other-request", "entered", {
       forwarderId: "other-forwarder",
@@ -110,8 +93,6 @@ it("exposes recovery-only startup solely for the authorized retained Xata record
       inputHash: "other-input",
       outcome: { status: "unknown", reason: "execution_error" },
     });
-    await expect(exact.hasOnlyAuthorizedPreDispatchFailure(authorization!)).resolves.toBe(false);
-    await expect(exact.assertReconciled()).rejects.toThrow("lost mutation custody");
 
     const unrelatedEntered = new DispatchJournal(join(root, "unrelated-entered.jsonl"));
     await unrelatedEntered.record("session", "request", "entered", {
@@ -120,7 +101,6 @@ it("exposes recovery-only startup solely for the authorized retained Xata record
       inputHash: "input",
     });
     expect(await unrelatedEntered.retainedXataPreDispatchAuthorization()).toBeUndefined();
-    await expect(unrelatedEntered.assertReconciled()).rejects.toThrow("lost mutation custody");
 
     const unrelatedOutcome = new DispatchJournal(join(root, "unrelated-outcome.jsonl"));
     await unrelatedOutcome.record("session", "request", "entered", {
@@ -135,7 +115,6 @@ it("exposes recovery-only startup solely for the authorized retained Xata record
       outcome: { status: "completed" },
     });
     expect(await unrelatedOutcome.retainedXataPreDispatchAuthorization()).toBeUndefined();
-    await expect(unrelatedOutcome.assertReconciled()).resolves.toBeUndefined();
   } finally {
     await rm(root, { recursive: true, force: true });
   }

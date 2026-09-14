@@ -22,164 +22,7 @@ async function authenticate(
 }
 
 describe("broker dispatch custody", () => {
-  it("recycles startup over an uncertain dispatchTracked entry superseded by its session's terminal receipt", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-journal-terminal-"));
-    const path = join(root, "dispatch.jsonl");
-    try {
-      const journal = new DispatchJournal(path);
-      // A stale-ref browsing click whose outcome was lost after dispatch.
-      await journal.record("session", "click", "dispatch_attempted", {
-        forwarderId: "lineage",
-        operation: "operate_click",
-        inputHash: "input",
-        dispatchTracked: true,
-      });
-      await journal.record("session", "click", "unknown", {
-        forwarderId: "lineage",
-        operation: "operate_click",
-        inputHash: "input",
-        dispatchTracked: true,
-        outcome: { status: "unknown", reason: "execution_error" },
-      });
-      // Facet C: benign cancelled browsing no longer fences the lineage at all
-      // — neither browser replacement nor same-lineage admission.
-      await expect(new DispatchJournal(path).assertReconciled()).resolves.toBeUndefined();
-      expect(await new DispatchJournal(path).hasOutstanding(undefined, "lineage")).toBe(false);
-
-      // The session then closed in an orderly terminal teardown.
-      await journal.recordTerminalReceipt("lineage", {
-        session_id: "session",
-        operation_id: "finish-op",
-        execution: "completed",
-        mutation: "not_dispatched",
-        cleanup: "closed",
-        closed: true,
-      });
-
-      const restarted = new DispatchJournal(path);
-      await expect(restarted.assertReconciled()).resolves.toBeUndefined();
-      expect(await restarted.hasOutstanding(undefined, "lineage")).toBe(false);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("settles benign cancelled browsing in-band: the lineage admits a fresh start without a reconnect", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-journal-benign-"));
-    const path = join(root, "dispatch.jsonl");
-    try {
-      const journal = new DispatchJournal(path);
-      await journal.record("session", "click", "dispatch_attempted", {
-        forwarderId: "lineage",
-        operation: "operate_click",
-        inputHash: "input",
-        dispatchTracked: true,
-      });
-      await journal.record("session", "click", "unknown", {
-        forwarderId: "lineage",
-        operation: "operate_click",
-        inputHash: "input",
-        dispatchTracked: true,
-        outcome: { status: "unknown", reason: "cancelled" },
-      });
-      const restarted = new DispatchJournal(path);
-      // Startup replacement is admitted...
-      await expect(restarted.assertReconciled()).resolves.toBeUndefined();
-      // ...and the same lineage is admitted for fresh work (the daemon gate
-      // is lineage-scoped), while the session-scoped fence still reports the
-      // uncertain entry for recovery purposes.
-      expect(await restarted.hasOutstanding(undefined, "lineage")).toBe(false);
-      expect(await restarted.hasOutstanding("session")).toBe(true);
-      // A different lineage was never fenced.
-      expect(await restarted.hasOutstanding(undefined, "other-lineage")).toBe(false);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("keeps the lineage fence for capture-unknown custody even without payment operations", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-journal-capture-"));
-    const path = join(root, "dispatch.jsonl");
-    try {
-      const journal = new DispatchJournal(path);
-      await journal.record("session", "click", "observed_result", {
-        forwarderId: "lineage",
-        operation: "operate_click",
-        inputHash: "input",
-        dispatchTracked: true,
-        outcome: {
-          status: "unknown",
-          reason: "execution_error",
-          capture: {
-            write_id: "write",
-            stored: false,
-            storage: "unknown",
-          },
-        },
-      });
-      const restarted = new DispatchJournal(path);
-      await expect(restarted.assertReconciled()).rejects.toThrow("lost mutation custody");
-      expect(await restarted.hasOutstanding(undefined, "lineage")).toBe(true);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("still refuses browser replacement for an uncertain payment outcome without a terminal receipt", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-journal-payment-"));
-    const path = join(root, "dispatch.jsonl");
-    try {
-      const journal = new DispatchJournal(path);
-      await journal.record("session", "card", "dispatch_attempted", {
-        forwarderId: "lineage",
-        operation: "inject_card",
-        inputHash: "card-input",
-        dispatchTracked: true,
-      });
-      await journal.record("session", "card", "unknown", {
-        forwarderId: "lineage",
-        operation: "inject_card",
-        inputHash: "card-input",
-        dispatchTracked: true,
-        outcome: { status: "unknown", reason: "execution_error" },
-      });
-      // A terminal receipt for a DIFFERENT session reconciles nothing here.
-      await journal.recordTerminalReceipt("lineage", {
-        session_id: "other-session",
-        operation_id: "finish-op",
-        execution: "completed",
-        mutation: "not_dispatched",
-        cleanup: "closed",
-        closed: true,
-      });
-      const restarted = new DispatchJournal(path);
-      await expect(restarted.assertReconciled()).rejects.toThrow("lost mutation custody");
-      expect(await restarted.hasOutstanding(undefined, "lineage")).toBe(true);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("refuses replacement after an uncertain dispatch and admits only a settled journal", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-journal-"));
-    const path = join(root, "dispatch.jsonl");
-    try {
-      const journal = new DispatchJournal(path);
-      await journal.assertReconciled();
-      await journal.record("session", "request", "entered");
-      await expect(new DispatchJournal(path).assertReconciled()).rejects.toThrow(
-        "lost mutation custody",
-      );
-      await journal.record("session", "request", "settled");
-      await new DispatchJournal(path).assertReconciled();
-      await appendFile(path, '{"session');
-      await expect(new DispatchJournal(path).assertReconciled()).rejects.toThrow("incomplete");
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("does not retain startup-only failures while retaining recipe mutation custody", async () => {
+  it("records failed tool calls for recovery without refusing later journal reads", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-journal-start-"));
     const path = join(root, "dispatch.jsonl");
     installBrokerBrowserCustody({
@@ -222,11 +65,15 @@ describe("broker dispatch custody", () => {
       await expect(
         broker.call(principal, "tool", { name: "operate_start", args: {} }, "start-request"),
       ).rejects.toThrow("operate_start failed");
-      await expect(journal.assertReconciled()).resolves.toBeUndefined();
       await expect(
         broker.call(principal, "tool", { name: "operate_recipe_run", args: {} }, "recipe-request"),
       ).rejects.toThrow("operate_recipe_run failed");
-      await expect(journal.assertReconciled()).rejects.toThrow("lost mutation custody");
+      // Nothing is fenced: the journal stays readable and recoverable.
+      await expect(
+        new DispatchJournal(path).recoveryOutcome(principal.forwarderId!, {
+          operation: "operate_recipe_run",
+        }),
+      ).resolves.toBeUndefined();
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -248,16 +95,13 @@ describe("broker dispatch custody", () => {
         inputHash: "card-input",
         outcome: { status: "completed" },
       });
-      await expect(new DispatchJournal(path).assertReconciled()).resolves.toBeUndefined();
       await expect(
         new DispatchJournal(path).recoveryOutcome("forwarder", {
           operation: "inject_card",
           inputHash: "card-input",
         }),
       ).resolves.toMatchObject({ sessionId: "session", requestId: "request" });
-      expect(await journal.hasOutstanding("session")).toBe(true);
       await expect(journal.acknowledge("forwarder", "request")).resolves.toBe(true);
-      expect(await journal.hasOutstanding("session")).toBe(false);
       expect(await journal.hasCompleted("forwarder", "request")).toBe(true);
       await expect(
         new DispatchJournal(path).recoveryOutcome("forwarder", {
@@ -308,7 +152,6 @@ describe("broker dispatch custody", () => {
         }),
       ).resolves.toMatchObject({ requestId: "new-request" });
       await journal.acknowledge("forwarder", "new-request");
-      await expect(journal.hasOutstanding("session", "forwarder")).resolves.toBe(false);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -586,7 +429,6 @@ it("retains the capture identity across durable dispatch transitions and restart
     const restarted = new DispatchJournal(path);
     expect(await restarted.hasCaptureWrite("lineage", "session", "original")).toBe(true);
     expect(await restarted.unresolvedCapture("lineage", "session")).toEqual(capture);
-    await expect(restarted.assertReconciled()).rejects.toThrow("lost mutation custody");
     await expect(
       restarted.recordCapture(
         "lineage",
@@ -608,29 +450,3 @@ it("retains the capture identity across durable dispatch transitions and restart
     await rm(root, { recursive: true, force: true });
   }
 });
-
-it.each(["observed_result", "delivery_acknowledged", "settled"] as const)(
-  "clears custody for not-dispatched outcomes at %s without clearing uncertain peers",
-  async (phase) => {
-    const root = await mkdtemp(join(tmpdir(), "ts-not-dispatched-"));
-    try {
-      const journal = new DispatchJournal(join(root, "dispatch.jsonl"));
-      await journal.record("session", "start", phase, {
-        start: true,
-        forwarderId: "lineage",
-        outcome: { status: "not_dispatched", error: "pre_dispatch_failure" },
-      });
-      expect(await journal.hasOutstanding(undefined, "lineage")).toBe(false);
-      expect(await journal.hasPendingStartDelivery("lineage")).toBe(false);
-      await journal.assertReconciled();
-      await journal.record("session", "uncertain", "unknown", {
-        forwarderId: "lineage",
-        outcome: { status: "unknown", reason: "execution_error" },
-      });
-      expect(await journal.hasOutstanding(undefined, "lineage")).toBe(true);
-      await expect(journal.assertReconciled()).rejects.toThrow("lost mutation custody");
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  },
-);

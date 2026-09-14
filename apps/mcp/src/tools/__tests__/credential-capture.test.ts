@@ -122,7 +122,6 @@ describe("explicit mutation capture", () => {
       write_id: "create-one",
     });
     await journal.acknowledge("lineage", "create-one");
-    expect(await journal.hasOutstanding("session")).toBe(true);
     await expect(
       journal.recordCapture(
         "lineage",
@@ -324,7 +323,6 @@ describe("explicit mutation capture", () => {
       retry: "extract_only",
     });
     await journal.acknowledge("lineage", "create-one");
-    expect(await journal.hasOutstanding("session")).toBe(true);
     await expect(
       journal.recordCapture(
         "lineage",
