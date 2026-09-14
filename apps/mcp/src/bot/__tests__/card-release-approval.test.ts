@@ -42,7 +42,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiClient } from "../../api-client.js";
 import { executeCardReleaseApproval, type CardReleaseBrowser, type PendingApprovalWait } from "../card-release-approval.js";
 import { sealToRecipient } from "../payment-hpke.js";
-import type { CheckoutCard, CheckoutSummary } from "../browser.js";
+import type { CheckoutCard, CheckoutSummary } from "../checkout.js";
 
 const CHECKOUT: CheckoutSummary = {
   merchant: "Synthetic Merchant",
