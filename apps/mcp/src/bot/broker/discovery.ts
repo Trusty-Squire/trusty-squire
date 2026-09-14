@@ -118,17 +118,23 @@ export async function publishEndpointOwner(path: string): Promise<void> {
   if (identity === null)
     throw new BrokerRefusal("ownership_unknown", "Cannot establish broker process birth identity");
   const socket = await lstat(path);
-  await writeFile(
-    `${path}.owner.json`,
-    JSON.stringify({
-      version: 1,
-      ...identity,
-      profileDir: profilePathIdentity(CHROME_PROFILE_DIR),
-      inode: socket.ino,
-      device: socket.dev,
-    } satisfies EndpointOwner),
-    { mode: 0o600, flag: "wx" },
-  );
+  const owner = JSON.stringify({
+    version: 1,
+    ...identity,
+    profileDir: profilePathIdentity(CHROME_PROFILE_DIR),
+    inode: socket.ino,
+    device: socket.dev,
+  } satisfies EndpointOwner);
+  try {
+    await writeFile(`${path}.owner.json`, owner, { mode: 0o600, flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    // The caller has already bound the socket, so no live incumbent owns this
+    // endpoint: an owner record here is a dead predecessor's leftover. Remove
+    // it and claim ownership.
+    await unlink(`${path}.owner.json`);
+    await writeFile(`${path}.owner.json`, owner, { mode: 0o600, flag: "wx" });
+  }
 }
 
 export async function reclaimDeadBrokerEndpoint(path: string): Promise<void> {
