@@ -447,7 +447,7 @@ export const registerEgressRoutes: FastifyPluginAsync<{
             ? req.body
             : JSON.stringify(req.body);
 
-      // If the app already placed a ${SECRET} marker (header/query/body) it is
+      // If the app already placed a ${SECRET} marker in a header/query value it is
       // telling us exactly where the key goes — honor that and do NOT also stamp
       // the stored auth_shape on top. A bearer-default shape would otherwise
       // collide with, e.g., an `xi-api-key: ${SECRET}` placement, and the
@@ -455,10 +455,20 @@ export const registerEgressRoutes: FastifyPluginAsync<{
       // `authorization` (the grant token) is already stripped above, so nothing
       // leaks; the executor substitutes ${SECRET} wherever the app put it.
       // auth_shape stays the fallback for dumb SDKs that can't place a marker.
+      //
+      // The BODY is deliberately excluded from this check (and from
+      // substitution entirely — see bodyVerbatim below). Unlike a header/query
+      // value the app sets to signal intent, the body is opaque application
+      // payload the app didn't author to talk to Squire — e.g. an LLM chat
+      // completion whose conversation can legitimately contain the literal
+      // text "${SECRET}" or "${SECRET.<field>}" (this repo's own docs, tool
+      // descriptions, and this very file quote that syntax). Treating that as
+      // a placement signal either skipped auth injection entirely (401s
+      // upstream) or spliced the real credential into the third-party
+      // provider's prompt body (a leak) — the bug this fix closes.
       const clientPlacedSecret =
         Object.values(inboundHeaders).some((v) => v.includes("${SECRET}")) ||
-        Object.values(inboundQuery).some((v) => v.includes("${SECRET}")) ||
-        (body !== undefined && body.includes("${SECRET}"));
+        Object.values(inboundQuery).some((v) => v.includes("${SECRET}"));
       try {
         const response = await opts.deps.vault.proxyResolvedCredential(
           cred,
@@ -482,7 +492,10 @@ export const registerEgressRoutes: FastifyPluginAsync<{
               ...(body !== undefined ? { body } : {}),
             };
           },
-          (input) => executor.execute(input),
+          // bodyVerbatim: the body above is the client workload's opaque
+          // payload, never a Squire-authored ${SECRET} template — forward it
+          // byte-for-byte, never scanned or substituted.
+          (input) => executor.execute({ ...input, bodyVerbatim: true }),
           {
             purpose: "egress_proxy",
             grant_id: grant.id,

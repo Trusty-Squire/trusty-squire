@@ -24,6 +24,7 @@ const seen: Array<{
   auth: string | undefined;
   method: string;
   headers: Record<string, string>;
+  body: string | undefined;
 }> = [];
 function fakeExecutor(): HttpProxyExecutor {
   return new HttpProxyExecutor({
@@ -34,6 +35,7 @@ function fakeExecutor(): HttpProxyExecutor {
         auth: input.headers.authorization,
         method: input.method,
         headers: { ...input.headers },
+        body: input.body,
       });
       return {
         status: 200,
@@ -596,6 +598,84 @@ describe("Egress Grants — /v1/egress", () => {
     expect(last.headers["xi-api-key"]).toBe("sk-the-real-secret");
     // …and the bearer-default shape was NOT stamped on top (no collision).
     expect(last.auth).toBeUndefined();
+  });
+
+  it("forwards a body containing literal ${SECRET} / ${SECRET.field} unchanged, with auth still injected", async () => {
+    const account = await h.deps.accountStore.createAccount("body@example.test", "B");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    const store = await h.server.inject({
+      method: "POST",
+      url: "/v1/vault/credentials/manual",
+      headers: { cookie, "content-type": "application/json" },
+      payload: {
+        service: "OpenRouter",
+        value: "sk-the-real-secret",
+        type: "api_key",
+        observed_hosts: ["openrouter.ai"],
+      },
+    });
+    expect(store.statusCode).toBe(201);
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenRouter" });
+
+    // A conversation whose content happens to quote Squire's own placeholder
+    // syntax — this is opaque LLM payload, not the app describing where the
+    // key goes.
+    const payload = {
+      model: "anthropic/claude",
+      messages: [
+        {
+          role: "user",
+          content: 'the docs say to use "${SECRET}" or "${SECRET.access_key}" for auth',
+        },
+      ],
+    };
+    const res = await h.server.inject({
+      method: "POST",
+      url: `/v1/egress/${grant_id}/api/v1/chat/completions`,
+      headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" },
+      payload,
+    });
+    expect(res.statusCode).toBe(200);
+    const last = seen.at(-1)!;
+    // Body reached upstream byte-for-byte — the placeholder text was never
+    // scanned, resolved, or replaced with the real secret.
+    expect(last.body).toBe(JSON.stringify(payload));
+    // The grant's own auth (bearer-default here) was still injected — the
+    // literal text in the body did not suppress auth_shape stamping.
+    expect(last.auth).toBe("Bearer sk-the-real-secret");
+  });
+
+  it("an egress body placeholder never surfaces as a proxy_error in the audit ledger", async () => {
+    const account = await h.deps.accountStore.createAccount("bodyaudit@example.test", "B");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    const store = await h.server.inject({
+      method: "POST",
+      url: "/v1/vault/credentials/manual",
+      headers: { cookie, "content-type": "application/json" },
+      payload: {
+        service: "OpenRouterAudit",
+        value: "sk-the-real-secret",
+        type: "api_key",
+        observed_hosts: ["openrouter.ai"],
+      },
+    });
+    const reference = (store.json() as { reference: string }).reference;
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenRouterAudit" });
+
+    const res = await h.server.inject({
+      method: "POST",
+      url: `/v1/egress/${grant_id}/api/v1/chat/completions`,
+      headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" },
+      payload: { messages: [{ role: "user", content: "please use ${SECRET.field_that_does_not_exist}" }] },
+    });
+    expect(res.statusCode).toBe(200);
+    const [audit] = await h.deps.vaultAuditStore.list(account.id, {
+      type: "vault.proxy_executed",
+      reference,
+    });
+    expect(audit?.payload).not.toHaveProperty("proxy_error");
   });
 
   it("injects Basic auth (key as username, blank password) — base64 server-side", async () => {
