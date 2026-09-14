@@ -22,10 +22,6 @@ import type {
 } from "../compact-observation-v2.js";
 import type { ApiClient } from "../../api-client.js";
 import type { OperatorBrowserWatchdog } from "../operator-browser-watchdog.js";
-// Type-only, so no runtime cycle exists: ObserveDeltaState still lives in the
-// facade because it belongs to the observation region. It follows this module
-// when that phase lands.
-import type { ObserveDeltaState } from "../provision-session.js";
 
 // Credential-egress seed provenance: start is the service host, auto_widen
 // is an observed same-base-domain redirect. mid_session is retained for legacy
@@ -64,15 +60,7 @@ export interface Session {
   // The last extracted elements, kept so resolveTarget can be unit-tested
   // against a snapshot, but act() always RE-extracts first (re-resolution).
   lastElements: InteractiveElement[];
-  // Per-session observe delta baseline: the previous observation's stable-ref →
-  // serialized-compact-element (payload form, so `path` is already EXCLUDED — a
-  // layout-only shift must not read as a change). Each observe diffs the current
-  // compact set against this and emits only what changed. Null until the first
-  // observe. Reset on a URL change so a delta never crosses pages.
-  prevObserve: ObserveDeltaState | null;
-  observeSnapshotFile: string | null;
   compactV2Secret: Buffer;
-  compactV2Mode: "off" | "on";
   compactV2HintPages: string[];
   /** True once this session has emitted V2; target resolution stays sealed until finish. */
   compactV2Active: boolean;
@@ -141,7 +129,6 @@ export interface CreateSessionInput {
   id: string;
   browser: BrowserController;
   allowedHosts: AllowedHostEntry[];
-  compactV2Mode: Session["compactV2Mode"];
   startUrl: string;
   consentInboxRead: boolean;
   userEmail: string | null;
@@ -163,10 +150,7 @@ export function createSession(input: CreateSessionInput): Session {
     generation: 0,
     secretSlots: new Map(),
     lastElements: [],
-    prevObserve: null,
-    observeSnapshotFile: null,
     compactV2Secret: randomBytes(32),
-    compactV2Mode: input.compactV2Mode,
     compactV2HintPages: [],
     compactV2Active: false,
     compactV2Refs: new Map(),
