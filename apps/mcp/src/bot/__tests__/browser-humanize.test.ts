@@ -13,6 +13,18 @@ import {
 } from "../browser.js";
 import { operatorBrowserMarkerStartedAt } from "../operator-browser-watchdog.js";
 import { closeProfileWithProof } from "../profile.js";
+import type { BrowserDriver } from "../driver/types.js";
+
+// Contract C (apps/mcp/src/bot/driver/types.ts): `BrowserController` must stay
+// assignable to the frozen seven-verb + observe driver surface. A renamed verb
+// or a drifted signature makes the conditional type below the literal `false`,
+// which fails `Expect<...>` and breaks typecheck — that is the whole point of
+// the contract. This is a compile-time assertion only; nothing runs.
+type Expect<T extends true> = T;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _BrowserControllerSatisfiesBrowserDriver = Expect<
+  BrowserController extends BrowserDriver ? true : false
+>;
 
 describe("BrowserController humanize option", () => {
   it("defaults humanize to true", () => {

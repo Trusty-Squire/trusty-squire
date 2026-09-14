@@ -1,5 +1,6 @@
 import { captureBoundScreenshot, type ScreenshotBinding } from "./screenshot-click.js";
 import { captureBrowserUseDOM, type BrowserUseCapture } from "./browser-use-capture.js";
+import type { BrowserDriver } from "./driver/types.js";
 import {
   CardValueOutputMask,
   compositePngCardMasks,
@@ -1570,7 +1571,7 @@ const INSTALL_WEBGL_SPOOF_SCRIPT = String.raw`(() => {
       }
     })();`;
 
-export class BrowserController {
+export class BrowserController implements BrowserDriver {
   private get context(): BrowserContext | null {
     return this.processOwner.context;
   }
@@ -2056,6 +2057,33 @@ export class BrowserController {
     if (this.isSatelliteAttachment) return;
     return await this.processOwner.start();
   }
+
+  // ---- Contract C driver surface (PR 3) ----------------------------------
+  // The frozen browser-driver interface (`driver/types.ts`): seven verbs plus
+  // one observe hook. `click`, `type` and `screenshot` already carry the
+  // contract names and signatures; the five below are one-line delegations to
+  // today's implementations so `implements BrowserDriver` holds with zero
+  // behaviour change and no caller changes.
+  async navigate(url: string, page?: Page): Promise<void> {
+    return await this.goto(url, page);
+  }
+
+  async select(selector: string, optionMatcher?: string): Promise<string> {
+    return await this.selectOption(selector, optionMatcher);
+  }
+
+  async press(key: string, page?: Page | null): Promise<void> {
+    return await this.pressKey(key, page);
+  }
+
+  async scroll(direction: "up" | "down" | "top" | "bottom", page?: Page | null): Promise<void> {
+    return await this.scrollViewport(direction, page);
+  }
+
+  async observe(page?: Page | null, settlePage?: boolean): Promise<BrowserUseCapture> {
+    return await this.extractBrowserUseObservation(page, settlePage);
+  }
+
   async reload(): Promise<void> {
     return await this.pageDriver.reload();
   }
