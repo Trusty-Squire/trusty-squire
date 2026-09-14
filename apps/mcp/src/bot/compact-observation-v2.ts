@@ -153,7 +153,7 @@ export interface SafePageSemanticsV2 {
 }
 
 export interface SafeBlockerV2 {
-  kind: "challenge" | "validation";
+  kind: "challenge" | "validation" | "dialog";
   text: string;
   ref?: string;
   target?: "unavailable";
@@ -1085,6 +1085,55 @@ function blockerTextV2(node: BrowserUseNode): string | undefined {
     .find((candidate) => candidate !== undefined);
 }
 
+const DIALOG_DISMISS_RE = /\b(?:close|dismiss|cancel|no\s+thanks)\b|[✕×]/i;
+const DIALOG_HEADING_TAGS = new Set(["h1", "h2", "h3", "h4", "h5", "h6"]);
+
+function dialogNameV2(dialog: BrowserUseNode): string | undefined {
+  const explicit = [
+    dialog.attributes["aria-label"],
+    dialog.attributes.ax_name,
+    dialog.attributes.title,
+  ].find((value) => typeof value === "string" && value.trim() !== "");
+  if (explicit !== undefined) return boundedBlockerTextV2(explicit);
+  let heading: string | undefined;
+  const walk = (node: BrowserUseNode): void => {
+    if (heading !== undefined) return;
+    for (const child of descendantsV2(node)) {
+      if (
+        DIALOG_HEADING_TAGS.has(nodeTagV2(child).toLowerCase()) ||
+        (child.attributes.role ?? child.axRole ?? "").toLowerCase() === "heading"
+      ) {
+        heading = blockerTextV2(child);
+        return;
+      }
+      walk(child);
+    }
+  };
+  walk(dialog);
+  return heading ?? blockerTextV2(dialog);
+}
+
+function dialogDismissControlV2(
+  dialog: BrowserUseNode,
+  nodes: BrowserUseNode[],
+  visibleFor: Map<BrowserUseNode, boolean>,
+  withinSubtree: (node: BrowserUseNode, ancestor: BrowserUseNode) => boolean,
+  refForNode: (node: BrowserUseNode) => string | undefined,
+): BrowserUseNode | undefined {
+  const candidates = nodes.filter(
+    (candidate) =>
+      candidate !== dialog &&
+      visibleFor.get(candidate) === true &&
+      withinSubtree(candidate, dialog) &&
+      blockerControlV2(candidate) &&
+      refForNode(candidate) !== undefined,
+  );
+  return (
+    candidates.find((candidate) => DIALOG_DISMISS_RE.test(blockerTextV2(candidate) ?? "")) ??
+    candidates[0]
+  );
+}
+
 function blockerControlV2(node: BrowserUseNode): boolean {
   const tag = nodeTagV2(node);
   const role = (node.attributes.role ?? node.axRole ?? "").toLowerCase();
@@ -1363,6 +1412,29 @@ export function safeBlockersV2(
     const text = blockerTextV2(node);
     if (text === undefined || blockers.some((blocker) => blocker.text === text)) continue;
     blockers.push({ kind: "validation", text });
+  }
+  // Open modal dialogs (role dialog/alertdialog or aria-modal) make the page
+  // inert; surface them so the compact observation reports the blocked state.
+  for (const node of nodes) {
+    if (blockers.length >= BLOCKER_MAX_ITEMS) break;
+    if (node.nodeType !== 1 || visibleFor.get(node) !== true) continue;
+    const role = (node.attributes.role ?? node.axRole ?? "").toLowerCase();
+    const isModalDialog =
+      role === "dialog" ||
+      role === "alertdialog" ||
+      node.attributes["aria-modal"]?.toLowerCase() === "true";
+    if (!isModalDialog) continue;
+    const name = dialogNameV2(node);
+    if (name === undefined || blockers.some((blocker) => blocker.text === name)) continue;
+    const close = dialogDismissControlV2(node, nodes, visibleFor, withinSubtree, refForNode);
+    const closeRef = close === undefined ? undefined : refForNode(close);
+    blockers.push({
+      kind: "dialog",
+      text: name,
+      ...(closeRef === undefined
+        ? { target: "unavailable" as const }
+        : { ref: closeRef }),
+    });
   }
   return blockers;
 }

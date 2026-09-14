@@ -1816,3 +1816,119 @@ it("uses native login semantics for JAF mail-address names and conflicting label
     ).toBe(expected);
   }
 });
+
+describe("safeBlockersV2 modal dialog", () => {
+  const node = (id: string, overrides: Partial<BrowserUseNode>): BrowserUseNode => ({
+    id,
+    nodeType: 1,
+    nodeName: "DIV",
+    value: "",
+    attributes: {},
+    visible: true,
+    snapshot: true,
+    bounds: null,
+    cursor: null,
+    scrollable: false,
+    showScroll: false,
+    scrollText: "",
+    clickListener: false,
+    axRole: null,
+    axProperties: [],
+    axChildIds: null,
+    shadowType: null,
+    hiddenElements: [],
+    hiddenContent: false,
+    children: [],
+    contentDocument: null,
+    ...overrides,
+  });
+  const text = (id: string, value: string): BrowserUseNode =>
+    node(id, { nodeType: 3, nodeName: "#text", value });
+  const page = (children: BrowserUseNode[]): BrowserUseNode =>
+    node("root", { nodeType: 9, nodeName: "#document", children });
+  const shopPayDialog = () =>
+    node("dialog", {
+      nodeName: "DIV",
+      attributes: { role: "dialog", "aria-modal": "true", "aria-label": "Confirm it's you" },
+      children: [
+        node("dialog-heading", {
+          nodeName: "H2",
+          children: [text("dialog-heading-text", "Confirm it's you")],
+        }),
+        text(
+          "dialog-body",
+          "Sign in as customer@example.com to securely use your saved information",
+        ),
+        node("dialog-close", {
+          nodeName: "BUTTON",
+          attributes: { "aria-label": "Close" },
+          axRole: "button",
+        }),
+      ],
+    });
+
+  it("names an open aria-modal dialog and grounds its close control", () => {
+    const dialog = shopPayDialog();
+    const close = dialog.children[2];
+    const root = page([
+      node("email-field", { nodeName: "INPUT", attributes: { type: "email" } }),
+      dialog,
+    ]);
+    expect(
+      safeBlockersV2(root, (candidate) => (candidate === close ? "@e:dialog-close" : undefined)),
+    ).toEqual([{ kind: "dialog", text: "Confirm it's you", ref: "@e:dialog-close" }]);
+  });
+
+  it("marks alertdialog without a close control as blocked and unavailable", () => {
+    const root = page([
+      node("dialog", {
+        nodeName: "DIV",
+        attributes: { role: "alertdialog", "aria-label": "Confirm it's you" },
+        children: [text("dialog-body", "Sign in to continue")],
+      }),
+    ]);
+    expect(safeBlockersV2(root)).toEqual([
+      { kind: "dialog", text: "Confirm it's you", target: "unavailable" },
+    ]);
+  });
+
+  it("falls back to the dialog heading for the name and any dialog control for the ref", () => {
+    const dialog = node("dialog", {
+      attributes: { "aria-modal": "true" },
+      children: [
+        node("dialog-heading", {
+          nodeName: "H2",
+          children: [text("dialog-heading-text", "Confirm it's you")],
+        }),
+        node("dialog-dismiss", {
+          nodeName: "BUTTON",
+          attributes: { "aria-label": "No thanks" },
+          axRole: "button",
+        }),
+      ],
+    });
+    const root = page([dialog]);
+    const dismiss = dialog.children[1];
+    expect(
+      safeBlockersV2(root, (candidate) => (candidate === dismiss ? "@e:dismiss" : undefined)),
+    ).toEqual([{ kind: "dialog", text: "Confirm it's you", ref: "@e:dismiss" }]);
+  });
+
+  it("stops reporting the dialog blocker once the dialog is removed", () => {
+    const dialog = shopPayDialog();
+    const close = dialog.children[2];
+    const withDialog = page([dialog]);
+    const withoutDialog = page([
+      node("email-field", { nodeName: "INPUT", attributes: { type: "email" } }),
+    ]);
+    const refs = (candidate: BrowserUseNode) =>
+      candidate === close ? "@e:dialog-close" : undefined;
+    expect(safeBlockersV2(withDialog, refs)).toHaveLength(1);
+    expect(safeBlockersV2(withoutDialog, refs)).toEqual([]);
+  });
+
+  it("ignores a hidden dialog", () => {
+    const root = page([node("dialog", { visible: false, attributes: { role: "dialog" } })]);
+    expect(safeBlockersV2(root)).toEqual([]);
+  });
+});
