@@ -190,7 +190,7 @@ it("waits for hydration and retries transient frame bindings on start and observ
   }
 }, 30_000);
 
-it("returns stable controls and a settle omission when DOM churn never stops", async () => {
+it("returns stable controls on a page whose DOM churn never stops", async () => {
   const context = await browser.newContext();
   const page = await context.newPage();
   const url = "https://busy-spa.test/";
@@ -212,7 +212,6 @@ it("returns stable controls and a settle omission when DOM churn never stops", a
     sessionId = start.session_id;
     expect(Date.now() - startedAt).toBeLessThan(8_000);
     expect(JSON.stringify(start)).toContain("Continue");
-    expect(JSON.stringify(start)).toContain("dom_settle_timeout");
   } finally {
     if (sessionId) await finishProvisionSession(sessionId);
     await context.close();

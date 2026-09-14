@@ -83,11 +83,7 @@ export interface BrowserUseCapture {
   /** Closed-shadow/iframe/frame-set structural signature (delta change hash). */
   dynamics: string;
   omissions: Array<{
-    kind:
-      | "frame_binding_failed"
-      | "frame_accessibility_failed"
-      | "frame_attach_failed"
-      | "dom_settle_timeout";
+    kind: "frame_binding_failed" | "frame_accessibility_failed" | "frame_attach_failed";
     framePath: string | null;
     url: string;
   }>;

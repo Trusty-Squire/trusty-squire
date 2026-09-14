@@ -6139,38 +6139,37 @@ export class BrowserController {
     settlePage = false,
   ): Promise<BrowserUseCapture> {
     if (page === null) throw new Error("Browser not started");
-    let settled = true;
     if (settlePage) {
       // A load event alone precedes SPA hydration. Network quiet plus bounded
       // DOM quiet gives pending scripts/frames time to install their controls.
       // Busy analytics/animations must never make observation wait indefinitely.
       await page.waitForLoadState("networkidle", { timeout: 1_500 }).catch(() => undefined);
-      settled = await page
+      await page
         .evaluate(
           () =>
-            new Promise<boolean>((resolve) => {
+            new Promise<void>((resolve) => {
               let quiet: ReturnType<typeof setTimeout>;
-              const finish = (settled: boolean) => {
+              const finish = () => {
                 clearTimeout(quiet);
                 clearTimeout(deadline);
                 observer.disconnect();
-                resolve(settled);
+                resolve();
               };
               const observer = new MutationObserver(() => {
                 clearTimeout(quiet);
-                quiet = setTimeout(() => finish(true), 500);
+                quiet = setTimeout(finish, 500);
               });
-              const deadline = setTimeout(() => finish(false), 2_000);
+              const deadline = setTimeout(finish, 2_000);
               observer.observe(document, {
                 subtree: true,
                 childList: true,
                 attributes: true,
                 characterData: true,
               });
-              quiet = setTimeout(() => finish(true), 500);
+              quiet = setTimeout(finish, 500);
             }),
         )
-        .catch(() => false);
+        .catch(() => undefined);
     }
     const bindingDeadline = Date.now() + 1_000;
     for (;;) {
@@ -6187,8 +6186,6 @@ export class BrowserController {
       ) {
         // Persistent omissions remain explicit; every attempt uses fresh trees
         // and bindings, and every returned path retains the card-value mask.
-        if (!settled)
-          capture.omissions.push({ kind: "dom_settle_timeout", framePath: null, url: page.url() });
         return this.cardValueOutputMask.maskCapture(capture);
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
