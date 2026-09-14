@@ -42,6 +42,58 @@ function frameIdentity(frame: Frame): string {
   return identity;
 }
 
+/**
+ * Map every out-of-process (site-isolated) child frame's CDP frameId to its
+ * Playwright Frame. `Page.getFrameTree` on the page session only lists frames
+ * in the page's own renderer process, so OOPIF children — hosted card fields
+ * served from a different registrable domain (e.g. Shopify's
+ * checkout.pci.shopifyinc.com) are a different SITE, hence a different
+ * process — are invisible to the top session's DOM walk and silently dropped.
+ * `Target.getTargets` names the iframe targets; each candidate Playwright
+ * Frame's own CDP session reports its real frame-tree root, and a root that
+ * differs from the main frame id identifies a cross-process frame. Frames
+ * without an iframe target (same-process children) are already bound by the
+ * local frame tree and never probed.
+ */
+async function outOfProcessFramesByCdpId(
+  page: Page,
+  cdp: CDPSession,
+): Promise<Map<string, Frame>> {
+  const frames = new Map<string, Frame>();
+  let rootId: string | null = null;
+  try {
+    const targets = await cdp.send("Target.getTargets");
+    const oopifUrls = new Set(
+      targets.targetInfos
+        .filter((target) => target.type === "iframe" && target.url !== "")
+        .map((target) => target.url),
+    );
+    if (oopifUrls.size === 0) return frames;
+    const tree = await cdp.send("Page.getFrameTree");
+    rootId = tree.frameTree.frame.id;
+    for (const frame of page.frames()) {
+      if (frame === page.mainFrame() || frame.isDetached()) continue;
+      if (!oopifUrls.has(frame.url())) continue;
+      let session: CDPSession | null = null;
+      try {
+        session = await page.context().newCDPSession(frame);
+        const childTree = await session.send("Page.getFrameTree");
+        const id = childTree.frameTree.frame.id;
+        if (id !== rootId) frames.set(id, frame);
+      } catch {
+        // Frame mid-navigation or already torn down; the DOM walk still sees
+        // it and reports an explicit omission if it cannot be captured.
+      } finally {
+        await session?.detach().catch(() => undefined);
+      }
+    }
+  } catch {
+    // Target enumeration unavailable; the local frame tree still captures
+    // every same-process frame.
+  }
+  return frames;
+}
+
 const STYLES = [
   "display",
   "visibility",
@@ -106,6 +158,7 @@ export async function captureBrowserUseDOM(
       layout: Layout | undefined;
       name: string;
       frame?: Frame;
+      frameId?: string;
     }
   >();
   let moreAbove = false,
@@ -117,6 +170,11 @@ export async function captureBrowserUseDOM(
   const elements: InteractiveElement[] = [];
   const cdp = await page.context().newCDPSession(page);
   const sessions: CDPSession[] = [cdp];
+  // Cross-process (site-isolated) child frames are invisible to the page
+  // session's frame tree and DOM walk; this map lets the walk resolve an
+  // iframe node's frameId to its real Playwright Frame so attachFrames can
+  // open that frame's own CDP session.
+  const outOfProcessFrames = await outOfProcessFramesByCdpId(page, cdp);
   let nextSyntheticIndex = Math.max(-1, ...inventory.map((element) => element.index)) + 1;
   const capture = async (
     client: CDPSession,
@@ -619,12 +677,14 @@ export async function captureBrowserUseDOM(
         children: [],
         contentDocument: null,
       };
+      const boundFrame =
+        raw.frameId === undefined
+          ? undefined
+          : (frameById.get(raw.frameId) ?? outOfProcessFrames.get(raw.frameId));
       viewMetadata.set(id, {
         layout: l,
         name: String(axNode?.name?.value ?? ""),
-        ...(raw.frameId && frameById.has(raw.frameId)
-          ? { frame: frameById.get(raw.frameId)! }
-          : {}),
+        ...(boundFrame === undefined ? {} : { frameId: raw.frameId, frame: boundFrame }),
       });
       rawById.set(id, raw);
       nodeFrame.set(id, frame);
@@ -1190,7 +1250,8 @@ export async function captureBrowserUseDOM(
         depth < 5 &&
         visited.size <= 100
       ) {
-        const frame = viewMetadata.get(n.id)?.frame;
+        const meta = viewMetadata.get(n.id);
+        const frame = meta?.frame;
         if (frame && !frame.isDetached() && !visited.has(frame)) {
           visited.add(frame);
           try {
@@ -1205,6 +1266,15 @@ export async function captureBrowserUseDOM(
             });
             n.contentDocument = null;
           }
+        } else if (frame === undefined && meta?.frameId !== undefined) {
+          // A rendered iframe whose child document never reached the capture:
+          // its CDP frame could not be resolved from either the local frame
+          // tree or the out-of-process frame map. Never a silent drop.
+          omissions.push({
+            kind: "frame_attach_failed",
+            framePath: null,
+            url: n.attributes.src ?? "",
+          });
         }
       }
       for (const c of n.children) await attachFrames(c, depth);
