@@ -2495,11 +2495,28 @@ export class BrowserController {
     page: Page | null = this.page,
   ): Promise<T> {
     if (page === null) throw new Error("Browser not started");
+    const handle = await page.$(selector).catch(() => null);
+    if (handle === null) return await fn(false);
+    try {
+      return await this.neutralizeModalInert(handle, page, fn);
+    } finally {
+      await handle.dispose().catch(() => undefined);
+    }
+  }
+
+  // Single Page|Frame implementation shared by withModalInertNeutralized
+  // (main frame, by selector) and clickInFrame (a handle inside an iframe).
+  // The target is always an ElementHandle; the restore sweep always runs
+  // against the document the handle actually lives in.
+  private async neutralizeModalInert<T>(
+    handle: ElementHandle<Element>,
+    scope: Page | Frame,
+    fn: (modalActive: boolean) => Promise<T>,
+  ): Promise<T> {
     const marker = "data-ts-inert-neutralized";
     const anchorMarker = "data-ts-inert-region-anchor";
-    const modalActive = await page
-      .$eval(
-        selector,
+    const modalActive = await handle
+      .evaluate(
         (el, markers) => {
           const { marker, anchorMarker } = markers;
           const composedParent = (node: Node): Element | null => {
@@ -2539,7 +2556,7 @@ export class BrowserController {
     try {
       return await fn(modalActive);
     } finally {
-      await page
+      await scope
         .evaluate(
           (markers) => {
             const { marker, anchorMarker } = markers;
@@ -8756,104 +8773,6 @@ export class BrowserController {
     return target.frameOrigin;
   }
 
-  private async withModalInertNeutralizedInFrame<T>(
-    frame: Frame,
-    handle: ElementHandle<Element>,
-    fn: () => Promise<T>,
-  ): Promise<T> {
-    const marker = "data-ts-inert-neutralized";
-    const anchorMarker = "data-ts-inert-region-anchor";
-    await handle
-      .evaluate(
-        (el, markers) => {
-          const { marker, anchorMarker } = markers;
-          const composedParent = (node: Node): Element | null => {
-            const parent = node.parentNode;
-            if (parent === null) return null;
-            if (parent instanceof ShadowRoot) return parent.host;
-            return parent instanceof Element ? parent : null;
-          };
-          const isDialogElement = (element: Element): boolean =>
-            element.getAttribute("role") === "dialog" ||
-            element.tagName.toLowerCase() === "dialog" ||
-            element.getAttribute("aria-modal") === "true";
-          const nearestModalRegion = (element: Element): Element | null => {
-            let cur: Element | null = element;
-            while (cur !== null) {
-              if (isDialogElement(cur)) return cur;
-              cur = composedParent(cur);
-            }
-            return null;
-          };
-          const region = nearestModalRegion(el);
-          if (region === null) return;
-          region.setAttribute(anchorMarker, "1");
-          let cur: Element | null = el;
-          while (cur !== null) {
-            if (cur.hasAttribute("inert")) {
-              cur.removeAttribute("inert");
-              cur.setAttribute(marker, "1");
-            }
-            cur = composedParent(cur);
-          }
-        },
-        { marker, anchorMarker },
-      )
-      .catch(() => undefined);
-    try {
-      return await fn();
-    } finally {
-      await frame
-        .evaluate(
-          (markers) => {
-            const { marker, anchorMarker } = markers;
-            const isDialogElement = (element: Element): boolean =>
-              element.getAttribute("role") === "dialog" ||
-              element.tagName.toLowerCase() === "dialog" ||
-              element.getAttribute("aria-modal") === "true";
-            // Mirrors the main-frame restore: only an open/rendered dialog
-            // keeps the background locked — a closed <dialog> or hidden
-            // role="dialog" remnant does not.
-            const isRenderedDialog = (element: Element): boolean => {
-              if (!isDialogElement(element)) return false;
-              if (element instanceof HTMLDialogElement) return element.open;
-              if (typeof element.checkVisibility === "function")
-                return element.checkVisibility({ visibilityProperty: true });
-              if (element.hasAttribute("hidden")) return false;
-              const style = window.getComputedStyle(element);
-              return style.display !== "none" && style.visibility !== "hidden";
-            };
-            const subtreeHasDialog = (root: Element | ShadowRoot): boolean => {
-              if (root instanceof Element) {
-                if (isRenderedDialog(root)) return true;
-                if (root.shadowRoot !== null && subtreeHasDialog(root.shadowRoot)) return true;
-              }
-              for (const el of Array.from(root.querySelectorAll("*"))) {
-                if (isRenderedDialog(el)) return true;
-                if (el.shadowRoot !== null && subtreeHasDialog(el.shadowRoot)) return true;
-              }
-              return false;
-            };
-            const cleanupAndRestore = (root: Document | ShadowRoot): void => {
-              root
-                .querySelectorAll(`[${anchorMarker}]`)
-                .forEach((el) => el.removeAttribute(anchorMarker));
-              root.querySelectorAll(`[${marker}]`).forEach((el) => {
-                el.removeAttribute(marker);
-                if (subtreeHasDialog(el)) el.setAttribute("inert", "");
-              });
-              root.querySelectorAll("*").forEach((el) => {
-                if (el.shadowRoot !== null) cleanupAndRestore(el.shadowRoot);
-              });
-            };
-            cleanupAndRestore(document);
-          },
-          { marker, anchorMarker },
-        )
-        .catch(() => undefined);
-    }
-  }
-
   // Frame-scoped click. Deliberately simpler than click() above (no radio/
   // checkbox/aria-toggle special-casing) — it's the escape hatch for a
   // control that lives inside an <iframe>, mirroring how resolvePageTarget is
@@ -8882,9 +8801,7 @@ export class BrowserController {
       if (frame === null) {
         await handle.click({ timeout: 8000 });
       } else {
-        await this.withModalInertNeutralizedInFrame(frame, handle, () =>
-          handle.click({ timeout: 8000 }),
-        );
+        await this.neutralizeModalInert(handle, frame, () => handle.click({ timeout: 8000 }));
       }
     } finally {
       await handle.dispose().catch(() => undefined);
