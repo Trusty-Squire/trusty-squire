@@ -87,55 +87,6 @@ import { ProvenPreDispatchMutationError } from "./mutation-dispatch-evidence.js"
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
 import { pickVerificationLink, type VerificationLinkCandidate } from "./email-verification.js";
 import {
-  type OperatorRecipe,
-  type TraceEntry,
-  type TraceAction,
-  type RecipeHole,
-  type RecipeTarget,
-  type OperatorVerb,
-  type KnownRecipeInputs,
-  type Postcondition,
-  type PostconditionResult,
-  type PostconditionSnapshot,
-  checkSuccessSignal,
-  bindKnownEmailTemplate,
-  bindRecipePostcondition,
-  bindRecipeTarget,
-  bindRecipeValue,
-  cssEscapeRecipeValue,
-  fillTemplate,
-  hasRecipeTargetCandidate,
-  isSingleUseUrl,
-  knownRecipeInputValue,
-  localeStableFieldRole,
-  operatorRecipeDomain,
-  operatorRecipeKeyForDomain,
-  canonicalVerb,
-  extractActionPath,
-  checkoutFieldSetSignature,
-  checkoutShapeKey,
-  readRecipe,
-  resolveRecipeFieldTarget,
-  resolveRecipeTarget,
-  verifyFilledFieldValues,
-  writeRecipe,
-} from "./operator-recipe.js";
-import {
-  captureOnboardingRound,
-  currentRunId,
-  resetCaptureChain,
-  resolveCaptureDir,
-} from "./onboarding-capture.js";
-import {
-  promoteToSkill,
-  pickRowDisambiguator,
-  pickStableDomHint,
-  pickHrefHint,
-  type PromoteResult,
-} from "./promote-to-skill.js";
-import { serviceSlugFromHost } from "@trusty-squire/skill-schema";
-import type { PostVerifyStep } from "./provision-types.js";
-import {
   looksLikeCodeIdentifier,
   looksLikeCredentialValue,
   isCredentialNoise,
@@ -245,7 +196,6 @@ export interface ScreenRegion {
 
 export interface ScreenOutline {
   foreground: string | null;
-  mode_markers: string[];
   regions: ScreenRegion[];
 }
 
@@ -442,8 +392,6 @@ export type ProvisionAction =
       kind: "type";
       target: string;
       text: string;
-      provenance?: RecipeHole;
-      replayRepair?: ReplayRepairBinding;
     }
   // Choose an option in a native <select> OR a custom listbox/combobox by its
   // visible text (fuzzy, case-insensitive substring). `type` cannot drive these
@@ -457,8 +405,6 @@ export type ProvisionAction =
       kind: "select";
       target: string;
       text: string;
-      provenance?: RecipeHole;
-      replayRepair?: ReplayRepairBinding;
     }
   // Set the country on a phone-number field's dial-code picker. No ref/target
   // — the bot locates a phone-local native <select>, including
@@ -467,8 +413,6 @@ export type ProvisionAction =
   | {
       kind: "set_phone_country";
       country: string;
-      provenance?: RecipeHole;
-      replayRepair?: ReplayRepairBinding;
     }
   | { kind: "goto"; url: string }
   | { kind: "press"; key: string }
@@ -482,14 +426,10 @@ export type ProvisionAction =
   // lifecycle tracking prevent a normal provider close from leaving the model
   // on a detached Playwright handle.
   | { kind: "oauth_login"; target: string; provider?: OAuthProviderId }
-  // Operator surface — declare a host to cross into mid-session (multi-app
-  // tasks: GCP Console → Firebase → the user's app). Pushed to the allow-set
-  // with source "mid_session" and audited; the goto gate then permits it.
-  | { kind: "allow_host"; host: string }
   // Sealed credential transfer — type a secret held in a session-local slot
   // into a field, WITHOUT the value ever crossing the MCP boundary to the
   // host. The host orchestrates by slot name; the bot types the real value.
-  | { kind: "type_secret"; slot: string; target: string; provenance?: RecipeHole }
+  | { kind: "type_secret"; slot: string; target: string }
   // Reveal below-the-fold controls on a long SPA form, then re-observe to pick
   // up the newly-visible elements (heavy consoles render fields off-viewport).
   | { kind: "scroll"; direction?: "down" | "up" | "bottom" | "top" }
@@ -499,25 +439,8 @@ export type ProvisionAction =
   // Not recorded in skill recipes — a machine-local path isn't portable.
   | { kind: "upload"; target: string; path: string };
 
-export interface ReplayRepairBinding {
-  stepIndex: number;
-  hole: string;
-}
-
-// The Session data model and its single construction contract live in
-// session/model.ts. This module stays the compatibility facade: it owns the
-// registry, every mutation, and every operation over a Session, and re-exports
-// the session types so no caller import changed.
 export type { AllowedHostEntry, HostSource, Session } from "./session/model.js";
-import type {
-  CartAddRecord,
-  CartIdentityContext,
-  CartMutation,
-  ReplayExpectedField,
-  ReplayState,
-  RecordedValueSource,
-  Session,
-} from "./session/model.js";
+import type { CartMutation, Session } from "./session/model.js";
 import { egressSeedHosts, hostStrings, registrableHost } from "./session/hosts.js";
 // Phase 2 — the lifecycle registry transaction moved to session/lifecycle.ts as
 // one unit (registry, real-profile lease, call leases and drains, watchdog,
@@ -1594,34 +1517,6 @@ function resolveAuthorizedCompactV2Target(
   return resolved;
 }
 
-// Squire's OWN control plane. The operator browser runs in the connect-seeded
-// profile, so it is authenticated as the user (a live Google session). It must
-// therefore NEVER be allowed to reach Squire's own web app / API: otherwise a
-// prompt-injected signup page could drive it to the user's vault UI, sign in
-// via that Google session, and read revealed secrets — defeating the
-// write-only model (a confused-deputy exfiltration path, confirmed 2026-07-21).
-// Explicit operator actions cannot reach these hosts. (Self-hosted
-// deployments on other domains should extend this list.)
-const SQUIRE_CONTROL_PLANE_HOSTS: readonly string[] = [
-  "trustysquire.ai",
-  "trustysquire.com",
-  "trusty-squire-api.fly.dev",
-];
-
-export function isSquireControlPlaneHost(host: string): boolean {
-  const h = host.trim().toLowerCase().replace(/\.$/, "");
-  if (h.length === 0) return false;
-  return SQUIRE_CONTROL_PLANE_HOSTS.some((d) => h === d || h.endsWith(`.${d}`));
-}
-
-// Preserve the existing control-plane boundary independently of browser egress.
-export function hostAllowed(url: string, _allowedHosts: readonly string[] = []): boolean {
-  try {
-    return !isSquireControlPlaneHost(new URL(url).hostname);
-  } catch {
-    return false;
-  }
-}
 
 type FrameScopedTarget = Pick<
   InteractiveElement,
@@ -1681,264 +1576,9 @@ function assertSecretFrameTargetAllowed(
   }
 }
 
-function visibleModeMarkers(pageText: string): string[] {
-  const text = pageText.replace(/\s+/g, " ").trim();
-  const markers: string[] = [];
-  if (
-    /\b(?:test|sandbox)\s+(?:mode|usage|environment|workspace)\b/i.test(text) ||
-    /\b(?:mode|environment|workspace)\s*[:=-]?\s*(?:test|sandbox)\b/i.test(text)
-  ) {
-    markers.push("test/sandbox mode");
-  }
-  if (
-    /\b(?:live|production)\s+mode\b/i.test(text) ||
-    /\b(?:mode|environment|workspace)\s*[:=-]?\s*(?:live|production)\b/i.test(text)
-  ) {
-    markers.push("live/production mode");
-  }
-  return markers;
-}
-
-function appSurfaceMarkers(pageText: string): string[] {
-  const text = pageText.replace(/\s+/g, " ").trim();
-  const markers: string[] = [];
-  const defs: Array<[string, RegExp]> = [
-    ["dashboard", /\bdashboard\b/i],
-    ["products", /\bproducts?\b/i],
-    ["customers", /\bcustomers?\b/i],
-    ["payments", /\bpayments?\b/i],
-    ["developers", /\bdevelopers?\b/i],
-    ["api keys", /\bapi\s+keys?\b/i],
-    ["settings", /\bsettings\b/i],
-    ["workspace", /\bworkspace\b/i],
-    ["project", /\bproject\b/i],
-    ["billing", /\bbilling\b/i],
-    ["usage", /\busage\b/i],
-    ["team", /\bteam\b/i],
-  ];
-  for (const [name, re] of defs) {
-    if (re.test(text)) markers.push(name);
-  }
-  for (const mode of visibleModeMarkers(text)) markers.push(mode);
-  return [...new Set(markers)].slice(0, 8);
-}
-
-// A login / OAuth-chooser page — an auth WALL, not the authenticated app surface.
-// Marketing/nav words on a login page ("developers", "api", "docs") otherwise
-// tripped authenticatedAppSurfaceMarkers into steering the agent to "prefer app
-// navigation" on an auth-gated page. MEASURED 2026-07-01 (Groq /authenticate:
-// "Create Account or Login … Continue with Google/GitHub/SSO/email").
-export function looksLikeLoginChooser(pageText: string): boolean {
-  const text = pageText.replace(/\s+/g, " ").trim();
-  const continueWith = (
-    text.match(/\bcontinue with (?:google|github|microsoft|sso|email|apple|gitlab)\b/gi) ?? []
-  ).length;
-  return (
-    continueWith >= 2 ||
-    /\bcreate account or (?:log|sign)\s?in\b/i.test(text) ||
-    /\b(?:log|sign)\s?in to (?:your account|continue)\b/i.test(text)
-  );
-}
-
-function authenticatedAppSurfaceMarkers(pageText: string): string[] {
-  if (looksLikeLoginChooser(pageText)) return []; // auth wall, not the app surface
-  const markers = appSurfaceMarkers(pageText);
-  const modeMarkers = visibleModeMarkers(pageText);
-  if (modeMarkers.length > 0) return markers;
-  return markers.length >= 2 ? markers : [];
-}
-
-function hasAccountSetupOverlay(pageText: string): boolean {
-  const text = pageText.replace(/\s+/g, " ").trim();
-  return (
-    /\b(?:finish|complete|set up|setup)\s+(?:creating\s+|setting\s+up\s+)?(?:your\s+)?(?:account|profile|organization|workspace|business)\b/i.test(
-      text,
-    ) ||
-    /\bcreate\s+(?:your\s+)?account\b/i.test(text) ||
-    /\btell us about (?:yourself|your business|your organization|your company)\b/i.test(text)
-  );
-}
-
-// An onboarding / org-or-workspace creation form that GATES the keys page. These
-// are NOT walls — the agent should fill the required fields with sensible
-// inferred values and submit to proceed. Broader than hasAccountSetupOverlay
-// (it also catches "create organization / you aren't part of an org yet").
-export function isOnboardingOrOrgForm(pageText: string): boolean {
-  const text = pageText.replace(/\s+/g, " ").trim();
-  if (hasAccountSetupOverlay(text)) return true;
-  return (
-    /\byou\s+(?:aren'?t|are not|do not|don'?t)\s+(?:part of|belong to|have)\b.*\borgani[sz]ation\b/i.test(
-      text,
-    ) ||
-    /\bcreate\s+(?:a\s+|your\s+|an\s+|new\s+)?(?:organi[sz]ation|org|workspace|team|project|company)\b/i.test(
-      text,
-    ) ||
-    /\bname\s+(?:your\s+)?(?:organi[sz]ation|workspace|team|project|company)\b/i.test(text) ||
-    /\b(?:what'?s|what is)\s+your\s+name\b/i.test(text) ||
-    /\bget\s+started\b.*\b(?:name|organi[sz]ation|workspace|team)\b/i.test(text)
-  );
-}
-
-// A "copy your key NOW — it won't be shown again" one-time reveal (Luma, many
-// console secrets). The value is on screen but vanishes on dismiss/navigate, so
-// the agent must extract it immediately (and name it with secret_label), not
-// click away first.
-export function hasOneTimeSecretModal(pageText: string): boolean {
-  const text = pageText.replace(/\s+/g, " ").trim();
-  return (
-    /\b(?:won'?t|will not|can'?t|cannot|never)\b[\s\w]{0,30}?\b(?:shown|displayed|see|view|retriev\w*|access\w*)\b[\s\w]{0,20}?\bagain\b/i.test(
-      text,
-    ) ||
-    /\b(?:only|last)\s+time\b.*\b(?:see|view|copy|shown)\b/i.test(text) ||
-    /\b(?:copy|save|store)\s+(?:and\s+save\s+)?(?:your\s+|this\s+|the\s+)?(?:secret|api\s*key|key|token|credential)\b.*\b(?:now|securely|somewhere|before)\b/i.test(
-      text,
-    ) ||
-    /\bmake\s+sure\s+to\s+(?:copy|save|store)\b/i.test(text)
-  );
-}
-
-// The operator acts as the user's REAL identity (not a fresh disposable alias
-// like the universal bot), so a service the user already has an account on
-// rejects a fresh signup — the page flips to a login form / "already
-// registered" / "invalid credentials". This is NOT a wall: the right move is to
-// LOG IN with the existing identity and read the EXISTING key, not retry signup.
-export function hasExistingAccountSignal(pageText: string): boolean {
-  const text = pageText.replace(/\s+/g, " ").trim();
-  return (
-    /\binvalid\s+(?:credentials|password|email\s+or\s+password|login)\b/i.test(text) ||
-    /\b(?:account|email|user(?:name)?)\s+(?:already\s+)?(?:exists|is\s+already\s+(?:registered|in\s+use|taken))\b/i.test(
-      text,
-    ) ||
-    /\b(?:email|account)\s+is\s+already\s+(?:registered|in\s+use|associated|taken)\b/i.test(text) ||
-    /\bthis\s+(?:email|account)\s+is\s+already\b/i.test(text) ||
-    /\ban?\s+account\s+(?:with\s+this\s+email\s+)?already\s+exists\b/i.test(text)
-  );
-}
-
-// An OAuth provider returned "account not found" — the user's Google/GitHub
-// identity is not a LINKED account on this service (Clerk-style: the OAuth
-// button is sign-IN only, signup is email-OTP). Retrying the OAuth button loops
-// forever; the fix is to switch to the email/OTP signup path.
-export function hasUnlinkedOAuthAccountSignal(pageText: string): boolean {
-  const text = pageText.replace(/\s+/g, " ").trim();
-  return (
-    /\bexternal\s+account\s+(?:was\s+)?not\s+found\b/i.test(text) ||
-    /\bno\s+(?:account|user)\s+(?:was\s+)?found\s+(?:for|with)\s+this\s+(?:google|github|oauth|external|account)\b/i.test(
-      text,
-    ) ||
-    /\b(?:couldn'?t|could\s+not|unable\s+to)\s+find\s+(?:an?\s+)?(?:account|user)\b[\s\w]{0,30}?\b(?:google|github|oauth|external)\b/i.test(
-      text,
-    )
-  );
-}
-
-// A stale/404 signup URL — the page is a "not found" shell, not a signup form.
-// Retrying the same URL loops; the fix is to recover the real signup entry. Guard
-// on length so a long app page that merely mentions "404" (an error-log widget, a
-// metrics tile) doesn't trip it — a real 404 page is sparse.
-export function hasNotFoundPageSignal(pageText: string): boolean {
-  const text = pageText.replace(/\s+/g, " ").trim();
-  if (text.length > 600) return false;
-  return (
-    /\b404\b/.test(text) ||
-    /\bpage not found\b/i.test(text) ||
-    /page (?:you(?:'re| are)? looking for )?(?:does\s?n'?t exist|not found|can'?t be found|could\s?n'?t be found)/i.test(
-      text,
-    )
-  );
-}
-
-export function provisionPerceptionGuidance(pageText: string): string | undefined {
-  const loginChooser = looksLikeLoginChooser(pageText);
-  const appMarkers = authenticatedAppSurfaceMarkers(pageText);
-  const modeMarkers = visibleModeMarkers(pageText);
-  // "Create Account or Login" on a login page false-matches the setup-overlay
-  // check; don't treat a login chooser as an authenticated setup surface.
-  const setupOverlay = !loginChooser && hasAccountSetupOverlay(pageText);
-  const parts: string[] = [];
-
-  // Stale signup URL — the page 404'd. Recover the real entry instead of looping
-  // on a dead URL (OpenRouter/Loops /signup both 404; the real forms are
-  // /register etc.). First so it leads when the page is just a not-found shell.
-  if (hasNotFoundPageSignal(pageText)) {
-    parts.push(
-      "Not-found page (404): this signup URL is stale — do NOT stop or report a wall. " +
-        "Recover the real signup entry: try another path on this host (/register, " +
-        "/sign-up, /join, /get-started), or navigate to the site's ROOT domain " +
-        "and click the 'Sign up' / 'Get started' / 'Register' link.",
-    );
-  }
-
-  // One-time secret reveal — extract NOW; it vanishes if you navigate away.
-  if (hasOneTimeSecretModal(pageText)) {
-    parts.push(
-      "One-time secret: the key/secret is shown HERE and will NOT be shown again. " +
-        'Extract it immediately with operate_act { kind: "extract" } (use secret_label to pick the ' +
-        "right field if several values are shown, and into_slot/store to capture it) " +
-        "BEFORE clicking anything that could dismiss this modal or navigate away.",
-    );
-  }
-
-  // Onboarding / org-creation form — fill it, don't treat it as a wall. NOT on a
-  // login chooser: "Create Account or Login" (Groq) false-matched as a setup form.
-  if (!loginChooser && isOnboardingOrOrgForm(pageText)) {
-    parts.push(
-      "Onboarding/setup form: this is NOT a wall and NOT a failure. It gates the " +
-        "keys/dashboard behind a setup step. Fill the required fields with sensible " +
-        "inferred values (your name; an organization/workspace/team name such as your " +
-        "name or 'Personal'; pick the smallest/free plan) and submit to continue. Do " +
-        "not stop or report a wall — drive through it to reach the keys page.",
-    );
-  }
-
-  // Existing-account signal — you act as the user's REAL identity, which may
-  // already be registered here. A fresh signup will keep failing.
-  if (hasExistingAccountSignal(pageText)) {
-    parts.push(
-      "Existing account: you are acting as the user's REAL identity, which " +
-        "already appears to have an account here (login form / 'already " +
-        "registered' / 'invalid credentials'). Do NOT retry signup. Switch to " +
-        "LOGGING IN — prefer the OAuth provider the user has a live session for, " +
-        "or a password reset — then navigate to the EXISTING API key and extract it.",
-    );
-  }
-
-  // Unlinked-OAuth signal — the OAuth identity isn't a linked account; the OAuth
-  // button is sign-in only. Stop clicking it; use the email/OTP signup path.
-  if (hasUnlinkedOAuthAccountSignal(pageText)) {
-    parts.push(
-      "Unlinked OAuth identity: the provider returned 'account not found' — your " +
-        "Google/GitHub identity is not a linked account here, so the OAuth button " +
-        "is sign-IN only. Do NOT keep clicking it. Switch to EMAIL signup/OTP " +
-        '(submit the email field, then operate_act { kind: "await_verification" } for the code) to ' +
-        "create the account, then continue to the keys page.",
-    );
-  }
-
-  if (modeMarkers.length > 0) {
-    parts.push(`Mode marker visible: ${modeMarkers.join(", ")}.`);
-  } else if (appMarkers.length > 0 || setupOverlay) {
-    parts.push(
-      "No test/sandbox/live mode marker is visible. For mode-sensitive tasks, do not create or save objects until the required mode is visible.",
-    );
-  }
-
-  if (setupOverlay && appMarkers.length > 0) {
-    parts.push(
-      `Screen perception: account/setup overlay text is present while authenticated app markers are also visible (${appMarkers.join(", ")}). This often means a foreground onboarding modal is blocking an already-authenticated app, not that OAuth failed. Do not restart OAuth or navigate to login solely because the overlay says create/finish account; either satisfy the minimal required setup once, or use same-origin app navigation/direct dashboard URLs toward the user's goal.`,
-    );
-  } else if (appMarkers.length > 0) {
-    parts.push(
-      `Screen perception: authenticated app markers are visible (${appMarkers.join(", ")}). Prefer app navigation over restarting OAuth unless the current URL is clearly an identity-provider login page.`,
-    );
-  }
-
-  return parts.length > 0 ? parts.join(" ") : undefined;
-}
 
 export function buildScreenOutline(
   elements: readonly InteractiveElement[],
-  pageText: string,
 ): ScreenOutline | undefined {
   if (elements.length === 0) return undefined;
   const byRegion = new Map<string, ScreenRegion>();
@@ -1982,7 +1622,6 @@ export function buildScreenOutline(
     null;
   return {
     foreground,
-    mode_markers: visibleModeMarkers(pageText),
     regions,
   };
 }
@@ -2384,9 +2023,6 @@ export function stashSecretSlot(sessionId: string, slot: string, value: string):
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   session.secretSlots.set(slot, value);
-  // Record the SEAL in the recipe trace (the value never goes in — only that a
-  // secret was sealed into this slot, so the replay rail says "reveal+seal here").
-  session.actionTrace.push({ action: { kind: "extract", slot } });
   audit(sessionId, "secret_slot_set", { slot, length: value.length });
   return { slot, preview: maskSecretValue(value), length: value.length };
 }
@@ -2412,307 +2048,6 @@ export function isCompactV2ProvisionSession(sessionId: string): boolean {
   return sessionForCall(sessionId)?.compactV2Mode === "on";
 }
 
-export interface CartAddResult {
-  status: "added" | "already_in_cart";
-  cart_delta: "+1" | "0" | "unknown";
-  cart_url: string | null;
-  checkout_state: CheckoutState;
-  postcondition: { product_identity: string; options_hash: string; quantity: number | null };
-}
-
-function canonicalCartIdentity(value: string): string {
-  const trimmed = value.trim();
-  try {
-    const url = new URL(trimmed);
-    url.hash = "";
-    return url.toString();
-  } catch {
-    return trimmed;
-  }
-}
-
-function cartLineMatches(
-  line: { product_identities: string[]; option_signatures: string[] },
-  productIdentity: string,
-  optionsHash: string,
-): boolean {
-  const product = canonicalCartIdentity(productIdentity);
-  const options = canonicalCartIdentity(optionsHash);
-  return (
-    line.product_identities.some((candidate) => canonicalCartIdentity(candidate) === product) &&
-    line.option_signatures.some((candidate) => canonicalCartIdentity(candidate) === options)
-  );
-}
-
-async function cartLineQuantity(
-  session: Session,
-  productIdentity: string,
-  optionsHash: string,
-  page?: Page,
-): Promise<number | null> {
-  const lines = await session.browser.readCheckoutReviewLineItems(true, page);
-  const matching = lines.filter((line) => cartLineMatches(line, productIdentity, optionsHash));
-  if (matching.length !== 1) return null;
-  return matching[0]!.quantity;
-}
-
-function alreadyInCartResult(result: CartAddResult): CartAddResult {
-  return {
-    ...result,
-    status: "already_in_cart",
-    cart_delta: "0",
-    checkout_state: { ...result.checkout_state },
-  };
-}
-
-async function capturePrivateCheckoutState(
-  session: Session,
-  page?: Page,
-): Promise<CheckoutState | undefined> {
-  const elements = await session.browser.extractInteractiveElements(page);
-  retainSessionElements(session, elements);
-  const url = page?.url() ?? session.browser.currentUrl();
-  const text = await session.browser.extractVisibleText(page);
-  const liveCheckout = await captureCartCheckoutForFillCardFallback(session, url, page);
-  return checkoutStateForObservation(session, url, text.slice(0, 12_000), elements, liveCheckout);
-}
-
-async function reconcileReservedCartAdd(
-  session: Session,
-  record: CartAddRecord,
-  page?: Page,
-): Promise<CartAddResult> {
-  if (record.result !== null) return alreadyInCartResult(record.result);
-  if (record.promise !== null) {
-    try {
-      return alreadyInCartResult(await record.promise);
-    } catch (error) {
-      if (record.phase === "reserved")
-        return await cartAdd(
-          session.id,
-          record.productIdentity,
-          record.optionsHash,
-          record.idempotencyKey,
-        );
-      const pageAfterAction = page;
-      const quantity = await cartLineQuantity(
-        session,
-        record.productIdentity,
-        record.optionsHash,
-        pageAfterAction,
-      );
-      if (quantity === null) throw error;
-      session.lastCartMutation = {
-        productIdentity: record.productIdentity,
-        optionsHash: record.optionsHash,
-        cartDelta: "0",
-        origin: originForUrl(pageAfterAction?.url() ?? session.browser.currentUrl()) ?? "",
-      };
-      const checkoutState = await capturePrivateCheckoutState(session, pageAfterAction);
-      if (checkoutState === undefined) throw error;
-      const result: CartAddResult = {
-        status: "already_in_cart",
-        cart_delta: "0",
-        cart_url: checkoutState.cart_url,
-        checkout_state: { ...checkoutState, quantity },
-        postcondition: {
-          product_identity: record.productIdentity,
-          options_hash: record.optionsHash,
-          quantity,
-        },
-      };
-      record.phase = "complete";
-      record.result = result;
-      return result;
-    }
-  }
-  throw new Error("cart add reservation has no operation");
-}
-
-async function performCartAdd(
-  session: Session,
-  record: CartAddRecord,
-  page?: Page,
-): Promise<CartAddResult> {
-  const beforeQuantity = await cartLineQuantity(
-    session,
-    record.productIdentity,
-    record.optionsHash,
-    page,
-  );
-  if (beforeQuantity !== null && beforeQuantity > 0) {
-    session.lastCartMutation = {
-      productIdentity: record.productIdentity,
-      optionsHash: record.optionsHash,
-      cartDelta: "0",
-      origin: originForUrl(page?.url() ?? session.browser.currentUrl()) ?? "",
-    };
-    const checkoutState = await capturePrivateCheckoutState(session, page);
-    if (checkoutState === undefined) throw new Error("cart state was not observable");
-    return {
-      status: "already_in_cart",
-      cart_delta: "0",
-      cart_url: checkoutState.cart_url,
-      checkout_state: { ...checkoutState, quantity: beforeQuantity },
-      postcondition: {
-        product_identity: record.productIdentity,
-        options_hash: record.optionsHash,
-        quantity: beforeQuantity,
-      },
-    };
-  }
-
-  const addTargets = [
-    'text="Add to Cart"',
-    'text="Add to Bag"',
-    'text="かごに追加"',
-    'text="カートに追加"',
-  ];
-  let addError: unknown;
-  let actionResult: InternalActResult | null = null;
-  for (const target of addTargets) {
-    try {
-      actionResult = await actInternally(
-        session.id,
-        { kind: "click", target },
-        "compact",
-        {
-          productIdentity: record.productIdentity,
-          optionsHash: record.optionsHash,
-          onActionReady: () => {
-            record.phase = "click_started";
-          },
-        },
-        true,
-        undefined,
-        page,
-      );
-      addError = undefined;
-      break;
-    } catch (error) {
-      addError = error;
-      if (!(error instanceof ProvisionTargetMissingError)) {
-        throw error;
-      }
-    }
-  }
-  if (addError !== undefined || actionResult === null) throw addError;
-  const pageAfterAction = actionResult.operationPage ?? page;
-  const afterQuantity = await cartLineQuantity(
-    session,
-    record.productIdentity,
-    record.optionsHash,
-    pageAfterAction,
-  );
-  if (afterQuantity === null || afterQuantity <= 0) {
-    throw new Error("requested product/variant line was not observable after add");
-  }
-  const checkoutState = actionResult.outcome.checkoutState;
-  if (checkoutState === undefined) throw new Error("cart state was not observable after add");
-  const cartDelta =
-    beforeQuantity === null
-      ? afterQuantity === 1
-        ? "+1"
-        : "unknown"
-      : afterQuantity === beforeQuantity + 1
-        ? "+1"
-        : "unknown";
-  session.lastCartMutation = {
-    productIdentity: record.productIdentity,
-    optionsHash: record.optionsHash,
-    cartDelta,
-    origin: originForUrl(pageAfterAction?.url() ?? session.browser.currentUrl()) ?? "",
-  };
-  return {
-    status: "added",
-    cart_delta: cartDelta,
-    cart_url: checkoutState.cart_url,
-    checkout_state: { ...checkoutState, quantity: afterQuantity },
-    postcondition: {
-      product_identity: record.productIdentity,
-      options_hash: record.optionsHash,
-      quantity: afterQuantity,
-    },
-  };
-}
-
-export interface CartClearResult {
-  status: "cleared";
-  cart_url: string | null;
-  checkout_state?: CheckoutState;
-}
-
-// Deterministic cart-normalize affordance: empty the cart before a cart_add so
-// a run reaches a KNOWN quantity regardless of what accumulated in the shared
-// persistent-profile cart across earlier operate_start sessions. Drops the
-// local idempotency reservations too — a stale "already_in_cart" for a line
-// that no longer exists must not suppress a real add after the clear.
-export async function cartClear(sessionId: string): Promise<CartClearResult> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const operationPage = operationPageForSession(session);
-  const cleared = await session.browser.clearCart(operationPage);
-  if (!cleared) throw new Error("cart_clear failed to reach the cart-clear endpoint");
-  session.cartAdds.clear();
-  session.cartAddsByIdempotencyKey.clear();
-  session.lastCartMutation = null;
-  const observed = await observeSession(session, "compact", undefined, operationPage);
-  return {
-    status: "cleared",
-    cart_url: observed.checkout_state?.cart_url ?? null,
-    ...(observed.checkout_state !== undefined ? { checkout_state: observed.checkout_state } : {}),
-  };
-}
-
-export async function cartAdd(
-  sessionId: string,
-  productIdentity: string,
-  optionsHash: string,
-  idempotencyKey: string,
-): Promise<CartAddResult> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const operationPage = operationPageForSession(session);
-  const lineKey = `${productIdentity}\u0000${optionsHash}`;
-  const byIdempotencyKey = session.cartAddsByIdempotencyKey.get(idempotencyKey);
-  if (
-    byIdempotencyKey !== undefined &&
-    (byIdempotencyKey.productIdentity !== productIdentity ||
-      byIdempotencyKey.optionsHash !== optionsHash)
-  ) {
-    throw new Error("idempotency_key is already bound to a different product/variant");
-  }
-  const existing = byIdempotencyKey ?? session.cartAdds.get(lineKey);
-  if (existing !== undefined) {
-    session.cartAddsByIdempotencyKey.set(idempotencyKey, existing);
-    return await reconcileReservedCartAdd(session, existing, operationPage);
-  }
-
-  const record: CartAddRecord = {
-    productIdentity,
-    optionsHash,
-    idempotencyKey,
-    phase: "reserved",
-    promise: null,
-    result: null,
-  };
-  session.cartAdds.set(lineKey, record);
-  session.cartAddsByIdempotencyKey.set(idempotencyKey, record);
-  record.promise = performCartAdd(session, record, operationPage)
-    .then((result) => {
-      record.phase = "complete";
-      record.result = result;
-      return result;
-    })
-    .catch((error: unknown) => {
-      if (record.phase === "reserved") {
-        session.cartAdds.delete(lineKey);
-        session.cartAddsByIdempotencyKey.delete(idempotencyKey);
-      }
-      throw error;
-    });
-  return await record.promise;
-}
 
 // PR3c — the user's own email captured at login (the authoritative signup
 // address), or null when none was captured. The tool layer reads this to fill
@@ -3485,57 +2820,6 @@ function withCheckoutState(
   };
 }
 
-function isCartAffectingAction(
-  action: ProvisionAction,
-  el: InteractiveElement | null,
-  extraLabels: readonly string[] = [],
-): boolean {
-  const parts = [
-    "target" in action ? action.target : "",
-    el?.visibleText ?? "",
-    el?.ariaLabel ?? "",
-    el?.labelText ?? "",
-    el?.name ?? "",
-    el?.id ?? "",
-    el?.container ?? "",
-    el?.screenPath ?? "",
-    ...extraLabels,
-  ];
-  const target = parts.join(" ");
-  if (action.kind === "click" || action.kind === "js_click") {
-    if (
-      /(?:add\s+to\s+(?:cart|bag|basket)|remove\s+from\s+(?:cart|bag|basket)|update\s+(?:cart|bag|basket)|increase\s+quantity|decrease\s+quantity|かごに追加|カートに追加|カートから削除|数量を増やす|数量を減らす)/i.test(
-        target,
-      )
-    ) {
-      return true;
-    }
-    const hasQuantityContext =
-      /(?:\b(?:quantity|qty|cart|basket|bag)\b|数量|個数|カート|かご)/i.test(target);
-    if (hasQuantityContext && parts.some((part) => /^\s*(?:\+|[-−])\s*$/.test(part))) {
-      return true;
-    }
-    const rowContext = `${el?.container ?? ""} ${el?.screenPath ?? ""}`;
-    const actionLabels = [
-      "target" in action ? action.target : "",
-      el?.visibleText ?? "",
-      el?.ariaLabel ?? "",
-      el?.labelText ?? "",
-      el?.name ?? "",
-      el?.id ?? "",
-      ...extraLabels,
-    ];
-    return (
-      /(?:\b(?:cart|basket|bag)(?:\s+item|\s+line)?\b|カート|かご)/i.test(rowContext) &&
-      actionLabels.some((label) => /^\s*(?:(?:remove|delete|update)\b|削除|更新)/i.test(label))
-    );
-  }
-  return (
-    (action.kind === "type" || action.kind === "select") &&
-    /(?:\b(?:quantity|qty)\b|数量|個数)/i.test(target)
-  );
-}
-
 function retainSessionElements(session: Session, elements: InteractiveElement[]): void {
   session.lastElements =
     session.compactV2Mode === "on"
@@ -3573,24 +2857,6 @@ function compactV2CorrelationSelector(session: Session, element: InteractiveElem
     .update(binding)
     .digest("base64url")
     .slice(0, 22)}`;
-}
-
-function replaySafeElementForSession(
-  session: Session,
-  element: InteractiveElement | null,
-): InteractiveElement | null {
-  if (element === null || session.compactV2Mode !== "on") return element;
-  if (element.frameOrigin !== null && element.frameOrigin !== undefined) {
-    if (safeOriginV2(element.frameOrigin) === null) {
-      rejectRecipeRecording(session, "compact_v2_unrepresentable_frame_origin");
-      return null;
-    }
-  }
-  return (
-    sealRetainedInteractiveElementsV2([element], (candidate) =>
-      compactV2CorrelationSelector(session, candidate),
-    )[0] ?? null
-  );
 }
 
 export interface CompactV2StartMetadata {
@@ -4194,39 +3460,6 @@ function compactV2Observation(
   } as unknown as Observation;
 }
 
-async function exerciseCompactV2Shadow(
-  session: Session,
-  generation: number,
-  elements: readonly InteractiveElement[],
-  semanticSource: ObservationSemanticSourceV2,
-  sourcePage: OAuthCompletionEvidence["page"] | undefined,
-): Promise<void> {
-  const saved = {
-    compactV2Active: session.compactV2Active,
-    compactV2Index: session.compactV2Index,
-    compactV2Refs: session.compactV2Refs,
-    compactV2Previous: session.compactV2Previous,
-    prevObserve: session.prevObserve,
-  };
-  try {
-    compactV2Observation(
-      session,
-      generation,
-      await session.browser.extractBrowserUseObservation(sourcePage),
-      semanticSource,
-      undefined,
-      sourcePage,
-    );
-  } catch {
-  } finally {
-    session.compactV2Active = saved.compactV2Active;
-    session.compactV2Index = saved.compactV2Index;
-    session.compactV2Refs = saved.compactV2Refs;
-    session.compactV2Previous = saved.compactV2Previous;
-    session.prevObserve = saved.prevObserve;
-  }
-}
-
 export async function observeQuery(
   sessionId: string,
   query: string,
@@ -4469,14 +3702,11 @@ async function observeSession(
         forceFullDOM,
       );
     }
-    if (v2Mode === "shadow")
-      await exerciseCompactV2Shadow(session, generation, elements, semanticSource, sourcePage);
     session.compactV2Active = false;
     invalidateCompactV2Snapshot(session);
     const text = await session.browser.extractVisibleText(sourcePage);
     const normalizedFull = text.replace(/\s+/g, " ").trim();
     const normalizedText = normalizedFull.slice(0, 4000);
-    const guidance = provisionPerceptionGuidance(normalizedText);
     const url = sourcePage?.url() ?? session.browser.currentUrl();
     const liveCheckout = await captureCartCheckoutForFillCardFallback(session, url, sourcePage);
     const checkoutState = checkoutStateForObservation(
@@ -4498,7 +3728,6 @@ async function observeSession(
         url,
         text: normalizedText,
         textTruncated,
-        ...(guidance !== undefined ? { guidance } : {}),
         elements,
         prev: session.prevObserve,
       });
@@ -4530,7 +3759,6 @@ async function observeSession(
             session_id: session.id,
             url,
             text: normalizedText,
-            ...(guidance !== undefined ? { guidance } : {}),
             // Still a COMPACT response — carry the (uncollapsed) set as the columnar
             // table so the host parses it the same way as any other compact observe.
             ...emitElements([...built.fullByRef.values()], "columnar"),
@@ -4570,14 +3798,13 @@ async function observeSession(
       textTruncated,
       elements.map((el) => toCompactElement(el, refOf(el), true, false)),
     );
-    const screen = buildScreenOutline(elements, normalizedText);
+    const screen = buildScreenOutline(elements);
     const accessibility = buildAccessibilitySnapshot(elements);
     return withCheckoutState(
       {
         session_id: session.id,
         url,
         text: normalizedText,
-        ...(guidance !== undefined ? { guidance } : {}),
         ...(screen !== undefined ? { screen } : {}),
         ...(accessibility !== undefined ? { accessibility } : {}),
         elements: elements.map((el) => {
@@ -4623,7 +3850,6 @@ interface InternalActResult {
   operationPage?: Page;
   outcome: {
     selectedOption?: string;
-    checkoutState?: CheckoutState;
   };
 }
 
@@ -4720,8 +3946,6 @@ async function actInternally(
   sessionId: string,
   action: ProvisionAction,
   detail: ObserveDetail = "compact",
-  cartIdentity?: CartIdentityContext,
-  collectCheckoutState = false,
   compactV2Authorization?: CompactV2TargetAuthorization,
   operationPage?: Page,
 ): Promise<InternalActResult> {
@@ -4737,9 +3961,7 @@ async function actInternally(
           sessionId,
           action,
           detail,
-          cartIdentity,
           true,
-          collectCheckoutState,
           compactV2Authorization,
           deadline,
           capturedOperationPage,
@@ -4780,7 +4002,6 @@ export async function act(
   sessionId: string,
   action: ProvisionAction,
   detail: ObserveDetail = "compact",
-  cartIdentity?: CartIdentityContext,
   outputFormat: "compact" | "full" = "full",
   compactMapEmitted = true,
 ): Promise<Observation> {
@@ -4815,8 +4036,6 @@ export async function act(
           sessionId,
           action,
           detail,
-          cartIdentity,
-          false,
           false,
           queuedOAuthAuthorization,
           deadline,
@@ -4895,9 +4114,7 @@ async function executeAct(
   sessionId: string,
   action: ProvisionAction,
   detail: ObserveDetail,
-  cartIdentity: CartIdentityContext | undefined,
   internalAccess: boolean,
-  collectCheckoutState: boolean,
   internalAuthorization?: CompactV2TargetAuthorization,
   oauthDeadline?: OAuthActionDeadline,
   operationPage?: Page,
@@ -4908,29 +4125,10 @@ async function executeAct(
 ): Promise<InternalActResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  if (
-    action.kind === "type_secret" &&
-    action.provenance !== undefined &&
-    action.provenance.hole !== `credential.${action.slot}`
-  ) {
-    throw new Error(
-      `type_secret provenance must match the authoritative slot credential.${action.slot}`,
-    );
-  }
   let browser = session.browser;
   const compactV2ActionPage = operationPage ?? operationPageForSession(session);
   let actionPageAfter = compactV2ActionPage;
   let completedAction: ProvisionAction = action;
-  let sensitiveSource: RecordedValueSource | undefined;
-  let cartAffecting = false;
-  const bindCartIdentity = (affecting: boolean): void => {
-    // Generic operate_act cart controls stay usable without identity. Identity
-    // is a best-effort observation hint here; exact product/variant binding and
-    // retry suppression belong to operate_act { kind: "cart_add" }'s dedicated contract.
-    if (!affecting || cartIdentity === undefined) return;
-    cartAffecting = true;
-    cartIdentity.onActionReady?.();
-  };
   let resolutionTarget: string | undefined;
   let auditTarget: string | undefined;
   let compactV2Authorization = internalAuthorization;
@@ -4980,11 +4178,7 @@ async function executeAct(
       : {}),
   });
 
-  // The URL the action is taken ON — captured BEFORE the action navigates. The
-  // capture round pairs this with the pre-action inventory + observed; using
-  // currentUrl() after the action recorded the POST-navigation URL (an OAuth
-  // click that redirected turned round 0's URL into the post-login dashboard,
-  // corrupting the skill's entry_url and the login step).
+  // The URL the action is taken ON — captured BEFORE the action navigates.
   const urlBeforeAction = compactV2ActionPage?.url() ?? browser.currentUrl();
   // Document identity BEFORE the action dispatches, so the return can report
   // honestly whether the document changed while the action was settling.
@@ -4995,48 +4189,10 @@ async function executeAct(
     docBeforeAction = undefined;
   }
 
-  // Defense-in-depth for the confused-deputy guard: if an ORGANIC redirect (not
-  // gated by hostAllowed) has landed the operator browser on Squire's own
-  // control plane, refuse to ACT on it — so the agent can't drive the vault
-  // login/OAuth or click "reveal". `goto` is still permitted so the agent can
-  // escape (and goto TO a control-plane host is already denied by hostAllowed).
-  if (action.kind !== "goto") {
-    let curHost: string | null = null;
-    try {
-      curHost = new URL(urlBeforeAction).hostname;
-    } catch {
-      curHost = null;
-    }
-    if (curHost !== null && isSquireControlPlaneHost(curHost)) {
-      throw new ProvisionTargetNotAllowedError(
-        `action refused: the browser is on Squire's own control plane (${curHost}). ` +
-          `The operator may not act on the Trusty Squire vault/app — navigate away with goto.`,
-      );
-    }
-  }
-
-  const recordingTransitionFields = await attestRecordedFieldsBeforeTransition(
-    session,
-    action,
-    compactV2ActionPage,
-  );
-
-  // Captured for the operator-recipe trace: the element a target action
-  // resolved to, so we record the VISIBLE text it acted on (not the ref).
-  let resolvedEl: InteractiveElement | null = null;
   try {
     switch (action.kind) {
       case "goto": {
-        if (!hostAllowed(action.url, hostStrings(session))) {
-          throw new ProvisionTargetNotAllowedError(
-            `goto refused: invalid URL or Squire control-plane destination: ${action.url}`,
-          );
-        }
         await browser.goto(action.url, compactV2ActionPage);
-        break;
-      }
-      case "allow_host": {
-        // Backward-compatible no-op: browser requests have no host scope.
         break;
       }
       case "press": {
@@ -5064,11 +4220,6 @@ async function executeAct(
               "For a page value instead, use operate_extract with into_slot first.",
           );
         }
-        sensitiveSource = {
-          traceIndex: -1,
-          hole: `credential.${action.slot}`,
-          literal: value,
-        };
         const locator = parseLocatorTarget(resolutionTarget!);
         if (locator !== null) {
           const resolved = await browser.resolvePageTarget(
@@ -5087,7 +4238,6 @@ async function executeAct(
             if (resolved.frameTarget !== null) {
               assertSecretFrameTargetAllowed(session, resolved.frameTarget, compactV2ActionPage);
             }
-            session.usedLocatorFallback = true;
             await browser.typeHandle(resolved.handle, value, true);
           } finally {
             await resolved.handle.dispose().catch(() => undefined);
@@ -5120,7 +4270,6 @@ async function executeAct(
           if (stale !== null) throw stale;
           throw new Error(`type_secret: no element matched target "${action.target}".`);
         }
-        resolvedEl = el;
         // Frame domain-lock (operator-frame-support) — never let a secret cross
         // into a rogue/third-party (e.g. payment) iframe. See
         // assertSecretFrameTargetAllowed; a main-frame or same-domain-frame
@@ -5169,11 +4318,9 @@ async function executeAct(
                 .join(", "),
           );
         }
-        resolvedEl = el;
         // Opaque (null-origin) frames are unaddressable — a plain "not
         // reachable" error. Secret injection has no further cross-origin gate.
         assertFrameTargetAllowed(session, el, "select", compactV2ActionPage);
-        bindCartIdentity(isCartAffectingAction(action, el));
         const selectFrame = frameTargetFor(el);
         const committedText =
           selectFrame !== null
@@ -5196,8 +4343,6 @@ async function executeAct(
       }
       case "set_phone_country": {
         // No captured element — the bot finds the phone-local native <select>.
-        // resolvedEl stays null; the step records without a captured-element
-        // trace (the country is host-replannable, not a replay recipe).
         await browser.setPhoneCountry(action.country, compactV2ActionPage);
         await settleAfterStateChange(browser, compactV2ActionPage);
         break;
@@ -5225,7 +4370,6 @@ async function executeAct(
                     "click",
                     compactV2ActionPage,
                   );
-                session.usedLocatorFallback = true; // Dispatched image points cannot be replayed.
               });
               onScreenshotDispatched?.();
             })) ?? actionPageAfter;
@@ -5277,8 +4421,6 @@ async function executeAct(
                 compactV2ActionPage,
               );
             }
-            bindCartIdentity(isCartAffectingAction(action, null, resolved.labels));
-            session.usedLocatorFallback = true;
             if (action.kind === "click" || action.kind === "js_click") {
               const method = action.kind;
               if (compactV2ActionPage !== undefined && !browser.isActivePage(compactV2ActionPage)) {
@@ -5346,12 +4488,10 @@ async function executeAct(
                 .join(", "),
           );
         }
-        resolvedEl = el;
         // Preserve frame identity and control-plane checks.
         // (The unsanctioned frame domain lock was removed; opaque/null-origin
         // frame targets still refuse.)
         assertFrameTargetAllowed(session, el, action.kind, compactV2ActionPage);
-        bindCartIdentity(isCartAffectingAction(action, el));
         if (action.kind === "click" || action.kind === "js_click") {
           const target = frameTargetFor(el);
           const sourcePageIsActive =
@@ -5482,7 +4622,6 @@ async function executeAct(
             `oauth_login: no element matched target "${action.target}". Re-observe and use the OAuth button ref.`,
           );
         }
-        resolvedEl = el;
         if (oauthDeadline === undefined) {
           throw new Error("OAuth action deadline was not established");
         }
@@ -5507,7 +4646,7 @@ async function executeAct(
     // fill a whole form from one observation. Only LEAVING the observed document
     // retires them — the same condition the authorization check enforces — so
     // drop the snapshot exactly then, and fail closed if the epoch is unreadable.
-    if (action.kind !== "allow_host" && session.compactV2Index !== null) {
+    if (session.compactV2Index !== null) {
       let stillObservedDocument = false;
       try {
         stillObservedDocument = session.compactV2Index.epoch.doc === compactV2EpochDoc(session);
@@ -5515,45 +4654,19 @@ async function executeAct(
       if (!stillObservedDocument) invalidateCompactV2Snapshot(session);
     }
   }
-  await verifyRecordedFieldsAfterTransition(
-    session,
-    action,
-    recordingTransitionFields,
-    compactV2ActionPage,
-  );
   if (action.kind === "click" || action.kind === "js_click") {
     actionPageAfter = returnFromClosedPicker(session, actionPageAfter);
   }
-  // Don't fold inbox-provider steps into the replayable recipe (see
-  // INBOX_READ_HOSTS): replay re-reads the code via awaitVerification, and a
-  // recorded inbox click would bake the email's subject into a shared recipe.
   const urlAfterAction = actionPageAfter?.url() ?? browser.currentUrl();
-  if (!isInboxReadHost(urlAfterAction)) {
-    const replayElement = replaySafeElementForSession(session, resolvedEl);
-    recordTrace(session, completedAction, replayElement, sensitiveSource);
-    recordCaptureRound(session, completedAction, replayElement, urlBeforeAction);
-  }
-  if (cartAffecting) {
-    session.lastCartMutation = {
-      productIdentity: cartIdentity!.productIdentity,
-      optionsHash: cartIdentity!.optionsHash,
-      cartDelta: "unknown",
-      origin: originForUrl(urlAfterAction) ?? "",
-    };
-  }
   // `detail:"none"` returns a minimal ack (the action ran; no perception emitted)
   // so multi-field fills don't each echo the page. The host must call
   // operate_observe before its next ref-targeted act (refs aren't refreshed here).
-  const checkoutState =
-    internalAccess && collectCheckoutState
-      ? await capturePrivateCheckoutState(session, actionPageAfter)
-      : undefined;
   const terminalOAuthCompletionUrl = browser.takeOAuthTerminalCompletionUrl();
   const actionObservationPage = actionPageAfter;
   const observation =
     terminalOAuthCompletionUrl !== null
       ? terminalOAuthCompletionObservation(session, terminalOAuthCompletionUrl)
-      : detail === "none" && !cartAffecting && action.kind !== "oauth_login"
+      : detail === "none" && action.kind !== "oauth_login"
         ? compactV2PublicObservation(
             session,
             () => ({
@@ -5604,7 +4717,6 @@ async function executeAct(
         : observationWithNavigation,
     outcome: {
       ...(completedAction.kind === "select" ? { selectedOption: completedAction.text } : {}),
-      ...(checkoutState === undefined ? {} : { checkoutState }),
     },
   };
 }
@@ -5662,8 +4774,6 @@ export async function formSelectMany(
         sessionId,
         { kind: "select", target, text: option },
         "none",
-        undefined,
-        false,
         authorization,
         operationPage,
       );
@@ -5769,700 +4879,6 @@ function compactV2ActionFailureReason(error: unknown, kind: ProvisionAction["kin
 // Mirrors the synthesizer's looksLikeEmail check (promote-to-skill.ts). The token
 // name keeps its legacy form for corpus compatibility (validateReplayGraph and
 // published skills key off it); it now means "the email to fill", not a Squire alias.
-const EMAIL_SLOT_TEMPLATE = "${EMAIL_ALIAS}";
-
-type EmailEncodingOperation = "URI" | "CSS";
-
-function regexEscape(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function nestedPercentByte(byte: number): string {
-  return `%(?:25)*${byte.toString(16).padStart(2, "0")}`;
-}
-
-function encodedCharacterPattern(char: string): string {
-  const raw = regexEscape(char);
-  const percent = [...Buffer.from(char)].map(nestedPercentByte).join("");
-  const encoded = `(?:${raw}|${percent})`;
-  const slash = `(?:\\\\|${nestedPercentByte(0x5c)})`;
-  const cssSimple = /[a-zA-Z0-9_-]/.test(char) ? null : `${slash}${encoded}`;
-  const cssHex = `${slash}${[...char.codePointAt(0)!.toString(16)]
-    .map((digit) => `(?:${digit}|${nestedPercentByte(digit.charCodeAt(0))})`)
-    .join("")}(?:(?:\\s|${nestedPercentByte(0x20)}))?`;
-  return `(?:${[encoded, cssSimple, cssHex].filter(Boolean).join("|")})`;
-}
-
-function decodeUriLayer(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
-function decodeCssLayer(value: string): string {
-  return value.replace(
-    /\\([0-9a-f]{1,6})(?:\r\n|[\t\n\f\r ])?|\\([^\r\n\f])/gi,
-    (_match, hex: string | undefined, escaped: string | undefined) =>
-      hex === undefined ? (escaped ?? "") : String.fromCodePoint(Number.parseInt(hex, 16)),
-  );
-}
-
-function applyEmailEncoding(value: string, operations: readonly EmailEncodingOperation[]): string {
-  return operations.reduce(
-    (encoded, operation) =>
-      operation === "URI" ? encodeURIComponent(encoded) : cssEscapeRecipeValue(encoded),
-    value,
-  );
-}
-
-function emailTemplateForRepresentation(representation: string, email: string): string | null {
-  const queue: Array<{ value: string; inverse: EmailEncodingOperation[] }> = [
-    { value: representation, inverse: [] },
-  ];
-  const seen = new Set<string>();
-  let fallback: EmailEncodingOperation[] | null = null;
-  while (queue.length > 0 && seen.size <= 4096) {
-    const current = queue.shift()!;
-    const key = `${current.value}\0${current.inverse.join("_")}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    if (current.value.toLowerCase() === email.toLowerCase()) {
-      const operations = [...current.inverse].reverse();
-      if (applyEmailEncoding(email, operations).toLowerCase() === representation.toLowerCase()) {
-        return `\${EMAIL_ALIAS${operations.map((operation) => `_${operation}`).join("")}}`;
-      }
-      fallback ??= operations;
-      continue;
-    }
-    const uriDecoded = decodeUriLayer(current.value);
-    if (uriDecoded !== current.value) {
-      queue.push({ value: uriDecoded, inverse: [...current.inverse, "URI"] });
-    }
-    const cssDecoded = decodeCssLayer(current.value);
-    if (cssDecoded !== current.value) {
-      queue.push({ value: cssDecoded, inverse: [...current.inverse, "CSS"] });
-    }
-  }
-  return fallback === null
-    ? null
-    : `\${EMAIL_ALIAS${fallback.map((operation) => `_${operation}`).join("")}}`;
-}
-const REPLAY_VERIFIED_HOLE = /^(?:address|contact)(?:\.|$)|^quantity$/;
-function looksLikeEmailValue(v: string): boolean {
-  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v.trim());
-}
-
-const COMPACT_V2_REPLAY_ROUTE_SEGMENTS = new Set([
-  "account",
-  "accounts",
-  "api",
-  "app",
-  "apps",
-  "auth",
-  "basket",
-  "billing",
-  "callback",
-  "cart",
-  "checkout",
-  "complete",
-  "console",
-  "create",
-  "credential",
-  "credentials",
-  "dashboard",
-  "developer",
-  "developers",
-  "key",
-  "keys",
-  "login",
-  "new",
-  "oauth",
-  "payment",
-  "profile",
-  "project",
-  "projects",
-  "register",
-  "security",
-  "settings",
-  "sign-in",
-  "sign-up",
-  "signin",
-  "signup",
-  "success",
-  "token",
-  "tokens",
-  "verification",
-  "verify",
-  "workspace",
-  "workspaces",
-]);
-
-function compactV2ReplaySafeUrl(rawUrl: string): string | null {
-  try {
-    const parsed = new URL(rawUrl);
-    if (safeOriginV2(parsed.origin) === null) return null;
-    if (
-      parsed.username.length > 0 ||
-      parsed.password.length > 0 ||
-      parsed.search.length > 0 ||
-      parsed.hash.length > 0 ||
-      isSingleUseUrl(rawUrl)
-    ) {
-      return null;
-    }
-    const segments = parsed.pathname.split("/").filter(Boolean);
-    if (
-      segments.some(
-        (segment) =>
-          segment !== segment.toLowerCase() || !COMPACT_V2_REPLAY_ROUTE_SEGMENTS.has(segment),
-      )
-    ) {
-      return null;
-    }
-    return parsed.toString();
-  } catch {
-    return null;
-  }
-}
-
-function compactV2RecordedAction(
-  session: Session,
-  action: ProvisionAction,
-): ProvisionAction | null {
-  if (session.compactV2Mode !== "on") return action;
-  if (action.kind === "goto") {
-    const url = compactV2ReplaySafeUrl(action.url);
-    if (url !== null) return { ...action, url };
-    rejectRecipeRecording(session, "compact_v2_unrepresentable_goto");
-    return null;
-  }
-  if (action.kind === "allow_host") {
-    const origin = safeOriginV2(`https://${action.host}`);
-    if (origin !== null) return { ...action, host: new URL(origin).hostname };
-    rejectRecipeRecording(session, "compact_v2_unrepresentable_host");
-    return null;
-  }
-  if (action.kind === "type") {
-    if (looksLikeEmailValue(action.text)) return { ...action, text: EMAIL_SLOT_TEMPLATE };
-    rejectRecipeRecording(session, "compact_v2_unrepresentable_value_action");
-    return null;
-  }
-  if (action.kind === "select") {
-    // Registry-bound recipe value, not an observation: it must be recognizable
-    // code-owned vocabulary before it is published to the shared registry.
-    const text = recordableTokenV2(action.text);
-    if (text !== undefined) return { ...action, text };
-    rejectRecipeRecording(session, "compact_v2_unrepresentable_value_action");
-    return null;
-  }
-  if (action.kind === "set_phone_country") {
-    if (/^[a-z]{2}$/i.test(action.country)) {
-      return { ...action, country: action.country.toUpperCase() };
-    }
-    rejectRecipeRecording(session, "compact_v2_unrepresentable_value_action");
-    return null;
-  }
-  return action;
-}
-// Exported for unit tests.
-export function redactEmailForTrace(value: string): string {
-  return looksLikeEmailValue(value) ? EMAIL_SLOT_TEMPLATE : value;
-}
-
-// PR3d — exact-scrub the KNOWN user email wherever it appears in a trace string
-// (not just a whole-value email field). In the operator path the host fills the
-// user's real address, which can also surface in a targeted element's visible
-// text (e.g. a "signed in as ada@x.com" chip the action hit). We know the exact
-// address (session.userEmail), so replace every occurrence with the slot token
-// before it's persisted to a recipe. (onboarding-capture observation frames are
-// NOT a vector here — that path belonged to the retired autonomous bot and is
-// not wired into operate_*.) Exported for unit tests.
-export function scrubKnownEmail(s: string, userEmail: string | null): string {
-  if (userEmail === null || userEmail.length === 0) return s;
-  const pattern = [...userEmail].map(encodedCharacterPattern).join("");
-  return s.replace(new RegExp(pattern, "gi"), (matched) => {
-    const template = emailTemplateForRepresentation(matched, userEmail);
-    if (template === null) {
-      throw new Error("known email encoding could not be provenance-templated");
-    }
-    return template;
-  });
-}
-
-// Append a stable-attribute-targeted entry to the session's operator-recipe
-// trace. Stores no ref/coordinate; visible text remains a unique-only fallback.
-// `extract` (the seal) is recorded separately in stashSecretSlot.
-function traceTextFor(el: InteractiveElement | null): string | undefined {
-  if (el === null) return undefined;
-  const keys = elementTargetKeys(el);
-  const first = keys[0];
-  return typeof first === "string" && first.length > 0 ? first.slice(0, 120) : undefined;
-}
-
-// Stable attributes already present in the inventory and consumed by the
-// skill synthesizer. Keep all of them; replay chooses in a fixed order.
-export function recipeTargetFor(
-  el: InteractiveElement | null,
-  inventory: readonly InteractiveElement[] = [],
-  userEmail: string | null = null,
-): RecipeTarget | undefined {
-  if (el === null) return undefined;
-  const scopedInventory = inventory.filter(
-    (candidate) =>
-      (candidate.frameOrigin ?? null) === (el.frameOrigin ?? null) &&
-      (candidate.framePath ?? null) === (el.framePath ?? null),
-  );
-  const role =
-    el.role ??
-    (el.tag === "button"
-      ? "button"
-      : el.tag === "a"
-        ? "link"
-        : el.tag === "input" || el.tag === "textarea"
-          ? "textbox"
-          : undefined);
-  const accessibleName =
-    el.ariaLabel ??
-    el.labelText ??
-    el.visibleText ??
-    el.iconLabel ??
-    el.placeholder ??
-    el.title ??
-    el.name ??
-    undefined;
-  const siblings = scopedInventory.filter((candidate) => {
-    if (candidate === el || candidate.selector === el.selector) return false;
-    const candidateName =
-      candidate.ariaLabel ??
-      candidate.labelText ??
-      candidate.visibleText ??
-      candidate.iconLabel ??
-      candidate.placeholder ??
-      candidate.title ??
-      candidate.name ??
-      undefined;
-    return (
-      (el.testId !== null && el.testId !== undefined && candidate.testId === el.testId) ||
-      (el.id !== null && candidate.id === el.id) ||
-      (el.name !== null && candidate.name === el.name) ||
-      (accessibleName !== undefined && candidateName === accessibleName) ||
-      (el.href !== null && el.href !== undefined && candidate.href === el.href)
-    );
-  });
-  const nearText = siblings.length > 0 ? pickRowDisambiguator(el, siblings, scopedInventory) : null;
-  const domHint = pickStableDomHint(el);
-  const hrefHint = pickHrefHint(el);
-  const scrub = (value: string): string => scrubKnownEmail(value, userEmail);
-  // Locale-stable role for money-path fill safety (autocomplete > data-role >
-  // distinguishing input type). Never label text — labels flip under i18n.
-  const fieldRole = localeStableFieldRole(el);
-  return {
-    ...(domHint !== undefined
-      ? {
-          dom_hint: {
-            ...(domHint.testid !== undefined ? { testid: scrub(domHint.testid) } : {}),
-            ...(domHint.id !== undefined ? { id: scrub(domHint.id) } : {}),
-            ...(domHint.name !== undefined ? { name: scrub(domHint.name) } : {}),
-          },
-        }
-      : {}),
-    ...(role !== undefined && role.length > 0 ? { role_hint: scrub(role) } : {}),
-    ...(accessibleName !== undefined && accessibleName.length > 0
-      ? { accessible_name: scrub(accessibleName) }
-      : {}),
-    ...(nearText !== null ? { near_text_hint: scrub(nearText) } : {}),
-    ...(hrefHint !== null && !isSingleUseUrl(el.href ?? "") ? { href_hint: scrub(hrefHint) } : {}),
-    ...(el.selector.length > 0 && !el.selector.startsWith("@c:")
-      ? { css: scrub(el.selector) }
-      : {}),
-    ...(el.visibleText !== null && el.visibleText.length > 0
-      ? { visible_text: scrub(el.visibleText) }
-      : {}),
-    ...(fieldRole !== null ? { field_role: fieldRole } : {}),
-    ...(el.frameOrigin !== undefined && el.frameOrigin !== null
-      ? { frame_origin: el.frameOrigin }
-      : {}),
-    ...(el.framePath !== undefined && el.framePath !== null ? { frame_path: el.framePath } : {}),
-  };
-}
-
-function recordTrace(
-  session: Session,
-  action: ProvisionAction,
-  el: InteractiveElement | null,
-  sensitiveSource?: RecordedValueSource,
-): void {
-  const recordedAction = compactV2RecordedAction(session, action);
-  if (recordedAction === null) return;
-  action = recordedAction;
-  // Never freeze a single-use link (email-verify / magic / reset token) into
-  // the recipe — it's dead on the next replay. The host agent re-plans the
-  // verification step live (operate_act { kind: "await_verification" } fetches a FRESH link)
-  // when it reaches that state, per the "recipe is a MAP, not a script" model.
-  if (action.kind === "goto" && isSingleUseUrl(action.url)) {
-    // Log only the host — never the token-bearing URL.
-    let host = "?";
-    try {
-      host = new URL(action.url).host;
-    } catch {
-      /* keep "?" */
-    }
-    audit(session.id, "trace_skip_single_use_goto", { url_host: host });
-    return;
-  }
-  // An upload attaches a machine-local file — not portable, never part of a
-  // shared recipe. Skip it here (the action is still in the audit trail).
-  if (action.kind === "upload") return;
-  const knownEmailHole =
-    action.kind === "type" &&
-    action.provenance === undefined &&
-    session.userEmail !== null &&
-    action.text === session.userEmail
-      ? "contact.email"
-      : undefined;
-  const actionHole =
-    action.kind === "type" || action.kind === "select" || action.kind === "set_phone_country"
-      ? (action.provenance?.hole ?? knownEmailHole)
-      : undefined;
-  const rawText = traceTextFor(el);
-  const text = rawText !== undefined ? scrubKnownEmail(rawText, session.userEmail) : undefined;
-  const withText = text !== undefined ? { text_match: text } : {};
-  const target = recipeTargetFor(el, session.lastElements, session.userEmail);
-  const withTarget = target !== undefined ? { target } : {};
-  let a: TraceAction;
-  switch (action.kind) {
-    case "goto":
-      a = { kind: "goto", url_template: scrubKnownEmail(action.url, session.userEmail) };
-      break;
-    case "allow_host":
-      a = { kind: "allow_host", host: action.host };
-      break;
-    case "press":
-      a = { kind: "press", key: action.key };
-      break;
-    case "oauth_settle":
-      a = { kind: "oauth_settle" };
-      break;
-    case "scroll":
-      a = {
-        kind: "scroll",
-        ...(action.direction !== undefined ? { direction: action.direction } : {}),
-      };
-      break;
-    case "type":
-      a = {
-        kind: "type",
-        ...withText,
-        ...withTarget,
-        value: scrubKnownEmail(redactEmailForTrace(action.text), session.userEmail),
-      };
-      break;
-    case "type_secret":
-      a = {
-        kind: "type_secret",
-        slot: action.slot,
-        value: { hole: `credential.${action.slot}` },
-        ...withText,
-        ...withTarget,
-      };
-      break;
-    case "select":
-      a = {
-        kind: "select",
-        value: action.text,
-        ...withText,
-        ...withTarget,
-      };
-      break;
-    case "set_phone_country":
-      a = {
-        kind: "set_phone_country",
-        value: action.country,
-      };
-      break;
-    case "click":
-      a = { kind: "click", ...withText, ...withTarget };
-      break;
-    case "js_click":
-      a = { kind: "js_click", ...withText, ...withTarget };
-      break;
-    case "oauth_click":
-      a = { kind: "oauth_click", ...withText, ...withTarget };
-      break;
-    case "oauth_login":
-      session.actionTrace.push({ action: { kind: "oauth_click", ...withText, ...withTarget } });
-      session.actionTrace.push({ action: { kind: "oauth_settle" } });
-      return;
-  }
-  const traceIndex = session.actionTrace.length;
-  session.actionTrace.push({ action: a });
-  if (action.kind === "type" || action.kind === "select" || action.kind === "set_phone_country") {
-    session.recordedValues.push({
-      traceIndex,
-      ...(actionHole !== undefined ? { hole: actionHole } : {}),
-      literal: action.kind === "set_phone_country" ? action.country : action.text,
-    });
-  } else if (action.kind === "type_secret") {
-    if (sensitiveSource === undefined) {
-      throw new Error(`type_secret ${action.slot} lacks an action-time source attestation`);
-    }
-    session.recordedValues.push({ ...sensitiveSource, traceIndex });
-  }
-}
-
-// ── Medium capture → skill (docs/DESIGN-operator-hints.md) ──────────────────
-
-// The service SLUG for the capture. It MUST be produced the same way
-// resolveRouteHint looks a hint up (serviceSlugFromUrl → canonicalizeServiceSlug)
-// or the produced skill lands under a different key and the loop never closes;
-// and it MUST be a valid SkillSchema slug (lowercase-with-dashes, NO dots) or
-// parseSkill rejects the whole skill as schema_invalid. registrableHost
-// ("resend.com") satisfied neither — the bug that made every real provision's
-// auto-promote fail. Exported for the regression test.
-export function captureServiceSlug(startUrl: string): string {
-  try {
-    return serviceSlugFromHost(new URL(startUrl).hostname);
-  } catch {
-    return "unknown";
-  }
-}
-
-function captureService(session: Session): string {
-  return captureServiceSlug(session.startUrl);
-}
-
-// Map a live operate action + the element it hit to the PostVerifyStep the
-// synthesizer consumes. Only skill-synthesizable kinds map; the rest (press,
-// scroll, oauth_settle, allow_host, type_secret) return null and are skipped —
-// a type_secret must NEVER carry its sealed value into a shared skill.
-export function captureObserved(
-  action: ProvisionAction,
-  el: InteractiveElement | null,
-): PostVerifyStep | null {
-  const frameScope =
-    el?.frameOrigin !== undefined &&
-    el.frameOrigin !== null &&
-    el.framePath !== undefined &&
-    el.framePath !== null
-      ? { frame_origin: el.frameOrigin, frame_path: el.framePath }
-      : {};
-  switch (action.kind) {
-    case "click":
-    case "js_click":
-    case "oauth_click":
-    case "oauth_login":
-      return el === null
-        ? null
-        : {
-            kind: "click",
-            selector: el.selector,
-            reason: traceTextFor(el) ?? action.kind,
-            ...frameScope,
-          };
-    case "type":
-      // Non-secret value; the synthesizer applies the email/token/identity PII
-      // scrub. type_secret is a different kind and is skipped above.
-      return el === null
-        ? null
-        : {
-            kind: "fill",
-            selector: el.selector,
-            value: action.text,
-            reason: traceTextFor(el) ?? "fill",
-            ...frameScope,
-          };
-    case "goto":
-      return { kind: "navigate", url: action.url, reason: "navigate" };
-    default:
-      return null;
-  }
-}
-
-// Accumulate one MEDIUM round: inventory + action + url, no html/screenshot.
-function recordCaptureRound(
-  session: Session,
-  action: ProvisionAction,
-  el: InteractiveElement | null,
-  urlAtObservation: string,
-): void {
-  const recordedAction = compactV2RecordedAction(session, action);
-  if (recordedAction === null) return;
-  const observed = captureObserved(recordedAction, el);
-  if (observed === null) return;
-  const stateUrl =
-    session.compactV2Mode === "on" ? compactV2ReplaySafeUrl(urlAtObservation) : urlAtObservation;
-  if (stateUrl === null) {
-    rejectRecipeRecording(session, "compact_v2_unrepresentable_page_url");
-    return;
-  }
-  session.captureRounds.push({
-    service: captureService(session),
-    round: session.captureRounds.length,
-    oauth: recordedAction.kind === "oauth_click" || recordedAction.kind === "oauth_login",
-    // The URL the inventory + action belong to (pre-action), NOT the post-
-    // navigation URL — see urlBeforeAction in act().
-    state: {
-      url: stateUrl,
-      title: "",
-      html: "",
-      screenshot: "",
-    },
-    inventory: session.lastElements,
-    observed,
-  });
-}
-
-// The EXTRACT round is the one round that keeps raw html — the key-extraction
-// step is synthesized from the page where the credential is shown.
-async function recordExtractRound(session: Session): Promise<boolean> {
-  const page = operationPageForSession(session);
-  let html = "";
-  if (session.compactV2Mode !== "on") {
-    try {
-      html = (await session.browser.getState(page)).html;
-    } catch {
-      /* best-effort — the copy-button/inventory extract path still works */
-    }
-  }
-  const stateUrl =
-    session.compactV2Mode === "on"
-      ? compactV2ReplaySafeUrl(page?.url() ?? session.browser.currentUrl())
-      : (page?.url() ?? session.browser.currentUrl());
-  if (stateUrl === null) {
-    rejectRecipeRecording(session, "compact_v2_unrepresentable_page_url");
-    return false;
-  }
-  session.captureRounds.push({
-    service: captureService(session),
-    round: session.captureRounds.length,
-    oauth: false,
-    state: {
-      url: stateUrl,
-      title: "",
-      html,
-      screenshot: "",
-    },
-    inventory: session.lastElements,
-    observed: { kind: "extract", reason: "extract the credential shown on the page" },
-  });
-  return true;
-}
-
-// Record the extract round from the live page, then write the accumulated medium
-// rounds through the real capture path (integrity chain) and synthesize a skill.
-// Best-effort: any failure returns a skip and never disrupts the parent
-// provision. The caller publishes the returned skill.
-export async function captureAndPromoteSession(
-  sessionId: string,
-): Promise<PromoteResult | { kind: "skipped"; reason: string }> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) return { kind: "skipped", reason: "unknown_session" };
-  // A run that used the text=/css= locator action fallback hit a control with no
-  // inventory ref; the synthesizer can't represent that step, so promoting would
-  // ship a skill missing an action. Skip rather than emit a silently-broken skill.
-  if (session.usedLocatorFallback) {
-    return { kind: "skipped", reason: "locator_fallback_unrepresentable" };
-  }
-  if (session.recipeRejectionReason !== null) {
-    return { kind: "skipped", reason: session.recipeRejectionReason };
-  }
-  const dir = resolveCaptureDir();
-  if (dir === null) return { kind: "skipped", reason: "capture_disabled" };
-  if (!session.captureRounds.some((r) => r.observed.kind === "extract")) {
-    await recordExtractRound(session);
-  }
-  if (session.recipeRejectionReason !== null) {
-    return { kind: "skipped", reason: session.recipeRejectionReason };
-  }
-  const hasExtract = session.captureRounds.some((r) => r.observed.kind === "extract");
-  if (!hasExtract || session.captureRounds.length < 2) {
-    return { kind: "skipped", reason: "too_few_rounds" };
-  }
-  const service = captureService(session);
-  try {
-    resetCaptureChain(service);
-    for (const r of session.captureRounds) captureOnboardingRound(r);
-    const runId = currentRunId(service);
-    if (runId === undefined) return { kind: "skipped", reason: "no_run_id" };
-    return promoteToSkill({ dir, service, run_id: runId });
-  } catch (err) {
-    return {
-      kind: "skipped",
-      reason: `synthesis_error: ${err instanceof Error ? err.message : String(err)}`,
-    };
-  }
-}
-
-// ── Deliverable #1: hint-lift measurement ──────────────────────────────────
-
-export interface ProvisionMeasurement {
-  service: string;
-  hint_present: boolean;
-  outcome: "success" | "fail";
-  duration_s: number;
-  turns: number;
-}
-
-// Pure so the shape is unit-testable without a live session or a clock.
-export function buildProvisionMeasurement(args: {
-  service: string;
-  hintServed: boolean;
-  outcome: "success" | "fail";
-  startedAt: number;
-  now: number;
-  turns: number;
-}): ProvisionMeasurement {
-  return {
-    service: args.service,
-    hint_present: args.hintServed,
-    outcome: args.outcome,
-    duration_s: Math.max(0, Math.round((args.now - args.startedAt) / 1000)),
-    turns: args.turns,
-  };
-}
-
-// Emit the hint-on vs hint-off lift signal for a finished provision — structured
-// stderr JSON so it aggregates like the other provision-audit lines. This is the
-// raw signal deliverable #1 buckets into success-rate + time by hint_present.
-export function emitProvisionMeasurement(
-  sessionId: string,
-  outcome: "success" | "fail",
-): ProvisionMeasurement | null {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) return null;
-  const m = buildProvisionMeasurement({
-    service: captureService(session),
-    hintServed: session.hintServed,
-    outcome,
-    startedAt: session.startedAt,
-    now: Date.now(),
-    turns: session.actionTrace.length,
-  });
-  const emitted =
-    session.compactV2Mode === "on"
-      ? { ...m, service: compactV2AuditValue("service", m.service) }
-      : m;
-  process.stderr.write(`${JSON.stringify({ marker: "provision-measurement", ...emitted })}\n`);
-  return m;
-}
-
-// ── new-tab adoption ──
-//
-// A click on a `target=_blank` link or a `window.open` control opens a NEW TAB,
-// and a real user lands on it. The operator has to do the same: an email
-// magic-link button in Gmail opens its login tab that way, and following the
-// tab is the ONLY safe way to reach it — the link carries a single-use login
-// token, so `extract` seals the href and must never hand it to the host as
-// text. Navigating the browser exposes nothing.
-//
-// Grace between the click returning and Playwright delivering the context
-// "page" event for the tab it opened. It cannot be zero: MEASURED 2026-09-03
-// (new-tab-adoption.test.ts, 3 runs) — at 0 the event has not landed yet and
-// every follow case fails, including the post-settle drain below. It is kept
-// short because a click that opens NO tab pays it in full, and a tab that
-// arrives later than this is still caught by that drain.
 const OPENED_TAB_GRACE_MS = 300;
 
 const openedTabAdoptionTails = new WeakMap<BrowserController, Promise<void>>();
@@ -6531,1094 +4947,6 @@ async function settleAfterStateChange(browser: BrowserController, page?: Page): 
   await browser.waitForInteractiveDom(1, 2_000, page).catch(() => undefined);
 }
 
-// ── operator-recipe: remember a successful run, verify a postcondition ──
-
-// Persist the session's action trace as a keyed, replayable operator-recipe.
-// Sealed secrets become SLOT references (stored:false) — never values. The
-// recipe's host metadata = start + auto_widen hosts; allow_host is a legacy no-op.
-function verifiedEmailSources(
-  session: Session,
-  inputs: KnownRecipeInputs,
-): Array<RecordedValueSource & { hole: string }> {
-  return session.recordedValues.filter(
-    (source): source is RecordedValueSource & { hole: string } =>
-      source.hole !== undefined &&
-      session.userEmail !== null &&
-      source.literal === session.userEmail &&
-      looksLikeEmailValue(source.literal) &&
-      knownRecipeInputValue(inputs, source.hole) === source.literal,
-  );
-}
-
-function traceWithVerifiedProvenance(session: Session, inputs: KnownRecipeInputs): TraceEntry[] {
-  const trace = session.actionTrace.map((entry) => ({
-    ...entry,
-    action: { ...entry.action },
-  }));
-  const recordedIndexes = new Set<number>();
-  for (const source of session.recordedValues) {
-    if (recordedIndexes.has(source.traceIndex)) {
-      throw new Error(`duplicate value source for trace step ${source.traceIndex}`);
-    }
-    recordedIndexes.add(source.traceIndex);
-    // Provenance is best-effort: a recorded value without an action-time
-    // source hole keeps its literal in the trace; replay then treats it as a
-    // constant instead of failing the save.
-    if (source.hole === undefined) continue;
-    const entry = trace[source.traceIndex];
-    if (
-      entry !== undefined &&
-      (entry.action.kind === "type" ||
-        entry.action.kind === "select" ||
-        entry.action.kind === "set_phone_country") &&
-      typeof entry.action.value === "string"
-    ) {
-      entry.action.value = { hole: source.hole };
-      continue;
-    }
-    if (
-      entry !== undefined &&
-      (entry.action.kind === "type_secret" || entry.action.kind === "operate_pay") &&
-      typeof entry.action.value !== "string" &&
-      entry.action.value?.hole === source.hole
-    ) {
-      continue;
-    }
-  }
-  const emailSources = verifiedEmailSources(session, inputs);
-  const emailHoles = new Set(emailSources.map((source) => source.hole));
-  for (const [traceIndex, entry] of trace.entries()) {
-    const targetText = JSON.stringify({
-      text_match: entry.action.text_match,
-      target: entry.action.target,
-      url_template: entry.action.url_template,
-    });
-    if (!targetText.includes("${EMAIL_ALIAS")) continue;
-    const directEmailHole = emailSources.find((source) => source.traceIndex === traceIndex)?.hole;
-    // Best-effort: bind the email hole only when it is unambiguous.
-    if (directEmailHole !== undefined || emailHoles.size === 1) {
-      const emailHole = directEmailHole ?? [...emailHoles][0]!;
-      entry.action.email_hole = emailHole;
-    }
-  }
-  return trace;
-}
-
-function scrubRecipePostcondition(
-  session: Session,
-  postcondition: Postcondition,
-  inputs: KnownRecipeInputs,
-): Postcondition {
-  const probeUrl =
-    postcondition.probe_url === undefined
-      ? undefined
-      : scrubKnownEmail(postcondition.probe_url, session.userEmail);
-  const signal = postcondition.success_signal;
-  const successSignal =
-    "url_contains" in signal
-      ? { url_contains: scrubKnownEmail(signal.url_contains, session.userEmail) }
-      : signal;
-  const hasTemplate =
-    probeUrl?.includes("${EMAIL_ALIAS") === true ||
-    ("url_contains" in successSignal && successSignal.url_contains.includes("${EMAIL_ALIAS"));
-  const base = { kind: postcondition.kind, describe: postcondition.describe };
-  if (!hasTemplate) {
-    return {
-      ...base,
-      ...(probeUrl !== undefined ? { probe_url: probeUrl } : {}),
-      success_signal: successSignal,
-    };
-  }
-  const holes = [...new Set(verifiedEmailSources(session, inputs).map((source) => source.hole))];
-  return {
-    ...base,
-    ...(probeUrl !== undefined ? { probe_url: probeUrl } : {}),
-    success_signal: successSignal,
-    ...(holes.length === 1 ? { email_hole: holes[0] } : {}),
-  };
-}
-
-export async function rememberRecipe(
-  sessionId: string,
-  opts: {
-    name: string;
-    goal: string;
-    postcondition: Postcondition;
-    verb?: OperatorVerb;
-    inputs: KnownRecipeInputs;
-    /**
-     * Opt into the already-supported runtime entry form when the caller has a
-     * fresh same-domain service URL for each replay.  The stored key/domain
-     * and all action/value provenance stay unchanged; recipeEntryUrl still
-     * rejects a cross-domain runtime URL.
-     */
-    entry_mode?: "runtime_service_url";
-  },
-): Promise<{
-  file: string;
-  name: string;
-  steps: number;
-  secrets: string[];
-  verified: PostconditionResult;
-  // replay-per-leg-signature — present only when this session's trace has a
-  // money field (a checkout-shaped leg exists to extract). A SECOND recipe,
-  // scoped to just that leg and keyed by the live checkout page's own
-  // field-name-set signature instead of domain — so it can be published and
-  // replayed on a completely different, unrelated store's checkout leg.
-  checkout_leg_file?: string;
-}> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  if (session.usedLocatorFallback) {
-    throw new Error(
-      "operate_recipe_save refused: this session used a text=/css= locator fallback that operator recipes cannot represent",
-    );
-  }
-  if (session.recipeRejectionReason !== null) {
-    throw new Error(`operate_recipe_save refused: ${session.recipeRejectionReason}`);
-  }
-  // Record only through the existing machine-checkable success gate. Previously
-  // operate_recipe_save wrote first and operate_finish verified later, leaving
-  // an unverified recipe on disk when the postcondition failed.
-  const verified = await verifyPostcondition(sessionId, opts.postcondition);
-  if (!verified.confirmed) {
-    throw new Error(
-      `operate_recipe_save refused: postcondition not confirmed (${verified.reason})`,
-    );
-  }
-  const secrets = [...session.secretSlots.keys()].map((slot) => ({ slot, stored: false as const }));
-  const scrubbedStartUrl = scrubKnownEmail(session.startUrl, session.userEmail);
-  const trace = traceWithVerifiedProvenance(session, opts.inputs);
-  const postcondition = scrubRecipePostcondition(session, opts.postcondition, opts.inputs);
-  if (opts.entry_mode !== undefined && opts.verb === undefined) {
-    throw new Error("runtime recipe entry requires a keyed verb");
-  }
-  const verb = opts.verb !== undefined ? canonicalVerb(opts.verb) : undefined;
-  const actionPath = verb !== undefined ? extractActionPath(session.startUrl) : "";
-  const recipe: OperatorRecipe = {
-    name: opts.name,
-    schema_version: 1,
-    goal: opts.goal,
-    ...(verb !== undefined
-      ? {
-          verb,
-          domain: operatorRecipeDomain(session.startUrl),
-          ...(actionPath.length > 0 ? { action_path: actionPath } : {}),
-        }
-      : {}),
-    // Canonical, stable replay entry — the page the session started at, never a
-    // mid-flow single-use link inferred from the trace.
-    ...(opts.entry_mode === "runtime_service_url" ||
-    isSingleUseUrl(session.startUrl) ||
-    scrubbedStartUrl !== session.startUrl
-      ? { entry_mode: "runtime_service_url" as const }
-      : { entry_url: session.startUrl }),
-    allowed_hosts: [...new Set(egressSeedHosts(session))],
-    trace,
-    secrets,
-    postcondition,
-  };
-  const file = await writeRecipe(recipe);
-  // No-regression guarantee (recipe-key-redesign): a recording that lands at
-  // the specific (verb, domain, action_path) file must also keep the
-  // crude-but-reliable degenerate (verb, domain) catch-all alive, so a later
-  // replay on an unrecognized path doesn't go cold where today it hits.
-  if (actionPath.length > 0) {
-    await refreshDegenerateCatchAll(recipe);
-  }
-  audit(sessionId, "remember_recipe", {
-    name: opts.name,
-    steps: recipe.trace.length,
-    secrets: secrets.length,
-    file,
-  });
-  const checkoutLegFile = await rememberCheckoutLeg(session, verb, trace).catch(() => null);
-  return {
-    file,
-    name: opts.name,
-    steps: recipe.trace.length,
-    secrets: secrets.map((s) => s.slot),
-    verified,
-    ...(checkoutLegFile !== null ? { checkout_leg_file: checkoutLegFile } : {}),
-  };
-}
-
-// recipe-key-redesign — no-regression guarantee: on every recording that
-// lands at a specific (verb, domain, action_path) file, also refresh the
-// degenerate (verb, domain) catch-all whenever that slot is absent or
-// itself empty-path (i.e. it's already the crude catch-all, not some other
-// specific recording). Without this, a future recording that extracts a
-// path would quietly stop refreshing the catch-all a later unrecognized-path
-// replay still relies on.
-async function refreshDegenerateCatchAll(recipe: OperatorRecipe): Promise<void> {
-  if (recipe.verb === undefined || recipe.domain === undefined) return;
-  let shouldRefresh: boolean;
-  try {
-    const existing = await readRecipe(operatorRecipeKeyForDomain(recipe.verb, recipe.domain));
-    shouldRefresh = existing.action_path === undefined || existing.action_path.length === 0;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    shouldRefresh = true;
-  }
-  if (!shouldRefresh) return;
-  const degenerateRecipe: OperatorRecipe = { ...recipe, action_path: undefined };
-  await writeRecipe(degenerateRecipe);
-}
-
-// recipe-key-redesign — replaces the deleted MONEY_REPLAY_VERBS for the two
-// SAVE-TIME classifiers below (checkout-leg carving, unprovenanced-money-
-// field refusal). Distinct from the money REPLAY gate (which is now a pure
-// trace-content check, unconditional on verb) — these two are scope filters
-// unrelated to the payment fence, so they keep the verb-set shape MONEY_
-// REPLAY_VERBS had, just canonicalized (post-merge, 7 legacy verbs collapse
-// to 4 canonical ones).
-const MONEY_SHAPED_VERBS = new Set<OperatorVerb>(["purchase", "subscribe", "checkout", "book"]);
-
-// replay-per-leg-signature — split off and save the checkout portion of a
-// just-recorded money-path trace as its OWN recipe, keyed by the checkout
-// page's live field-name-set signature instead of domain. Best-effort and
-// silent on any reason it can't produce one (non-money verb, no money field
-// captured, empty live field set) — the whole-task recipe above is already
-// saved and stands on its own either way; this only ever ADDS a second,
-// narrower, cross-domain-reusable recipe alongside it.
-async function rememberCheckoutLeg(
-  session: Session,
-  verb: OperatorVerb | undefined,
-  trace: readonly TraceEntry[],
-): Promise<string | null> {
-  if (verb === undefined || !MONEY_SHAPED_VERBS.has(verb)) return null;
-  const legStart = checkoutLegStartIndex(trace);
-  if (legStart === null) return null;
-  const legTrace = trace.slice(legStart);
-  const fieldNames = await session.browser.extractCheckoutFieldNames(
-    operationPageForSession(session),
-  );
-  const signature = checkoutFieldSetSignature(fieldNames);
-  if (signature === null) return null;
-  const legSlots = new Set(
-    legTrace
-      .filter((entry) => entry.action.kind === "type_secret")
-      .map((entry) => entry.action.slot)
-      .filter((slot): slot is string => slot !== undefined),
-  );
-  const checkoutRecipe: OperatorRecipe = {
-    name: `checkout-leg--${signature.slice(0, 12)}`,
-    schema_version: 1,
-    goal: "Fill the checkout leg's fields",
-    verb,
-    domain: checkoutShapeKey(signature),
-    allowed_hosts: [],
-    trace: legTrace,
-    secrets: [...legSlots].map((slot) => ({ slot, stored: false as const })),
-    postcondition: checkoutLegPostcondition(legTrace),
-  };
-  return await writeRecipe(checkoutRecipe);
-}
-
-// Read a single page snapshot for postcondition checking. Field VALUES are
-// reduced to lengths here so a token/secret success-signal can't leak.
-async function snapshotForPostcondition(
-  session: Session,
-  sourcePage: Page | undefined,
-): Promise<PostconditionSnapshot> {
-  const privateFields =
-    session.compactV2Mode === "on"
-      ? (await session.browser.extractInteractiveElements(sourcePage))
-          .filter((element) => typeof element.value === "string" && element.value.length > 0)
-          .map((element) => {
-            const sealed = sealRetainedInteractiveElementsV2([element])[0]!;
-            const description = safeDescriptionV2(
-              sealed.labelText ??
-                sealed.ariaLabel ??
-                sealed.placeholder ??
-                sealed.title ??
-                sealed.name ??
-                sealed.id,
-            );
-            const fieldRole = localeStableFieldRole(sealed);
-            return {
-              label: [description, fieldRole]
-                .filter((value): value is string => value !== undefined && value !== null)
-                .join(" "),
-              value_len: element.value!.length,
-            };
-          })
-          .filter((field) => field.label.length > 0)
-      : null;
-  const obs = await observeSession(session, "compact", undefined, sourcePage);
-  const fields =
-    privateFields ??
-    session.lastElements
-      .filter((element) => typeof element.value === "string" && element.value.length > 0)
-      .map((element) => ({
-        label: elementRef(element),
-        value_len: element.value!.length,
-      }));
-  return {
-    url:
-      obs.format === "browser-use-dom"
-        ? (sourcePage?.url() ?? session.browser.currentUrl())
-        : obs.url,
-    text:
-      obs.format === "browser-use-dom"
-        ? await session.browser.extractVisibleText(sourcePage)
-        : (session.prevObserve?.text ?? obs.text ?? ""),
-    fields,
-  };
-}
-
-// Verify a recipe's postcondition against the live session — the anti-false-
-// green gate for replay. execute_capability checks the current end-state;
-// observe_artifact navigates to the probe surface first (Phase B paces this).
-export async function verifyPostcondition(
-  sessionId: string,
-  postcondition: Postcondition,
-): Promise<PostconditionResult> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const sourcePage = operationPageForSession(session);
-  if (postcondition.kind === "observe_artifact" && postcondition.probe_url !== undefined) {
-    const host = registrableHost(postcondition.probe_url);
-    if (host !== null && !session.allowedHosts.some((e) => e.host === host)) {
-      session.allowedHosts.push({ host, source: "mid_session" });
-    }
-    invalidateCompactV2Snapshot(session);
-    await session.browser.goto(postcondition.probe_url, sourcePage);
-    await settle(1500);
-  }
-  const snap = await snapshotForPostcondition(session, sourcePage);
-  const result = checkSuccessSignal(postcondition.success_signal, snap);
-  audit(sessionId, "verify_postcondition", {
-    kind: postcondition.kind,
-    confirmed: result.confirmed,
-    reason: result.reason,
-  });
-  return result;
-}
-
-export async function verifySavedRecipePostcondition(
-  sessionId: string,
-  recipe: OperatorRecipe,
-): Promise<PostconditionResult> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const state = session.replayState;
-  if (state !== null && state.recipeHash === replayDigest(recipe)) {
-    return await verifyPostcondition(sessionId, state.boundPostcondition);
-  }
-  let postcondition: Postcondition;
-  try {
-    postcondition = bindRecipePostcondition(recipe.postcondition, {});
-  } catch {
-    throw new Error("saved recipe postcondition requires bindings from its active replay");
-  }
-  return await verifyPostcondition(sessionId, postcondition);
-}
-
-export async function verifyActiveRecipePostcondition(
-  sessionId: string,
-  recipeName: string,
-): Promise<PostconditionResult | null> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const state = session.replayState;
-  if (state === null) return null;
-  if (state.recipeName !== recipeName) {
-    throw new Error(`verify_recipe ${recipeName} does not match active replay ${state.recipeName}`);
-  }
-  return await verifyPostcondition(sessionId, state.boundPostcondition);
-}
-
-// replay-per-leg-signature — the checkout leg's registry/local-store key,
-// computed from the CURRENT live page. Callers use this to resolve (and,
-// on a hit, replay via replayOperatorRecipe) a checkout-leg recipe
-// independently of whatever (or whether any) whole-task recipe applies to
-// this session's domain — the mechanism that lets a checkout plan recorded
-// on one store resolve on a different, unrelated store of the same
-// checkout platform. Returns null when the live page has no field-name-set
-// to key by (nothing to resolve yet).
-export async function checkoutShapeSignatureForSession(sessionId: string): Promise<string | null> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const fieldNames = await session.browser.extractCheckoutFieldNames(
-    operationPageForSession(session),
-  );
-  return checkoutFieldSetSignature(fieldNames);
-}
-
-export type OperatorReplayResult =
-  | {
-      status: "complete";
-      observation: Observation;
-      replayed_steps: number;
-      field_values_verified: boolean;
-    }
-  | {
-      status: "fallback_required";
-      observation: Observation;
-      step_index: number;
-      next_index: number;
-      step: TraceEntry;
-      reason: string;
-    }
-  | {
-      status: "human_required";
-      observation: Observation;
-      reason: "field_missing" | "field_value_mismatch";
-      field: string;
-    }
-  | {
-      // replay-per-leg-signature — a replay field failure that occurred
-      // AFTER a genuine catalog/storefront prefix (legStartIndex > 0): the
-      // catalog/storefront leg already replayed fine, only the checkout leg
-      // needs cold driving. Distinct from human_required, which stays the
-      // terminal "stop, nothing narrower to fall back to" response for a
-      // single-leg (or leg-less) recipe. It is not resumable via resume_from,
-      // and recipe recording remains refused because recipeRejectionReason is
-      // set. The host may drive the checkout leg cold from from_step_index;
-      // card release still goes through a fresh, human-approved inject_card call.
-      status: "leg_fallback_required";
-      observation: Observation;
-      leg: "checkout";
-      from_step_index: number;
-      reason: string;
-    };
-
-function replayTarget(action: TraceAction): RecipeTarget | null {
-  return action.target !== undefined
-    ? action.target
-    : action.text_match !== undefined
-      ? { visible_text: action.text_match }
-      : null;
-}
-
-function boundReplayTarget(
-  action: TraceAction,
-  bindings: Readonly<Record<string, string>>,
-): RecipeTarget | null {
-  const target =
-    action.target !== undefined
-      ? action.target
-      : action.text_match !== undefined
-        ? { visible_text: action.text_match }
-        : null;
-  return target === null ? null : bindRecipeTarget(target, bindings, action.email_hole);
-}
-
-const MONEY_FIELD_TARGET =
-  /(?:^|[\s._-])(?:address|street|line\s*[12]|city|state|province|postal|zip|country|e-?mail|phone|first\s*name|last\s*name|full\s*name|quantity|qty)(?:$|[\s._-])/i;
-
-function moneyFieldName(action: TraceAction): string | null {
-  if (action.kind === "set_phone_country") return "phone_country";
-  if (action.kind !== "type" && action.kind !== "select") return null;
-  const target = replayTarget(action);
-  if (target === null) return null;
-  const label = [
-    target.dom_hint?.testid,
-    target.dom_hint?.id,
-    target.dom_hint?.name,
-    target.accessible_name,
-    target.visible_text,
-  ]
-    .filter((value): value is string => value !== undefined)
-    .join(" ")
-    .replace(/([a-z])([A-Z])/g, "$1 $2");
-  return MONEY_FIELD_TARGET.test(label) ? label || "field" : null;
-}
-
-// replay-per-leg-signature — the checkout leg is whatever portion of a
-// money-path trace touches money fields (address/contact/card-adjacent —
-// the exact same classifier moneyFieldName already uses for the fill
-// guard). Reusing it here means the leg boundary needs no new heuristic
-// (no URL/path pattern-matching, no platform name): the first step the
-// existing guard already treats as a money field IS where checkout starts.
-// Returns null when the trace has no money field at all (verb classified
-// money-path but nothing was actually captured, or a non-money recipe).
-function checkoutLegStartIndex(trace: readonly TraceEntry[]): number | null {
-  const index = trace.findIndex((entry) => moneyFieldName(entry.action) !== null);
-  return index === -1 ? null : index;
-}
-
-// A checkout-leg-only recipe still needs a postcondition (the schema
-// requires one), but it isn't the whole task's "order placed" signal — it
-// only covers the leg it replays. Anchor it to the LAST money field in the
-// leg holding a non-empty value, mirroring the field_text/min_value_len
-// pattern already used elsewhere (e.g. the OAuth Playground token check):
-// checks a length, never a value, so it can't leak what it proves.
-// legTrace is guaranteed non-empty and to start on a money field by
-// construction (checkoutLegStartIndex found it), so a label always exists.
-function checkoutLegPostcondition(legTrace: readonly TraceEntry[]): Postcondition {
-  const lastLabel = [...legTrace]
-    .reverse()
-    .map((entry) => moneyFieldName(entry.action))
-    .find((label): label is string => label !== null)!;
-  return {
-    kind: "execute_capability",
-    describe: "checkout leg fields filled and re-verified",
-    success_signal: { field_text: lastLabel, min_value_len: 1 },
-  };
-}
-
-function replayDigest(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
-}
-
-function bindingDigest(bindings: Readonly<Record<string, string>>): string {
-  return replayDigest(
-    Object.entries(bindings)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, value]) => [key, value]),
-  );
-}
-
-function expectedReplayFields(
-  recipe: OperatorRecipe,
-  bindings: Readonly<Record<string, string>>,
-): { fields: Map<number, ReplayExpectedField>; missing: string | null } {
-  const fields = new Map<number, ReplayExpectedField>();
-  for (let stepIndex = 0; stepIndex < recipe.trace.length; stepIndex += 1) {
-    const action = recipe.trace[stepIndex]!.action;
-    const unprovenanced = moneyFieldName(action);
-    if (unprovenanced !== null && typeof action.value === "string") {
-      return { fields, missing: unprovenanced };
-    }
-    if (
-      (action.kind !== "type" && action.kind !== "select" && action.kind !== "set_phone_country") ||
-      action.value === undefined ||
-      typeof action.value === "string" ||
-      !REPLAY_VERIFIED_HOLE.test(action.value.hole)
-    ) {
-      continue;
-    }
-    const expected = bindings[action.value.hole];
-    if (expected === undefined) return { fields, missing: action.value.hole };
-    let target: RecipeTarget | null;
-    try {
-      target = boundReplayTarget(action, bindings);
-    } catch {
-      return { fields, missing: action.email_hole ?? "email_target" };
-    }
-    fields.set(stepIndex, {
-      stepIndex,
-      hole: action.value.hole,
-      expected,
-      target,
-      kind: action.kind,
-    });
-  }
-  return { fields, missing: null };
-}
-
-function markReplayFailure(
-  session: Session,
-  reason: "field_missing" | "field_value_mismatch",
-  field: string,
-): void {
-  rejectRecipeRecording(session, `replay transition failed (${field}: ${reason})`);
-  if (session.replayState === null) return;
-  session.replayState.failure = { reason, field };
-  audit(session.id, "replay_field_value_guard", { ok: false, reason, field });
-}
-
-function verifyReplayFieldInElements(
-  session: Session,
-  expected: ReplayExpectedField,
-  elements: readonly InteractiveElement[],
-  allowCommittedSelect = false,
-): { ok: true } | { ok: false; reason: "field_missing" | "field_value_mismatch" } {
-  if (expected.kind === "set_phone_country" || expected.target === null) {
-    return { ok: false, reason: "field_missing" };
-  }
-  const resolution = resolveRecipeFieldTarget(elements, expected.target);
-  if (resolution === null) return { ok: false, reason: "field_missing" };
-  const guard = verifyFilledFieldValues(elements, [
-    {
-      target: expected.target,
-      expected: expected.expected,
-      hole: expected.hole,
-      kind: expected.kind === "select" ? "select" : "type",
-    },
-  ]);
-  if (guard.ok) {
-    if (expected.kind === "select") {
-      clearCommittedSelectValue(session, resolution.element.selector);
-    }
-    return { ok: true };
-  }
-  if (
-    allowCommittedSelect &&
-    expected.kind === "select" &&
-    session.committedSelectValues.get(
-      compactV2CommittedSelectKey(session, resolution.element.selector),
-    ) === compactV2CommittedSelectValue(session, expected.expected)
-  ) {
-    clearCommittedSelectValue(session, resolution.element.selector);
-    return { ok: true };
-  }
-  if (expected.kind === "select") {
-    clearCommittedSelectValue(session, resolution.element.selector);
-  }
-  return { ok: false, reason: guard.reason };
-}
-
-async function verifyReplayField(
-  session: Session,
-  expected: ReplayExpectedField,
-  allowCommittedSelect = false,
-  page?: Page,
-): Promise<{ ok: true } | { ok: false; reason: "field_missing" | "field_value_mismatch" }> {
-  if (expected.kind === "set_phone_country") {
-    return (await session.browser.verifyPhoneCountry(expected.expected, page))
-      ? { ok: true }
-      : { ok: false, reason: "field_value_mismatch" };
-  }
-  const target = expected.target;
-  if (target === null) return { ok: false, reason: "field_missing" };
-  const fresh = await session.browser.extractInteractiveElements(page);
-  retainSessionElements(session, fresh);
-  return verifyReplayFieldInElements(session, expected, fresh, allowCommittedSelect);
-}
-
-async function verifyReplayFieldWithElements(
-  session: Session,
-  expected: ReplayExpectedField,
-  elements: readonly InteractiveElement[],
-  allowCommittedSelect = false,
-  page?: Page,
-): Promise<{ ok: true } | { ok: false; reason: "field_missing" | "field_value_mismatch" }> {
-  if (expected.kind === "set_phone_country") {
-    return (await session.browser.verifyPhoneCountry(expected.expected, page))
-      ? { ok: true }
-      : { ok: false, reason: "field_value_mismatch" };
-  }
-  return verifyReplayFieldInElements(session, expected, elements, allowCommittedSelect);
-}
-
-async function isReplayFieldMounted(
-  session: Session,
-  expected: ReplayExpectedField,
-  elements: readonly InteractiveElement[],
-  page?: Page,
-): Promise<boolean> {
-  if (expected.kind === "set_phone_country") {
-    return await session.browser.hasPhoneCountryControl(page);
-  }
-  return expected.target !== null && hasRecipeTargetCandidate(elements, expected.target);
-}
-
-function isReplayTransitionAction(action: ProvisionAction): boolean {
-  return (
-    action.kind !== "type" &&
-    action.kind !== "select" &&
-    action.kind !== "set_phone_country" &&
-    action.kind !== "allow_host"
-  );
-}
-
-function rejectRecipeRecording(session: Session, reason: string): void {
-  session.recipeRejectionReason ??= reason;
-}
-
-function recordedMoneyFields(session: Session): ReplayExpectedField[] {
-  const fields: ReplayExpectedField[] = [];
-  for (const source of session.recordedValues) {
-    if (source.hole === undefined || !REPLAY_VERIFIED_HOLE.test(source.hole)) continue;
-    const action = session.actionTrace[source.traceIndex]?.action;
-    if (
-      action === undefined ||
-      (action.kind !== "type" && action.kind !== "select" && action.kind !== "set_phone_country")
-    ) {
-      continue;
-    }
-    let target: RecipeTarget | null = null;
-    if (action.kind !== "set_phone_country") {
-      try {
-        target = boundReplayTarget(
-          { ...action, email_hole: source.hole },
-          { [source.hole]: source.literal },
-        );
-      } catch {
-        target = null;
-      }
-    }
-    fields.push({
-      stepIndex: source.traceIndex,
-      hole: source.hole,
-      expected: source.literal,
-      target,
-      kind: action.kind,
-    });
-  }
-  return fields;
-}
-
-async function attestRecordedFieldsBeforeTransition(
-  session: Session,
-  action: ProvisionAction,
-  page?: Page,
-): Promise<ReplayExpectedField[]> {
-  if (session.replayState !== null || !isReplayTransitionAction(action)) return [];
-  const fields = recordedMoneyFields(session);
-  if (fields.length === 0) return fields;
-  const fresh = await session.browser.extractInteractiveElements(page);
-  retainSessionElements(session, fresh);
-  for (const expected of fields) {
-    const guard = await verifyReplayFieldWithElements(session, expected, fresh, false, page);
-    if (!guard.ok) {
-      rejectRecipeRecording(
-        session,
-        `checkout transition could not be attested (${expected.hole}: ${guard.reason})`,
-      );
-      return [];
-    }
-  }
-  return fields;
-}
-
-async function verifyRecordedFieldsAfterTransition(
-  session: Session,
-  action: ProvisionAction,
-  fields: readonly ReplayExpectedField[],
-  page?: Page,
-): Promise<void> {
-  if (session.replayState !== null || !isReplayTransitionAction(action) || fields.length === 0) {
-    return;
-  }
-  const fresh = await session.browser.extractInteractiveElements(page);
-  retainSessionElements(session, fresh);
-  for (const expected of fields) {
-    if (!(await isReplayFieldMounted(session, expected, fresh, page))) {
-      rejectRecipeRecording(
-        session,
-        `checkout transition could not be attested (${expected.hole}: field_missing)`,
-      );
-      return;
-    }
-    const guard = await verifyReplayFieldWithElements(session, expected, fresh, false, page);
-    if (!guard.ok) {
-      rejectRecipeRecording(
-        session,
-        `checkout transition could not be attested (${expected.hole}: ${guard.reason})`,
-      );
-      return;
-    }
-  }
-}
-
-/**
- * Execute deterministic recipe steps until completion or one local miss.
- * A miss is returned to the host with a continuation index; after the host
- * repairs that one step, calling again with `fromIndex=next_index` continues.
- */
-export async function replayOperatorRecipe(
-  sessionId: string,
-  recipe: OperatorRecipe,
-  bindings: Readonly<Record<string, string>>,
-  fromIndex = 0,
-  options: {
-    beforeStep?: (input: { step_index: number; action: TraceAction }) => Promise<void> | void;
-    beforeAction?: (input: { step_index: number; action: ProvisionAction }) => Promise<void> | void;
-  } = {},
-): Promise<OperatorReplayResult> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  let operationPage = operationPageForSession(session);
-  const recipeHash = replayDigest(recipe);
-  const bindingsHash = bindingDigest(bindings);
-  const boundPostcondition = bindRecipePostcondition(recipe.postcondition, bindings);
-  // recipe-key-redesign money rule: the only surviving invariant is that a
-  // card-charging step is never blind-replayed — enforced unconditionally
-  // below where recorded.kind === "operate_pay" always forces a fallback to
-  // the fresh, human-approved inject_card path. isMoneyPath here only feeds
-  // the leg-fallback narrowing (where to resume cold-driving), not a
-  // software field-verification gate.
-  const isMoneyPath = recipe.trace.some((entry) => entry.action.kind === "operate_pay");
-  let state: ReplayState;
-
-  const humanRequired = async (
-    reason: "field_missing" | "field_value_mismatch",
-    field: string,
-  ): Promise<OperatorReplayResult> => {
-    // replay-per-leg-signature — a genuine catalog/storefront prefix exists
-    // ahead of the checkout leg (legStartIndex > 0): degrade to a leg-scoped
-    // fallback instead of aborting the whole replay. A recipe with no such
-    // prefix (legStartIndex is 0 or null — a simple/single-leg money-path
-    // recipe) has nothing narrower to fall back to, so it keeps today's
-    // behavior exactly: hard-stop at human_required.
-    if (state.moneyPath && state.legStartIndex !== null && state.legStartIndex > 0) {
-      const fromStepIndex = state.legStartIndex;
-      // Deliberately does NOT null out session.replayState — a resumed
-      // fallback should not silently reopen a failed replay.
-      // nextIndex is left unset (not stepIndex+1), so a resume_from
-      // attempt still hits "invalid replay continuation" below — this is
-      // not a resumable fallback the way fallback_required is.
-      markReplayFailure(session, reason, field);
-      audit(sessionId, "replay_leg_fallback", { reason, field, from_step_index: fromStepIndex });
-      return {
-        status: "leg_fallback_required",
-        observation: await observeSession(session, "compact", undefined, operationPage),
-        leg: "checkout",
-        from_step_index: fromStepIndex,
-        reason: `${reason}: ${field}`,
-      };
-    }
-    markReplayFailure(session, reason, field);
-    return {
-      status: "human_required",
-      observation: await observeSession(session, "compact", undefined, operationPage),
-      reason,
-      field,
-    };
-  };
-
-  if (fromIndex === 0) {
-    if (session.replayState !== null) {
-      throw new Error("replay already started in this session; use the issued continuation");
-    }
-    const expected = expectedReplayFields(recipe, bindings);
-    state = {
-      recipeName: recipe.name,
-      recipeHash,
-      bindingsHash,
-      boundPostcondition,
-      moneyPath: isMoneyPath,
-      nextIndex: null,
-      expectedFields: expected.fields,
-      verifiedFields: new Set(),
-      legStartIndex: isMoneyPath ? checkoutLegStartIndex(recipe.trace) : null,
-    };
-    session.replayState = state;
-    if (expected.missing !== null) return await humanRequired("field_missing", expected.missing);
-  } else {
-    state = session.replayState!;
-    if (
-      state === null ||
-      state.recipeHash !== recipeHash ||
-      state.bindingsHash !== bindingsHash ||
-      state.nextIndex !== fromIndex
-    ) {
-      throw new Error("invalid replay continuation: resume_from was not issued for this session");
-    }
-    if (state.failure !== undefined) {
-      return await humanRequired(state.failure.reason, state.failure.field);
-    }
-    const repairedField = state.expectedFields.get(fromIndex - 1);
-    if (repairedField !== undefined && !state.verifiedFields.has(fromIndex - 1)) {
-      const guard = await verifyReplayField(session, repairedField, false, operationPage);
-      if (!guard.ok) return await humanRequired(guard.reason, repairedField.hole);
-      state.verifiedFields.add(fromIndex - 1);
-    }
-    state.nextIndex = null;
-  }
-
-  let replayed = 0;
-
-  const fallback = async (
-    step: TraceEntry,
-    stepIndex: number,
-    reason: string,
-  ): Promise<OperatorReplayResult> => {
-    state.nextIndex = stepIndex + 1;
-    return {
-      status: "fallback_required",
-      observation: await observeSession(session, "compact", undefined, operationPage),
-      step_index: stepIndex,
-      next_index: stepIndex + 1,
-      step,
-      reason,
-    };
-  };
-
-  for (let i = fromIndex; i < recipe.trace.length; i += 1) {
-    throwIfOperatorRequestCancelled();
-    const step = recipe.trace[i] as TraceEntry;
-    const recorded = step.action;
-    await options.beforeStep?.({ step_index: i, action: recorded });
-    let action: ProvisionAction;
-
-    if (recorded.kind === "extract") {
-      return await fallback(
-        step,
-        i,
-        "credential extraction requires host planning on the live page",
-      );
-    }
-
-    if (recorded.kind === "operate_pay") {
-      return await fallback(step, i, "payment requires the existing inject_card approval flow");
-    }
-
-    if (recorded.kind === "goto") {
-      // Organic redirects and OAuth popups remain governed by the existing
-      // session navigation model.
-      if (recorded.url_template === undefined) {
-        return await fallback(step, i, "goto step has no URL");
-      }
-      let urlTemplate: string;
-      try {
-        urlTemplate = bindKnownEmailTemplate(recorded.url_template, bindings, recorded.email_hole);
-      } catch (error) {
-        return await fallback(step, i, error instanceof Error ? error.message : String(error));
-      }
-      const filled = fillTemplate(urlTemplate, bindings as Record<string, string>);
-      if (filled.missing.length > 0) {
-        return await fallback(step, i, `missing bindings: ${filled.missing.join(", ")}`);
-      }
-      action = { kind: "goto", url: filled.url };
-    } else if (recorded.kind === "allow_host") {
-      if (recorded.host === undefined) {
-        return await fallback(step, i, "allow_host step has no host");
-      }
-      action = { kind: "allow_host", host: recorded.host };
-    } else if (recorded.kind === "press") {
-      if (recorded.key === undefined) {
-        return await fallback(step, i, "press step has no key");
-      }
-      action = { kind: "press", key: recorded.key };
-    } else if (recorded.kind === "oauth_settle") {
-      action = { kind: "oauth_settle" };
-    } else if (recorded.kind === "scroll") {
-      action = {
-        kind: "scroll",
-        ...(recorded.direction !== undefined ? { direction: recorded.direction } : {}),
-      };
-    } else if (recorded.kind === "set_phone_country") {
-      if (recorded.value === undefined) {
-        return await fallback(step, i, "set_phone_country step has no value");
-      }
-      try {
-        action = {
-          kind: "set_phone_country",
-          country: bindRecipeValue(recorded.value, bindings),
-          ...(typeof recorded.value === "string" ? {} : { provenance: recorded.value }),
-        };
-      } catch (error) {
-        return await fallback(step, i, error instanceof Error ? error.message : String(error));
-      }
-    } else {
-      let target: RecipeTarget | null;
-      try {
-        target = boundReplayTarget(recorded, bindings);
-      } catch (error) {
-        return await fallback(step, i, error instanceof Error ? error.message : String(error));
-      }
-      if (target === null) {
-        return await fallback(step, i, "step has no replay target");
-      }
-      // Structural pre-check: resolve against the live inventory before every
-      // deterministic act. This is especially load-bearing on money paths.
-      const fresh = await session.browser.extractInteractiveElements(operationPage);
-      retainSessionElements(session, fresh);
-      const expectedForStep = state.expectedFields.get(i);
-      const resolution =
-        expectedForStep === undefined
-          ? resolveRecipeTarget(fresh, target)
-          : resolveRecipeFieldTarget(fresh, target);
-      if (resolution === null) {
-        return await fallback(step, i, "ordered target resolver missed");
-      }
-      const ref = provisionElementRefs(fresh).get(resolution.element);
-      if (ref === undefined) {
-        return await fallback(step, i, "resolved target has no live ref");
-      }
-      if (recorded.kind === "type" || recorded.kind === "select") {
-        if (recorded.value === undefined) {
-          return await fallback(step, i, `${recorded.kind} step has no value`);
-        }
-        let text: string;
-        try {
-          text = bindRecipeValue(recorded.value, bindings);
-        } catch (error) {
-          return await fallback(step, i, error instanceof Error ? error.message : String(error));
-        }
-        action =
-          recorded.kind === "type"
-            ? {
-                kind: "type",
-                target: ref,
-                text,
-                ...(typeof recorded.value === "string" ? {} : { provenance: recorded.value }),
-              }
-            : {
-                kind: "select",
-                target: ref,
-                text,
-                ...(typeof recorded.value === "string" ? {} : { provenance: recorded.value }),
-              };
-      } else if (recorded.kind === "type_secret") {
-        if (recorded.slot === undefined) {
-          return await fallback(step, i, "type_secret step has no slot");
-        }
-        action = { kind: "type_secret", target: ref, slot: recorded.slot };
-      } else if (recorded.kind === "click") {
-        action = { kind: "click", target: ref };
-      } else if (recorded.kind === "js_click") {
-        action = { kind: "js_click", target: ref };
-      } else {
-        const recipeProvider = (recipe as { oauth_provider?: unknown }).oauth_provider;
-        action = {
-          kind: "oauth_click",
-          target: ref,
-          ...(recipeProvider === "google" || recipeProvider === "github"
-            ? { provider: recipeProvider }
-            : {}),
-        };
-      }
-    }
-
-    try {
-      await options.beforeAction?.({ step_index: i, action });
-      await markOperatorMutationDispatchAttempted();
-      const acted = await actInternally(
-        sessionId,
-        action,
-        "none",
-        undefined,
-        false,
-        undefined,
-        operationPage,
-      );
-      operationPage = acted.operationPage ?? operationPage;
-      if (acted.observation.oauth?.state === "awaiting_human") {
-        return await fallback(
-          step,
-          i,
-          session.compactV2Active ? "awaiting_human" : acted.observation.oauth.reason,
-        );
-      }
-      replayed += 1;
-      const expected = state.expectedFields.get(i);
-      if (expected !== undefined) {
-        const guard = await verifyReplayField(
-          session,
-          expected,
-          expected.kind === "select",
-          operationPage,
-        );
-        if (!guard.ok) return await humanRequired(guard.reason, expected.hole);
-        state.verifiedFields.add(i);
-      }
-    } catch (error) {
-      return await fallback(
-        step,
-        i,
-        session.compactV2Active
-          ? compactV2ActionFailureReason(error, action.kind)
-          : error instanceof Error
-            ? error.message
-            : String(error),
-      );
-    }
-  }
-
-  return {
-    status: "complete",
-    observation: await observeSession(session, "compact", undefined, operationPage),
-    replayed_steps: replayed,
-    field_values_verified: true,
-  };
-}
-
 // ── extraction (the `extract` thick tool) ──
 
 export interface ExtractResult {
@@ -7631,11 +4959,6 @@ export interface ExtractResult {
   // How many labeled credential candidates the page presented — diagnostic so
   // the host can tell "found nothing" from "found masked values it couldn't read".
   candidate_count: number;
-  // Set when extraction failed CLOSED: the page is a login wall / anti-bot
-  // interstitial with no credential to give (Grok/X tombstone), so the extractor
-  // refused to surface junk. The host should drive an interactive login or hand
-  // back to the user rather than treat an empty result as "service issued none".
-  blocked_reason?: string;
 }
 
 const normLabelKey = (label: string): string =>
@@ -7645,40 +4968,6 @@ const normLabelKey = (label: string): string =>
     .toLowerCase()
     .slice(0, 40);
 
-// Credential-shape predicates (looksLikeCodeIdentifier, looksLikeCredentialValue,
-// isCredentialNoise, findCredentialTokens, looksLikeCredentialToken) live in
-// credential-shape.ts — imported above. detectExtractionBlock stays here: it's
-// page-state detection (a login-wall interstitial), not value-shape.
-
-// A credentials page that is actually a login wall / anti-bot interstitial has
-// no key to give — every token on it (CSRF cookie, asset hash, guest id) is
-// junk. Grok is the standing case: x.ai routes signup through X (Twitter) OAuth,
-// and X serves headless Chromium its "JavaScript is not available" tombstone, so
-// the extractor would otherwise scrape session tokens and hand one back as a
-// false-green key. Detect that state and fail CLOSED — return no credential plus
-// an explicit reason the host agent can act on (drive an interactive login),
-// rather than surfacing a bogus value. The phrases below are the load-bearing
-// markers of X's tombstone + the four anti-bot vendors waitForFormReady knows.
-const LOGIN_WALL_MARKERS: readonly RegExp[] = [
-  /javascript is not available/i,
-  /enable javascript/i,
-  /verifying you are human/i,
-  /checking your browser/i,
-  /just a moment/i,
-  /review the security of your connection/i,
-  /unusual (traffic|activity) (from|on)/i,
-];
-export function detectExtractionBlock(pageText: string): string | null {
-  // Require a SHORT page — a real keys page that merely mentions "enable
-  // JavaScript" in a footer is not a wall. A tombstone/interstitial is sparse.
-  if (pageText.trim().length > 600) return null;
-  for (const re of LOGIN_WALL_MARKERS) {
-    if (re.test(pageText)) {
-      return "login_wall: the page is an anti-bot/login interstitial (no credential present) — drive an interactive login or hand back to the user";
-    }
-  }
-  return null;
-}
 
 function firstTokenMatching(haystack: string, re: RegExp): string | null {
   const match = haystack.match(re);
@@ -8290,21 +5579,6 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   const inputs = await browser.extractAllInputValues(page);
   const nearCopy = await browser.extractCredentialsNearCopyButtons(page);
   const text = await browser.extractVisibleText(page);
-
-  // Fail CLOSED on a login wall / anti-bot interstitial: scraping it yields only
-  // session/CSRF/asset tokens, and handing one back is a false-green. Refuse,
-  // and tell the host why so it can drive an interactive login instead.
-  const blocked = detectExtractionBlock(text);
-  if (blocked !== null) {
-    audit(sessionId, "extract", { found: false, blocked_reason: blocked });
-    return {
-      session_id: sessionId,
-      url: page?.url() ?? browser.currentUrl(),
-      credentials: {},
-      candidate_count: 0,
-      blocked_reason: blocked,
-    };
-  }
 
   // Copy-only key surfaces (e.g. LangWatch's /settings/api-keys) never render
   // the value into the DOM — it goes to the clipboard on a "Copy" click. Read

@@ -21,14 +21,11 @@ import type {
   SafeObservationIndexV2,
 } from "../compact-observation-v2.js";
 import type { ApiClient } from "../../api-client.js";
-import type { Postcondition, RecipeTarget, TraceEntry } from "../operator-recipe.js";
-import type { OnboardingRoundCapture } from "../onboarding-capture.js";
 import type { OperatorBrowserWatchdog } from "../operator-browser-watchdog.js";
-// Type-only, so no runtime cycle exists: these three field types still live in
-// the facade because they belong to regions later phases move (perception for
-// ObserveDeltaState, actions for CartAddResult, the payment bridge for
-// ActivePaymentLease). They follow this module when those phases land.
-import type { CartAddResult, ObserveDeltaState } from "../provision-session.js";
+// Type-only, so no runtime cycle exists: ObserveDeltaState still lives in the
+// facade because it belongs to the observation region. It follows this module
+// when that phase lands.
+import type { ObserveDeltaState } from "../provision-session.js";
 
 // Credential-egress seed provenance: start is the service host, auto_widen
 // is an observed same-base-domain redirect. mid_session is retained for legacy
@@ -40,58 +37,11 @@ export interface AllowedHostEntry {
   source: HostSource;
 }
 
-export interface ReplayExpectedField {
-  stepIndex: number;
-  hole: string;
-  expected: string;
-  target: RecipeTarget | null;
-  kind: "type" | "select" | "set_phone_country";
-}
-
-export interface ReplayState {
-  recipeName: string;
-  recipeHash: string;
-  bindingsHash: string;
-  boundPostcondition: Postcondition;
-  moneyPath: boolean;
-  nextIndex: number | null;
-  expectedFields: Map<number, ReplayExpectedField>;
-  verifiedFields: Set<number>;
-  failure?: { reason: "field_missing" | "field_value_mismatch"; field: string };
-  // replay-per-leg-signature — index of this recipe's OWN first money field,
-  // or null when none exists. > 0 means there's a genuine non-money prefix
-  // (a catalog/storefront leg) ahead of it, which is what lets a field
-  // failure degrade to leg_fallback_required instead of the terminal
-  // human_required — see humanRequired in replayOperatorRecipe.
-  legStartIndex: number | null;
-}
-
-export interface RecordedValueSource {
-  traceIndex: number;
-  hole?: string;
-  literal: string;
-}
-
-export interface CartAddRecord {
-  productIdentity: string;
-  optionsHash: string;
-  idempotencyKey: string;
-  phase: "reserved" | "click_started" | "complete";
-  promise: Promise<CartAddResult> | null;
-  result: CartAddResult | null;
-}
-
 export interface CartMutation {
   productIdentity: string | null;
   optionsHash: string | null;
   cartDelta: "+1" | "0" | "unknown";
   origin: string;
-}
-
-export interface CartIdentityContext {
-  productIdentity: string;
-  optionsHash: string;
-  onActionReady?: () => void;
 }
 
 export interface SessionTerminalTeardownOwner {
@@ -122,7 +72,7 @@ export interface Session {
   prevObserve: ObserveDeltaState | null;
   observeSnapshotFile: string | null;
   compactV2Secret: Buffer;
-  compactV2Mode: "off" | "shadow" | "on";
+  compactV2Mode: "off" | "on";
   compactV2HintPages: string[];
   /** True once this session has emitted V2; target resolution stays sealed until finish. */
   compactV2Active: boolean;
@@ -132,27 +82,10 @@ export interface Session {
   // raw DOM output, so every delta remains inside the allowlist
   // seal even when a page mutates confidential values or live regions.
   compactV2Previous: SafeObservationBaselineV2 | null;
-  // Phase A operator-recipe capture (docs/ARCHITECTURE.md): the
-  // ordered, TEXT-targeted action trace of this session, so a successful run can
-  // be `remember`ed as a replayable rail. Records visible text + non-secret
-  // params only — sealed secret values stay in secretSlots, never the trace.
-  actionTrace: TraceEntry[];
-  recordedValues: RecordedValueSource[];
   committedSelectValues: Map<string, string>;
-  // MEDIUM capture rounds for skill synthesis at verified success (docs/DESIGN-
-  // operator-hints.md): inventory + action + url per step, no screenshots, raw
-  // html only on the extract round. Accumulated live; written + promoted at
-  // operate_finish on a verified success.
-  captureRounds: OnboardingRoundCapture[];
-  // Deliverable #1 measurement (docs/DESIGN-operator-hints.md): when the session
-  // started and whether a registry hint was served this run, so finish emits the
-  // hint-on vs hint-off lift signal (success rate + time, bucketed).
   startedAt: number;
-  hintServed: boolean;
-  // The session's START url (service_url at operate_start, or the resolved
-  // entry on an operate_recipe_run replay). Persisted as the recipe's canonical
-  // entry_url so a replay always opens at a STABLE page, never a mid-flow
-  // single-use link inferred from the trace.
+  // The session's START url (service_url at operate_start). Used as the
+  // canonical entry_url metadata.
   startUrl: string;
   // PR2 — whether this session may read the inbox for email verification. From
   // the install-time consent flag; gates awaitVerification (fail-closed).
@@ -164,13 +97,6 @@ export interface Session {
   // gate spend a VAULTED 2Captcha key through the injecting proxy instead of a
   // raw env key. Undefined → the gate falls back to TWOCAPTCHA_API_KEY.
   api?: ApiClient;
-  // Set when a step used the text=/css= locator action fallback. Such an action
-  // resolves off-inventory, so it cannot be synthesized into a portable skill
-  // step — this flag suppresses auto-promotion so no silently-incomplete skill
-  // ships (captureAndPromoteSession).
-  usedLocatorFallback: boolean;
-  recipeRejectionReason: string | null;
-  replayState: ReplayState | null;
   // The human has not approved or denied yet. A later inject_card call resumes
   // the same approval. A terminal outcome clears this, so the next call mints
   // a fresh approval instead of replaying a dead one.
@@ -189,8 +115,6 @@ export interface Session {
   } | null;
   // Per-line idempotency records are local to the one active browser/cart. A
   // retry must inspect this before it ever reaches a merchant add button.
-  cartAdds: Map<string, CartAddRecord>;
-  cartAddsByIdempotencyKey: Map<string, CartAddRecord>;
   cartUrls: Map<string, string>;
   lastCartMutation: CartMutation | null;
   // A finish first flips this bit, then waits for outstanding call leases.  A
@@ -219,7 +143,6 @@ export interface CreateSessionInput {
   allowedHosts: AllowedHostEntry[];
   compactV2Mode: Session["compactV2Mode"];
   startUrl: string;
-  hintServed: boolean;
   consentInboxRead: boolean;
   userEmail: string | null;
   api?: ApiClient;
@@ -249,17 +172,9 @@ export function createSession(input: CreateSessionInput): Session {
     compactV2Refs: new Map(),
     compactV2Index: null,
     compactV2Previous: null,
-    actionTrace: [],
-    recordedValues: [],
     committedSelectValues: new Map(),
-    captureRounds: [],
-    usedLocatorFallback: false,
-    recipeRejectionReason: null,
-    replayState: null,
     activePayment: null,
     releasedPaymentCard: null,
-    cartAdds: new Map(),
-    cartAddsByIdempotencyKey: new Map(),
     cartUrls: new Map(),
     lastCartMutation: null,
     closing: false,
@@ -270,7 +185,6 @@ export function createSession(input: CreateSessionInput): Session {
     startedAt: Date.now(),
     watchdog: null,
     terminalTeardownOwner: null,
-    hintServed: input.hintServed,
     startUrl: input.startUrl,
     consentInboxRead: input.consentInboxRead,
     userEmail: input.userEmail,

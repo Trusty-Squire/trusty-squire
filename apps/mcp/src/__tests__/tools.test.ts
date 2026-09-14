@@ -21,8 +21,6 @@ import {
 import * as OperatorSurface from "../tools/provision-drive.js";
 import {
   operateLoginTool,
-  operateRecipeRunTool,
-  operateRecipeSaveTool,
   operateFinishTool,
   provisionStartTool,
 } from "../tools/provision-drive.js";
@@ -310,7 +308,7 @@ describe("TOOLS registry", () => {
     }
   });
 
-  it("exposes exactly the named flat target plus unchanged vault and recipe tools", () => {
+  it("exposes exactly the named flat target plus unchanged vault tools", () => {
     const target = [
       "operate_start",
       "operate_finish",
@@ -341,8 +339,6 @@ describe("TOOLS registry", () => {
       "revoke_app_access",
       "store_credential",
       "use_credential",
-      "operate_recipe_run",
-      "operate_recipe_save",
     ];
     expect(target).toHaveLength(18);
     expect(TOOLS.map((tool) => tool.name).sort()).toEqual([...target, ...unchanged].sort());
@@ -366,14 +362,14 @@ describe("TOOLS registry", () => {
       const tools = buildToolRegistry(
         disabled === undefined ? {} : { TRUSTY_SQUIRE_DIAGNOSTICS: disabled },
       );
-      expect(tools).toHaveLength(29);
+      expect(tools).toHaveLength(27);
       expect(tools.map((tool) => tool.name)).not.toEqual(
         expect.arrayContaining(["list_extract_failures", "get_extract_failure"]),
       );
     }
 
     const tools = buildToolRegistry({ TRUSTY_SQUIRE_DIAGNOSTICS: "1" });
-    expect(tools).toHaveLength(31);
+    expect(tools).toHaveLength(29);
     expect(tools.map((tool) => tool.name)).toEqual(
       expect.arrayContaining(["list_extract_failures", "get_extract_failure"]),
     );
@@ -442,9 +438,6 @@ describe("TOOLS registry", () => {
         "operate_login",
         "operate_fill_credential",
         "operate_extract",
-        // Recipe tools are a separate preserved surface; no alias definitions remain.
-        "operate_recipe_save",
-        "operate_recipe_run",
       ].sort(),
     );
     expect(OperatorSurface.OPERATE_TOOLS.map((tool) => tool.name).sort()).toEqual(names);
@@ -477,8 +470,6 @@ describe("TOOLS registry", () => {
       enum: ["none", "credentials", "result"],
     });
 
-    expect(operateRecipeRunTool.name).toBe("operate_recipe_run");
-    expect(operateRecipeSaveTool.name).toBe("operate_recipe_save");
     const names = TOOLS.map((tool) => tool.name);
     expect(names).not.toEqual(
       expect.arrayContaining([

@@ -253,8 +253,6 @@ describe("characterization: registered operator tool surface", () => {
       "operate_login",
       "operate_fill_credential",
       "operate_extract",
-      "operate_recipe_save",
-      "operate_recipe_run",
     ]);
   });
 
@@ -314,14 +312,10 @@ describe("characterization: Session construction", () => {
     expect(constructed).toEqual({
       activePayment: null,
       releasedPaymentCard: null,
-      actionTrace: { kind: "Array", length: 0 },
       allowedHosts: { kind: "Array", length: 1 },
       browser: { kind: "object", ctor: "BrowserController" },
       callCount: 0,
       callDrainWaiters: { kind: "Set", size: 0 },
-      captureRounds: { kind: "Array", length: 0 },
-      cartAdds: { kind: "Map", size: 0 },
-      cartAddsByIdempotencyKey: { kind: "Map", size: 0 },
       cartUrls: { kind: "Map", size: 0 },
       closing: false,
       committedSelectValues: { kind: "Map", size: 0 },
@@ -334,7 +328,6 @@ describe("characterization: Session construction", () => {
       compactV2Secret: { kind: "Buffer", length: 32 },
       consentInboxRead: true,
       generation: 0,
-      hintServed: false,
       id: expect.any(String),
       initializing: true,
       lastActivityAt: expect.any(Number),
@@ -342,14 +335,10 @@ describe("characterization: Session construction", () => {
       lastElements: { kind: "Array", length: 0 },
       observeSnapshotFile: null,
       prevObserve: null,
-      recipeRejectionReason: null,
-      recordedValues: { kind: "Array", length: 0 },
-      replayState: null,
       secretSlots: { kind: "Map", size: 0 },
       startUrl: "https://app.example.com/signup",
       startedAt: expect.any(Number),
       terminalTeardownOwner: null,
-      usedLocatorFallback: false,
       userEmail: "operator@example.com",
       watchdog: { kind: "object", ctor: "OperatorBrowserWatchdog" },
     });
@@ -388,21 +377,16 @@ describe("characterization: Session construction", () => {
     await startHarnessProvisionSession({
       serviceUrl: "https://shop.example.com/cart",
       browser,
-      hint: "route hint",
       observationFormat: "v1",
     });
 
     expect(constructed).toEqual({
       activePayment: null,
       releasedPaymentCard: null,
-      actionTrace: { kind: "Array", length: 0 },
       allowedHosts: { kind: "Array", length: 1 },
       browser: { kind: "object", ctor: "BrowserController" },
       callCount: 0,
       callDrainWaiters: { kind: "Set", size: 0 },
-      captureRounds: { kind: "Array", length: 0 },
-      cartAdds: { kind: "Map", size: 0 },
-      cartAddsByIdempotencyKey: { kind: "Map", size: 0 },
       cartUrls: { kind: "Map", size: 0 },
       closing: false,
       committedSelectValues: { kind: "Map", size: 0 },
@@ -416,7 +400,6 @@ describe("characterization: Session construction", () => {
       compactV2Secret: { kind: "Buffer", length: 32 },
       consentInboxRead: true,
       generation: 0,
-      hintServed: true,
       id: expect.any(String),
       initializing: true,
       lastActivityAt: expect.any(Number),
@@ -424,14 +407,10 @@ describe("characterization: Session construction", () => {
       lastElements: { kind: "Array", length: 0 },
       observeSnapshotFile: null,
       prevObserve: null,
-      recipeRejectionReason: null,
-      recordedValues: { kind: "Array", length: 0 },
-      replayState: null,
       secretSlots: { kind: "Map", size: 0 },
       startUrl: "https://shop.example.com/cart",
       startedAt: expect.any(Number),
       terminalTeardownOwner: null,
-      usedLocatorFallback: false,
       userEmail: null,
       watchdog: { kind: "object", ctor: "OperatorBrowserWatchdog" },
     });
@@ -523,7 +502,6 @@ const START_COMPACT_V2_KEYS = ["format", "safe_table", "session_id", "stage", "u
 const V1_COMPACT_KEYS = [
   "delta",
   "elements_total",
-  "guidance",
   "session_id",
   "snapshot_file",
   "text",
@@ -534,7 +512,6 @@ const V1_COMPACT_KEYS = [
 const V1_FULL_KEYS = [
   "accessibility",
   "elements",
-  "guidance",
   "screen",
   "session_id",
   "text",

@@ -98,27 +98,6 @@ describe("extract { store } is unchanged: vault metadata only", () => {
     expect(result).not.toHaveProperty("credentials");
     expect(result.stored_credential?.field_names).toEqual(["api_key", "api_secret"]);
   });
-
-  it("still carries a blocked_reason through, so a login wall is not a silent empty", () => {
-    const result = storedExtractResult(
-      {
-        session_id: "sess_1",
-        url: "https://dashboard.example.test/login",
-        credentials: {},
-        candidate_count: 0,
-        blocked_reason: "login wall",
-      },
-      {
-        reference: "vault://a/b/c",
-        service: "Example",
-        label: undefined,
-        field_names: [],
-        allowed_hosts: [],
-        updated: false,
-      },
-    );
-    expect(result.blocked_reason).toBe("login wall");
-  });
 });
 
 describe("fetch_credential is the only raw-value tool on the surface", () => {

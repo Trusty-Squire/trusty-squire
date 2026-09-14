@@ -17,14 +17,13 @@ import { runBrokerDaemon } from "./bot/broker/daemon.js";
 import { MissingSessionError } from "./api-client.js";
 import { runCli } from "./install/cli.js";
 import { runServer } from "./server.js";
-import { runSkillCli } from "./skill-cli/cli.js";
 import { VERSION } from "./version.js";
 
 const argv = process.argv.slice(2);
 
 // Check for version flags early, before dispatching to subcommands.
 // Supports: --version, -v, -V, and "version" as a positional.
-// Must NOT interfere with `server` or `skill` subcommands.
+// Must NOT interfere with `server`.
 const isVersionFlag =
   argv[0] === "version" || argv[0] === "--version" || argv[0] === "-v" || argv[0] === "-V";
 
@@ -35,7 +34,6 @@ if (isVersionFlag) {
 
 const isServer = argv[0] === "server";
 const isBroker = argv[0] === "broker";
-const isSkill = argv[0] === "skill";
 // NB: the `housekeeper` subcommand moved to its own operator-only package
 // (@trusty-squire/housekeeper, the `ts-housekeeper` bin). `mcp housekeeper`
 // no longer exists here; the systemd timer invokes ts-housekeeper directly.
@@ -51,10 +49,6 @@ async function dispatch(): Promise<number> {
     // termination signal. A return here is therefore only a normal startup
     // path with no active stdio loop left to keep alive.
     return 0;
-  }
-  if (isSkill) {
-    // skill CLI returns its own exit code (T30 error taxonomy).
-    return await runSkillCli(argv.slice(1));
   }
   await runCli(argv);
   return 0;
@@ -78,7 +72,7 @@ dispatch()
     if (err instanceof MissingSessionError) {
       console.error(err.message);
     } else {
-      const surface = isServer ? "server" : isSkill ? "skill" : "cli";
+      const surface = isServer ? "server" : "cli";
       console.error(
         `[trusty-squire] ${surface} failed: ` + (err instanceof Error ? err.message : String(err)),
       );

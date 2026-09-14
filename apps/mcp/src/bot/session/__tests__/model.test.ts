@@ -18,7 +18,6 @@ function input(over: Partial<CreateSessionInput> = {}): CreateSessionInput {
     allowedHosts: [{ host: "app.example.com", source: "start" }],
     compactV2Mode: "on",
     startUrl: "https://app.example.com/signup",
-    hintServed: false,
     consentInboxRead: false,
     userEmail: null,
     ...over,
@@ -37,7 +36,6 @@ describe("createSession", () => {
     expect(session.generation).toBe(0);
     expect(session.startUrl).toBe("https://app.example.com/signup");
     expect(session.compactV2Mode).toBe("on");
-    expect(session.hintServed).toBe(false);
     expect(session.consentInboxRead).toBe(false);
     expect(session.userEmail).toBeNull();
 
@@ -46,8 +44,6 @@ describe("createSession", () => {
       session.secretSlots,
       session.compactV2Refs,
       session.committedSelectValues,
-      session.cartAdds,
-      session.cartAddsByIdempotencyKey,
       session.cartUrls,
     ]) {
       expect(collection).toBeInstanceOf(Map);
@@ -57,13 +53,7 @@ describe("createSession", () => {
       expect(collection).toBeInstanceOf(Set);
       expect(collection.size).toBe(0);
     }
-    for (const list of [
-      session.lastElements,
-      session.compactV2HintPages,
-      session.actionTrace,
-      session.recordedValues,
-      session.captureRounds,
-    ]) {
+    for (const list of [session.lastElements, session.compactV2HintPages]) {
       expect(list).toEqual([]);
     }
 
@@ -72,8 +62,6 @@ describe("createSession", () => {
     expect(session.observeSnapshotFile).toBeNull();
     expect(session.compactV2Index).toBeNull();
     expect(session.compactV2Previous).toBeNull();
-    expect(session.recipeRejectionReason).toBeNull();
-    expect(session.replayState).toBeNull();
     expect(session.activePayment).toBeNull();
     expect(session.releasedPaymentCard).toBeNull();
     expect(session.lastCartMutation).toBeNull();
@@ -81,7 +69,6 @@ describe("createSession", () => {
     expect(session.terminalTeardownOwner).toBeNull();
 
     expect(session.compactV2Active).toBe(false);
-    expect(session.usedLocatorFallback).toBe(false);
     expect(session.closing).toBe(false);
     expect(session.initializing).toBe(true);
     expect(session.callCount).toBe(0);
@@ -104,9 +91,8 @@ describe("createSession", () => {
     const first = createSession(input({ id: "a" }));
     const second = createSession(input({ id: "b" }));
     first.secretSlots.set("slot", "value");
-    first.actionTrace.push({} as never);
     expect(second.secretSlots.size).toBe(0);
-    expect(second.actionTrace).toEqual([]);
+    expect(second.compactV2HintPages).toEqual([]);
   });
 
   it("omits `api` entirely when no client was threaded through", () => {
@@ -125,7 +111,6 @@ describe("createSession", () => {
       input({
         compactV2Mode: "off",
         startUrl: "https://shop.example.com/cart",
-        hintServed: true,
         consentInboxRead: false,
         userEmail: null,
       }),
@@ -133,14 +118,12 @@ describe("createSession", () => {
     const normal = createSession(input({ consentInboxRead: true, userEmail: "u@example.com" }));
 
     expect(harness.compactV2Mode).toBe("off");
-    expect(harness.hintServed).toBe(true);
     expect(normal.consentInboxRead).toBe(true);
     expect(normal.userEmail).toBe("u@example.com");
     // The two differ ONLY on the declared inputs.
     const varying = new Set([
       "compactV2Mode",
       "startUrl",
-      "hintServed",
       "consentInboxRead",
       "userEmail",
       "compactV2Secret",

@@ -119,8 +119,8 @@ silent failures.
   - Verification-link click and post-verify navigation primitives the host agent
     drives through the flat `operate_*` tools; there is no public inbox-polling
     operator verb.
-  - DOM/screenshot observation + vault-backed credential extraction +
-    operator-recipe replay (`operate_recipe_run`) the host agent composes per step.
+  - DOM/screenshot observation + vault-backed credential extraction the host
+    agent composes per step.
   - **`operate_screenshot` — a dedicated debugging capture,**
     separate from the per-step planner screenshot baked into `operate_observe`.
     Page (viewport or `full_page`) or ONE frame in isolation (`frame_index` /
@@ -138,9 +138,9 @@ silent failures.
     or any future one) gets a real MCP `type:"image"` content block
     (`toolResultContent` in `server.ts`), not base64 buried in JSON text.
   - **Frame/iframe support (operator-frame-support).** Ordinary child-frame
-    controls now retain their frame origin through observation, action, and
-    operator-recipe replay. The user-facing contract lives in README's MCP-tool
-    reference; `frameTargetAllowed`/`assertSecretFrameTargetAllowed` in
+    controls now retain their frame origin through observation and action. The
+    user-facing contract lives in README's MCP-tool
+    reference; `assertFrameTargetAllowed`/`assertSecretFrameTargetAllowed` in
     `provision-session.ts` own the action-time security boundary.
   - **New-tab adoption.** The user-facing ownership and magic-link-following
     contract lives in README's MCP-tool reference. `PageDriver`

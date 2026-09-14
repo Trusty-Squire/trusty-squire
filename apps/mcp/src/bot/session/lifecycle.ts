@@ -482,10 +482,10 @@ export function observeSnapshotDir(sessionId: string): string {
   return join(parent, sessionId);
 }
 
-function configuredCompactV2Mode(): "off" | "shadow" | "on" {
+function configuredCompactV2Mode(): "off" | "on" {
   const configured = (process.env.TRUSTY_SQUIRE_OBSERVE_V2 ?? "on").toLowerCase();
   if (configured === "off" || configured === "0") return "off";
-  return configured === "shadow" ? "shadow" : "on";
+  return "on";
 }
 
 // ── start ──
@@ -499,9 +499,6 @@ export interface StartOptions {
   proxyUrl?: string;
   // Deprecated compatibility input; ignored.
   extraAllowedHosts?: readonly string[];
-  // Registry route guidance the tool layer resolved (renderSkillHint). Attached
-  // to the start observation so the agent reads the map before driving.
-  hint?: string;
   // May the operator read the inbox for email verification? Sourced from the
   // install-time `consent_operator_inbox_otp` preference. It defaults on; an
   // explicit false makes awaitVerification hand the code request back instead.
@@ -647,7 +644,6 @@ export async function startProvisionSession(
     allowedHosts,
     compactV2Mode,
     startUrl: opts.serviceUrl,
-    hintServed: opts.hint !== undefined,
     consentInboxRead: opts.consentInboxRead !== false,
     userEmail: workerEmail,
     ...(opts.api !== undefined ? { api: opts.api } : {}),
@@ -658,7 +654,6 @@ export async function startProvisionSession(
     audit(id, "start", {
       service_url: opts.serviceUrl,
       allowed_hosts: hostStrings(session),
-      has_hint: opts.hint !== undefined,
     });
     await browser.goto(opts.serviceUrl);
     // A cookie/consent overlay (Usercentrics/OneTrust/…) renders after load and its
@@ -677,15 +672,11 @@ export async function startProvisionSession(
       }
       if (attempt === 0) await browser.waitForCaptchaChallengeToSettle(800, 0).catch(() => false);
     }
-    // Tell the agent which provider the user actually has a live session for
-    // (Google-preferred) — the bot knows from the profile cookies, so the agent
-    // doesn't have to guess. Composed with the skill route hint (if any).
     const loginHint = loginSessionGuidance(liveProviders);
-    const hintParts = [loginHint, ...(opts.hint !== undefined ? [opts.hint] : [])];
     const observation = await ports.observeSession(
       session,
       requestedFormat,
-      ports.compactV2StartMetadata(opts.hint, loginHint, session.userEmail),
+      ports.compactV2StartMetadata(undefined, loginHint, session.userEmail),
     );
     session.initializing = false;
     session.lastActivityAt = Date.now();
@@ -696,7 +687,7 @@ export async function startProvisionSession(
       return observation;
     return {
       ...observation,
-      hint: hintParts.join("\n"),
+      hint: loginHint,
       ...(session.userEmail !== null ? { user_email: session.userEmail } : {}),
     };
   } catch (err) {
@@ -728,7 +719,6 @@ export async function startHarnessProvisionSession(
     allowedHosts,
     compactV2Mode: opts.observationFormat === "browser-use-dom" ? "on" : "off",
     startUrl: opts.serviceUrl,
-    hintServed: opts.hint !== undefined,
     consentInboxRead: opts.consentInboxRead !== false,
     userEmail: null,
     ...(opts.api === undefined ? {} : { api: opts.api }),
@@ -744,7 +734,7 @@ export async function startHarnessProvisionSession(
     const observation = await ports.observeSession(
       session,
       requestedFormat,
-      ports.compactV2StartMetadata(opts.hint, "", null),
+      ports.compactV2StartMetadata(undefined, "", null),
     );
     session.initializing = false;
     session.lastActivityAt = Date.now();
@@ -753,7 +743,7 @@ export async function startHarnessProvisionSession(
       observation.format === "browser-use-control-query"
     )
       return observation;
-    return { ...observation, hint: opts.hint ?? "" };
+    return { ...observation, hint: "" };
   } catch (error) {
     deregisterProvisionSession(session);
     disposeSessionWatchdog(session);

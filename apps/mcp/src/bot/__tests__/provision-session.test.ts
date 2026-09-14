@@ -7,8 +7,6 @@ import {
   provisionElementRefs,
   stableElementId,
   AmbiguousProvisionTargetError,
-  hostAllowed,
-  isSquireControlPlaneHost,
   elementRef,
   buildAccessibilitySnapshot,
   isInboxReadHost,
@@ -17,22 +15,12 @@ import {
   expectedVerificationDomains,
   buildVerificationResult,
   buildConsentRefusal,
-  redactEmailForTrace,
-  scrubKnownEmail,
   generatePassword,
   classifyVouchflowCredentials,
-  detectExtractionBlock,
   sanitizeExtractedCredentials,
   buildScreenOutline,
-  provisionPerceptionGuidance,
   maskSecretValue,
   googleSessionGate,
-  isOnboardingOrOrgForm,
-  hasOneTimeSecretModal,
-  hasExistingAccountSignal,
-  hasUnlinkedOAuthAccountSignal,
-  hasNotFoundPageSignal,
-  looksLikeLoginChooser,
   buildVerificationSearchQuery,
   makeTwoCaptchaVaultProxy,
   toCompactElement,
@@ -633,60 +621,6 @@ describe("buildConsentRefusal (PR2 — inbox-read consent withheld)", () => {
   });
 });
 
-describe("redactEmailForTrace (PR3 — user email never lands in a recipe)", () => {
-  it("templatizes an email-shaped value to the email slot token", () => {
-    expect(redactEmailForTrace("ada@example.com")).toBe("${EMAIL_ALIAS}");
-    expect(redactEmailForTrace("  user.name+tag@sub.domain.io  ")).toBe("${EMAIL_ALIAS}");
-  });
-
-  it("leaves non-email values untouched (token names, free text)", () => {
-    expect(redactEmailForTrace("my-project")).toBe("my-project");
-    expect(redactEmailForTrace("Acme Inc")).toBe("Acme Inc");
-    expect(redactEmailForTrace("not@anemail")).toBe("not@anemail"); // no TLD
-  });
-});
-
-describe("scrubKnownEmail (PR3d — exact known-email scrub in trace text)", () => {
-  it("replaces every occurrence of the known email with the slot token", () => {
-    expect(scrubKnownEmail("signed in as ada@x.com", "ada@x.com")).toBe(
-      "signed in as ${EMAIL_ALIAS}",
-    );
-    expect(scrubKnownEmail("ada@x.com / ada@x.com", "ada@x.com")).toBe(
-      "${EMAIL_ALIAS} / ${EMAIL_ALIAS}",
-    );
-  });
-
-  it("is a no-op when the email is null, empty, or absent", () => {
-    expect(scrubKnownEmail("Continue", "ada@x.com")).toBe("Continue");
-    expect(scrubKnownEmail("ada@x.com", null)).toBe("ada@x.com");
-    expect(scrubKnownEmail("ada@x.com", "")).toBe("ada@x.com");
-  });
-
-  it("scrubs CSS-escaped and URL-encoded forms with reversible tokens", () => {
-    expect(scrubKnownEmail('[data-testid="ada\\@x\\.com"]', "ada@x.com")).toBe(
-      '[data-testid="${EMAIL_ALIAS_CSS}"]',
-    );
-    expect(scrubKnownEmail("/account/ada%40x.com", "ada@x.com")).toBe(
-      "/account/${EMAIL_ALIAS_URI}",
-    );
-    expect(scrubKnownEmail("/account/ada%40x%2Ecom", "ada@x.com")).toBe(
-      "/account/${EMAIL_ALIAS_URI}",
-    );
-    expect(scrubKnownEmail("/account/%61%64%61%40%78%2e%63%6f%6d", "ada@x.com")).toBe(
-      "/account/${EMAIL_ALIAS_URI}",
-    );
-    expect(scrubKnownEmail("/account/ada%2540x.com", "ada@x.com")).toBe(
-      "/account/${EMAIL_ALIAS_URI_URI}",
-    );
-    expect(scrubKnownEmail("[data-email='ada\\%40x\\.com']", "ada@x.com")).toBe(
-      "[data-email='${EMAIL_ALIAS_URI_CSS}']",
-    );
-    expect(scrubKnownEmail("/account/ada%5C%40x%5C.com", "ada@x.com")).toBe(
-      "/account/${EMAIL_ALIAS_CSS_URI}",
-    );
-  });
-});
-
 describe("generatePassword (PR3c signup password)", () => {
   it("clamps length to [16,64] and is policy-compliant (lower/upper/digit/symbol)", () => {
     for (const req of [1, 16, 24, 64, 200]) {
@@ -804,120 +738,6 @@ describe("keyFamilyPrefix (multi-key surfacing gate — Resend capture bug 2026-
   });
 });
 
-describe("detectExtractionBlock (fail-closed on a login wall)", () => {
-  it("flags X's anti-bot tombstone (the Grok false-green source)", () => {
-    const tombstone =
-      "JavaScript is not available.\nWe've detected that JavaScript is disabled in this browser.";
-    expect(detectExtractionBlock(tombstone)).not.toBeNull();
-    expect(detectExtractionBlock(tombstone)).toContain("login_wall");
-  });
-
-  it("flags the Cloudflare 'Just a moment' interstitial", () => {
-    expect(detectExtractionBlock("Just a moment...\nVerifying you are human.")).not.toBeNull();
-  });
-
-  it("does NOT flag a real keys page that merely mentions enabling JavaScript", () => {
-    // A long, content-rich page is not a wall even if the phrase appears in a footer.
-    const realPage =
-      `Your API keys\nProduction key ${sk("live-abc123def456ghi789")}\n`.repeat(20) +
-      "Note: enable JavaScript for the best experience.";
-    expect(detectExtractionBlock(realPage)).toBeNull();
-  });
-
-  it("returns null for an ordinary short dashboard with a key", () => {
-    expect(detectExtractionBlock("Dashboard\nAPI key: xai-abc123DEF456ghi789")).toBeNull();
-  });
-});
-
-describe("hostAllowed (existing control-plane boundary only)", () => {
-  const allowed = ["langwatch.ai"];
-
-  it("allows the target host and its subdomains", () => {
-    expect(hostAllowed("https://langwatch.ai/onboarding", allowed)).toBe(true);
-    expect(hostAllowed("https://app.langwatch.ai/x", allowed)).toBe(true);
-  });
-
-  it("allows cross-domain login hosts without a provider list", () => {
-    expect(hostAllowed("https://console.neon.tech", ["neon.com"])).toBe(true);
-    expect(hostAllowed("https://attacker.neon.tech", ["neon.com"])).toBe(true);
-    expect(hostAllowed("https://console.neon.tech", ["example.com"])).toBe(true);
-  });
-
-  it("allows default identity-provider hosts", () => {
-    expect(hostAllowed("https://accounts.google.com/o/oauth2/auth", allowed)).toBe(true);
-    expect(hostAllowed("https://github.com/login/oauth", allowed)).toBe(true);
-  });
-
-  it("allows firebase/web.app auth handlers", () => {
-    expect(hostAllowed("https://medalis-ecaf7.firebaseapp.com/__/auth/handler", allowed)).toBe(
-      true,
-    );
-  });
-
-  it("allows an unrelated host", () => {
-    expect(hostAllowed("https://evil.example.com/steal", allowed)).toBe(true);
-  });
-
-  it("blocks a malformed url", () => {
-    expect(hostAllowed("not a url", allowed)).toBe(false);
-  });
-
-  it("ignores legacy extra host declarations", () => {
-    expect(hostAllowed("https://mail.proton.me/inbox", ["langwatch.ai", "mail.proton.me"])).toBe(
-      true,
-    );
-  });
-
-  it("allows tenant sibling hosts with or without declarations", () => {
-    expect(hostAllowed("https://tsagent.kinde.com/admin", ["app.kinde.com"])).toBe(true);
-    expect(
-      hostAllowed("https://tsagent.kinde.com/admin", ["app.kinde.com", "tsagent.kinde.com"]),
-    ).toBe(true);
-  });
-
-  it("HARD-blocks Squire's own control plane even when the agent added it to the allow-set", () => {
-    // Confused-deputy guard: the operator browser is authed as the user, so it
-    // must never reach the vault UI / API — the denylist overrides the allow-set.
-    for (const url of [
-      "https://trustysquire.ai/vault",
-      "https://trustysquire.ai/vault/settings",
-      "https://www.trustysquire.ai/vault",
-      "https://trusty-squire-api.fly.dev/v1/vault/credentials",
-      "https://trustysquire.com/vault",
-    ]) {
-      expect(
-        hostAllowed(url, ["trustysquire.ai", "trusty-squire-api.fly.dev", "trustysquire.com"]),
-      ).toBe(false);
-    }
-  });
-});
-
-describe("isSquireControlPlaneHost (confused-deputy denylist)", () => {
-  it("matches Squire's own web app + API, exact and subdomain", () => {
-    for (const h of [
-      "trustysquire.ai",
-      "www.trustysquire.ai",
-      "vault.trustysquire.ai",
-      "trustysquire.com",
-      "trusty-squire-api.fly.dev",
-    ]) {
-      expect(isSquireControlPlaneHost(h)).toBe(true);
-    }
-  });
-
-  it("does not match unrelated or lookalike hosts", () => {
-    for (const h of [
-      "trustysquire.ai.evil.com",
-      "nottrustysquire.ai",
-      "registry.example.com",
-      "api.openai.com",
-      "",
-    ]) {
-      expect(isSquireControlPlaneHost(h)).toBe(false);
-    }
-  });
-});
-
 describe("sanitizeExtractedCredentials", () => {
   it("keeps Langfuse one-time keys and drops version/date/noise fields", () => {
     const creds = sanitizeExtractedCredentials(
@@ -985,30 +805,9 @@ describe("sanitizeExtractedCredentials", () => {
   });
 });
 
-describe("provision perception guidance", () => {
-  it("warns not to restart OAuth when app/test-mode UI is visible behind account overlay", () => {
-    const guidance = provisionPerceptionGuidance(
-      "Finish creating your account Create account CP Cactus Practice Test mode Products",
-    );
-
-    expect(guidance).toContain("Mode marker visible");
-    expect(guidance).toContain("account/setup overlay");
-    expect(guidance).toContain("authenticated app markers");
-    expect(guidance).toContain("Do not restart OAuth");
-  });
-
-  it("treats sandbox usage controls as a visible test/sandbox mode marker", () => {
-    const text = "Settings Apps Sandbox usage Production usage";
-    const guidance = provisionPerceptionGuidance(text);
-
-    expect(guidance).toContain("Mode marker visible");
-  });
-});
-
 describe("buildScreenOutline", () => {
   it("groups elements by DOM region and marks the foreground dialog", () => {
-    const outline = buildScreenOutline(
-      [
+    const outline = buildScreenOutline([
         el({
           visibleText: "Products",
           selector: "#products",
@@ -1028,11 +827,9 @@ describe("buildScreenOutline", () => {
           topmost: true,
         }),
       ],
-      "Finish creating your account Test mode Products",
     );
 
     expect(outline?.foreground).toBe("dialog:finish-account");
-    expect(outline?.mode_markers).toEqual(["test/sandbox mode"]);
     expect(outline?.regions).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1057,68 +854,6 @@ describe("buildScreenOutline", () => {
         }),
       ]),
     );
-  });
-});
-
-describe("isOnboardingOrOrgForm (setup forms are not walls)", () => {
-  it("detects the instant-db / 'tell us about yourself' onboarding", () => {
-    expect(isOnboardingOrOrgForm("Tell us about yourself to finish setup")).toBe(true);
-  });
-  it("detects growthbook's 'you aren't part of an organization yet'", () => {
-    expect(
-      isOnboardingOrOrgForm("You aren't part of an organization yet. Create one to continue."),
-    ).toBe(true);
-  });
-  it("detects an anyscale-style create-org/workspace form", () => {
-    expect(isOnboardingOrOrgForm("Create your organization Name your team")).toBe(true);
-  });
-  it("does NOT fire on an ordinary keys page", () => {
-    expect(isOnboardingOrOrgForm("API Keys — create a new key for your project")).toBe(false);
-  });
-});
-
-describe("hasOneTimeSecretModal (Luma one-time reveal)", () => {
-  it("detects 'you won't be able to see this again'", () => {
-    expect(hasOneTimeSecretModal("Copy your API key. You won't be able to view it again.")).toBe(
-      true,
-    );
-  });
-  it("detects 'make sure to copy your secret now'", () => {
-    expect(
-      hasOneTimeSecretModal("Make sure to copy your secret key now and store it securely."),
-    ).toBe(true);
-  });
-  it("does NOT fire on an ordinary always-visible key field", () => {
-    expect(
-      hasOneTimeSecretModal(`Your API key: ${sk("live-abc123")} (always available here)`),
-    ).toBe(false);
-  });
-});
-
-describe("hasExistingAccountSignal (real-identity already registered — OpenRouter)", () => {
-  it("detects the openrouter 'invalid credentials' login flip", () => {
-    expect(hasExistingAccountSignal("Sign in to continue. Invalid credentials.")).toBe(true);
-  });
-  it("detects 'an account with this email already exists'", () => {
-    expect(
-      hasExistingAccountSignal("An account with this email already exists. Sign in instead."),
-    ).toBe(true);
-  });
-  it("detects 'email is already registered'", () => {
-    expect(hasExistingAccountSignal("That email is already registered.")).toBe(true);
-  });
-  it("does NOT fire on a clean fresh signup form", () => {
-    expect(hasExistingAccountSignal("Create your account — enter your email to get started")).toBe(
-      false,
-    );
-  });
-  it("does NOT fire on a bare 'Already have an account? Sign in' link", () => {
-    expect(hasExistingAccountSignal("Sign up. Already have an account? Sign in")).toBe(false);
-  });
-  it("surfaces the log-in steer through provisionPerceptionGuidance", () => {
-    const g = provisionPerceptionGuidance("Invalid credentials. Please try again.");
-    expect(g).toContain("Existing account");
-    expect(g).toContain("LOGGING IN");
   });
 });
 
@@ -1149,65 +884,6 @@ describe("buildVerificationSearchQuery (finds passwordless mail)", () => {
     expect(link).toBe(
       "https://app.loops.so/api/auth/callback/email?callbackUrl=https%3A%2F%2Fapp.loops.so%2Fadd-domain&token=REDACTED&email=x%40y.com",
     );
-  });
-});
-
-describe("looksLikeLoginChooser (auth wall, not the app surface)", () => {
-  it("detects Groq's login chooser and suppresses the app-navigation steer", () => {
-    const groq =
-      "Build Fast Create Account or Login Last used Continue with Google Continue with GitHub Continue with SSO or Continue with email developers api keys";
-    expect(looksLikeLoginChooser(groq)).toBe(true);
-    // neither the "authenticated app / prefer app navigation" steer NOR the
-    // "onboarding/setup form" fill-the-fields steer should fire on a login page
-    const g = provisionPerceptionGuidance(groq) ?? "";
-    expect(g).not.toMatch(/prefer app navigation|no test\/sandbox/i);
-    expect(g).not.toMatch(/onboarding\/setup form/i);
-  });
-  it("does NOT fire on the real authenticated dashboard", () => {
-    expect(looksLikeLoginChooser("Products Developers API Keys Team Billing Usage")).toBe(false);
-  });
-});
-
-describe("hasNotFoundPageSignal (stale/404 signup URL)", () => {
-  it("detects a sparse 404 page (the Loops /signup case)", () => {
-    expect(
-      hasNotFoundPageSignal("404 L'oops! The page you're looking for doesn't exist. Home"),
-    ).toBe(true);
-    expect(hasNotFoundPageSignal("Page not found")).toBe(true);
-    expect(hasNotFoundPageSignal("Sorry, that page couldn't be found.")).toBe(true);
-  });
-  it("does NOT fire on a real signup form", () => {
-    expect(hasNotFoundPageSignal("Sign up for Loops Work Email First Name Company Sign up")).toBe(
-      false,
-    );
-  });
-  it("does NOT fire on a long app page that merely mentions 404", () => {
-    const longPage = "Dashboard ".repeat(80) + "HTTP 404 errors this week: 3";
-    expect(longPage.length).toBeGreaterThan(600);
-    expect(hasNotFoundPageSignal(longPage)).toBe(false);
-  });
-  it("steers to recovery via provisionPerceptionGuidance", () => {
-    const g = provisionPerceptionGuidance("404 The page you're looking for doesn't exist.");
-    expect(g).toBeDefined();
-    expect(g!.toLowerCase()).toContain("stale");
-    expect(g!.toLowerCase()).toContain("/register");
-  });
-});
-
-describe("hasUnlinkedOAuthAccountSignal (OAuth not linked — Clerk)", () => {
-  it("detects clerk's 'The External Account was not found'", () => {
-    expect(hasUnlinkedOAuthAccountSignal("The External Account was not found.")).toBe(true);
-  });
-  it("detects 'no account found for this Google account'", () => {
-    expect(hasUnlinkedOAuthAccountSignal("No account found for this Google account.")).toBe(true);
-  });
-  it("does NOT fire on a normal OAuth consent screen", () => {
-    expect(hasUnlinkedOAuthAccountSignal("Continue with Google to sign in")).toBe(false);
-  });
-  it("steers to email/OTP via provisionPerceptionGuidance", () => {
-    const g = provisionPerceptionGuidance("The External Account was not found.");
-    expect(g).toContain("Unlinked OAuth");
-    expect(g).toContain("EMAIL signup/OTP");
   });
 });
 
