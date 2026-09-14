@@ -15,10 +15,7 @@
 import { randomBytes } from "node:crypto";
 import type { Buffer } from "node:buffer";
 import type { BrowserController, CheckoutCard, InteractiveElement } from "../browser.js";
-import type {
-  PendingApprovalWait,
-  TerminalPaymentApprovalStatus,
-} from "../card-release-approval.js";
+import type { PendingApprovalWait } from "../card-release-approval.js";
 import type {
   SafeObservationBaselineV2,
   SafeObservationIndexV2,
@@ -175,16 +172,9 @@ export interface Session {
   recipeRejectionReason: string | null;
   replayState: ReplayState | null;
   // The human has not approved or denied yet. A later inject_card call resumes
-  // the same approval. Once denial or expiry is observed, terminal_approval
-  // retains that outcome long enough to report it once.
-  activePayment:
-    | { status: "awaiting_approval"; state: PendingApprovalWait }
-    | {
-        status: "terminal_approval";
-        state: PendingApprovalWait;
-        terminalStatus: TerminalPaymentApprovalStatus;
-      }
-    | null;
+  // the same approval. A terminal outcome clears this, so the next call mints
+  // a fresh approval instead of replaying a dead one.
+  activePayment: { status: "awaiting_approval"; state: PendingApprovalWait } | null;
   /** Internal card released by the existing purchase approval; never serialized. */
   releasedPaymentCard: {
     approvalId: string;

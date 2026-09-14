@@ -361,6 +361,14 @@ function startSessionWatchdog(session: Session): void {
   watchdog.start();
 }
 
+/** Thrown when a session-addressed call names a session this process does not own. */
+export class UnknownProvisionSessionError extends Error {
+  constructor(sessionId: string) {
+    super(`unknown provision session ${sessionId}`);
+    this.name = "UnknownProvisionSessionError";
+  }
+}
+
 export function sessionForCall(sessionId: string): Session | undefined {
   return sessions.get(sessionId);
 }
@@ -380,7 +388,7 @@ export function paymentSession(sessionId?: string): Session {
   let session: Session | undefined;
   if (sessionId !== undefined) {
     session = sessionForCall(sessionId);
-    if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+    if (session === undefined) throw new UnknownProvisionSessionError(sessionId);
   } else {
     if (sessions.size !== 1) {
       throw new Error(
@@ -442,7 +450,7 @@ export async function withProvisionSessionCall<T>(
   signal?: AbortSignal,
 ): Promise<T> {
   const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  if (session === undefined) throw new UnknownProvisionSessionError(sessionId);
   if (signal?.aborted) throw signal.reason ?? new Error("operator_request_cancelled");
   const cancelled = (): void => {
     const leases = cancelledCallLeases.get(session) ?? new Set<AbortSignal>();

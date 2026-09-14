@@ -42,28 +42,6 @@ const inputSchema = z.object({
 
 type InjectCardInput = z.infer<typeof inputSchema>;
 
-const cardReleaseTails = new WeakMap<Session, Promise<void>>();
-
-async function withCardReleaseSerialization<T>(
-  session: Session,
-  operation: () => Promise<T>,
-): Promise<T> {
-  const previous = cardReleaseTails.get(session) ?? Promise.resolve();
-  let release!: () => void;
-  const held = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const tail = previous.then(() => held);
-  cardReleaseTails.set(session, tail);
-  await previous;
-  try {
-    return await operation();
-  } finally {
-    release();
-    if (cardReleaseTails.get(session) === tail) cardReleaseTails.delete(session);
-  }
-}
-
 function cloneCard(card: CheckoutCard): CheckoutCard {
   return {
     ...card,
@@ -122,7 +100,7 @@ function pendingResult(session: Session, result: Record<string, unknown>): Recor
 export const injectCardTool: Tool<InjectCardInput> = {
   name: "inject_card",
   description:
-    "Release one saved card under the existing single human purchase approval and fill only the supplied observation refs. Supply session_id and refs for pan/cvv/expiry/name from operate_observe; each may target the main document or any reachable frame. Avoid provider helper/autofill/focus inputs and choose the actual card control. This tool never searches for payment providers, chooses a card UI, reads or validates the total, clicks submit, clears fields, or diagnoses the checkout. Partial results are ordinary browser outcomes; retry changed refs with the same approval_id. Before placing the order, re-observe and confirm no competing saved-card control is selected. If 3-D Secure appears, immediately notify the cardholder in chat and ask them to complete it. The released PAN/CVV are masked from all normal operator output before the first write.",
+    "Release one saved card under the existing single human purchase approval and fill only the supplied observation refs. Supply session_id and refs for pan/cvv/expiry/name from operate_observe; each may target the main document or any reachable frame. Avoid provider helper/autofill/focus inputs and choose the actual card control. This tool never searches for payment providers, chooses a card UI, reads or validates the total, clicks submit, clears fields, or diagnoses the checkout. Partial results are ordinary browser outcomes; retry changed refs with the same approval_id. Before placing the order, re-observe and confirm no competing saved-card control is selected. The released PAN/CVV are masked from all normal operator output before the first write.",
   inputSchema,
   jsonInputSchema: {
     type: "object",
@@ -164,108 +142,85 @@ export const injectCardTool: Tool<InjectCardInput> = {
   async handler(args, api, context) {
     assertApi(api);
     return await withPaymentSessionCall(args.session_id, async (session) => {
-      return await withCardReleaseSerialization(session, async () => {
-        if (session.releasedPaymentCard !== null) return await injectReleasedCard(session, args);
-        if (args.approval_id !== undefined) {
-          const pending = session.activePayment;
-          if (
-            pending?.status !== "awaiting_approval" ||
-            pending.state.approval_id !== args.approval_id
-          ) {
-            throw new Error("approval_id is not resumable in this session");
-          }
-        }
-        if (session.activePayment?.status === "terminal_approval") {
-          const terminal = session.activePayment;
-          session.activePayment = null;
-          return {
-            session_id: session.id,
-            status:
-              terminal.terminalStatus === "denied"
-                ? "payment_approval_denied"
-                : terminal.terminalStatus === "expired"
-                  ? "payment_approval_timeout"
-                  : "payment_confirmation_failed",
-            approval_id: terminal.state.approval_id,
-            approval_url: terminal.state.approval_url,
-            approved_terms: terminal.state.checkout,
-          };
-        }
+      if (session.releasedPaymentCard !== null) return await injectReleasedCard(session, args);
+      if (args.approval_id !== undefined) {
+        const pending = session.activePayment;
         if (
-          session.activePayment !== null &&
-          session.activePayment.status !== "awaiting_approval"
+          pending?.status !== "awaiting_approval" ||
+          pending.state.approval_id !== args.approval_id
         ) {
-          throw new Error("another card release is already in progress");
+          throw new Error("approval_id is not resumable in this session");
         }
-        const resumeFrom: PendingApprovalWait | undefined =
-          session.activePayment?.status === "awaiting_approval"
-            ? session.activePayment.state
-            : undefined;
-        const controller = session.browser;
-        let releasedCard: CheckoutCard | null = null;
-        let fieldResults: Record<InjectCardField, InjectCardFieldResult> | null = null;
-        let filled: ReleasedCardApproval | null = null;
-        const releaseBrowser: CardReleaseBrowser = {
-          injectCardFields: async (card) => {
-            releasedCard = cloneCard(card);
-            fieldResults = await injectCardIntoSessionTargets(session.id, card, args.fields);
+      }
+      const resumeFrom: PendingApprovalWait | undefined =
+        session.activePayment?.status === "awaiting_approval"
+          ? session.activePayment.state
+          : undefined;
+      const controller = session.browser;
+      let releasedCard: CheckoutCard | null = null;
+      let fieldResults: Record<InjectCardField, InjectCardFieldResult> | null = null;
+      let filled: ReleasedCardApproval | null = null;
+      const releaseBrowser: CardReleaseBrowser = {
+        injectCardFields: async (card) => {
+          releasedCard = cloneCard(card);
+          fieldResults = await injectCardIntoSessionTargets(session.id, card, args.fields);
+        },
+        currentUrl: () => controller.currentUrl(),
+      };
+      const result = await executeCardReleaseApproval(
+        {
+          merchant: args.merchant,
+          amount_cents: args.amount_cents,
+          currency: args.currency,
+          item: args.item,
+          reason: args.reason,
+          card_ref: args.card_ref,
+        },
+        api as ApiClient,
+        releaseBrowser,
+        {
+          ...(resumeFrom === undefined ? {} : { resumeFrom }),
+          ...(context?.signal === undefined ? {} : { signal: context.signal }),
+          pollBudgetMs: APPROVAL_WAIT_MS,
+          surfaceApprovalUrl: async (url) => {
+            await context?.notifyUser?.(`Approve this purchase on your phone: ${url}`, {
+              approval_url: url,
+            });
           },
-          currentUrl: () => controller.currentUrl(),
-        };
-        const result = await executeCardReleaseApproval(
-          {
-            merchant: args.merchant,
-            amount_cents: args.amount_cents,
-            currency: args.currency,
-            item: args.item,
-            reason: args.reason,
-            card_ref: args.card_ref,
+          onApprovalPending: (state) => {
+            session.activePayment = { status: "awaiting_approval", state };
           },
-          api as ApiClient,
-          releaseBrowser,
-          {
-            ...(resumeFrom === undefined ? {} : { resumeFrom }),
-            pollBudgetMs: context?.paymentApprovalWaitMs ?? APPROVAL_WAIT_MS,
-            surfaceApprovalUrl: async (url) => {
-              await context?.notifyUser?.(`Approve this purchase on your phone: ${url}`, {
-                approval_url: url,
-              });
-            },
-            onApprovalPending: (state) => {
-              session.activePayment = { status: "awaiting_approval", state };
-            },
-            onApprovalTerminal: (state, terminalStatus) => {
-              session.activePayment = { status: "terminal_approval", state, terminalStatus };
-            },
-            onCardFilled: (pending) => {
-              filled = pending;
-            },
+          onApprovalTerminal: () => {
+            session.activePayment = null;
           },
-        );
-        if (releasedCard === null || fieldResults === null || filled === null) {
-          return pendingResult(session, result);
-        }
-        const approved = filled as ReleasedCardApproval;
-        session.releasedPaymentCard = {
-          approvalId: approved.approval_id,
-          approvalUrl: approved.approval_url,
-          checkout: approved.checkout,
-          cardRef: approved.card_ref,
-          last4: approved.last4,
-          deadline: approved.deadline ?? Date.now() + 5 * 60_000,
-          card: releasedCard,
-        };
-        session.activePayment = null;
-        return {
-          status: "card_injected",
-          session_id: session.id,
-          approval_id: approved.approval_id,
-          approval_url: approved.approval_url,
-          approved_terms: approved.checkout,
-          last4: approved.last4,
-          ...fieldSummary(fieldResults, args.fields),
-        };
-      });
+          onCardFilled: (pending) => {
+            filled = pending;
+          },
+        },
+      );
+      if (releasedCard === null || fieldResults === null || filled === null) {
+        return pendingResult(session, result);
+      }
+      const approved = filled as ReleasedCardApproval;
+      session.releasedPaymentCard = {
+        approvalId: approved.approval_id,
+        approvalUrl: approved.approval_url,
+        checkout: approved.checkout,
+        cardRef: approved.card_ref,
+        last4: approved.last4,
+        deadline: approved.deadline ?? Date.now() + 5 * 60_000,
+        card: releasedCard,
+      };
+      session.activePayment = null;
+      return {
+        status: "card_injected",
+        session_id: session.id,
+        approval_id: approved.approval_id,
+        approval_url: approved.approval_url,
+        approved_terms: approved.checkout,
+        last4: approved.last4,
+        ...fieldSummary(fieldResults, args.fields),
+      };
     });
   },
 };

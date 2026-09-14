@@ -117,9 +117,11 @@ describe("still-true contracts survive the cleanup", () => {
     expect(injectCardTool.description).toContain("single human purchase approval");
     expect(injectCardTool.description).toContain("fill only the supplied observation refs");
     expect(injectCardTool.description).toContain("competing saved-card control");
-    expect(injectCardTool.description).toContain("immediately notify the cardholder");
     expect(injectCardTool.jsonInputSchema.required).toContain("session_id");
     expect(provisionStartTool.description).toContain("inject_card");
+    // No code detects a 3-D Secure challenge or notifies on one, so the
+    // description must not promise either (see card-release-approval.ts).
+    expect(injectCardTool.description).not.toMatch(/3-D Secure|notify/i);
   });
 });
 

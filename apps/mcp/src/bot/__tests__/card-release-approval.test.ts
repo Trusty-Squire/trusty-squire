@@ -40,7 +40,7 @@ import { canonicalize as vouchflowCanonicalize } from "@vouchflow/web";
 import { exportJWK, SignJWT } from "jose";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiClient } from "../../api-client.js";
-import { executeCardReleaseApproval, type CardReleaseBrowser } from "../card-release-approval.js";
+import { executeCardReleaseApproval, type CardReleaseBrowser, type PendingApprovalWait } from "../card-release-approval.js";
 import { sealToRecipient } from "../payment-hpke.js";
 import type { CheckoutCard, CheckoutSummary } from "../browser.js";
 
@@ -132,38 +132,6 @@ async function signMandateLikeWeb(params: {
   return { jws, sealed_card, canonical };
 }
 
-async function signReviewLikeWeb(params: {
-  operatorPubkey: string;
-  privateKey: KeyObject;
-  approvalPayloadSha256: string;
-  cardRef: string;
-}): Promise<{ jws: string; sealed_card: string }> {
-  const payload = {
-    approval_id: "appr_seam",
-    approval_payload_sha256: params.approvalPayloadSha256,
-    card_ref: params.cardRef,
-    recipient_pubkey_hash: recipientPubkeyHash(params.operatorPubkey),
-  };
-  const canonical = vouchflowCanonicalize(payload);
-  const aad = createHash("sha256").update(canonical, "utf8").digest();
-  const jws = await new SignJWT({
-    payload_sha256: aad.toString("base64url"),
-    context: "purchase",
-    confidence: "low",
-    mandate_id: "seam-review",
-  })
-    .setProtectedHeader({ alg: "RS256", kid: "test-key" })
-    .setIssuer("https://vouchflow.dev")
-    .setAudience("customer_test")
-    .sign(params.privateKey);
-  const sealed_card = await sealToRecipient(
-    params.operatorPubkey,
-    new TextEncoder().encode(JSON.stringify(SYNTHETIC_CARD)),
-    new Uint8Array(aad),
-  );
-  return { jws, sealed_card };
-}
-
 // Drives the real single-approval card release path with a synthetic card.
 async function runSeam(cfg: {
   boundCardRef: string; // what the server binds + echoes as approval.card_ref
@@ -172,12 +140,16 @@ async function runSeam(cfg: {
   signApprovalId?: string; // what the phone signs over (default = current approval)
   signAccountBinding?: string;
   confidence?: "low" | "medium" | "high";
+  // Abort the MCP client's signal after the first live read returns a still-pending
+  // approval, so the bounded wait is cut short without a candidate ever arriving.
+  cancelAfterFirstRead?: AbortController;
 }): Promise<{
   result: Record<string, unknown>;
   filledCards: CheckoutCard[];
   canonical: string;
   confirmationBodies: Array<Record<string, unknown>>;
   resolvedCardRefs: string[];
+  pendingStates: PendingApprovalWait[];
 }> {
   const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const jwk = await exportJWK(publicKey);
@@ -185,14 +157,13 @@ async function runSeam(cfg: {
   const confirmationBodies: Array<Record<string, unknown>> = [];
   const filledCards: CheckoutCard[] = [];
   const resolvedCardRefs: string[] = [];
+  const pendingStates: PendingApprovalWait[] = [];
   const nonce = "seam-nonce";
   const agent = "seam-agent@host";
   const accountBinding = "owner-account-binding";
   let clock = 0;
   let webCanonical = "";
-  let reviewVerified = false;
   let approved = false;
-  let reviewCandidate: { jws: string; sealed_card: string } | undefined;
   let finalCandidate: { jws: string; sealed_card: string } | undefined;
 
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -222,46 +193,40 @@ async function runSeam(cfg: {
       init?.method === "GET"
     ) {
       const operatorPubkey = String(approvalBodies[0]!.operator_pubkey);
-      if (!reviewVerified) {
-        const approvalCanonical = canonicalize({
-          account_binding: accountBinding,
-          approval_id: "appr_seam",
+      const cancel = cfg.cancelAfterFirstRead;
+      if (cancel !== undefined && !cancel.signal.aborted) {
+        cancel.abort();
+        return Response.json({
+          id: "appr_seam",
+          status: "pending",
           ...CHECKOUT,
           nonce,
           card_ref: cfg.boundCardRef,
-          recipient_pubkey_hash: recipientPubkeyHash(operatorPubkey),
-          item: "Synthetic seam item",
-          reason: "Synthetic seam purchase reason",
-          agent,
-        })!;
-        reviewCandidate ??= await signReviewLikeWeb({
+          operator_pubkey: operatorPubkey,
+          account_binding: accountBinding,
+          jws: null,
+          sealed_card: null,
+          expires_at: new Date(60_000).toISOString(),
+        });
+      }
+      if (finalCandidate === undefined) {
+        const { jws, sealed_card, canonical } = await signMandateLikeWeb({
           operatorPubkey,
           privateKey,
-          approvalPayloadSha256: createHash("sha256")
-            .update(approvalCanonical, "utf8")
-            .digest("base64url"),
-          cardRef: cfg.boundCardRef,
+          nonce,
+          agent,
+          accountBinding: cfg.signAccountBinding ?? accountBinding,
+          cardRef: cfg.signCardRef ?? cfg.boundCardRef,
+          amountCents: cfg.signAmountCents ?? CHECKOUT.amount_cents,
+          ...(cfg.signApprovalId !== undefined ? { approvalId: cfg.signApprovalId } : {}),
+          item: "Synthetic seam item",
+          reason: "Synthetic seam purchase reason",
+          ...(cfg.confidence !== undefined ? { confidence: cfg.confidence } : {}),
         });
-      } else {
-        if (finalCandidate === undefined) {
-          const { jws, sealed_card, canonical } = await signMandateLikeWeb({
-            operatorPubkey,
-            privateKey,
-            nonce,
-            agent,
-            accountBinding: cfg.signAccountBinding ?? accountBinding,
-            cardRef: cfg.signCardRef ?? cfg.boundCardRef,
-            amountCents: cfg.signAmountCents ?? CHECKOUT.amount_cents,
-            ...(cfg.signApprovalId !== undefined ? { approvalId: cfg.signApprovalId } : {}),
-            item: "Synthetic seam item",
-            reason: "Synthetic seam purchase reason",
-            ...(cfg.confidence !== undefined ? { confidence: cfg.confidence } : {}),
-          });
-          finalCandidate = { jws, sealed_card };
-          webCanonical = canonical;
-        }
+        finalCandidate = { jws, sealed_card };
+        webCanonical = canonical;
       }
-      const candidate = reviewVerified ? finalCandidate! : reviewCandidate!;
+      const candidate = finalCandidate!;
       return Response.json({
         id: "appr_seam",
         status: approved ? "approved" : "pending",
@@ -277,10 +242,6 @@ async function runSeam(cfg: {
     if (url.endsWith("/v1/pay/approvals/appr_seam/confirm") && init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
       confirmationBodies.push(body);
-      if (!reviewVerified) {
-        reviewVerified = true;
-        return Response.json({ status: "verified" });
-      }
       approved = true;
       return Response.json({ status: "approved" });
     }
@@ -326,12 +287,20 @@ async function runSeam(cfg: {
       webBase: "https://web.test",
       surfaceApprovalUrl: vi.fn(),
       pollIntervalMs: 1,
-      jitApprovalTimeoutMs: 3,
       onCardResolved: (cardRef) => resolvedCardRefs.push(cardRef),
+      onApprovalPending: (state) => pendingStates.push(state),
+      ...(cfg.cancelAfterFirstRead === undefined ? {} : { signal: cfg.cancelAfterFirstRead.signal }),
     },
   )) as Record<string, unknown>;
 
-  return { result, filledCards, canonical: webCanonical, confirmationBodies, resolvedCardRefs };
+  return {
+    result,
+    filledCards,
+    canonical: webCanonical,
+    confirmationBodies,
+    resolvedCardRefs,
+    pendingStates,
+  };
 }
 
 describe("web ↔ mcp mandate canonical form (cross-package seam)", () => {
@@ -377,7 +346,7 @@ describe("web ↔ mcp mandate canonical form (cross-package seam)", () => {
     // canonical bytes. So this asserts the web/mcp canonical forms are identical.
     expect(result).toMatchObject({ status: "card_released" });
     expect(filledCards).toEqual([expect.objectContaining({ pan: SYNTHETIC_CARD.pan })]);
-    expect(confirmationBodies).toHaveLength(2);
+    expect(confirmationBodies).toHaveLength(1);
     expect(resolvedCardRefs).toEqual(["card_bound_by_server"]);
     // Sanity: the signing side really used the vouchflow SDK canonicalizer, and
     // it equals what mcp would produce for the same object.
@@ -406,7 +375,7 @@ describe("web ↔ mcp mandate canonical form (cross-package seam)", () => {
     });
     expect(result).toMatchObject({ status: "payment_mandate_rejected" });
     expect(filledCards).toHaveLength(0);
-    expect(confirmationBodies).toHaveLength(1);
+    expect(confirmationBodies).toHaveLength(0);
     expect(resolvedCardRefs).toHaveLength(0);
   });
 
@@ -417,7 +386,7 @@ describe("web ↔ mcp mandate canonical form (cross-package seam)", () => {
     });
     expect(result).toMatchObject({ status: "payment_mandate_rejected" });
     expect(filledCards).toHaveLength(0);
-    expect(confirmationBodies).toHaveLength(1);
+    expect(confirmationBodies).toHaveLength(0);
     expect(resolvedCardRefs).toHaveLength(0);
   });
 
@@ -428,7 +397,7 @@ describe("web ↔ mcp mandate canonical form (cross-package seam)", () => {
     });
     expect(result).toMatchObject({ status: "payment_mandate_rejected" });
     expect(filledCards).toHaveLength(0);
-    expect(confirmationBodies).toHaveLength(1);
+    expect(confirmationBodies).toHaveLength(0);
     expect(resolvedCardRefs).toHaveLength(0);
   });
 
@@ -439,7 +408,25 @@ describe("web ↔ mcp mandate canonical form (cross-package seam)", () => {
     });
     expect(result).toMatchObject({ status: "payment_mandate_rejected" });
     expect(filledCards).toHaveLength(0);
-    expect(confirmationBodies).toHaveLength(1);
+    expect(confirmationBodies).toHaveLength(0);
     expect(resolvedCardRefs).toHaveLength(0);
+  });
+
+  it("stops waiting when the client cancels and leaves the approval resumable", async () => {
+    const controller = new AbortController();
+    const { result, filledCards, pendingStates } = await runSeam({
+      boundCardRef: "card_bound_by_server",
+      cancelAfterFirstRead: controller,
+    });
+    // The cancelled call returns pending before the full wait budget, writes no
+    // card, and hands the session the same approval to resume.
+    expect(controller.signal.aborted).toBe(true);
+    expect(result).toMatchObject({ status: "approval_pending", approval_id: "appr_seam" });
+    expect(filledCards).toHaveLength(0);
+    expect(pendingStates).toHaveLength(1);
+    expect(pendingStates[0]).toMatchObject({
+      approval_id: "appr_seam",
+      cardRef: "card_bound_by_server",
+    });
   });
 });
