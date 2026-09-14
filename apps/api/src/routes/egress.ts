@@ -107,6 +107,14 @@ const EGRESS_RETRY_AFTER_SECONDS = (() => {
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 30;
 })();
 
+// Fastify's default bodyLimit (1MiB) is sized for typical API JSON bodies, not
+// a workload's LLM chat payload — a long conversation history or large tool
+// output can run to tens of MiB and was being rejected with a 413 before ever
+// reaching the proxy. Raised here, not server-wide, since every other route on
+// this API (mint/list/revoke, webhooks, vault) has no legitimate need for a
+// body this large.
+const EGRESS_PROXY_BODY_LIMIT_BYTES = 256 * 1024 * 1024; // 256MB
+
 function sendEgressStoreUnavailable(reply: FastifyReply): void {
   reply.header("Retry-After", String(EGRESS_RETRY_AFTER_SECONDS));
   reply.code(503).send({
@@ -354,6 +362,7 @@ export const registerEgressRoutes: FastifyPluginAsync<{
   // ── Transparent egress proxy (grant token) ────────────────────
   fastify.all<{ Params: { grant: string; "*": string } }>(
     "/v1/egress/:grant/*",
+    { bodyLimit: EGRESS_PROXY_BODY_LIMIT_BYTES },
     async (req, reply) => {
       // EGRESS_DISABLED kills the proxy for EXISTING grants too — the panic
       // switch must stop live workloads, not just new mints.
