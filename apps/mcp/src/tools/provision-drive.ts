@@ -41,36 +41,10 @@ import {
   readSecretSlotValue,
   getSessionUserEmail,
   generatePassword,
-  rememberRecipe,
-  verifyActiveRecipePostcondition,
-  verifySavedRecipePostcondition,
-  captureAndPromoteSession,
-  replayOperatorRecipe,
-  emitProvisionMeasurement,
-  checkoutShapeSignatureForSession,
   type ProvisionAction,
   type ExtractResult,
 } from "../bot/provision-session.js";
-import { signSkillForPublish } from "../skill-cli/signing.js";
-import {
-  readRecipe,
-  readRecipeForTask,
-  readRecipeForCheckoutShape,
-  readRecipeFromFile,
-  renderOperatorRecipeHint,
-  recipeEntryUrl,
-  fillTemplate,
-  operatorRecipeDomain,
-  checkoutShapeKey,
-  isCheckoutShapeKey,
-  OperatorVerbSchema,
-  PostconditionSchema,
-  type OperatorVerb,
-  type OperatorRecipe,
-} from "../bot/operator-recipe.js";
 import { isMaskedDisplay } from "../bot/credential-shape.js";
-import { renderSkillHint, serviceSlugFromUrl } from "../bot/skill-hint.js";
-import { clientFromEnv, generateProvisionId } from "../skill-registry-client.js";
 import { openSessionStorage } from "../session.js";
 import { servingAccountId } from "../session-guard.js";
 import { sessionForCall } from "../bot/session/lifecycle.js";
@@ -98,147 +72,6 @@ async function readInboxConsent(): Promise<boolean> {
 // an account it never bound to" defect this work exists to remove.
 function resolveAccountId(): string | undefined {
   return servingAccountId();
-}
-
-// Best-effort: ask the registry for a known route for this service so the agent
-// drives on rails instead of ad-hoc. Returns undefined on any miss (no skill,
-// no registry configured, network error) — the agent just drives without it.
-async function resolveRouteHint(serviceUrl: string): Promise<string | undefined> {
-  try {
-    const accountId = resolveAccountId();
-    if (accountId === undefined || accountId.length === 0) return undefined;
-    const client = clientFromEnv(accountId);
-    if (client === null) return undefined;
-    const slug = serviceSlugFromUrl(serviceUrl);
-    if (slug === null) return undefined;
-    const provisionId = generateProvisionId();
-    // Try the slug first; fall back to resolving by signup_url host so a
-    // custom-named skill (x.ai → "xai-grok") is reachable from its URL.
-    let outcome = await client.fetchActiveSkill(slug, provisionId);
-    if (outcome.kind !== "found") {
-      const host = new URL(serviceUrl).hostname.toLowerCase().replace(/^www\./, "");
-      outcome = await client.fetchSkillByHost(host, provisionId);
-    }
-    return outcome.kind === "found" ? renderSkillHint(outcome.result.skill) : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-// Verified success → synthesize the run into a pending-review skill and publish
-// it so the next provision of this service gets a hint. The registry gates
-// activation on the verifier replay, so this upload is best-effort: every
-// outcome is recorded in the operate_finish result trail, nothing is thrown.
-async function autoPromoteProvision(sessionId: string): Promise<string> {
-  try {
-    const promoted = await captureAndPromoteSession(sessionId);
-    if (promoted.kind === "skipped") return `skipped:${promoted.reason}`;
-    if (promoted.kind !== "ok") {
-      // Surface the rejection DETAIL (e.g. the ZodError for schema_invalid), not
-      // just the kind — a bare "rejected:schema_invalid" is undiagnosable.
-      const detail =
-        "detail" in promoted && typeof promoted.detail === "string"
-          ? ` — ${promoted.detail.replace(/\s+/g, " ").slice(0, 400)}`
-          : "";
-      return `rejected:${promoted.error_kind ?? "unknown"}${detail}`;
-    }
-    const accountId = resolveAccountId();
-    if (accountId === undefined || accountId.length === 0) return "produced:no_account";
-    const client = clientFromEnv(accountId);
-    if (client === null) return "produced:no_registry";
-    let signature: string;
-    try {
-      signature = signSkillForPublish(promoted.skill).signature;
-    } catch {
-      // No signing key — the registry ignores the signature (the verifier is
-      // the trust signal), so a valid-shaped base64url placeholder is accepted.
-      signature = "A".repeat(86);
-    }
-    const res = await client.publishSkill(promoted.skill, signature);
-    return res.kind === "ok" ? `published:${res.status}` : `publish_failed:${res.reason}`;
-  } catch (err) {
-    return `error:${err instanceof Error ? err.message : String(err)}`;
-  }
-}
-
-// replay-serve-live-domainlock — after `operate_recipe_save` writes a recipe
-// locally, best-effort PUBLISH it to the shared registry so the NEXT
-// install to visit this (verb, eTLD+1) can immediately reuse it — a
-// recipe serves live the moment the registry accepts it; there is no
-// candidate/promotion tier. What stands between this write and steering
-// another user's browser is the domain-lock + share-eligibility gates
-// (both re-checked server-side; see routes/recipes.ts). Never fails the
-// local save: every outcome (including "not eligible to share") is just a
-// status string in the tool's result trail. The eligibility gate
-// (isRecipeShareEligible) and domain-lock (recipeDomainLockViolations) run
-// inside publishRecipe — this function never second-guesses them.
-export async function publishRecipeToRegistry(file: string): Promise<string> {
-  try {
-    const recipe = await readRecipeFromFile(file);
-    const accountId = resolveAccountId();
-    if (accountId === undefined || accountId.length === 0) return "skipped:no_account";
-    const client = clientFromEnv(accountId);
-    if (client === null) return "skipped:no_registry";
-    const outcome = await client.publishRecipe(recipe);
-    if (outcome.kind === "ok") return `published:${outcome.key}`;
-    if (outcome.kind === "not_share_eligible") {
-      return `not_shared:${outcome.reasons.join("; ").slice(0, 300)}`;
-    }
-    return `unavailable:${outcome.reason}`;
-  } catch (err) {
-    return `error:${err instanceof Error ? err.message : String(err)}`;
-  }
-}
-
-// replay-serve-live-domainlock — the cross-user reuse path. Local storage
-// stays the primary, zero-latency lookup (unchanged single-user behavior);
-// only on a LOCAL miss do we ask the shared registry, so an install with
-// its own recipe never pays a network round trip it didn't have before.
-// The registry returns whatever was last written for the key. A registry miss
-// or an unreachable registry re-throws the ORIGINAL local error so the
-// caller's existing cold-start fallback is untouched.
-export async function resolveRecipeForTask(
-  verb: OperatorVerb,
-  serviceUrl: string,
-): Promise<OperatorRecipe> {
-  try {
-    return await readRecipeForTask(verb, serviceUrl);
-  } catch (localErr) {
-    const accountId = resolveAccountId();
-    if (accountId === undefined || accountId.length === 0) throw localErr;
-    const client = clientFromEnv(accountId);
-    if (client === null) throw localErr;
-    const domain = operatorRecipeDomain(serviceUrl);
-    const outcome = await client.fetchRecipe(verb, domain, generateProvisionId());
-    if (outcome.kind !== "found") throw localErr;
-    return outcome.result.recipe;
-  }
-}
-
-// replay-per-leg-signature — the checkout leg's own independent resolution
-// path: local first (same zero-latency-on-hit shape as resolveRecipeForTask
-// above), then the shared registry, keyed by the LIVE page's field-name-set
-// signature instead of domain. Returns null (not a throw) on a total miss —
-// the caller degrades to cold driving for this leg only, same as any other
-// cache_miss, never a task-ending error.
-export async function resolveCheckoutLegRecipe(
-  verb: OperatorVerb,
-  signature: string,
-): Promise<OperatorRecipe | null> {
-  try {
-    return await readRecipeForCheckoutShape(verb, signature);
-  } catch {
-    const accountId = resolveAccountId();
-    if (accountId === undefined || accountId.length === 0) return null;
-    const client = clientFromEnv(accountId);
-    if (client === null) return null;
-    const outcome = await client.fetchRecipe(
-      verb,
-      checkoutShapeKey(signature),
-      generateProvisionId(),
-    );
-    return outcome.kind === "found" ? outcome.result.recipe : null;
-  }
 }
 
 const proxySchema = z
@@ -303,9 +136,6 @@ const startSchema = z.object({
   // Sensitive: may include proxy credentials. It is launch-only and is never
   // retained in the session state, action trail, status, or recipe.
   proxy: proxySchema.optional(),
-  // Deprecated compatibility parameters; browser egress is unrestricted.
-  allowed_hosts: z.array(z.string().min(1).max(120)).max(20).optional(),
-  extra_allowed_hosts: z.array(z.string().min(1).max(120)).max(10).optional(),
   // Operate tasks that act AS the user (drive a gated app on an existing
   // account) set this so start fails closed to a connect hand-back if no live
   // Google session exists — rather than driving into a mid-task login wall.
@@ -356,10 +186,7 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
     "checkout with operate_click, operate_type, operate_select, operate_navigate, operate_scroll, and operate_login (inject_card releases a saved card into named fields), re-read with " +
     "operate_observe, and call operate_extract " +
     "when you reach the credentials. Always operate_finish when done. The " +
-    "browser has unrestricted egress. If the " +
-    "registry knows this service, the first observation includes a `hint` — the " +
-    "route (login method, where the key lives, how many credentials). Read it and " +
-    "drive toward it; fall back to your own judgment if the live page diverges.",
+    "browser has unrestricted egress.",
   inputSchema: startSchema,
   jsonInputSchema: {
     type: "object",
@@ -372,19 +199,15 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
         description:
           "Optional per-session HTTP/HTTPS proxy URL with or without credentials, or unauthenticated SOCKS5 URL. HTTP/HTTPS passwords require a non-empty username; authenticated SOCKS5 is unsupported by the browser engine. Sensitive and launch-only; never returned or saved.",
       },
-      allowed_hosts: { type: "array", items: { type: "string" } },
-      extra_allowed_hosts: { type: "array", items: { type: "string" } },
     },
   },
   async handler(args, api) {
-    const hint = await resolveRouteHint(args.service_url);
     const consentInboxRead = await readInboxConsent();
     return await startProvisionSession({
       serviceUrl: args.service_url,
       format: args.format ?? "compact",
       consentInboxRead,
       ...(args.proxy !== undefined ? { proxyUrl: args.proxy } : {}),
-      ...(hint !== undefined ? { hint } : {}),
       // Thread the api-client so the captcha gate can spend a vaulted 2Captcha key.
       ...(api !== null ? { api } : {}),
     });
@@ -937,7 +760,6 @@ const finishOutcomeSchema = z.union([
       kind: z.literal("result"),
       summary: z.string().max(4000).optional(),
       data: finishDataSchema.optional(),
-      verify_recipe: z.string().min(1).max(80).optional(),
     })
     .refine((outcome) => outcome.summary !== undefined || outcome.data !== undefined, {
       message: "result outcome requires summary or data",
@@ -963,36 +785,18 @@ async function handleFinishOutcome(
           Object.keys(extracted.credentials).length > 0
             ? await persistExtracted(sessionId, extracted.credentials, outcome.store, api)
             : null;
-        const autoPromote =
-          stored !== null && blocked === undefined
-            ? await autoPromoteProvision(sessionId)
-            : undefined;
         successfulOutcome = stored !== null && blocked === undefined;
-        emitProvisionMeasurement(sessionId, successfulOutcome ? "success" : "fail");
         return {
           kind: "credentials" as const,
           candidate_count: extracted.candidate_count,
           ...(blocked !== undefined ? { blocked_reason: blocked } : {}),
           stored_credential: stored,
-          ...(autoPromote !== undefined ? { auto_promote: autoPromote } : {}),
         };
       }
-      const verified =
-        outcome.verify_recipe === undefined
-          ? undefined
-          : ((await verifyActiveRecipePostcondition(sessionId, outcome.verify_recipe)) ??
-            (await verifySavedRecipePostcondition(
-              sessionId,
-              await readRecipe(outcome.verify_recipe),
-            )));
-      // The agent's reported outcome IS the outcome. An optional verify_recipe
-      // still runs and is echoed back as a diagnostic, but it never gates success.
       successfulOutcome = true;
-      emitProvisionMeasurement(sessionId, successfulOutcome ? "success" : "fail");
       return {
         kind: "result" as const,
         summary: (outcome.summary ?? "").slice(0, 4000),
-        ...(verified !== undefined ? { verified } : {}),
         ...(outcome.data !== undefined ? { data: outcome.data } : {}),
       };
     },
@@ -1001,289 +805,6 @@ async function handleFinishOutcome(
   return { ...prepared, ...finish };
 }
 
-// ── operator-recipe tools (Phase A — docs/ARCHITECTURE.md) ──
-
-const rememberSchema = z.object({
-  session_id: z.string().min(1),
-  name: z.string().min(1).max(80),
-  goal: z.string().min(1).max(300),
-  verb: OperatorVerbSchema,
-  inputs: z
-    .object({
-      address: z.record(z.string().max(2000)).optional(),
-      contact: z.record(z.string().max(2000)).optional(),
-      product_query: z.string().max(2000).optional(),
-      credential: z.union([z.string().max(2000), z.record(z.string().max(2000))]).optional(),
-      card: z.union([z.string().max(2000), z.record(z.string().max(2000))]).optional(),
-      quantity: z.union([z.string().max(100), z.number()]).optional(),
-    })
-    .strict(),
-  postcondition: PostconditionSchema,
-});
-
-export const operateRecipeSaveTool: Tool<z.infer<typeof rememberSchema>> = {
-  name: "operate_recipe_save",
-  description:
-    "Save the CURRENT successful operate session as a replayable local recipe. " +
-    "Pass the host-classified closed-enum `verb` and the complete authoritative `inputs` " +
-    "ledger (address, contact, product_query, credential, card, quantity), plus a name, goal, and " +
-    "`postcondition`. The postcondition is checked BEFORE anything is written — the " +
-    "machine-checkable success signal: kind 'execute_capability' observes the " +
-    "end-state now; `success_signal` is {field_text,min_value_len} (a field whose " +
-    "value is at least N chars — checked by LENGTH, never the value), {text_present}, " +
-    "or {url_contains}. The recipe stores the session's TEXT-targeted action trace " +
-    "as a rail; sealed secrets become slot references, NEVER values. Call AFTER the " +
-    "task succeeded; replay later by (verb, service URL), or by legacy name.",
-  inputSchema: rememberSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id", "name", "goal", "verb", "inputs", "postcondition"],
-    properties: {
-      session_id: { type: "string" },
-      name: { type: "string" },
-      goal: { type: "string" },
-      verb: { type: "string", enum: OperatorVerbSchema.options },
-      inputs: { type: "object" },
-      postcondition: {
-        type: "object",
-        required: ["kind", "describe", "success_signal"],
-        properties: {
-          kind: { type: "string", enum: ["execute_capability", "observe_artifact"] },
-          describe: { type: "string" },
-          success_signal: { type: "object" },
-          probe_url: { type: "string" },
-        },
-      },
-    },
-  },
-  async handler(args) {
-    const result = await rememberRecipe(args.session_id, {
-      name: args.name,
-      goal: args.goal,
-      postcondition: args.postcondition,
-      verb: args.verb,
-      inputs: args.inputs,
-    });
-    // replay-serve-live-domainlock — best-effort; never blocks or fails the local save.
-    const registryPublish = await publishRecipeToRegistry(result.file);
-    // replay-per-leg-signature — the checkout-leg recipe (when this session's
-    // trace had one) publishes through the exact same path, under its own
-    // shape-keyed domain slot. Also best-effort.
-    const checkoutLegRegistryPublish =
-      result.checkout_leg_file !== undefined
-        ? await publishRecipeToRegistry(result.checkout_leg_file)
-        : undefined;
-    return {
-      ...result,
-      registry_publish: registryPublish,
-      ...(checkoutLegRegistryPublish !== undefined
-        ? { checkout_leg_registry_publish: checkoutLegRegistryPublish }
-        : {}),
-    };
-  },
-};
-
-// replay-per-leg-signature — resolve (local, then registry, by the live
-// checkout page's own field-name-set signature) and replay just the
-// checkout leg on an already-open session. Degrades to a `cache_miss`-
-// shaped result (never throws) whenever there's nothing to key by yet or
-// nothing matches — the host keeps driving the leg cold either way.
-// replayOperatorRecipe's own "replay already started" guard covers the one
-// real misuse case (calling this while a whole-task replay is still
-// active on the same session) with a clear error.
-async function useCheckoutLegRecipe(
-  sessionId: string,
-  verb: OperatorVerb,
-  params: Record<string, string>,
-): Promise<Record<string, unknown>> {
-  const signature = await checkoutShapeSignatureForSession(sessionId);
-  if (signature === null) {
-    return {
-      ...(await observe(sessionId)),
-      replay: {
-        status: "cache_miss" as const,
-        reason: "current page has no checkout field-name-set yet; continue cold",
-      },
-    };
-  }
-  const recipe = await resolveCheckoutLegRecipe(verb, signature);
-  if (recipe === null) {
-    return {
-      ...(await observe(sessionId)),
-      replay: {
-        status: "cache_miss" as const,
-        reason: "no recipe for this checkout shape; continue cold",
-      },
-    };
-  }
-  const replay = await replayOperatorRecipe(sessionId, recipe, params, 0);
-  const { observation, ...replayState } = replay;
-  return { ...observation, replay: replayState };
-}
-
-const useSchema = z
-  .object({
-    // Legacy selector; new calls use verb + service_url.
-    name: z.string().min(1).max(80).optional(),
-    verb: OperatorVerbSchema.optional(),
-    service_url: z.string().url().optional(),
-    params: z.record(z.string().max(2000)).optional(),
-    // After the host repairs one missed step, resume the same live session at
-    // replay.next_index instead of starting over.
-    session_id: z.string().min(1).optional(),
-    resume_from: z.number().int().min(0).max(200).optional(),
-    // replay-per-leg-signature — resolve+replay the CHECKOUT LEG only,
-    // independently of any whole-task (verb, domain) recipe, against an
-    // already-open session's CURRENT page. Requires verb + session_id, no
-    // service_url (the session already has its own live page) and no
-    // resume_from (this always starts a fresh leg-scoped replay attempt).
-    leg: z.enum(["checkout"]).optional(),
-  })
-  .refine(
-    (value) =>
-      value.name !== undefined ||
-      (value.verb !== undefined && value.service_url !== undefined) ||
-      (value.verb !== undefined && value.leg === "checkout" && value.session_id !== undefined),
-    {
-      message:
-        "provide legacy name, or both verb and service_url, or verb + session_id with leg:'checkout'",
-    },
-  )
-  .refine((value) => value.leg === undefined || value.resume_from === undefined, {
-    message: "leg:'checkout' always starts a fresh leg replay; it does not take resume_from",
-  })
-  .refine(
-    (value) =>
-      value.leg === undefined ||
-      (value.verb !== undefined &&
-        value.session_id !== undefined &&
-        value.service_url === undefined),
-    {
-      message:
-        "leg:'checkout' requires verb + session_id and takes no service_url (the session already has its own live page)",
-    },
-  )
-  .refine(
-    (value) =>
-      value.leg !== undefined ||
-      (value.session_id === undefined) === (value.resume_from === undefined),
-    { message: "session_id and resume_from must be provided together" },
-  );
-
-export const operateRecipeRunTool: Tool<z.infer<typeof useSchema>> = {
-  name: "operate_recipe_run",
-  description:
-    "Replay a local prepared-statement recipe selected by the host-classified closed-enum " +
-    "verb plus service_url. Lookup uses eTLD+1 plus an allow-listed action path derived from " +
-    "the URL path, then falls back to the eTLD+1 catch-all; query parameters are ignored. " +
-    "A legacy name opens the " +
-    "saved workflow as a planning hint without deterministic replay. Binds " +
-    "hole values and executes each step through ordered target fallback. A single miss " +
-    "returns replay.status='fallback_required' with that step and next_index; repair only " +
-    "that step, then call operate_recipe_run again with the same params plus session_id + " +
-    "resume_from=next_index. " +
-    "A historical recorded payment step is never replayed and instead returns fallback_required so " +
-    "card release runs through a fresh, human-approved inject_card call. " +
-    "Pass verb + session_id + leg:'checkout' (no service_url) to resolve+replay just the " +
-    "CHECKOUT leg against an already-open session's current page — keyed by the checkout page's " +
-    "own field-name-set signature, so a checkout plan recorded on one store can replay on a " +
-    "different, unrelated store of the same checkout platform (cross-domain reuse). " +
-    "replay.status='cache_miss' means no recipe matches this page's shape; drive the checkout " +
-    "leg cold. A replay field failure on a recipe with a real catalog/storefront prefix " +
-    "returns replay.status='leg_fallback_required' (not human_required): do not resume that " +
-    "recipe; drive the checkout leg cold from from_step_index, and route any charge through " +
-    "a fresh, human-approved inject_card call on the live session.",
-  inputSchema: useSchema,
-  jsonInputSchema: {
-    type: "object",
-    properties: {
-      name: { type: "string" },
-      verb: { type: "string", enum: OperatorVerbSchema.options },
-      service_url: { type: "string" },
-      params: { type: "object" },
-      session_id: { type: "string" },
-      resume_from: { type: "integer" },
-      leg: { type: "string", enum: ["checkout"] },
-    },
-  },
-  async handler(args, api) {
-    if (args.leg === "checkout") {
-      return await useCheckoutLegRecipe(args.session_id!, args.verb!, args.params ?? {});
-    }
-    let recipe: Awaited<ReturnType<typeof readRecipe>>;
-    try {
-      recipe =
-        args.name !== undefined
-          ? await readRecipe(args.name)
-          : await resolveRecipeForTask(args.verb!, args.service_url!);
-    } catch (error) {
-      // A keyed cache miss is the expected cold path, not a task failure.
-      if (
-        args.name !== undefined ||
-        args.service_url === undefined ||
-        args.session_id !== undefined
-      ) {
-        throw error;
-      }
-      const cold = await startProvisionSession({
-        serviceUrl: args.service_url,
-        consentInboxRead: await readInboxConsent(),
-        ...(api !== null ? { api } : {}),
-      });
-      if (cold.needs_user !== undefined) return cold;
-      return {
-        ...cold,
-        replay: {
-          status: "cache_miss" as const,
-          reason:
-            "no local recipe for this action path or its (verb, eTLD+1) catch-all; continue cold",
-        },
-      };
-    }
-    if (recipe.domain !== undefined && isCheckoutShapeKey(recipe.domain)) {
-      throw new Error(
-        `operator-recipe "${recipe.name}" is a checkout-leg recipe and can only be replayed via operate_recipe_run{leg:"checkout"}`,
-      );
-    }
-    const entry = recipeEntryUrl(recipe, args.service_url);
-    if (entry === null) {
-      throw new Error(
-        recipe.entry_mode === "runtime_service_url"
-          ? `operator-recipe "${recipe.name}" requires verb + service_url to resolve its runtime entry`
-          : `operator-recipe "${recipe.name}" has no stable entry (goto) step to start from`,
-      );
-    }
-    const { url, missing } = fillTemplate(entry, args.params ?? {});
-    if (missing.length > 0) {
-      throw new Error(
-        `operator-recipe "${recipe.name}" needs params: ${missing.join(", ")} — ` +
-          `pass them as operate_recipe_run{ params: { ${missing.map((m) => `${m}: "..."`).join(", ")} } }`,
-      );
-    }
-    let sessionId = args.session_id;
-    if (sessionId === undefined) {
-      const consentInboxRead = await readInboxConsent();
-      const started = await startProvisionSession({
-        serviceUrl: url,
-        consentInboxRead,
-        hint: renderOperatorRecipeHint(recipe),
-        ...(api !== null ? { api } : {}),
-      });
-      if (started.needs_user !== undefined) return started;
-      sessionId = started.session_id;
-    }
-    const replay = await replayOperatorRecipe(
-      sessionId,
-      recipe,
-      args.params ?? {},
-      args.resume_from ?? 0,
-    );
-    const { observation, ...replayState } = replay;
-    return { ...observation, replay: replayState };
-  },
-};
-
-// PR3c — username/password signup credential lifecycle (no Trusty Squire alias).
 const prepareLoginSchema = z.object({
   session_id: z.string().min(1),
   login_slot: z.string().min(1).max(60).optional(),
@@ -1952,7 +1473,6 @@ const publicFinishSchema = z
     store: storeShape.optional(),
     summary: z.string().max(4000).optional(),
     data: finishDataSchema.optional(),
-    verify_recipe: z.string().min(1).max(80).optional(),
   })
   .superRefine((args, ctx) => {
     if (args.outcome === "credentials" && args.store === undefined)
@@ -1991,7 +1511,6 @@ export const operateFinishTool: Tool<z.infer<typeof publicFinishSchema>> = {
       store: { type: "object", required: ["service"], properties: storeJsonProps },
       summary: { type: "string" },
       data: { type: "object" },
-      verify_recipe: { type: "string" },
     },
     allOf: [
       {
@@ -2013,7 +1532,7 @@ export const operateFinishTool: Tool<z.infer<typeof publicFinishSchema>> = {
   },
 };
 
-// Recipe tools and the rest of the vault surface are unchanged and are outside
+// The rest of the vault surface is unchanged and is outside
 // the direct observation/action target set.
 export const OPERATE_TOOLS: Tool[] = [
   provisionStartTool,
@@ -2031,8 +1550,6 @@ export const OPERATE_TOOLS: Tool[] = [
   operateLoginTool,
   operateFillCredentialTool,
   provisionExtractTool,
-  operateRecipeSaveTool,
-  operateRecipeRunTool,
 ] as Tool[];
 
 const captureOutputSchema = {
