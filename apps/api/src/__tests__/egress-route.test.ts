@@ -140,6 +140,26 @@ describe("Egress Grants — /v1/egress", () => {
     expect(seen.at(-1)?.method).toBe("POST");
   });
 
+  it("forwards a multi-MiB egress body instead of 413ing (long LLM context)", async () => {
+    const account = await h.deps.accountStore.createAccount("bigbody@example.test", "B");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    await storeCred(h, cookie, "OpenAI");
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenAI" });
+
+    // Past Fastify's 1MiB default bodyLimit but well under the egress route's
+    // raised 256MiB cap — this is the payload shape that used to 413.
+    const bigContent = "x".repeat(5 * 1024 * 1024);
+    const res = await h.server.inject({
+      method: "POST",
+      url: `/v1/egress/${grant_id}/v1/chat/completions`,
+      headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" },
+      payload: { model: "gpt-4o", messages: [{ role: "user", content: bigContent }] },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(seen.at(-1)?.body?.length ?? 0).toBeGreaterThan(5 * 1024 * 1024);
+  });
+
   it("returns and revokes a persisted grant when lifecycle audit writes fail", async () => {
     const account = await h.deps.accountStore.createAccount("audit-down@example.test", "A");
     const cookie = await webCookie(h.deps, account.id);
