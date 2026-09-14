@@ -38,7 +38,6 @@ jobs:
       api: ${{ steps.scope.outputs.api }}
       build_any: ${{ steps.scope.outputs.build_any }}
       mcp: ${{ steps.scope.outputs.mcp }}
-      replay_eval: ${{ steps.scope.outputs.replay_eval }}
       registry: ${{ steps.scope.outputs.registry }}
       schema: ${{ steps.scope.outputs.schema }}
       shell_tests: ${{ steps.scope.outputs.shell_tests }}
@@ -66,7 +65,6 @@ jobs:
 
           api=false
           mcp=false
-          replay_eval=false
           registry=false
           schema=false
           shell_tests=false
@@ -76,7 +74,6 @@ jobs:
           mark_all() {
             api=true
             mcp=true
-            replay_eval=true
             registry=true
             schema=true
             shell_tests=true
@@ -89,16 +86,11 @@ jobs:
               apps/api/*)
                 api=true
                 ;;
-              apps/mcp/src/eval/replay-harness/*|apps/mcp/src/replay-engine/*|apps/mcp/src/bot/replay-engine*)
-                mcp=true
-                replay_eval=true
-                ;;
               apps/mcp/*)
                 mcp=true
                 ;;
               corpus/shopping/*)
                 mcp=true
-                replay_eval=true
                 ;;
               apps/registry/*)
                 registry=true
@@ -162,7 +154,6 @@ jobs:
             echo "api=$api"
             echo "build_any=$build_any"
             echo "mcp=$mcp"
-            echo "replay_eval=$replay_eval"
             echo "registry=$registry"
             echo "schema=$schema"
             echo "shell_tests=$shell_tests"
@@ -322,14 +313,6 @@ jobs:
           node-version: 20.11.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # Chromium is needed ONLY by the frozen-corpus replay gate below: the
-      # replay harness launches a headless browser against frozen HARs (no
-      # live network, deterministic). The real-browser test tier does NOT run
-      # on PRs (see vitest.tiers.ts REAL_BROWSER_FILES) and needs no browser
-      # install here.
-      - name: Install Chromium for the frozen-corpus replay gate
-        if: needs.secret-scan.outputs.replay_eval == 'true'
-        run: pnpm --filter '@trusty-squire/mcp' exec playwright install --with-deps chromium
       # Registry's Prisma client must be generated before its tests. NOT vault
       # (apps/api owns an isolated client; vault's src/tests don't import one)
       # and NOT api (its tests use the in-memory store fallback).
@@ -338,14 +321,6 @@ jobs:
         run: pnpm --filter '@trusty-squire/registry' prisma:generate
       - name: Build workspace dep dists
         run: pnpm -r --filter "./packages/**" --if-present build
-      # Deterministic frozen-corpus gate: all-cold baseline + stable-page
-      # drift battery. The full warm evaluation (eval:replay, which bridges
-      # to the replay engine) is run explicitly, not in CI. Checkout is
-      # deliberately excluded here and runs live only against the
-      # operator-owned whitejade test-mode store.
-      - name: Replay-engine frozen corpus gate
-        if: needs.secret-scan.outputs.replay_eval == 'true'
-        run: pnpm -F @trusty-squire/mcp test replay-harness
       # Per-package test over every package whose suite passes locally. MCP's
       # required tier keeps all non-browser payment/card-sealing coverage AND
       # the non-browser operator behavior suites (via vitest.tiers.ts

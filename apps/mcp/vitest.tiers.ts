@@ -19,9 +19,9 @@ export const SLOW_POST_MERGE_FILES = [
 // They are the slowest, flakiest part of the suite, so they do NOT gate pull
 // requests or prerelease publishes: they run post-merge (mcp-slow-tests.yml)
 // and gate only a stable/`latest` release (release.yml's real-browser tier).
-// Disjoint from SLOW_POST_MERGE_FILES (widget-corpus-eval and replay-harness
-// are also real-browser but stay in the slow tier; the full `vitest run`
-// nightly suite covers everything regardless).
+// Disjoint from SLOW_POST_MERGE_FILES (widget-corpus-eval is also real-browser
+// but stays in the slow tier; the full `vitest run` nightly suite covers
+// everything regardless).
 // Keep in sync with reality: every file here must launch a browser, and every
 // browser-launching test file must be listed here (grep for
 // `chromium.launch|patchrightChromium.launch|connectOverCDP|launchPersistentContext`
