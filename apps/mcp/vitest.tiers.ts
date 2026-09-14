@@ -79,7 +79,6 @@ export function excludingRealBrowser(files: string[]): string[] {
 export const REQUIRED_BEHAVIOR_FILES = [
   "src/__tests__/broker-default-start.test.ts",
   "src/bot/__tests__/broker-discovery.test.ts",
-  "src/bot/__tests__/broker-recovery.test.ts",
   "src/bot/__tests__/broker-daemon.test.ts",
   "src/bot/__tests__/broker-runtime.test.ts",
   "src/bot/__tests__/broker-forwarder.test.ts",

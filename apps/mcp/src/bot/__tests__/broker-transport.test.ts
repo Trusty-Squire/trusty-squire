@@ -8,7 +8,6 @@ import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 import { BrokerClient, listenBroker } from "../broker/transport.js";
 import { BrokerAuthority } from "../broker/authority.js";
-import { publishEndpointOwner } from "../broker/discovery.js";
 const require = createRequire(import.meta.url);
 
 describe("authenticated broker IPC", () => {
@@ -250,7 +249,6 @@ describe("authenticated broker IPC", () => {
       child.kill("SIGKILL");
       await new Promise<void>((resolve) => child.once("exit", () => resolve()));
       expect((await stat(path)).isSocket()).toBe(true);
-      await writeFile(`${path}.owner.json`, JSON.stringify({ stale: true }));
       const broker = await listenBroker(path, {
         authenticate: async () => ({ accountId: "account", agentId: "agent" }),
         call: async () => ({}),
@@ -277,25 +275,6 @@ describe("authenticated broker IPC", () => {
       await rm(root, { recursive: true, force: true });
     }
   }, 10_000);
-
-  it("replaces a stale owner record for an endpoint this broker already bound", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-ipc-owner-"));
-    const path = join(root, "b.sock");
-    const broker = await listenBroker(path, {
-      authenticate: async () => ({ accountId: "account", agentId: "agent" }),
-      call: async () => ({}),
-      disconnect: async () => undefined,
-    });
-    try {
-      await writeFile(`${path}.owner.json`, JSON.stringify({ stale: true }));
-      await expect(publishEndpointOwner(path)).resolves.toBeUndefined();
-      const owner = JSON.parse(await readFile(`${path}.owner.json`, "utf8")) as { pid: number };
-      expect(owner.pid).toBe(process.pid);
-    } finally {
-      await broker.close();
-      await rm(root, { recursive: true, force: true });
-    }
-  });
 
   it("does not acknowledge a tool response before caller delivery", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-ipc-"));

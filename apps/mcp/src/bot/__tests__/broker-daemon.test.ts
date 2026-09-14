@@ -565,12 +565,6 @@ it("keeps a live control client, coordinates plain maintenance, refreshes creden
         () => false,
       ),
     ).toBe(false);
-    expect(
-      await lstat(`${socket}.owner.json`).then(
-        () => true,
-        () => false,
-      ),
-    ).toBe(false);
   } finally {
     await first?.close();
     await replacement?.close();

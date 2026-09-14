@@ -130,9 +130,8 @@ async function bindBrokerServer(server: Server, path: string): Promise<void> {
     if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
     if (await brokerEndpointHasLiveListener(path)) throw error;
     // The socket path exists but nothing answers: a SIGKILLed predecessor
-    // orphaned it. Unlink the socket and its owner proof, then bind normally.
+    // orphaned it. Unlink the socket and bind normally.
     await unlink(path).catch(() => undefined);
-    await unlink(`${path}.owner.json`).catch(() => undefined);
     await attempt();
   }
 }
