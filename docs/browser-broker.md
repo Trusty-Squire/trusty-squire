@@ -18,10 +18,10 @@ have mode 0700. The default private parent is created automatically.
 
 Endpoint election is bind-exclusive against a live incumbent. When the socket
 path exists but no listener answers it (a broker killed with SIGKILL cannot run
-its graceful close, so it orphans `broker.sock` and `broker.sock.owner.json`),
-the starting broker probes the endpoint with a client connect, then unlinks the
-stale socket and owner record and binds normally. A live listener keeps winning
-election: the probe succeeds and the `EADDRINUSE` refusal is preserved.
+its graceful close, so it orphans `broker.sock`), the starting broker probes the
+endpoint with a client connect, then unlinks the stale socket and binds
+normally. A live listener keeps winning election: the probe succeeds and the
+`EADDRINUSE` refusal is preserved.
 
 `operate_start` accepts `proxy` as an HTTP or HTTPS URL (optional credentials)
 or an unauthenticated SOCKS5 URL. It configures the shared browser at launch,
@@ -77,13 +77,10 @@ binding.
   when clients choose different socket paths or temporary directories. It stays
   held through maintenance. A separate physical-profile lease coordinates Chrome
   and the existing plain-login path. Profile enrollment pins the account on disk.
-- Default discovery probes broker responsiveness independently of a lineage handoff.
-  Two failed health handshakes permit retiring an unresponsive automatic broker
-  only after endpoint inode and process birth match its owner record. Retirement
-  is serialized by the launch lease and bounded through SIGTERM then SIGKILL.
-  The existing owner reaper closes Chrome. Dead endpoint reclamation waits for
-  that physical profile to become free, and preserves the dispatch journal.
-  Neither recovery path replays a mutation or bypasses journal reconciliation.
+- Default discovery is probe then unlink then bind: a socket path with no live
+  listener is a dead predecessor's orphan and is removed and rebound. There is no
+  owner record and no process signaling; a broker that still answers keeps the
+  endpoint. Neither recovery path replays a mutation.
 - Each session owns a target family and a serialized command queue. A service
   URL does not reserve a site; one authenticated client drives the shared profile.
 - Browser egress is unrestricted for all targets. Session cleanup closes only that owned

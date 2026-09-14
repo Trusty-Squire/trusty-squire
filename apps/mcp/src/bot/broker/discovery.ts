@@ -1,29 +1,18 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, lstatSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { lstat, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   acquireProfileOperationGuard,
   ProfileBusyError,
-  processBirthIdentity,
-  processBirthIdentityState,
   profilePathIdentity,
   CHROME_PROFILE_DIR,
-  waitForProfileFree,
   type ProfileOperationLease,
 } from "../profile.js";
 import { BrokerClient } from "./transport.js";
 import { BrokerRefusal } from "./refusal.js";
-interface EndpointOwner {
-  version: 1;
-  pid: number;
-  start_time: string;
-  profileDir: string;
-  inode: number;
-  device: number;
-}
 
 const BROKER_CONNECT_TIMEOUT_MS = 10_000;
 const BROKER_CONNECT_POLL_MS = 100;
@@ -113,114 +102,6 @@ export function brokerEnvironment(env: NodeJS.ProcessEnv, path: string): NodeJS.
   return { ...brokerEnv, TRUSTY_SQUIRE_BROKER_SOCKET: path };
 }
 
-export async function publishEndpointOwner(path: string): Promise<void> {
-  const identity = processBirthIdentity(process.pid);
-  if (identity === null)
-    throw new BrokerRefusal("ownership_unknown", "Cannot establish broker process birth identity");
-  const socket = await lstat(path);
-  const owner = JSON.stringify({
-    version: 1,
-    ...identity,
-    profileDir: profilePathIdentity(CHROME_PROFILE_DIR),
-    inode: socket.ino,
-    device: socket.dev,
-  } satisfies EndpointOwner);
-  try {
-    await writeFile(`${path}.owner.json`, owner, { mode: 0o600, flag: "wx" });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    // The caller has already bound the socket, so no live incumbent owns this
-    // endpoint: an owner record here is a dead predecessor's leftover. Remove
-    // it and claim ownership.
-    await unlink(`${path}.owner.json`);
-    await writeFile(`${path}.owner.json`, owner, { mode: 0o600, flag: "wx" });
-  }
-}
-
-export async function reclaimDeadBrokerEndpoint(path: string): Promise<void> {
-  let owner: EndpointOwner;
-  try {
-    owner = JSON.parse(await readFile(`${path}.owner.json`, "utf8")) as EndpointOwner;
-  } catch {
-    throw new BrokerRefusal(
-      "broker_unavailable",
-      "Endpoint ownership is unknown; refusing to remove it",
-    );
-  }
-  const profileDir = profilePathIdentity(CHROME_PROFILE_DIR);
-  if (
-    owner.version !== 1 ||
-    !Number.isSafeInteger(owner.pid) ||
-    typeof owner.start_time !== "string" ||
-    owner.profileDir !== profileDir ||
-    processBirthIdentityState(owner) !== "stale"
-  ) {
-    throw new BrokerRefusal("broker_unavailable", "Endpoint belongs to a live or unproven broker");
-  }
-  const lease = acquireProfileOperationGuard(
-    profileDir,
-    await prepareBrokerElectionRoot(profileDir),
-  );
-  try {
-    if (!(await waitForProfileFree(profileDir, { deadlineMs: BROKER_CONNECT_TIMEOUT_MS })))
-      throw new BrokerRefusal("profile_busy", "Old browser is still being reaped");
-    const socket = await lstat(path).catch(() => null);
-    const latest = await readFile(`${path}.owner.json`, "utf8");
-    if (JSON.stringify(JSON.parse(latest)) !== JSON.stringify(owner))
-      throw new BrokerRefusal("broker_unavailable", "Endpoint ownership changed");
-    if (socket !== null && (socket.ino !== owner.inode || socket.dev !== owner.device))
-      throw new BrokerRefusal("broker_unavailable", "Endpoint was replaced");
-    if (socket !== null) await unlink(path);
-    await unlink(`${path}.owner.json`);
-  } finally {
-    lease.release();
-  }
-}
-
-function handshakeTimedOut(error: unknown): boolean {
-  return error instanceof BrokerRefusal && error.code === "broker_handshake_timeout";
-}
-
-/** A fresh-lineage health handshake does not wait for forwarder handoff. Only
- * two timed-out handshakes plus the existing endpoint/birth proof permit
- * replacing a wedged owner. The owner's reaper closes Chrome; its journal is
- * retained and still decides whether replacement may admit any work. */
-export async function retireUnresponsiveBroker(path: string, token: string): Promise<void> {
-  try {
-    const healthy = await BrokerClient.connect(path, token);
-    await healthy.close();
-    throw new BrokerRefusal(
-      "broker_unavailable",
-      "Broker is responsive; forwarder handoff timed out",
-    );
-  } catch (error) {
-    if (!handshakeTimedOut(error) && !isUnavailable(error)) throw error;
-  }
-  const profileDir = profilePathIdentity(CHROME_PROFILE_DIR);
-  const owner = JSON.parse(await readFile(`${path}.owner.json`, "utf8")) as EndpointOwner;
-  const endpoint = await lstat(path);
-  if (
-    owner.version !== 1 ||
-    owner.profileDir !== profileDir ||
-    !Number.isSafeInteger(owner.pid) ||
-    owner.pid <= 1 ||
-    typeof owner.start_time !== "string" ||
-    owner.inode !== endpoint.ino ||
-    owner.device !== endpoint.dev
-  )
-    throw new BrokerRefusal("ownership_unknown", "Cannot prove unresponsive broker ownership");
-  const waitForDeath = async (ms: number) => {
-    const deadline = Date.now() + ms;
-    while (processBirthIdentityState(owner) === "matching" && Date.now() < deadline)
-      await new Promise((resolve) => setTimeout(resolve, 50));
-  };
-  if (processBirthIdentityState(owner) === "matching") process.kill(owner.pid, "SIGTERM");
-  await waitForDeath(3_000);
-  if (processBirthIdentityState(owner) === "matching") process.kill(owner.pid, "SIGKILL");
-  await waitForDeath(3_000);
-  if (processBirthIdentityState(owner) !== "stale")
-    throw new BrokerRefusal("ownership_unknown", "Broker process exit remains unproven");
-}
 
 export async function connectOrLaunchBroker(
   path: string,
@@ -232,25 +113,9 @@ export async function connectOrLaunchBroker(
     await health.close();
     return await BrokerClient.connect(path, token, lineageCredential);
   } catch (error) {
-    if (!isUnavailable(error) && !handshakeTimedOut(error)) throw error;
-    if (handshakeTimedOut(error)) {
-      const profileDir = profilePathIdentity(CHROME_PROFILE_DIR);
-      const root = brokerLaunchRoot(profileDir);
-      await mkdir(root, { recursive: true, mode: 0o700 });
-      let lease: ProfileOperationLease;
-      try {
-        lease = acquireProfileOperationGuard(profileDir, root);
-      } catch (failure) {
-        if (failure instanceof ProfileBusyError)
-          return await waitForBroker(path, token, lineageCredential);
-        throw failure;
-      }
-      try {
-        await retireUnresponsiveBroker(path, token);
-      } finally {
-        lease.release();
-      }
-    }
+    // A socket with no live listener is a dead predecessor's orphan; the new
+    // broker's own bind reclaims it (probe -> unlink -> bind).
+    if (!isUnavailable(error)) throw error;
   }
 
   const profileDir = profilePathIdentity(CHROME_PROFILE_DIR);
@@ -274,13 +139,6 @@ export async function connectOrLaunchBroker(
     }
     if (await brokerElectionIsHeld(profileDir))
       return await waitForBroker(path, token, lineageCredential);
-    // Reclamation belongs to the launch lease too: concurrent reconnects must
-    // not race each other over the dead endpoint's owner record.
-    if (
-      (await lstat(path).catch(() => null)) ||
-      (await lstat(`${path}.owner.json`).catch(() => null))
-    )
-      await reclaimDeadBrokerEndpoint(path);
     const child = spawn(
       process.execPath,
       [fileURLToPath(new URL("../../bin.js", import.meta.url)), "broker"],

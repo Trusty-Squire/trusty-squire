@@ -3,17 +3,38 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { chromium } from "playwright";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, symlink, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { expect } from "vitest";
 import { SessionStore } from "../session.js";
-import { defaultBrokerSocket } from "../bot/broker/discovery.js";
-import { processBirthIdentityState } from "../bot/profile.js";
+import { defaultBrokerSocket, brokerElectionRoot } from "../bot/broker/discovery.js";
+import { processBirthIdentityState, profilePathIdentity } from "../bot/profile.js";
 
 export const canRunDefaultBrokerAcceptance =
   process.platform === "linux" && existsSync(chromium.executablePath());
 
 type Owner = { pid: number; start_time: string };
+/** The broker holds the profile operation lease for its whole life, so the
+ * lease record is where its pid and birth identity are published. */
+function brokerLeasePath(profile: string): string {
+  const digest = createHash("sha256")
+    .update(profilePathIdentity(profile))
+    .digest("hex")
+    .slice(0, 24);
+  return join(brokerElectionRoot(profile), `trusty-squire-profile-${digest}.lock`);
+}
+async function readLeaseOwner(path: string): Promise<Owner | undefined> {
+  const candidate = await readFile(path, "utf8").then(
+    (source) => source,
+    async () => await readFile(join(path, "owner.json"), "utf8").catch(() => undefined),
+  );
+  if (candidate === undefined) return undefined;
+  const owner = JSON.parse(candidate) as Owner;
+  return Number.isSafeInteger(owner.pid) && typeof owner.start_time === "string"
+    ? owner
+    : undefined;
+}
 async function waitFor<T>(read: () => Promise<T | undefined>, description: string): Promise<T> {
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
@@ -86,7 +107,7 @@ export async function checkDefaultBrokerAcceptance(
   let owner: Owner | undefined;
   const readOwner = async (): Promise<Owner | undefined> => {
     try {
-      return JSON.parse(await readFile(`${socket}.owner.json`, "utf8")) as Owner;
+      return await readLeaseOwner(brokerLeasePath(profile));
     } catch {
       return undefined;
     }
@@ -152,24 +173,6 @@ export async function checkDefaultBrokerAcceptance(
       "default-broker after SIGKILL replacement:" +
         " " +
         JSON.stringify({ owner, chromeRoots: replacementChromeRoots }) +
-        "\n",
-    );
-    // A live PID with a stopped event loop must not wedge future clients.
-    // Two health probes fail before the birth-proven owner is replaced.
-    process.kill(owner.pid, "SIGSTOP");
-    await start();
-    const recovered = await waitFor(async () => {
-      const next = await readOwner();
-      return next?.pid !== owner?.pid ? next : undefined;
-    }, "unresponsive broker replacement");
-    expect(recovered.pid).not.toBe(owner.pid);
-    owner = recovered;
-    const recoveredChromeRoots = await chromeRoots();
-    expect(recoveredChromeRoots).toBe(1);
-    process.stdout.write(
-      "default-broker after SIGSTOP replacement:" +
-        " " +
-        JSON.stringify({ owner, chromeRoots: recoveredChromeRoots }) +
         "\n",
     );
   } finally {

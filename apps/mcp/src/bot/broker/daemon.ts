@@ -1,7 +1,7 @@
 import { resolveBrokerSocket } from "./discovery.js";
-import { brokerElectionRoot, publishEndpointOwner } from "./discovery.js";
+import { brokerElectionRoot } from "./discovery.js";
 import { DispatchJournal } from "./dispatch-journal.js";
-import { lstat, unlink, mkdir } from "node:fs/promises";
+import { lstat, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { createSessionGuard, setServingAccountId } from "../../session-guard.js";
@@ -247,7 +247,6 @@ export async function runBrokerDaemon(): Promise<void> {
       scheduleShutdownIfIdle();
     },
   });
-  await publishEndpointOwner(path);
   function scheduleShutdownIfIdle(): void {
     if (idleTimer !== undefined) clearTimeout(idleTimer);
     idleTimer = undefined;
@@ -291,7 +290,6 @@ export async function runBrokerDaemon(): Promise<void> {
       listenerClosed = true;
       await listener.close();
     }
-    await unlink(`${path}.owner.json`).catch(() => undefined);
     profileElection.release();
     process.exit(0);
   };

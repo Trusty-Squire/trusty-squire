@@ -12,6 +12,8 @@ import { SessionStore } from "../../session.js";
 import { brokerElectionRoot } from "../broker/discovery.js";
 import { ProfileBusyError, acquireProfileOperationGuard } from "../profile.js";
 import { VERSION } from "../../version.js";
+import { createHash } from "node:crypto";
+import { profilePathIdentity } from "../profile.js";
 
 const require = createRequire(import.meta.url);
 const credential = "a".repeat(43);
@@ -147,9 +149,17 @@ async function waitFor<T>(read: () => Promise<T | undefined>, description: strin
   throw new Error(`${description} did not become available${failure ? `: ${failure}` : ""}`);
 }
 
-async function endpointOwner(path: string): Promise<EndpointOwner | undefined> {
+async function endpointOwner(profile: string): Promise<EndpointOwner | undefined> {
+  const digest = createHash("sha256")
+    .update(profilePathIdentity(profile))
+    .digest("hex")
+    .slice(0, 24);
+  const lock = join(brokerElectionRoot(profile), `trusty-squire-profile-${digest}.lock`);
   try {
-    const owner = JSON.parse(await readFile(`${path}.owner.json`, "utf8")) as EndpointOwner;
+    const source = await readFile(lock, "utf8").catch(
+      async () => await readFile(join(lock, "owner.json"), "utf8"),
+    );
+    const owner = JSON.parse(source) as EndpointOwner;
     return Number.isSafeInteger(owner.pid) && typeof owner.start_time === "string"
       ? owner
       : undefined;
@@ -298,7 +308,7 @@ describeChromium("broker-backed MCP stdio restart", () => {
     try {
       const owner = await waitFor(async () => {
         if (broker.exitCode !== null) throw new Error(brokerDiagnostics);
-        return await endpointOwner(socket);
+        return await endpointOwner(profile);
       }, "broker endpoint owner");
       let contender: { release(): void } | undefined;
       try {
@@ -340,7 +350,7 @@ describeChromium("broker-backed MCP stdio restart", () => {
         "retained real broker browser owner",
       );
       expect(after).toEqual(before);
-      expect(await endpointOwner(socket)).toEqual(owner);
+      expect(await endpointOwner(profile)).toEqual(owner);
       expect(broker.exitCode).toBeNull();
 
       process.kill(owner.pid, "SIGKILL");

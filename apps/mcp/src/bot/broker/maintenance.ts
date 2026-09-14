@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { createSessionGuard } from "../../session-guard.js";
 import { BrokerClient } from "./transport.js";
 import { BrokerRefusal } from "./refusal.js";
-import { resolveBrokerSocket, reclaimDeadBrokerEndpoint } from "./discovery.js";
+import { resolveBrokerSocket } from "./discovery.js";
 
 /** Connect retains the maintenance connection throughout the existing plain,
  * no-CDP login lifecycle. It never opens a second automated browser. */
@@ -29,7 +29,8 @@ export async function withBrokerMaintenance<T>(operation: () => Promise<T>): Pro
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== "ECONNREFUSED" && code !== "broker_lost") throw error;
-    await reclaimDeadBrokerEndpoint(path);
+    // Nothing answers on the socket path: a dead predecessor's orphan. The
+    // next broker's bind reclaims it; run the operation without a broker.
     return await operation();
   }
   let ready = false;
