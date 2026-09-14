@@ -7,9 +7,7 @@ import {
 import type { GoogleHumanChallenge } from "./google-auth-state.js";
 import type { CaptureSource } from "./credential-capture.js";
 import {
-  markOperatorMutationDispatchAttempted,
   operatorMutationDispatchPhase,
-  throwIfOperatorRequestCancelled,
   currentOperatorRequestSignal,
   composeOperatorSignals,
 } from "./request-cancellation.js";
@@ -34,18 +32,14 @@ import { serializeBrowserUseDOM } from "./browser-use-serializer.js";
 import { createHash, createHmac, randomInt } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Buffer } from "node:buffer";
-import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import type { ElementHandle, Page } from "playwright";
 import {
   BrowserClickDispatchError,
   clickDispatchStatusForError,
-  parseCheckoutAmount,
   OAuthAwaitingHumanError,
   OAuthFailedError,
   OAuthOnboardingRequiredError,
   type BrowserController,
-  type CheckoutSummary,
   type CheckoutCard,
   type FrameTarget,
   type InjectCardField,
@@ -57,7 +51,6 @@ import {
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import {
   buildSafeControlsV2,
-  checkoutStageFromUrlV2,
   compactV2LegacyRefForHandle,
   compactV2DegradeMetadata,
   StableObservationRefs,
@@ -65,13 +58,9 @@ import {
   isCompactV2Label,
   controlQueryMatchV2,
   encodeV2QueryPage,
-  compactV2AuditHost,
   compactV2AuditUrl,
-  compactV2AuditValue,
-  recordableTokenV2,
   safeDescriptionV2,
   safeBlockersV2,
-  safeOriginV2,
   safePageSemanticsV2,
   sealRetainedInteractiveElementsV2,
   safeStageV2,
@@ -104,168 +93,23 @@ import {
   type CandidateClass,
 } from "./extraction.js";
 
-export interface ObservedElement {
-  // Stable action handle for this element identity. Prefer this as
-  // operate_act.target; it remains reusable across observations while the
-  // element exists, and a removed or changed identity fails to resolve.
-  ref: string;
-  // Human label for display/backcompat. operate_act still accepts labels, but
-  // generated refs are safer on pages with repeated labels.
-  label: string;
-  tag: string;
-  // Below ref/label/tag, fields are nullable in FULL mode (emitted as null) and
-  // OMITTED entirely in compact mode when empty — hence
-  // optional. `value_len` replaces `value` in compact (never the raw value).
-  role?: string | null;
-  type?: string | null;
-  value?: string | null;
-  value_len?: number;
-  checked?: boolean | null;
-  // Link target, so the agent can see where a nav item goes and `goto` it
-  // directly instead of guessing URLs (a live LangWatch run hit a 404 guessing
-  // /settings because the sidebar "Settings" is a hover-expand with the real
-  // path only in its href). Null for non-link elements.
-  href?: string | null;
-  // The site's own stable test hook (data-testid/-cy/-qa), the most
-  // refactor-resilient target when present.
-  testId?: string | null;
-  // DOM-derived screen context for non-vision host agents. `path` is a compact
-  // targetable label such as "dialog:finish-account > button:create-account".
-  // Compact wire payloads omit it; the complete snapshot file retains it.
-  path?: string | null;
-  // `container` is redundant with `path` (path = "<container> > <kind>:<label>")
-  // and is OMITTED in compact mode.
-  container?: string | null;
-  topmost?: boolean | null;
-  occluded_by?: string | null;
-  // The origin of the <iframe> this element lives in (same- or cross-origin),
-  // e.g. "https://checkout.merchant.com". Absent for an ordinary main-frame
-  // element — every pre-existing observation shape is unchanged. Load-bearing
-  // signal, not decoration: operate_act re-derives which frame to act in (and
-  // which credential-injection guard applies) from this, never from the top page's URL.
-  frame_origin?: string | null;
-}
 
-export type PaymentField =
-  | "card_number"
-  | "expiry"
-  | "expiry_month"
-  | "expiry_year"
-  | "security_code"
-  | "cardholder_name";
-
-export interface CheckoutMoney {
-  amount_cents: number;
-  currency: string;
-}
-
-// A compact purchase-state overlay. This is intentionally separate from the
-// raw accessibility inventory: a cart is a business state, not a pile of DOM
-// controls, and small models must not infer it from repeated add buttons.
-export interface CheckoutState {
-  authority: "informational_only";
-  completeness: "best_effort";
-  authoritative_for_payment: false;
-  stage: "product" | "cart" | "checkout";
-  product_identity: string | null;
-  options_hash: string | null;
-  quantity: number | null;
-  subtotal: CheckoutMoney | null;
-  shipping: CheckoutMoney | null;
-  payable_total: CheckoutMoney | null;
-  cart_url: string | null;
-  next_action:
-    | { tool: "operate_act"; kind: "click"; intent: "proceed_to_checkout" }
-    | { tool: "operate_observe" };
-}
-
-export interface ScreenRegion {
-  id: string;
-  role: string;
-  topmost: boolean;
-  occluded_by: string | null;
-  children: Array<{
-    ref: string;
-    role: string | null;
-    text: string | null;
-    href: string | null;
-    topmost: boolean | null;
-    occluded_by: string | null;
-  }>;
-}
-
-export interface ScreenOutline {
-  foreground: string | null;
-  regions: ScreenRegion[];
-}
 
 export interface Observation {
   session_id: string;
-  // V1 and Compact V2 start with the live page location. Compact V2 can shorten
-  // fixed metadata only when necessary to fit its wire budget.
+  // The live page location. Compact V2 can shorten fixed metadata only when
+  // necessary to fit its wire budget.
   url: string;
   // Registry route guidance, present ONLY on the first (start) observation when
   // a skill exists for the service. The host agent reads it before driving.
   hint?: string;
-  // V1 compatibility only. Compact-v2 omits this property entirely and
-  // emits the canonical interleaved `dom` representation instead.
-  text?: string;
   // Domain-aware steering for the host planner. This is not a script; it is
   // guardrail context for states the raw page text routinely misleads agents on.
   guidance?: string;
-  // V1 full-mode relational view of interactive DOM regions. This is
-  // intentionally smaller than raw DOM but preserves hierarchy/occlusion that
-  // flat text loses.
-  screen?: ScreenOutline;
-  // V1 AXI-style planner scan surface. Additive in full mode: the rich
-  // `elements` inventory remains the source of truth for actionability/state.
-  accessibility?: AccessibilitySnapshot;
-  // V1 FULL-mode element inventory (the legacy escape hatch): one JSON object
-  // per element with every field. In V1 COMPACT mode `elements` is absent and
-  // the element set rides on `el_table` instead (see below).
-  elements?: ObservedElement[];
-  // V1 COMPACT-mode element inventory as a tab-delimited table
-  // (docs/DESIGN-observe-compact.md § Legacy V1 Phase 4). The first line is a
-  // tab-joined HEADER naming the
-  // columns present in this emit (a subset of ref,label,tag,role,type,value_len,
-  // checked,href,testId,topmost,occluded_by,frame_origin, always starting
-  // ref,label,tag);
-  // each following line is ONE element, tab-joined cells in header order. An
-  // empty cell means the field is absent for that element. Tab, newline,
-  // carriage-return and backslash inside a cell are backslash-escaped (\t \n \r
-  // \\). Numeric (value_len) and boolean (checked,topmost) cells are their plain
-  // text form. On a DELTA emit `el_table` carries ONLY the changed elements (same
-  // upsert-by-ref/`removed`/`unchanged` semantics as before); it is ABSENT when
-  // no element changed. On a FULL emit it is the resync set (minus collapsed
-  // chrome links, which stay in snapshot_file). `detail:"full"` uses `elements`
-  // (JSON), never this.
-  el_table?: string;
-  // V1 compact-mode bookkeeping so omission is never silent: the complete
-  // current element count (including delta/collapsed omissions), and whether
-  // page text was capped at 4000 characters. Absent in full mode.
-  elements_total?: number;
-  text_truncated?: boolean;
-  // True when a dialog/modal region (role="dialog", <dialog>, aria-modal="true")
-  // currently has at least one topmost (unoccluded) element — i.e. a modal is
-  // open and interactable. Omitted (never `false`) when no modal is active, so
-  // its presence alone is the signal.
-  modal_active?: boolean;
-  // V1 per-session observe delta (docs/DESIGN-observe-compact.md). On a DELTA
-  // emit,
-  // `el_table` carries ONLY the rows whose compact form changed vs the previous
-  // observation; `delta` is true and `unchanged` counts the elements that were
-  // identical and therefore omitted (present in the persisted snapshot_file).
-  // `removed` lists refs that were present last observe and are now gone
-  // (usually empty). On a FULL compact emit `delta` is false and
-  // `unchanged`/`removed` are absent; `el_table` is the resync set but may omit
-  // collapsed chrome links that remain in snapshot_file. If persistence fails,
-  // snapshot_file is absent and `el_table` is instead complete and uncollapsed.
-  // A full snapshot is emitted on the first observe, a URL change, or high churn
-  // (SPA re-render). Compact V2 also uses `delta:true`, but only for its
-  // session-bound action map; it never exposes the V1 snapshot or inventory
-  // recovery fields.
+  // Set on a same-document return: `safe_table` (compact) carries only the rows
+  // whose compact form changed; `dom` (full) is a replacement tree and
+  // `removed` lists refs that left the rendered view.
   delta?: boolean;
-  unchanged?: number;
   removed?: string[];
   // True only on act/act-style returns when the browser's main document
   // changed between the action's dispatch and the post-settle capture (a real
@@ -273,22 +117,6 @@ export interface Observation {
   // `url` already names the new location; the host must not assume refs from
   // before the action still resolve (docs/observation-model.md §4.1).
   navigated?: true;
-  // V1-only: set on a DELTA emit when the (normalized, same-cap) page text is
-  // identical to the previous observation's — the `text` field is then emitted
-  // EMPTY and the host reuses the prior text (recoverable in full from
-  // snapshot_file).
-  // Corpus-measured: 38% of re-observes have byte-identical text, and the text
-  // blob is a large share of each observe.
-  text_unchanged?: boolean;
-  // V1 FULL compact emit only: count of plain chrome-region <a> links collapsed
-  // out of `el_table` (a site-dependent bonus). The collapsed links stay in
-  // snapshot_file. Buttons/inputs/dismiss controls are never collapsed.
-  chrome_links_collapsed?: number;
-  // Every V1 observe writes the COMPLETE current snapshot (all elements, WITH
-  // the verbose `path` field) to this session-scoped file, so the host can
-  // re-expand the full inventory after ITS own context compacts, or grep for an
-  // element the delta didn't re-show. Compact V2 never writes or emits this path.
-  snapshot_file?: string;
   // Phase 2 — set to "none" on the minimal ack returned by
   // operate_act{observe:"none"} (action ran; no perception emitted — call
   // operate_observe before the next ref-targeted act).
@@ -350,16 +178,7 @@ export interface Observation {
   // the signup email so the account is user-owned, and it is the same identity
   // whose inbox awaitVerification reads. Absent when no email was captured.
   user_email?: string;
-  // Present whenever this observation is part of a cart/checkout flow (and
-  // always after a cart mutation). It supplies one unambiguous next action.
-  checkout_state?: CheckoutState;
-  // The postcondition for a cart-add attempt. `unknown` is honest when the
-  // merchant did not expose a count we can verify; callers still receive the
-  // canonical cart URL and safe retry semantics from operate_act { kind: "cart_add" }.
-  cart_delta?: "+1" | "0" | "unknown";
   selected_option?: string;
-  // Browser-use DOM trees and paged control-query results do not use the V1
-  // snapshot-file recovery protocol.
   format?: "browser-use-dom" | "browser-use-control-query";
   stage?: SafeStageV2;
   generation?: number;
@@ -374,13 +193,6 @@ export interface Observation {
   hint_overflow?: { remaining: number; next_cursor: string };
 }
 
-export interface AccessibilitySnapshot {
-  tree: string;
-  refs: number;
-  truncated: boolean;
-  total_chars: number;
-  source: "interactive_dom";
-}
 
 export type ProvisionAction =
   | { kind: "click"; target: string; screenshot?: ScreenshotPoint }
@@ -440,7 +252,7 @@ export type ProvisionAction =
   | { kind: "upload"; target: string; path: string };
 
 export type { AllowedHostEntry, HostSource, Session } from "./session/model.js";
-import type { CartMutation, Session } from "./session/model.js";
+import type { Session } from "./session/model.js";
 import { egressSeedHosts, hostStrings, registrableHost } from "./session/hosts.js";
 // Phase 2 — the lifecycle registry transaction moved to session/lifecycle.ts as
 // one unit (registry, real-profile lease, call leases and drains, watchdog,
@@ -454,7 +266,6 @@ import {
   finishProvisionSession,
   finishProvisionSessionWithPreparation,
   googleSessionGate,
-  observeSnapshotDir,
   paymentSession,
   sessionForCall,
   startProvisionSession as startProvisionSessionInternal,
@@ -792,10 +603,7 @@ async function runSerializedOAuthBoundary(
               let handle: Awaited<ReturnType<BrowserController["bindOAuthClickTarget"]>> = null;
               try {
                 const resolveCurrentTarget = async (): Promise<InteractiveElement> => {
-                  const fresh =
-                    session.compactV2Mode === "on"
-                      ? (await browser.extractBrowserUseObservation()).elements
-                      : await browser.extractInteractiveElements();
+                  const fresh = (await browser.extractBrowserUseObservation()).elements;
                   retainSessionElements(session, fresh);
                   return resolveAuthorizedCompactV2Target(session, fresh, compactAuthorization);
                 };
@@ -863,8 +671,6 @@ async function runSerializedOAuthBoundary(
   );
   return completed.browser;
 }
-
-const settle = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // ── pure helpers (exported for unit tests) ──
 
@@ -1514,125 +1320,6 @@ function frameTargetFor(el: FrameScopedTarget): FrameTarget | null {
   };
 }
 
-export function buildScreenOutline(
-  elements: readonly InteractiveElement[],
-): ScreenOutline | undefined {
-  if (elements.length === 0) return undefined;
-  const byRegion = new Map<string, ScreenRegion>();
-  for (const el of elements) {
-    const id = el.container ?? "body:root";
-    const role = id.split(":")[0] ?? "region";
-    const existing = byRegion.get(id);
-    const region: ScreenRegion = existing ?? {
-      id: id,
-      role: role,
-      topmost: false,
-      occluded_by: null,
-      children: [],
-    };
-    if (el.topmost === true) {
-      region.topmost = true;
-      region.occluded_by = null;
-    } else if (
-      region.occluded_by === null &&
-      el.occludedBy !== null &&
-      el.occludedBy !== undefined
-    ) {
-      region.occluded_by = el.occludedBy;
-    }
-    if (region.children.length < 10) {
-      region.children.push({
-        ref: el.screenPath !== null && el.screenPath !== undefined ? el.screenPath : elementRef(el),
-        role: el.role === null ? null : el.role,
-        text: elementRef(el),
-        href: el.href === null || el.href === undefined ? null : el.href,
-        topmost: el.topmost ?? null,
-        occluded_by: el.occludedBy === null || el.occludedBy === undefined ? null : el.occludedBy,
-      });
-    }
-    byRegion.set(id, region);
-  }
-  const regions = [...byRegion.values()].slice(0, 12);
-  const foreground =
-    regions.find((r) => r.topmost && r.role === "dialog")?.id ??
-    regions.find((r) => r.topmost)?.id ??
-    null;
-  return {
-    foreground,
-    regions,
-  };
-}
-
-function roleForAccessibility(el: InteractiveElement): string {
-  if (el.role !== null && el.role.length > 0) return el.role;
-  if (el.tag === "a") return "link";
-  if (el.tag === "input") return el.type ?? "textbox";
-  return el.tag;
-}
-
-export function buildAccessibilitySnapshot(
-  elements: readonly InteractiveElement[],
-  limit = 12000,
-): AccessibilitySnapshot | undefined {
-  if (elements.length === 0) return undefined;
-  const refs = provisionElementRefs(elements);
-  const byRegion = new Map<string, InteractiveElement[]>();
-  for (const el of elements) {
-    const region = el.container ?? "body:root";
-    const group = byRegion.get(region) ?? [];
-    group.push(el);
-    byRegion.set(region, group);
-  }
-
-  const entries = [...byRegion.entries()];
-  const structurallyTruncated =
-    entries.length > 24 || entries.some(([, group]) => group.length > 16);
-  const lines: string[] = ["RootWebArea"];
-  for (const [region, group] of entries.slice(0, 24)) {
-    lines.push(`  region "${region}"`);
-    for (const el of group.slice(0, 16)) {
-      const label = elementRef(el).replace(/"/g, '\\"');
-      const role = roleForAccessibility(el);
-      const shownValue = el.value ?? null;
-      const flags = [
-        el.value !== undefined && el.value !== null
-          ? `value="${(shownValue ?? "").slice(0, 60)}"`
-          : null,
-        el.checked !== undefined && el.checked !== null ? `checked=${el.checked}` : null,
-        el.href !== undefined && el.href !== null ? `href="${el.href.slice(0, 120)}"` : null,
-        el.topmost === false ? `occluded_by="${el.occludedBy ?? "unknown"}"` : null,
-      ].filter((v): v is string => v !== null);
-      lines.push(
-        `    ${role} "${label}" ref=${refs.get(el) ?? provisionElementRef(el)}` +
-          (flags.length > 0 ? ` ${flags.join(" ")}` : ""),
-      );
-    }
-  }
-  if (structurallyTruncated) {
-    lines.push("  ... (truncated, more interactive elements omitted)");
-  }
-
-  const tree = lines.join("\n");
-  if (tree.length <= limit) {
-    return {
-      tree,
-      refs: elements.length,
-      truncated: structurallyTruncated,
-      total_chars: tree.length,
-      source: "interactive_dom",
-    };
-  }
-  const cut = tree.lastIndexOf("\n", limit);
-  const text = tree.slice(0, cut > 0 ? cut : limit);
-  return {
-    tree: text,
-    refs: elements.length,
-    truncated: true,
-    total_chars: tree.length,
-    source: "interactive_dom",
-  };
-}
-
 function baseDomain(host: string): string {
   const parts = host.toLowerCase().split(".").filter(Boolean);
   if (parts.length <= 2) return parts.join(".");
@@ -1759,7 +1446,7 @@ export async function observe(
 async function observeOwned(sessionId: string, format?: "compact" | "full"): Promise<Observation> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const requestedFormat = format ?? (session.compactV2Mode === "on" ? "full" : "compact");
+  const requestedFormat = format ?? "full";
   const completionSource = oauthCompletionSourcePage(session);
   if (completionSource?.isClosed() === true) {
     session.browser.completeOAuthTransitionRecovery();
@@ -1981,10 +1668,6 @@ export function currentProvisionUrl(sessionId: string): string {
   return operationPageForSession(session)?.url() ?? session.browser.currentUrl();
 }
 
-export function isCompactV2ProvisionSession(sessionId: string): boolean {
-  return sessionForCall(sessionId)?.compactV2Mode === "on";
-}
-
 
 // PR3c — the user's own email captured at login (the authoritative signup
 // address), or null when none was captured. The tool layer reads this to fill
@@ -2017,764 +1700,26 @@ export function generatePassword(length = 24): string {
   return chars.join("");
 }
 
-// Observation verbosity — ONE ordered knob (docs/DESIGN-observe-compact.md), set
-// per call via operate_observe{detail} / operate_act{detail}:
+// Observation verbosity, set per call via operate_observe{format} /
+// operate_act{detail}:
 //   "none"    — bare ack, no perception (operate_act only; for chained fills).
-//   "compact" — stable-ref element/text deltas + a complete snapshot pointer;
-//               empty fields omitted, value→value_len, `path`/`container`
-//               dropped from the wire, no screen/accessibility. The DEFAULT.
-//   "full"    — the legacy payload: screen + accessibility + full element fields.
-// The persisted compact snapshot preserves the complete inventory; see the
-// design doc for reconstruction and measured savings. The planner escalates to
-// "full" per call on a genuinely ambiguous step.
+//   "compact" — the paged browser-use control map. The DEFAULT.
+//   "full"    — the browser-use DOM tree.
 export type ObserveDetail = "none" | "compact" | "full";
 
-// Type-elision (docs/DESIGN-observe-compact.md § Phase 4). `text` is always the
-// default input type; `button`/`submit` are redundant only when the tag or role
-// already identifies a button. Other types and unmarked input action controls
-// are load-bearing and kept. Applied only to the wire form, never the persisted
-// file.
-const ELIDED_TYPES = new Set(["button", "submit", "text"]);
-
-function shouldElideType(el: InteractiveElement): boolean {
-  const type = (el.type ?? "").toLowerCase();
-  if (!ELIDED_TYPES.has(type)) return false;
-  if (type === "text") return true;
-  return el.tag === "button" || (el.role ?? "").toLowerCase() === "button";
-}
-
-// Keep this detection narrow and structural. It only annotates fields that are
-// recognizably part of collecting card data; address fields remain normal
-// checkout fields. The affordance is advisory metadata, never a relaxation of
-// the frame or PAN guards below.
-export function paymentFieldForObservation(el: InteractiveElement): PaymentField | null {
-  const autocomplete = (el.autocomplete ?? "").toLowerCase().split(/\s+/);
-  const signal = [el.name, el.id, el.ariaLabel, el.labelText, el.placeholder]
-    .filter((value): value is string => typeof value === "string")
-    .join(" ")
-    .toLowerCase();
-  if (autocomplete.includes("cc-number") || /card[\s_-]*number|cardnumber|\bpan\b/.test(signal)) {
-    return "card_number";
-  }
-  if (autocomplete.includes("cc-csc") || /\b(?:cvv|cvc)\b|security[\s_-]*code/.test(signal)) {
-    return "security_code";
-  }
-  if (autocomplete.includes("cc-exp-month") || /exp(?:iry|iration)?[\s_-]*month/.test(signal)) {
-    return "expiry_month";
-  }
-  if (autocomplete.includes("cc-exp-year") || /exp(?:iry|iration)?[\s_-]*year/.test(signal)) {
-    return "expiry_year";
-  }
-  if (
-    autocomplete.includes("cc-exp") ||
-    /\bmm\s*\/\s*yy\b|exp(?:iry|iration)?[\s_-]*(?:date)?\b/.test(signal)
-  ) {
-    return "expiry";
-  }
-  if (autocomplete.includes("cc-name") || /cardholder|card[\s_-]*name/.test(signal)) {
-    return "cardholder_name";
-  }
-  return null;
-}
-
-// One element, compacted: ref/label/tag always; every other field omitted when
-// empty. `value`→`value_len` (never the raw value — keeps the sealed-field moat);
-// `checked` kept for real checkables (true OR false), omitted when null;
-// `topmost` only when false (the informative case); `container` dropped.
-export function toCompactElement(
-  el: InteractiveElement,
-  ref: string,
-  // `path` is the single most verbose field and agents act by ref, not path — so
-  // it is DROPPED from the default host payload (78% → 85% of the measured cut).
-  // It is retained ONLY in the persisted snapshot file (includePath=true), which
-  // the host can re-expand or grep. It is also excluded from the delta identity,
-  // so a layout-only path shift never forces a re-emit.
-  includePath = false,
-  // Apply type-elision (Phase 4) to the WIRE form. The persisted file
-  // form keeps full fidelity for re-expansion, so callers that write the file
-  // pass false.
-  elide = false,
-): ObservedElement {
-  const out: ObservedElement = {
-    ref,
-    label: elementRef(el),
-    tag: el.tag,
-  };
-  if (el.role) out.role = el.role;
-  if (el.type && !(elide && shouldElideType(el))) {
-    out.type = el.type;
-  }
-  // value_len is a LENGTH signal, not the value — report the REAL character count.
-  const realLen = (el.value ?? "").length;
-  if (realLen > 0) out.value_len = realLen;
-  if (el.checked !== null && el.checked !== undefined) out.checked = el.checked;
-  if (el.href) out.href = el.href;
-  if (el.testId) out.testId = el.testId;
-  if (includePath && el.screenPath) {
-    out.path = el.screenPath;
-  }
-  if (el.topmost === false) out.topmost = false;
-  if (el.occludedBy) {
-    out.occluded_by = el.occludedBy;
-  }
-  if (el.frameOrigin) {
-    out.frame_origin = el.frameOrigin;
-  }
-  return out;
-}
-
-// Columnar wire encoding (docs/DESIGN-observe-compact.md § Phase 4). The compact
-// `elements` array repeated every field NAME on every element; a tab-delimited
-// table names each column ONCE in a header line, then one terse row per element.
-// Column order is CANONICAL (matches toCompactElement's field order) so a parsed
-// row reconstructs byte-identically. `ref`/`label`/`tag` are always present;
-// other columns appear only when at least one emitted element carries them.
-const ELEMENT_TABLE_COLUMNS = [
-  "ref",
-  "label",
-  "tag",
-  "role",
-  "type",
-  "value_len",
-  "checked",
-  "href",
-  "testId",
-  "topmost",
-  "occluded_by",
-  "frame_origin",
-] as const;
-type ElementColumn = (typeof ELEMENT_TABLE_COLUMNS)[number];
-
-// The string cell for one column of one element, or undefined when absent.
-// Booleans/numbers render as plain text; the parser coerces them back.
-function elementCell(e: ObservedElement, col: ElementColumn): string | undefined {
-  switch (col) {
-    case "ref":
-      return e.ref;
-    case "label":
-      return e.label;
-    case "tag":
-      return e.tag;
-    case "role":
-      return e.role ?? undefined;
-    case "type":
-      return e.type ?? undefined;
-    case "value_len":
-      return e.value_len !== undefined ? String(e.value_len) : undefined;
-    case "checked":
-      return e.checked === true ? "true" : e.checked === false ? "false" : undefined;
-    case "href":
-      return e.href ?? undefined;
-    case "testId":
-      return e.testId ?? undefined;
-    case "topmost":
-      return e.topmost === false ? "false" : undefined;
-    case "occluded_by":
-      return e.occluded_by ?? undefined;
-    case "frame_origin":
-      return e.frame_origin ?? undefined;
-  }
-}
-
-// Escape the only bytes that break the tab/newline framing. Backslash FIRST so
-// the decoder's single pass is unambiguous.
-function escapeCell(v: string): string {
-  return v.replace(/\\/g, "\\\\").replace(/\t/g, "\\t").replace(/\n/g, "\\n").replace(/\r/g, "\\r");
-}
-function unescapeCell(v: string): string {
-  return v.replace(/\\(.)/g, (_m, c: string) =>
-    c === "t" ? "\t" : c === "n" ? "\n" : c === "r" ? "\r" : c,
-  );
-}
-
-// Encode a set of compact elements as the tab table. Returns "" for an empty set
-// (the caller then omits `el_table` — an empty table costs a header for nothing).
-export function encodeElementsTable(els: readonly ObservedElement[]): string {
-  if (els.length === 0) return "";
-  const columns = ELEMENT_TABLE_COLUMNS.filter(
-    (c) =>
-      c === "ref" ||
-      c === "label" ||
-      c === "tag" ||
-      els.some((e) => elementCell(e, c) !== undefined),
-  );
-  const header = columns.join("\t");
-  const rows = els.map((e) => columns.map((c) => escapeCell(elementCell(e, c) ?? "")).join("\t"));
-  return [header, ...rows].join("\n");
-}
-
-// Inverse of encodeElementsTable — reconstruct the compact elements from the wire
-// table. The delta stream's losslessness gate (INV-lossless-resync) round-trips
-// through this, and it documents the EXACT parse the host performs. An empty
-// cell (or a header column absent for a row) means the field is absent; only the
-// three mandatory columns are always assigned.
-export function parseElementsTable(table: string): ObservedElement[] {
-  if (table.length === 0) return [];
-  const lines = table.split("\n");
-  const columns = (lines[0] ?? "").split("\t");
-  const out: ObservedElement[] = [];
-  for (let i = 1; i < lines.length; i++) {
-    const cells = (lines[i] ?? "").split("\t").map(unescapeCell);
-    const e: ObservedElement = { ref: "", label: "", tag: "" };
-    columns.forEach((col, idx) => {
-      const raw = cells[idx] ?? "";
-      if (col === "ref") e.ref = raw;
-      else if (col === "label") e.label = raw;
-      else if (col === "tag") e.tag = raw;
-      else if (raw === "")
-        return; // absent optional field
-      else if (col === "role") e.role = raw;
-      else if (col === "type") e.type = raw;
-      else if (col === "value_len") e.value_len = Number(raw);
-      else if (col === "checked") e.checked = raw === "true";
-      else if (col === "href") e.href = raw;
-      else if (col === "testId") e.testId = raw;
-      else if (col === "topmost") e.topmost = false;
-      else if (col === "occluded_by") e.occluded_by = raw;
-      else if (col === "frame_origin") e.frame_origin = raw;
-    });
-    out.push(e);
-  }
-  return out;
-}
-
-// The compact wire carries its element set as `el_table` (columnar); an empty set
-// omits the field entirely. FULL mode keeps `elements` (JSON). One helper so both
-// buildCompactObservation branches and the persist-fallback stay consistent.
-function emitElements(
-  els: readonly ObservedElement[],
-  encode: "columnar" | "json",
-): Pick<Observation, "elements" | "el_table"> {
-  if (encode === "json") return { elements: [...els] };
-  const table = encodeElementsTable(els);
-  return table.length > 0 ? { el_table: table } : {};
-}
-
-// Session-scoped observe-snapshot persistence (docs/DESIGN-observe-compact.md).
-// Reuses the best-effort writeFileSync pattern of the corpus dump-hook:
-// a write failure must NEVER break an observe. Rolling one file per session (the
-// latest COMPLETE inventory) — that's what the host wants when it re-expands
-// after a context compaction or greps for an element the delta didn't re-show.
-function persistObserveSnapshot(
-  session: Session,
-  generation: number,
-  url: string,
-  text: string,
-  textTruncated: boolean,
-  elements: ObservedElement[],
-): string | null {
-  let temporaryFile: string | null = null;
-  const dir = observeSnapshotDir(session.id);
-  const file = join(dir, `observe-${session.id}.json`);
-  try {
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    chmodSync(dir, 0o700);
-    temporaryFile = join(dir, `.observe-${session.id}-${generation}.tmp`);
-    writeFileSync(
-      temporaryFile,
-      JSON.stringify(
-        {
-          session_id: session.id,
-          generation,
-          url,
-          elements_total: elements.length,
-          text,
-          text_truncated: textTruncated,
-          elements,
-        },
-        null,
-        2,
-      ),
-      { encoding: "utf8", mode: 0o600 },
-    );
-    renameSync(temporaryFile, file);
-    session.observeSnapshotFile = file;
-    return file;
-  } catch {
-    if (temporaryFile !== null) {
-      try {
-        unlinkSync(temporaryFile);
-      } catch {}
-    }
-    for (const staleFile of new Set([session.observeSnapshotFile, file])) {
-      if (staleFile === null) continue;
-      try {
-        unlinkSync(staleFile);
-      } catch {}
-    }
-    session.observeSnapshotFile = null;
-    return null;
-  }
-}
-
-// An actionable control the chrome-link collapse must NEVER drop: any
-// button/input, or an element whose role is button/tab/checkbox/radio/menuitem,
-// or a type=submit. Button-shaped dismiss/consent/gate controls survive by
-// construction even in a chrome region; link-shaped variants are guarded
-// separately by isPlainChromeLink.
-export function isActionableControl(el: InteractiveElement): boolean {
-  const role = (el.role ?? "").toLowerCase();
-  if (
-    role === "button" ||
-    role === "tab" ||
-    role === "checkbox" ||
-    role === "radio" ||
-    role === "menuitem"
-  ) {
-    return true;
-  }
-  if (el.tag === "button" || el.tag === "input") return true;
-  if ((el.type ?? "").toLowerCase() === "submit") return true;
-  return false;
-}
-
-// "Chrome region" per docs/DESIGN-observe-compact.md: the element's path
-// root is a nav/footer/banner/aside-style landmark, OR a `section:` whose name is
-// a known boilerplate block (newsletter/copyright/social/…). Site-dependent
-// (measured 0% on flat DOMs, up to 57% on hoka) — a bonus, never the main win.
-export function isChromeRegionPath(el: InteractiveElement): boolean {
-  const path = el.screenPath ?? el.container ?? "";
-  const root = (path.split(" > ")[0] ?? "").trim();
-  const colon = root.indexOf(":");
-  const role = (colon >= 0 ? root.slice(0, colon) : root).toLowerCase();
-  const name = colon >= 0 ? root.slice(colon + 1).toLowerCase() : "";
-  if (
-    role === "navigation" ||
-    role === "footer" ||
-    role === "contentinfo" ||
-    role === "banner" ||
-    role === "complementary" ||
-    role === "aside"
-  ) {
-    return true;
-  }
-  if (role === "section") {
-    return /newsletter|copyright|trustpilot|accepted-payment|social|footer|shop-the-collection/.test(
-      name,
-    );
-  }
-  return false;
-}
-
-// A label that reads as a dismiss / consent / gate action — the collapse must
-// keep these even when they are shipped as a chrome-region <a>, and even when the
-// consent banner gives them a real fallback URL. Errs toward KEEPING (a false
-// positive keeps a nav link, which is safe; a false negative would drop a
-// dismiss control, which is not) — so it covers the accept/reject vocabulary AND
-// its opposites (decline/agree/allow) and the "preferences/opt out/got it" verbs.
-const DISMISS_CONSENT_LABEL_RE =
-  /close|dismiss|skip|no thanks|accept|reject|decline|agree|allow|cookie|consent|preferences|opt.?out|not now|maybe later|got it/i;
-
-// A PLAIN chrome-region NAVIGATION link — the ONLY thing the collapse removes.
-// Buttons, inputs, and role-controls are never plain links (isActionableControl
-// short-circuits), so they are always kept regardless of region. Beyond that, a
-// link is treated as a NAVIGATION link (collapsible) ONLY when it clearly is one;
-// anything that could be a dismiss/consent control is kept:
-//   - no href, a `#`-fragment href, or a `javascript:` href → an action-link, not
-//     navigation (a "Close banner"/"Manage cookies" anchor) → KEEP.
-//   - inConsentWidget → part of a cookie/consent banner → KEEP.
-//   - label matches a dismiss/consent pattern (close/dismiss/accept/reject/cookie/
-//     …) → KEEP even with a real fallback URL (consent banners often provide one).
-// This closes the "a dismiss control shipped as a bare/consent <a> gets dropped"
-// gap: only true, non-consent navigation links are collapsible.
-export function isPlainChromeLink(el: InteractiveElement): boolean {
-  if (isActionableControl(el)) return false;
-  const isLink = el.tag === "a" || (el.role ?? "").toLowerCase() === "link";
-  if (!isLink) return false;
-  if (!isChromeRegionPath(el)) return false;
-  if (el.inConsentWidget === true) return false;
-  const href = (el.href ?? "").trim();
-  if (href.length === 0 || href.startsWith("#") || href.toLowerCase().startsWith("javascript:")) {
-    return false;
-  }
-  if (DISMISS_CONSENT_LABEL_RE.test(elementRef(el))) return false;
-  return true;
-}
-
-// Fraction of the previous element set that changed (added/changed + removed).
-// Above this an observe emits a FULL snapshot instead of a delta — a big SPA
-// re-render is clearer whole, and a delta that touches most of the page is barely
-// smaller than the full set anyway.
-const OBSERVE_CHURN_FULL_THRESHOLD = 0.6;
-
-// The delta baseline carried between observes: the previous observation's URL,
-// its stable-ref → serialized-compact-element map (payload form, `path`
-// excluded), and its normalized page text (for the text delta).
-export interface ObserveDeltaState {
-  url: string;
-  byRef: Map<string, string>;
-  text: string;
-}
-
-export interface CompactObservationBuild {
-  // The emitted payload. `snapshot_file` is added by the caller after it persists
-  // the complete snapshot (so this pure core stays filesystem-free).
-  observation: Observation;
-  // The COMPLETE compact set (path EXCLUDED) keyed by ref — the reconstruction
-  // ground truth: emitted wire records are a subset on a delta/collapse.
-  fullByRef: Map<string, ObservedElement>;
-  // The COMPLETE snapshot the caller persists to the session file (path INCLUDED).
-  fileElements: ObservedElement[];
-  // The baseline to hand the NEXT observe.
-  nextState: ObserveDeltaState;
-}
-
-// Pure core of the compact/delta observe path — no browser, no filesystem — so
-// the delta invariants (lossless resync, actionable-never-dropped, token budget)
-// are unit-testable over synthetic element sequences. observeSession supplies the
-// live elements/text/url; this decides delta-vs-full, applies the chrome-link
-// collapse, and returns both the emit and the complete ground-truth set.
-export function buildCompactObservation(args: {
-  sessionId: string;
-  url: string;
-  text: string;
-  textTruncated?: boolean;
-  guidance?: string;
-  elements: readonly InteractiveElement[];
-  prev: ObserveDeltaState | null;
-  // Wire encoding of the emitted element set. Default "columnar" (the tab table).
-  // The eval harness passes "json" to measure the columnar transform's marginal
-  // against the pre-columnar payload; production always uses the default.
-  encode?: "columnar" | "json";
-  // Apply Phase-4 type-elision to the wire element form. Default true; the eval
-  // harness passes false to isolate the type-elision transform's marginal.
-  elide?: boolean;
-}): CompactObservationBuild {
-  const { sessionId, url, text, elements, prev } = args;
-  const encode = args.encode ?? "columnar";
-  const elide = args.elide ?? true;
-  const refs = provisionElementRefs(elements);
-  const refOf = (el: InteractiveElement): string => refs.get(el) ?? provisionElementRef(el);
-
-  const fullByRef = new Map<string, ObservedElement>();
-  const serializedByRef = new Map<string, string>();
-  const fileElements: ObservedElement[] = [];
-  for (const el of elements) {
-    const ref = refOf(el);
-    fullByRef.set(ref, toCompactElement(el, ref, false, elide));
-    serializedByRef.set(ref, JSON.stringify(fullByRef.get(ref)));
-    // The persisted file keeps FULL fidelity (path included, no elision) so a
-    // re-expansion after a host compaction loses nothing.
-    fileElements.push(toCompactElement(el, ref, true, false));
-  }
-  const nextState: ObserveDeltaState = { url, byRef: serializedByRef, text };
-
-  // A dialog/modal region with at least one topmost (unoccluded) element is
-  // "active" — the host planner should treat it as the current interaction
-  // surface rather than the page behind it. Uses each element's dedicated
-  // dialog-membership flag, independent of container grouping, and the FULL
-  // element set so it stays accurate on every emit, delta or full.
-  const modalActive = elements.some((el) => el.inDialog === true && el.topmost !== false);
-
-  const base: Observation = {
-    session_id: sessionId,
-    url,
-    text,
-    ...(args.guidance !== undefined ? { guidance: args.guidance } : {}),
-    elements_total: elements.length,
-    ...(args.textTruncated === true ? { text_truncated: true } : {}),
-    ...(modalActive ? { modal_active: true } : {}),
-  };
-
-  // Delta path: same URL as last observe, and churn under the threshold.
-  if (prev !== null && prev.url === url) {
-    const changed: ObservedElement[] = [];
-    let unchanged = 0;
-    for (const [ref, ser] of serializedByRef) {
-      if (prev.byRef.get(ref) === ser) unchanged += 1;
-      else changed.push(fullByRef.get(ref) as ObservedElement);
-    }
-    const removed = [...prev.byRef.keys()].filter((ref) => !serializedByRef.has(ref));
-    const churn = changed.length + removed.length;
-    if (churn / Math.max(prev.byRef.size, 1) <= OBSERVE_CHURN_FULL_THRESHOLD) {
-      // Text delta: emit the blob empty + a marker when it's byte-identical to
-      // the previous observe (the host reuses the prior text; the full text is in
-      // snapshot_file). Otherwise emit it in full.
-      const textUnchanged = prev.text === text;
-      return {
-        observation: {
-          ...base,
-          ...(textUnchanged ? { text: "", text_unchanged: true } : {}),
-          ...emitElements(changed, encode),
-          delta: true,
-          unchanged,
-          ...(removed.length > 0 ? { removed } : {}),
-        },
-        fullByRef,
-        fileElements,
-        nextState,
-      };
-    }
-  }
-
-  // FULL compact snapshot — first observe / URL change / high churn. Only HERE do
-  // we collapse plain chrome-region links (never a button/input/dismiss control);
-  // the collapsed links stay in the persisted snapshot.
-  const emitted: ObservedElement[] = [];
-  let chromeLinksCollapsed = 0;
-  for (const el of elements) {
-    if (isPlainChromeLink(el)) {
-      chromeLinksCollapsed += 1;
-      continue;
-    }
-    emitted.push(fullByRef.get(refOf(el)) as ObservedElement);
-  }
-  return {
-    observation: {
-      ...base,
-      ...emitElements(emitted, encode),
-      delta: false,
-      ...(chromeLinksCollapsed > 0 ? { chrome_links_collapsed: chromeLinksCollapsed } : {}),
-    },
-    fullByRef,
-    fileElements,
-    nextState,
-  };
-}
-
-// Best-effort structured checkout evidence for the current observation. Most
-// pages have no parseable total; that is an ordinary null result.
-async function captureCartCheckoutForFillCardFallback(
-  session: Session,
-  url: string,
-  page?: Page,
-): Promise<CheckoutSummary | null> {
-  let origin: string;
-  try {
-    origin = new URL(url).origin;
-  } catch {
-    return null;
-  }
-  try {
-    const checkout = await session.browser.readCheckoutSummary(undefined, page);
-    if (checkout.checkout_origin === origin) return checkout;
-  } catch {
-    // No readable total on this page.
-  }
-  return null;
-}
-
-function checkoutStageFromUrl(url: string): CheckoutState["stage"] | null {
-  return checkoutStageFromUrlV2(url);
-}
-
-function checkoutStage(
-  url: string,
-  elements: readonly InteractiveElement[],
-): CheckoutState["stage"] | null {
-  const routeStage = checkoutStageFromUrl(url);
-  if (routeStage !== null) return routeStage;
-  if (elements.some((element) => paymentFieldForObservation(element) !== null)) return "checkout";
-  const contexts = elements
-    .flatMap((element) => [element.container, element.screenPath])
-    .filter((value): value is string => typeof value === "string");
-  if (
-    contexts.some((context) =>
-      /(?:^|[ >:/_-])(?:checkout|payment|order[-_ ]?review|お支払い|注文確認)(?:$|[ >:/_-])/i.test(
-        context,
-      ),
-    )
-  ) {
-    return "checkout";
-  }
-  if (
-    contexts.some((context) =>
-      /(?:^|[ >:/_-])(?:cart|basket|bag|カート|かご)(?:$|[ >:/_-])/i.test(context),
-    )
-  ) {
-    return "cart";
-  }
-  return null;
-}
-
-function observedCartQuantity(
-  elements: readonly InteractiveElement[],
-  text: string,
-): number | null {
-  for (const el of elements) {
-    const label = `${el.name ?? ""} ${el.id ?? ""} ${el.ariaLabel ?? ""} ${el.labelText ?? ""}`;
-    if (!/\b(?:quantity|qty)\b|(?:数量|個数)/i.test(label)) continue;
-    const value = el.value?.trim() ?? "";
-    if (/^\d+$/.test(value)) return Number(value);
-  }
-  const match = text.match(/(?:quantity|qty|数量|個数)\s*[:：x×]?\s*(\d+)/i);
-  return match?.[1] === undefined ? null : Number(match[1]);
-}
-
-const checkoutComponentBoundary = String.raw`(?:subtotal|merchandise\s+subtotal|shipping|delivery|tax|grand\s+total|order\s+total|total\s+due|amount\s+due|total|商品合計|小計|送料|配送料|税|合計)`;
-
-function labeledCheckoutMoney(
-  text: string,
-  label: string,
-  fallbackCurrency?: string,
-): CheckoutMoney | null {
-  const match = text.match(
-    new RegExp(
-      `(?:${label})\\s*[:：]?\\s*([\\s\\S]*?)(?=${checkoutComponentBoundary}\\s*[:：]?|$)`,
-      "iu",
-    ),
-  );
-  const value = match?.[1]?.trim();
-  if (value === undefined || value.length === 0) return null;
-  const parsed = parseCheckoutAmount([`Total ${value}`], fallbackCurrency);
-  return parsed !== null && fallbackCurrency !== undefined && parsed.currency !== fallbackCurrency
-    ? null
-    : parsed;
-}
-
-function shippingMoney(text: string, fallbackCurrency?: string): CheckoutMoney | null {
-  const pattern = new RegExp(
-    `(?:shipping|delivery|送料|配送料)\\s*[:：]?\\s*([\\s\\S]*?)(?=${checkoutComponentBoundary}\\s*[:：]?|$)`,
-    "giu",
-  );
-  const candidates: CheckoutMoney[] = [];
-  for (const match of text.matchAll(pattern)) {
-    const value = match[1]?.trim();
-    if (value === undefined || value.length === 0) continue;
-    if (
-      /\b(?:on|for)\s+(?:all\s+)?orders?\b|\borders?\s+(?:over|above|of)\b|\b(?:minimum|qualifying)\s+(?:order|spend|purchase)\b/iu.test(
-        value,
-      )
-    ) {
-      continue;
-    }
-    if (/^(?:free|complimentary|0|無料)(?:\s|$)/iu.test(value)) {
-      if (fallbackCurrency !== undefined) {
-        candidates.push({ amount_cents: 0, currency: fallbackCurrency });
-      }
-      continue;
-    }
-    if (!/^(?:(?:[A-Z]{3}\p{Sc}?|\p{Sc})\s*)?\d/iu.test(value)) continue;
-    const parsed = parseCheckoutAmount([`Total ${value}`], fallbackCurrency);
-    if (parsed === null) continue;
-    if (fallbackCurrency !== undefined && parsed.currency !== fallbackCurrency) continue;
-    candidates.push(parsed);
-  }
-  return candidates.at(-1) ?? null;
-}
-
-function originForUrl(url: string): string | null {
-  try {
-    return new URL(url).origin;
-  } catch {
-    return null;
-  }
-}
-
-function cartMutationForUrl(session: Session, url: string): CartMutation | null {
-  const origin = originForUrl(url);
-  return origin !== null && session.lastCartMutation?.origin === origin
-    ? session.lastCartMutation
-    : null;
-}
-
-function cartUrlForState(
-  session: Session,
-  url: string,
-  elements: readonly InteractiveElement[],
-): string | null {
-  const origin = originForUrl(url);
-  if (origin === null) return null;
-  if (checkoutStageFromUrl(url) === "cart") {
-    session.cartUrls.set(origin, url);
-    return url;
-  }
-  const cartLink = elements.find((el) => {
-    const label = `${el.visibleText ?? ""} ${el.ariaLabel ?? ""} ${el.labelText ?? ""}`;
-    return (
-      el.href !== null &&
-      el.href !== undefined &&
-      /\b(?:cart|basket|bag)\b|(?:かご|カート)/i.test(label)
-    );
-  });
-  if (cartLink?.href !== undefined && cartLink.href !== null) {
-    try {
-      const resolved = new URL(cartLink.href, url);
-      if (resolved.origin === origin && checkoutStage(resolved.toString(), []) === "cart") {
-        session.cartUrls.set(origin, resolved.toString());
-        return resolved.toString();
-      }
-    } catch {
-      // A malformed href is not a canonical cart URL; fall through to the
-      // previously observed cart page rather than fabricating one.
-    }
-  }
-  return session.cartUrls.get(origin) ?? null;
-}
-
-function checkoutStateForObservation(
-  session: Session,
-  url: string,
-  text: string,
-  elements: readonly InteractiveElement[],
-  liveCheckout: CheckoutSummary | null,
-): CheckoutState | undefined {
-  const stage = checkoutStage(url, elements);
-  const mutation = cartMutationForUrl(session, url);
-  const origin = originForUrl(url);
-  const checkout =
-    origin !== null && liveCheckout?.checkout_origin === origin ? liveCheckout : undefined;
-  // Do not burden unrelated provision flows with an empty cart-shaped object.
-  if (stage === null && mutation === null) return undefined;
-  const payableTotal =
-    checkout === undefined
-      ? null
-      : { amount_cents: checkout.amount_cents, currency: checkout.currency };
-  const fallbackCurrency = checkout?.currency;
-  const resolvedStage = stage ?? "product";
-  return {
-    authority: "informational_only",
-    completeness: "best_effort",
-    authoritative_for_payment: false,
-    stage: resolvedStage,
-    product_identity: mutation?.productIdentity ?? null,
-    options_hash: mutation?.optionsHash ?? null,
-    quantity: observedCartQuantity(elements, text),
-    subtotal: labeledCheckoutMoney(
-      text,
-      String.raw`subtotal|merchandise\s+subtotal|商品合計|小計`,
-      fallbackCurrency,
-    ),
-    shipping: shippingMoney(text, fallbackCurrency),
-    payable_total: payableTotal,
-    cart_url: cartUrlForState(session, url, elements),
-    next_action:
-      resolvedStage === "cart"
-        ? { tool: "operate_act", kind: "click", intent: "proceed_to_checkout" }
-        : { tool: "operate_observe" },
-  };
-}
-
-function withCheckoutState(
-  observation: Observation,
-  state: CheckoutState | undefined,
-  mutation: CartMutation | null,
-): Observation {
-  return {
-    ...observation,
-    ...(state === undefined ? {} : { checkout_state: state }),
-    ...(mutation === null ? {} : { cart_delta: mutation.cartDelta }),
-  };
-}
-
 function retainSessionElements(session: Session, elements: InteractiveElement[]): void {
-  session.lastElements =
-    session.compactV2Mode === "on"
-      ? sealRetainedInteractiveElementsV2(elements, (element) =>
-          compactV2CorrelationSelector(session, element),
-        )
-      : elements;
+  session.lastElements = sealRetainedInteractiveElementsV2(elements, (element) =>
+    compactV2CorrelationSelector(session, element),
+  );
 }
 
 function compactV2CommittedSelectKey(session: Session, selector: string): string {
-  if (session.compactV2Mode !== "on") return selector;
   return createHmac("sha256", session.compactV2Secret)
     .update(`select-key\0${selector}`)
     .digest("base64url");
 }
 
 function compactV2CommittedSelectValue(session: Session, value: string): string {
-  if (session.compactV2Mode !== "on") return value;
   return createHmac("sha256", session.compactV2Secret)
     .update(`select-value\0${value}`)
     .digest("base64url");
@@ -3078,7 +2023,7 @@ function compactV2LiveControls(
     handles,
     pageOrigin,
     pageUrl,
-    canonical: session.compactV2Mode === "on",
+    canonical: true,
     anchorLabel: (ref, label) => compactV2RefAllocator(session).label(ref, label),
   });
 }
@@ -3162,7 +2107,6 @@ function compactV2HintPage(
 
 function compactV2PublicObservation(
   session: Session,
-  legacy: () => Observation,
   fields: {
     stage: SafeStageV2;
     guidance?: string;
@@ -3173,7 +2117,6 @@ function compactV2PublicObservation(
   },
   outputFormat: "compact" | "full" = "full",
 ): Observation {
-  if (session.compactV2Mode !== "on") return legacy();
   session.compactV2Active = true;
   const payload = {
     format:
@@ -3312,7 +2255,6 @@ function compactV2Observation(
           }
         : {}),
   };
-  session.prevObserve = null;
   if (outputFormat === "compact") {
     const encodePage = (delta: boolean) =>
       encodeV2QueryPage({
@@ -3525,28 +2467,19 @@ function terminalOAuthCompletionObservation(session: Session, url: string): Obse
   rememberOAuthCompletionSourcePage(session, undefined);
   rememberCompactV2SourcePage(session, undefined);
   invalidateCompactV2Snapshot(session);
-  session.prevObserve = null;
   retainSessionElements(session, []);
   const guidance =
     "OAuth completed in a popup that closed before its controls could be observed. " +
     "Call operate_observe to inspect the active product page.";
   return compactV2PublicObservation(
     session,
-    () => ({
-      session_id: session.id,
-      url,
-      text: "",
-      elements: [],
-      guidance,
-      terminal,
-    }),
     { stage: safeStageV2(url, []), guidance, terminal, url },
   );
 }
 
 async function observeSession(
   session: Session,
-  detail: "compact" | "full" = "compact",
+  _detail: "compact" | "full" = "compact",
   startMetadata?: CompactV2StartMetadata,
   sourcePage?: OAuthCompletionEvidence["page"],
   preserveSourceBinding = false,
@@ -3566,7 +2499,6 @@ async function observeSession(
   }
   if (!preserveSourceBinding) rememberOAuthCompletionSourcePage(session, sourcePage);
   const oauthInProgress = (): Observation => {
-    session.prevObserve = null;
     invalidateCompactV2Snapshot(session);
     const oauth = session.browser.oauthTransitionStatus?.();
     const guidance =
@@ -3580,15 +2512,12 @@ async function observeSession(
     session.browser.completeOAuthTransitionRecovery();
     return compactV2PublicObservation(
       session,
-      () => ({
-        session_id: session.id,
-        url: oauth?.productUrl ?? session.startUrl,
-        text: "",
+      {
+        stage: "auth",
         guidance,
-        elements: [],
         oauth: state,
-      }),
-      { stage: "auth", guidance, oauth: state },
+        url: oauth?.productUrl ?? session.startUrl,
+      },
       outputFormat,
     );
   };
@@ -3609,13 +2538,8 @@ async function observeSession(
     }
     session.generation += 1;
     const generation = session.generation;
-    const capture =
-      session.compactV2Mode === "on"
-        ? await session.browser.extractBrowserUseObservation(sourcePage, true)
-        : null;
-    const elements =
-      capture?.elements ?? (await session.browser.extractInteractiveElements(sourcePage));
-    retainSessionElements(session, elements);
+    const capture = await session.browser.extractBrowserUseObservation(sourcePage, true);
+    retainSessionElements(session, capture.elements);
     let semanticSource: ObservationSemanticSourceV2 = { title: "", headings: [] };
     try {
       semanticSource = await session.browser.extractObservationSemantics(sourcePage);
@@ -3623,151 +2547,17 @@ async function observeSession(
       // Semantic context is optional availability-wise; it is independently
       // sealed below and never changes action-map safety.
     }
-    const v2Mode = session.compactV2Mode;
-    if (v2Mode === "on") {
-      if (capture === null) throw new Error("observation_capture_missing");
-      return compactV2Observation(
-        session,
-        generation,
-        capture,
-        semanticSource,
-        startMetadata,
-        sourcePage,
-        outputFormat,
-        compactActionDelta,
-        compactMapEmitted,
-        forceFullDOM,
-      );
-    }
-    session.compactV2Active = false;
-    invalidateCompactV2Snapshot(session);
-    const text = await session.browser.extractVisibleText(sourcePage);
-    const normalizedFull = text.replace(/\s+/g, " ").trim();
-    const normalizedText = normalizedFull.slice(0, 4000);
-    const url = sourcePage?.url() ?? session.browser.currentUrl();
-    const liveCheckout = await captureCartCheckoutForFillCardFallback(session, url, sourcePage);
-    const checkoutState = checkoutStateForObservation(
-      session,
-      url,
-      text.slice(0, 12_000),
-      elements,
-      liveCheckout,
-    );
-    const currentCartMutation = cartMutationForUrl(session, url);
-    const refs = provisionElementRefs(elements);
-    const refOf = (el: InteractiveElement): string => refs.get(el) ?? provisionElementRef(el);
-    const textTruncated = normalizedFull.length > 4000;
-
-    // Compact (default): the delta path, computed by the pure core.
-    if (detail !== "full") {
-      const built = buildCompactObservation({
-        sessionId: session.id,
-        url,
-        text: normalizedText,
-        textTruncated,
-        elements,
-        prev: session.prevObserve,
-      });
-      // Persist the COMPLETE snapshot (path INCLUDED) — the safety net that makes
-      // delta safe: the host re-expands the full inventory from here.
-      const snapshotFile = persistObserveSnapshot(
-        session,
-        generation,
-        url,
-        normalizedText,
-        textTruncated,
-        built.fileElements,
-      );
-      if (snapshotFile === null) {
-        // Persistence FAILED, so no recovery file exists. A delta (which omits
-        // unchanged elements) or a collapsed full snapshot (which omits chrome
-        // links) would be UNRECOVERABLE — the host would have no way to re-expand.
-        // Fall back to a FULL, UNCOLLAPSED response (every element inline). And
-        // INVALIDATE the delta baseline (null, not "leave it at the last good
-        // state"): the host's reconstruction is now THIS full set, so the next
-        // observe must emit a fresh FULL snapshot too, never a delta computed
-        // against the last-persisted baseline — that stale-baseline delta would
-        // desync a host that has already moved to this full state (a
-        // remove-then-restore-across-a-failed-persist sequence would silently drop
-        // the restored element otherwise).
-        session.prevObserve = null;
-        return withCheckoutState(
-          {
-            session_id: session.id,
-            url,
-            text: normalizedText,
-            // Still a COMPACT response — carry the (uncollapsed) set as the columnar
-            // table so the host parses it the same way as any other compact observe.
-            ...emitElements([...built.fullByRef.values()], "columnar"),
-            delta: false,
-            elements_total: elements.length,
-            ...(textTruncated ? { text_truncated: true } : {}),
-            ...(built.observation.modal_active === true ? { modal_active: true } : {}),
-          },
-          checkoutState,
-          currentCartMutation,
-        );
-      }
-      session.prevObserve = built.nextState;
-      return withCheckoutState(
-        {
-          ...built.observation,
-          snapshot_file: snapshotFile,
-        },
-        checkoutState,
-        currentCartMutation,
-      );
-    }
-
-    // Full (legacy rich) path — the explicit escape hatch. Byte-identical to the
-    // pre-delta full payload: every element with every field, screen, and
-    // accessibility, never a delta and never a chrome collapse.
-    session.prevObserve = null;
-    // Refresh the persisted snapshot as a SIDE EFFECT so a re-expansion after a
-    // full-only observe can't restore stale state (the previous compact snapshot).
-    // Deliberately NOT surfaced in the payload — the full escape hatch stays
-    // byte-equivalent to the legacy shape (no snapshot_file field added).
-    persistObserveSnapshot(
+    return compactV2Observation(
       session,
       generation,
-      url,
-      normalizedText,
-      textTruncated,
-      elements.map((el) => toCompactElement(el, refOf(el), true, false)),
-    );
-    const screen = buildScreenOutline(elements);
-    const accessibility = buildAccessibilitySnapshot(elements);
-    return withCheckoutState(
-      {
-        session_id: session.id,
-        url,
-        text: normalizedText,
-        ...(screen !== undefined ? { screen } : {}),
-        ...(accessibility !== undefined ? { accessibility } : {}),
-        elements: elements.map((el) => {
-          const observed: ObservedElement = {
-            ref: refOf(el),
-            label: elementRef(el),
-            tag: el.tag,
-            role: el.role === null ? null : el.role,
-            type: el.type === null ? null : el.type,
-            value: el.value ?? null,
-            checked: el.checked ?? null,
-            href: el.href === null || el.href === undefined ? null : el.href,
-            testId: el.testId === null || el.testId === undefined ? null : el.testId,
-            path: el.screenPath === null || el.screenPath === undefined ? null : el.screenPath,
-            container: el.container === null || el.container === undefined ? null : el.container,
-            topmost: el.topmost ?? null,
-            occluded_by:
-              el.occludedBy === null || el.occludedBy === undefined ? null : el.occludedBy,
-            frame_origin:
-              el.frameOrigin === null || el.frameOrigin === undefined ? null : el.frameOrigin,
-          };
-          return observed;
-        }),
-      },
-      checkoutState,
-      currentCartMutation,
+      capture,
+      semanticSource,
+      startMetadata,
+      sourcePage,
+      outputFormat,
+      compactActionDelta,
+      compactMapEmitted,
+      forceFullDOM,
     );
   } catch (err) {
     const oauth = session.browser.oauthTransitionStatus?.();
@@ -3800,7 +2590,6 @@ function oauthAwaitingHumanObservation(
   session: Session,
   error: OAuthAwaitingHumanError,
 ): Observation {
-  session.prevObserve = null;
   invalidateCompactV2Snapshot(session);
   const url = session.browser.currentUrl();
   const reason = error.message;
@@ -3815,18 +2604,7 @@ function oauthAwaitingHumanObservation(
     ...(error.notification === undefined ? {} : { notification: error.notification }),
     next_action: "operate_observe",
   };
-  return compactV2PublicObservation(
-    session,
-    () => ({
-      session_id: session.id,
-      url,
-      text: "",
-      guidance,
-      elements: [],
-      oauth,
-    }),
-    { stage: "auth", guidance, oauth, url },
-  );
+  return compactV2PublicObservation(session, { stage: "auth", guidance, oauth, url });
 }
 
 function oauthErrorAfterDispatchAttempt(session: Session, error: unknown): Observation | null {
@@ -3840,7 +2618,6 @@ function oauthErrorAfterDispatchAttempt(session: Session, error: unknown): Obser
   ) {
     return null;
   }
-  session.prevObserve = null;
   invalidateCompactV2Snapshot(session);
   const url = session.browser.currentUrl();
   const guidance =
@@ -3851,18 +2628,13 @@ function oauthErrorAfterDispatchAttempt(session: Session, error: unknown): Obser
     completion: "unknown",
     next_action: "operate_observe",
   };
-  return compactV2PublicObservation(
-    session,
-    () => ({ session_id: session.id, url, text: "", guidance, elements: [], oauth }),
-    { stage: "auth", guidance, oauth, url },
-  );
+  return compactV2PublicObservation(session, { stage: "auth", guidance, oauth, url });
 }
 
 function oauthOnboardingRequiredObservation(
   session: Session,
   error: OAuthOnboardingRequiredError,
 ): Observation {
-  session.prevObserve = null;
   invalidateCompactV2Snapshot(session);
   const url = session.browser.currentUrl();
   const guidance =
@@ -3872,11 +2644,7 @@ function oauthOnboardingRequiredObservation(
     reason: error.message,
     next_action: "operate_observe",
   };
-  return compactV2PublicObservation(
-    session,
-    () => ({ session_id: session.id, url, text: "", guidance, elements: [], oauth }),
-    { stage: "form", guidance, oauth, url },
-  );
+  return compactV2PublicObservation(session, { stage: "form", guidance, oauth, url });
 }
 
 async function actInternally(
@@ -4183,10 +2951,7 @@ async function executeAct(
           });
           break;
         }
-        const fresh =
-          session.compactV2Mode === "on"
-            ? (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements
-            : await browser.extractInteractiveElements(compactV2ActionPage);
+        const fresh = (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements;
         retainSessionElements(session, fresh);
         // resolveTarget recomputes identities (incl. volatile positional-group
         // fingerprints) from these FRESH elements, so a ref whose group fingerprint
@@ -4223,10 +2988,7 @@ async function executeAct(
         // Re-resolve against FRESH elements — the target may be the <select> or
         // its <label>. Main-frame execution uses selectOption; frame execution
         // uses selectInFrame. text is the fuzzy option matcher in both paths.
-        const fresh =
-          session.compactV2Mode === "on"
-            ? (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements
-            : await browser.extractInteractiveElements(compactV2ActionPage);
+        const fresh = (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements;
         retainSessionElements(session, fresh);
         const el =
           compactV2Authorization === undefined
@@ -4366,10 +3128,7 @@ async function executeAct(
           break;
         }
         // Re-resolve against FRESH elements every act — never trust a stale index.
-        const fresh =
-          session.compactV2Mode === "on"
-            ? (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements
-            : await browser.extractInteractiveElements(compactV2ActionPage);
+        const fresh = (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements;
         retainSessionElements(session, fresh);
         // resolveTarget recomputes identities (incl. volatile positional-group
         // fingerprints) from these FRESH elements, so a ref whose group fingerprint
@@ -4506,10 +3265,7 @@ async function executeAct(
         // Atomic OAuth deliberately accepts only the observed stable ref. A raw
         // locator would lose the same stale-reference guarantees as every other
         // action before the provider transition begins.
-        const fresh =
-          session.compactV2Mode === "on"
-            ? (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements
-            : await browser.extractInteractiveElements(compactV2ActionPage);
+        const fresh = (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements;
         retainSessionElements(session, fresh);
         const el =
           compactV2Authorization === undefined
@@ -4559,7 +3315,6 @@ async function executeAct(
   if (action.kind === "click" || action.kind === "js_click") {
     actionPageAfter = returnFromClosedPicker(session, actionPageAfter);
   }
-  const urlAfterAction = actionPageAfter?.url() ?? browser.currentUrl();
   // `detail:"none"` returns a minimal ack (the action ran; no perception emitted)
   // so multi-field fills don't each echo the page. The host must call
   // operate_observe before its next ref-targeted act (refs aren't refreshed here).
@@ -4569,24 +3324,14 @@ async function executeAct(
     terminalOAuthCompletionUrl !== null
       ? terminalOAuthCompletionObservation(session, terminalOAuthCompletionUrl)
       : detail === "none" && action.kind !== "oauth_login"
-        ? compactV2PublicObservation(
-            session,
-            () => ({
-              session_id: session.id,
-              url: actionObservationPage?.url() ?? browser.currentUrl(),
-              text: "",
-              elements: [],
-              observed: "none" as const,
-            }),
-            {
-              stage: safeStageV2(
-                actionObservationPage?.url() ?? browser.currentUrl(),
-                session.lastElements,
-              ),
-              observed: "none",
-              url: actionObservationPage?.url() ?? browser.currentUrl(),
-            },
-          )
+        ? compactV2PublicObservation(session, {
+            stage: safeStageV2(
+              actionObservationPage?.url() ?? browser.currentUrl(),
+              session.lastElements,
+            ),
+            observed: "none",
+            url: actionObservationPage?.url() ?? browser.currentUrl(),
+          })
         : await observeSession(
             session,
             detail === "none" ? "compact" : detail,

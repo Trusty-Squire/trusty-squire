@@ -1,4 +1,5 @@
 import { operatorHandlerForwarder } from "./operator-handler-forwarder.js";
+import { mockBrowserUseCapture } from "../bot/__tests__/browser-use-test-capture.js";
 // Operator crash hardening: malformed / erroring operate_* calls must come
 // back as clean per-call tool errors, and the server must keep serving the
 // NEXT call. A live Hermes-driven checkout run sent a batch of operator calls
@@ -131,6 +132,9 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
       armOpenedTabAdoption: vi.fn(),
       adoptOpenedTab: vi.fn(async () => null),
       extractInteractiveElements: vi.fn().mockResolvedValue([]),
+      extractBrowserUseObservation: vi.fn(async () => mockBrowserUseCapture([])),
+      extractObservationSemantics: vi.fn(async () => ({ title: "", headings: [] })),
+      mainDocumentIdentity: vi.fn().mockReturnValue("doc"),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout session still active"),
       currentUrl: vi.fn().mockReturnValue(url),
       activePage: vi.fn().mockReturnValue(null),
@@ -172,11 +176,11 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
       expect(JSON.parse(resultText(malformed)).error.code).toBe("invalid_arguments");
       expect(JSON.parse(resultText(unknown)).error.code).toBe("unknown_tool");
       expect(observed.isError).not.toBe(true);
-      expect(started.text).toBe("Checkout session still active");
+      expect(started.format).toBe("browser-use-control-query");
       expect(JSON.parse(resultText(observed))).toMatchObject({
         session_id: started.session_id,
         url,
-        text_unchanged: true,
+        format: "browser-use-control-query",
       });
       expect(browser.currentUrl).toHaveBeenCalled();
     } finally {
@@ -297,6 +301,9 @@ it("roundtrips flat finish schemas and typed receipts through the MCP SDK", asyn
     armOpenedTabAdoption: vi.fn(),
     adoptOpenedTab: vi.fn(async () => null),
     extractInteractiveElements: vi.fn().mockResolvedValue([]),
+    extractBrowserUseObservation: vi.fn(async () => mockBrowserUseCapture([])),
+    extractObservationSemantics: vi.fn(async () => ({ title: "", headings: [] })),
+    mainDocumentIdentity: vi.fn().mockReturnValue("doc"),
     extractVisibleText: vi.fn().mockResolvedValue("Ready"),
     currentUrl: () => "https://schema.test/",
     activePage: () => null,

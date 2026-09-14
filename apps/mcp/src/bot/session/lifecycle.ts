@@ -29,9 +29,6 @@ import { brokerBrowserCustody } from "../broker/custody.js";
 // runtime import cycle, exactly as session/model.ts does with its type-only
 // back-reference.
 import { randomUUID } from "node:crypto";
-import { lstatSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { BrowserController } from "../browser.js";
 import { compactV2AuditValue } from "../compact-observation-v2.js";
 import type { ApiClient } from "../../api-client.js";
@@ -89,13 +86,9 @@ export function audit(
   event: string,
   detail: Record<string, unknown> = {},
 ): void {
-  const session = sessions.get(sessionId);
-  const sealedDetail =
-    session?.compactV2Mode === "on"
-      ? Object.fromEntries(
-          Object.entries(detail).map(([key, value]) => [key, compactV2AuditValue(key, value)]),
-        )
-      : detail;
+  const sealedDetail = Object.fromEntries(
+    Object.entries(detail).map(([key, value]) => [key, compactV2AuditValue(key, value)]),
+  );
   process.stderr.write(
     `${JSON.stringify({ marker: "provision-audit", surface: "operate", session_id: sessionId, event, ...sealedDetail })}\n`,
   );
@@ -473,21 +466,6 @@ export async function withPaymentSessionCall<T>(
   return await withSelectedProvisionSessionCall(session, fn);
 }
 
-// Where a session's rolling observe snapshot lives. Owned here because the
-// terminal artifact cleanup must remove exactly this directory; perception
-// writes into it through the same helper.
-export function observeSnapshotDir(sessionId: string): string {
-  const override = (process.env.TRUSTY_SQUIRE_OBSERVE_DIR ?? "").trim();
-  const parent = override.length > 0 ? override : join(tmpdir(), "trusty-squire-observe");
-  return join(parent, sessionId);
-}
-
-function configuredCompactV2Mode(): "off" | "on" {
-  const configured = (process.env.TRUSTY_SQUIRE_OBSERVE_V2 ?? "on").toLowerCase();
-  if (configured === "off" || configured === "0") return "off";
-  return "on";
-}
-
 // ── start ──
 
 export interface StartOptions {
@@ -510,7 +488,6 @@ export interface StartOptions {
 
 export interface HarnessStartOptions extends Omit<StartOptions, "profileDir" | "proxyUrl"> {
   browser: BrowserController;
-  observationFormat?: "v1" | "browser-use-dom";
 }
 
 // Fail-closed precondition GATE — NOT autonomous recovery. An operate task that
@@ -578,8 +555,7 @@ export async function startProvisionSession(
   ports: SessionStartPorts,
 ): Promise<Observation> {
   const id = randomUUID();
-  const compactV2Mode = configuredCompactV2Mode();
-  const requestedFormat = opts.format ?? (compactV2Mode === "on" ? "full" : "compact");
+  const requestedFormat = opts.format ?? "full";
   let browser: BrowserController;
   let liveProviders: OAuthProviderId[];
   let workerEmail: string | null = null;
@@ -603,24 +579,22 @@ export async function startProvisionSession(
       audit(id, "connect_gate", { ok: false, wall: "google_session" });
       await releaseWarmBrowserPage(browser, false);
       refusedStartSessionIds.add(id);
-      return compactV2Mode === "on"
-        ? requestedFormat === "full"
-          ? {
-              session_id: id,
-              format: "browser-use-dom",
-              stage: "auth",
-              url: "",
-              needs_user: gate.needs_user,
-            }
-          : {
-              session_id: id,
-              format: "browser-use-control-query",
-              stage: "auth",
-              url: "",
-              safe_table: [],
-              needs_user: gate.needs_user,
-            }
-        : { session_id: id, url: "", text: "", elements: [], needs_user: gate.needs_user };
+      return requestedFormat === "full"
+        ? {
+            session_id: id,
+            format: "browser-use-dom",
+            stage: "auth",
+            url: "",
+            needs_user: gate.needs_user,
+          }
+        : {
+            session_id: id,
+            format: "browser-use-control-query",
+            stage: "auth",
+            url: "",
+            safe_table: [],
+            needs_user: gate.needs_user,
+          };
     }
     if (custody === undefined)
       workerEmail =
@@ -642,7 +616,6 @@ export async function startProvisionSession(
     id,
     browser,
     allowedHosts,
-    compactV2Mode,
     startUrl: opts.serviceUrl,
     consentInboxRead: opts.consentInboxRead !== false,
     userEmail: workerEmail,
@@ -704,8 +677,7 @@ export async function startHarnessProvisionSession(
   ports: SessionStartPorts,
 ): Promise<Observation> {
   const id = randomUUID();
-  const requestedFormat =
-    opts.format ?? (opts.observationFormat === "browser-use-dom" ? "full" : "compact");
+  const requestedFormat = opts.format ?? "compact";
   const targetHost = registrableHost(opts.serviceUrl);
   const allowedHosts: AllowedHostEntry[] = [...(targetHost === null ? [] : [targetHost])]
     .filter((host, index, hosts) => hosts.indexOf(host) === index)
@@ -717,7 +689,6 @@ export async function startHarnessProvisionSession(
     id,
     browser: opts.browser,
     allowedHosts,
-    compactV2Mode: opts.observationFormat === "browser-use-dom" ? "on" : "off",
     startUrl: opts.serviceUrl,
     consentInboxRead: opts.consentInboxRead !== false,
     userEmail: null,
@@ -775,85 +746,8 @@ export interface PreparedFinishResult<T> {
   prepared: T | undefined;
 }
 
-const OBSERVE_SNAPSHOT_CLEANUP_RETRY_MS = 250;
-const OBSERVE_SNAPSHOT_SHUTDOWN_DRAIN_MS = 500;
-const pendingObserveSnapshotCleanup = new Set<string>();
-let observeSnapshotCleanupTimer: ReturnType<typeof setTimeout> | null = null;
-
-function observeSnapshotPathState(path: string): "present" | "missing" | "unknown" {
-  try {
-    lstatSync(path);
-    return "present";
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unknown";
-  }
-}
-
-function scheduleObserveSnapshotCleanup(): void {
-  if (observeSnapshotCleanupTimer !== null || pendingObserveSnapshotCleanup.size === 0) return;
-  observeSnapshotCleanupTimer = setTimeout(() => {
-    observeSnapshotCleanupTimer = null;
-    retryPendingObserveSnapshotCleanup();
-    scheduleObserveSnapshotCleanup();
-  }, OBSERVE_SNAPSHOT_CLEANUP_RETRY_MS);
-  observeSnapshotCleanupTimer.unref();
-}
-
-function retryPendingObserveSnapshotCleanup(): void {
-  for (const path of pendingObserveSnapshotCleanup) {
-    try {
-      rmSync(path, { recursive: true, force: true });
-    } catch {}
-    if (observeSnapshotPathState(path) === "missing") {
-      pendingObserveSnapshotCleanup.delete(path);
-    }
-  }
-}
-
-async function drainPendingObserveSnapshotCleanup(): Promise<void> {
-  if (observeSnapshotCleanupTimer !== null) {
-    clearTimeout(observeSnapshotCleanupTimer);
-    observeSnapshotCleanupTimer = null;
-  }
-  const deadline = Date.now() + OBSERVE_SNAPSHOT_SHUTDOWN_DRAIN_MS;
-  do {
-    retryPendingObserveSnapshotCleanup();
-    if (pendingObserveSnapshotCleanup.size === 0) return;
-    await new Promise<void>((resolveWait) => {
-      setTimeout(resolveWait, Math.min(25, Math.max(1, deadline - Date.now())));
-    });
-  } while (Date.now() < deadline);
-  retryPendingObserveSnapshotCleanup();
-  scheduleObserveSnapshotCleanup();
-}
-
-function removeObserveSnapshotDirectory(path: string): unknown | undefined {
-  let failure: unknown;
-  try {
-    rmSync(path, { recursive: true, force: true });
-  } catch (error) {
-    failure = error;
-  }
-  if (observeSnapshotPathState(path) === "missing") {
-    pendingObserveSnapshotCleanup.delete(path);
-  } else {
-    pendingObserveSnapshotCleanup.add(path);
-    scheduleObserveSnapshotCleanup();
-  }
-  return failure;
-}
-
 function clearSessionArtifacts(session: Session): void {
-  session.prevObserve = null;
-  session.observeSnapshotFile = null;
   session.secretSlots.clear();
-  const error = removeObserveSnapshotDirectory(observeSnapshotDir(session.id));
-  if (error !== undefined) {
-    const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(
-      `[operator] session artifact cleanup failed session=${session.id}: ${message}\n`,
-    );
-  }
 }
 
 function deregisterProvisionSession(session: Session): void {
@@ -886,8 +780,6 @@ async function closeFinishingProvisionSession(
     session.terminalTeardownOwner ?? undefined,
     async () => {
       clearSessionArtifacts(session);
-      if (observeSnapshotPathState(observeSnapshotDir(session.id)) !== "missing")
-        throw new Error("operator artifact cleanup unproven");
       await persistOperatorTerminalReceipt(receipt);
     },
   );
@@ -1038,7 +930,6 @@ export async function closeAllProvisionSessions(): Promise<void> {
     })();
   } finally {
     refusedStartSessionIds.clear();
-    await drainPendingObserveSnapshotCleanup();
     shutdownInProgress -= 1;
   }
 }

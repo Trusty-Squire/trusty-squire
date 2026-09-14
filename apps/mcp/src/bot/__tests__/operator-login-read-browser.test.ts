@@ -38,7 +38,6 @@ it("reads current login controls repeatedly and fills the matching saved fields 
     const start = await startHarnessProvisionSession({
       browser: BrowserController.fromHarnessPage(page),
       serviceUrl: "https://fixture.test/login",
-      observationFormat: "browser-use-dom",
       format: "compact",
     });
     sessionId = start.session_id;

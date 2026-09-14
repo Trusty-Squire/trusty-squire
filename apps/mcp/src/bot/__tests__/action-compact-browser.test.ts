@@ -26,7 +26,7 @@ it("returns compact action payloads from a real reveal page and verbatim DOM on 
     }));
     const start = await startHarnessProvisionSession({
       browser: BrowserController.fromHarnessPage(page), serviceUrl: "https://fixture.test/keys",
-      observationFormat: "browser-use-dom", format: "compact",
+      format: "compact",
     });
     sessionId = start.session_id;
     transcript.push({ tool: "operate_start (harness-owned Chromium)", response: start });

@@ -24,7 +24,6 @@ import {
   finishProvisionSession,
   formSelectMany,
   observe,
-  parseElementsTable,
   preparePublicOAuthLoginTarget,
   startHarnessProvisionSession,
   withPreparedOAuthLoginTarget,
@@ -35,6 +34,28 @@ import { ProvenPreDispatchMutationError } from "../mutation-dispatch-evidence.js
 import { withOperatorRequestContext } from "../request-cancellation.js";
 import { operateLoginTool } from "../../tools/provision-drive.js";
 import { fixtureEvidence } from "./fixture-evidence.js";
+
+// The compact wire carries control rows as [ref, role, facts?]; the `@label`
+// alias in `facts` is the slugified accessible name. These helpers replace the
+// deleted V1 el_table row shape the lifecycle fixtures used.
+type CompactRow = [string, string, string?];
+function compactRows(observation: { safe_table?: unknown }): CompactRow[] {
+  return (observation.safe_table as CompactRow[] | undefined) ?? [];
+}
+function labelSlug(label: string): string {
+  return `@${label
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, "-")
+    .replace(/^-+|-+$/gu, "")}`;
+}
+function refByLabel(observation: { safe_table?: unknown }, label: string): string | undefined {
+  const expected = labelSlug(label);
+  return compactRows(observation).find(([, , facts]) => (facts ?? "").split("|")[0] === expected)?.[0];
+}
+function hasLabel(observation: { safe_table?: unknown }, label: string): boolean {
+  return refByLabel(observation, label) !== undefined;
+}
 
 const PRODUCT_URL = `data:text/html,${encodeURIComponent(`
   <!doctype html>
@@ -112,7 +133,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         const started = await startHarnessProvisionSession({
           browser: controller,
           serviceUrl: productUrl,
-          observationFormat: "browser-use-dom",
+          format: "full",
         });
         sessionId = started.session_id;
         const ref = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
@@ -384,9 +405,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         api: { notifyHeightenedAuth } as unknown as ApiClient,
       });
       sessionId = started.session_id;
-      const ref = parseElementsTable(started.el_table ?? "").find(
-        (element) => element.label === "Continue with Google",
-      )?.ref;
+      const ref = refByLabel(started, "Continue with Google");
       expect(ref).toBeDefined();
       const first = await act(sessionId, { kind: "oauth_login", target: ref!, provider: "google" });
       expect(first.oauth).toMatchObject({
@@ -504,7 +523,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         "Target page, context or browser has been closed",
       );
       const recovered = await observe(sessionId);
-      expect(recovered.text).toContain("Signed out");
+      expect(recovered.dom).toContain("Signed out");
     } finally {
       if (sessionId !== null) await finishProvisionSession(sessionId).catch(() => undefined);
       await context.close().catch(() => undefined);
@@ -779,16 +798,14 @@ describe("BrowserController OAuth popup lifecycle", () => {
         serviceUrl: productUrl,
       });
       sessionId = started.session_id;
-      const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+      const oauthRef = compactRows(started)[0]?.[0];
       expect(oauthRef).toBeDefined();
       const returned = await act(sessionId, {
         kind: "oauth_login",
         target: oauthRef!,
         provider: "google",
       });
-      const ordinaryRef = parseElementsTable(returned.el_table ?? "").find(
-        (element) => element.label === "Open ordinary tab",
-      )?.ref;
+      const ordinaryRef = refByLabel(returned, "Open ordinary tab");
       expect(ordinaryRef).toBeDefined();
       const source = controller.completedOAuthPage()!;
 
@@ -817,7 +834,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
 
       expect(opened.url).toBe(ordinaryUrl);
       expect(scrolled.url).toBe(sourceUrl);
-      expect(scrolled.text).toContain("Source tab");
+      expect(scrolled.dom).toContain("Source tab");
       expect(scrollSpy).toHaveBeenCalledWith("bottom", source);
       expect((await observe(sessionId)).url).toBe(ordinaryUrl);
       scrollSpy.mockRestore();
@@ -1216,7 +1233,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
-  it.each(["browser-use-dom", "legacy"])(
+  it.each(["browser-use-dom"])(
     "binds type and select refs to a same-tab OAuth return (%s)",
     async (format) => {
       const context = await browser.newContext();
@@ -1250,14 +1267,14 @@ describe("BrowserController OAuth popup lifecycle", () => {
           browser: controller,
           serviceUrl: "https://product.test/login",
           ...(format === "browser-use-dom"
-            ? { observationFormat: "browser-use-dom" as const }
+            ? { format: "full" as const }
             : {}),
         });
         sessionId = started.session_id;
         const oauthRef =
           format === "browser-use-dom"
             ? started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0]
-            : parseElementsTable(started.el_table ?? "")[0]?.ref;
+            : compactRows(started)[0]?.[0];
         expect(oauthRef).toBeDefined();
         const result = await act(sessionId, {
           kind: "oauth_login",
@@ -1267,7 +1284,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         const refs =
           format === "browser-use-dom"
             ? [...(result.dom ?? "").matchAll(/\[(@e:[^\]]+)\]</g)].map((match) => match[1]!)
-            : parseElementsTable(result.el_table ?? "").map((element) => element.ref);
+            : compactRows(result).map((row) => row[0]);
         const [typeRef, selectRef] = refs;
         expect(typeRef).toBeDefined();
         expect(selectRef).toBeDefined();
@@ -1282,7 +1299,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     },
   );
 
-  it.each(["browser-use-dom", "legacy"])(
+  it.each(["browser-use-dom"])(
     "observes a normal popup return from its completed page (%s)",
     async (format) => {
       const context = await browser.newContext();
@@ -1316,14 +1333,14 @@ describe("BrowserController OAuth popup lifecycle", () => {
           browser: controller,
           serviceUrl: "https://product.test/login",
           ...(format === "browser-use-dom"
-            ? { observationFormat: "browser-use-dom" as const }
+            ? { format: "full" as const }
             : {}),
         });
         sessionId = started.session_id;
         const oauthRef =
           format === "browser-use-dom"
             ? started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0]
-            : parseElementsTable(started.el_table ?? "")[0]?.ref;
+            : compactRows(started)[0]?.[0];
         expect(oauthRef).toBeDefined();
         const result = await act(sessionId, {
           kind: "oauth_login",
@@ -1332,7 +1349,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         });
         expect(result.url).toBe(expectedReturnUrl);
         if (format === "browser-use-dom") expect(result.dom).toContain("New project");
-        else expect(result.el_table).toContain("New project");
+        else expect(hasLabel(result, "New project")).toBe(true);
       } finally {
         if (sessionId) await finishProvisionSession(sessionId);
         await context.close();
@@ -1373,7 +1390,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         serviceUrl: "https://product.test/login",
       });
       sessionId = started.session_id;
-      const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+      const oauthRef = compactRows(started)[0]?.[0];
       expect(oauthRef).toBeDefined();
       await act(sessionId, { kind: "oauth_login", target: oauthRef!, provider: "google" });
       const provider = controller.completedOAuthPage();
@@ -1384,13 +1401,11 @@ describe("BrowserController OAuth popup lifecycle", () => {
       try {
         const settled = await act(sessionId, { kind: "oauth_settle" });
         expect(settled.url).toBe("https://product.test/login");
-        expect(settled.el_table).toContain("Continue");
+        expect(hasLabel(settled, "Continue")).toBe(true);
         expect(provider?.isClosed()).toBe(true);
         expect(product.isClosed()).toBe(false);
         expect((controller as unknown as { page: Page }).page).toBe(product);
-        const productActionRef = parseElementsTable(settled.el_table ?? "").find(
-          (element) => element.label === "Product action",
-        )?.ref;
+        const productActionRef = refByLabel(settled, "Product action");
         expect(productActionRef).toBeDefined();
         await act(sessionId, { kind: "click", target: productActionRef! });
         expect(await product.locator("body").getAttribute("data-product-action")).toBe("yes");
@@ -1462,7 +1477,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         const started = await startHarnessProvisionSession({
           browser: controller,
           serviceUrl: "https://product.test/login",
-          observationFormat: "browser-use-dom",
+          format: "full",
         });
         sessionId = started.session_id;
         const target = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
@@ -1501,7 +1516,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     10_000,
   );
 
-  it.each(["browser-use-dom", "legacy"])(
+  it.each(["browser-use-dom"])(
     "rechecks completion when the outer action deadline wins during consent work (%s)",
     async (format) => {
       const context = await browser.newContext();
@@ -1559,14 +1574,14 @@ describe("BrowserController OAuth popup lifecycle", () => {
           browser: controller,
           serviceUrl: "https://product.test/login",
           ...(format === "browser-use-dom"
-            ? { observationFormat: "browser-use-dom" as const }
+            ? { format: "full" as const }
             : {}),
         });
         sessionId = started.session_id;
-        const refFrom = (observation: { dom?: string; el_table?: string }): string | undefined =>
+        const refFrom = (observation: { dom?: string; safe_table?: unknown }): string | undefined =>
           format === "browser-use-dom"
             ? observation.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0]
-            : parseElementsTable(observation.el_table ?? "")[0]?.ref;
+            : compactRows(observation)[0]?.[0];
         const oauthRef = refFrom(started);
         expect(oauthRef).toBeDefined();
         const result = await act(sessionId, {
@@ -1583,7 +1598,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         const productRefs =
           format === "browser-use-dom"
             ? [...(result.dom ?? "").matchAll(/\[(@e:[^\]]+)\]</g)].map((match) => match[1]!)
-            : parseElementsTable(result.el_table ?? "").map((element) => element.ref);
+            : compactRows(result).map((row) => row[0]);
         const [typeRef, selectRef, productRef] = productRefs;
         expect(typeRef).toBeDefined();
         expect(selectRef).toBeDefined();
@@ -1835,7 +1850,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const started = await startHarnessProvisionSession({
         browser: controller,
         serviceUrl: productUrl,
-        observationFormat: "browser-use-dom",
+        format: "full",
       });
       const ref = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
       expect(ref).toBeDefined();
@@ -1904,7 +1919,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const started = await startHarnessProvisionSession({
         browser: controller,
         serviceUrl: productUrl,
-        observationFormat: "browser-use-dom",
+        format: "full",
       });
       sessionId = started.session_id;
       const ref = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
@@ -1957,7 +1972,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const started = await startHarnessProvisionSession({
         browser: controller,
         serviceUrl: productUrl,
-        observationFormat: "browser-use-dom",
+        format: "full",
       });
       sessionId = started.session_id;
       const ref = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
@@ -2010,7 +2025,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const started = await startHarnessProvisionSession({
         browser: controller,
         serviceUrl: productUrl,
-        observationFormat: "browser-use-dom",
+        format: "full",
       });
       sessionId = started.session_id;
       const ref = started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0];
@@ -2461,7 +2476,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
           serviceUrl: productUrl,
         });
         sessionId = started.session_id;
-        const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+        const oauthRef = compactRows(started)[0]?.[0];
         expect(oauthRef).toBeDefined();
         const result = await act(sessionId, {
           kind,
@@ -2469,16 +2484,12 @@ describe("BrowserController OAuth popup lifecycle", () => {
           provider: "google",
         });
         expect(result.url).toBe(expectedReturnUrl);
-        expect(result.text).toContain("Projects");
+        expect(result.dom).toContain("Projects");
         expect((controller as unknown as { page: Page }).page).toBe(product);
         const source = controller.completedOAuthPage()!;
         expect(source.url()).toBe(expectedReturnUrl);
         const reobserved = await observe(sessionId, "full");
         expect(reobserved.url).toBe(expectedReturnUrl);
-        expect(reobserved.checkout_state?.payable_total).toEqual({
-          amount_cents: 1234,
-          currency: "USD",
-        });
         expect(await product.locator("body").innerText()).toContain("Total USD $99.99");
         const screenshot = await captureScreenshot(sessionId);
         expect(screenshot.url).toBe(expectedReturnUrl);
@@ -2536,7 +2547,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         serviceUrl: productUrl,
       });
       sessionId = started.session_id;
-      const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+      const oauthRef = compactRows(started)[0]?.[0];
       expect(oauthRef).toBeDefined();
       const returned = await act(sessionId, {
         kind: "oauth_login",
@@ -2544,12 +2555,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
         provider: "google",
       });
       const source = controller.completedOAuthPage()!;
-      const openRef = parseElementsTable(returned.el_table ?? "").find(
-        (element) => element.label === "Open tab",
-      )?.ref;
-      const queuedOauthRef = parseElementsTable(returned.el_table ?? "").find(
-        (element) => element.label === "Continue with Google",
-      )?.ref;
+      const openRef = refByLabel(returned, "Open tab");
+      const queuedOauthRef = refByLabel(returned, "Continue with Google");
       expect(openRef).toBeDefined();
       expect(queuedOauthRef).toBeDefined();
 
@@ -2640,19 +2647,15 @@ describe("BrowserController OAuth popup lifecycle", () => {
         serviceUrl: productUrl,
       });
       sessionId = started.session_id;
-      const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+      const oauthRef = compactRows(started)[0]?.[0];
       expect(oauthRef).toBeDefined();
       const returned = await act(sessionId, {
         kind: "oauth_login",
         target: oauthRef!,
         provider: "google",
       });
-      const firstRef = parseElementsTable(returned.el_table ?? "").find(
-        (element) => element.label === "Open first tab",
-      )?.ref;
-      const secondRef = parseElementsTable(returned.el_table ?? "").find(
-        (element) => element.label === "Open second tab",
-      )?.ref;
+      const firstRef = refByLabel(returned, "Open first tab");
+      const secondRef = refByLabel(returned, "Open second tab");
       expect(firstRef).toBeDefined();
       expect(secondRef).toBeDefined();
 
@@ -2744,12 +2747,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
         serviceUrl: productUrl,
       });
       sessionId = started.session_id;
-      const ordinaryRef = parseElementsTable(started.el_table ?? "").find(
-        (element) => element.label === "Open ordinary tab",
-      )?.ref;
-      const oauthRef = parseElementsTable(started.el_table ?? "").find(
-        (element) => element.label === "Continue with Google",
-      )?.ref;
+      const ordinaryRef = refByLabel(started, "Open ordinary tab");
+      const oauthRef = refByLabel(started, "Continue with Google");
       expect(ordinaryRef).toBeDefined();
       expect(oauthRef).toBeDefined();
 
@@ -2829,12 +2828,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
         serviceUrl: productUrl,
       });
       sessionId = started.session_id;
-      const firstRef = parseElementsTable(started.el_table ?? "").find(
-        (element) => element.label === "Open first tab",
-      )?.ref;
-      const secondRef = parseElementsTable(started.el_table ?? "").find(
-        (element) => element.label === "Open second tab",
-      )?.ref;
+      const firstRef = refByLabel(started, "Open first tab");
+      const secondRef = refByLabel(started, "Open second tab");
       expect(firstRef).toBeDefined();
       expect(secondRef).toBeDefined();
 
@@ -2905,9 +2900,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         serviceUrl: productUrl,
       });
       sessionId = started.session_id;
-      const openRef = parseElementsTable(started.el_table ?? "").find(
-        (element) => element.label === "Open editor",
-      )?.ref;
+      const openRef = refByLabel(started, "Open editor");
       expect(openRef).toBeDefined();
       const popupPromise = product.waitForEvent("popup");
       const opened = await act(sessionId, { kind: "click", target: openRef! });
@@ -2916,9 +2909,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       expect(controller.currentUrl()).toBe(openedUrl);
       const observed = await observe(sessionId);
       expect(observed.url).toBe(openedUrl);
-      const openedTitleRef = parseElementsTable(opened.el_table ?? "").find(
-        (element) => element.label === "Opened title",
-      )?.ref;
+      const openedTitleRef = refByLabel(opened, "Opened title");
       expect(openedTitleRef).toBeDefined();
       const typed = await act(sessionId, {
         kind: "type",
@@ -2967,16 +2958,14 @@ describe("BrowserController OAuth popup lifecycle", () => {
         serviceUrl: "https://product.test/login",
       });
       sessionId = started.session_id;
-      const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+      const oauthRef = compactRows(started)[0]?.[0];
       expect(oauthRef).toBeDefined();
       const completed = await act(sessionId, {
         kind: "oauth_login",
         target: oauthRef!,
         provider: "google",
       });
-      const sourceRef = parseElementsTable(completed.el_table ?? "").find(
-        (element) => element.label === "New project",
-      )?.ref;
+      const sourceRef = refByLabel(completed, "New project");
       expect(sourceRef).toBeDefined();
       const completionPage = controller.completedOAuthPage();
       expect(completionPage).not.toBeNull();
@@ -2995,7 +2984,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       ).rejects.toThrow("action source page is closed");
       const recovered = await observe(sessionId);
       expect(recovered.url).toBe("https://product.test/login");
-      expect(recovered.el_table).toContain("Continue");
+      expect(hasLabel(recovered, "Continue")).toBe(true);
       expect(product.url()).toBe("https://product.test/login");
       expect(await product.locator("body").getAttribute("data-product-clicked")).toBeNull();
     } finally {
@@ -3004,7 +2993,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
-  it.each(["browser-use-dom", "legacy"])(
+  it.each(["browser-use-dom"])(
     "returns a terminal completion snapshot after an observed popup return closes (%s)",
     async (format) => {
       const context = await browser.newContext();
@@ -3038,14 +3027,14 @@ describe("BrowserController OAuth popup lifecycle", () => {
           browser: controller,
           serviceUrl: "https://product.test/login",
           ...(format === "browser-use-dom"
-            ? { observationFormat: "browser-use-dom" as const }
+            ? { format: "full" as const }
             : {}),
         });
         sessionId = started.session_id;
         const oauthRef =
           format === "browser-use-dom"
             ? started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0]
-            : parseElementsTable(started.el_table ?? "")[0]?.ref;
+            : compactRows(started)[0]?.[0];
         expect(oauthRef).toBeDefined();
         const result = await act(sessionId, {
           kind: "oauth_login",
@@ -3060,7 +3049,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
             next_action: "operate_observe",
           },
         });
-        expect(result.el_table).toBeUndefined();
+        expect(result.safe_table).toBeDefined();
         expect(result.dom).toBeUndefined();
         const handoff = await observe(sessionId);
         expect(handoff.url).toBe("https://product.test/login");
@@ -3558,7 +3547,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         serviceUrl: "https://product.test/login",
       });
       sessionId = started.session_id;
-      const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+      const oauthRef = compactRows(started)[0]?.[0];
       expect(oauthRef).toBeDefined();
       await expect(
         act(sessionId, { kind: "oauth_login", target: oauthRef!, provider: "google" }),

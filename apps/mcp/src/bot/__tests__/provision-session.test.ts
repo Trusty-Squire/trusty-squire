@@ -8,7 +8,6 @@ import {
   stableElementId,
   AmbiguousProvisionTargetError,
   elementRef,
-  buildAccessibilitySnapshot,
   isInboxReadHost,
   parseVerification,
   extractSenderEmail,
@@ -18,13 +17,10 @@ import {
   generatePassword,
   classifyVouchflowCredentials,
   sanitizeExtractedCredentials,
-  buildScreenOutline,
   maskSecretValue,
   googleSessionGate,
   buildVerificationSearchQuery,
   makeTwoCaptchaVaultProxy,
-  toCompactElement,
-  paymentFieldForObservation,
 } from "../provision-session.js";
 import {
   looksLikeCodeIdentifier,
@@ -61,126 +57,6 @@ function el(partial: Partial<InteractiveElement>): InteractiveElement {
   };
 }
 
-describe("toCompactElement (BOT_OBSERVE_COMPACT)", () => {
-  it("omits empty fields — a bare button is just ref/label/tag", () => {
-    const c = toCompactElement(el({ tag: "button", visibleText: "Continue" }), "@g1:x");
-    expect(c).toEqual({ ref: "@g1:x", label: "Continue", tag: "button" });
-    // no null keys serialized
-    expect(Object.values(c).every((v) => v !== null && v !== undefined)).toBe(true);
-  });
-
-  it("leaves a card-number control directly targetable without payment orchestration metadata", () => {
-    const card = el({
-      tag: "input",
-      type: "text",
-      autocomplete: "cc-number",
-      id: "pv-card-number",
-      labelText: "Card number",
-    });
-    expect(paymentFieldForObservation(card)).toBe("card_number");
-    const compact = toCompactElement(card, "@e:card");
-    expect(compact).toMatchObject({ ref: "@e:card", label: "Card number", tag: "input" });
-    expect(compact).not.toHaveProperty("payment_field");
-    expect(compact).not.toHaveProperty("interaction");
-    expect(compact).not.toHaveProperty("recommended_action");
-  });
-
-  it("keeps role/type/href/testId; DROPS path from the default payload and the redundant container", () => {
-    const args = el({
-      tag: "a",
-      role: "link",
-      type: null,
-      visibleText: "Docs",
-      href: "/docs",
-      testId: "docs-link",
-      screenPath: "nav:main > link:docs",
-      container: "nav:main",
-    });
-    const c = toCompactElement(args, "@e:d_1");
-    expect(c.href).toBe("/docs");
-    expect(c.testId).toBe("docs-link");
-    // path is the single most verbose field and agents act by ref — dropped from
-    // the default payload (85% cut), retained only in the persisted snapshot.
-    expect("path" in c).toBe(false);
-    expect("container" in c).toBe(false); // redundant with path
-    expect("value" in c).toBe(false);
-    // includePath=true (the persisted snapshot form) DOES carry path.
-    const withPath = toCompactElement(args, "@e:d_1", true);
-    expect(withPath.path).toBe("nav:main > link:docs");
-  });
-
-  it("reports the REAL value_len for every field, password fields included", () => {
-    const filled = toCompactElement(
-      el({ tag: "input", type: "text", value: "hello@example.com" }),
-      "@g1:e",
-    );
-    expect(filled.value_len).toBe("hello@example.com".length);
-    expect("value" in filled).toBe(false);
-
-    // A password field is no longer a special case: same real length, and the
-    // compact element form carries value_len rather than value for every field
-    // as a size budget, not as a seal.
-    const password = toCompactElement(
-      el({ tag: "input", type: "password", value: "supersecret" }),
-      "@g1:p",
-    );
-    expect(password.value_len).toBe("supersecret".length);
-    expect("value" in password).toBe(false);
-  });
-
-  it("keeps checked for real checkables (true AND false), omits when null", () => {
-    expect(
-      toCompactElement(el({ tag: "input", type: "checkbox", checked: true }), "@g1:a").checked,
-    ).toBe(true);
-    expect(
-      toCompactElement(el({ tag: "input", type: "checkbox", checked: false }), "@g1:b").checked,
-    ).toBe(false);
-    expect("checked" in toCompactElement(el({ tag: "button", checked: null }), "@g1:c")).toBe(
-      false,
-    );
-  });
-
-  it("emits topmost only when false and occluded_by only when set", () => {
-    const occluded = toCompactElement(
-      el({ tag: "button", visibleText: "Hidden", topmost: false, occludedBy: "modal:dialog" }),
-      "@g1:o",
-    );
-    expect(occluded.topmost).toBe(false);
-    expect(occluded.occluded_by).toBe("modal:dialog");
-    const top = toCompactElement(el({ tag: "button", visibleText: "Top", topmost: true }), "@g1:t");
-    expect("topmost" in top).toBe(false);
-    expect("occluded_by" in top).toBe(false);
-  });
-
-  it("is materially smaller than the full element shape", () => {
-    const e = el({
-      tag: "a",
-      role: "link",
-      visibleText: "Pricing",
-      href: "/pricing",
-      screenPath: "navigation:skip-to-contentopenroutersearch > link:pricing",
-      container: "navigation:skip-to-contentopenroutersearch",
-      topmost: true,
-    });
-    const full = {
-      ref: "@g1:z",
-      label: "Pricing",
-      tag: "a",
-      role: "link",
-      type: null,
-      value: null,
-      checked: null,
-      href: "/pricing",
-      testId: null,
-      path: "navigation:skip-to-contentopenroutersearch > link:pricing",
-      container: "navigation:skip-to-contentopenroutersearch",
-      topmost: true,
-      occluded_by: null,
-    };
-    const compactBytes = JSON.stringify(toCompactElement(e, "@g1:z")).length;
-    expect(compactBytes).toBeLessThan(JSON.stringify(full).length * 0.6);
-  });
-});
 
 describe("elementRef", () => {
   it("prefers visibleText, then falls back through the label chain", () => {
@@ -353,85 +229,6 @@ describe("resolveTarget", () => {
   });
 });
 
-describe("buildAccessibilitySnapshot", () => {
-  it("renders an AXI-style action tree with generated refs and regions", () => {
-    const elements = [
-      el({
-        visibleText: "Create account",
-        role: "button",
-        container: "dialog:finish-account",
-        screenPath: "dialog:finish-account > button:create-account",
-        selector: "#create",
-      }),
-      el({
-        tag: "input",
-        placeholder: "Email",
-        value: "",
-        container: "form:signup",
-        screenPath: "form:signup > textbox:email",
-        selector: "#email",
-      }),
-    ];
-    const snap = buildAccessibilitySnapshot(elements);
-    expect(snap?.source).toBe("interactive_dom");
-    expect(snap?.refs).toBe(2);
-    expect(snap?.tree).toContain('region "dialog:finish-account"');
-    expect(snap?.tree).toContain('button "Create account" ref=@e:');
-    expect(snap?.tree).toContain('textbox "Email" ref=@e:');
-  });
-
-  it("reports a password-type field's real value — nothing is masked", () => {
-    const elements = [
-      el({
-        tag: "input",
-        type: "password",
-        value: "nG^6+HsnfVCcXp8%*4rMgXjw",
-        screenPath: "form:signup > input:password",
-        selector: "#pw",
-      }),
-    ];
-    const snap = buildAccessibilitySnapshot(elements);
-    expect(snap?.tree).toContain("nG^6+HsnfVCcXp8");
-    expect(snap?.tree).not.toContain("[sealed]");
-  });
-
-  it("reports a type_secret target's real value like any other field", () => {
-    const elements = [
-      el({
-        tag: "input",
-        type: "email",
-        value: "methoxine@gmail.com",
-        screenPath: "form:signup > input:email",
-        selector: "#email",
-      }),
-      el({
-        tag: "input",
-        type: "text",
-        value: "Acme Inc",
-        screenPath: "form:signup > input:org",
-        selector: "#org",
-      }),
-    ];
-    const snap = buildAccessibilitySnapshot(elements);
-    expect(snap?.tree).toContain("methoxine@gmail.com");
-    expect(snap?.tree).toContain('value="Acme Inc"');
-    expect(snap?.tree).not.toContain("[sealed]");
-  });
-
-  it("leaves ordinary field values untouched", () => {
-    const elements = [
-      el({
-        tag: "input",
-        type: "text",
-        value: "Acme Inc",
-        screenPath: "form:signup > input:org",
-        selector: "#org",
-      }),
-    ];
-    const snap = buildAccessibilitySnapshot(elements);
-    expect(snap?.tree).toContain('value="Acme Inc"');
-  });
-});
 
 describe("isInboxReadHost", () => {
   it("flags the webmail hosts awaitVerification drives into", () => {
@@ -447,20 +244,6 @@ describe("isInboxReadHost", () => {
     expect(isInboxReadHost("https://accounts.google.com/o/oauth2/v2/auth")).toBe(false);
     expect(isInboxReadHost("https://github.com/login/oauth/authorize")).toBe(false);
     expect(isInboxReadHost("not a url")).toBe(false);
-  });
-
-  it("truncates large trees at a line boundary", () => {
-    const elements = Array.from({ length: 40 }, (_, i) =>
-      el({
-        visibleText: `Button ${i}`,
-        container: "main:dashboard",
-        screenPath: `main:dashboard > button:${i}`,
-      }),
-    );
-    const snap = buildAccessibilitySnapshot(elements, 160);
-    expect(snap?.truncated).toBe(true);
-    expect(snap?.total_chars).toBeGreaterThan(160);
-    expect(snap?.tree.endsWith("\n")).toBe(false);
   });
 });
 
@@ -805,57 +588,6 @@ describe("sanitizeExtractedCredentials", () => {
   });
 });
 
-describe("buildScreenOutline", () => {
-  it("groups elements by DOM region and marks the foreground dialog", () => {
-    const outline = buildScreenOutline([
-        el({
-          visibleText: "Products",
-          selector: "#products",
-          role: "link",
-          href: "/test/products",
-          screenPath: "main:dashboard > link:products",
-          container: "main:dashboard",
-          topmost: false,
-          occludedBy: "dialog:finish-account",
-        }),
-        el({
-          visibleText: "Create account",
-          selector: "#create",
-          role: "button",
-          screenPath: "dialog:finish-account > button:create-account",
-          container: "dialog:finish-account",
-          topmost: true,
-        }),
-      ],
-    );
-
-    expect(outline?.foreground).toBe("dialog:finish-account");
-    expect(outline?.regions).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: "main:dashboard",
-          occluded_by: "dialog:finish-account",
-          children: [
-            expect.objectContaining({
-              ref: "main:dashboard > link:products",
-              occluded_by: "dialog:finish-account",
-            }),
-          ],
-        }),
-        expect.objectContaining({
-          id: "dialog:finish-account",
-          topmost: true,
-          children: [
-            expect.objectContaining({
-              ref: "dialog:finish-account > button:create-account",
-              topmost: true,
-            }),
-          ],
-        }),
-      ]),
-    );
-  });
-});
 
 describe("buildVerificationSearchQuery (finds passwordless mail)", () => {
   it("covers passwordless sign-in / login vocabulary, not just OTP words", () => {

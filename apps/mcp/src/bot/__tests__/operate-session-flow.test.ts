@@ -228,7 +228,6 @@ const h = vi.hoisted(() => ({
 // This suite is the V1 contract suite. Individual Compact V2 tests opt in
 // explicitly below, which keeps the feature-flagged V1 and V2 action
 // protocols independently testable while V2 is the production default.
-let compactV2ModeBeforeTest: string | undefined;
 
 // Inject the broker page port; these tests exercise session behavior, not physical launch.
 vi.mock("../broker/custody.js", async () => {
@@ -959,7 +958,6 @@ import {
   paymentSession,
   closeAllProvisionSessions,
   activeSessionCount,
-  parseElementsTable,
   formSelectMany,
   captureScreenshot,
   observeQuery,
@@ -1037,8 +1035,6 @@ function elem(partial: Record<string, unknown>): unknown {
 beforeEach(() => {
   h.capturePage = null;
   h.captureClick = null;
-  compactV2ModeBeforeTest = process.env.TRUSTY_SQUIRE_OBSERVE_V2;
-  process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "off";
   process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
   h.providers = ["google"];
   h.oauthStatus = "already_valid";
@@ -1192,8 +1188,6 @@ afterEach(async () => {
   delete process.env.BOT_START_TIMEOUT_MS;
   delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
   delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
-  if (compactV2ModeBeforeTest === undefined) delete process.env.TRUSTY_SQUIRE_OBSERVE_V2;
-  else process.env.TRUSTY_SQUIRE_OBSERVE_V2 = compactV2ModeBeforeTest;
 });
 
 // The 3.1 "commit-or-stop" autocomplete gate (detect a suggestion popup,
@@ -1206,7 +1200,6 @@ afterEach(async () => {
 // part of the next observation, and the agent can click it if it wants.
 describe("typing into a combobox/autocomplete field (no commit-or-stop gate)", () => {
   it("types Shopify's required address line as plain text and still runs the #635 commit", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
         tag: "input",
@@ -1322,7 +1315,7 @@ describe("operate session — OAuth lifecycle", () => {
     expect(h.oauthLoginCalls).toEqual(["#google-oauth"]);
     expect(h.startCalls).toBe(1);
     expect(h.profileDirs).toHaveLength(1);
-    expect(result.text).toBe("Signed in");
+    expect(result.dom).toContain("Signed in");
     await finishProvisionSession(started.session_id);
   });
 
@@ -1630,7 +1623,6 @@ describe("operate session — OAuth lifecycle", () => {
     // challenge page, whose URL alone can exceed the whole compact-v2 payload
     // budget. The pending human step must still come back as an observation,
     // never as a "compact-v2 budget metadata exceeded" error.
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.visibleText = "Continue with Google";
     h.elements = [
       elem({
@@ -1750,7 +1742,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("retains only sealed inventory after a V2 observation", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
         tag: "input",
@@ -1788,14 +1779,12 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("navigates to an undeclared third-party host in compact-v2", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/signup" });
     await act(started.session_id, { kind: "goto", url: "https://metrics.example.net/stats" });
     expect(h.gotos).toContain("https://metrics.example.net/stats");
   });
 
   it("keeps start metadata, rejects locators, and binds a handle to its current page snapshot", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.workerEmail = "operator@example.test";
     h.elements = [
       elem({
@@ -1841,7 +1830,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("audits forged targets opaquely before rejecting them", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
     ];
@@ -1867,7 +1855,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("rejects a handle after its snapshot lifetime expires", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
     ];
@@ -1889,7 +1876,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("keeps every continuation cursor bound to its original query and snapshot", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = Array.from({ length: 250 }, (_, index) =>
       elem({
         index,
@@ -1946,7 +1932,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("pages across a volatile query-token change on the same origin+path", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = Array.from({ length: 250 }, (_, index) =>
       elem({
         index,
@@ -1977,7 +1962,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("keeps a continuation immutable across a rerender while a cursorless query refreshes", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = Array.from({ length: 250 }, (_, index) =>
       elem({
         index,
@@ -2021,7 +2005,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("still invalidates overflow cursors on a cross-document or cross-path navigation", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = Array.from({ length: 250 }, (_, index) =>
       elem({
         index,
@@ -2060,7 +2043,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("searches only the sealed action map", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
         tag: "input",
@@ -2087,7 +2069,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("preserves a page title in query semantic metadata without changing its action map", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const token = "f9a062f02fadf5";
     h.observationSemantics = {
       title: `Developer ${token} Resource`,
@@ -2115,7 +2096,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("queries and re-resolves Resend's existing Google control", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
         tag: "button",
@@ -2141,7 +2121,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("matches merchant labels while returning labeled safe-table rows", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Buy Acme", selector: "#acme" }),
       elem({
@@ -2176,7 +2155,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("requires every private query term to match one naming source", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Buy Acme Basic", selector: "#basic" }),
       elem({
@@ -2199,7 +2177,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("uses four-digit private query terms to distinguish sealed controls", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Buy Model 2023", selector: "#2023" }),
       elem({
@@ -2221,7 +2198,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("keeps one anchor through duplicate sibling churn and never transfers its alias", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const held = elem({
       observationIdentity: "physical-held",
       tag: "button",
@@ -2268,7 +2244,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("retires a physical node capability on material change even after re-observation", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const held = elem({
       observationIdentity: "physical-held",
       tag: "a",
@@ -2294,7 +2269,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("keeps a ref valid when other controls appear in the live action map", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const email = elem({
       tag: "input",
       type: "email",
@@ -2318,7 +2292,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("keeps a ref actionable when a benign re-render changes only its wire label", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const identity = "physical-label-anchor";
     const intent = "stable-intent";
     h.elements = [
@@ -2353,7 +2326,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("rejects a handle after a same-URL main-document replacement", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
     ];
@@ -2399,7 +2371,6 @@ describe("Compact V2 action-map boundary", () => {
   }
 
   it("fills a whole delivery block across an autocomplete re-render and a checkout token rewrite", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const fields = ["firstName", "lastName", "address1", "city", "zip"] as const;
     h.elements = deliveryBlock(fields);
     const started = await startProvisionSession({
@@ -2426,7 +2397,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("still retires refs on a same-document route change to a different logical page", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
     ];
@@ -2447,7 +2417,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("does not collapse an authored path slug that merely sits under /checkouts/", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
     ];
@@ -2468,7 +2437,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("still retires refs when a different checkout replaces the document", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
     ];
@@ -2489,7 +2457,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("distinguishes destructive and affirmative controls with code-owned semantics", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Delete account", selector: "#delete" }),
       elem({
@@ -2509,7 +2476,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("keeps a ref through a selector-only re-render of the same control", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#step-one" }),
     ];
@@ -2531,7 +2497,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("rejects a handle when its live sealed semantics change before dispatch", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#action" }),
     ];
@@ -2553,7 +2518,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("shows and queries OTP-shaped control descriptions", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
         tag: "button",
@@ -2581,7 +2545,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("keeps checkout confirmation routes in checkout until positive completion", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout/confirm",
     });
@@ -2589,7 +2552,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("requires auth actions and fields to share a container", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
         tag: "button",
@@ -2624,7 +2586,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("keeps merchant labels separate from owned wire facts", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
         tag: "button",
@@ -2646,7 +2607,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("prioritizes payment evidence over an incidental cart upsell", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
         tag: "input",
@@ -2668,7 +2628,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("exposes the live URL (path and query included) while V2 text stays budgeted", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.visibleText = "Review order";
     const serviceUrl = "https://shop.example.com/checkout/review?token=private-url-token-123456789";
     const started = await startProvisionSession({ serviceUrl });
@@ -2676,7 +2635,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("interleaves verbatim text, preserves refs and omits the deleted text channel", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
     ];
@@ -2684,7 +2642,7 @@ describe("Compact V2 action-map boundary", () => {
     h.prose = [`Your token ${token} was created.`];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
+      format: "full",
       serviceUrl: "https://app.example.com/dashboard",
     });
     expect(started).not.toHaveProperty("text");
@@ -2704,14 +2662,13 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("removes departed refs without reindexing surviving controls", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "First action", selector: "#first" }),
       elem({ tag: "button", role: "button", visibleText: "Second action", selector: "#second" }),
     ];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
+      format: "full",
       serviceUrl: "https://app.example.com/dashboard",
     });
     const [first, second] = domRefs(started);
@@ -2725,7 +2682,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("degrades only an unbound shadow control, preserving stable refs and every actionable control", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const elements = [
       elem({ index: 0, tag: "button", visibleText: "Outside action", selector: "#outside" }),
       elem({ index: 1, tag: "button", visibleText: "Unbound shadow action", selector: "#shadow" }),
@@ -2749,7 +2705,7 @@ describe("Compact V2 action-map boundary", () => {
     h.captureOverride = capture;
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
+      format: "full",
       serviceUrl: "https://app.example.com/dashboard",
     });
     expect(started.dom).toContain("Complete surrounding page");
@@ -2778,7 +2734,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("keeps a short ref stable across successive observations and clicks with the earlier ref", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
         tag: "input",
@@ -2791,7 +2746,7 @@ describe("Compact V2 action-map boundary", () => {
     ];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
+      format: "full",
       serviceUrl: "https://app.example.com/dashboard",
     });
     const original = domRefs(started)[0]!;
@@ -2811,12 +2766,11 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("explicitly marks an unchanged delta and distinguishes a newly blank page", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [elem({ id: "continue", visibleText: "Continue", selector: "#continue" })];
     h.prose = ["Waiting for the protection check"];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
+      format: "full",
       serviceUrl: "https://app.example.com/protect",
     });
     expect(started.dom).toContain("Waiting for the protection check");
@@ -2838,7 +2792,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("reports navigated:true when the document changed while a click was settling", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
         tag: "button",
@@ -2849,7 +2802,7 @@ describe("Compact V2 action-map boundary", () => {
     ];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
+      format: "full",
       serviceUrl: "https://app.example.com/protect",
     });
     // A Turnstile-style protect check: the click lands, the challenge frame
@@ -2883,13 +2836,12 @@ describe("Compact V2 action-map boundary", () => {
   it.each([false, true])(
     "does not report navigated for a same-document click with pathname change=%s",
     async (changePath) => {
-      process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
       h.elements = [
         elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
       ];
       const started = await startHarnessProvisionSession({
         browser: new BrowserController(),
-        observationFormat: "browser-use-dom",
+        format: "full",
         serviceUrl: "https://app.example.com/dashboard",
       });
       const ref = domRefs(started)[0]!;
@@ -2907,11 +2859,10 @@ describe("Compact V2 action-map boundary", () => {
   );
 
   it("re-emits the DOM when the URL changes without a document change", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [elem({ visibleText: "Continue", selector: "#continue" })];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
+      format: "full",
       serviceUrl: "https://app.example.com/protect?attempt=1",
     });
     const unchanged = await observe(started.session_id);
@@ -2926,7 +2877,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("keeps refs stable when a dialog mount re-creates unchanged elements and reports only the dialog controls", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const navLink = (identity: string) =>
       elem({
         tag: "a",
@@ -2941,7 +2891,7 @@ describe("Compact V2 action-map boundary", () => {
     h.captureOverride = before;
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
+      format: "full",
       serviceUrl: "https://app.example.com/dashboard",
     });
     const navRef = domRefs(started)[0]!;
@@ -2987,7 +2937,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("re-emits the DOM when a closed-shadow iframe changes without a text change", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const elements = [
       elem({ tag: "button", role: "button", visibleText: "Verify", selector: "#verify" }),
     ] as InteractiveElement[];
@@ -3032,7 +2981,7 @@ describe("Compact V2 action-map boundary", () => {
     h.captureOverride = initial;
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
+      format: "full",
       serviceUrl: "https://app.example.com/protect",
     });
     expect(started.dom).toContain("Closed Shadow");
@@ -3069,11 +3018,10 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("surfaces a failed DOM capture instead of silently emitting an empty observation", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [elem({ visibleText: "Continue", selector: "#continue" })];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
+      format: "full",
       serviceUrl: "https://app.example.com/dashboard",
     });
     h.proseError = "DOMSnapshot.captureSnapshot failed";
@@ -3084,12 +3032,11 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("never drops interleaved content to meet a byte count", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [elem({ visibleText: "Continue", selector: "#continue" })];
     h.prose = ["Long readable content. ".repeat(600)];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "browser-use-dom",
+      format: "full",
       serviceUrl: "https://app.example.com/dashboard",
     });
     expect(started.dom).toContain(h.prose[0]!.trim());
@@ -3097,28 +3044,16 @@ describe("Compact V2 action-map boundary", () => {
     expect(started).not.toHaveProperty("text");
   });
 
-  it("keeps harness V1 consumers explicit while bounding opt-in V2 metadata", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+  it("bounds the harness full observation to the V2 wire budget", async () => {
     h.visibleText = "Harness page";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
     ];
 
-    const legacy = await startHarnessProvisionSession({
-      browser: new BrowserController(),
-      serviceUrl: "https://shop.example.com/checkout",
-    });
-    expect(legacy.format).toBeUndefined();
-    const full = await observe(legacy.session_id, "full");
-    const legacyRef = full.elements?.[0]?.ref;
-    expect(legacyRef).toMatch(/^@e:/);
-    await act(legacy.session_id, { kind: "click", target: legacyRef! });
-    expect(h.clickCalls).toBe(1);
-
     const compact = await startHarnessProvisionSession({
       browser: new BrowserController(),
       serviceUrl: "https://shop.example.com/checkout",
-      observationFormat: "browser-use-dom",
+      format: "full",
     });
     expect(compact.format).toBe("browser-use-dom");
     expect(Buffer.byteLength(JSON.stringify(compact), "utf8")).toBeLessThanOrEqual(
@@ -3127,7 +3062,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("carries OAuth and no-observation exits in the V2 envelope with the live URL", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const secretUrl = "https://app.example.com/login?token=private-query-token";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
@@ -3141,7 +3075,6 @@ describe("Compact V2 action-map boundary", () => {
       url: secretUrl,
       observed: "none",
     });
-    expect(ack.elements).toBeUndefined();
     // A detail:"none" scroll returns no map, but it does not retire the one the
     // agent already holds — the control it names has not moved.
     await act(started.session_id, { kind: "click", target: ref }, "none");
@@ -3167,7 +3100,6 @@ describe("Compact V2 action-map boundary", () => {
         next_action: "operate_observe",
       },
     });
-    expect(transition.elements).toBeUndefined();
     expect(h.oauthRecoveryCalls).toBe(1);
     await expect(act(started.session_id, { kind: "click", target: refreshedRef })).rejects.toThrow(
       "stale_ref",
@@ -3175,7 +3107,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("keeps a ref usable after a dispatched action throws", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
     ];
@@ -3195,7 +3126,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("invalidates a handle before the captcha driver receives the browser", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
     ];
@@ -3210,7 +3140,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("requires sealed V2 handles before bulk selection enters the private executor", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
         tag: "select",
@@ -3243,7 +3172,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("keeps a later bulk target actionable when the preceding mutation spares it", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
         tag: "select",
@@ -3300,7 +3228,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("rejects a bulk target the preceding mutation replaced", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
         tag: "select",
@@ -3354,7 +3281,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("normalizes private browser selection failures in V2 results", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
         tag: "select",
@@ -3382,7 +3308,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("normalizes private browser selection failures from direct V2 actions", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
         tag: "select",
@@ -3413,7 +3338,6 @@ describe("Compact V2 action-map boundary", () => {
   });
 
   it("selects a cross-origin frame target without retiring the later ref", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
         tag: "select",
@@ -3516,7 +3440,6 @@ describe("Compact V2 checkout copy stays unredacted", () => {
   }
 
   it("exposes shipping-method radios in the V2 map and their query results", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = shopifyCheckoutFixture();
 
     const started = await startProvisionSession({ serviceUrl: checkoutUrl });
@@ -3617,8 +3540,8 @@ describe("Compact V2 checkout copy stays unredacted", () => {
     const observed = await observe(started.session_id, "full");
     // Nothing is scrubbed out of observation text — the rendered key, the OTPs,
     // and the operator's own injected value all come back verbatim.
-    expect(observed.text).toContain(sk("proj-1234567890abcdefghijklmnopqrstuv"));
-    expect(observed.text).toContain(secret);
+    expect(observed.dom).toContain(sk("proj-1234567890abcdefghijklmnopqrstuv"));
+    expect(observed.dom).toContain(secret);
   });
 });
 
@@ -3637,7 +3560,6 @@ describe("Compact V2 durable ref identity", () => {
   }
 
   it("fills a multi-field form from ONE observation while the page re-renders", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const fields = [
       field(0, { id: "first-name", labelText: "First name", selector: "#first-name" }),
       field(1, { id: "email", labelText: "Email", selector: "#email" }),
@@ -3671,7 +3593,6 @@ describe("Compact V2 durable ref identity", () => {
   });
 
   it("survives a useId re-render, and dies on a real navigation", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", id: ":r3:", visibleText: "Continue", selector: "#a" }),
     ];
@@ -3695,7 +3616,6 @@ describe("Compact V2 durable ref identity", () => {
   });
 
   it("disambiguates a label shared by two grid controls with ordinals, and acts on either", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [0, 1].map((index) =>
       elem({
         index,
@@ -3729,7 +3649,6 @@ describe("Compact V2 durable ref identity", () => {
   });
 
   it("acts on a label that names exactly one control", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
       elem({ index: 1, tag: "button", role: "button", visibleText: "Cancel", selector: "#cancel" }),
@@ -3740,7 +3659,6 @@ describe("Compact V2 durable ref identity", () => {
   });
 
   it("scopes a large product grid to the viewport without dropping query reachability", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     // 240 controls: a long storefront grid plus a full checkout form.
     h.elements = Array.from({ length: 240 }, (_, index) =>
       elem({
@@ -3889,13 +3807,12 @@ describe("operate_act — locator (text=/css=) resolution", () => {
     ];
 
     const full = await observe(started.session_id, "full");
-    expect(full.text).toContain(secret);
-    expect(full.text).not.toContain("[sealed]");
+    expect(full.dom).toContain(secret);
+    expect(full.dom).not.toContain("[sealed]");
     expect(JSON.stringify(full)).toContain(secret);
   });
 
   it("keeps a reflected slot value on the compact-v2 wire and query; its credential-shaped label remains readable", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const secret = "stored-credential-7f3d9a";
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
     stashSecretSlot(started.session_id, "login", secret);
@@ -3934,9 +3851,9 @@ describe("operate_act — locator (text=/css=) resolution", () => {
     h.visibleText = `API key: ${sk("proj-1234567890abcdefghijklmnopqrstuv")} ${secret}`;
     h.elements = [];
     const full = await observe(started.session_id, "full");
-    expect(full.text).not.toContain("[sealed]");
-    expect(full.text).toContain(secret);
-    expect(full.text).toContain(sk("proj-1234567890abcdefghijklmnopqrstuv"));
+    expect(full.dom).not.toContain("[sealed]");
+    expect(full.dom).toContain(secret);
+    expect(full.dom).toContain(sk("proj-1234567890abcdefghijklmnopqrstuv"));
   });
 
 });
@@ -4010,7 +3927,8 @@ describe("operate session — sealed credential transfer", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
-    const staleRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+    const rows = started.safe_table as unknown as Array<[string, string, string?]>;
+    const staleRef = rows[0]?.[0];
     expect(staleRef).toMatch(/^@e:/);
 
     // This is the captured P3 shape: a variant change replaces the old form
@@ -4331,7 +4249,6 @@ describe("operate_extract — vault-store response", () => {
   });
 
   it("returns raw Compact V2 extraction results at the public tool boundary", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const rawSecret = sk("live-public-extract-secret-123456789");
     const urlToken = "private-url-token-123456789";
     h.visibleText = `API key ${rawSecret}`;
@@ -4357,7 +4274,6 @@ describe("operate_extract — vault-store response", () => {
 describe("operate session — live-profile precondition gate", () => {
   it("omits the compact-v2 auth-gate text field after probing a profile without Google", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-empty";
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.providers = []; // no live session
     h.liveGoogleEmail = null;
     const obs = await startProvisionSession({
@@ -4368,7 +4284,6 @@ describe("operate session — live-profile precondition gate", () => {
     expect(obs.needs_user?.wall).toBe("google_session");
     expect(obs).toMatchObject({ format: "browser-use-dom", stage: "auth", url: "" });
     expect(obs).not.toHaveProperty("text");
-    expect(obs.elements).toBeUndefined();
     expect(h.startCalls).toBe(1);
     expect(h.started).toBe(0); // the rejected profile is closed before handoff
     expect(h.gotos).toHaveLength(0);
@@ -4518,7 +4433,6 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     });
     await finishProvisionSession(legacy.session_id);
 
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const compact = await startProvisionSession({
       serviceUrl: "https://app.example.com/",
       consentInboxRead: true,
@@ -4561,7 +4475,6 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
   });
 
   it("seals sender text before writing a Compact V2 verification audit", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const privateSender = "private.sender@example.com";
     const obs = await startProvisionSession({
       serviceUrl: "https://app.example.com/",
@@ -4979,7 +4892,6 @@ describe("operate_finish lifecycle consolidation", () => {
   });
 
   it("seals the current URL from Compact V2 finish results", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const urlToken = "private-finish-token-123456789";
     const started = await startProvisionSession({
       serviceUrl: `https://app.example.com/done?token=${urlToken}`,
@@ -5369,70 +5281,13 @@ describe("operate session — PR3c username/password login (capture-at-login sou
 });
 
 describe("observation detail ladder (none < compact < full)", () => {
-  it("default is compact: no screen/accessibility, value_len, elements_total, no container, path DROPPED", async () => {
-    h.elements = [
-      elem({
-        tag: "input",
-        type: "text",
-        value: "acme",
-        screenPath: "form:x > input:org",
-        container: "form:x",
-      }),
-    ];
-    h.visibleText = "Org";
-    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-    expect(obs.screen).toBeUndefined();
-    expect(obs.accessibility).toBeUndefined();
-    expect(obs.elements_total).toBe(1);
-    // Compact wire carries the element set as the columnar el_table (Phase 4).
-    const e = parseElementsTable(obs.el_table!)[0]!;
-    const bag = e as unknown as Record<string, unknown>;
-    expect(bag.value).toBeUndefined();
-    expect(e.value_len).toBe(4);
-    expect(bag.container).toBeUndefined();
-    // path is now dropped from the default payload (retained only in the
-    // persisted snapshot file, whose path the response carries).
-    expect("path" in e).toBe(false);
-    expect(typeof obs.snapshot_file).toBe("string");
-  });
-
-  it("operate_observe detail:'full' restores the screen + accessibility views", async () => {
-    h.elements = [
-      elem({
-        tag: "button",
-        visibleText: "Go",
-        screenPath: "main:x > button:go",
-        container: "main:x",
-      }),
-    ];
-    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-    const full = await observe(obs.session_id, "full");
-    expect(full.screen).toBeDefined();
-    expect(full.accessibility).toBeDefined();
-  });
-
   it("operate_act detail:'none' returns a minimal ack (no perception)", async () => {
     h.elements = [elem({ tag: "button", visibleText: "Go", screenPath: "main:x > button:go" })];
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
     const ack = await act(obs.session_id, { kind: "scroll", direction: "down" }, "none");
     expect(ack.observed).toBe("none");
-    expect(ack.elements).toEqual([]);
-    expect(ack.screen).toBeUndefined();
-  });
-
-  it("operate_act detail:'full' returns the legacy payload", async () => {
-    h.elements = [
-      elem({
-        tag: "button",
-        visibleText: "Go",
-        screenPath: "main:x > button:go",
-        container: "main:x",
-      }),
-    ];
-    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-    const full = await act(obs.session_id, { kind: "scroll", direction: "down" }, "full");
-    expect(full.screen).toBeDefined();
-    expect(full.accessibility).toBeDefined();
+    expect(ack.safe_table).toBeUndefined();
+    expect(ack.dom).toBeUndefined();
   });
 });
 
@@ -5460,7 +5315,7 @@ describe("frame targets — identity and credential boundaries (operator-frame-s
   const SAME_DOMAIN_FRAME_URL = "https://payments.example.com/widget";
   const CROSS_DOMAIN_FRAME_URL = "https://evil-payments.test/widget";
 
-  it("el_table tags a frame element with its own frame_origin (observe surfaces iframe content)", async () => {
+  it("safe_table tags a frame element with its own frame origin (observe surfaces iframe content)", async () => {
     h.elements = [
       elem({
         testId: "ship-standard",
@@ -5471,17 +5326,17 @@ describe("frame targets — identity and credential boundaries (operator-frame-s
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    const rows = parseElementsTable(started.el_table ?? "");
-    const row = rows.find((r) => r.label === "Standard Shipping");
-    expect(row?.frame_origin).toBe("https://payments.example.com");
+    const rows = started.safe_table as unknown as Array<[string, string, string?]>;
+    const row = rows.find(([, , facts]) => facts?.includes("@standard-shipping"));
+    expect(row?.[2]).toContain("x=s");
   });
 
-  it("main-frame elements are unaffected — no frame_origin column noise (regression)", async () => {
+  it("main-frame elements are unaffected — no frame marker on the row (regression)", async () => {
     h.elements = [elem({ testId: "go", labelText: "Continue", selector: "#go" })];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    const rows = parseElementsTable(started.el_table ?? "");
-    const row = rows.find((r) => r.label === "Continue");
-    expect(row?.frame_origin).toBeUndefined();
+    const rows = started.safe_table as unknown as Array<[string, string, string?]>;
+    const row = rows.find(([, , facts]) => facts?.includes("@continue"));
+    expect(row?.[2] ?? "").not.toContain("x=");
   });
 
   it("click on a same-registrable-domain iframe element succeeds (the merchant's own checkout widget)", async () => {
@@ -5681,7 +5536,6 @@ describe("frame targets — identity and credential boundaries (operator-frame-s
 
 describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", () => {
   it("surfaces an unbound challenge through compact start and query without minting a ref", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const elements = [
       elem({ index: 0, tag: "button", visibleText: "Continue with Google", selector: "#oauth" }),
       elem({ index: 1, tag: "input", type: "email", labelText: "Email", selector: "#email" }),
@@ -5861,7 +5715,6 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
   }
 
   it("retrieves below-the-fold controls through whole-document query", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = xataShapedElements();
     const started = await startProvisionSession({ serviceUrl: "https://xata.example.com/login" });
     expect(started.more_below).toBe(true);
@@ -5874,7 +5727,6 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
   });
 
   it("pages overflow deterministically and rejects a different filter on a map cursor", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = Array.from({ length: 400 }, (_, index) =>
       elem({
         index,
@@ -5941,7 +5793,6 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
   });
 
   it("finds controls by generic terms across label, role word, and placeholder", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
         index: 0,
@@ -5985,7 +5836,6 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
   });
 
   it("refreshes rows and page semantics on every cursorless query", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.observationSemantics = { title: "Loading", headings: ["Please wait"] };
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Old action", selector: "#old" }),
@@ -6011,7 +5861,6 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
   });
 
   it("never trips the budget cliff on a real-world OAuth-shaped URL", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = xataShapedElements();
     const started = await startProvisionSession({
       serviceUrl: "https://xata.example.com/login",
@@ -6112,7 +5961,6 @@ describe("flat operator verbs", () => {
   });
 
   it("reaches DOM fallback through compact-v2 after a proven non-dispatch", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
     ];
@@ -6136,7 +5984,6 @@ describe("flat operator verbs", () => {
   });
 
   it("returns the compact control map after an action by default; full DOM only on request", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
         tag: "input",
@@ -6286,7 +6133,6 @@ describe("flat operator verbs", () => {
     ["select", operateSelectTool, { ref: "@region", values: ["US"] }],
     ["select many", operateSelectTool, { selections: { "@region": "US" } }],
   ] as const)("resends controls discarded by %s capture", async (_name, tool, args) => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
       elem({ tag: "input", role: "textbox", ariaLabel: "Name", selector: "#name" }),
@@ -6372,7 +6218,6 @@ describe("flat operator verbs", () => {
   });
 
   it("resends controls after discarded fill observations and filtered queries", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [elem({ tag: "input", role: "textbox", ariaLabel: "Name", selector: "#name" })];
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
     await observe(started.session_id, "compact");
@@ -6400,7 +6245,6 @@ describe("flat operator verbs", () => {
   });
 
   it("falls back to a paginated complete map when removals exceed the delta budget", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [];
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
     await observe(started.session_id, "compact");
@@ -6495,7 +6339,6 @@ function domRefs(observation: { dom?: string; safe_table?: unknown[] }): string[
 }
 
 it("explicit full reads restore the DOM after unchanged reads and compact actions", async () => {
-  process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
   h.elements = [elem({ id: "email", name: "email", type: "email", selector: "#email" })];
   h.prose = ["Login form"];
   const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
@@ -6536,7 +6379,6 @@ it("explicit full reads restore the DOM after unchanged reads and compact action
 });
 
 it("missing login slots explain the vault field names and supported fill flow in compact v2", async () => {
-  process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
   h.elements = [
     elem({ id: "password", name: "password", type: "password", selector: "#password" }),
   ];

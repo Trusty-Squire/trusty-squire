@@ -224,11 +224,8 @@ full-DOM structure is in
 require re-observation before a ref is used again. Click, type, select, press,
 and scroll also default to compact observations; pass `format:"full"` on that
 action only when its verbatim DOM is needed. See the observation contract above
-for delta handling and response envelopes. Maintainers can select the
-legacy V1 `el_table`/snapshot contract with
-`TRUSTY_SQUIRE_OBSERVE_V2=off`, or exercise the browser-use DOM serializer
-without emitting it with `shadow`; the detailed DOM-tree contract lives in
-[browser-use-serializer-port.md](docs/browser-use-serializer-port.md).
+for delta handling and response envelopes. The detailed DOM-tree contract lives
+in [browser-use-serializer-port.md](docs/browser-use-serializer-port.md).
 
 - Rejected tool calls return a JSON `error` envelope with a stable `code` and
   message. Malformed and unknown calls fail only that request; they do not stop

@@ -81,7 +81,6 @@ it.each(["click", "type", "select"] as const)(
     const started = await startHarnessProvisionSession({
       browser: BrowserController.fromHarnessPage(page),
       serviceUrl: url,
-      observationFormat: "browser-use-dom",
       format: "compact",
     });
     try {
@@ -163,7 +162,6 @@ it("waits for hydration and retries transient frame bindings on start and observ
     const start = await startHarnessProvisionSession({
       browser: controller,
       serviceUrl: url,
-      observationFormat: "browser-use-dom",
       format: "full",
     });
     sessionId = start.session_id;
@@ -206,7 +204,6 @@ it("returns stable controls on a page whose DOM churn never stops", async () => 
     const start = await startHarnessProvisionSession({
       browser: BrowserController.fromHarnessPage(page),
       serviceUrl: url,
-      observationFormat: "browser-use-dom",
       format: "full",
     });
     sessionId = start.session_id;
@@ -232,7 +229,6 @@ it.each(["removed", "ambiguous"])(
       const start = await startHarnessProvisionSession({
         browser: BrowserController.fromHarnessPage(page),
         serviceUrl: url,
-        observationFormat: "browser-use-dom",
         format: "compact",
       });
       sessionId = start.session_id;
@@ -273,7 +269,6 @@ it.each([false, true])(
     const start = await startHarnessProvisionSession({
       browser: BrowserController.fromHarnessPage(page),
       serviceUrl: url,
-      observationFormat: "browser-use-dom",
       format: "compact",
     });
     try {
@@ -321,7 +316,6 @@ it.each([
     const start = await startHarnessProvisionSession({
       browser: controller,
       serviceUrl: url,
-      observationFormat: "browser-use-dom",
       format: "compact",
     });
     try {

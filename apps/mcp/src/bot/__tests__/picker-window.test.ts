@@ -84,7 +84,6 @@ it.each([
       const started = await startHarnessProvisionSession({
         browser: controller,
         serviceUrl: "https://picker.test/form",
-        observationFormat: "browser-use-dom",
         format: "compact",
       });
       sessionId = started.session_id;

@@ -1,4 +1,5 @@
 import { operatorHandlerForwarder } from "./operator-handler-forwarder.js";
+import { mockBrowserUseCapture } from "../bot/__tests__/browser-use-test-capture.js";
 // End-to-end coverage for operate_screenshot through the REAL MCP tool-call
 // path (InMemoryTransport, same harness as server-resilience.test.ts): a
 // session, a mocked BrowserController.captureOperatorScreenshot, and an assertion
@@ -45,6 +46,9 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       armOpenedTabAdoption: vi.fn(),
       adoptOpenedTab: vi.fn(async () => null),
       extractInteractiveElements: vi.fn().mockResolvedValue([]),
+      extractBrowserUseObservation: vi.fn(async () => mockBrowserUseCapture([])),
+      extractObservationSemantics: vi.fn(async () => ({ title: "", headings: [] })),
+      mainDocumentIdentity: vi.fn().mockReturnValue("doc"),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
       currentUrl: vi.fn().mockReturnValue(url),
       activePage: vi.fn().mockReturnValue({ isClosed: () => false, url: () => url }),
@@ -110,6 +114,9 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       extractInteractiveElements: vi
         .fn()
         .mockResolvedValue([{ selector: "#otp-code" }, { selector: "#promo-code" }]),
+      extractBrowserUseObservation: vi.fn(async () => mockBrowserUseCapture([])),
+      extractObservationSemantics: vi.fn(async () => ({ title: "", headings: [] })),
+      mainDocumentIdentity: vi.fn().mockReturnValue("doc"),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
       currentUrl: vi.fn().mockReturnValue(url),
       activePage: vi.fn().mockReturnValue({ isClosed: () => false, url: () => url }),
@@ -158,6 +165,9 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
             ? Promise.reject(new Error("execution context destroyed"))
             : Promise.resolve([]),
         ),
+      extractBrowserUseObservation: vi.fn(async () => mockBrowserUseCapture([])),
+      extractObservationSemantics: vi.fn(async () => ({ title: "", headings: [] })),
+      mainDocumentIdentity: vi.fn().mockReturnValue("doc"),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
       currentUrl: vi.fn().mockReturnValue(url),
       activePage: vi.fn().mockReturnValue({ isClosed: () => false, url: () => url }),
@@ -200,6 +210,9 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       armOpenedTabAdoption: vi.fn(),
       adoptOpenedTab: vi.fn(async () => null),
       extractInteractiveElements: vi.fn().mockResolvedValue([]),
+      extractBrowserUseObservation: vi.fn(async () => mockBrowserUseCapture([])),
+      extractObservationSemantics: vi.fn(async () => ({ title: "", headings: [] })),
+      mainDocumentIdentity: vi.fn().mockReturnValue("doc"),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
       currentUrl: vi.fn().mockReturnValue(url),
       activePage: vi.fn().mockReturnValue({ isClosed: () => false, url: () => url }),
@@ -239,6 +252,9 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       armOpenedTabAdoption: vi.fn(),
       adoptOpenedTab: vi.fn(async () => null),
       extractInteractiveElements: vi.fn().mockResolvedValue([]),
+      extractBrowserUseObservation: vi.fn(async () => mockBrowserUseCapture([])),
+      extractObservationSemantics: vi.fn(async () => ({ title: "", headings: [] })),
+      mainDocumentIdentity: vi.fn().mockReturnValue("doc"),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
       currentUrl: vi.fn().mockReturnValue(url),
       activePage: vi.fn().mockReturnValue({ isClosed: () => false, url: () => url }),

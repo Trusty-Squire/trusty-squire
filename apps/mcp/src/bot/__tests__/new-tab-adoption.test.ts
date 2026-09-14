@@ -293,8 +293,8 @@ describe("operator new-tab adoption", () => {
 
       const transition = await observe(sessionId, "full");
       expect(transition.url).toBe("https://product.test/welcome");
-      expect(transition.text).toContain("Signed in to Product");
-      expect(transition.text).not.toContain("Inbox");
+      expect(transition.dom).toContain("Signed in to Product");
+      expect(transition.dom).not.toContain("Inbox");
       // The token stays in the browser. Nothing the caller receives carries it.
       expect(JSON.stringify(transition)).not.toContain(LOGIN_TOKEN);
     } finally {
@@ -323,8 +323,9 @@ describe("operator new-tab adoption", () => {
   it("follows a magic link clicked through an observed ref, not just a locator", async () => {
     const { context, controller, inbox, sessionId } = await inboxSession();
     try {
-      const full = await observe(sessionId, "full");
-      const ref = full.elements?.find((el) => /Log in to Product/i.test(el.label))?.ref;
+      const observed = await observe(sessionId, "compact");
+      const rows = observed.safe_table as unknown as Array<[string, string, string?]>;
+      const ref = rows.find(([, , facts]) => facts?.includes("@log-in-to-product"))?.[0];
       expect(ref).toMatch(/^@e:/);
 
       await act(sessionId, { kind: "click", target: ref! });
@@ -344,7 +345,7 @@ describe("operator new-tab adoption", () => {
 
       expect(activePage(controller)).toBe(inbox);
       expect(controller.currentUrl()).toBe("https://mail.test/inbox");
-      expect(transition.text).toContain("Marked read");
+      expect(transition.dom).toContain("Marked read");
       expect(context.pages().filter((page) => !page.isClosed())).toHaveLength(1);
     } finally {
       await finishProvisionSession(sessionId).catch(() => undefined);

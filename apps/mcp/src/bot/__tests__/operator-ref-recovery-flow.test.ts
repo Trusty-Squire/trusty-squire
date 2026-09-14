@@ -28,7 +28,6 @@ it("recovers through the public tools after a checkout rerender and a removed co
     const start = await startHarnessProvisionSession({
       browser: BrowserController.fromHarnessPage(page),
       serviceUrl: url,
-      observationFormat: "browser-use-dom",
       format: "compact",
     });
     sessionId = start.session_id;
