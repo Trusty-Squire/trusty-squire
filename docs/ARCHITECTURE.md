@@ -190,8 +190,9 @@ agent calls inject_card with purchase terms, card_ref, and exact field refs
 agent re-observes and drives the checkout with generic browser actions
   -> partial fills can be retried under the same still-valid approval
   -> agent chooses currency, clicks place order, and waits
-  -> when 3-D Secure appears, agent immediately notifies the cardholder in chat,
-     asks them to complete it, and continues observing
+  -> when 3-D Secure appears, the operator detects the rendered challenge,
+     nudges the cardholder once, and reports `three_ds` in the result;
+     the human completes it in their bank app and the agent keeps observing
   -> operator does not guess submit controls, validate totals, clear fields,
      arbitrate saved cards, or keep post-submit payment custody
 ```

@@ -348,6 +348,16 @@ export interface Observation {
     refs: "unavailable";
     next_action: "operate_observe";
   };
+  // A rendered 3-D Secure challenge on the checkout after a card release. The
+  // operator notified the cardholder once through the API notify path (when
+  // that call succeeded); the challenge itself is never blocked, waited on, or
+  // taken into custody. The human completes it in their bank app and the agent
+  // keeps observing the live checkout.
+  three_ds?: {
+    state: "challenge_detected";
+    url: string;
+    notified?: boolean;
+  };
   // A provider-owned OAuth popup closed while a legacy two-step OAuth action
   // was still settling. This is an expected browser lifecycle transition, not
   // a failed login or a reason to abandon the session. The host should simply
@@ -2130,13 +2140,44 @@ async function observedOAuthChallenge(
   };
 }
 
+async function observedThreeDsChallenge(
+  sessionId: string,
+): Promise<Observation["three_ds"] | undefined> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) return undefined;
+  const released = session.releasedPaymentCard;
+  if (released === null) return undefined;
+  const challenge = await session.browser.detectThreeDsChallenge().catch(() => null);
+  if (challenge === null) return undefined;
+  let notified: boolean | undefined;
+  if (released.threeDsNotified !== true) {
+    released.threeDsNotified = true;
+    try {
+      notified = (await session.api?.notifyThreeDs(released.approvalId, "detected_challenge"))
+        ?.sent;
+    } catch {
+      notified = false;
+    }
+  }
+  return {
+    state: "challenge_detected",
+    url: challenge.url,
+    ...(notified === undefined ? {} : { notified }),
+  };
+}
+
 export async function observe(
   sessionId: string,
   format?: "compact" | "full",
 ): Promise<Observation> {
   const result = await observeOwned(sessionId, format);
   const oauth = await observedOAuthChallenge(sessionId);
-  return oauth === undefined ? result : { ...result, oauth };
+  const threeDs = await observedThreeDsChallenge(sessionId);
+  return {
+    ...result,
+    ...(oauth === undefined ? {} : { oauth }),
+    ...(threeDs === undefined ? {} : { three_ds: threeDs }),
+  };
 }
 
 async function observeOwned(sessionId: string, format?: "compact" | "full"): Promise<Observation> {
@@ -4194,7 +4235,12 @@ export async function observeQuery(
 ): Promise<Record<string, unknown>> {
   const result = await observeQueryOwned(sessionId, query, role, cursor);
   const oauth = await observedOAuthChallenge(sessionId);
-  return oauth === undefined ? result : { ...result, oauth };
+  const threeDs = await observedThreeDsChallenge(sessionId);
+  return {
+    ...result,
+    ...(oauth === undefined ? {} : { oauth }),
+    ...(threeDs === undefined ? {} : { three_ds: threeDs }),
+  };
 }
 
 async function observeQueryOwned(
@@ -4794,7 +4840,10 @@ export async function act(
       session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")
         ? await withOAuthActionBoundary(session, oauthProvider, execute)
         : await execute(undefined);
-    return result.observation;
+    const threeDs = await observedThreeDsChallenge(sessionId);
+    return threeDs === undefined
+      ? result.observation
+      : { ...result.observation, three_ds: threeDs };
   } catch (error) {
     if (action.kind === "click" && action.screenshot) {
       if (error instanceof ScreenshotClickError) throw error;
@@ -7379,7 +7428,6 @@ export async function replayOperatorRecipe(
       reason,
     };
   };
-
 
   for (let i = fromIndex; i < recipe.trace.length; i += 1) {
     throwIfOperatorRequestCancelled();

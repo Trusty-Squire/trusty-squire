@@ -639,10 +639,13 @@ the cross-session authorization boundary in [`SECURITY.md`](SECURITY.md#client-e
 Keep approval timing, denial/expiry custody, same-approval resume guidance, and
 the direct observation/action contract in those owners rather than copying them
 here. `inject_card` writes only explicitly named frame/node targets; the agent
-handles late mounts, total/currency reads, card choice, submission, 3DS, and
-outcome evidence through generic operator tools. It re-observes before submission
-for competing selected saved-card controls and immediately notifies the
-cardholder in chat when a 3DS challenge appears.
+handles late mounts, total/currency reads, card choice, submission, and outcome
+evidence through generic operator tools. It re-observes before submission for
+competing selected saved-card controls. A rendered 3-D Secure challenge is
+detected by the operator on the next observation/action result
+(`observedThreeDsChallenge`), which notifies the cardholder once through
+`ApiClient.notifyThreeDs` and reports `three_ds`; the operator never blocks,
+waits on, or takes custody of the challenge.
 
 ### Browser egress is unrestricted
 

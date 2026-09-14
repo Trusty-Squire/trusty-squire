@@ -351,7 +351,9 @@ job without exposing plaintext to the agent.
 - `inject_card` retains the existing single purchase approval and fills only
   caller-named refs. It does not submit or interpret the checkout. Use
   `operate_observe`, `operate_network`, and masked screenshots as evidence, then
-  drive the page with ordinary actions.
+  drive the page with ordinary actions. A rendered 3-D Secure challenge is
+  detected on observation/action results; the operator notifies the cardholder
+  once and reports `three_ds` without waiting on or gating the challenge.
 
 Legacy union verbs and aliases are not part of this contract. Use the flat names
 shown above, and use the installed server’s `tools/list` schema for optional
