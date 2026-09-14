@@ -3153,19 +3153,6 @@ describe("Compact V2 action-map boundary", () => {
     );
   });
 
-  it("keeps shadow observations on the V1 action contract", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "shadow";
-    h.elements = [
-      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
-    ];
-    const started = await startProvisionSession({
-      serviceUrl: "https://shop.example.com/checkout",
-    });
-    expect(started.format).toBeUndefined();
-    await act(started.session_id, { kind: "click", target: "Continue" });
-    expect(h.clickCalls).toBe(1);
-  });
-
   it("keeps a ref usable after a dispatched action throws", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [

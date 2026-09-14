@@ -3812,39 +3812,6 @@ function compactV2Observation(
   } as unknown as Observation;
 }
 
-async function exerciseCompactV2Shadow(
-  session: Session,
-  generation: number,
-  elements: readonly InteractiveElement[],
-  semanticSource: ObservationSemanticSourceV2,
-  sourcePage: OAuthCompletionEvidence["page"] | undefined,
-): Promise<void> {
-  const saved = {
-    compactV2Active: session.compactV2Active,
-    compactV2Index: session.compactV2Index,
-    compactV2Refs: session.compactV2Refs,
-    compactV2Previous: session.compactV2Previous,
-    prevObserve: session.prevObserve,
-  };
-  try {
-    compactV2Observation(
-      session,
-      generation,
-      await session.browser.extractBrowserUseObservation(sourcePage),
-      semanticSource,
-      undefined,
-      sourcePage,
-    );
-  } catch {
-  } finally {
-    session.compactV2Active = saved.compactV2Active;
-    session.compactV2Index = saved.compactV2Index;
-    session.compactV2Refs = saved.compactV2Refs;
-    session.compactV2Previous = saved.compactV2Previous;
-    session.prevObserve = saved.prevObserve;
-  }
-}
-
 export async function observeQuery(
   sessionId: string,
   query: string,
@@ -4087,8 +4054,6 @@ async function observeSession(
         forceFullDOM,
       );
     }
-    if (v2Mode === "shadow")
-      await exerciseCompactV2Shadow(session, generation, elements, semanticSource, sourcePage);
     session.compactV2Active = false;
     invalidateCompactV2Snapshot(session);
     const text = await session.browser.extractVisibleText(sourcePage);

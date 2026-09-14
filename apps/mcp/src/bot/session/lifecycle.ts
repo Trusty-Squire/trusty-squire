@@ -482,10 +482,10 @@ export function observeSnapshotDir(sessionId: string): string {
   return join(parent, sessionId);
 }
 
-function configuredCompactV2Mode(): "off" | "shadow" | "on" {
+function configuredCompactV2Mode(): "off" | "on" {
   const configured = (process.env.TRUSTY_SQUIRE_OBSERVE_V2 ?? "on").toLowerCase();
   if (configured === "off" || configured === "0") return "off";
-  return configured === "shadow" ? "shadow" : "on";
+  return "on";
 }
 
 // ── start ──

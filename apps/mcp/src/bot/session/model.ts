@@ -88,7 +88,7 @@ export interface Session {
   prevObserve: ObserveDeltaState | null;
   observeSnapshotFile: string | null;
   compactV2Secret: Buffer;
-  compactV2Mode: "off" | "shadow" | "on";
+  compactV2Mode: "off" | "on";
   compactV2HintPages: string[];
   /** True once this session has emitted V2; target resolution stays sealed until finish. */
   compactV2Active: boolean;
