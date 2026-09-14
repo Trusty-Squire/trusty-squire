@@ -1,4 +1,4 @@
-// Host metadata retained for credential egress and recipe capture; never browser filtering.
+// Host metadata retained for credential egress; never browser filtering.
 import type { Session } from "./model.js";
 
 export function registrableHost(url: string): string | null {

@@ -114,9 +114,6 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.0.4
         version: 1.29.0(zod@3.25.76)
-      '@trusty-squire/recipe-schema':
-        specifier: workspace:*
-        version: link:../../packages/recipe-schema
       '@trusty-squire/skill-schema':
         specifier: workspace:0.1.6
         version: link:../../packages/skill-schema

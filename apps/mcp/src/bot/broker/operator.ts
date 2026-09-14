@@ -175,9 +175,7 @@ export class OperatorBroker implements BrokerTransportPort {
     if (tool === null || !isOperatorCommand(tool.name))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
-    const starting =
-      tool.name === "operate_start" ||
-      (tool.name === "operate_recipe_run" && args.session_id === undefined);
+    const starting = tool.name === "operate_start";
     if (requestSignal.aborted) throw requestSignal.reason;
     let api = this.apis.get(principal.clientId);
     if (api === undefined) {
