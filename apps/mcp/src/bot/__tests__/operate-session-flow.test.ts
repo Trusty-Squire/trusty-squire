@@ -208,7 +208,6 @@ const h = vi.hoisted(() => ({
           framePath: string;
           frameOrigin: string;
           frameUrl: string;
-          frameOpaque?: boolean;
         } | null;
       }
     | { ok: false; reason: "none" | "ambiguous"; candidates: string[] },
@@ -694,7 +693,6 @@ vi.mock("../browser.js", async (importOriginal) => ({
             framePath: string;
             frameOrigin: string;
             frameUrl: string;
-            frameOpaque?: boolean;
           } | null;
         }
       | { ok: false; reason: "none" | "ambiguous"; candidates: string[] }
@@ -3840,7 +3838,7 @@ describe("operate_act — locator (text=/css=) resolution", () => {
     ]);
   });
 
-  it("refuses secret locator typing into an opaque sandboxed frame", async () => {
+  it("types a secret into a null-origin frame via locator — frame origin is metadata, not a gate", async () => {
     h.locatorResolve = {
       ok: true,
       text: "Password",
@@ -3848,15 +3846,12 @@ describe("operate_act — locator (text=/css=) resolution", () => {
         framePath: "0",
         frameOrigin: "null",
         frameUrl: "about:srcdoc",
-        frameOpaque: true,
       },
     };
     const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
     stashSecretSlot(obs.session_id, "login", "s3cr3t");
-    await expect(
-      act(obs.session_id, { kind: "type_secret", target: "text=Password", slot: "login" }),
-    ).rejects.toThrow(/opaque frame/i);
-    expect(h.locatorTypeCalls).toEqual([]);
+    await act(obs.session_id, { kind: "type_secret", target: "text=Password", slot: "login" });
+    expect(h.locatorTypeCalls).toEqual([{ text: "s3cr3t", sealed: true }]);
   });
 
   it("seals a same-domain type_secret locator before typing", async () => {
@@ -5564,7 +5559,7 @@ describe("frame targets — identity and credential boundaries (operator-frame-s
     expect(h.typed).toEqual([]);
   });
 
-  it("refuses actions and secrets in an opaque frame with a terminal message — never the allow_host remedy, which can't satisfy a null origin", async () => {
+  it("acts on and types a secret into a null-origin (about:srcdoc) frame — CDP reaches it and the mask covers outputs", async () => {
     h.elements = [
       elem({
         testId: "sandbox-password",
@@ -5572,49 +5567,47 @@ describe("frame targets — identity and credential boundaries (operator-frame-s
         selector: "#password",
         frameUrl: "about:srcdoc",
         frameOrigin: "null",
-        frameOpaque: true,
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    const clickError = await act(started.session_id, {
-      kind: "click",
-      target: "Sandbox Password",
-    }).catch((cause: unknown) => cause);
-    expect(clickError).toBeInstanceOf(Error);
-    expect((clickError as Error).message).toMatch(/opaque/i);
-    expect((clickError as Error).message).not.toMatch(/allow_host/);
+    await act(started.session_id, { kind: "click", target: "Sandbox Password" });
+    expect(h.frameClicks).toEqual(["about:srcdoc|#password"]);
+    expect(h.clickCalls).toBe(0);
     stashSecretSlot(started.session_id, "login", "s3cr3t-value");
-    await expect(
-      act(started.session_id, {
-        kind: "type_secret",
-        slot: "login",
-        target: "Sandbox Password",
-      }),
-    ).rejects.toThrow(/opaque frame/i);
-    expect(h.frameClicks).toEqual([]);
-    expect(h.frameTypes).toEqual([]);
+    await act(started.session_id, {
+      kind: "type_secret",
+      slot: "login",
+      target: "Sandbox Password",
+    });
+    expect(h.frameTypes).toEqual([
+      { frameUrl: "about:srcdoc", selector: "#password", text: "s3cr3t-value", sealed: true },
+    ]);
+    expect(h.typed).toEqual([]);
   });
 
-  it("type_secret is refused for a sandboxed frame tagged opaque even when its URL is the page's own domain (nonblank-sandbox-origin-bypass)", async () => {
+  it("types a secret into a frame whose URL is the page's own domain (no opaque-origin gate)", async () => {
     h.elements = [
       elem({
         testId: "sandboxed-password",
         labelText: "Password",
         selector: "#password",
-        // A sandbox="allow-scripts" iframe keeps its real URL but has a null
-        // active origin — extraction tags it frameOpaque; the guard must key
-        // on that tag, never the URL.
+        // A sandbox="allow-scripts" iframe keeps its real URL; that URL origin
+        // is the only frame metadata, and it never gates the write.
         frameUrl: "https://shop.example.com/embedded-login",
-        frameOrigin: "null",
-        frameOpaque: true,
+        frameOrigin: "https://shop.example.com",
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
     stashSecretSlot(started.session_id, "login", "s3cr3t-value");
-    await expect(
-      act(started.session_id, { kind: "type_secret", slot: "login", target: "Password" }),
-    ).rejects.toThrow(/opaque frame/i);
-    expect(h.frameTypes).toEqual([]);
+    await act(started.session_id, { kind: "type_secret", slot: "login", target: "Password" });
+    expect(h.frameTypes).toEqual([
+      {
+        frameUrl: "https://shop.example.com/embedded-login",
+        selector: "#password",
+        text: "s3cr3t-value",
+        sealed: true,
+      },
+    ]);
     expect(h.typed).toEqual([]);
   });
 

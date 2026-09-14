@@ -546,7 +546,7 @@ describe("native screenshot/click tool contract on an isolated session", () => {
   });
 
   it.each([false, true])(
-    "refuses an allowed URL with opaque sandbox origin (inherited=%s)",
+    "dispatches into a sandboxed cross-origin frame (inherited=%s)",
     async (nested) => {
       const f = await fixture();
       const started = await startHarnessProvisionSession({
@@ -574,17 +574,15 @@ describe("native screenshot/click tool contract on an isolated session", () => {
         expect(await target.evaluate(() => location.origin)).toBe("http://child.test");
         const shot = await captureScreenshot(started.session_id);
         const mouse = vi.spyOn(f.page.mouse, "click");
-        await expect(
-          operateClickTool.handler(
-            {
-              session_id: started.session_id,
-              screenshot: { screenshot_id: shot.click_binding!.screenshot_id, x: 174, y: 244 },
-            },
-            null,
-          ),
-        ).rejects.toThrow("target_not_allowed");
-        expect(mouse).not.toHaveBeenCalled();
-        expect(await target.evaluate("window.events")).toEqual([]);
+        await operateClickTool.handler(
+          {
+            session_id: started.session_id,
+            screenshot: { screenshot_id: shot.click_binding!.screenshot_id, x: 174, y: 244 },
+          },
+          null,
+        );
+        expect(mouse).toHaveBeenCalledOnce();
+        expect(await target.evaluate("window.events")).toEqual([{ trusted: true, checked: true }]);
       } finally {
         vi.restoreAllMocks();
         await finishProvisionSession(started.session_id);

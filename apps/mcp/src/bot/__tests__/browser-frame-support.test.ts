@@ -197,7 +197,7 @@ describe("extractInteractiveElements — frame support (real Chromium, real HTTP
     }
   }, 30000);
 
-  it("surfaces an unconfirmed JavaScript-populated about:blank frame as opaque", async () => {
+  it("surfaces an unconfirmed JavaScript-populated about:blank frame under its null URL origin", async () => {
     const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
     try {
       await page.evaluate(() => {
@@ -210,14 +210,13 @@ describe("extractInteractiveElements — frame support (real Chromium, real HTTP
       const blank = els.find((element) => element.testId === "blank-button");
       expect(blank?.frameUrl).toBe("about:blank");
       expect(blank?.frameOrigin).toBe("null");
-      expect(blank?.frameOpaque).toBe(true);
       expect(blank?.framePath).toBe("0");
     } finally {
       await page.close();
     }
   }, 30000);
 
-  it("keeps a sandboxed srcdoc document opaque after its sandbox attribute is removed", async () => {
+  it("captures a sandboxed srcdoc document under its null URL origin after its sandbox attribute is removed", async () => {
     const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
     try {
       await page.setContent(
@@ -230,7 +229,6 @@ describe("extractInteractiveElements — frame support (real Chromium, real HTTP
       const els = await ctrl.extractInteractiveElements();
       const opaque = els.find((element) => element.testId === "opaque-button");
       expect(opaque?.frameOrigin).toBe("null");
-      expect(opaque?.frameOpaque).toBe(true);
       expect(opaque?.frameOrigin).not.toBe(`http://127.0.0.1:${port}`);
     } finally {
       await page.close();
@@ -333,13 +331,9 @@ describe("extractInteractiveElements — frame support (real Chromium, real HTTP
     }
   }, 30000);
 
-  it("tags a sandboxed (allow-scripts, no allow-same-origin) frame opaque even when its URL is a real same-origin URL", async () => {
+  it("captures a sandboxed (allow-scripts, no allow-same-origin) frame's controls under its URL origin", async () => {
     const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
     try {
-      // The nonblank-sandbox-origin-bypass case: the frame's URL says
-      // "same origin as the page", but sandbox without allow-same-origin
-      // gives it an OPAQUE active origin per spec — tagging by URL would
-      // let the same-domain secret gate trust it.
       await page.setContent(
         page_(
           `<iframe sandbox="allow-scripts" src="http://127.0.0.1:${port}/frame-same"></iframe>`,
@@ -349,14 +343,13 @@ describe("extractInteractiveElements — frame support (real Chromium, real HTTP
       const els = await ctrl.extractInteractiveElements();
       const sandboxed = els.find((element) => element.testId === "same-frame-btn");
       expect(sandboxed).toBeDefined();
-      expect(sandboxed?.frameOrigin).toBe("null");
-      expect(sandboxed?.frameOpaque).toBe(true);
+      expect(sandboxed?.frameOrigin).toBe(`http://127.0.0.1:${port}`);
     } finally {
       await page.close();
     }
   }, 30000);
 
-  it("keeps a real-URL sandboxed frame opaque after it forges window.origin and loses its sandbox attribute", async () => {
+  it("captures a real-URL sandboxed frame under its URL origin after it forges window.origin", async () => {
     const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
     try {
       await page.setContent(
@@ -374,14 +367,13 @@ describe("extractInteractiveElements — frame support (real Chromium, real HTTP
       const sandboxed = els.find((element) => element.testId === "forged-origin-frame-btn");
       expect(sandboxed).toBeDefined();
       expect(sandboxed?.frameUrl).toBe(`http://127.0.0.1:${port}/frame-forged-origin`);
-      expect(sandboxed?.frameOrigin).toBe("null");
-      expect(sandboxed?.frameOpaque).toBe(true);
+      expect(sandboxed?.frameOrigin).toBe(`http://127.0.0.1:${port}`);
     } finally {
       await page.close();
     }
   }, 30000);
 
-  it("keeps a sandbox='allow-scripts allow-same-origin' frame trusted by its URL (the sandbox rule only ever ADDS a restriction)", async () => {
+  it("keeps a sandbox='allow-scripts allow-same-origin' frame under its URL origin", async () => {
     const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
     try {
       await page.setContent(
@@ -394,13 +386,12 @@ describe("extractInteractiveElements — frame support (real Chromium, real HTTP
       const framed = els.find((element) => element.testId === "same-frame-btn");
       expect(framed).toBeDefined();
       expect(framed?.frameOrigin).toBe(`http://127.0.0.1:${port}`);
-      expect(framed?.frameOpaque ?? false).toBe(false);
     } finally {
       await page.close();
     }
   }, 30000);
 
-  it("propagates an ancestor iframe's sandbox opacity to a nested real-URL frame", async () => {
+  it("reaches a nested real-URL frame inside a sandboxed ancestor under its own URL origin", async () => {
     const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
     try {
       await page.setContent(
@@ -414,8 +405,7 @@ describe("extractInteractiveElements — frame support (real Chromium, real HTTP
       expect(nested).toBeDefined();
       expect(nested?.frameUrl).toBe(`http://127.0.0.1:${port}/frame-same`);
       expect(nested?.framePath).toBe("0/0");
-      expect(nested?.frameOrigin).toBe("null");
-      expect(nested?.frameOpaque).toBe(true);
+      expect(nested?.frameOrigin).toBe(`http://127.0.0.1:${port}`);
     } finally {
       await page.close();
     }

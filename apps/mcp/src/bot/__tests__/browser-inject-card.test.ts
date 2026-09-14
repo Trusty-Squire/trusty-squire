@@ -3,6 +3,7 @@ import { chromium, type Browser, type BrowserContext, type Page } from "playwrig
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ApiClient } from "../../api-client.js";
 import { injectCardTool } from "../../tools/inject-card.js";
+import { operateTypeTool } from "../../tools/provision-drive.js";
 import { BrowserController, type CheckoutCard, type InteractiveElement } from "../browser.js";
 import { serializeBrowserUseDOM } from "../browser-use-serializer.js";
 import {
@@ -255,6 +256,127 @@ describe("direct card injection and masked observation", () => {
         expect(visible).toContain("3-D Secure authentication");
         expect(JSON.stringify(evidence)).toContain("401");
         expect(JSON.stringify(evidence)).toContain("api-visible");
+      } finally {
+        if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
+        await isolated.context.close();
+      }
+    },
+  );
+
+  it.skipIf(!available)(
+    "lists cross-origin hosted fields in the COMPACT map with x=x and fills them by compact ref",
+    async () => {
+      const isolated = await page();
+      let sessionId: string | undefined;
+      try {
+        const topUrl = "https://merchant.test/checkout";
+        const frameUrl = "https://checkout.pci.shopifyinc.test/build/number-ltr.html";
+        await isolated.page.route("**/*", async (route) => {
+          const url = route.request().url();
+          if (url === topUrl) {
+            return route.fulfill({
+              contentType: "text/html",
+              body:
+                '<main>Checkout</main><iframe name="card-fields-number" sandbox="allow-scripts" ' +
+                `src="${frameUrl}" style="width:320px;height:200px;border:0"></iframe>`,
+            });
+          }
+          if (url === frameUrl) {
+            return route.fulfill({
+              contentType: "text/html",
+              body:
+                '<input name="number" aria-label="Card number">' +
+                '<input name="expiry" aria-label="Expiry">' +
+                '<input name="verification_value" aria-label="Security code">' +
+                '<input name="cardholder" aria-label="Name on card">',
+            });
+          }
+          return route.fulfill({ status: 404, body: "not found" });
+        });
+        const controller = BrowserController.fromHarnessPage(isolated.page);
+        const started = await startHarnessProvisionSession({
+          browser: controller,
+          serviceUrl: topUrl,
+          observationFormat: "browser-use-dom",
+          format: "compact",
+        });
+        sessionId = started.session_id;
+
+        // One cursorless query builds one immutable snapshot; every ref below
+        // is drawn from that COMPACT map, never from el_table.
+        const compact = await observeQuery(sessionId, "");
+        const rows = compact.safe_table as Array<[string, string, string?]>;
+        const textbox = (label: string): [string, string, string?] => {
+          const row = rows.find(
+            (candidate) => candidate[1] === "t" && (candidate[2] ?? "").includes(`@${label}`),
+          );
+          if (row === undefined) throw new Error(`compact map is missing textbox ${label}`);
+          return row;
+        };
+
+        const numberRow = textbox("card-number");
+        const expiryRow = textbox("expiry");
+        const cvvRow = textbox("security-code");
+        const nameRow = textbox("name-on-card");
+        for (const row of [numberRow, expiryRow, cvvRow, nameRow]) {
+          expect(row[2] ?? "").toContain("x=x");
+        }
+
+        const frame = isolated.page.frames().find((candidate) => candidate.url() === frameUrl)!;
+
+        // operate_type resolves the compact ref to the hosted frame itself.
+        await operateTypeTool.handler(
+          { session_id: sessionId, ref: expiryRow[0], text: "12/30" },
+          null,
+        );
+        expect(await frame.locator('[name="expiry"]').inputValue()).toBe("12/30");
+
+        // inject_card fills pan/cvv/name from COMPACT refs, not el_table.
+        paymentSession(sessionId).releasedPaymentCard = {
+          approvalId: "approval_compact",
+          approvalUrl: "https://approve.test/approval_compact",
+          checkout: {
+            merchant: "Synthetic Merchant",
+            checkout_origin: "https://merchant.test",
+            amount_cents: 123,
+            currency: "JPY",
+          },
+          cardRef: "card_synthetic",
+          last4: "1111",
+          deadline: Date.now() + 60_000,
+          card: CARD,
+        };
+        const result = await injectCardTool.handler(
+          injectCardTool.inputSchema.parse({
+            session_id: sessionId,
+            merchant: "Synthetic Merchant",
+            amount_cents: 123,
+            currency: "JPY",
+            item: "Synthetic item",
+            reason: "Synthetic test purchase",
+            card_ref: "card_synthetic",
+            approval_id: "approval_compact",
+            fields: {
+              pan: { ref: numberRow[0] },
+              cvv: { ref: cvvRow[0] },
+              exp_month: { ref: expiryRow[0] },
+              name: { ref: nameRow[0] },
+            },
+          }),
+          {} as ApiClient,
+        );
+        expect(result).toMatchObject({
+          status: "card_injected",
+          fields: {
+            pan: { status: "filled" },
+            cvv: { status: "filled" },
+            exp_month: { status: "filled" },
+            name: { status: "filled" },
+          },
+        });
+        expect(await frame.locator('[name="number"]').inputValue()).toBe(CARD.pan);
+        expect(await frame.locator('[name="verification_value"]').inputValue()).toBe(CARD.cvv);
+        expect(await frame.locator('[name="cardholder"]').inputValue()).toBe(CARD.name);
       } finally {
         if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
         await isolated.context.close();
