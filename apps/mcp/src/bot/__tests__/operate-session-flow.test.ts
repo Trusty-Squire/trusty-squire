@@ -52,6 +52,7 @@ const h = vi.hoisted(() => ({
   },
   oauthRecoveryCalls: 0,
   typed: [] as Array<{ selector: string; text: string; sealed?: true }>,
+  typeError: null as Error | null,
   uploads: [] as Array<{ selector: string; filePath: string }>,
   selected: [] as Array<{ selector: string; matcher: string | undefined }>,
   selectError: null as Error | null,
@@ -66,16 +67,9 @@ const h = vi.hoisted(() => ({
     dispatchStatus: "not_dispatched" | "dispatched" | "unknown";
     message: string;
   },
-  autocompleteSuggestions: [] as string[],
-  autocompleteCommitMutation: null as { selector: string; value: string } | null,
-  shippingMethodsLoadOnAutocompleteCommit: false,
+  shippingMethodsLoadOnRequiredAddressCommit: false,
   shippingMethodsLoaded: false,
   requiredShippingAddressCommits: [] as string[],
-  autocompleteCommitCalls: [] as number[],
-  autocompleteConfirmOverride: null as boolean | null,
-  autocompleteConfirmCalls: [] as Array<{ selector: string; pickedText: string }>,
-  autocompleteDiscardCalls: 0,
-  autocompleteDiscardEscapeCalls: [] as boolean[],
   clickCalls: 0,
   jsClickCalls: 0,
   clickError: null as Error | null,
@@ -501,6 +495,7 @@ vi.mock("../browser.js", async (importOriginal) => ({
     }
     async type(selector: string, text: string, sealed = false): Promise<string[]> {
       h.typed.push({ selector, text, ...(sealed ? { sealed: true as const } : {}) });
+      if (h.typeError !== null) throw h.typeError;
       for (const element of h.elements as Array<Record<string, unknown>>) {
         if (element.selector === selector) element.value = text;
       }
@@ -523,35 +518,7 @@ vi.mock("../browser.js", async (importOriginal) => ({
     }
     async commitRequiredShippingAddressLine1(selector: string): Promise<void> {
       h.requiredShippingAddressCommits.push(selector);
-      if (h.shippingMethodsLoadOnAutocompleteCommit) h.shippingMethodsLoaded = true;
-    }
-    async markPreexistingTypeSuggestionPopups(): Promise<void> {}
-    async detectTypeSuggestionPopup(_selector: string): Promise<string[]> {
-      return h.autocompleteSuggestions;
-    }
-    async commitTypeSuggestion(index: number): Promise<void> {
-      h.autocompleteCommitCalls.push(index);
-      if (h.autocompleteCommitMutation !== null) {
-        for (const element of h.elements as Array<Record<string, unknown>>) {
-          if (element.selector === h.autocompleteCommitMutation.selector) {
-            element.value = h.autocompleteCommitMutation.value;
-          }
-        }
-      }
-      if (h.shippingMethodsLoadOnAutocompleteCommit) h.shippingMethodsLoaded = true;
-    }
-    async discardTypeSuggestionPopup(dismissWithEscape: boolean): Promise<void> {
-      h.autocompleteDiscardCalls += 1;
-      h.autocompleteDiscardEscapeCalls.push(dismissWithEscape);
-    }
-    async confirmAutocompleteCommitted(selector: string, pickedText: string): Promise<boolean> {
-      h.autocompleteConfirmCalls.push({ selector, pickedText });
-      if (h.autocompleteConfirmOverride !== null) return h.autocompleteConfirmOverride;
-      const normalize = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
-      const el = (h.elements as Array<Record<string, unknown>>).find(
-        (e) => e.selector === selector,
-      );
-      return normalize(String(el?.value ?? "")) === normalize(pickedText);
+      if (h.shippingMethodsLoadOnRequiredAddressCommit) h.shippingMethodsLoaded = true;
     }
     async selectOption(selector: string, matcher?: string): Promise<string> {
       h.selected.push({ selector, matcher });
@@ -1115,6 +1082,7 @@ beforeEach(() => {
   h.oauthTransition = null;
   h.oauthRecoveryCalls = 0;
   h.typed = [];
+  h.typeError = null;
   h.uploads = [];
   h.selected = [];
   h.selectError = null;
@@ -1126,16 +1094,9 @@ beforeEach(() => {
   h.clickHook = null;
   h.clickPhoneCountryMutation = null;
   h.trackedClickFailure = null;
-  h.autocompleteSuggestions = [];
-  h.autocompleteCommitMutation = null;
-  h.shippingMethodsLoadOnAutocompleteCommit = false;
+  h.shippingMethodsLoadOnRequiredAddressCommit = false;
   h.shippingMethodsLoaded = false;
   h.requiredShippingAddressCommits = [];
-  h.autocompleteCommitCalls = [];
-  h.autocompleteConfirmOverride = null;
-  h.autocompleteConfirmCalls = [];
-  h.autocompleteDiscardCalls = 0;
-  h.autocompleteDiscardEscapeCalls = [];
   h.clickCalls = 0;
   h.clickError = null;
   h.jsClickCalls = 0;
@@ -3012,8 +2973,16 @@ afterEach(async () => {
   else process.env.TRUSTY_SQUIRE_OBSERVE_V2 = compactV2ModeBeforeTest;
 });
 
-describe("3.1 — autocomplete-aware type fill", () => {
-  it("fills Shopify's required address combobox, commits its suggestion, and leaves apartment empty", async () => {
+// The 3.1 "commit-or-stop" autocomplete gate (detect a suggestion popup,
+// match-or-throw, positively confirm a click) was removed outright per
+// captain's order: it was blocking a legitimate operate_type on Shopify's
+// shipping-address1 combobox (a plain, settable text input that merely has
+// an autocomplete listbox) with a bare, unrecoverable action_failed. Typing
+// into a combobox/autocomplete field now behaves exactly like typing into
+// any other text field — the page's own suggestion popup, if any, is just
+// part of the next observation, and the agent can click it if it wants.
+describe("typing into a combobox/autocomplete field (no commit-or-stop gate)", () => {
+  it("types Shopify's required address line as plain text and still runs the #635 commit", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
@@ -3035,385 +3004,79 @@ describe("3.1 — autocomplete-aware type fill", () => {
         value: "",
       }),
     ];
-    h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
-    h.autocompleteCommitMutation = {
-      selector: "#shipping-address",
-      value: "350 5th Ave, New York, NY 10118, USA",
-    };
-    // Shopify only enables delivery-rate selection after the required address
-    // line is committed by blur/change, not merely after a Places selection.
-    h.shippingMethodsLoadOnAutocompleteCommit = true;
+    // #635 fix (kept, not a gate): Shopify only enables delivery-rate
+    // selection after the required address line is committed by
+    // blur/change, not merely after the raw keystrokes land.
+    h.shippingMethodsLoadOnRequiredAddressCommit = true;
 
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
     const rows = (await observeQuery(started.session_id, "")).safe_table as Array<
       [string, string, string?]
     >;
     const addressRef = rows.find((row) => row[1] === "s" && row[2]?.includes("f=address"))?.[0];
-
-    // The old observation exposed both controls as f=address, allowing the
-    // textbox below the required line to receive this value and leaving
-    // shipping blocked. The only f=address ref now identifies line 1.
     expect(addressRef).toBeDefined();
+
     await act(started.session_id, { kind: "type", target: addressRef!, text: "350 5th Ave" });
 
     expect(h.typed).toEqual([{ selector: "#shipping-address", text: "350 5th Ave" }]);
-    expect(h.autocompleteCommitCalls).toEqual([0]);
     expect(h.requiredShippingAddressCommits).toEqual(["#shipping-address"]);
     expect(h.shippingMethodsLoaded).toBe(true);
-    expect(h.autocompleteConfirmCalls).toEqual([
-      { selector: "#shipping-address", pickedText: "350 5th Ave, New York, NY 10118, USA" },
-    ]);
+    // No auto-pick: the field holds exactly what was typed, nothing else.
     expect(h.elements).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({
-          selector: "#shipping-address",
-          value: "350 5th Ave, New York, NY 10118, USA",
-        }),
+        expect.objectContaining({ selector: "#shipping-address", value: "350 5th Ave" }),
         expect.objectContaining({ selector: "#shipping-apartment", value: "" }),
       ]),
     );
   });
 
-  it("commits the single matching suggestion and verifies the underlying value actually committed", async () => {
-    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
-    h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
-    h.autocompleteCommitMutation = {
-      selector: "#address",
-      value: "350 5th Ave, New York, NY 10118, USA",
-    };
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" });
-    expect(h.typed).toEqual([{ selector: "#address", text: "350 5th Ave" }]);
-    expect(h.autocompleteCommitCalls).toEqual([0]);
-    expect((h.elements[0] as Record<string, unknown>).value).toBe(
-      "350 5th Ave, New York, NY 10118, USA",
-    );
-  });
-
-  it("no-ops when typing opens no suggestion popup (plain text field, unchanged behavior)", async () => {
+  it("does not run the required-address commit for an ordinary field", async () => {
     h.elements = [elem({ testId: "shipping-name", labelText: "Name", selector: "#name" })];
-    h.autocompleteSuggestions = [];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
     await act(started.session_id, { kind: "type", target: "Name", text: "Ada Lovelace" });
-    expect(h.autocompleteCommitCalls).toEqual([]);
+    expect(h.requiredShippingAddressCommits).toEqual([]);
     expect((h.elements[0] as Record<string, unknown>).value).toBe("Ada Lovelace");
   });
 
-  it("stops on an ambiguous autocomplete match instead of guessing", async () => {
-    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
-    h.autocompleteSuggestions = [
-      "350 5th Ave, New York, NY 10118, USA",
-      "350 5th Avenue, Brooklyn, NY 11215, USA",
+  // Live regression: whitejade.xyz's Shopify checkout. A real
+  // shipping-address1 combobox opens a Google-Places-style suggestion
+  // popup as a side effect of typing. The old gate threw
+  // AutocompleteCommitRequiredError on 0 or >1 prefix matches, which fell
+  // through to a bare action_failed and fenced the whole forwarder. There
+  // is nothing left in the type path that looks at a popup at all, so this
+  // must succeed regardless of how many suggestions the (unobserved) popup
+  // would have rendered.
+  it("succeeds and keeps the typed text when the field's popup would offer 3 suggestions", async () => {
+    h.elements = [
+      elem({
+        tag: "input",
+        role: "combobox",
+        ariaLabel: "Address",
+        labelText: "Address",
+        autocomplete: "shipping address-line1",
+        required: true,
+        selector: "#shipping-address1",
+        value: "",
+      }),
     ];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await expect(
-      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
-    ).rejects.toThrow(/autocomplete_commit_required/i);
-    expect(h.autocompleteCommitCalls).toEqual([]);
-    // Never a confident wrong commit — the field still holds only what was
-    // typed, not a guessed option.
-    expect((h.elements[0] as Record<string, unknown>).value).toBe("350 5th Ave");
-  });
-
-  it("stops when a popup opened but no suggestion matches the typed text", async () => {
-    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
-    h.autocompleteSuggestions = ["1 Infinite Loop, Cupertino, CA 95014, USA"];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await expect(
-      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
-    ).rejects.toThrow(/autocomplete_commit_required/i);
-    expect(h.autocompleteCommitCalls).toEqual([]);
-  });
-
-  // Gate-decision-2 fix (wrong-error-branch): the error must report the
-  // MATCHED subset, not the raw popup — otherwise a genuine zero-match
-  // never takes the "no option started with the typed text" branch (the
-  // popup itself is always non-empty here) and the multi-match branch
-  // reports the wrong count.
-  it("reports a genuine zero-match with the zero-match message, not a miscounted multi-match message", async () => {
-    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
-    h.autocompleteSuggestions = ["1 Infinite Loop, Cupertino, CA 95014, USA"];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await expect(
-      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
-    ).rejects.toThrow(/no visible option started with the typed text/i);
-  });
-
-  it("reports the matched-candidate count, not the popup size, on an ambiguous match", async () => {
-    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
-    h.autocompleteSuggestions = [
-      "350 5th Ave, New York, NY 10118, USA",
-      "350 5th Avenue, Brooklyn, NY 11215, USA",
-      "1 Infinite Loop, Cupertino, CA 95014, USA",
-    ];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await expect(
-      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
-    ).rejects.toThrow(/matched 2 suggestions, not one/i);
-  });
-
-  // Gate-decision-2 fix (double-slice-undercounts-matches): the call site
-  // used to slice the matched subset to 8 before constructing the error,
-  // whose message ALSO slices for display — so with more than 8 matches the
-  // reported count was capped at 8 instead of the true count.
-  it("reports the true match count, not a display-capped count, when more than 8 suggestions match", async () => {
-    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
-    h.autocompleteSuggestions = Array.from(
-      { length: 12 },
-      (_, i) => `350 5th Ave Suite ${i}, New York, NY 10118, USA`,
-    );
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await expect(
-      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
-    ).rejects.toThrow(/matched 12 suggestions, not one/i);
-  });
-
-  // Gate-decision-2 fix (incidental-popup-collateral): 3.1 must only
-  // engage for a form/recipe field where a committed value is actually
-  // required — a site-search/catalog-search box that happens to open its
-  // own suggestion listbox must keep ordinary free-text behavior.
-  it("keeps free-text behavior for a search box that opens its own suggestion popup", async () => {
-    h.elements = [elem({ testId: "site-search-box", labelText: "Search", selector: "#search" })];
-    h.autocompleteSuggestions = ["Wireless Mouse", "Wireless Keyboard"];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/catalog" });
-    await expect(
-      act(started.session_id, { kind: "type", target: "Search", text: "Wireless" }),
-    ).resolves.toBeDefined();
-    expect(h.autocompleteCommitCalls).toEqual([]);
-    expect((h.elements[0] as Record<string, unknown>).value).toBe("Wireless");
-  });
-
-  it("still applies the autocomplete-commit rule when the host explicitly tags a non-money-shaped field with a recipe hole", async () => {
-    h.elements = [elem({ testId: "site-search-box", labelText: "Search", selector: "#search" })];
-    h.autocompleteSuggestions = ["Wireless Mouse", "Wireless Keyboard"];
-    h.autocompleteCommitMutation = { selector: "#search", value: "Wireless Mouse" };
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/catalog" });
-    await act(started.session_id, {
-      kind: "type",
-      target: "Search",
-      text: "Wireless Mouse",
-      provenance: { hole: "product_query" },
-    });
-    expect(h.autocompleteCommitCalls).toEqual([0]);
-  });
-
-  it("throws when a commit click lands but the underlying value never actually changed", async () => {
-    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
-    h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
-    // No autocompleteCommitMutation configured — the click "lands" (per the
-    // mock's commitTypeSuggestion) but the field's live value never changes,
-    // simulating a widget whose onSelect didn't actually fire.
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await expect(
-      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
-    ).rejects.toThrow(/did not take/i);
-    expect(h.autocompleteCommitCalls).toEqual([0]);
-  });
-
-  // Gate-decision fix (2): the commit-took check must accept a broader
-  // positive signal than the typed-into selector's own live value — a
-  // react-select/cmdk-style widget clears its search input on selection and
-  // renders the committed choice in a nearby element instead. The mock's
-  // confirmAutocompleteCommitted override stands in for that nearby-signal
-  // path (el.value never changes here, only the override says "confirmed").
-  it("accepts a broader commit-confirmation signal than the same-selector value", async () => {
-    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
-    h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
-    h.autocompleteConfirmOverride = true;
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await expect(
-      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
-    ).resolves.toBeDefined();
-    expect(h.autocompleteConfirmCalls).toEqual([
-      { selector: "#address", pickedText: "350 5th Ave, New York, NY 10118, USA" },
-    ]);
-  });
-
-  // Gate-decision hard constraint on fix (2): a can't-tell must never be
-  // assumed a success — the override defaults to null (mock falls back to
-  // the realistic same-selector-value check), so with no mutation and no
-  // override this must still stop, exactly like the existing
-  // same-selector-only test above (regression guard for the broadened
-  // signal not accidentally loosening the "never assume success" rule).
-  it("still stops on a can't-tell commit even with the broadened confirmation signal", async () => {
-    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
-    h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await expect(
-      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
-    ).rejects.toThrow(/did not take/i);
-  });
-
-  // Gate-decision auto-fix: the popup lifecycle (Escape + clear markers)
-  // must run on EVERY outcome — ambiguous stop, a failed "did not take"
-  // commit, and success — not just the ambiguous path, or leftover markers
-  // (and a still-open popup) desync the next type action's detection.
-  it("cleans up the popup on an ambiguous stop", async () => {
-    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
-    h.autocompleteSuggestions = [
-      "350 5th Ave, New York, NY 10118, USA",
-      "350 5th Avenue, Brooklyn, NY 11215, USA",
-    ];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await expect(
-      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
-    ).rejects.toThrow(/autocomplete_commit_required/i);
-    expect(h.autocompleteDiscardCalls).toBe(1);
-  });
-
-  it("cleans up the popup after a failed 'did not take' commit", async () => {
-    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
-    h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await expect(
-      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
-    ).rejects.toThrow(/did not take/i);
-    expect(h.autocompleteDiscardCalls).toBe(1);
-  });
-
-  it("cleans up the popup after a successful commit", async () => {
-    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
-    h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
-    h.autocompleteCommitMutation = {
-      selector: "#address",
-      value: "350 5th Ave, New York, NY 10118, USA",
-    };
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" });
-    expect(h.autocompleteDiscardCalls).toBe(1);
-  });
-
-  // Gate-decision-2 fix (zero-suggestion-path-leaks-popup-markers): cleanup
-  // used to be scoped INSIDE the `suggestionTexts.length > 0` branch, so a
-  // type into a scoped field that opened NO popup left the "preexisting"
-  // markers set by markPreexistingTypeSuggestionPopups uncleared —
-  // markComboboxPreexistingElements only ADDS markers, so a stale one could
-  // exclude a genuine popup from detection on a later type/select into the
-  // same element.
-  it("cleans up markers even when the field opens no suggestion popup at all", async () => {
-    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
-    h.autocompleteSuggestions = [];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" });
-    expect(h.autocompleteDiscardCalls).toBe(1);
-  });
-
-  // Captain decision (unconditional-escape-closes-modals, narrowed by the
-  // escape-after-successful-commit finding): Escape must only fire when a
-  // detected popup is plausibly still open — the ambiguous/zero-match stop
-  // (no option was ever clicked) and the failed-commit path (the click may
-  // not have registered). It must NEVER fire when no popup was detected,
-  // nor after a confirmed successful commit (the widget already closed its
-  // popup on selection) — Escape commonly bubbles to close an enclosing
-  // modal/dialog too (a cmdk-in-Radix-dialog combobox, a cart-drawer
-  // quantity field, an address-edit modal).
-  it("tells the browser NOT to press Escape when no popup was ever detected", async () => {
-    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
-    h.autocompleteSuggestions = [];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" });
-    expect(h.autocompleteDiscardEscapeCalls).toEqual([false]);
-  });
-
-  it("tells the browser NOT to press Escape after a confirmed successful commit", async () => {
-    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
-    h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
-    h.autocompleteCommitMutation = {
-      selector: "#address",
-      value: "350 5th Ave, New York, NY 10118, USA",
-    };
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" });
-    expect(h.autocompleteDiscardEscapeCalls).toEqual([false]);
-  });
-
-  it("tells the browser to press Escape on an ambiguous-match stop", async () => {
-    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
-    h.autocompleteSuggestions = [
-      "350 5th Ave, New York, NY 10118, USA",
-      "350 5th Avenue, Brooklyn, NY 11215, USA",
-    ];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await expect(
-      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
-    ).rejects.toThrow(/autocomplete_commit_required/i);
-    expect(h.autocompleteDiscardEscapeCalls).toEqual([true]);
-  });
-
-  it("tells the browser to press Escape after a failed 'did not take' commit", async () => {
-    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
-    h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await expect(
-      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
-    ).rejects.toThrow(/did not take/i);
-    expect(h.autocompleteDiscardEscapeCalls).toEqual([true]);
-  });
-
-  // The committed value (not the raw typed draft) must be what recordTrace
-  // records, so the saved trace reflects what actually ended up on the
-  // page.
-  it("records the committed value, not the raw typed draft, after a successful autocomplete commit", async () => {
-    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
-    h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
-    h.autocompleteCommitMutation = {
-      selector: "#address",
-      value: "350 5th Ave, New York, NY 10118, USA",
-    };
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, {
+    const started = await startProvisionSession({ serviceUrl: "https://whitejade.xyz/checkout" });
+    const result = await act(started.session_id, {
       kind: "type",
       target: "Address",
       text: "350 5th Ave",
-      provenance: { hole: "address.line1" },
     });
-    expect((h.elements[0] as Record<string, unknown>).value).toBe(
-      "350 5th Ave, New York, NY 10118, USA",
-    );
+    expect(result).toBeDefined();
+    expect(h.typed).toEqual([{ selector: "#shipping-address1", text: "350 5th Ave" }]);
+    expect((h.elements[0] as Record<string, unknown>).value).toBe("350 5th Ave");
   });
 
-  // Nearby-signal commits (react-select/cmdk clear their search input and
-  // render the choice in a separate element) must record the field's LIVE
-  // post-commit value, not pickedText — the cold-path transition
-  // attestation re-reads the live value, so a pickedText literal would flag
-  // every such commit as a mismatch and silently disqualify recipe
-  // recording for exactly the widgets 3.1 targets.
-  it("records the field's live value on a nearby-signal commit so cold attestation still passes", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-nearby-commit-"));
-    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
-    h.elements = [
-      elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
-      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
-    ];
-    h.autocompleteSuggestions = ["Queens, NY, USA"];
-    h.autocompleteConfirmOverride = true;
+  it("surfaces the underlying error message instead of a bare action_failed on a type failure", async () => {
+    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
+    h.typeError = new Error("widget dispatch swallowed the keystrokes");
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, {
-      kind: "type",
-      target: "City",
-      text: "Queens",
-      provenance: { hole: "address.city" },
-    });
-    await act(started.session_id, { kind: "click", target: "Continue" });
-    h.visibleText = "Review order";
-    await operateRecipeSaveTool.handler(
-      {
-        session_id: started.session_id,
-        name: "nearby-commit",
-        goal: "Buy coffee",
-        verb: "purchase",
-        inputs: { address: { city: "Queens" } },
-        postcondition: {
-          kind: "execute_capability",
-          describe: "Ready to approve",
-          success_signal: { text_present: "Review order" },
-        },
-      },
-      null as unknown as ApiClient,
-    );
-    expect(readdirSync(dir).length).toBeGreaterThan(0);
-    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
-    rmSync(dir, { recursive: true, force: true });
+    await expect(
+      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
+    ).rejects.toThrow(/widget dispatch swallowed the keystrokes/);
   });
 });
 
