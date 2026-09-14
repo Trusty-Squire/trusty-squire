@@ -237,8 +237,7 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
     CONTROL_QUERY_CONTRACT +
     'Use `format:"full"` only when the page DOM and text are needed. A released card\'s PAN (complete ordinary spellings and prefixes of at least eight digits) and security code are masked; all other emitted content stays verbatim. ' +
     DOM_OBSERVATION_CONTRACT +
-    "Supplying query, role, or cursor always selects the compact control-map path, regardless of format. " +
-    "Explicit legacy sessions (TRUSTY_SQUIRE_OBSERVE_V2=off or shadow) return legacy observations.",
+    "Supplying query, role, or cursor always selects the compact control-map path, regardless of format.",
   inputSchema: observeSchema,
   jsonInputSchema: {
     type: "object",
@@ -296,8 +295,8 @@ export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
     "the whole page (default: viewport; full_page:true for the whole scrollable page) or ONE specific " +
     "frame in isolation via frame_index or frame_url_contains, so a cross-origin challenge iframe (a " +
     "3-D Secure ACS frame, a captcha) can be captured on its own even when it won't show clearly inside " +
-    "a full-page shot. Use this when the DOM tree, or text/el_table from an explicitly " +
-    "selected V1 session, isn't enough to tell what state " +
+    "a full-page shot. Use this when the DOM tree from an explicitly " +
+    "selected full observation isn't enough to tell what state " +
     "a stuck page is actually in — a challenge that never advances, an unexpected layout, a captcha you " +
     "need to SEE. Read-only: never navigates, clicks, types, submits, or steals focus; it only reads " +
     "pixels. After inject_card releases a card, pixels containing that card's PAN (complete ordinary spellings or prefixes of at least eight digits) or security code in injected controls and identified ordinary displayed copies are covered in the returned image; surrounding borders, labels, and errors remain visible. An active mask is never bypassed: if the mask cannot scan or composite the capture, the screenshot call fails rather than returning the unmasked image. When click_binding is present, its screenshot_id and original image width/height authorize one operate_click screenshot point for 60 seconds. Navigation, viewport/scroll or frame geometry changes invalidate it. An absent binding means this image is read-only; capture again for a coordinate click.",

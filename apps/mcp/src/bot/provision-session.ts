@@ -7,9 +7,7 @@ import {
 import type { GoogleHumanChallenge } from "./google-auth-state.js";
 import type { CaptureSource } from "./credential-capture.js";
 import {
-  markOperatorMutationDispatchAttempted,
   operatorMutationDispatchPhase,
-  throwIfOperatorRequestCancelled,
   currentOperatorRequestSignal,
   composeOperatorSignals,
 } from "./request-cancellation.js";
@@ -38,7 +36,6 @@ import type { ElementHandle, Page } from "playwright";
 import {
   BrowserClickDispatchError,
   clickDispatchStatusForError,
-  parseCheckoutAmount,
   OAuthAwaitingHumanError,
   OAuthFailedError,
   OAuthOnboardingRequiredError,
@@ -62,7 +59,6 @@ import {
   controlQueryMatchV2,
   encodeV2QueryPage,
   compactV2AuditUrl,
-  compactV2AuditValue,
   safeDescriptionV2,
   safeBlockersV2,
   safePageSemanticsV2,
@@ -256,7 +252,7 @@ export type ProvisionAction =
   | { kind: "upload"; target: string; path: string };
 
 export type { AllowedHostEntry, HostSource, Session } from "./session/model.js";
-import type { CartMutation, Session } from "./session/model.js";
+import type { Session } from "./session/model.js";
 import { egressSeedHosts, hostStrings, registrableHost } from "./session/hosts.js";
 // Phase 2 — the lifecycle registry transaction moved to session/lifecycle.ts as
 // one unit (registry, real-profile lease, call leases and drains, watchdog,
@@ -675,8 +671,6 @@ async function runSerializedOAuthBoundary(
   );
   return completed.browser;
 }
-
-const settle = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // ── pure helpers (exported for unit tests) ──
 
@@ -1706,23 +1700,13 @@ export function generatePassword(length = 24): string {
   return chars.join("");
 }
 
-// Observation verbosity — ONE ordered knob (docs/DESIGN-observe-compact.md), set
-// per call via operate_observe{detail} / operate_act{detail}:
+// Observation verbosity, set per call via operate_observe{format} /
+// operate_act{detail}:
 //   "none"    — bare ack, no perception (operate_act only; for chained fills).
-//   "compact" — stable-ref element/text deltas + a complete snapshot pointer;
-//               empty fields omitted, value→value_len, `path`/`container`
-//               dropped from the wire, no screen/accessibility. The DEFAULT.
-//   "full"    — the legacy payload: screen + accessibility + full element fields.
-// The persisted compact snapshot preserves the complete inventory; see the
-// design doc for reconstruction and measured savings. The planner escalates to
-// "full" per call on a genuinely ambiguous step.
+//   "compact" — the paged browser-use control map. The DEFAULT.
+//   "full"    — the browser-use DOM tree.
 export type ObserveDetail = "none" | "compact" | "full";
 
-// Type-elision (docs/DESIGN-observe-compact.md § Phase 4). `text` is always the
-// default input type; `button`/`submit` are redundant only when the tag or role
-// already identifies a button. Other types and unmarked input action controls
-// are load-bearing and kept. Applied only to the wire form, never the persisted
-// file.
 function retainSessionElements(session: Session, elements: InteractiveElement[]): void {
   session.lastElements = sealRetainedInteractiveElementsV2(elements, (element) =>
     compactV2CorrelationSelector(session, element),
@@ -2495,7 +2479,7 @@ function terminalOAuthCompletionObservation(session: Session, url: string): Obse
 
 async function observeSession(
   session: Session,
-  detail: "compact" | "full" = "compact",
+  _detail: "compact" | "full" = "compact",
   startMetadata?: CompactV2StartMetadata,
   sourcePage?: OAuthCompletionEvidence["page"],
   preserveSourceBinding = false,
@@ -3331,7 +3315,6 @@ async function executeAct(
   if (action.kind === "click" || action.kind === "js_click") {
     actionPageAfter = returnFromClosedPicker(session, actionPageAfter);
   }
-  const urlAfterAction = actionPageAfter?.url() ?? browser.currentUrl();
   // `detail:"none"` returns a minimal ack (the action ran; no perception emitted)
   // so multi-field fills don't each echo the page. The host must call
   // operate_observe before its next ref-targeted act (refs aren't refreshed here).
