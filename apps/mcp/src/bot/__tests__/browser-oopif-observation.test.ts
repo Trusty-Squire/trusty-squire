@@ -150,7 +150,6 @@ describe("out-of-process iframe observation (real Chromium, real HTTP)", () => {
         const started = await startHarnessProvisionSession({
           browser: controller,
           serviceUrl: topUrl,
-          observationFormat: "browser-use-dom",
           format: "compact",
         });
         sessionId = started.session_id;
@@ -245,7 +244,6 @@ describe("out-of-process iframe observation (real Chromium, real HTTP)", () => {
         const started = await startHarnessProvisionSession({
           browser: controller,
           serviceUrl: topUrl,
-          observationFormat: "browser-use-dom",
           format: "compact",
         });
         sessionId = started.session_id;
