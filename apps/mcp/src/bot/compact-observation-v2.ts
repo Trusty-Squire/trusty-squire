@@ -511,18 +511,32 @@ type WireControlV2 = [string, string, string?];
 // checked/unchecked, disabled, action, field, card choice, and frame context
 // remain distinguishable without paying for empty slots on every row. The
 // label grammar excludes `|` and `=`, so no escaping is needed.
+const WIRE_ROLE_LETTERS: Record<SafeRoleV2, string> = {
+  button: "b",
+  link: "l",
+  textbox: "t",
+  select: "s",
+  checkbox: "c",
+  radio: "r",
+  tab: "tb",
+  menuitem: "m",
+  file: "f",
+};
+
+/**
+ * The wire emits single-letter roles for the canonical control kinds and
+ * passes literal roles (slider, generic, switch…) through verbatim. A caller
+ * can only know roles from what the wire emitted (C5), so a role filter is
+ * stated in wire form: translate the letters back to the internal role words
+ * before comparing, and leave literal roles untouched.
+ */
+export function wireRoleToSafeRoleV2(role: string): SafeRoleV2 | string {
+  const entry = Object.entries(WIRE_ROLE_LETTERS).find(([, letter]) => letter === role);
+  return entry === undefined ? role : (entry[0] as SafeRoleV2);
+}
+
 function wireControl(row: SafeControlV2): WireControlV2 {
-  const role: Record<SafeRoleV2, string> = {
-    button: "b",
-    link: "l",
-    textbox: "t",
-    select: "s",
-    checkbox: "c",
-    radio: "r",
-    tab: "tb",
-    menuitem: "m",
-    file: "f",
-  };
+  const role = WIRE_ROLE_LETTERS;
   const facts = [
     row.label,
     ...(row.visibility === "near" ? ["v=offscreen"] : []),

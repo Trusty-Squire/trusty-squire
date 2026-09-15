@@ -19,6 +19,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BrowserController } from "../browser.js";
 import { finishProvisionSession, startHarnessProvisionSession } from "../provision-session.js";
 import { observe } from "../provision-session.js";
+import { observeQuery } from "../observe/observe.js";
 import { operateClickTool } from "../../tools/provision-drive.js";
 
 let available = false;
@@ -93,6 +94,15 @@ const ROLES = `<!doctype html><html><head><style>
   </div>
 </main></div>
 </body></html>`;
+
+// C5 fixture: the compact map emits canonical roles as single letters — a
+// country <select> is role "s" on the wire — so a role filter stated the way
+// the map taught the caller ("s") must match the same row.
+const COUNTRY = `<!doctype html><html><body><main>
+  <h1>Shipping</h1>
+  <label>Country <select id="country"><option>Japan</option><option>United States</option></select></label>
+  <button type="button">Continue to payment</button>
+</main></body></html>`;
 
 let browser: Browser | undefined;
 
@@ -215,6 +225,41 @@ describe("AX-faithful control emission (C1) and per-field invalid state (C7)", (
           );
           expect(JSON.stringify(clicked)).toBeDefined();
         }
+      } finally {
+        if (sessionId) await finishProvisionSession(sessionId).catch(() => {});
+        await page.context().close();
+      }
+    },
+    120000,
+  );
+  it(
+    "matches role filters stated in wire form (C5: role:\"s\" finds the select)",
+    async () => {
+      const page = await newPage(COUNTRY);
+      let sessionId: string | undefined;
+      try {
+        const start = await startHarnessProvisionSession({
+          browser: BrowserController.fromHarnessPage(page),
+          serviceUrl: "https://fixture.test/shipping",
+          format: "compact",
+        });
+        sessionId = start.session_id;
+
+        // The unfiltered map taught the caller the role: the select's wire row
+        // carries the letter "s".
+        const rows = (start as unknown as { safe_table: string[][] }).safe_table;
+        const selectRow = rows.find((row) => row[1] === "s");
+        expect(selectRow, "select row with wire role s").toBeDefined();
+
+        // C5 — a role filter in the emitted form must find the control; the
+        // old code compared the letter against the internal role word and
+        // returned an empty safe_table for a control the caller had just seen.
+        const filtered = (await observeQuery(sessionId, "country", "s")) as unknown as {
+          safe_table: string[][];
+        };
+        expect(filtered.safe_table).toHaveLength(1);
+        expect(filtered.safe_table[0]![0]).toBe(selectRow![0]);
+        expect(filtered.safe_table[0]![1]).toBe("s");
       } finally {
         if (sessionId) await finishProvisionSession(sessionId).catch(() => {});
         await page.context().close();

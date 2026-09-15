@@ -26,6 +26,7 @@ import {
   type SafeObservationIndexV2,
   type SafePageSemanticsV2,
   type SafeStageV2,
+  wireRoleToSafeRoleV2,
 } from "../compact-observation-v2.js";
 import {
   completeOAuthTransitionRecovery,
@@ -752,10 +753,15 @@ async function observeQueryOwned(
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const sourcePage = operationPageForSession(session);
   const needle = norm(query);
-  const unfiltered = needle.length === 0 && role === undefined;
+  // A role filter is stated in wire form — the letters (and literal roles) the
+  // compact map actually emits (C5): filtering `role:"s"` against the internal
+  // `"select"` word made every observation with a role filter return an empty
+  // safe_table for controls the same session had just emitted.
+  const roleFilter = role === undefined ? undefined : wireRoleToSafeRoleV2(role);
+  const unfiltered = needle.length === 0 && roleFilter === undefined;
   const cursorScope = unfiltered
     ? compactV2ControlCursorScope(session)
-    : compactV2QueryCursorScope(session, needle, role);
+    : compactV2QueryCursorScope(session, needle, roleFilter);
   if (cursor !== undefined) {
     if (unfiltered) {
       try {
@@ -813,7 +819,7 @@ async function observeQueryOwned(
     liveByLegacy.set(legacy, element);
   }
   const ranked = index.rows.flatMap((row, position) => {
-    if (role !== undefined && row.role !== role) return [];
+    if (roleFilter !== undefined && row.role !== roleFilter) return [];
     if (needle.length === 0) return [{ row, position, rank: 0 }];
     const legacy = index.byRef.get(row.ref);
     const element = legacy === undefined ? undefined : liveByLegacy.get(legacy);
