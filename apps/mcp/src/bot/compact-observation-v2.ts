@@ -177,10 +177,18 @@ export interface SafeBlockerV2 {
    * a modal's option set is discoverable in compact mode — not just the one
    * control `ref` points at. When the cap binds, a rendered dismiss affordance is
    * kept first, then the controls that resolve the dialog (buttons, checkboxes,
-   * radios, submits), then anchors; a fuller list needs a control query. `ref`
-   * names an exit or nothing: a button whose WHOLE label is a close/cancel form
-   * or a keep-what-was-entered form, preferring the latter. A dialog rendering
-   * no such control reports exactly what it does offer and
+   * radios, submits), then anchors; a fuller list needs a control query. A nested
+   * modal's controls belong to that modal's own blocker, never to this one.
+   *
+   * `ref` names an exit or nothing. A control qualifies only when its WHOLE
+   * label is a close/cancel form (`Close`, `Cancel`, `No thanks`, `Close
+   * dialog`, a ✕ glyph) or a keep-what-was-entered form (`Keep what I entered`,
+   * `Use the address you entered`); the latter wins when both are present,
+   * because preserving the entry is the safer exit. A label that merely
+   * CONTAINS an exit word is not one — `Cancel subscription` and `Close
+   * account` are the destructive confirm, and `Use the suggested address
+   * instead of the one you entered` accepts the correction. A dialog rendering
+   * no qualifying control reports exactly what it does offer and
    * `target: "unavailable"`. This is additive evidence, never a gate.
    */
   options?: Array<{ ref: string; label?: string }>;
@@ -1114,11 +1122,9 @@ const ERROR_PAGE_SIGNATURES: ReadonlyArray<{ re: RegExp; headings: boolean }> = 
   { re: /sorry, you have been blocked/i, headings: true },
   { re: /^403 error$/i, headings: true },
   // Bare status vocabulary. A reference page's h1 is legitimately exactly "403
-  // Forbidden", so these name a wall only as the whole document title — where a
+  // Forbidden", so this names a wall only as the whole document title — where a
   // documentation page would carry a site suffix.
   { re: /^403 forbidden$/i, headings: false },
-  { re: /^access denied$/i, headings: false },
-  { re: /^request blocked$/i, headings: false },
 ];
 
 function errorPageBlockerV2(
@@ -1197,11 +1203,12 @@ const DIALOG_CLOSE_RES = [
 ];
 // A suggestion dialog's exit keeps what the user typed, so it is named after the
 // entry rather than after closing. Preferred over a plain close when both exist.
+// Anchored like the close family: "Use the suggested address instead of the one
+// you entered" ACCEPTS the correction and must never win the exit slot.
 const DIALOG_KEEP_RES = [
-  /\bkeep\b.*\bentered\b/i,
-  /\bkeep\s+(?:this|my|the)\s+address\b/i,
-  /\buse\b.*\bas\s+entered\b/i,
-  /\buse\b.*\b(?:i|you)\s+entered\b/i,
+  /^(?:keep|use)\s+(?:what|(?:the\s+)?address)\s+(?:i|you)\s+entered$/i,
+  /^use\s+(?:the\s+)?address\s+as\s+entered$/i,
+  /^keep\s+(?:this|my|the)\s+address$/i,
 ];
 const DIALOG_HEADING_TAGS = new Set(["h1", "h2", "h3", "h4", "h5", "h6"]);
 const DIALOG_MAX_OPTIONS = 6;
@@ -1244,11 +1251,22 @@ function dialogNameV2(
   return subtreeText === undefined ? undefined : { text: subtreeText, source: "subtree" };
 }
 
+function modalDialogV2(node: BrowserUseNode): boolean {
+  if (node.nodeType !== 1) return false;
+  const role = (node.attributes.role ?? node.axRole ?? "").toLowerCase();
+  return (
+    role === "dialog" ||
+    role === "alertdialog" ||
+    node.attributes["aria-modal"]?.toLowerCase() === "true"
+  );
+}
+
 function dialogHeadingNodeV2(dialog: BrowserUseNode): BrowserUseNode | undefined {
   let heading: BrowserUseNode | undefined;
   const walk = (node: BrowserUseNode): void => {
     if (heading !== undefined) return;
     for (const child of descendantsV2(node)) {
+      if (modalDialogV2(child)) continue;
       if (
         DIALOG_HEADING_TAGS.has(nodeTagV2(child).toLowerCase()) ||
         (child.attributes.role ?? child.axRole ?? "").toLowerCase() === "heading"
@@ -1278,6 +1296,7 @@ function dialogDetailV2(
   let budget = DIALOG_DETAIL_SOURCE_MAX_CHARS;
   const walk = (node: BrowserUseNode): void => {
     if (budget <= 0 || excluded.has(node)) return;
+    if (node !== dialog && modalDialogV2(node)) return;
     if (!holdingExcluded.has(node)) {
       const whole = browserUseBoundedContextText(node, budget);
       if (whole !== null) {
@@ -1308,14 +1327,16 @@ function dialogControlsV2(
   dialog: BrowserUseNode,
   nodes: BrowserUseNode[],
   visibleFor: Map<BrowserUseNode, boolean>,
-  withinSubtree: (node: BrowserUseNode, ancestor: BrowserUseNode) => boolean,
+  enclosingDialog: (node: BrowserUseNode) => BrowserUseNode | undefined,
   refForNode: (node: BrowserUseNode) => string | undefined,
 ): BrowserUseNode[] {
+  // Nearest enclosing modal, not plain containment: a CMP renders its vendor
+  // panel as a nested dialog, whose buttons belong to that panel's own blocker.
   return nodes.filter(
     (candidate) =>
       candidate !== dialog &&
       visibleFor.get(candidate) === true &&
-      withinSubtree(candidate, dialog) &&
+      enclosingDialog(candidate) === dialog &&
       dialogControlV2(candidate) &&
       refForNode(candidate) !== undefined,
   );
@@ -1462,6 +1483,14 @@ export function safeBlockersV2(
       current = parentFor.get(current);
     }
     return false;
+  };
+  const enclosingDialogV2 = (node: BrowserUseNode): BrowserUseNode | undefined => {
+    let current = parentFor.get(node);
+    while (current !== undefined) {
+      if (modalDialogV2(current)) return current;
+      current = parentFor.get(current);
+    }
+    return undefined;
   };
   const challengeFrames = nodes.filter(
     (node) =>
@@ -1623,16 +1652,10 @@ export function safeBlockersV2(
   // inert; surface them so the compact observation reports the blocked state.
   for (const node of nodes) {
     if (blockers.length >= BLOCKER_MAX_ITEMS) break;
-    if (node.nodeType !== 1 || visibleFor.get(node) !== true) continue;
-    const role = (node.attributes.role ?? node.axRole ?? "").toLowerCase();
-    const isModalDialog =
-      role === "dialog" ||
-      role === "alertdialog" ||
-      node.attributes["aria-modal"]?.toLowerCase() === "true";
-    if (!isModalDialog) continue;
+    if (visibleFor.get(node) !== true || !modalDialogV2(node)) continue;
     const name = dialogNameV2(node);
     if (name === undefined || blockers.some((blocker) => blocker.text === name.text)) continue;
-    const controls = dialogControlsV2(node, nodes, visibleFor, withinSubtree, refForNode);
+    const controls = dialogControlsV2(node, nodes, visibleFor, enclosingDialogV2, refForNode);
     // `ref` is the exit, so only a button-shaped control whose whole label is one
     // earns it — and a keep-what-I-entered exit outranks a plain close, since it
     // preserves the entry. A radio ACCEPTS a choice and an anchor navigates away,

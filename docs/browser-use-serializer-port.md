@@ -56,21 +56,12 @@ Visible verification instructions and structurally identified validation errors
 appear in `semantic.blockers`, with `semantic.blocked: true` independent of `stage`.
 Gateway/CDN block pages (CloudFront 403-style signatures in the title or
 headings) surface as an `error_page` blocker rather than a normal page. Dialog
-blockers additionally carry up to `DIALOG_MAX_OPTIONS` rendered controls as
-`options`, in DOM order, including the close affordance whenever the dialog
-renders one — so "keep entered address" paths are never invisible. When more
-controls qualify than fit, that dismiss path and the controls that resolve the
-dialog are kept ahead of anchors. `ref` names an exit or nothing: a button whose
-WHOLE label is a close/cancel form (`Close`, `Cancel`, `No thanks`, `Close
-dialog`, a ✕ glyph) or a keep-what-was-entered form (`Keep what I entered`, `Use
-the address you entered`), preferring the latter because it preserves the entry.
-A label that merely contains an exit word is not one: `Cancel subscription` and
-`Close account` are the destructive confirm, so a dialog offering only those —
-like one whose controls are only choices or links — reports them in `options`
-with `target: "unavailable"` rather than advertising one as the way out. A
-bounded `detail` carries the dialog's own prose, excluding the control labels the
-blocker already reports and absent when the dialog had no name of its own, since
-`text` is then that same prose.
+blockers additionally carry a bounded `options` list of the modal's own rendered
+controls and a bounded `detail` of its own prose, so "keep entered address"
+paths are never invisible; `ref` names an exit only when a control's whole label
+is one. The `SafeBlockerV2` JSDoc in `apps/mcp/src/bot/compact-observation-v2.ts`
+owns the exit vocabulary, the option cap and its priority order, and when
+`detail` is omitted.
 A solved Turnstile widget no longer blocks when its associated hidden response
 input (`cf-turnstile-response` / `cf-chl-widget-*_response`) carries a non-empty
 token or capture confirms its iframe is no longer rendered. Viewport exclusion

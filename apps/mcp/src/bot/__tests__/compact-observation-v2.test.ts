@@ -145,10 +145,17 @@ describe("CDN/gateway error pages are named, not mistaken for a normal page", ()
     }
   });
 
-  it("reports block-wall titles and vendor attribution headings", () => {
-    for (const title of ["403 Forbidden", "Access Denied", "Request blocked"]) {
-      expect(safePageSemanticsV2({ title, headings: [] }).blocked).toBe(true);
+  it("does not name an app-authorization page as a CDN wall", () => {
+    // Jenkins and several admin consoles title their permission page exactly
+    // "Access Denied". The remedy is a different identity, not a bot wall, and
+    // calling it error_page invites abandoning a recoverable step.
+    for (const title of ["Access Denied", "Request blocked"]) {
+      expect(safePageSemanticsV2({ title, headings: [] }).blocked).toBeUndefined();
     }
+  });
+
+  it("reports block-wall titles and vendor attribution headings", () => {
+    expect(safePageSemanticsV2({ title: "403 Forbidden", headings: [] }).blocked).toBe(true);
     expect(
       safePageSemanticsV2({ title: "Example Domain", headings: ["Sorry, you have been blocked"] })
         .blockers,
@@ -2164,6 +2171,95 @@ describe("safeBlockersV2 modal dialog", () => {
       { ref: "@e:suggested", label: "Use suggested address" },
       { ref: "@e:keep", label: "Keep what I entered" },
     ]);
+  });
+
+  it("refuses an accept button phrased around what was entered", () => {
+    // "…instead of the one you entered" ACCEPTS the correction. Matching it as a
+    // keep-style exit would outrank the real close and advertise the accept
+    // button as the path that preserves the entry.
+    const dialog = node("dialog", {
+      attributes: { role: "dialog", "aria-modal": "true", "aria-label": "Verify your address" },
+      children: [
+        node("dialog-accept", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [
+            text("accept-text", "Use the suggested address instead of the one you entered"),
+          ],
+        }),
+        node("dialog-close", {
+          nodeName: "BUTTON",
+          attributes: { "aria-label": "Close" },
+          axRole: "button",
+        }),
+      ],
+    });
+    const refs = new Map(dialog.children.map((child, index) => [child, `@e:a${index}`]));
+    const blocker = safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate))[0];
+    expect(blocker?.ref).toBe("@e:a1");
+  });
+
+  it("leaves a nested modal's controls and prose to that modal's own blocker", () => {
+    // IAB/TCF consent managers render the vendor panel as a nested role=dialog.
+    // Absorbing it made the outer blocker advertise vendor buttons as its own
+    // choices and resolve `ref` to the inner Close, which leaves the wall up.
+    const vendorPanel = node("vendor-panel", {
+      attributes: { role: "dialog", "aria-label": "Vendor list" },
+      children: [
+        node("vendor-body", {
+          nodeName: "P",
+          children: [text("vendor-body-text", "Select vendors.")],
+        }),
+        node("vendor-a", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("vendor-a-text", "Vendor A")],
+        }),
+        node("vendor-close", {
+          nodeName: "BUTTON",
+          attributes: { "aria-label": "Close" },
+          axRole: "button",
+        }),
+      ],
+    });
+    const dialog = node("dialog", {
+      attributes: { role: "dialog", "aria-modal": "true", "aria-label": "We value your privacy" },
+      children: [
+        node("outer-body", {
+          nodeName: "P",
+          children: [text("outer-body-text", "We and 412 partners store data.")],
+        }),
+        node("accept-all", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("accept-all-text", "Accept all")],
+        }),
+        vendorPanel,
+      ],
+    });
+    const refs = new Map<BrowserUseNode, string>([
+      [dialog.children[1]!, "@e:accept"],
+      [vendorPanel.children[1]!, "@e:vendor-a"],
+      [vendorPanel.children[2]!, "@e:vendor-close"],
+    ]);
+    const blockers = safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate));
+    expect(blockers[0]).toEqual({
+      kind: "dialog",
+      text: "We value your privacy",
+      target: "unavailable",
+      options: [{ ref: "@e:accept", label: "Accept all" }],
+      detail: "We and 412 partners store data.",
+    });
+    expect(blockers[1]).toEqual({
+      kind: "dialog",
+      text: "Vendor list",
+      ref: "@e:vendor-close",
+      options: [
+        { ref: "@e:vendor-a", label: "Vendor A" },
+        { ref: "@e:vendor-close", label: "Close" },
+      ],
+      detail: "Select vendors.",
+    });
   });
 
   it("refuses a destructive confirm that merely contains an exit word", () => {
