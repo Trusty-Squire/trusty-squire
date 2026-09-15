@@ -173,17 +173,19 @@ export interface SafeBlockerV2 {
   focus?: "focused" | "focusable";
   keyboard?: "space" | "tab_space";
   /**
-   * Every control the dialog really offers (Confirm, cancel, close, …), in DOM
-   * order, so a modal's full option set is discoverable in compact mode — not
-   * just the one control `ref` happens to point at. A suggestion dialog must
-   * surface the way to keep what was entered, including the control reached by
-   * closing it. This is additive evidence, never a gate.
+   * Up to DIALOG_MAX_OPTIONS of the dialog's rendered controls (Confirm, cancel,
+   * close, a radio choice, an anchor escape path, …) in DOM order, so a modal's
+   * option set is discoverable in compact mode — not just the one control `ref`
+   * points at. The dismiss affordance is always present, sitting out of DOM
+   * position when it would otherwise fall past the bound; a fuller list needs a
+   * control query. This is additive evidence, never a gate.
    */
   options?: Array<{ ref: string; label?: string }>;
   /**
-   * Bounded rendered text of the dialog body, so what a suggestion would
-   * change relative to what was entered is visible without leaving compact
-   * mode.
+   * Rendered text of the dialog body, so what a suggestion would change
+   * relative to what was entered is visible without leaving compact mode. It is
+   * whole or absent — a body past DIALOG_DETAIL_MAX_CHARS omits the field
+   * rather than emit a cut sentence that reads as the complete suggestion.
    */
   detail?: string;
 }
@@ -1108,7 +1110,7 @@ const ERROR_PAGE_SIGNAL_RES = [
   /^403 error$/i,
 ];
 
-export function errorPageBlockerV2(
+function errorPageBlockerV2(
   title: string | undefined,
   headings: readonly string[],
 ): SafeBlockerV2 | undefined {
@@ -1540,9 +1542,13 @@ export function safeBlockersV2(
     const name = dialogNameV2(node);
     if (name === undefined || blockers.some((blocker) => blocker.text === name)) continue;
     const controls = dialogControlsV2(node, nodes, visibleFor, withinSubtree, refForNode);
+    // Radios and anchors belong in `options` but never in `ref`: a radio ACCEPTS
+    // a choice and an anchor navigates away, so neither dismisses the dialog.
+    // With no button-shaped candidate the honest answer stays "unavailable".
+    const dismissible = controls.filter(blockerControlV2);
     const close =
-      controls.find((candidate) => DIALOG_DISMISS_RE.test(blockerTextV2(candidate) ?? "")) ??
-      controls[0];
+      dismissible.find((candidate) => DIALOG_DISMISS_RE.test(blockerTextV2(candidate) ?? "")) ??
+      dismissible[0];
     // The dismiss path is the one control a blocked agent always needs, so it
     // displaces the last capped entry rather than falling off the slice; `ref`
     // therefore always names one of the emitted options.

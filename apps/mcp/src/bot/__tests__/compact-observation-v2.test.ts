@@ -2180,10 +2180,31 @@ describe("safeBlockersV2 modal dialog", () => {
       [dialog.children[1], "@e:entered"],
       [dialog.children[2], "@e:edit"],
     ]);
-    expect(safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate))[0]?.options).toEqual([
+    const blocker = safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate))[0];
+    expect(blocker?.options).toEqual([
       { ref: "@e:suggested", label: "Use suggested address" },
       { ref: "@e:entered", label: "Use the address you entered" },
       { ref: "@e:edit", label: "Edit address" },
+    ]);
+    // A radio ACCEPTS a choice and an anchor navigates away; neither dismisses
+    // the dialog, so naming one as ref would advertise accept-the-suggestion as
+    // the escape path. With no button-shaped control the answer stays honest.
+    expect(blocker?.ref).toBeUndefined();
+    expect(blocker?.target).toBe("unavailable");
+  });
+
+  it("omits detail rather than cut a body past the budget mid-suggestion", () => {
+    // A legal blurb ahead of the addresses pushes the body past the budget. A
+    // prefix ending mid-address would read as the complete suggestion and the
+    // agent would compare against a sentence that was cut, so the field is
+    // dropped and the rest of the blocker still names the dialog.
+    const blurb = "This address could not be verified exactly. ".repeat(12);
+    const dialog = node("dialog", {
+      attributes: { role: "dialog", "aria-modal": "true", "aria-label": "Verify your address" },
+      children: [text("dialog-body", `${blurb}Suggested address: 1 Example Way, Portland, OR.`)],
+    });
+    expect(safeBlockersV2(page([dialog]))).toEqual([
+      { kind: "dialog", text: "Verify your address", target: "unavailable" },
     ]);
   });
 
