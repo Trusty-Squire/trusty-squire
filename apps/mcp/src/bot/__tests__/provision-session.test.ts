@@ -8,7 +8,6 @@ import {
   stableElementId,
   AmbiguousProvisionTargetError,
   elementRef,
-  isInboxReadHost,
   parseVerification,
   extractSenderEmail,
   expectedVerificationDomains,
@@ -229,23 +228,6 @@ describe("resolveTarget", () => {
   });
 });
 
-
-describe("isInboxReadHost", () => {
-  it("flags the webmail hosts awaitVerification drives into", () => {
-    expect(isInboxReadHost("https://mail.google.com/mail/u/0/#search/x")).toBe(true);
-    expect(isInboxReadHost("https://outlook.live.com/mail/0/")).toBe(true);
-    expect(isInboxReadHost("https://mail.proton.me/u/0/inbox")).toBe(true);
-  });
-
-  it("does NOT flag the service or identity-provider hosts (those stay in the recipe)", () => {
-    expect(isInboxReadHost("https://next-app.useplunk.com/auth/verify-email?token=abc")).toBe(
-      false,
-    );
-    expect(isInboxReadHost("https://accounts.google.com/o/oauth2/v2/auth")).toBe(false);
-    expect(isInboxReadHost("https://github.com/login/oauth/authorize")).toBe(false);
-    expect(isInboxReadHost("not a url")).toBe(false);
-  });
-});
 
 describe("parseVerification (email OTP + link extraction)", () => {
   it("prefers a code adjacent to an OTP keyword", () => {

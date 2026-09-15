@@ -1327,25 +1327,6 @@ function baseDomain(host: string): string {
   return parts.slice(-2).join(".");
 }
 
-// Webmail hosts awaitVerification drives the browser INTO to read a code/link.
-// Actions taken while parked here must NOT enter the
-// replayable recipe: (a) replay re-fetches the code via awaitVerification, so a
-// recorded inbox click is dead weight, and (b) the clicked row's visible text
-// carries the email's subject/snippet — baking a user's inbox content into a
-// shareable recipe. Identity-provider hosts (accounts.google.com, github.com)
-// are NOT here — OAuth steps stay in the trace.
-const INBOX_READ_HOSTS = new Set([
-  "mail.google.com",
-  "outlook.live.com",
-  "outlook.office365.com",
-  "mail.yahoo.com",
-  "mail.proton.me",
-]);
-export function isInboxReadHost(url: string): boolean {
-  const host = registrableHost(url);
-  return host !== null && INBOX_READ_HOSTS.has(host);
-}
-
 function widenAllowedHostsFromUrl(session: Session, url: string): void {
   const host = registrableHost(url);
   if (host === null || session.allowedHosts.some((e) => e.host === host)) return;
