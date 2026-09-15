@@ -611,21 +611,14 @@ Three things about it are load-bearing; do not "simplify" any of them:
   **The signer half rests on an UNVALIDATED premise — check it before that
   binding ships.** It reads a `device_token` claim out of the verified JWS, and
   nothing here has confirmed Vouchflow puts that claim inside the JWS rather
-  than beside it in the sign-complete HTTP response (where `@vouchflow/web`
-  0.3.1 exposes `deviceToken`/`signingDeviceId`). The only claims this codebase
-  has proven live in the JWS are `payload_sha256`, `context`, `confidence` and
-  `mandate_id`; every device-bearing JWS in the suite is minted by the suite's
-  own `signHash`, so no test can fail on it. The check fails CLOSED: if the
-  claim is absent, every reveal and every credential mutation returns
-  `403 missing_device_token`. Validate by running one real `signPayload` in a
-  browser, decoding the assertion with
-  `JSON.parse(atob(assertion.split(".")[1]))`, and confirming all three: the
-  `device_token` claim is non-empty (as is `signing_device_id`); it EQUALS
-  `getVouchflow().getEnrollmentState().deviceId`, which is the value
-  `registerEnrolledDevice` actually stores and the binding compares against; and
-  its length is inside the 8..256 bound `POST /v1/vouchflow/devices` accepts.
-  Any one of the three failing silently refuses every approval that browser
-  could sign, so if any fails the binding must not ship as written.
+  than beside it in the sign-complete HTTP response. The check fails CLOSED: if
+  the claim is absent, every reveal and every credential mutation returns
+  `403 missing_device_token` — and no test can catch it, because every
+  device-bearing JWS in the suite is minted by the suite's own `signHash`. The
+  pre-deploy validation (decode one real assertion, confirm three things about
+  the claim) and the refusal to ship if any of it fails are owned by
+  [`CLAUDE.md`](CLAUDE.md)'s "Unvalidated premise" block — run it before this
+  binding ships.
 - **Its description is a security control.** It has to keep steering agents to
   `use_credential` first and keep saying that the value lands in the transcript.
   A shorter, friendlier description measurably makes the model reach for the

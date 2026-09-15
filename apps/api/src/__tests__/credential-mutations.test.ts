@@ -236,9 +236,9 @@ describe("vouch-gated credential mutations", () => {
     ).approval_id;
     const otherReference = await storeCredential("Stripe", "default", "sk-other");
     const other = (
-      (
-        await createMutation({ operation: "delete", reference: otherReference })
-      ).json() as { approval_id: string }
+      (await createMutation({ operation: "delete", reference: otherReference })).json() as {
+        approval_id: string;
+      }
     ).approval_id;
 
     const otherCeremony = await mutationCeremony(other);

@@ -20,11 +20,7 @@ import {
 } from "@trusty-squire/vault";
 
 /** Terminal fetch outcomes settled OUTSIDE the vault's decrypt path. */
-export type CredentialFetchTerminalOutcome =
-  | "approved"
-  | "denied"
-  | "expired"
-  | "internal_error";
+export type CredentialFetchTerminalOutcome = "approved" | "denied" | "expired" | "internal_error";
 
 /** The audit-relevant face of an approval — deliberately no value-bearing field. */
 export interface CredentialFetchAuditSubject {

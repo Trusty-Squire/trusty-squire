@@ -14,9 +14,7 @@ import type { ApiDeps } from "../services/deps.js";
 // alphabet this repo has never observed, and a charset guess that is wrong
 // rejects every claim — which silently refuses every approval that browser
 // would have signed.
-const registerBody = z
-  .object({ device_token: z.string().min(8).max(256) })
-  .strict();
+const registerBody = z.object({ device_token: z.string().min(8).max(256) }).strict();
 
 export const registerVouchflowDeviceRoutes: FastifyPluginAsync<{
   deps: ApiDeps;

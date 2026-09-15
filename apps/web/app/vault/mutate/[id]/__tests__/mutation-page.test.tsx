@@ -2,6 +2,7 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as PairingModule from "../../../../lib/pairing";
 
 const api = vi.hoisted(() => {
   class ApiError extends Error {
@@ -38,7 +39,7 @@ vi.mock("../../../../lib/vouchflow", () => ({ getVouchflow: () => vouchflow }));
 // same module as the mocked device calls; keep the REAL ones so the page
 // tests exercise the shipped copy rather than a stub of it.
 vi.mock("../../../../lib/pairing", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../../../lib/pairing")>()),
+  ...(await importOriginal<typeof PairingModule>()),
   getPairingState: pairing.getPairingState,
   pairDevice: pairing.pairDevice,
   registerEnrolledDevice: pairing.registerEnrolledDevice,
@@ -232,7 +233,7 @@ describe("credential mutation approval page", () => {
     expect(router.replace).not.toHaveBeenCalled();
   });
 
-  it("does not submit when no passkey is enrolled", async () =>{
+  it("does not submit when no passkey is enrolled", async () => {
     pairing.getPairingState.mockResolvedValue({ enrolled: false });
     render(<CredentialMutationApprovalPage />);
     const user = userEvent.setup();
