@@ -10,7 +10,9 @@
 // used by every ceremony.
 
 import type { FastifyReply } from "fastify";
+import type { JWTPayload } from "jose";
 import type { resolveCredentialForAccount } from "./credential-resolution.js";
+import type { VouchflowDeviceStore } from "./vouchflow-device-store.js";
 import {
   VouchMandateVerificationError,
   type VouchMandateVerificationInput,
@@ -66,4 +68,46 @@ export async function verifyApprovalMandate(
     reply.code(code === "vouchflow_expected_audience_unset" ? 503 : 403).send({ error: code });
     return null;
   }
+}
+
+/** The signer an accepted assertion names, for the ledger row it produces. */
+export interface ApprovalMandateSigner {
+  deviceToken: string;
+  signingDeviceId: string | null;
+}
+
+/**
+ * The second half of "the passkey IS the authentication": a genuine Vouchflow
+ * assertion proves SOMEONE signed these exact bytes, never that it was the
+ * account whose approval it answers. Vouchflow names the signer in the signed
+ * claims; this resolves that device against the devices the owning account has
+ * claimed from a signed-in browser, so a stranger's entirely genuine passkey
+ * cannot settle someone else's approval now that the ceremony is sessionless.
+ *
+ * Returns the signer on success and `null` once it has replied — so a caller
+ * cannot accidentally continue on an unattributable one.
+ */
+export async function resolveApprovalMandateSigner(
+  devices: VouchflowDeviceStore,
+  claims: JWTPayload,
+  ownerAccountId: string,
+  reply: FastifyReply,
+): Promise<ApprovalMandateSigner | null> {
+  const deviceToken = typeof claims.device_token === "string" ? claims.device_token : "";
+  if (deviceToken.length === 0) {
+    reply.code(403).send({ error: "missing_device_token" });
+    return null;
+  }
+  const authorized = await devices.listTokensByAccount(ownerAccountId);
+  if (!authorized.includes(deviceToken)) {
+    reply.code(403).send({ error: "mandate_signer_not_authorized" });
+    return null;
+  }
+  return {
+    deviceToken,
+    signingDeviceId:
+      typeof claims.signing_device_id === "string" && claims.signing_device_id.length > 0
+        ? claims.signing_device_id
+        : null,
+  };
 }

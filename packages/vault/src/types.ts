@@ -155,7 +155,9 @@ export interface VaultAuditPayload {
     | "internal_error";
   // The account whose passkey settled an approval-gated reveal. It is the
   // credential owner on every accepted approval — the approve endpoint only
-  // accepts an assertion over the approval's account-bound payload.
+  // accepts an assertion over the approval's account-bound payload, signed by
+  // a device that account registered. A refusal carries no assertion, so
+  // denial rows name nobody.
   approver_account_id?: string;
   credential_type?: string;
   service?: string;

@@ -4,8 +4,23 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { AppShell } from "../../../components/AppShell";
 import { ApiError, apiGet, apiPost } from "../../../lib/api";
-import { getPairingState, pairDevice } from "../../../lib/pairing";
+import { getPairingState, pairDevice, registerEnrolledDevice } from "../../../lib/pairing";
 import { getVouchflow } from "../../../lib/vouchflow";
+
+// The ceremony itself is sessionless, so a refusal here is about the SIGNER,
+// not about a missing login: the passkey on this device was never claimed by
+// the account that owns the credential.
+const UNLINKED_DEVICE_MESSAGE =
+  "This device isn't linked to your Trusty Squire account yet. Sign in at " +
+  "trustysquire.ai/vault on this device — that links it automatically — then " +
+  "come back and try again.";
+
+function approvalErrorMessage(caught: unknown, fallback: string): string {
+  if (caught instanceof ApiError && caught.message === "mandate_signer_not_authorized") {
+    return UNLINKED_DEVICE_MESSAGE;
+  }
+  return caught instanceof Error ? caught.message : fallback;
+}
 
 interface EditableMetadata {
   label: string;
@@ -81,16 +96,12 @@ export default function CredentialMutationApprovalPage() {
       })
       .catch((caught: unknown) => {
         if (cancelled) return;
-        if (caught instanceof ApiError && caught.status === 401) {
-          redirectToLogin();
-          return;
-        }
         setError(caught instanceof Error ? caught.message : "Failed to load approval.");
       });
     return () => {
       cancelled = true;
     };
-  }, [fetchCeremony, redirectToLogin]);
+  }, [fetchCeremony]);
 
   const approve = useCallback(async () => {
     if (ceremony === null || ceremony.status !== "pending") return;
@@ -114,15 +125,11 @@ export default function CredentialMutationApprovalPage() {
       setCeremony(await fetchCeremony());
       setNeedsPasskeySetup(false);
     } catch (caught) {
-      if (caught instanceof ApiError && caught.status === 401) {
-        redirectToLogin();
-        return;
-      }
-      setError(caught instanceof Error ? caught.message : "Approval failed.");
+      setError(approvalErrorMessage(caught, "Approval failed."));
     } finally {
       setBusy(false);
     }
-  }, [ceremony, fetchCeremony, redirectToLogin]);
+  }, [ceremony, fetchCeremony]);
 
   const setUpPasskey = useCallback(async () => {
     setBusy(true);
@@ -130,6 +137,9 @@ export default function CredentialMutationApprovalPage() {
     try {
       await apiGet("/v1/vault/e2e");
       await pairDevice();
+      // Setting up here needed a session (the /v1/vault/e2e probe above), so
+      // this is the moment the new device can be claimed for the account.
+      await registerEnrolledDevice();
       setNeedsPasskeySetup(false);
     } catch (caught) {
       if (caught instanceof ApiError && caught.status === 401) {

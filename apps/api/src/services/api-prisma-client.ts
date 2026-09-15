@@ -214,6 +214,13 @@ interface CredentialFetchApprovalRow {
   delivered_at: Date | null;
 }
 
+interface VouchflowDeviceRow {
+  device_token: string;
+  account_id: string;
+  first_seen_at: Date;
+  last_seen_at: Date;
+}
+
 interface EgressGrantRow {
   id: string;
   account_id: string;
@@ -449,6 +456,14 @@ export interface ApiPrismaClient {
     create(args: { data: Record<string, unknown> }): Promise<TelegramLinkTokenRow>;
     findUnique(args: { where: { token: string } }): Promise<TelegramLinkTokenRow | null>;
     deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
+  };
+  vouchflowDevice: {
+    upsert(args: {
+      where: { device_token: string };
+      create: Record<string, unknown>;
+      update: Record<string, unknown>;
+    }): Promise<VouchflowDeviceRow>;
+    findMany(args: { where: Record<string, unknown> }): Promise<VouchflowDeviceRow[]>;
   };
   egressGrant: {
     create(args: { data: Record<string, unknown> }): Promise<EgressGrantRow>;

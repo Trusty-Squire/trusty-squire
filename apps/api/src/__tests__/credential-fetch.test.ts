@@ -24,6 +24,12 @@ import { HttpProxyExecutor } from "../services/http-proxy.js";
 const SESSION_SECRET = "credential-fetch-test-session-secret";
 const AUDIENCE = "credential-fetch-test-customer";
 const SECRET_VALUE = "sk-live-this-must-never-leak";
+// The ceremony is sessionless, so the SIGNER is what ties an assertion to the
+// owning account: Vouchflow names the device in the signed claims, and the
+// owner claims that device from a signed-in browser.
+const OWNER_DEVICE_TOKEN = "dev_owner_device_token";
+const OWNER_SIGNING_DEVICE_ID = "sdev_owner_signing_device";
+const FOREIGN_DEVICE_TOKEN = "dev_stranger_device_token";
 
 type SigningKey = Awaited<ReturnType<typeof generateKeyPair>>["privateKey"];
 
@@ -52,6 +58,7 @@ describe("passkey-gated fetch_credential", () => {
     const account = await deps.accountStore.createAccount("fetcher@example.test", "Fetcher");
     accountId = account.id;
     agentToken = await issueAgentToken(accountId, "codex");
+    expect((await registerDevice(OWNER_DEVICE_TOKEN)).statusCode).toBe(204);
   });
 
   afterEach(async () => {
@@ -98,6 +105,15 @@ describe("passkey-gated fetch_credential", () => {
     return `${SESSION_COOKIE_NAME}=${signSessionJwt(jwt, SESSION_SECRET)}`;
   }
 
+  async function registerDevice(deviceToken: string, cookie?: string) {
+    return await server.inject({
+      method: "POST",
+      url: "/v1/vouchflow/devices",
+      headers: { cookie: cookie ?? (await webCookie()) },
+      payload: { device_token: deviceToken },
+    });
+  }
+
   async function createFetch(payload: Record<string, unknown>, token = agentToken) {
     return await server.inject({
       method: "POST",
@@ -130,12 +146,17 @@ describe("passkey-gated fetch_credential", () => {
     context: string,
     mandateId: string,
     expiration: string | number = "10m",
+    device: { device_token?: string; signing_device_id?: string } = {
+      device_token: OWNER_DEVICE_TOKEN,
+      signing_device_id: OWNER_SIGNING_DEVICE_ID,
+    },
   ): Promise<string> {
     return await new SignJWT({
       context,
       payload_sha256: hash,
       confidence: "low",
       mandate_id: mandateId,
+      ...device,
     })
       .setProtectedHeader({ alg: "ES256", kid: "credential-fetch-test-key" })
       .setIssuer("https://vouchflow.dev")
@@ -145,16 +166,14 @@ describe("passkey-gated fetch_credential", () => {
       .sign(signingKey);
   }
 
-  // The human half of the ceremony is the OWNER's browser session — the same
-  // account that owns the credential, holding a live web cookie.
+  // The human half of the ceremony is sessionless: the assertion, signed over
+  // this approval's payload by a device the owner registered, is the authority.
   async function approve(id: string, context = CREDENTIAL_FETCH_VOUCH_CONTEXT) {
-    const cookie = await webCookie();
-    const signed = await ceremony(id, cookie);
+    const signed = await ceremony(id);
     const jws = await signHash(signed.payload_sha256, context, `mandate_${id}`);
     return await server.inject({
       method: "POST",
       url: `/v1/vault/fetch-approvals/${id}/approve`,
-      headers: { cookie },
       payload: { jws },
     });
   }
@@ -232,6 +251,9 @@ describe("passkey-gated fetch_credential", () => {
       purpose: "reveal",
       approval_id: approval.approval_id,
       approver_account_id: accountId,
+      // The device the assertion came from, which is what let the route
+      // attribute the approval to this account at all.
+      signing_device_id: OWNER_SIGNING_DEVICE_ID,
     });
     // The delivery row names the approver too. A ledger where only the decision
     // carries it cannot answer "who released this secret?" from the row that
@@ -328,14 +350,16 @@ describe("passkey-gated fetch_credential", () => {
 
     const audit = await revealAudit();
     expect(audit).toHaveLength(1);
-    // The ledger names the outcome, the credential, and WHO refused it.
+    // The ledger names the outcome and the credential. It does NOT name a
+    // refuser: deny carries no assertion, so the route knows only that someone
+    // holding the link said no — claiming the owner did would be a fiction.
     expect(audit[0]!.payload).toMatchObject({
       outcome: "denied",
       reference,
       purpose: "reveal",
       approval_id: approval.approval_id,
-      approver_account_id: accountId,
     });
+    expect(audit[0]!.payload).not.toHaveProperty("approver_account_id");
     expect(JSON.stringify(audit)).not.toContain(SECRET_VALUE);
   });
 
@@ -598,6 +622,68 @@ describe("passkey-gated fetch_credential", () => {
     expectNoValueAnywhere(polled.body);
     expect(await revealAudit()).toEqual([]);
     expect(JSON.stringify(await revealAudit())).not.toContain(SECRET_VALUE);
+  });
+
+  // The hole the payload binding alone does NOT close, now that the ceremony
+  // takes no session: an assertion over the RIGHT payload, produced by someone
+  // else's entirely genuine passkey. Only the account's own registered signing
+  // devices may answer its approvals.
+  it("refuses a correctly-bound assertion from a device the account never registered", async () => {
+    const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
+    const approval = (await createFetch({ reference })).json() as { approval_id: string };
+    const signed = await ceremony(approval.approval_id);
+
+    const strangerJws = await signHash(
+      signed.payload_sha256,
+      CREDENTIAL_FETCH_VOUCH_CONTEXT,
+      `mandate_${approval.approval_id}`,
+      "10m",
+      { device_token: FOREIGN_DEVICE_TOKEN, signing_device_id: "sdev_stranger" },
+    );
+    const stranger = await server.inject({
+      method: "POST",
+      url: `/v1/vault/fetch-approvals/${approval.approval_id}/approve`,
+      payload: { jws: strangerJws },
+    });
+    expect(stranger.statusCode, stranger.body).toBe(403);
+    expect(stranger.json()).toEqual({ error: "mandate_signer_not_authorized" });
+
+    // An assertion that names no signer at all is equally unattributable.
+    const unnamedJws = await signHash(
+      signed.payload_sha256,
+      CREDENTIAL_FETCH_VOUCH_CONTEXT,
+      `mandate_${approval.approval_id}`,
+      "10m",
+      {},
+    );
+    const unnamed = await server.inject({
+      method: "POST",
+      url: `/v1/vault/fetch-approvals/${approval.approval_id}/approve`,
+      payload: { jws: unnamedJws },
+    });
+    expect(unnamed.statusCode, unnamed.body).toBe(403);
+    expect(unnamed.json()).toEqual({ error: "missing_device_token" });
+
+    // The approval never moved, nothing was revealed, and the ledger has no
+    // settlement to report.
+    const polled = await resume(approval.approval_id);
+    expect((polled.json() as { status: string }).status).toBe("pending");
+    expectNoValueAnywhere(polled.body);
+    expect(await revealAudit()).toEqual([]);
+
+    // Once the owner claims that device from a signed-in browser, the SAME
+    // assertion settles the approval — the binding is the only thing that
+    // was missing.
+    expect((await registerDevice(FOREIGN_DEVICE_TOKEN)).statusCode).toBe(204);
+    const accepted = await server.inject({
+      method: "POST",
+      url: `/v1/vault/fetch-approvals/${approval.approval_id}/approve`,
+      payload: { jws: strangerJws },
+    });
+    expect(accepted.statusCode, accepted.body).toBe(200);
+    expect((await resume(approval.approval_id)).json()).toMatchObject({
+      fields: { value: SECRET_VALUE },
+    });
   });
 
   // The human half is sessionless, exactly like the payment approval path:

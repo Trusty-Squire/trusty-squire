@@ -19,6 +19,7 @@ const api = vi.hoisted(() => ({
 const router = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn() }));
 const mandate = vi.hoisted(() => ({
   getPairingState: vi.fn(),
+  registerEnrolledDevice: vi.fn(),
   signPayload: vi.fn(),
 }));
 
@@ -37,7 +38,10 @@ vi.mock("../../lib/api", () => ({
   timeAgo: () => "1d ago",
 }));
 
-vi.mock("../../lib/pairing", () => ({ getPairingState: mandate.getPairingState }));
+vi.mock("../../lib/pairing", () => ({
+  getPairingState: mandate.getPairingState,
+  registerEnrolledDevice: mandate.registerEnrolledDevice,
+}));
 vi.mock("../../lib/vouchflow", () => ({
   getVouchflow: () => ({ signPayload: mandate.signPayload }),
 }));
@@ -71,6 +75,7 @@ function mockLists(cards: unknown[], creds: unknown[] = []) {
 beforeEach(() => {
   vi.clearAllMocks();
   mandate.getPairingState.mockResolvedValue({ enrolled: true });
+  mandate.registerEnrolledDevice.mockResolvedValue(undefined);
   mandate.signPayload.mockResolvedValue({ assertion: "signed-mandate" });
 });
 afterEach(() => {

@@ -9,10 +9,9 @@
 // The three human-facing endpoints are SESSIONLESS, exactly like the payment
 // approval path: the Vouchflow passkey assertion is the authentication, not a
 // signed-in web session. Release still requires an assertion signed over THIS
-// approval's payload — whose signed bytes carry an opaque binding to the
-// owning account, enforced at verification — so the link alone authorizes
-// nothing; a valid attestation over the account-bound payload is what answers
-// the approval.
+// approval's payload AND signed by a device the owning account has registered
+// (resolveApprovalMandateSigner) — so the link alone authorizes nothing, and
+// neither does a stranger's own entirely genuine passkey.
 //
 // The vault is otherwise a write-only sink: `use_credential` spends a secret
 // server-side and `extract { store }` puts one in without either ever crossing
@@ -25,6 +24,9 @@
 //   * the assertion that settles the approval is signed over THIS approval's
 //     payload, and those signed bytes carry an opaque binding to the owning
 //     account — verification rejects anything signed over a different payload;
+//   * and the DEVICE that signed it is one the owning account claimed from a
+//     signed-in browser — a genuine assertion from a stranger's passkey names
+//     a signer this account never registered, and is refused;
 //   * the approval is bound to (account, credential, field) at mint, and the
 //     resume re-checks the account, so an approval minted by one account is
 //     invisible to another;
@@ -58,6 +60,7 @@ import {
 } from "../services/credential-fetch-audit.js";
 import {
   approvalPageUrl,
+  resolveApprovalMandateSigner,
   sendResolutionFailure,
   verifyApprovalMandate,
 } from "../services/approval-ceremony.js";
@@ -184,9 +187,9 @@ async function recordOutcome(
   deps: ApiDeps,
   record: CredentialFetchApprovalRecord,
   outcome: CredentialFetchTerminalOutcome,
-  approverAccountId?: string,
+  approver?: { accountId: string; signingDeviceId: string | null },
 ): Promise<void> {
-  await recordCredentialFetchOutcome(deps.vaultAuditStore, record, outcome, approverAccountId);
+  await recordCredentialFetchOutcome(deps.vaultAuditStore, record, outcome, approver);
 }
 
 async function settleExpired(
@@ -362,11 +365,11 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
           record.id,
           approvedNames,
           // Who released the secret. The approve endpoint accepts only an
-          // assertion signed over this approval's account-bound payload, so
-          // the only account that can have signed it is the record's own — the
-          // same value the `approved` row carries. If approval on someone
-          // else's behalf is ever allowed, the approver has to be persisted on
-          // the record and read from there.
+          // assertion signed over this approval's account-bound payload by a
+          // device registered to the record's account, so the approving
+          // account is the record's own — the same value the `approved` row
+          // carries. If approval on someone else's behalf is ever allowed, the
+          // approver has to be persisted on the record and read from there.
           record.accountId,
           unattributedVaultAuditAttribution("reveal"),
         );
@@ -469,6 +472,16 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
         reply,
       );
       if (claims === null) return;
+      // A verified assertion says these bytes were signed; it does not say by
+      // whom. Resolve the signer against the owner's registered devices BEFORE
+      // the approval moves at all.
+      const signer = await resolveApprovalMandateSigner(
+        opts.deps.vouchflowDeviceStore,
+        claims,
+        record.accountId,
+        reply,
+      );
+      if (signer === null) return;
 
       const mandateId = typeof claims.mandate_id === "string" ? claims.mandate_id : null;
       const result = await opts.deps.credentialFetchApprovalStore.approve(record.id, mandateId);
@@ -485,14 +498,19 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
       // WHO said it. An approval that is never claimed would otherwise leave no
       // trace of the decision until it lapsed.
       if (result === "approved") {
-        await recordOutcome(opts.deps, record, "approved", record.accountId);
+        await recordOutcome(opts.deps, record, "approved", {
+          accountId: record.accountId,
+          signingDeviceId: signer.signingDeviceId,
+        });
       }
       return reply.code(200).send({ status: "approved" });
     },
   );
 
-  // The human's NO, sessionless like the rest of the ceremony. Refusing is the
-  // conservative answer: it closes the approval without ever moving a value.
+  // The human's NO, sessionless like the rest of the ceremony and carrying no
+  // assertion at all. Refusing is the conservative answer: it closes the
+  // approval without ever moving a value, so it asks for no proof — and
+  // therefore names nobody in the ledger.
   fastify.post<{ Params: { id: string } }>(
     "/v1/vault/fetch-approvals/:id/deny",
     {},
@@ -505,7 +523,7 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
       const now = opts.deps.now?.() ?? new Date();
       const result = await opts.deps.credentialFetchApprovalStore.deny(record.id, now);
       if (result === "denied") {
-        await recordOutcome(opts.deps, record, "denied", record.accountId);
+        await recordOutcome(opts.deps, record, "denied");
         return reply.code(200).send({ status: "denied" });
       }
       if (result === "already_denied") return reply.code(200).send({ status: "denied" });

@@ -40,10 +40,12 @@ export async function recordCredentialFetchOutcome(
   auditStore: VaultAuditStore,
   subject: CredentialFetchAuditSubject,
   outcome: CredentialFetchTerminalOutcome,
-  // The account whose passkey settled it, when a human did. The approve
-  // endpoint only accepts an assertion over the approval's account-bound
-  // payload, so the settlement account is the record's own.
-  approverAccountId?: string,
+  // Who approved, and on which device. ONLY the approve endpoint may name an
+  // approver, and only from an assertion whose signer device is registered to
+  // the record's account — that check is what makes the attribution true. Deny
+  // carries no assertion and proves nothing about who sent it, so denial rows
+  // are deliberately unattributed; so are expiries, which no human settled.
+  approver?: { accountId: string; signingDeviceId: string | null },
 ): Promise<void> {
   await auditStore.record({
     account_id: subject.accountId,
@@ -56,7 +58,14 @@ export async function recordCredentialFetchOutcome(
       approval_id: subject.id,
       label: subject.credentialLabel,
       ...(subject.credentialService !== null ? { service: subject.credentialService } : {}),
-      ...(approverAccountId !== undefined ? { approver_account_id: approverAccountId } : {}),
+      ...(approver !== undefined
+        ? {
+            approver_account_id: approver.accountId,
+            ...(approver.signingDeviceId !== null
+              ? { signing_device_id: approver.signingDeviceId }
+              : {}),
+          }
+        : {}),
     },
   });
 }

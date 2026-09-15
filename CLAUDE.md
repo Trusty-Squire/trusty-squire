@@ -793,8 +793,13 @@ treat a failure there as a security regression, not a test to update:
 approval-bound to (account, credential, field); the human half
 (`ceremony`/`approve`/`deny`) is sessionless, exactly like the payment path —
 the Vouchflow assertion over the account-bound payload is the authentication,
-and the record loads unscoped by id (no web session, no per-account 404);
-single-use delivery (the store's
+and the record loads unscoped by id (no web session, no per-account 404). The
+assertion alone does not say WHO signed, so `approve` additionally resolves the
+signed `device_token` claim against the devices the owning account claimed from
+a signed-in browser (`POST /v1/vouchflow/devices` →
+`services/vouchflow-device-store.ts`), refusing `missing_device_token` /
+`mandate_signer_not_authorized` before any state moves — otherwise any enrolled
+passkey could answer a link-holder's approval. Single-use delivery (the store's
 `approved → consumed` conditional update IS the fence); expiry closes both the
 unsigned and the signed-but-unclaimed halves, and fences denial too (a lapsed
 approval settles as `expired`, never as a refusal the human never made); every

@@ -8,7 +8,12 @@ import { AppShell } from "../../../components/AppShell";
 import { CardEntry } from "../../../components/CardEntry";
 import { ApiError, apiGet, apiPost } from "../../../lib/api";
 import { formatCardIdentity } from "../../../lib/wallet";
-import { getPairingState, isPaymentPasskeyUnavailable, pairDevice } from "../../../lib/pairing";
+import {
+  getPairingState,
+  isPaymentPasskeyUnavailable,
+  pairDevice,
+  registerEnrolledDevice,
+} from "../../../lib/pairing";
 import { getVouchflow } from "../../../lib/vouchflow";
 
 interface CeremonyCard {
@@ -297,6 +302,10 @@ export default function PaymentApprovalPage() {
     try {
       await apiGet("/v1/vault/e2e");
       await pairDevice();
+      // The session that just proved who this is is also what lets us claim
+      // the new device for them, so the sessionless ceremonies can attribute
+      // its assertions later.
+      await registerEnrolledDevice();
       setNeedsPasskeySetup(false);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {

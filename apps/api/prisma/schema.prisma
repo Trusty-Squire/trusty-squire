@@ -179,6 +179,7 @@ model Account {
   credential_mutation_approvals CredentialMutationApproval[]
   credential_fetch_approvals    CredentialFetchApproval[]
   telegram_link_tokens          TelegramLinkToken[]
+  vouchflow_devices             VouchflowDevice[]
 
   @@index([stripe_customer_id])
 }
@@ -435,6 +436,25 @@ model CredentialFetchApproval {
   @@index([account_id, intent_hash, status])
   @@index([expires_at])
   @@map("credential_fetch_approvals")
+}
+
+// A Vouchflow signing device the account has claimed from a signed-in
+// browser. This is the ONLY place Trusty Squire learns which passkeys belong
+// to whom: enrollment itself goes browser → Vouchflow and never touches our
+// API, so without this table an assertion's `device_token` claim names a
+// signer we cannot attribute. The approval ceremonies are sessionless, so this
+// registry is what keeps a stranger's entirely genuine passkey from settling
+// someone else's approval.
+model VouchflowDevice {
+  device_token String   @id
+  account_id   String   @db.VarChar(26)
+  first_seen_at DateTime @default(now())
+  last_seen_at  DateTime @default(now()) @updatedAt
+
+  account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
+
+  @@index([account_id])
+  @@map("vouchflow_devices")
 }
 
 // Telegram account-linking token. Minted by POST /v1/telegram/link,

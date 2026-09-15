@@ -16,7 +16,11 @@ const api = vi.hoisted(() => {
 });
 const router = vi.hoisted(() => ({ replace: vi.fn() }));
 const vouchflow = vi.hoisted(() => ({ signPayload: vi.fn() }));
-const pairing = vi.hoisted(() => ({ getPairingState: vi.fn(), pairDevice: vi.fn() }));
+const pairing = vi.hoisted(() => ({
+  getPairingState: vi.fn(),
+  pairDevice: vi.fn(),
+  registerEnrolledDevice: vi.fn(),
+}));
 
 vi.mock("next/navigation", () => ({
   useParams: () => ({ id: "fetch_1" }),
@@ -54,7 +58,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   status = "pending";
   pairing.getPairingState.mockResolvedValue({ enrolled: true });
-  pairing.pairDevice.mockResolvedValue(undefined);
+  pairing.pairDevice.mockResolvedValue("dev_token");
+  pairing.registerEnrolledDevice.mockResolvedValue(undefined);
   vouchflow.signPayload.mockResolvedValue({ assertion: "signed-fetch-jws" });
   api.apiGet.mockImplementation((path: string) => {
     if (path === "/v1/status") return Promise.resolve({ billing_enabled: false });
@@ -133,33 +138,35 @@ describe("credential fetch approval page", () => {
     expect(api.apiPost).toHaveBeenCalledWith("/v1/vault/fetch-approvals/fetch_1/deny", {});
   });
 
-  // The ceremony is sessionless server-side now, but the page still routes a
-  // 401 to login and brings the visitor back to the SAME approval, instead of
-  // showing them an error for a link that is theirs.
-  it("sends a signed-out visitor to log in, keeping the approval link", async () => {
+  // The ceremony is sessionless, so a link opened signed-out is not a login
+  // problem — the only thing the visitor can be missing is a device this
+  // account has claimed, and the page has to say so in those words.
+  it("explains an unlinked signing device instead of the raw refusal code", async () => {
+    api.apiPost.mockRejectedValue(new api.ApiError("mandate_signer_not_authorized", 403));
+    render(<CredentialFetchApprovalPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Approve reveal" }));
+
+    await waitFor(() => expect(screen.getByText(/isn't linked to your/i)).toBeTruthy());
+    expect(screen.queryByText(/mandate_signer_not_authorized/)).toBeNull();
+    expect(router.replace).not.toHaveBeenCalled();
+  });
+
+  it("shows a load failure in place rather than bouncing to login", async () => {
     api.apiGet.mockImplementation((path: string) => {
       if (path === "/v1/vault/fetch-approvals/fetch_1/ceremony") {
-        return Promise.reject(new api.ApiError("web_session_required", 401));
+        return Promise.reject(new api.ApiError("credential_fetch_approval_not_found", 404));
       }
       return Promise.resolve({ billing_enabled: false });
     });
 
     render(<CredentialFetchApprovalPage />);
     await waitFor(() =>
-      expect(router.replace).toHaveBeenCalledWith("/login?next=/vault/fetch/fetch_1"),
+      expect(screen.getByText(/credential_fetch_approval_not_found/)).toBeTruthy(),
     );
+    expect(router.replace).not.toHaveBeenCalled();
     expect(api.apiPost).not.toHaveBeenCalled();
     expect(vouchflow.signPayload).not.toHaveBeenCalled();
-  });
-
-  it("sends the human to log in when the session lapses mid-ceremony", async () => {
-    api.apiPost.mockRejectedValue(new api.ApiError("web_session_required", 401));
-    render(<CredentialFetchApprovalPage />);
-    const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "Approve reveal" }));
-    await waitFor(() =>
-      expect(router.replace).toHaveBeenCalledWith("/login?next=/vault/fetch/fetch_1"),
-    );
   });
 
   it("does not submit when no passkey is enrolled", async () => {

@@ -17,7 +17,11 @@ const api = vi.hoisted(() => {
 });
 const router = vi.hoisted(() => ({ replace: vi.fn() }));
 const vouchflow = vi.hoisted(() => ({ signPayload: vi.fn() }));
-const pairing = vi.hoisted(() => ({ getPairingState: vi.fn(), pairDevice: vi.fn() }));
+const pairing = vi.hoisted(() => ({
+  getPairingState: vi.fn(),
+  pairDevice: vi.fn(),
+  registerEnrolledDevice: vi.fn(),
+}));
 
 vi.mock("next/navigation", () => ({
   useParams: () => ({ id: "mutation_1" }),
@@ -63,7 +67,8 @@ const ceremony = {
 beforeEach(() => {
   vi.clearAllMocks();
   pairing.getPairingState.mockResolvedValue({ enrolled: true });
-  pairing.pairDevice.mockResolvedValue(undefined);
+  pairing.pairDevice.mockResolvedValue("dev_token");
+  pairing.registerEnrolledDevice.mockResolvedValue(undefined);
   vouchflow.signPayload.mockResolvedValue({ assertion: "signed-mutation-jws" });
   let approved = false;
   api.apiGet.mockImplementation((path: string) => {
@@ -86,10 +91,12 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("credential mutation approval page", () => {
-  it("sends a signed-out visitor to login with the approval link", async () => {
+  // The ceremony is sessionless, so an approval link opened signed-out loads
+  // normally; a failure to load is a failure to report, not a login prompt.
+  it("shows a load failure in place rather than bouncing to login", async () => {
     api.apiGet.mockImplementation((path: string) => {
       if (path === "/v1/vault/mutation-approvals/mutation_1/ceremony") {
-        return Promise.reject(new api.ApiError("web_session_required", 401));
+        return Promise.reject(new api.ApiError("credential_mutation_approval_not_found", 404));
       }
       return Promise.resolve({ billing_enabled: false });
     });
@@ -97,8 +104,9 @@ describe("credential mutation approval page", () => {
     render(<CredentialMutationApprovalPage />);
 
     await waitFor(() =>
-      expect(router.replace).toHaveBeenCalledWith("/login?next=/vault/mutate/mutation_1"),
+      expect(screen.getByText(/credential_mutation_approval_not_found/)).toBeTruthy(),
     );
+    expect(router.replace).not.toHaveBeenCalled();
     expect(api.apiPost).not.toHaveBeenCalled();
     expect(vouchflow.signPayload).not.toHaveBeenCalled();
   });
@@ -129,15 +137,17 @@ describe("credential mutation approval page", () => {
     expect(await screen.findByText(/vault mutation is complete/i)).toBeTruthy();
   });
 
-  it("sends an expired approval session to login", async () => {
-    api.apiPost.mockRejectedValue(new api.ApiError("web_session_required", 401));
+  // The only thing a visitor can be missing on a sessionless ceremony is a
+  // device this account has claimed — say that, not the raw refusal code.
+  it("explains an unlinked signing device instead of the raw refusal code", async () => {
+    api.apiPost.mockRejectedValue(new api.ApiError("mandate_signer_not_authorized", 403));
     render(<CredentialMutationApprovalPage />);
 
     await userEvent.setup().click(await screen.findByRole("button", { name: "Approve edit" }));
 
-    await waitFor(() =>
-      expect(router.replace).toHaveBeenCalledWith("/login?next=/vault/mutate/mutation_1"),
-    );
+    await waitFor(() => expect(screen.getByText(/isn't linked to your/i)).toBeTruthy());
+    expect(screen.queryByText(/mandate_signer_not_authorized/)).toBeNull();
+    expect(router.replace).not.toHaveBeenCalled();
   });
 
   it("does not submit when no passkey is enrolled", async () => {

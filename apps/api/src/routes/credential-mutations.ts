@@ -11,6 +11,7 @@ import { resolveCredentialForAccount } from "../services/credential-resolution.j
 import {
   approvalPageUrl,
   approvalWebBaseUrl,
+  resolveApprovalMandateSigner,
   sendResolutionFailure,
   verifyApprovalMandate,
 } from "../services/approval-ceremony.js";
@@ -329,8 +330,9 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
   );
 
   // The human's YES, sessionless like the payment approve: the authority is
-  // the Vouchflow assertion itself, and it must be signed over this exact
-  // approval's account-bound payload — anything else fails verification.
+  // the Vouchflow assertion itself. It must be signed over this exact
+  // approval's account-bound payload, BY a device the owning account has
+  // registered — anything else fails verification or signer resolution.
   fastify.post<{ Params: { id: string } }>(
     "/v1/vault/mutation-approvals/:id/approve",
     {},
@@ -366,6 +368,16 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
         reply,
       );
       if (claims === null) return;
+      // A verified assertion says these bytes were signed; it does not say by
+      // whom. Resolve the signer against the owner's registered devices before
+      // anything — including the idempotent replay below — treats it as a YES.
+      const signer = await resolveApprovalMandateSigner(
+        opts.deps.vouchflowDeviceStore,
+        claims,
+        record.accountId,
+        reply,
+      );
+      if (signer === null) return;
 
       // Idempotent retries still prove possession of a valid mandate. The
       // mutation is not repeated, but an arbitrary string must never be
@@ -375,7 +387,11 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
       }
 
       const mandateId = typeof claims.mandate_id === "string" ? claims.mandate_id : null;
-      const result = await opts.deps.credentialMutationApprovalStore.commit(record.id, mandateId);
+      const result = await opts.deps.credentialMutationApprovalStore.commit(
+        record.id,
+        mandateId,
+        signer.signingDeviceId,
+      );
       if (result === "already_approved") {
         return reply.code(200).send({ status: "approved", operation: record.operation });
       }
@@ -399,7 +415,10 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
         reply.code(409).send({ error: "credential_mutation_approval_not_pending" });
         return;
       }
-      notifyVaultAuditAfterCommit(opts.deps.vaultAuditStore, mutationAuditEvent(record));
+      notifyVaultAuditAfterCommit(
+        opts.deps.vaultAuditStore,
+        mutationAuditEvent(record, signer.signingDeviceId),
+      );
       return reply.code(200).send({ status: "approved", operation: record.operation });
     },
   );

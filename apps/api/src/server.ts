@@ -26,6 +26,7 @@ import { registerTelegramRoute } from "./routes/telegram.js";
 import { registerVaultAccessRoute } from "./routes/vault-access.js";
 import { registerCredentialMutationRoutes } from "./routes/credential-mutations.js";
 import { registerCredentialFetchRoutes } from "./routes/credential-fetch.js";
+import { registerVouchflowDeviceRoutes } from "./routes/vouchflow-devices.js";
 import { registerEgressRoutes } from "./routes/egress.js";
 import type { EgressGrantStore } from "./services/egress-grant.js";
 import type { EmailForwarder } from "./services/email-forwarder.js";
@@ -291,6 +292,13 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     requireAny: auth.requireAny,
     ...(opts.vouchVerifier !== undefined ? { vouchVerifier: opts.vouchVerifier } : {}),
   });
+  // The account→signing-device binding the two sessionless ceremonies below
+  // check their assertions against. Web-session only: it is where the human's
+  // identity is actually established.
+  await fastify.register(registerVouchflowDeviceRoutes, {
+    deps,
+    requireWeb: auth.requireWeb,
+  });
   await fastify.register(registerCredentialMutationRoutes, {
     deps,
     requireAny: auth.requireAny,
@@ -303,8 +311,8 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     deps,
     requireAny: auth.requireAny,
     // approve/deny/ceremony are the human half — sessionless, like payments;
-    // the passkey assertion over the account-bound payload is the
-    // authentication.
+    // the passkey assertion over the account-bound payload, signed by a device
+    // the owning account has claimed, is the authentication.
     ...(opts.vouchVerifier !== undefined ? { vouchVerifier: opts.vouchVerifier } : {}),
   });
   await fastify.register(registerTelegramRoute, {

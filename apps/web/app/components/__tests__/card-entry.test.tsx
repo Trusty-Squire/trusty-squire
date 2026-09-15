@@ -17,7 +17,11 @@ vi.mock("../../lib/api", () => ({
 
 // Enrollment state is per-test controllable — the pre-enrollment gate and the
 // enrolled form make different trust claims, and both must be PAN-scoped.
-const pairing = vi.hoisted(() => ({ getPairingState: vi.fn(), pairDevice: vi.fn() }));
+const pairing = vi.hoisted(() => ({
+  getPairingState: vi.fn(),
+  pairDevice: vi.fn(),
+  registerEnrolledDevice: vi.fn(),
+}));
 vi.mock("../../lib/pairing", () => pairing);
 
 vi.mock("../../lib/passkey", () => ({

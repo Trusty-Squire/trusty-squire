@@ -9,7 +9,7 @@ import { CardIcon } from "../components/CardIcon";
 import { Modal } from "../components/Modal";
 import { CredentialFields, type FieldsResult } from "../components/CredentialFields";
 import { parseHostList } from "../lib/hosts";
-import { getPairingState } from "../lib/pairing";
+import { getPairingState, registerEnrolledDevice } from "../lib/pairing";
 import { getVouchflow } from "../lib/vouchflow";
 import { type CardMeta, isLegacyCard } from "../lib/wallet";
 import { ApiError, apiDelete, apiGet, apiPatch, apiPost, timeAgo } from "../lib/api";
@@ -69,6 +69,10 @@ export default function VaultPage() {
     (async () => {
       try {
         await load();
+        // A signed-in visit is the only moment we can learn that this
+        // browser's passkey belongs to this account — the sessionless approval
+        // ceremonies rely on that link. Never let it block the dashboard.
+        void registerEnrolledDevice().catch(() => {});
       } catch (err) {
         if (cancelled) return;
         if (err instanceof ApiError && err.status === 401) {
@@ -877,6 +881,7 @@ function EditModal({
         if (!pairing.enrolled) {
           throw new Error("Set up a passkey before changing credential metadata.");
         }
+        await registerEnrolledDevice();
         const approval = await apiPost<{ approval_id: string }>("/v1/vault/mutation-approvals", {
           operation: "edit",
           reference: cred.reference,

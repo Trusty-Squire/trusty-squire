@@ -1,3 +1,4 @@
+import { apiPost } from "./api";
 import { getVouchflow } from "./vouchflow";
 
 const SUPPORT_ERROR =
@@ -38,7 +39,36 @@ export async function getPairingState(): Promise<{ enrolled: boolean }> {
   }
 }
 
-export async function pairDevice(): Promise<void> {
+/**
+ * The enrolled Vouchflow device id — the same value the SDK sends as
+ * `device_token` when it signs, and therefore the value the API matches an
+ * approval assertion's signer against. `null` when nothing is enrolled here.
+ */
+export async function getEnrolledDeviceToken(): Promise<string | null> {
+  try {
+    const { enrolled, deviceId } = await getVouchflow().getEnrollmentState();
+    return enrolled ? deviceId : null;
+  } catch (error) {
+    if (error instanceof Error && error.message.toLowerCase().includes("not configured")) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Claim this browser's enrolled device for the signed-in account. Enrollment
+ * goes browser → Vouchflow and never touches our API, so without this call the
+ * sessionless approval ceremonies see an assertion from a signer they cannot
+ * attribute and refuse it. Idempotent; safe to call on every signed-in visit.
+ */
+export async function registerEnrolledDevice(): Promise<void> {
+  const deviceToken = await getEnrolledDeviceToken();
+  if (deviceToken === null) return;
+  await apiPost("/v1/vouchflow/devices", { device_token: deviceToken });
+}
+
+export async function pairDevice(): Promise<string> {
   const client = getVouchflow();
 
   try {
@@ -65,7 +95,8 @@ export async function pairDevice(): Promise<void> {
 
     // v0.3 requires an option object; this is the SDK's default user handle,
     // also used by getEnrollmentState() and evaluatePrf().
-    await client.enroll({ userHandle: "__default__" });
+    const { deviceToken } = await client.enroll({ userHandle: "__default__" });
+    return deviceToken;
   } catch (error) {
     switch (errorCode(error)) {
       case "platform_authenticator_unavailable":
