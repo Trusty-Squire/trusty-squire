@@ -332,7 +332,7 @@ job without exposing plaintext to the agent.
   attempt-owned callback denials take precedence over interrupted-click uncertainty;
   they and proven pre-dispatch failures retain their failure semantics. See the
   routed click-then-error regression in
-  `apps/mcp/src/bot/__tests__/oauth-lifecycle.test.ts`. Native OAuth
+  `apps/mcp/src/bot/__tests__/oauth-login.test.ts`. Native OAuth
   errors retain `error.session_id`; ordinary errors direct observation, while
   unsettled cancellation keeps its existing wait/finish guidance. Never replay
   OAuth automatically after an uncertain result.
