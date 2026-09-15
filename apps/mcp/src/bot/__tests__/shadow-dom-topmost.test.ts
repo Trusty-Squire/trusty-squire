@@ -15,7 +15,8 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
 import { BrowserController } from "../browser.js";
-import { provisionElementRefs, resolveTarget } from "../provision-session.js";
+import { provisionElementRefs } from "../observe/refs.js";
+import { resolveTarget } from "../provision-session.js";
 
 // Contract C click/type verbs take a DriverTarget now.
 const clickTarget = (selector: string) =>
