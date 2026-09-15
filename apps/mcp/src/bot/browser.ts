@@ -7767,7 +7767,41 @@ export class BrowserController implements BrowserDriver {
     index = 0,
     page: Page | null = this.page,
   ): Promise<ElementHandle<Element> | null> {
-    const frame = this.resolveFrame(target, page);
+    const handle = await this.resolveFrameElementInFrame(
+      this.resolveFrame(target, page),
+      target,
+      selector,
+      index,
+      page,
+    );
+    if (handle !== null) return handle;
+    // Hosted-field providers (Braintree, PayPal, Stripe Elements) remount
+    // their card <iframe>s after the first input; Playwright then appends the
+    // replacement to the parent's childFrames() list, so the positional path
+    // recorded at observation time no longer addresses the live frame. The
+    // remount keeps the iframe's src: re-resolve by exact frame URL at write
+    // time. The origin check inside the per-frame resolution still guards
+    // every candidate, so this can never land in a foreign-origin frame.
+    if (page === null || target.frameUrl === undefined || target.frameUrl === "") return null;
+    for (const frame of page.frames()) {
+      if (frame === page.mainFrame() || frame.isDetached()) continue;
+      if (frame.url() !== target.frameUrl) continue;
+      const byUrl = await this.resolveFrameElementInFrame(frame, target, selector, index, page);
+      if (byUrl !== null) return byUrl;
+    }
+    return null;
+  }
+
+  // Resolve a selector inside ONE candidate frame; null when the frame is
+  // gone, captcha-scoped, or no longer holds the expected origin.
+  private async resolveFrameElementInFrame(
+    frame: Frame | null,
+    target: FrameTarget,
+    selector: string,
+    index: number,
+    page: Page | null,
+  ): Promise<ElementHandle<Element> | null> {
+    if (page === null) return null;
     if (frame === null || this.frameWithinCaptcha(frame)) return null;
     const handle = await frame
       .locator(selector)

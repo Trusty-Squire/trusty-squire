@@ -744,14 +744,22 @@ function baseIdentityFields(el: InteractiveElement): string[] {
     elementRef({ ...el, value: null }),
     el.href ?? "",
     el.type ?? "",
-    // Frame origin — WITHOUT this, an element's `selector` (folded into
-    // stableElementId below) is only unique within its own document, so a
-    // same-shaped selector in two different frames (or a frame vs. the main
-    // page) could hash to the SAME ref and let an act resolve to the wrong
-    // frame's element. Load-bearing for frame identity: the ref
+    // Frame origin + full frame URL — WITHOUT these, an element's `selector`
+    // (folded into stableElementId below) is only unique within its own
+    // document, so a same-shaped selector in two different frames (or a frame
+    // vs. the main page) could hash to the SAME ref and let an act resolve to
+    // the wrong frame's element. Load-bearing for frame identity: the ref
     // itself must be frame-scoped, not just the guard that later reads it.
+    //
+    // The frame's URL, NOT its positional framePath, is the durable frame
+    // component: hosted-field providers (Braintree, PayPal, Stripe Elements)
+    // remount their <iframe> after the first input, and Playwright then
+    // APPENDS the replacement to the parent's childFrames() list, shifting
+    // every positional path. A framePath-keyed identity would re-mint every
+    // framed ref on that remount and turn later inject_card fields into
+    // not_found; the remount keeps the iframe's src, so the URL survives.
     el.frameOrigin ?? "",
-    el.framePath ?? "",
+    el.frameUrl ?? "",
   ];
 }
 
