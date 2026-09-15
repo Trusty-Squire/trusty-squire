@@ -28,7 +28,10 @@ afterAll(async () => {
 });
 
 describe("operate_click internal fallback with a real browser", () => {
-  it("clicks an intercepted control exactly once in legacy mode", async () => {
+  it("clicks an intercepted control exactly once", async () => {
+    // Under the V2 surface the click target is the control's observed @label
+    // (the legacy plain-selector ref mode is gone); the interception-fallback
+    // behavior under test is unchanged.
     const context = await browser.newContext();
     const page = await context.newPage();
     page.setDefaultTimeout(1000);
@@ -57,7 +60,7 @@ describe("operate_click internal fallback with a real browser", () => {
     });
     try {
       await provisionObserveTool.handler({ session_id: started.session_id }, null);
-      await operateClickTool.handler({ session_id: started.session_id, ref: "Continue" }, null);
+      await operateClickTool.handler({ session_id: started.session_id, ref: "@continue" }, null);
       expect(plainClick).toHaveBeenCalledOnce();
       await expect(plainClick.mock.results[0]!.value).rejects.toThrow("intercepts pointer events");
       expect(domClick).toHaveBeenCalledOnce();

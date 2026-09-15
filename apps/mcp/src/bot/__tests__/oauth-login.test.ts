@@ -509,7 +509,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
       await context.close();
     }
-  });
+  }, 30_000);
 
   it("admits Google only from the active browser context", async () => {
     const { controller, product } = await controllerForProduct();
@@ -601,8 +601,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
         serviceUrl: PRODUCT_URL,
       });
       sessionId = started.session_id;
+      const oauthRef = refByLabel(started, "Login with Provider");
+      expect(oauthRef).toBeDefined();
       const [result] = await Promise.all([
-        act(sessionId, { kind: "oauth_login", target: "Login with Provider" }),
+        act(sessionId, { kind: "oauth_login", target: oauthRef! }),
         providerReturned,
       ]);
 
@@ -690,8 +692,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await source.setContent(
         `<button id="open-foreign" onclick="window.open('${foreignUrl}')">Open foreign tab</button>`,
       );
-
-      const opened = await act(sessionId, { kind: "click", target: "Open foreign tab" });
+      const fresh = await observe(sessionId, "compact");
+      const foreignRef = refByLabel(fresh, "Open foreign tab");
+      expect(foreignRef).toBeDefined();
+      const opened = await act(sessionId, { kind: "click", target: foreignRef! });
       const foreign = context.pages().find((page) => page.url() === foreignUrl);
       expect(opened.url).toBe(foreignUrl);
       expect(foreign).toBeDefined();
@@ -852,9 +856,11 @@ describe("BrowserController OAuth popup lifecycle", () => {
         target: oauthRef!,
         provider: "google",
       });
-      const ordinaryRef = refByLabel(returned, "Open ordinary tab");
-      expect(ordinaryRef).toBeDefined();
       const source = controller.completedOAuthPage()!;
+      // The act returns a full-DOM observation; refs come from the compact map.
+      const returnedCompact = await observe(sessionId, "compact");
+      const ordinaryRef = refByLabel(returnedCompact, "Open ordinary tab");
+      expect(ordinaryRef).toBeDefined();
 
       let scrollEntered!: () => void;
       let resumeScroll!: () => void;
@@ -889,7 +895,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       if (sessionId !== undefined) await finishProvisionSession(sessionId);
       await context.close();
     }
-  });
+  }, 30_000);
 
   it("keeps a provider-less SPA OAuth control pending after its popup closes", async () => {
     const context = await browser.newContext();
@@ -1444,11 +1450,13 @@ describe("BrowserController OAuth popup lifecycle", () => {
       try {
         const settled = await act(sessionId, { kind: "oauth_settle" });
         expect(settled.url).toBe("https://product.test/login");
-        expect(hasLabel(settled, "Continue")).toBe(true);
+        // The act returns a full-DOM observation; labels come from the compact map.
+        const settledCompact = await observe(sessionId, "compact");
+        expect(hasLabel(settledCompact, "Continue")).toBe(true);
         expect(provider?.isClosed()).toBe(true);
         expect(product.isClosed()).toBe(false);
         expect((controller as unknown as { page: Page }).page).toBe(product);
-        const productActionRef = refByLabel(settled, "Product action");
+        const productActionRef = refByLabel(settledCompact, "Product action");
         expect(productActionRef).toBeDefined();
         await act(sessionId, { kind: "click", target: productActionRef! });
         expect(await product.locator("body").getAttribute("data-product-action")).toBe("yes");
@@ -1467,7 +1475,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       if (sessionId) await finishProvisionSession(sessionId);
       await context.close();
     }
-  });
+  }, 30_000);
 
   it.each(["completed", "awaiting_human"] as const)(
     "reports a reused-session popup as %s while the initiating click is still pending",
@@ -2530,7 +2538,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
           serviceUrl: productUrl,
         });
         sessionId = started.session_id;
-        const oauthRef = compactRows(started)[0]?.[0];
+        // The initiated page hosts many controls; V2 row order is not the OAuth
+        // button, so target it by its exact label instead of row position.
+        const oauthRef = refByLabel(started, "Continue");
         expect(oauthRef).toBeDefined();
         const result = await act(sessionId, {
           kind,
@@ -2609,10 +2619,11 @@ describe("BrowserController OAuth popup lifecycle", () => {
         provider: "google",
       });
       const source = controller.completedOAuthPage()!;
-      const openRef = refByLabel(returned, "Open tab");
-      const queuedOauthRef = refByLabel(returned, "Continue with Google");
-      expect(openRef).toBeDefined();
-      expect(queuedOauthRef).toBeDefined();
+      // Sanity-check the completed OAuth page exposes the same controls before
+      // the verification handoff (the later act targets are re-observed then).
+      const returnedCompact = await observe(sessionId, "compact");
+      expect(refByLabel(returnedCompact, "Open tab")).toBeDefined();
+      expect(refByLabel(returnedCompact, "Continue with Google")).toBeDefined();
 
       let enteredInbox!: () => void;
       let resumeInbox!: () => void;
@@ -2633,6 +2644,14 @@ describe("BrowserController OAuth popup lifecycle", () => {
 
       const verification = awaitVerification(sessionId);
       await inboxEntered;
+      // await_verification invalidates the compact index by contract (it owns
+      // the source page next). The page has not navigated yet (goto paused in
+      // the spy), so re-observe to authorize the concurrent source-page actions.
+      const concurrent = await observe(sessionId, "compact");
+      const openRef = refByLabel(concurrent, "Open tab");
+      const queuedOauthRef = refByLabel(concurrent, "Continue with Google");
+      expect(openRef).toBeDefined();
+      expect(queuedOauthRef).toBeDefined();
       const queuedOauth = act(sessionId, {
         kind: "oauth_login",
         target: queuedOauthRef!,
@@ -2708,8 +2727,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
         target: oauthRef!,
         provider: "google",
       });
-      const firstRef = refByLabel(returned, "Open first tab");
-      const secondRef = refByLabel(returned, "Open second tab");
+      // The act returns a full-DOM observation; refs come from the compact map.
+      const returnedCompact = await observe(sessionId, "compact");
+      const firstRef = refByLabel(returnedCompact, "Open first tab");
+      const secondRef = refByLabel(returnedCompact, "Open second tab");
       expect(firstRef).toBeDefined();
       expect(secondRef).toBeDefined();
 
@@ -2738,11 +2759,23 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await firstAdoption;
       const second = act(sessionId, { kind: "click", target: secondRef! });
       resumeFirstAdoption();
-      const [firstResult, secondResult] = await Promise.all([first, second]);
+      const [firstResult, secondOutcome] = await Promise.all([
+        first,
+        second.then(
+          () => null,
+          (error) => error,
+        ),
+      ]);
       adoptionSpy.mockRestore();
 
+      // V2 contract: after the first click adopts the first tab, the queued
+      // second ref is re-authorized at dispatch time against the adopted
+      // document and is rejected pre-dispatch — it never re-targets the
+      // adopted page nor opens its own tab.
       expect(firstResult.url).toBe(firstUrl);
-      expect(secondResult.url).toBe(secondUrl);
+      expect(secondOutcome).toBeInstanceOf(ProvenPreDispatchMutationError);
+      expect((secondOutcome as Error).message).toBe("stale_ref");
+      expect(context.pages().find((page) => page.url() === secondUrl)).toBeUndefined();
       await expect(
         context
           .pages()
@@ -2750,18 +2783,11 @@ describe("BrowserController OAuth popup lifecycle", () => {
           .locator("main")
           .textContent(),
       ).resolves.toBe("First tab");
-      await expect(
-        context
-          .pages()
-          .find((page) => page.url() === secondUrl)!
-          .locator("main")
-          .textContent(),
-      ).resolves.toBe("Second tab");
     } finally {
       if (sessionId !== undefined) await finishProvisionSession(sessionId);
       await context.close();
     }
-  });
+  }, 30_000);
 
   it("does not let an OAuth popup replace a queued ordinary click", async () => {
     const context = await browser.newContext();
@@ -2855,9 +2881,13 @@ describe("BrowserController OAuth popup lifecycle", () => {
       if (sessionId !== undefined) await finishProvisionSession(sessionId);
       await context.close();
     }
-  });
+  }, 30_000);
 
   it("keeps queued ordinary clicks on their captured page", async () => {
+    // Under the V2 contract the queued second click is re-authorized at
+    // dispatch time against the adopted first tab's document and is rejected
+    // pre-dispatch (stale_ref) rather than re-targeting any page — asserted
+    // below via data-wrong-tab-clicked staying unset.
     const context = await browser.newContext();
     const product = await context.newPage();
     const productUrl = "https://product.test/editor";
@@ -2912,12 +2942,24 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await firstAdoption;
       const second = act(sessionId, { kind: "click", target: secondRef! });
       resumeFirstAdoption();
-      const [firstResult, secondResult] = await Promise.all([first, second]);
+      const [firstResult, secondOutcome] = await Promise.all([
+        first,
+        second.then(
+          () => null,
+          (error) => error,
+        ),
+      ]);
       adoptionSpy.mockRestore();
 
+      // V2 contract: a click ref is re-authorized at dispatch time against the
+      // then-current observed document. The first click adopted the first tab,
+      // so the queued second ref (captured on the editor page) is rejected
+      // pre-dispatch instead of being re-resolved — and in particular never
+      // re-resolved onto the adopted page's same-labeled control.
       const firstPage = context.pages().find((page) => page.url() === firstUrl)!;
       expect(firstResult.url).toBe(firstUrl);
-      expect(secondResult.url).toBe(secondUrl);
+      expect(secondOutcome).toBeInstanceOf(ProvenPreDispatchMutationError);
+      expect((secondOutcome as Error).message).toBe("stale_ref");
       await expect(
         firstPage.locator("body").getAttribute("data-wrong-tab-clicked"),
       ).resolves.toBeNull();
@@ -2963,7 +3005,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
       expect(controller.currentUrl()).toBe(openedUrl);
       const observed = await observe(sessionId);
       expect(observed.url).toBe(openedUrl);
-      const openedTitleRef = refByLabel(opened, "Opened title");
+      // The act returns a full-DOM observation; refs come from the compact map.
+      const openedTitleRef = refByLabel(await observe(sessionId, "compact"), "Opened title");
       expect(openedTitleRef).toBeDefined();
       const typed = await act(sessionId, {
         kind: "type",
@@ -2977,7 +3020,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       if (sessionId) await finishProvisionSession(sessionId);
       await context.close();
     }
-  });
+  }, 30_000);
 
   it("rejects a closed completion source instead of clicking a colliding product control", async () => {
     const context = await browser.newContext();
@@ -3012,20 +3055,26 @@ describe("BrowserController OAuth popup lifecycle", () => {
         serviceUrl: "https://product.test/login",
       });
       sessionId = started.session_id;
-      const oauthRef = compactRows(started)[0]?.[0];
+      // V2 row order is not the OAuth button; target it by exact label.
+      const oauthRef = refByLabel(started, "Continue");
       expect(oauthRef).toBeDefined();
       const completed = await act(sessionId, {
         kind: "oauth_login",
         target: oauthRef!,
         provider: "google",
       });
-      const sourceRef = refByLabel(completed, "New project");
+      expect(completed.url).toBe(expectedReturnUrl);
+      // The act returns a full-DOM observation; refs come from the compact map.
+      const sourceRef = refByLabel(await observe(sessionId, "compact"), "New project");
       expect(sourceRef).toBeDefined();
       const completionPage = controller.completedOAuthPage();
       expect(completionPage).not.toBeNull();
       await completionPage?.close();
+      // Under V2 a targeted act on the closed completion source fails closed
+      // with a pre-dispatch stale_ref — the product's colliding control is
+      // never clicked.
       await expect(act(sessionId, { kind: "click", target: sourceRef! })).rejects.toMatchObject({
-        code: "target_stale",
+        code: "stale_ref",
       });
       await expect(act(sessionId, { kind: "press", key: "Enter" })).rejects.toThrow(
         "action source page is closed",
@@ -3036,7 +3085,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await expect(
         act(sessionId, { kind: "goto", url: "https://product.test/other" }),
       ).rejects.toThrow("action source page is closed");
-      const recovered = await observe(sessionId);
+      const recovered = await observe(sessionId, "compact");
       expect(recovered.url).toBe("https://product.test/login");
       expect(hasLabel(recovered, "Continue")).toBe(true);
       expect(product.url()).toBe("https://product.test/login");
@@ -3101,7 +3150,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
             next_action: "operate_observe",
           },
         });
-        expect(result.safe_table).toBeDefined();
+        // V2: the return page closed itself, so the terminal snapshot carries
+        // no row table — refs are explicitly "unavailable".
+        expect(result.safe_table).toBeUndefined();
         expect(result.dom).toBeUndefined();
         const handoff = await observe(sessionId);
         expect(handoff.url).toBe("https://product.test/login");

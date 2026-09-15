@@ -36,6 +36,11 @@ const h = vi.hoisted(() => ({
   oauthLoginTimeouts: [] as number[],
   oauthHumanHandoffTimeouts: [] as number[],
   oauthLoginError: null as Error | null,
+  // Plain oauth-login.ts handshake simulation for the fake browser: "return"
+  // redirects same-tab to the provider and back to h.oauthResultUrl,
+  // "provider" stops on the provider URL, "dispatch-only" only records the
+  // dispatch marker/count without navigating.
+  oauthClickSimulate: null as null | "return" | "provider" | "dispatch-only",
   oauthConsentProviders: [] as Array<string | undefined>,
   oauthExpectedGoogleAccountEmails: [] as Array<string | null | undefined>,
   oauthLoginGates: new Map<number, Promise<void>>(),
@@ -344,6 +349,7 @@ vi.mock("../browser.js", async (importOriginal) => ({
                   : (h.workerEmail ?? h.liveGoogleEmail);
             },
             isClosed: () => false,
+            bringToFront: async () => {},
             url: () =>
               identityEmail.value === null
                 ? "https://accounts.google.com/ServiceLogin"
@@ -358,20 +364,66 @@ vi.mock("../browser.js", async (importOriginal) => ({
       };
     }
     // The active working page the OAuth helpers treat as the product tab.
-    // Listeners are registrars only; tests choreograph outcomes via h state.
+    // The plain oauth-login.ts handshake registers framenavigated/popup/close
+    // listeners and compares frames by IDENTITY (frame !== page.mainFrame()),
+    // so this page must be a stable singleton: working on/once/off/emit
+    // registry, one stable mainFrame whose url() tracks h.currentUrl, and the
+    // evaluate/locator surfaces the consent loop reads. Tests choreograph
+    // navigation through clickSelector's h.oauthClickSimulate branch.
+    private oauthSimPage: {
+      page: Record<string, unknown>;
+      frame: Record<string, unknown>;
+    } | null = null;
     get activeOAuthPage(): unknown {
-      return {
-        isClosed: () => false,
-        url: () => this.currentUrl(),
-        mainFrame: () => ({ url: () => this.currentUrl() }),
-        on: () => {},
-        once: () => {},
-        off: () => {},
-        goto: async () => {},
-        waitForLoadState: async () => {},
-        bringToFront: async () => {},
-        close: async () => {},
-      };
+      if (this.oauthSimPage === null) {
+        const listeners = new Map<string, Set<(payload: unknown) => void>>();
+        const subscribe = (
+          event: string,
+          handler: (payload: unknown) => void,
+          once: boolean,
+        ): void => {
+          const wrapped = (payload: unknown): void => {
+            if (once) listeners.get(event)?.delete(wrapped);
+            handler(payload);
+          };
+          let set = listeners.get(event);
+          if (set === undefined) {
+            set = new Set();
+            listeners.set(event, set);
+          }
+          set.add(wrapped);
+        };
+        const page: Record<string, unknown> = {
+          isClosed: () => false,
+          url: () => this.currentUrl(),
+          mainFrame: () => frame,
+          on: (event: string, handler: (payload: unknown) => void) =>
+            subscribe(event, handler, false),
+          once: (event: string, handler: (payload: unknown) => void) =>
+            subscribe(event, handler, true),
+          off: (event: string, handler: (payload: unknown) => void) => {
+            listeners.get(event)?.delete(handler);
+          },
+          emit: (event: string, payload: unknown) => {
+            for (const handler of [...(listeners.get(event) ?? [])]) handler(payload);
+          },
+          goto: async () => {},
+          waitForLoadState: async () => {},
+          bringToFront: async () => {},
+          close: async () => {},
+          // relyingPartyOnboarding() runs an onboarding-form probe in the page.
+          evaluate: async () => false,
+          // classifyGoogleAuthState reads body text off the provider page.
+          locator: () => ({ innerText: async () => "", evaluateAll: async () => [] }),
+        };
+        const frame: Record<string, unknown> = {
+          url: () => this.currentUrl(),
+          parentFrame: () => null,
+          page: () => page,
+        };
+        this.oauthSimPage = { page, frame };
+      }
+      return this.oauthSimPage.page;
     }
     async goto(url: string): Promise<void> {
       h.gotos.push(url);
@@ -389,6 +441,10 @@ vi.mock("../browser.js", async (importOriginal) => ({
     }
     activePage() {
       if (h.capturePage !== null) return h.capturePage;
+      // Identity-stable like production: the plain oauth handshake and
+      // settleAfterOAuth compare pages by object identity, so the session's
+      // operation page must BE the controller's current page object.
+      if (this.page !== null) return this.page;
       return {
         isClosed: () => false,
         url: () => this.currentUrl(),
@@ -667,7 +723,38 @@ vi.mock("../browser.js", async (importOriginal) => ({
         h.phoneCountry = h.clickPhoneCountryMutation;
       }
       if (h.clearElementsOnClick) h.elements = [];
+      await this.simulateOAuthClick();
       if (h.clickError !== null) throw h.clickError;
+    }
+    // Same-tab OAuth handshake simulation for the plain oauth-login.ts path:
+    // mark the dispatch attempted, optionally park behind a test gate, then
+    // fire the same-tab framenavigated hop(s) the handshake's
+    // recordTopLevelNavigation listener consumes (provider auth URL with
+    // redirect_uri, then the product return). Shared by the selector and
+    // element-handle click routes because V2 refs resolve to handles.
+    async simulateOAuthClick(): Promise<void> {
+      if (h.oauthClickSimulate === null) return;
+      await markOperatorMutationDispatchAttempted();
+      h.oauthDispatchCalls += 1;
+      const gate = h.oauthLoginGates.get(h.oauthDispatchCalls - 1);
+      if (gate !== undefined) await gate;
+      if (h.oauthClickSimulate !== "dispatch-only" && this.oauthSimPage !== null) {
+        const resultUrl = h.oauthResultUrl;
+        const isProviderUrl = /accounts\.google\.com|github\.com/.test(resultUrl);
+        const oauthPage = this.oauthSimPage.page as {
+          emit: (event: string, payload: unknown) => void;
+        };
+        if (!isProviderUrl) {
+          h.currentUrl = `https://accounts.google.com/o/oauth2/auth?client_id=test&redirect_uri=${encodeURIComponent(resultUrl)}&response_type=code`;
+          oauthPage.emit("framenavigated", this.oauthSimPage.frame);
+        }
+        if (h.oauthClickSimulate === "return" || isProviderUrl) {
+          h.currentUrl = resultUrl;
+          oauthPage.emit("framenavigated", this.oauthSimPage.frame);
+        }
+        if (h.oauthClickSimulate === "return") h.prose = ["Signed in"];
+      }
+      if (h.oauthLoginError !== null) throw h.oauthLoginError;
     }
     async clickViaJs(): Promise<void> {
       h.jsClickCalls += 1;
@@ -818,6 +905,7 @@ vi.mock("../browser.js", async (importOriginal) => ({
     }
     async clickHandle(): Promise<void> {
       h.locatorClickCalls += 1;
+      await this.simulateOAuthClick();
       if (h.clickValueMutation !== null) {
         for (const element of h.elements as Array<Record<string, unknown>>) {
           if (element.selector === h.clickValueMutation.selector) {
@@ -1041,6 +1129,7 @@ import {
   captureScreenshot,
   observeQuery,
 } from "../provision-session.js";
+import { actInternally } from "../act/act.js";
 import { OBSERVE_V2_MAX_WIRE_BYTES } from "../compact-observation-v2.js";
 import {
   operateClickTool,
@@ -1112,6 +1201,9 @@ function elem(partial: Record<string, unknown>): unknown {
 }
 
 beforeEach(() => {
+  // Tests that arm fake timers (OAuth handoff budget) must not leak them into
+  // later tests when they fail mid-advance.
+  vi.useRealTimers();
   h.capturePage = null;
   h.captureClick = null;
   process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
@@ -1122,6 +1214,7 @@ beforeEach(() => {
   h.oauthLoginTimeouts = [];
   h.oauthHumanHandoffTimeouts = [];
   h.oauthLoginError = null;
+  h.oauthClickSimulate = null;
   h.oauthConsentProviders = [];
   h.oauthExpectedGoogleAccountEmails = [];
   h.oauthLoginGates = new Map();
@@ -1320,7 +1413,12 @@ describe("typing into a combobox/autocomplete field (no commit-or-stop gate)", (
   it("does not run the required-address commit for an ordinary field", async () => {
     h.elements = [elem({ testId: "shipping-name", labelText: "Name", selector: "#name" })];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, { kind: "type", target: "Name", text: "Ada Lovelace" });
+    const rows = (await observeQuery(started.session_id, "")).safe_table as Array<
+      [string, string, string?]
+    >;
+    const nameRef = rows.find((row) => row[2]?.includes("@name"))?.[0];
+    expect(nameRef).toBeDefined();
+    await act(started.session_id, { kind: "type", target: nameRef!, text: "Ada Lovelace" });
     expect(h.requiredShippingAddressCommits).toEqual([]);
     expect((h.elements[0] as Record<string, unknown>).value).toBe("Ada Lovelace");
   });
@@ -1347,9 +1445,14 @@ describe("typing into a combobox/autocomplete field (no commit-or-stop gate)", (
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://whitejade.xyz/checkout" });
+    const rows = (await observeQuery(started.session_id, "")).safe_table as Array<
+      [string, string, string?]
+    >;
+    const addressRef = rows.find((row) => row[2]?.includes("@address"))?.[0];
+    expect(addressRef).toBeDefined();
     const result = await act(started.session_id, {
       kind: "type",
-      target: "Address",
+      target: addressRef!,
       text: "350 5th Ave",
     });
     expect(result).toBeDefined();
@@ -1361,13 +1464,25 @@ describe("typing into a combobox/autocomplete field (no commit-or-stop gate)", (
     h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
     h.typeError = new Error("widget dispatch swallowed the keystrokes");
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    const rows = (await observeQuery(started.session_id, "")).safe_table as Array<
+      [string, string, string?]
+    >;
+    const addressRef = rows.find((row) => row[2]?.includes("@address"))?.[0];
+    expect(addressRef).toBeDefined();
     await expect(
-      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
+      act(started.session_id, { kind: "type", target: addressRef!, text: "350 5th Ave" }),
     ).rejects.toThrow(/widget dispatch swallowed the keystrokes/);
   });
 });
 
 describe("operate session — OAuth lifecycle", () => {
+  // V2 act targets must be a current observation's durable @e: handle; the
+  // Google button is each fixture's only control, so its ref comes straight
+  // from the start observation.
+  function googleRef(started: { dom?: string; safe_table?: unknown[] }): string {
+    return domRefs(started)[0]!;
+  }
+
   it("preserves the authorized target and completes OAuth in the existing real-profile browser", async () => {
     h.visibleText = "Continue with Google";
     h.elements = [
@@ -1378,12 +1493,16 @@ describe("operate session — OAuth lifecycle", () => {
         selector: "#google-oauth",
       }),
     ];
+    h.oauthClickSimulate = "return";
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
     const result = (await operateLoginTool.handler(
-      { session_id: started.session_id, provider: "google", ref: "Continue with Google" },
+      { session_id: started.session_id, provider: "google", ref: googleRef(started) },
       null,
     )) as Awaited<ReturnType<typeof act>>;
-    expect(h.oauthLoginCalls).toEqual(["#google-oauth"]);
+    // Plain-path dispatch: the outer clickWithDispatchTracking plus its nested
+    // browser.click re-entry both record the same authorized selector.
+    expect(h.dispatchTargets).toEqual(["#google-oauth", "#google-oauth"]);
+    expect(h.oauthDispatchCalls).toBe(1);
     expect(h.startCalls).toBe(1);
     expect(h.profileDirs).toHaveLength(1);
     expect(result.dom).toContain("Signed in");
@@ -1391,7 +1510,11 @@ describe("operate session — OAuth lifecycle", () => {
   });
 
   it("waits for DOM readiness instead of spending the OAuth completion budget on a fixed dwell", async () => {
-    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "30";
+    // The machine budget stays far above the simulated handshake so the flow
+    // completes normally and the post-action settle runs; the assertion below
+    // pins that the settle waits on interactive DOM (bounded 2s) rather than
+    // a fixed dwell.
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1000";
     h.visibleText = "Continue with Google";
     h.elements = [
       elem({
@@ -1401,6 +1524,10 @@ describe("operate session — OAuth lifecycle", () => {
         selector: "#google-oauth",
       }),
     ];
+    // Same-tab handshake simulation that returns to the product dashboard and
+    // marks the settled DOM as "Signed in".
+    h.oauthClickSimulate = "return";
+    h.oauthResultUrl = "https://app.example.com/dashboard";
     h.oauthLoginGates.set(
       0,
       new Promise<void>((resolve) => {
@@ -1410,8 +1537,8 @@ describe("operate session — OAuth lifecycle", () => {
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
 
     await expect(
-      act(started.session_id, { kind: "oauth_login", target: "Continue with Google" }),
-    ).resolves.toMatchObject({ text: "Signed in" });
+      act(started.session_id, { kind: "oauth_login", target: googleRef(started) }),
+    ).resolves.toMatchObject({ dom: expect.stringContaining("Signed in") });
     expect(h.waitForInteractiveDomCalls).toContainEqual({ minElements: 1, timeoutMs: 2_000 });
     await finishProvisionSession(started.session_id);
   });
@@ -1428,23 +1555,32 @@ describe("operate session — OAuth lifecycle", () => {
         selector: "#google-oauth",
       }),
     ];
-    h.oauthLoginGates.set(
-      0,
-      new Promise<void>((resolve) => {
-        setTimeout(resolve, 31_000);
-      }),
-    );
+    // Same-tab redirect that stays on the provider (no return URL): the
+    // handshake parks on Google and the human handoff deadline takes over.
+    h.oauthClickSimulate = "provider";
+    h.oauthResultUrl = "https://accounts.google.com/o/oauth2/auth?client_id=test";
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
 
     const login = operateLoginTool.handler(
-      { session_id: started.session_id, provider: "google", ref: "Continue with Google" },
+      { session_id: started.session_id, provider: "google", ref: googleRef(started) },
       null,
     );
+    let settledEarly = false;
+    void login.then(
+      () => {
+        settledEarly = true;
+      },
+      () => {
+        settledEarly = true;
+      },
+    );
     await vi.advanceTimersByTimeAsync(31_000);
+    expect(settledEarly).toBe(false);
+    await vi.advanceTimersByTimeAsync(29_000);
 
-    await expect(login).resolves.toMatchObject({ text: "Signed in" });
-    expect(h.oauthLoginTimeouts).toEqual([30_000]);
-    expect(h.oauthHumanHandoffTimeouts).toEqual([60_000]);
+    await expect(login).resolves.toMatchObject({
+      oauth: { state: "awaiting_human", next_action: "operate_observe" },
+    });
     await finishProvisionSession(started.session_id);
   });
 
@@ -1470,16 +1606,9 @@ describe("operate session — OAuth lifecycle", () => {
         selector: "#google-oauth",
       }),
     ];
-    let releaseOAuth!: () => void;
-    h.oauthLoginGates.set(
-      0,
-      new Promise<void>((resolve) => {
-        releaseOAuth = resolve;
-      }),
-    );
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
     const timedOut = (await operateLoginTool.handler(
-      { session_id: started.session_id, provider: "google", ref: "Continue with Google" },
+      { session_id: started.session_id, provider: "google", ref: googleRef(started) },
       null,
     )) as Awaited<ReturnType<typeof act>>;
     expect(timedOut.oauth).toMatchObject({
@@ -1496,7 +1625,6 @@ describe("operate session — OAuth lifecycle", () => {
     });
     // …oauth_settle is still callable on the same session…
     await expect(act(started.session_id, { kind: "oauth_settle" })).resolves.toBeDefined();
-    releaseOAuth();
     // …and operate_finish closes the still-registered session normally.
     await expect(finishProvisionSession(started.session_id)).resolves.toMatchObject({
       session_id: started.session_id,
@@ -1532,6 +1660,7 @@ describe("operate session — OAuth lifecycle", () => {
         );
       }),
     );
+    h.oauthClickSimulate = "provider";
     h.oauthResultUrl = "https://accounts.google.com/o/oauth2/v2/auth";
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
 
@@ -1539,7 +1668,7 @@ describe("operate session — OAuth lifecycle", () => {
       controller.signal,
       async () =>
         await operateLoginTool.handler(
-          { session_id: started.session_id, provider: "google", ref: "Continue with Google" },
+          { session_id: started.session_id, provider: "google", ref: googleRef(started) },
           null,
         ),
       async (phase) => {
@@ -1565,7 +1694,8 @@ describe("operate session — OAuth lifecycle", () => {
     expect(result.guidance).toMatch(/do not repeat/i);
     expect(result.guidance).not.toMatch(/human|challenge/i);
     expect(result.oauth).not.toHaveProperty("challenge");
-    expect(h.oauthLoginCalls).toHaveLength(1);
+    expect(h.oauthDispatchCalls).toBe(1);
+    expect(h.dispatchTargets).toHaveLength(2);
     await finishProvisionSession(started.session_id);
   });
 
@@ -1584,6 +1714,7 @@ describe("operate session — OAuth lifecycle", () => {
       const controller = new AbortController();
       h.oauthResultUrl = "https://app.example.com/dashboard";
       h.oauthLoginError = new Error("page click: Timeout 15000ms exceeded after navigation");
+      h.oauthClickSimulate = "dispatch-only";
       const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
       let release!: () => void;
       h.oauthLoginGates.set(
@@ -1594,7 +1725,7 @@ describe("operate session — OAuth lifecycle", () => {
       );
       const login = withOperatorRequestContext(controller.signal, () =>
         operateLoginTool.handler(
-          { session_id: started.session_id, provider: "google", ref: "Continue with Google" },
+          { session_id: started.session_id, provider: "google", ref: googleRef(started) },
           null,
         ),
       );
@@ -1611,7 +1742,7 @@ describe("operate session — OAuth lifecycle", () => {
         },
         guidance: expect.stringMatching(/do not repeat/i),
       });
-      expect(h.oauthLoginCalls).toHaveLength(1);
+      expect(h.oauthDispatchCalls).toBe(1);
       await expect(observe(started.session_id)).resolves.toMatchObject({
         session_id: started.session_id,
       });
@@ -1633,15 +1764,19 @@ describe("operate session — OAuth lifecycle", () => {
       }),
     ];
     h.oauthLoginError = error;
+    h.oauthClickSimulate = "dispatch-only";
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+    // Conclusive failures must not be laundered into in_progress uncertainty:
+    // the act still REJECTS with the failure's own diagnosis, even though the
+    // dispatch-attempt marker was set by the plain oauth handshake path.
     await expect(
       withOperatorRequestContext(new AbortController().signal, () =>
         operateLoginTool.handler(
-          { session_id: started.session_id, provider: "google", ref: "Continue with Google" },
+          { session_id: started.session_id, provider: "google", ref: googleRef(started) },
           null,
         ),
       ),
-    ).rejects.toBe(error);
+    ).rejects.toThrow(error.message);
     await expect(observe(started.session_id)).resolves.toMatchObject({
       session_id: started.session_id,
     });
@@ -1659,6 +1794,7 @@ describe("operate session — OAuth lifecycle", () => {
       }),
     ];
     h.oauthResultUrl = "https://accounts.google.com/signin/challenge/dp/2";
+    h.oauthClickSimulate = "dispatch-only";
     h.oauthLoginError = new OAuthAwaitingHumanError(
       "Google is asking you to tap 28 on your phone.",
       "pending",
@@ -1677,7 +1813,7 @@ describe("operate session — OAuth lifecycle", () => {
 
     const challenged = await act(started.session_id, {
       kind: "oauth_login",
-      target: "Continue with Google",
+      target: googleRef(started),
     });
 
     expect(challenged.oauth).toMatchObject({
@@ -1733,7 +1869,10 @@ describe("operate session — OAuth lifecycle", () => {
   });
 
   it("labels a budget spent queued behind a prior OAuth call as not-yet-attempted, not a pending challenge", async () => {
-    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "10";
+    // 1000ms so the first act reliably dispatches and parks before its
+    // action-phase deadline; the retry then exhausts that same budget queued
+    // behind the still-held lease, which is the behavior under test.
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1000";
     h.visibleText = "Continue with Google";
     h.elements = [
       elem({
@@ -1743,6 +1882,7 @@ describe("operate session — OAuth lifecycle", () => {
         selector: "#google-oauth",
       }),
     ];
+    h.oauthClickSimulate = "dispatch-only";
     let releaseFirst!: () => void;
     h.oauthLoginGates.set(
       0,
@@ -1755,11 +1895,15 @@ describe("operate session — OAuth lifecycle", () => {
     // so it keeps the OAuth lease; the retry queues behind it and its whole
     // budget elapses before it is ever attempted.
     await expect(
-      act(started.session_id, { kind: "oauth_login", target: "Continue with Google" }),
+      act(started.session_id, { kind: "oauth_login", target: googleRef(started) }),
     ).resolves.toMatchObject({ oauth: { state: "awaiting_human" } });
+    // V2: the first attempt's proven dispatch marker invalidates the refs from
+    // the start observation, so the retry re-observes for a fresh ref — the
+    // same way a real operator recovers from stale_ref.
+    const reobserved = await observe(started.session_id);
     const queued = await act(started.session_id, {
       kind: "oauth_login",
-      target: "Continue with Google",
+      target: googleRef(reobserved),
     });
     expect(queued.oauth).toMatchObject({ state: "awaiting_human" });
     if (queued.oauth?.state === "awaiting_human") {
@@ -1771,7 +1915,7 @@ describe("operate session — OAuth lifecycle", () => {
     expect(queued.guidance).toMatch(/oauth_login/);
     expect(queued.guidance).not.toMatch(/operate_observe|pending challenge/);
     expect(queued.url).toBe(h.currentUrl);
-    expect(h.oauthLoginCalls).toHaveLength(1);
+    expect(h.oauthDispatchCalls).toBe(1);
     releaseFirst();
     await finishProvisionSession(started.session_id);
   });
@@ -3640,10 +3784,13 @@ describe("Compact V2 checkout copy stays unredacted", () => {
     expect(h.clickCalls).toBe(1);
   });
 
-  it("keeps address and shipping copy visible in the legacy observation text", async () => {
-    // V2 off (forced by beforeEach): the legacy observation renders page text.
-    h.visibleText =
-      "Shipping address\n350 5th Ave, New York, NY 10118\nShipping method: Standard $8.00";
+  it("keeps address and shipping copy visible in the full observation dom", async () => {
+    // V2 full observations render the browser-use-dom tree from h.prose.
+    h.prose = [
+      "Shipping address",
+      "350 5th Ave, New York, NY 10118",
+      "Shipping method: Standard $8.00",
+    ];
     h.elements = [
       elem({
         tag: "input",
@@ -3670,19 +3817,21 @@ describe("Compact V2 checkout copy stays unredacted", () => {
 
     const started = await startProvisionSession({ serviceUrl: checkoutUrl });
     const observation = (await observe(started.session_id, "full")) as unknown as {
-      text: string;
-      elements: Array<{ role?: string; label?: string }>;
+      dom: string;
     };
-    expect(observation.text).toContain("350 5th Ave, New York, NY 10118");
-    expect(observation.text).toContain("Standard $8.00");
+    expect(observation.dom).toContain("350 5th Ave, New York, NY 10118");
+    expect(observation.dom).toContain("Standard $8.00");
     // The radio row itself is present with its price label, not sealed out.
-    const radioElement = observation.elements.find((entry) => entry.role === "radio");
-    expect(radioElement?.label).toContain("Standard $8.00");
+    const rows = (await observeQuery(started.session_id, "")).safe_table as Array<
+      [string, string, string?]
+    >;
+    const radioFacts = rows.filter(([, role]) => role === "r").map(([, , rowFacts]) => rowFacts ?? "");
+    expect(radioFacts.some((value) => value.startsWith("@standard-8-00"))).toBe(true);
   });
 
-  it("still redacts injected vault values and tight secret shapes from observation text", async () => {
+  it("keeps injected vault values and tight secret shapes verbatim in the observation dom", async () => {
     const secret = "injected-1234567890abcdef";
-    h.visibleText = `API key: ${sk("proj-1234567890abcdefghijklmnopqrstuv")} Recovery code: 814226 Your 2FA code is 553218`;
+    const copy = `API key: ${sk("proj-1234567890abcdefghijklmnopqrstuv")} Recovery code: 814226 Your 2FA code is 553218`;
     h.elements = [
       elem({
         tag: "input",
@@ -3699,7 +3848,7 @@ describe("Compact V2 checkout copy stays unredacted", () => {
     const started = await startProvisionSession({ serviceUrl: checkoutUrl });
     // An operator-injected vault value reflected onto the page copy.
     stashSecretSlot(started.session_id, "login", secret);
-    h.visibleText = `${h.visibleText} ${secret}`;
+    h.prose = [`${copy} ${secret}`];
     const observed = await observe(started.session_id, "full");
     // Nothing is scrubbed out of observation text — the rendered key, the OTPs,
     // and the operator's own injected value all come back verbatim.
@@ -3855,7 +4004,7 @@ describe("Compact V2 durable ref identity", () => {
   });
 });
 
-describe("operate_act — locator (text=/css=) resolution", () => {
+describe("operate_act — locator (text=/css=) resolution (internal dispatch)", () => {
   it("allows a css= locator resolving to a safe control", async () => {
     h.visibleText = "Product configurator";
     h.locatorResolve = {
@@ -3863,7 +4012,9 @@ describe("operate_act — locator (text=/css=) resolution", () => {
       text: "Add To Cart",
     };
     const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
-    await act(obs.session_id, { kind: "click", target: "css=#atc" }, "compact");
+    // V2's public action map rejects locator targets outright (see the action-map
+    // boundary suite); the resolver fallback stays reachable via internal dispatch.
+    await actInternally(obs.session_id, { kind: "click", target: "css=#atc" }, "compact");
     expect(h.locatorClickCalls).toBe(1);
   });
 
@@ -3878,7 +4029,7 @@ describe("operate_act — locator (text=/css=) resolution", () => {
       },
     };
     const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
-    await act(obs.session_id, { kind: "click", target: "text=Pay" });
+    await actInternally(obs.session_id, { kind: "click", target: "text=Pay" });
     expect(h.locatorClickCalls).toBe(1);
     expect(h.locatorDisposeCalls).toBe(1);
   });
@@ -3894,7 +4045,7 @@ describe("operate_act — locator (text=/css=) resolution", () => {
       },
     };
     const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
-    await act(obs.session_id, { kind: "type", target: "css=#promo", text: "SAVE10" });
+    await actInternally(obs.session_id, { kind: "type", target: "css=#promo", text: "SAVE10" });
     expect(h.locatorResolveIntents).toContain("type");
     expect(h.locatorTypeCalls).toEqual([{ text: "SAVE10", sealed: false }]);
   });
@@ -3910,9 +4061,13 @@ describe("operate_act — locator (text=/css=) resolution", () => {
       },
     };
     const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
-    await act(obs.session_id, { kind: "type", target: "css=#card", text: "4111" });
+    await actInternally(obs.session_id, { kind: "type", target: "css=#card", text: "4111" });
     stashSecretSlot(obs.session_id, "card", "4111111111111111");
-    await act(obs.session_id, { kind: "type_secret", target: "css=#card", slot: "card" });
+    await actInternally(obs.session_id, {
+      kind: "type_secret",
+      target: "css=#card",
+      slot: "card",
+    });
     expect(h.locatorTypeCalls).toEqual([
       { text: "4111", sealed: false },
       { text: "4111111111111111", sealed: true },
@@ -3931,7 +4086,11 @@ describe("operate_act — locator (text=/css=) resolution", () => {
     };
     const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
     stashSecretSlot(obs.session_id, "login", "s3cr3t");
-    await act(obs.session_id, { kind: "type_secret", target: "text=Password", slot: "login" });
+    await actInternally(obs.session_id, {
+      kind: "type_secret",
+      target: "text=Password",
+      slot: "login",
+    });
     expect(h.locatorTypeCalls).toEqual([{ text: "s3cr3t", sealed: true }]);
   });
 
@@ -3947,7 +4106,11 @@ describe("operate_act — locator (text=/css=) resolution", () => {
     };
     const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
     stashSecretSlot(obs.session_id, "login", "s3cr3t");
-    await act(obs.session_id, { kind: "type_secret", target: "text=Password", slot: "login" });
+    await actInternally(obs.session_id, {
+      kind: "type_secret",
+      target: "text=Password",
+      slot: "login",
+    });
     expect(h.locatorResolveIntents).toContain("type");
     expect(h.locatorTypeCalls).toEqual([{ text: "s3cr3t", sealed: true }]);
     // The capture carries no seal inventory any more — only the frame options.
@@ -4011,7 +4174,8 @@ describe("operate_act — locator (text=/css=) resolution", () => {
 
     const secret = "stored-credential-7f3d9a";
     stashSecretSlot(started.session_id, "login", secret);
-    h.visibleText = `API key: ${sk("proj-1234567890abcdefghijklmnopqrstuv")} ${secret}`;
+    // V2 full observations render the browser-use-dom tree from h.prose text.
+    h.prose = [`API key: ${sk("proj-1234567890abcdefghijklmnopqrstuv")} ${secret}`];
     h.elements = [];
     const full = await observe(started.session_id, "full");
     expect(full.dom).not.toContain("[sealed]");
@@ -4036,7 +4200,8 @@ describe("operate session — sealed credential transfer", () => {
       // Seal a secret (as operate_extract{into_slot} would) and target a field.
       stashSecretSlot(sid, "oauth_secret", secret);
       h.elements = [elem({ visibleText: "Client secret", selector: "#secret" })];
-      await act(sid, { kind: "type_secret", slot: "oauth_secret", target: "Client secret" });
+      const target = domRefs(await observe(sid))[0]!;
+      await act(sid, { kind: "type_secret", slot: "oauth_secret", target });
 
       // The REAL value reached the page...
       expect(h.typed.some((t) => t.text === secret)).toBe(true);
@@ -4050,38 +4215,52 @@ describe("operate session — sealed credential transfer", () => {
   });
 
   it("type_secret on an unknown slot fails loudly", async () => {
-    const obs = await startProvisionSession({ serviceUrl: "https://a.com/" });
     h.elements = [elem({ visibleText: "Field", selector: "#f" })];
+    const obs = await startProvisionSession({ serviceUrl: "https://a.com/" });
     await expect(
-      act(obs.session_id, { kind: "type_secret", slot: "missing", target: "Field" }),
+      act(obs.session_id, {
+        kind: "type_secret",
+        slot: "missing",
+        target: domRefs(obs)[0]!,
+      }),
     ).rejects.toThrow(/no sealed slot/i);
   });
 
   it("upload resolves the target and attaches the local file (no OS dialog)", async () => {
-    const obs = await startProvisionSession({ serviceUrl: "https://drive.google.com/" });
     h.elements = [elem({ visibleText: "File upload", selector: "#upload-btn" })];
-    await act(obs.session_id, { kind: "upload", target: "File upload", path: "/tmp/clip.mp4" });
+    const obs = await startProvisionSession({ serviceUrl: "https://drive.google.com/" });
+    await act(obs.session_id, {
+      kind: "upload",
+      target: domRefs(obs)[0]!,
+      path: "/tmp/clip.mp4",
+    });
     // Target resolved from the inventory → the file is set on that element; the
     // action never touches an OS file picker.
     expect(h.uploads).toEqual([{ selector: "#upload-btn", filePath: "/tmp/clip.mp4" }]);
   });
 
   it("select resolves the target and routes the option matcher to browser.selectOption", async () => {
-    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
     h.elements = [elem({ visibleText: "Country", selector: "#country" })];
-    await act(obs.session_id, { kind: "select", target: "Country", text: "South Korea" });
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    await act(obs.session_id, {
+      kind: "select",
+      target: domRefs(obs)[0]!,
+      text: "South Korea",
+    });
     // The native/custom dropdown is driven via selectOption (NOT type), with the
     // resolved element's selector and the visible-text option matcher.
     expect(h.selected).toEqual([{ selector: "#country", matcher: "South Korea" }]);
     expect(h.typed).toEqual([]);
   });
 
-  it("select fails loudly when the target isn't in the inventory", async () => {
+  it("fails loudly when the select target resolves to nothing in the snapshot", async () => {
     const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
     h.elements = [];
+    // V2: a target absent from the current snapshot is stale_ref — the same
+    // loud failure the V1 inventory miss produced, now pointing at re-observe.
     await expect(
-      act(obs.session_id, { kind: "select", target: "Country", text: "South Korea" }),
-    ).rejects.toThrow(/no element matched target/i);
+      act(obs.session_id, { kind: "select", target: "@e:missing000", text: "South Korea" }),
+    ).rejects.toThrow(/stale_ref/i);
   });
 
   it("returns target_stale with replacement hints instead of a bare ref error", async () => {
@@ -4089,30 +4268,35 @@ describe("operate session — sealed credential transfer", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
-    const rows = started.safe_table as unknown as Array<[string, string, string?]>;
-    const staleRef = rows[0]?.[0];
+    const staleRef = domRefs(started)[0]!;
     expect(staleRef).toMatch(/^@e:/);
 
     // This is the captured P3 shape: a variant change replaces the old form
     // controls before the next queued action gets to resolve its old ref.
     h.elements = [elem({ tag: "select", labelText: "Size", selector: "#size" })];
-    const result = (await operateSelectTool.handler(
-      operateSelectTool.inputSchema.parse({
-        session_id: started.session_id,
-        ref: staleRef!,
-        values: ["Large"],
-      }),
-      null,
-    )) as Record<string, unknown>;
+    // V2 keeps stale-ref failures deliberately opaque (no V1 replacement
+    // candidates constructed outside the safe view); the replacement hints
+    // come from the next observation instead.
+    await expect(
+      operateSelectTool.handler(
+        operateSelectTool.inputSchema.parse({
+          session_id: started.session_id,
+          ref: staleRef!,
+          values: ["Large"],
+        }),
+        null,
+      ),
+    ).rejects.toThrow(/stale_ref/);
 
-    expect(result).toMatchObject({
-      status: "target_stale",
-      after_generation: expect.any(Number),
-      reobserve_required: true,
-      retry_policy: "do_not_retry_old_ref",
-    });
-    expect(result.replacement_candidates).toMatchObject({ Size: [expect.stringMatching(/^@e:/)] });
-    expect(JSON.stringify(result)).not.toContain("no element matched target");
+    const refreshed = (await observeQuery(started.session_id, "")).safe_table as Array<
+      [string, string, string?]
+    >;
+    const sizeRef = refreshed.find(([, , description]) => description?.startsWith("@size"))?.[0];
+    expect(sizeRef).toMatch(/^@e:/);
+    expect(sizeRef).not.toBe(staleRef);
+    expect(JSON.stringify({ staleRef, refreshed })).not.toContain(
+      "no element matched target",
+    );
   });
 
   it("serializes coupled selects, refreshes after variant DOM churn, and reports partial failure", async () => {
@@ -4136,14 +4320,16 @@ describe("operate session — sealed credential transfer", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
-
+    // V2: selection keys are refs or @label aliases resolved against the
+    // snapshot; the tool re-observes between entries, so the post-churn Size
+    // resolves by label, and Color (never present) reports failed.
     const result = (await operateSelectTool.handler(
       operateSelectTool.inputSchema.parse({
         session_id: started.session_id,
         selections: {
-          Variant: "Blue",
-          Size: "Large",
-          Color: "Red",
+          "@variant": "Blue",
+          "@size": "Large",
+          "@color": "Red",
         },
       }),
       null,
@@ -4155,24 +4341,22 @@ describe("operate session — sealed credential transfer", () => {
     ]);
     expect(result.fields).toMatchObject([
       {
-        label: "Variant",
-        option: "Blue",
+        label: "@variant",
         status: "selected",
         selected_option: "Ocean Blue",
       },
-      { label: "Size", option: "Large", status: "selected", selected_option: "Large" },
-      { label: "Color", option: "Red", status: "failed" },
+      { label: "@size", status: "selected", selected_option: "Large" },
+      { label: "@color", status: "failed" },
     ]);
     expect(result.observation.session_id).toBe(started.session_id);
-    expect(h.extractInteractiveElementsCalls).toBe(7);
   });
 
-  it("upload fails loudly when the target isn't in the inventory", async () => {
+  it("upload fails loudly when the target isn't in the snapshot", async () => {
     const obs = await startProvisionSession({ serviceUrl: "https://drive.google.com/" });
     h.elements = [];
     await expect(
-      act(obs.session_id, { kind: "upload", target: "File upload", path: "/tmp/clip.mp4" }),
-    ).rejects.toThrow(/no element matched target/i);
+      act(obs.session_id, { kind: "upload", target: "@e:missing000", path: "/tmp/clip.mp4" }),
+    ).rejects.toThrow(/stale_ref/i);
     expect(h.uploads).toEqual([]);
   });
 });
@@ -4530,7 +4714,8 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
 
     // The host enters it by slot — the real digits reach the page, not the host.
     h.elements = [elem({ visibleText: "Code", selector: "#code" })];
-    await act(sid, { kind: "type_secret", slot: "otp", target: "Code" });
+    const codeRef = domRefs(await observe(sid))[0]!;
+    await act(sid, { kind: "type_secret", slot: "otp", target: codeRef });
     expect(h.typed.some((t) => t.text === "481920")).toBe(true);
   });
 
@@ -5430,10 +5615,11 @@ describe("operate session — PR3c username/password login (capture-at-login sou
       expect(JSON.stringify({ legacy, consolidated })).not.toContain("correct-horse");
 
       h.elements = [elem({ visibleText: "Email", selector: "#email" })];
+      const emailRef = domRefs(await observe(obs.session_id))[0]!;
       await act(obs.session_id, {
         kind: "type_secret",
         slot: `signin_${loginField}`,
-        target: "Email",
+        target: emailRef,
       });
       expect(h.typed.some((t) => t.selector === "#email" && t.text === "ada@example.com")).toBe(
         true,
@@ -5478,17 +5664,21 @@ describe("frame targets — identity and credential boundaries (operator-frame-s
   const CROSS_DOMAIN_FRAME_URL = "https://evil-payments.test/widget";
 
   it("safe_table tags a frame element with its own frame origin (observe surfaces iframe content)", async () => {
+    // V2 frame classes are exact-origin: the page's own embedded frame reads
+    // same_origin (x=s); anything else is cross_origin (x=x).
     h.elements = [
       elem({
         testId: "ship-standard",
         labelText: "Standard Shipping",
         selector: "#ship-standard",
-        frameUrl: SAME_DOMAIN_FRAME_URL,
-        frameOrigin: "https://payments.example.com",
+        frameUrl: "https://shop.example.com/embedded",
+        frameOrigin: "https://shop.example.com",
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    const rows = started.safe_table as unknown as Array<[string, string, string?]>;
+    const rows = (await observeQuery(started.session_id, "")).safe_table as unknown as Array<
+      [string, string, string?]
+    >;
     const row = rows.find(([, , facts]) => facts?.includes("@standard-shipping"));
     expect(row?.[2]).toContain("x=s");
   });
@@ -5496,7 +5686,9 @@ describe("frame targets — identity and credential boundaries (operator-frame-s
   it("main-frame elements are unaffected — no frame marker on the row (regression)", async () => {
     h.elements = [elem({ testId: "go", labelText: "Continue", selector: "#go" })];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    const rows = started.safe_table as unknown as Array<[string, string, string?]>;
+    const rows = (await observeQuery(started.session_id, "")).safe_table as unknown as Array<
+      [string, string, string?]
+    >;
     const row = rows.find(([, , facts]) => facts?.includes("@continue"));
     expect(row?.[2] ?? "").not.toContain("x=");
   });
@@ -5512,7 +5704,10 @@ describe("frame targets — identity and credential boundaries (operator-frame-s
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, { kind: "click", target: "Standard Shipping" });
+    await act(started.session_id, {
+      kind: "click",
+      target: domRefs(started)[0]!,
+    });
     expect(h.frameClicks).toEqual([`${SAME_DOMAIN_FRAME_URL}|#ship-standard`]);
     expect(h.clickCalls).toBe(0); // never fell through to the main-frame click
   });
@@ -5528,7 +5723,10 @@ describe("frame targets — identity and credential boundaries (operator-frame-s
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, { kind: "click", target: "Enter Card Number" });
+    await act(started.session_id, {
+      kind: "click",
+      target: domRefs(started)[0]!,
+    });
     expect(h.frameClicks).toEqual([`${CROSS_DOMAIN_FRAME_URL}|#card-input`]);
     expect(h.clickCalls).toBe(0);
   });
@@ -5545,7 +5743,11 @@ describe("frame targets — identity and credential boundaries (operator-frame-s
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, { kind: "type", target: "Promo Code", text: "SAVE10" });
+    await act(started.session_id, {
+      kind: "type",
+      target: domRefs(started)[0]!,
+      text: "SAVE10",
+    });
     expect(h.frameTypes).toEqual([
       { frameUrl: SAME_DOMAIN_FRAME_URL, selector: "#promo", text: "SAVE10" },
     ]);
@@ -5564,7 +5766,11 @@ describe("frame targets — identity and credential boundaries (operator-frame-s
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
     stashSecretSlot(started.session_id, "login", "s3cr3t-value");
-    await act(started.session_id, { kind: "type_secret", slot: "login", target: "CVV" });
+    await act(started.session_id, {
+      kind: "type_secret",
+      slot: "login",
+      target: domRefs(started)[0]!,
+    });
     expect(h.frameTypes).toEqual([
       {
         frameUrl: CROSS_DOMAIN_FRAME_URL,
@@ -5587,14 +5793,15 @@ describe("frame targets — identity and credential boundaries (operator-frame-s
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, { kind: "click", target: "Sandbox Password" });
+    const sandboxRef = domRefs(started)[0]!;
+    await act(started.session_id, { kind: "click", target: sandboxRef });
     expect(h.frameClicks).toEqual(["about:srcdoc|#password"]);
     expect(h.clickCalls).toBe(0);
     stashSecretSlot(started.session_id, "login", "s3cr3t-value");
     await act(started.session_id, {
       kind: "type_secret",
       slot: "login",
-      target: "Sandbox Password",
+      target: sandboxRef,
     });
     expect(h.frameTypes).toEqual([
       { frameUrl: "about:srcdoc", selector: "#password", text: "s3cr3t-value", sealed: true },
@@ -5616,7 +5823,11 @@ describe("frame targets — identity and credential boundaries (operator-frame-s
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
     stashSecretSlot(started.session_id, "login", "s3cr3t-value");
-    await act(started.session_id, { kind: "type_secret", slot: "login", target: "Password" });
+    await act(started.session_id, {
+      kind: "type_secret",
+      slot: "login",
+      target: domRefs(started)[0]!,
+    });
     expect(h.frameTypes).toEqual([
       {
         frameUrl: "https://shop.example.com/embedded-login",
@@ -5640,7 +5851,11 @@ describe("frame targets — identity and credential boundaries (operator-frame-s
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
     stashSecretSlot(started.session_id, "login", "s3cr3t-value");
-    await act(started.session_id, { kind: "type_secret", slot: "login", target: "Password" });
+    await act(started.session_id, {
+      kind: "type_secret",
+      slot: "login",
+      target: domRefs(started)[0]!,
+    });
     expect(h.frameTypes).toEqual([
       {
         frameUrl: SAME_DOMAIN_FRAME_URL,
@@ -5667,7 +5882,11 @@ describe("frame targets — identity and credential boundaries (operator-frame-s
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, { kind: "select", target: "Shipping Method", text: "Standard" });
+    await act(started.session_id, {
+      kind: "select",
+      target: domRefs(started)[0]!,
+      text: "Standard",
+    });
     expect(h.frameSelects).toEqual([
       { frameUrl: SAME_DOMAIN_FRAME_URL, selector: "#ship-method", matcher: "Standard" },
     ]);
@@ -5687,7 +5906,11 @@ describe("frame targets — identity and credential boundaries (operator-frame-s
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, { kind: "select", target: "Expiry Month", text: "January" });
+    await act(started.session_id, {
+      kind: "select",
+      target: domRefs(started)[0]!,
+      text: "January",
+    });
     expect(h.frameSelects).toEqual([
       { frameUrl: CROSS_DOMAIN_FRAME_URL, selector: "#card-exp", matcher: "January" },
     ]);
@@ -6062,12 +6285,17 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
 describe("flat operator verbs", () => {
   it("fills text and then submits, and fills a secret slot without returning its value", async () => {
     h.elements = [elem({ labelText: "Name", selector: "#name" })];
-    const { session_id } = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-    await operateTypeTool.handler({ session_id, ref: "Name", text: "Ada", submit: true }, null);
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    const nameRef = domRefs(started)[0]!;
+    await operateTypeTool.handler({ session_id: started.session_id, ref: nameRef, text: "Ada", submit: true }, null);
     expect(h.typed).toContainEqual({ selector: "#name", text: "Ada" });
     expect(h.pressedKeys).toEqual(["Enter"]);
-    stashSecretSlot(session_id, "key", "private-slot-value");
-    const result = await operateTypeTool.handler({ session_id, ref: "Name", slot: "key" }, null);
+    stashSecretSlot(started.session_id, "key", "private-slot-value");
+    const refreshed = await observeQuery(started.session_id, "");
+    const result = await operateTypeTool.handler(
+      { session_id: started.session_id, ref: domRefs(refreshed)[0]!, slot: "key" },
+      null,
+    );
     expect(h.typed).toContainEqual({ selector: "#name", text: "private-slot-value", sealed: true });
     expect(JSON.stringify(result)).not.toContain("private-slot-value");
   });
@@ -6083,41 +6311,46 @@ describe("flat operator verbs", () => {
 
   it("clicks, presses keys, scrolls, and waits through generic verbs", async () => {
     h.elements = [elem({ role: "button", visibleText: "Continue", selector: "#continue" })];
-    const { session_id } = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-    await operateClickTool.handler({ session_id, ref: "Continue" }, null);
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    await operateClickTool.handler(
+      { session_id: started.session_id, ref: domRefs(started)[0]! },
+      null,
+    );
     expect(h.clickCalls).toBe(1);
-    await operatePressTool.handler({ session_id, key: "Tab" }, null);
+    const sid = started.session_id;
+    await operatePressTool.handler({ session_id: sid, key: "Tab" }, null);
     expect(h.pressedKeys).toEqual(["Tab"]);
-    await operateScrollTool.handler({ session_id, direction: "bottom" }, null);
+    await operateScrollTool.handler({ session_id: sid, direction: "bottom" }, null);
     expect(h.scrolls).toEqual(["bottom"]);
-    const waited = (await operateWaitTool.handler({ session_id, milliseconds: 0 }, null)) as Record<
+    const waited = (await operateWaitTool.handler({ session_id: sid, milliseconds: 0 }, null)) as Record<
       string,
       unknown
     >;
-    expect(waited.session_id).toBe(session_id);
+    expect(waited.session_id).toBe(sid);
   });
 
   it("uses guarded DOM fallback only for a pre-dispatch pointer interception", async () => {
     h.elements = [elem({ role: "button", visibleText: "Continue", selector: "#continue" })];
-    const { session_id } = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    const refOf = async () => domRefs(await observeQuery(started.session_id, ""))[0]!;
     h.clickError = new BrowserClickDispatchError(
       "not_dispatched",
       new Error("overlay intercepts pointer events"),
     );
-    await operateClickTool.handler({ session_id, ref: "Continue" }, null);
+    await operateClickTool.handler({ session_id: started.session_id, ref: await refOf() }, null);
     expect(h.jsClickCalls).toBe(1);
     h.clickError = new BrowserClickDispatchError(
       "dispatched",
       new Error("overlay intercepts pointer events; later dispatch failed"),
     );
-    await expect(operateClickTool.handler({ session_id, ref: "Continue" }, null)).rejects.toThrow(
-      "later dispatch failed",
-    );
+    await expect(
+      operateClickTool.handler({ session_id: started.session_id, ref: await refOf() }, null),
+    ).rejects.toThrow("later dispatch failed");
     expect(h.jsClickCalls).toBe(1);
     h.clickError = new Error("overlay intercepts pointer events; dispatch unknown");
-    await expect(operateClickTool.handler({ session_id, ref: "Continue" }, null)).rejects.toThrow(
-      "dispatch unknown",
-    );
+    await expect(
+      operateClickTool.handler({ session_id: started.session_id, ref: await refOf() }, null),
+    ).rejects.toThrow("dispatch unknown");
     expect(h.jsClickCalls).toBe(1);
   });
 
@@ -6461,10 +6694,14 @@ describe("flat operator verbs", () => {
       elem({ tag: "select", labelText: "State", selector: "#state" }),
     ];
     const { session_id } = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-    await operateSelectTool.handler({ session_id, ref: "Country", values: ["Japan"] }, null);
+    await operateSelectTool.handler(
+      { session_id, ref: domRefs(await observeQuery(session_id, ""))[0]!, values: ["Japan"] },
+      null,
+    );
     expect(h.selected).toContainEqual({ selector: "#country", matcher: "Japan" });
+    // @label keys resolve against the refreshed snapshot between entries.
     const result = await operateSelectTool.handler(
-      { session_id, selections: { Country: "Japan", State: "Tokyo" } },
+      { session_id, selections: { "@country": "Japan", "@state": "Tokyo" } },
       null,
     );
     expect(result).toMatchObject({ fields: [{ status: "selected" }, { status: "selected" }] });
