@@ -49,7 +49,6 @@ let pendingChildResponses: Array<() => void> = [];
 
 beforeAll(async () => {
   server = createServer((req, res) => {
-    const host = (req.headers.host ?? "").split(":")[0];
     const url = (req.url ?? "").split("?")[0];
     if (url === "/parent") {
       res.setHeader("content-type", "text/html");
@@ -216,41 +215,55 @@ describe("frame binding during uncommitted navigations (real Chromium, real HTTP
       const { page } = await newPage();
       try {
         await page.goto(`http://${PARENT_HOST}:${port}/child`, { waitUntil: "domcontentloaded" });
-        // Remove and recreate an iframe on a short timer so a capture running
-        // concurrently straddles the swap; the doomed frame's accessibility
-        // fetch then fails mid-capture. Bounded retry: most runs observe it
-        // within a few captures.
-        await page.evaluate(() => {
-          const f = document.createElement("iframe");
-          f.id = "churn";
-          f.width = "200";
-          f.height = "100";
-          document.body.appendChild(f);
-          setInterval(() => {
-            const old = document.getElementById("churn");
-            const fresh = old?.cloneNode() as HTMLIFrameElement;
-            old?.remove();
-            if (fresh) document.body.appendChild(fresh);
-          }, 40);
-        });
+        // Remove and recreate a cross-site (OOPIF) iframe on a short timer so
+        // a capture running concurrently straddles the swap; the doomed
+        // frame's bind/accessibility/attach step then fails mid-capture and
+        // none of its document reaches the tree. Bounded retry: most runs
+        // observe both halves within a handful of captures.
+        await page.evaluate(
+          ({ src }) => {
+            const make = (): HTMLIFrameElement => {
+              const f = document.createElement("iframe");
+              f.id = "churn";
+              f.width = "200";
+              f.height = "100";
+              f.src = src;
+              return f;
+            };
+            document.body.appendChild(make());
+            setInterval(() => {
+              document.getElementById("churn")?.remove();
+              document.body.appendChild(make());
+            }, 40);
+          },
+          { src: `http://${CHILD_HOST}:${port}/child` },
+        );
 
-        let observed: BrowserUseCapture | undefined;
-        for (let attempt = 0; attempt < 24 && observed === undefined; attempt += 1) {
+        let named: BrowserUseCapture["omissions"][number] | undefined;
+        let unread: BrowserUseNode[] = [];
+        for (
+          let attempt = 0;
+          attempt < 40 && (named === undefined || unread.length === 0);
+          attempt += 1
+        ) {
           const result = await capture(page);
-          if (result.omissions.length > 0) observed = result;
+          named ??= result.omissions.find((omission) => omission.source !== undefined);
+          const marked = iframes(result.root).filter((n) =>
+            n.scrollText.startsWith("frame content not read"),
+          );
+          if (marked.length > 0) unread = marked;
+          // The marker says nothing was read, so it must never sit on a row
+          // whose document did reach the tree.
+          for (const node of marked) expect(node.contentDocument).toBeNull();
         }
-        expect(observed).toBeDefined();
-        expect(observed!.omissions[0]!.kind).toMatch(/^frame_(binding|accessibility)_failed$/);
         // The omission names the region that was not read — the iframe
         // element's identity, not a bare unmatchable url.
-        expect(observed!.omissions[0]!.source).toBeDefined();
-        expect(observed!.omissions[0]!.source!.id).toBe("churn");
+        expect(named).toBeDefined();
+        expect(named!.kind).toMatch(/^frame_(binding|accessibility|attach)_failed$/);
+        expect(named!.source!.id).toBe("churn");
         // And the row itself carries the fact, so an unreadable frame is not
         // indistinguishable from a genuinely empty one.
-        const unread = iframes(observed!.root).filter((n) =>
-          n.scrollText.startsWith("frame content not read"),
-        );
-        expect(unread.length).toBeGreaterThanOrEqual(1);
+        expect(unread.map((n) => n.attributes.id)).toContain("churn");
       } finally {
         await page.context().close();
       }

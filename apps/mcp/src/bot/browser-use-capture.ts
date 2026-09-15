@@ -153,6 +153,23 @@ const rect = (v: number[] | undefined): DOMBounds | null =>
  */
 const isUncommittedFrameUrl = (url: string): boolean => url === "" || url === ":";
 
+type FrameOmission = BrowserUseCapture["omissions"][number];
+
+/** The one definition of "which iframe element this omission is about". */
+const iframeSource = (n: BrowserUseNode): NonNullable<FrameOmission["source"]> => ({
+  src: n.attributes.src ?? null,
+  id: n.attributes.id ?? null,
+  name: n.attributes.name ?? null,
+  title: n.attributes.title ?? null,
+});
+
+/** Row text replacing "(scroll)" when a frame's content is absent from the tree. */
+const unreadFrameMarker: Record<FrameOmission["kind"], string> = {
+  frame_binding_failed: "frame content not read — binding failed",
+  frame_accessibility_failed: "frame content not read — accessibility failed",
+  frame_attach_failed: "frame content not read — attach failed",
+};
+
 /** Capture the three canonical Chrome trees. No page mutation and no Python runtime. */
 export async function captureBrowserUseDOM(
   page: Page,
@@ -161,6 +178,11 @@ export async function captureBrowserUseDOM(
 ): Promise<BrowserUseCapture> {
   const nodeElements = new Map<string, InteractiveElement>();
   const omissions: BrowserUseCapture["omissions"] = [];
+  // Rows whose frame produced an omission. The marker is decided only once the
+  // whole tree exists: a same-process frame's document is pierced into the tree
+  // regardless of binding, and an unbound out-of-process frame can still be
+  // attached afterwards — in both cases its content WAS read.
+  const unreadFrameRows: Array<{ node: BrowserUseNode; kind: FrameOmission["kind"] }> = [];
   const renderedNodes = new Map<string, boolean>();
   const frameViews = new Map<Frame, { width: number; height: number; x: number; y: number }>();
   const viewMetadata = new Map<
@@ -277,25 +299,30 @@ export async function captureBrowserUseDOM(
       framePathById.set(tree.frame.id, frame === page.mainFrame() ? null : framePath(frame));
       const available = new Set(frame.childFrames());
       for (const [index, child] of (tree.childFrames ?? []).entries()) {
+        // A frame whose navigation has not committed has no stable URL to
+        // match on: the CDP tree reports ":" where Playwright reports "".
+        // String equality therefore fails on every capture for as long as
+        // the navigation stays pending, so a merchant iframe that renders
+        // before its navigation commits (ad/analytics frames, a 3-D Secure
+        // challenge) reported frame_binding_failed for the whole session
+        // while other frames bound. Pair such a frame with its OWN sibling
+        // position — their documents are all the initial empty document, so
+        // the pairing has no observable effect, and once a navigation
+        // commits the next capture re-binds by its real URL. Anything looser
+        // than the exact position could pair two frames across each other.
+        const sibling = frame.childFrames()[index];
         const matched =
           [...available].find((candidate) => candidate.url() === child.frame.url) ??
-          // A frame whose navigation has not committed has no stable URL to
-          // match on: the CDP tree reports ":" where Playwright reports "".
-          // String equality therefore fails on every capture for as long as
-          // the navigation stays pending, so a merchant iframe that renders
-          // before its navigation commits (ad/analytics frames, a 3-D Secure
-          // challenge) reported frame_binding_failed for the whole session
-          // while other frames bound. Pair remaining uncommitted frames
-          // positionally — their documents are all the initial empty
-          // document, so a swap has no observable effect, and once a
-          // navigation commits the next capture re-binds by its real URL.
-          (isUncommittedFrameUrl(child.frame.url)
-            ? [...available].find((candidate) => candidate.url() === "")
+          (isUncommittedFrameUrl(child.frame.url) &&
+          sibling !== undefined &&
+          available.has(sibling) &&
+          isUncommittedFrameUrl(sibling.url())
+            ? sibling
             : undefined);
         if (matched) {
           available.delete(matched);
           bindFrames(child, matched);
-        } else markUnboundFrameTree(child, frame.childFrames()[index]);
+        } else markUnboundFrameTree(child, sibling);
       }
     };
     bindFrames(frames.frameTree, owningFrame);
@@ -1278,16 +1305,8 @@ export async function captureBrowserUseDOM(
         const raw = rawById.get(n.id);
         const omission = raw?.frameId === undefined ? undefined : unboundOmissions.get(raw.frameId);
         if (omission && omission.source === undefined) {
-          omission.source = {
-            src: n.attributes.src ?? null,
-            id: n.attributes.id ?? null,
-            name: n.attributes.name ?? null,
-            title: n.attributes.title ?? null,
-          };
-          n.scrollText =
-            omission.kind === "frame_binding_failed"
-              ? "frame content not read — binding failed"
-              : "frame content not read — accessibility failed";
+          omission.source = iframeSource(n);
+          unreadFrameRows.push({ node: n, kind: omission.kind });
         }
       }
       for (const child of n.children) resolveUnreadFrames(child);
@@ -1330,15 +1349,10 @@ export async function captureBrowserUseDOM(
               kind: "frame_attach_failed",
               framePath: framePath(frame),
               url: frame.url(),
-              source: {
-                src: n.attributes.src ?? null,
-                id: n.attributes.id ?? null,
-                name: n.attributes.name ?? null,
-                title: n.attributes.title ?? null,
-              },
+              source: iframeSource(n),
             });
             n.contentDocument = null;
-            n.scrollText = "frame content not read — attach failed";
+            n.scrollText = unreadFrameMarker.frame_attach_failed;
           }
         } else if (frame === undefined) {
           // A rendered iframe whose child document never reached the capture
@@ -1349,20 +1363,17 @@ export async function captureBrowserUseDOM(
             kind: "frame_attach_failed",
             framePath: null,
             url: n.attributes.src ?? "",
-            source: {
-              src: n.attributes.src ?? null,
-              id: n.attributes.id ?? null,
-              name: n.attributes.name ?? null,
-              title: n.attributes.title ?? null,
-            },
+            source: iframeSource(n),
           });
-          n.scrollText = "frame content not read — attach failed";
+          n.scrollText = unreadFrameMarker.frame_attach_failed;
         }
       }
       for (const c of n.children) await attachFrames(c, depth);
       if (n.contentDocument) await attachFrames(n.contentDocument, depth + 1);
     };
     await attachFrames(root);
+    for (const { node, kind } of unreadFrameRows)
+      if (node.contentDocument === null) node.scrollText = unreadFrameMarker[kind];
     const hints = async (n: BrowserUseNode): Promise<void> => {
       if (["IFRAME", "FRAME"].includes(n.nodeName) && n.contentDocument) {
         const viewportHeight = viewMetadata.get(n.id)?.layout?.client?.height ?? 0;
