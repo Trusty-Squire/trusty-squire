@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
-import * as lifecycle from "../session/lifecycle.js";
-import { captureCredentialSource, probeCaptureSource } from "../provision-session.js";
-import type { Session } from "../session/model.js";
-import type { ApiClient } from "../../api-client.js";
+import * as lifecycle from "../../session/lifecycle.js";
+import { captureCredentialSource, probeCaptureSource } from "../capture.js";
+import type { Session } from "../../session/model.js";
+import type { ApiClient } from "../../../api-client.js";
 
 let browser: Browser;
 let page: Page;
@@ -700,9 +700,9 @@ it.each([
 it("returns operate_extract capture receipts from a real open-shadow dialog", async () => {
   const { mkdir, writeFile } = await import("node:fs/promises");
   const { join } = await import("node:path");
-  const sessionModule = await import("../provision-session.js");
-  const { provisionExtractTool } = await import("../../tools/provision-drive.js");
-  const { withOperatorRequestContext } = await import("../request-cancellation.js");
+  const sessionModule = await import("../../provision-session.js");
+  const { provisionExtractTool } = await import("../../../tools/provision-drive.js");
+  const { withOperatorRequestContext } = await import("../../request-cancellation.js");
   const hosts = vi
     .spyOn(sessionModule, "observedHostsForSession")
     .mockReturnValue(["groq.example.test"]);
