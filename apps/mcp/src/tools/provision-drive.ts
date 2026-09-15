@@ -168,7 +168,7 @@ const CONTROL_QUERY_CONTRACT =
   "Use overflow.next_cursor to page safe_table. A cursor from hint_overflow returns `hint` and pages with hint_overflow.next_cursor. ";
 
 const ACTION_FORMAT_NOTE =
-  "The action response is the compact `browser-use-control-query` control map by default: after a compact map on the same document, `delta:true` carries changed/new controls in `safe_table` and departed refs in `removed`, never the verbatim DOM. The acted control's own current row is always included, marked `w=acted`, so a write is confirmable from its own result. " + +
+  "The action response is the compact `browser-use-control-query` control map by default: after a compact map on the same document, `delta:true` carries changed/new controls in `safe_table` and departed refs in `removed`, never the verbatim DOM. The acted control's own current row is always included, marked `w=acted`, so a write is confirmable from its own result. " +
   'Pass `format:"full"` to receive the `browser-use-dom` tree instead. After inject_card releases a card, its PAN (complete ordinary spellings and prefixes of at least eight digits) and security code are replaced in every normal observation; all other emitted content stays verbatim. ';
 
 const ACTION_FORMATS = ["compact", "full"] as const;
