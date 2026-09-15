@@ -1585,6 +1585,10 @@ describe("operate session — OAuth lifecycle", () => {
   });
 
   it("keeps the session alive and inspectable after an OAuth completion-wait timeout", async () => {
+    // What this proves, in one sentence: when a completion wait times out, the
+    // session is not terminalized — observe still reads it, oauth_settle is
+    // still callable on it, and operate_finish closes it normally.
+    //
     // Regression: an OAuth boundary timeout used to force-terminate the whole
     // provision session ("oauth_action_terminalize"), so a pending
     // chooser/consent screen became unreachable — observe/screenshot/oauth_settle
@@ -1596,7 +1600,17 @@ describe("operate session — OAuth lifecycle", () => {
     // rejects at all (the old rejection asserted an unverifiable cause, "the
     // saved session may have expired"). It resolves as a non-throwing
     // `awaiting_human` observation instead.
-    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "10";
+    //
+    // Determinism: the completion wait never completes BY FIXTURE — the
+    // authorized click parks on a gate this test controls — instead of racing a
+    // wall-clock budget against the flow. The budget below is only the upper
+    // bound that ends the parked wait, so it must be comfortably longer than the
+    // (pure mock) dispatch path under load. Before the park, that budget chose
+    // whether the inner provider wait or the outer action deadline reported the
+    // timeout, and those two leave different OAuth page lifecycles behind: the
+    // inner path retains a live provider page whose settle is a bounded 12×1s
+    // provider-close poll that outlives vitest's default test budget.
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1000";
     h.visibleText = "Continue with Google";
     h.elements = [
       elem({
@@ -1606,6 +1620,14 @@ describe("operate session — OAuth lifecycle", () => {
         selector: "#google-oauth",
       }),
     ];
+    h.oauthClickSimulate = "dispatch-only";
+    let releaseParkedClick: (() => void) | undefined;
+    h.oauthLoginGates.set(
+      0,
+      new Promise<void>((resolve) => {
+        releaseParkedClick = resolve;
+      }),
+    );
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
     const timedOut = (await operateLoginTool.handler(
       { session_id: started.session_id, provider: "google", ref: googleRef(started) },
@@ -1630,6 +1652,10 @@ describe("operate session — OAuth lifecycle", () => {
       session_id: started.session_id,
       closed: true,
     });
+    // Release the parked click so the OAuth lease drains for later tests in
+    // this file: the lease is held until the timed-out action's in-flight work
+    // settles.
+    releaseParkedClick?.();
   });
 
   it("reports unknown OAuth progress without claiming a human challenge when the request budget expires after dispatch", async () => {
