@@ -70,7 +70,6 @@ import {
   throwIfOperatorRequestCancelled,
 } from "./request-cancellation.js";
 import { BrowserProcessOwner } from "./browser-process-owner.js";
-import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
 import {
   classifyGoogleAuthState,
   extractGoogleHumanChallenge,
@@ -323,16 +322,6 @@ export type CaptchaSolveResult =
   | { found: false }
   | { found: true; solved: true; kind: CaptchaKind }
   | { found: true; solved: false; kind: CaptchaKind };
-
-export type HcaptchaCoordinateSolveResult =
-  | { found: false; solved: false; reason: "no_visible_challenge" }
-  | {
-      found: true;
-      solved: boolean;
-      reason?: string;
-      clicks: number;
-      durationMs?: number;
-    };
 
 function pngDimensions(buf: Buffer): { width: number; height: number } | null {
   if (buf.length < 24) return null;
@@ -1226,115 +1215,6 @@ export class BrowserController implements BrowserDriver {
   async goto(url: string, page?: Page): Promise<void> {
     await markOperatorMutationDispatchAttempted();
     return await this.pageDriver.goto(url, page);
-  }
-
-  // Pre-warm a domain by visiting its root. Useful before navigating
-  // to a deep signup URL on a strict-Cloudflare service: the root sets
-  // first-party cookies and lets the bot-scoring JS calibrate on a
-  // benign page before we hit anything sensitive.
-  //
-  // `mode`:
-  //   - "fast" (default): visit the root, dwell ~2s, jitter the mouse,
-  //     done. Cheap and adequate when the domain has been warmed
-  //     recently (cookies already in jar, prior session in the
-  //     scoring JS's memory).
-  //   - "referrer-chain": simulate a research session — Google search
-  //     → click the brand result → scroll the marketing site →
-  //     navigate. ~20-40s of wall clock, but builds a realistic
-  //     browsing-history signal that v3 weighs heavily. Use this on
-  //     first-attempt against strict services and after a captcha
-  //     failure.
-  async prewarm(url: string, mode: "fast" | "referrer-chain" = "fast"): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    if (mode === "referrer-chain") {
-      await this.prewarmViaReferrerChain(url);
-      return;
-    }
-    const root = new URL(url).origin;
-    await this.page.goto(root, { waitUntil: "domcontentloaded", timeout: 30000 });
-    if (this.humanize) {
-      await this.sleep(rand(1200, 2500));
-      // Tiny mouse jitter so cf_clearance JS sees pointer activity.
-      await this.jitterMouse();
-    }
-  }
-
-  // Simulates a research session that ends at the signup target.
-  //
-  // Why this is more than theater: reCAPTCHA v3 reads a "browsing
-  // history" signal that aggregates referrer + dwell + interaction
-  // across the prior 1-2 page loads in this context. A cold landing on
-  // `/sign_up` has none of that — score gets clamped near 0.3, which
-  // is the kill-floor for most v3-protected forms. A simulated
-  // Google → result-click → marketing-site → /sign_up chain lifts the
-  // score to 0.5-0.7 range, which is where real users sit.
-  //
-  // Best-effort throughout: if any step fails (Google rate-limits us,
-  // the brand's marketing site is down, etc.) we degrade to the fast
-  // prewarm rather than aborting the whole signup. Network surprises
-  // are common; the bot still works without this lift, just worse.
-  private async prewarmViaReferrerChain(url: string): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    const targetOrigin = new URL(url).origin;
-    // Strip "www." for the search query so "postmarkapp.com" becomes
-    // "postmarkapp" not "www postmarkapp"; reads more like what a
-    // human types into a search box.
-    const brand = new URL(url).hostname.replace(/^www\./, "").split(".")[0];
-    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(brand + " sign up")}`;
-
-    try {
-      await this.page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
-      if (this.humanize) await this.sleep(rand(2000, 4000));
-      // Look for a result link pointing at the target origin. Google
-      // wraps result hrefs but exposes the real destination as a child
-      // attribute or via the `href` itself for organic results — we
-      // grab whichever link's href starts with the target origin.
-      // Google SERPs often expose several anchors to the same origin
-      // (the organic result, "People also ask" related links, sitelinks
-      // like /pricing). Scope to the first match so Playwright's strict
-      // mode doesn't throw before we get to click.
-      const resultLocator = this.page.locator(`a[href^="${targetOrigin}"]`).first();
-      const hasResult = (await resultLocator.count()) > 0;
-      if (hasResult) {
-        // Use humanClick if available — moves the mouse along a bezier
-        // path to the link, which feeds the scoring JS pointer entropy
-        // as a side effect.
-        if (this.humanize) {
-          await this.humanClickLocator(resultLocator);
-        } else {
-          await resultLocator.click();
-        }
-        await this.page.waitForLoadState("domcontentloaded", { timeout: 30000 });
-      } else {
-        // Couldn't find an organic result (Google sometimes interposes
-        // an ad or "people also ask" block first). Navigate directly
-        // and accept that the referrer chain is shorter but still
-        // includes the search.
-        await this.page.goto(targetOrigin, { waitUntil: "domcontentloaded", timeout: 30000 });
-      }
-
-      // Marketing-site dwell: scroll a bit, pause, scroll back. The
-      // scroll events plus the wall clock build up the "this user is
-      // reading" signal. Magnitude is intentionally small — overshooting
-      // (scrolling to the bottom in 200ms, etc.) is itself bot-like.
-      if (this.humanize) {
-        await this.sleep(rand(1500, 3500));
-        await this.page.mouse.wheel(0, rand(200, 500));
-        await this.sleep(rand(800, 2000));
-        await this.page.mouse.wheel(0, rand(-200, 0));
-        await this.sleep(rand(1000, 2500));
-        await this.jitterMouse();
-      }
-    } catch (err) {
-      // Any step in the chain failing leaves us at *some* page (the
-      // search results, the marketing site, an error page) — that's
-      // still better than a cold landing on /sign_up. Log and proceed.
-      this.logOperatorDiagnostic(
-        `[operator] referrer-chain prewarm partial failure (non-fatal): ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
   }
 
   // Contract C `type` verb: the driver owns the handle/frame/page dispatch.
@@ -2961,10 +2841,20 @@ export class BrowserController implements BrowserDriver {
               label.closest(".n-form-group__row") ??
               label.closest("label")?.parentElement ??
               label.parentElement;
-            const control = root?.querySelector<HTMLElement>(
-              'select,button[role="combobox"],input[role="combobox"],[role="combobox"]',
+            // Only fall back to a control found by row proximity when the
+            // row offers EXACTLY ONE candidate. Taking the first of several
+            // silently drove the wrong control (measured live: a "Phone
+            // country" label over a row holding an address select and a
+            // phone select committed the ADDRESS select and reported
+            // success). With several candidates the label is left as the
+            // target and the combobox path refuses loudly.
+            const controls = Array.from(
+              root?.querySelectorAll<HTMLElement>(
+                'select,button[role="combobox"],input[role="combobox"],[role="combobox"]',
+              ) ?? [],
             );
-            if (control === null || control === undefined) return null;
+            const control = controls.length === 1 ? controls[0] : undefined;
+            if (control === undefined) return null;
             const id = control.getAttribute("id");
             if (id !== null && id.length > 0) return `#${CSS.escape(id)}`;
             const testId =
@@ -3017,19 +2907,45 @@ export class BrowserController implements BrowserDriver {
       const firstReal = allValues.find((v) => v.length > 0);
       let chosenValue: string | undefined = firstReal !== undefined ? firstReal : allValues[0];
       if (optionMatcher !== undefined) {
-        const matcherLower = optionMatcher.toLowerCase();
-        // Returns either a matched value (may be "") or null when no
-        // option's text matches. Wrap in an object so we can
-        // distinguish "matched to empty value" from "no match".
+        // Whitespace-normalized on both sides so a matcher read from a
+        // wrapped inventory line still compares cleanly.
+        const matcherLower = optionMatcher.replace(/\s+/g, " ").trim().toLowerCase();
+        // Whitespace-normalized, case-insensitive. An EXACT match wins
+        // outright. A substring fallback is taken only when it is UNIQUE:
+        // `includes` + first-match silently committed the wrong option on
+        // any text collision (measured live: "Guinea" committed
+        // "Equatorial Guinea", "Korea" committed "North Korea"), and a
+        // silent wrong pick is worse than a loud refusal the planner can
+        // re-plan from. Ambiguity names the candidates and refuses.
+        // Returns either a chosen value (may be "") or the ambiguous texts.
         const matched = await optionLocator.evaluateAll((opts, needle) => {
-          const hit = opts
-            .filter((o): o is HTMLOptionElement => o instanceof HTMLOptionElement)
-            .find((o) => o.textContent?.toLowerCase().includes(needle));
-          return hit !== undefined ? { value: hit.value } : null;
+          const options = opts.filter(
+            (o): o is HTMLOptionElement => o instanceof HTMLOptionElement,
+          );
+          const text = (o: HTMLOptionElement): string =>
+            (o.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+          const exact = options.find((o) => text(o) === needle);
+          if (exact !== undefined) return { value: exact.value };
+          const partial = options.filter((o) => text(o).includes(needle));
+          const only = partial[0];
+          if (partial.length === 1 && only !== undefined) return { value: only.value };
+          if (partial.length > 1) {
+            return {
+              ambiguous: partial.slice(0, 6).map((o) => (o.textContent ?? "").trim()),
+            };
+          }
+          return null;
         }, matcherLower);
         if (matched === null) {
           throw new Error(
             `<select> ${activeSelector}: no option matched ${JSON.stringify(optionMatcher)}`,
+          );
+        }
+        if ("ambiguous" in matched) {
+          throw new Error(
+            `<select> ${activeSelector}: ${JSON.stringify(optionMatcher)} matches several options ` +
+              `(${matched.ambiguous.map((t) => JSON.stringify(t)).join(", ")}) — ` +
+              "pass the exact option text",
           );
         }
         chosenValue = matched.value;
@@ -3417,13 +3333,43 @@ export class BrowserController implements BrowserDriver {
       const options = page.locator("[data-ts-select-option-tier]");
       let target = options.first();
       if (optionMatcher !== undefined) {
-        const matching = options.filter({ hasText: optionMatcher });
-        if ((await matching.count()) === 0) {
+        // Same contract as the native <select> path: an EXACT option text
+        // wins, a substring fallback is taken only when it is UNIQUE, and
+        // ambiguity refuses loudly. Playwright's `hasText` substring +
+        // `.first()` silently committed the wrong option on a collision
+        // (measured live: "Vue" committed "Vue.js").
+        const matched = await options.evaluateAll((els, needle) => {
+          const text = (el: Element): string =>
+            ((el as HTMLElement).innerText ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+          const exact = els.findIndex((el) => text(el) === needle);
+          if (exact !== -1) return { index: exact };
+          const partial = els
+            .map((el, index) => ({ index, text: text(el) }))
+            .filter((o) => o.text.includes(needle));
+          const only = partial[0];
+          if (partial.length === 1 && only !== undefined) return { index: only.index };
+          if (partial.length > 1) {
+            return {
+              ambiguous: partial
+                .slice(0, 6)
+                .map((o) => ((els[o.index] as HTMLElement).innerText ?? "").trim()),
+            };
+          }
+          return null;
+        }, optionMatcher.replace(/\s+/g, " ").trim().toLowerCase());
+        if (matched === null) {
           throw new Error(
             `combobox ${triggerSelector}: no option matched ${JSON.stringify(optionMatcher)}`,
           );
         }
-        target = matching.first();
+        if ("ambiguous" in matched) {
+          throw new Error(
+            `combobox ${triggerSelector}: ${JSON.stringify(optionMatcher)} matches several options ` +
+              `(${matched.ambiguous.map((t) => JSON.stringify(t)).join(", ")}) — ` +
+              "pass the exact option text",
+          );
+        }
+        target = options.nth(matched.index);
       } else if ((await options.count()) === 0) {
         throw new Error(`combobox ${triggerSelector}: opened popup has no actionable options`);
       }
@@ -3868,10 +3814,12 @@ export class BrowserController implements BrowserDriver {
         return false;
       });
       if (solved) {
-        if (widget.kind === "hcaptcha") {
-          const settled = await this.waitForCaptchaChallengeToSettle(15_000, 10_000, page);
-          if (!settled) return { found: true, solved: false, kind: widget.kind };
-        }
+        // The minted response token IS the success signal (see the module's
+        // own comments and captchaGate's). The removed 5a018714 hCaptcha
+        // branch additionally required the challenge iframe to stay gone for
+        // 10 continuous seconds and returned `solved: false` otherwise —
+        // measured live to discard a genuinely minted hCaptcha token after
+        // 15.7s, and to spend 10.6s even when the frame did clear.
         return { found: true, solved: true, kind: widget.kind };
       }
     }
@@ -4715,6 +4663,15 @@ export class BrowserController implements BrowserDriver {
     return null;
   }
 
+  // True once no vendor challenge frame has been visible for `stableClearMs`
+  // within `timeoutMs` — a bounded page-shape observation, NOT a solve
+  // verdict. Introduced in 5a018714 to decide whether a minted hCaptcha
+  // token had "really" taken (the challenge image should disappear); that
+  // use was removed in the 2026-09-15 audit wave because it discarded a
+  // genuinely minted token (measured: `solved: false` after 15.7s with
+  // `h-captcha-response` populated). Callers today are wait/backoff uses
+  // (Gmail search retries, consent-banner hydrate retry) plus captchaGate's
+  // own `settled` verdict; the minted response token is the success signal.
   async waitForCaptchaChallengeToSettle(
     timeoutMs = 4000,
     stableClearMs = 2_500,
@@ -4754,21 +4711,6 @@ export class BrowserController implements BrowserDriver {
       await this.sleep(250);
     }
     return false;
-  }
-
-  // Small mouse wiggle near the current position. Used during prewarm
-  // so the page sees pointer events before we navigate away.
-  private async jitterMouse(): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    const wiggles = rand(2, 5);
-    for (let i = 0; i < wiggles; i++) {
-      const nx = this.mouseX + rand(-50, 50);
-      const ny = this.mouseY + rand(-50, 50);
-      await this.page.mouse.move(nx, ny);
-      this.mouseX = nx;
-      this.mouseY = ny;
-      await this.sleep(rand(40, 120));
-    }
   }
 
   sleep(ms: number): Promise<void> {
@@ -7527,11 +7469,32 @@ export class BrowserController implements BrowserDriver {
           // no matcher is given ("Select…" placeholders are the wrong pick).
           let chosen = options.find((option) => option.value.length > 0) ?? options[0]!;
           if (needle !== null) {
-            const hit = options.find((option) =>
-              (option.textContent ?? "").toLowerCase().includes(needle),
-            );
-            if (hit === undefined) return { ok: false as const, reason: "no option matched" };
-            chosen = hit;
+            // Same contract as the main-frame path: exact text wins, a
+            // substring fallback only when unique, ambiguity refuses loudly
+            // (see selectOptionInner).
+            const text = (option: HTMLOptionElement): string =>
+              (option.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+            const exact = options.find((option) => text(option) === needle);
+            if (exact !== undefined) {
+              chosen = exact;
+            } else {
+              const partial = options.filter((option) => text(option).includes(needle));
+              const only = partial[0];
+              if (partial.length === 1 && only !== undefined) {
+                chosen = only;
+              } else if (partial.length > 1) {
+                return {
+                  ok: false as const,
+                  reason:
+                    `option text is ambiguous (${partial
+                      .slice(0, 6)
+                      .map((option) => JSON.stringify((option.textContent ?? "").trim()))
+                      .join(", ")}) — pass the exact option text`,
+                };
+              } else {
+                return { ok: false as const, reason: "no option matched" };
+              }
+            }
           }
           control.value = chosen.value;
           if (control.value !== chosen.value) {
@@ -7549,7 +7512,9 @@ export class BrowserController implements BrowserDriver {
             text: (chosen.textContent ?? "").replace(/\s+/g, " ").trim(),
           };
         },
-        optionMatcher !== undefined ? optionMatcher.toLowerCase() : null,
+        optionMatcher !== undefined
+          ? optionMatcher.replace(/\s+/g, " ").trim().toLowerCase()
+          : null,
       );
       if (!result.ok) {
         const detail =

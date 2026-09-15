@@ -44,6 +44,7 @@ export const REAL_BROWSER_FILES = [
   "src/bot/__tests__/browser-three-ds-method.test.ts",
   "src/bot/__tests__/browser-three-ds-notify.test.ts",
   "src/bot/__tests__/browser-unrestricted-egress.test.ts",
+  "src/bot/__tests__/captcha-solve-token-signal.test.ts",
   "src/bot/capture/__tests__/credential-capture-browser.test.ts",
   "src/bot/__tests__/locator-fallback.test.ts",
   "src/bot/__tests__/modal-overlay-inert.test.ts",
@@ -61,6 +62,7 @@ export const REAL_BROWSER_FILES = [
   "src/bot/__tests__/picker-window.test.ts",
   "src/bot/__tests__/screenshot-click.test.ts",
   "src/bot/__tests__/screenshot-target-diagnostic.test.ts",
+  "src/bot/__tests__/select-option-ambiguity.test.ts",
   "src/bot/__tests__/shadow-dom-topmost.test.ts",
 ];
 
