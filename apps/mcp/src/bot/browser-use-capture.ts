@@ -188,10 +188,12 @@ export function matchFrameChild<T extends { url(): string }>(
   available: ReadonlySet<T>,
   sibling: T | undefined,
 ): T | undefined {
+  if (isUncommittedFrameUrl(cdpChildUrl)) {
+    if (sibling === undefined || !available.has(sibling)) return undefined;
+    return isUncommittedFrameUrl(sibling.url()) ? sibling : undefined;
+  }
   for (const candidate of available) if (candidate.url() === cdpChildUrl) return candidate;
-  if (!isUncommittedFrameUrl(cdpChildUrl)) return undefined;
-  if (sibling === undefined || !available.has(sibling)) return undefined;
-  return isUncommittedFrameUrl(sibling.url()) ? sibling : undefined;
+  return undefined;
 }
 
 type FrameOmission = BrowserUseCapture["omissions"][number];
@@ -1335,7 +1337,7 @@ export async function captureBrowserUseDOM(
       for (const child of n.children) resolveUnreadFrames(child);
       if (n.contentDocument !== null) resolveUnreadFrames(n.contentDocument);
     };
-    resolveUnreadFrames(root);
+    if (unboundOmissions.size > 0) resolveUnreadFrames(root);
     return root;
   };
   try {

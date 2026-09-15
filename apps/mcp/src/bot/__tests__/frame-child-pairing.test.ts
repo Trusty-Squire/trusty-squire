@@ -19,27 +19,36 @@ describe("matchFrameChild", () => {
     expect(matchFrameChild("https://b.example/two", available, a)).toBe(b);
   });
 
-  it("pairs an uncommitted child with its own sibling position", () => {
-    const first = frame("");
-    const second = frame("");
-    const available = new Set([first, second]);
-    expect(matchFrameChild(":", available, second)).toBe(second);
-  });
+  it.each([":", ""])(
+    "pairs an uncommitted child (cdp %j) with its own sibling position",
+    (sentinel) => {
+      const first = frame("");
+      const second = frame("");
+      const available = new Set([first, second]);
+      expect(matchFrameChild(sentinel, available, second)).toBe(second);
+    },
+  );
 
-  it("never hands one uncommitted frame the slot of an earlier unmatched sibling", () => {
-    // The live skew: CDP reports child 0 as committed while Playwright has not
-    // yet processed that navigation, so both Playwright children still read "".
-    // Child 0 matches nothing; child 1 is uncommitted. Pairing child 1 with the
-    // FIRST remaining "" candidate would bind it to Playwright's child 0.
-    const playwrightChild0 = frame("");
-    const playwrightChild1 = frame("");
-    const available = new Set([playwrightChild0, playwrightChild1]);
+  // Both CDP spellings of "no committed url" must pair identically. "" is also
+  // what Playwright reports for such a frame, so it is the spelling that an
+  // exact-url pass would silently accept against the WRONG sibling.
+  it.each([":", ""])(
+    "never hands an uncommitted child (cdp %j) the slot of an earlier unmatched sibling",
+    (sentinel) => {
+      // The live skew: CDP reports child 0 as committed while Playwright has
+      // not yet processed that navigation, so both Playwright children still
+      // read "". Child 0 matches nothing; child 1 is uncommitted. Pairing
+      // child 1 with the FIRST remaining "" candidate binds it to child 0.
+      const playwrightChild0 = frame("");
+      const playwrightChild1 = frame("");
+      const available = new Set([playwrightChild0, playwrightChild1]);
 
-    expect(matchFrameChild("https://a.example/committed", available, playwrightChild0)).toBe(
-      undefined,
-    );
-    expect(matchFrameChild(":", available, playwrightChild1)).toBe(playwrightChild1);
-  });
+      expect(matchFrameChild("https://a.example/committed", available, playwrightChild0)).toBe(
+        undefined,
+      );
+      expect(matchFrameChild(sentinel, available, playwrightChild1)).toBe(playwrightChild1);
+    },
+  );
 
   it("leaves an uncommitted child unpaired when its sibling position is already taken", () => {
     const taken = frame("");
