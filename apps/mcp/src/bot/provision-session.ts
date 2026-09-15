@@ -12,7 +12,6 @@ import {
   composeOperatorSignals,
 } from "./request-cancellation.js";
 import type { BrowserUseCapture } from "./browser-use-capture.js";
-import { serializeBrowserUseDOM } from "./browser-use-serializer.js";
 // Phase 1 — the session-holding "thick tools" surface a frontier host agent
 // drives. MCP tool calls are stateless, but a provision run needs ONE live
 // browser held across many calls; this module is that registry + the
@@ -29,9 +28,8 @@ import { serializeBrowserUseDOM } from "./browser-use-serializer.js";
 //  - no credential is ever read back to the agent except via the explicit
 //    `finish`/extract path; the vault stays write-only.
 
-import { createHash, createHmac, randomInt } from "node:crypto";
+import { randomInt } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { Buffer } from "node:buffer";
 import type { ElementHandle, Page } from "playwright";
 import {
   BrowserClickDispatchError,
@@ -53,13 +51,11 @@ import {
   oauthHumanHandoffTimeoutMs,
   oauthLoginLeaseCooldownMs,
   oauthTransitionStatus,
-  refreshOAuthHumanChallenge,
   resetOAuthActionDeadline,
   settleAfterOAuth,
   withOAuthActionLease,
   withinOAuthActionDeadline,
   type OAuthActionDeadline,
-  type OAuthCompletionEvidence,
   OAuthAwaitingHumanError,
   OAuthFailedError,
   OAuthOnboardingRequiredError,
@@ -67,25 +63,14 @@ import {
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import type { ClickMethod, DriverTarget } from "./driver/types.js";
 import {
-  buildSafeControlsV2,
   compactV2LegacyRefForHandle,
-  compactV2DegradeMetadata,
-  StableObservationRefs,
   isCompactV2Handle,
   isCompactV2Label,
-  controlQueryMatchV2,
-  encodeV2QueryPage,
   compactV2AuditUrl,
   safeDescriptionV2,
-  safeBlockersV2,
-  safePageSemanticsV2,
-  sealRetainedInteractiveElementsV2,
   safeStageV2,
   type SafeControlV2,
-  type ObservationEpochV2,
-  type ObservationSemanticSourceV2,
   type SafePageSemanticsV2,
-  type SafeObservationIndexV2,
   type SafeStageV2,
 } from "./compact-observation-v2.js";
 import type { ApiClient, HeightenedAuthNotificationResult } from "../api-client.js";
@@ -267,7 +252,7 @@ export type ProvisionAction =
 
 export type { AllowedHostEntry, HostSource, Session } from "./session/model.js";
 import type { Session } from "./session/model.js";
-import { egressSeedHosts, hostStrings, registrableHost } from "./session/hosts.js";
+import { egressSeedHosts, registrableHost } from "./session/hosts.js";
 // Phase 3 — session state left the facade: the sealed <select> bookkeeping and
 // element retention moved to session/model.ts, the secret slots to
 // session/slots.ts, and the host-scope state to session/registry.ts. The
@@ -284,6 +269,39 @@ import { stashSecretSlot, type SlotHandle } from "./session/slots.js";
 
 export { getSessionUserEmail } from "./session/registry.js";
 export { readSecretSlotValue, stashSecretSlot, type SlotHandle } from "./session/slots.js";
+// Phase 4 — the observe pipeline moved to observe/observe.ts (compact-V2
+// snapshot shaping, paging cursors, source-page bookkeeping) with the pure
+// ref-identity helpers in observe/refs.ts. The session-facing entry points are
+// imported back here; `observeQuery` stays re-exported (the tool layer's
+// import surface), as with the lifecycle names.
+import {
+  compactV2EpochDoc,
+  compactV2LiveControls,
+  compactV2PublicObservation,
+  compactV2RefAllocator,
+  compactV2StartMetadata,
+  invalidateCompactV2Snapshot,
+  oauthCompletionSourcePage,
+  observeSession,
+  observedOAuthChallenge,
+  observedThreeDsChallenge,
+  type ObserveDetail,
+  operationPageForSession,
+  rememberCompactV2SourcePage,
+  rememberOAuthCompletionSourcePage,
+  returnFromClosedPicker,
+  terminalOAuthCompletionObservation,
+} from "./observe/observe.js";
+import {
+  elementIdentity,
+  elementRef,
+  norm,
+  parseProvisionRef,
+  provisionElementRefs,
+  volatilePositionalGroups,
+} from "./observe/refs.js";
+
+export { observeQuery } from "./observe/observe.js";
 // Phase 2 — the lifecycle registry transaction moved to session/lifecycle.ts as
 // one unit (registry, real-profile lease, call leases and drains, watchdog,
 // bounded close, terminal owner, artifact cleanup, start/finish/shutdown).
@@ -510,207 +528,6 @@ async function runSerializedOAuthBoundary(
 
 // ── pure helpers (exported for unit tests) ──
 
-const norm = (s: string | null | undefined): string =>
-  (s ?? "").replace(/\s+/g, " ").trim().toLowerCase();
-
-// Element ref = a STABLE-by-default handle: "@e:<identity>_<ordinal>". For a
-// normal control `<identity>` is its generation-independent stableElementId, so
-// the per-session observe delta can leave an unchanged element un-re-emitted and
-// the ref the host already holds keeps resolving. The `@e:` sigil only
-// disambiguates a ref from a free-text label target (a label may legitimately end
-// in "_<digits>"). Staleness is guarded by IDENTITY, not a counter: a ref whose
-// element is now gone finds no match in resolveTarget → returns null → the public
-// tool returns structured target_stale guidance and the host re-observes.
-//
-// The exceptional identity form (issue #399) applies to same-base-identity
-// siblings distinguished ONLY by positional selectors. Those "volatile" members
-// get an identity prefixed with their sibling group's composition FINGERPRINT
-// ("<fp>-<hash>", see volatilePositionalGroups + elementIdentity), so a ref is
-// valid only while that fingerprint matches. A membership-count change re-mints
-// the group and makes every old ref resolve to null, never to a survivor.
-// Size-preserving changes among truly indistinguishable members are the bounded
-// residual documented at volatilePositionalGroups. `<fp>-` stays within the id
-// charset below, so no parsing changes are needed.
-const PROVISION_REF_RE = /^@e:([a-z0-9_-]+)$/i;
-const PROVISION_REF_ID_RE = /^(.+)_(\d+)$/;
-
-// The label a host sees + targets by. Prefer the most human, stable signal.
-export function elementRef(el: InteractiveElement): string {
-  const cand =
-    el.visibleText ??
-    el.labelText ??
-    el.ariaLabel ??
-    el.iconLabel ??
-    el.placeholder ??
-    el.title ??
-    el.name ??
-    (typeof el.value === "string" && el.value.length > 0 ? el.value : null);
-  const label = (cand ?? "").replace(/\s+/g, " ").trim();
-  return label.length > 0 ? label.slice(0, 80) : `${el.tag}#${el.index}`;
-}
-
-function shortHash(s: string): string {
-  return createHash("sha256").update(s).digest("base64url").slice(0, 12);
-}
-
-function baseIdentityFields(el: InteractiveElement): string[] {
-  return [
-    el.screenPath ?? "",
-    el.testId ?? "",
-    el.container ?? "",
-    el.role ?? "",
-    el.tag,
-    elementRef({ ...el, value: null }),
-    el.href ?? "",
-    el.type ?? "",
-    // Frame origin + full frame URL — WITHOUT these, an element's `selector`
-    // (folded into stableElementId below) is only unique within its own
-    // document, so a same-shaped selector in two different frames (or a frame
-    // vs. the main page) could hash to the SAME ref and let an act resolve to
-    // the wrong frame's element. Load-bearing for frame identity: the ref
-    // itself must be frame-scoped, not just the guard that later reads it.
-    //
-    // The frame's URL, NOT its positional framePath, is the durable frame
-    // component: hosted-field providers (Braintree, PayPal, Stripe Elements)
-    // remount their <iframe> after the first input, and Playwright then
-    // APPENDS the replacement to the parent's childFrames() list, shifting
-    // every positional path. A framePath-keyed identity would re-mint every
-    // framed ref on that remount and turn later inject_card fields into
-    // not_found; the remount keeps the iframe's src, so the URL survives.
-    el.frameOrigin ?? "",
-    el.frameUrl ?? "",
-  ];
-}
-
-export function stableElementId(el: InteractiveElement): string {
-  return shortHash(
-    [
-      ...baseIdentityFields(el),
-      // The element's own selector — a per-element discriminator so two controls
-      // that are otherwise identical (same label/path/role, e.g. sibling "Remove"
-      // buttons in a list) get DISTINCT identities. Without it, a stable ref is a
-      // positional ordinal within a same-hash group: remove the first sibling and
-      // the old `_1` silently retargets the survivor. With a STABLE selector
-      // (id/data-attr) folded in, the removed element's identity is unique, so its
-      // old ref finds no match and resolveTarget returns null (the host
-      // re-observes) — no mis-click.
-      //
-      // Mutable state (`checked`, value length, topmost/occlusion) is deliberately
-      // excluded so fills, toggles, and visibility changes keep the same ref.
-      // A purely POSITIONAL selector (`:nth-of-type`/`:nth-child`/`>> nth=`)
-      // recycles on sibling removal, so this hash alone would let a survivor
-      // slide onto a departed node's identity. Closed one layer up (issue #399):
-      // volatilePositionalGroups fingerprints such sibling groups and
-      // elementIdentity prefixes their refs with that fingerprint, so a group
-      // size change makes every old positional ref resolve to null.
-      el.selector,
-    ].join("\u001f"),
-  );
-}
-
-// The base identity WITHOUT the selector — the grouping key for same-label
-// sibling detection.
-function baseElementKey(el: InteractiveElement): string {
-  return baseIdentityFields(el).join("\u001f");
-}
-
-// A selector that pins an element only by its POSITION among siblings
-// (`:nth-of-type`/`:nth-child`, or Playwright's `>> nth=` index). Such selectors
-// RECYCLE: remove an earlier sibling and a later one slides into the vacated
-// position, so the identical selector string then designates a DIFFERENT node.
-// Stable anchors (#id, [data-testid], [name=…]) never recycle this way. Quoted
-// attribute VALUES (incl. backslash-escaped quotes) are blanked first so a stable
-// `[data-key="x:nth-child(1)"]` — the value merely CONTAINS the syntax — is not
-// misread as a positional combinator; only real structural syntax counts.
-const POSITIONAL_SELECTOR_RE = /:nth-of-type\(|:nth-child\(|>>\s*nth=/i;
-const QUOTED_VALUE_RE = /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g;
-function isPositionalSelector(selector: string): boolean {
-  return POSITIONAL_SELECTOR_RE.test(selector.replace(QUOTED_VALUE_RE, '""'));
-}
-
-// A "volatile positional group": the ≥2 POSITIONAL members of a same-base-identity
-// group (any stable-anchored siblings in the same base group keep their plain,
-// non-volatile refs). Removing one shifts a survivor's positional selector onto a
-// departed node's identity, so a purely structural ref would silently retarget
-// the survivor (issue #399). Returns each such member mapped to a GROUP
-// FINGERPRINT — a hash of the positional members' stableElementIds in extraction
-// order. elementIdentity prefixes the member's ref with that fingerprint, so the
-// ref is valid ONLY while the positional membership matches.
-//
-// Guarantees (the #399 invariant): after a member is REMOVED (group size N→N-1),
-// the fingerprint changes, so the departed member's old ref appears in `removed`
-// (or a full resync) and resolves to null — never a survivor — including WITHIN a
-// turn (the act path re-extracts, so a mid-turn removal changes the fingerprint
-// and forces a re-observe rather than mis-targeting a shifted sibling). Because
-// the identity is composition-derived (not an observe counter), a static group's
-// refs stay stable across observes (no wasted churn) and a toggled checkbox /
-// filled field keeps its ref (mutable state is excluded from stableElementId).
-//
-// Bounded residual: the fingerprint is built from the members' own
-// position-derived hashes, so a SIZE-PRESERVING shuffle of TRULY INDISTINGUISHABLE
-// members — delete-one-and-insert-one, or a pure reorder, where the members carry
-// ZERO distinguishing signal (identical label/aria/testid/text/screenPath, only
-// the nth differs) — leaves the fingerprint unchanged and is not detected. This
-// is information-theoretically unavoidable for a string-derived identity: such an
-// observation is byte-identical to "nothing changed," so no ref scheme can flag
-// it. Real per-row controls carry a distinguishing signal (row text / aria-label
-// / a data-id), which lands them in DISTINCT base groups (non-volatile) where the
-// #398 stable-selector identity already guards them. Fully closing the residual
-// needs an extractor-stamped per-node id that survives DOM mutation — deferred
-// because stamping every interactive node with a persistent attribute is
-// anti-bot-detectable (a worse regression than the residual it removes).
-function volatilePositionalGroups(
-  elements: readonly InteractiveElement[],
-): Map<InteractiveElement, string> {
-  const groups = new Map<string, InteractiveElement[]>();
-  for (const el of elements) {
-    const key = baseElementKey(el);
-    const group = groups.get(key);
-    if (group === undefined) groups.set(key, [el]);
-    else group.push(el);
-  }
-  const fingerprintOf = new Map<InteractiveElement, string>();
-  for (const group of groups.values()) {
-    // ≥2 positional siblings sharing a base identity can recycle onto EACH
-    // OTHER; a lone positional member (or any stable-anchored member) cannot.
-    const positional = group.filter((el) => isPositionalSelector(el.selector));
-    if (positional.length < 2) continue;
-    // Extraction-order fingerprint: sensitive to membership-count and selector-
-    // sequence changes, subject to the size-preserving residual above.
-    const fp = shortHash(positional.map((el) => stableElementId(el)).join(""));
-    for (const el of positional) fingerprintOf.set(el, fp);
-  }
-  return fingerprintOf;
-}
-
-// The ref identity of one element. A volatile positional-group member is
-// prefixed with its group fingerprint (`<fp>-<hash>`) so its ref survives only
-// while the group's composition is unchanged; everything else uses its plain,
-// composition-independent stableElementId (byte-identical to the pre-#399 ref).
-function elementIdentity(
-  el: InteractiveElement,
-  fingerprintOf: ReadonlyMap<InteractiveElement, string>,
-): string {
-  const base = stableElementId(el);
-  const fp = fingerprintOf.get(el);
-  return fp === undefined ? base : `${fp}-${base}`;
-}
-
-export function provisionElementRef(el: InteractiveElement, ordinal = 1): string {
-  return `@e:${stableElementId(el)}_${ordinal}`;
-}
-
-function parseProvisionRef(target: string): { id: string; ordinal: number | null } | null {
-  const m = target.trim().match(PROVISION_REF_RE);
-  if (m === null) return null;
-  const rawId = m[1] as string;
-  const idMatch = rawId.match(PROVISION_REF_ID_RE);
-  return {
-    id: idMatch !== null ? (idMatch[1] as string) : rawId,
-    ordinal: idMatch !== null ? Number.parseInt(idMatch[2] as string, 10) : null,
-  };
-}
-
 // A locator-form target the host supplies when NO `@e:` ref exists for the
 // control it needs to act on — for example, a bare click-handler <div> the
 // inventory never emitted (no role/label/testid, and past the card-scan cap).
@@ -738,21 +555,6 @@ export function parseLocatorTarget(target: string): LocatorTarget | null {
   }
   if (value.length === 0) return null;
   return { mode, value };
-}
-
-export function provisionElementRefs(
-  elements: readonly InteractiveElement[],
-): Map<InteractiveElement, string> {
-  const fingerprintOf = volatilePositionalGroups(elements);
-  const seen = new Map<string, number>();
-  const refs = new Map<InteractiveElement, string>();
-  for (const el of elements) {
-    const id = elementIdentity(el, fingerprintOf);
-    const ordinal = (seen.get(id) ?? 0) + 1;
-    seen.set(id, ordinal);
-    refs.set(el, `@e:${id}_${ordinal}`);
-  }
-  return refs;
 }
 
 export class AmbiguousProvisionTargetError extends Error {
@@ -942,71 +744,6 @@ export function resolveTarget(
   return best?.el ?? null;
 }
 
-const compactV2SourcePages = new WeakMap<object, OAuthCompletionEvidence["page"]>();
-const oauthCompletionSourcePages = new WeakMap<object, OAuthCompletionEvidence["page"]>();
-
-function compactV2SourcePage(session: object): OAuthCompletionEvidence["page"] | undefined {
-  const page = compactV2SourcePages.get(session);
-  if (page?.isClosed()) {
-    compactV2SourcePages.delete(session);
-    return undefined;
-  }
-  return page;
-}
-
-function rememberCompactV2SourcePage(
-  session: object,
-  page: OAuthCompletionEvidence["page"] | undefined,
-): void {
-  if (page === undefined) compactV2SourcePages.delete(session);
-  else compactV2SourcePages.set(session, page);
-}
-
-function oauthCompletionSourcePage(session: object): OAuthCompletionEvidence["page"] | undefined {
-  return oauthCompletionSourcePages.get(session);
-}
-
-function operationPageForSession(session: Session): Page | undefined {
-  const page =
-    oauthCompletionSourcePage(session) ??
-    (session.compactV2Active ? compactV2SourcePage(session) : undefined) ??
-    session.browser.activePage() ??
-    undefined;
-  return returnFromClosedPicker(session, page);
-}
-
-function returnFromClosedPicker(session: Session, page: Page | undefined): Page | undefined {
-  if (page === undefined || !page.isClosed()) return page;
-  const opener = session.browser.returnFromClosedPopup(page);
-  if (opener === null) return page;
-  // Only post-click perception follows the opener. The dispatched target and
-  // any field verification stay bound to the original popup document.
-  if (oauthCompletionSourcePage(session) !== undefined) {
-    rememberOAuthCompletionSourcePage(session, opener);
-  } else if (session.compactV2Active) {
-    rememberCompactV2SourcePage(session, opener);
-  }
-  invalidateCompactV2Snapshot(session);
-  return opener;
-}
-
-function rememberOAuthCompletionSourcePage(
-  session: object,
-  page: OAuthCompletionEvidence["page"] | undefined,
-): void {
-  if (page === undefined) oauthCompletionSourcePages.delete(session);
-  else oauthCompletionSourcePages.set(session, page);
-}
-
-function invalidateCompactV2Snapshot(
-  session: Pick<Session, "compactV2Refs" | "compactV2Index" | "compactV2Previous">,
-): void {
-  session.compactV2Refs = new Map();
-  session.compactV2Index = null;
-  session.compactV2Previous = null;
-  compactV2SourcePages.delete(session);
-}
-
 function throwCompactV2StaleRef(): never {
   // Deliberately opaque: stale V2 errors must not construct V1 replacement
   // candidates or reveal raw labels/legacy identities outside the safe view.
@@ -1051,22 +788,6 @@ export function withPreparedOAuthLoginTarget<T>(
   operation: () => Promise<T>,
 ): Promise<T> {
   return preparedOAuthLoginTarget.run(prepared, operation);
-}
-
-/** Wire-visible equality for the action response's changed-control delta. */
-function sameCompactV2Control(left: SafeControlV2, right: SafeControlV2): boolean {
-  return (
-    left.ref === right.ref &&
-    left.role === right.role &&
-    left.state === right.state &&
-    left.visibility === right.visibility &&
-    left.action === right.action &&
-    left.field === right.field &&
-    left.label === right.label &&
-    left.choice === right.choice &&
-    left.frame === right.frame &&
-    left.match === right.match
-  );
 }
 
 /**
@@ -1187,46 +908,6 @@ export async function startHarnessProvisionSession(
   return await startHarnessProvisionSessionInternal(opts, sessionStartPorts);
 }
 
-async function observedOAuthChallenge(
-  sessionId: string,
-): Promise<Observation["oauth"] | undefined> {
-  const session = sessionForCall(sessionId);
-  const error = await (session?.browser ? refreshOAuthHumanChallenge(session.browser) : undefined);
-  if (error == null || error.challenge === undefined) return undefined;
-  return {
-    state: "awaiting_human",
-    reason: error.message,
-    next_action: "operate_observe",
-    challenge: error.challenge,
-    ...(error.notification === undefined ? {} : { notification: error.notification }),
-  };
-}
-
-async function observedThreeDsChallenge(
-  sessionId: string,
-): Promise<Observation["three_ds"] | undefined> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) return undefined;
-  const released = session.releasedPaymentCard;
-  if (released === null) return undefined;
-  const challenge = await session.browser.detectThreeDsChallenge().catch(() => null);
-  if (challenge === null) return undefined;
-  let notified: boolean | undefined;
-  if (released.threeDsNotified !== true) {
-    released.threeDsNotified = true;
-    try {
-      notified = (await session.api?.notifyThreeDs(released.approvalId, "detected_challenge"))
-        ?.sent;
-    } catch {
-      notified = false;
-    }
-  }
-  return {
-    state: "challenge_detected",
-    url: challenge.url,
-    ...(notified === undefined ? {} : { notified }),
-  };
-}
 
 export async function observe(
   sessionId: string,
@@ -1448,846 +1129,6 @@ export function generatePassword(length = 24): string {
     [chars[i], chars[j]] = [chars[j]!, chars[i]!];
   }
   return chars.join("");
-}
-
-// Observation verbosity, set per call via operate_observe{format} /
-// operate_act{detail}:
-//   "none"    — bare ack, no perception (operate_act only; for chained fills).
-//   "compact" — the paged browser-use control map. The DEFAULT.
-//   "full"    — the browser-use DOM tree.
-export type ObserveDetail = "none" | "compact" | "full";
-
-export interface CompactV2StartMetadata {
-  hintPages?: string[];
-  userEmail?: string;
-}
-
-/**
- * Last index in `page` at which a split leaves complete whitespace-delimited
- * tokens on both sides (the position right after the final whitespace run), or
- * -1 when the page holds no interior token boundary.
- */
-function lastUtf8TokenBoundary(page: string): number {
-  const match = /\s(?=\S*$)/.exec(page);
-  return match === null ? -1 : match.index + 1;
-}
-
-/**
- * Split `value` into byte-bounded pages LOSSLESSLY (concatenating the pages
- * reproduces the input) and at TOKEN boundaries: an overflow never cuts a word
- * or URL mid-token when an interior boundary exists — the ipinfo dogfood read
- * "- entry: https://ipin" off page 0 and had to spend an extra paging call to
- * reassemble trusted routing metadata. Only a single token longer than a whole
- * page falls back to the old character split.
- */
-function splitUtf8Pages(value: string, maxBytes: number): string[] {
-  if (value.length === 0) return [];
-  const pages: string[] = [];
-  let page = "";
-  let bytes = 0;
-  for (const character of value) {
-    const characterBytes = Buffer.byteLength(character, "utf8");
-    if (bytes + characterBytes > maxBytes && page.length > 0) {
-      const boundary = lastUtf8TokenBoundary(page);
-      if (boundary > 0) {
-        const rest = page.slice(boundary);
-        pages.push(page.slice(0, boundary));
-        page = rest;
-        bytes = Buffer.byteLength(rest, "utf8");
-      } else {
-        pages.push(page);
-        page = "";
-        bytes = 0;
-      }
-    }
-    page += character;
-    bytes += characterBytes;
-  }
-  if (page.length > 0) pages.push(page);
-  return pages;
-}
-
-function compactV2StartMetadata(
-  registryHint: string | undefined,
-  loginHint: string,
-  userEmail: string | null,
-): CompactV2StartMetadata {
-  const hint = [loginHint, registryHint]
-    .filter((part): part is string => part !== undefined && part.length > 0)
-    .join("\n");
-  const validEmail =
-    userEmail !== null &&
-    Buffer.byteLength(userEmail, "utf8") <= 254 &&
-    /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(userEmail)
-      ? userEmail
-      : undefined;
-  return {
-    ...(hint.length === 0 ? {} : { hintPages: splitUtf8Pages(hint, 384) }),
-    ...(validEmail === undefined ? {} : { userEmail: validEmail }),
-  };
-}
-
-/**
- * Scope for the default map's overflow paging cursors. Deliberately NOT bound
- * to a query/role: the map ordering is canonical and any filter rides on top
- * of paging. Binding the scope to the exact query/role (the old behavior)
- * made the model's natural "page the overflow, looking for X" call — a map
- * cursor plus a search term — fail with invalid_cursor on every attempt (the
- * live Xata failure).
- */
-function compactV2ControlCursorScope(session: Session): string {
-  return createHmac("sha256", session.compactV2Secret)
-    .update("control-map-paging")
-    .digest("base64url")
-    .slice(0, 10);
-}
-
-function compactV2QueryCursorScope(
-  session: Session,
-  query: string,
-  role: SafeControlV2["role"] | undefined,
-): string {
-  return createHmac("sha256", session.compactV2Secret)
-    .update(JSON.stringify([query, role ?? null]))
-    .digest("base64url")
-    .slice(0, 10);
-}
-
-function compactV2HintCursorScope(session: Session): string {
-  return createHmac("sha256", session.compactV2Secret)
-    .update("start-metadata")
-    .digest("base64url")
-    .slice(0, 10);
-}
-
-interface CompactV2PagingSnapshot {
-  id: string;
-  scope: string;
-  epoch: ObservationEpochV2;
-  stage: SafeStageV2;
-  semantics: SafePageSemanticsV2;
-  pageUrl: string;
-  rows: readonly SafeControlV2[];
-  hintPages: readonly string[];
-  expiresAt: number;
-}
-
-const compactV2PagingSnapshots = new WeakMap<
-  Session,
-  { sequence: number; snapshots: Map<string, CompactV2PagingSnapshot> }
->();
-const COMPACT_V2_MAX_PAGING_SNAPSHOTS = 12;
-
-function retainCompactV2PagingSnapshot(
-  session: Session,
-  index: SafeObservationIndexV2,
-  scope: string,
-  pageUrl: string,
-  rows: readonly SafeControlV2[],
-  hintPages: readonly string[] = [],
-): CompactV2PagingSnapshot {
-  let state = compactV2PagingSnapshots.get(session);
-  if (state === undefined) {
-    state = { sequence: 0, snapshots: new Map() };
-    compactV2PagingSnapshots.set(session, state);
-  }
-  const now = Date.now();
-  for (const [id, snapshot] of state.snapshots) {
-    if (snapshot.expiresAt < now) state.snapshots.delete(id);
-  }
-  const snapshot: CompactV2PagingSnapshot = {
-    id: (++state.sequence).toString(36),
-    scope,
-    epoch: { ...index.epoch },
-    stage: index.stage,
-    semantics: { ...index.semantics },
-    pageUrl,
-    rows: rows.map((row) => ({ ...row })),
-    hintPages: [...hintPages],
-    expiresAt: Math.min(index.expiresAt, now + 5 * 60_000),
-  };
-  state.snapshots.set(snapshot.id, snapshot);
-  while (state.snapshots.size > COMPACT_V2_MAX_PAGING_SNAPSHOTS) {
-    const oldest = state.snapshots.keys().next().value as string | undefined;
-    if (oldest === undefined) break;
-    state.snapshots.delete(oldest);
-  }
-  return snapshot;
-}
-
-function compactV2Cursor(
-  session: Session,
-  snapshot: CompactV2PagingSnapshot,
-  offset: number,
-): string {
-  // The cursor identifies an immutable, bounded paging snapshot. Fresh reads
-  // may replace the live action map without changing what an older cursor
-  // means; action-time resolution still revalidates every returned ref.
-  const body = `${snapshot.id}:${snapshot.epoch.rev.toString(36)}:${offset.toString(36)}:${snapshot.scope}`;
-  const signature = createHmac("sha256", session.compactV2Secret)
-    .update(body)
-    .digest("base64url")
-    .slice(0, 12);
-  return `${body}.${signature}`;
-}
-
-// A live checkout mints a per-checkout token INTO ITS PATH and re-writes it as
-// the checkout SPA re-renders a step. The token names the checkout, never the
-// document, so folding it into `doc` retires every ref between two fills of one
-// address block. This is the path-side twin of the query/fragment exclusion
-// PR #624 landed; it is deliberately a CLOSED list of known checkout shapes —
-// every other path keeps its full identity, so an SPA route change to a
-// different logical page still retires refs.
-const VOLATILE_CHECKOUT_PATH_RULES: readonly RegExp[] = [
-  // Shopify hosted checkout, current (`…/checkouts/cn/<token>[/<step>]`) and
-  // legacy (`…/checkouts/c|co/<token>[/<step>]`), under any locale/shop prefix.
-  // The marker must be a whole segment, so a token that merely starts with "c"
-  // cannot be split across the capture.
-  /^(.*\/checkouts\/c[no]?)\/([^/]+)(?:\/.*)?$/i,
-  // Older Shopify: `/<shop-id>/checkouts/<token>[/<step>]`.
-  /^(.*\/checkouts)\/([^/]+)(?:\/.*)?$/i,
-];
-
-/**
- * Generated, not authored. An authored path slug under `/checkouts/` (a docs
- * page, a marketing route) must keep its own identity, so the token has to look
- * minted: long, in the URL-safe token alphabet, and carrying a digit.
- */
-function looksLikeVolatileCheckoutToken(segment: string): boolean {
-  return segment.length >= 16 && /^[A-Za-z0-9_-]+$/.test(segment) && /\d/.test(segment);
-}
-
-/**
- * Collapse a known-volatile checkout path onto one logical-page key. The step
- * suffix collapses with the token: inside a single checkout the steps are
- * same-document SPA routing, and a move to a DIFFERENT checkout replaces the
- * document, which the primary document-identity signal catches.
- */
-function normalizeVolatileCheckoutPath(pathname: string): string {
-  for (const rule of VOLATILE_CHECKOUT_PATH_RULES) {
-    const match = rule.exec(pathname);
-    if (match !== null && looksLikeVolatileCheckoutToken(match[2]!)) {
-      return `${match[1]}/:checkout`;
-    }
-  }
-  return pathname;
-}
-
-// The `doc` half of the observation epoch (docs/observation-model.md §4.1):
-// the browser's stable main-document identity, not the URL. The full URL is too
-// volatile to key on — live checkouts (e.g. Shopify) rotate a token in the
-// query string AND in the path on every step re-render, which would invalidate
-// every ref between two acts. A NORMALIZED origin+pathname is folded in as a
-// fail-closed backstop for a host whose document identity does not move on a
-// logical page change; query-string, fragment, and known-volatile checkout
-// token churn on the same logical page must not invalidate.
-function compactV2EpochDoc(
-  session: Session,
-  page: OAuthCompletionEvidence["page"] | undefined = operationPageForSession(session),
-): string {
-  let location = page?.url() ?? session.browser.currentUrl();
-  try {
-    const parsed = new URL(location);
-    if (parsed.origin !== "null" && parsed.origin !== "")
-      location = `${parsed.origin}${normalizeVolatileCheckoutPath(parsed.pathname)}`;
-  } catch {}
-  return createHmac("sha256", session.compactV2Secret)
-    .update(`${session.browser.mainDocumentIdentity(page)}\u0000${location}`)
-    .digest("base64url");
-}
-
-// Weak ownership keeps allocator lifetime bound to the session without retaining
-// closed sessions. One namespace/counter serves both action and display refs.
-const observationRefs = new WeakMap<Session, StableObservationRefs>();
-function compactV2RefAllocator(session: Session): StableObservationRefs {
-  let refs = observationRefs.get(session);
-  if (!refs) {
-    refs = new StableObservationRefs(session.compactV2Secret);
-    observationRefs.set(session, refs);
-  }
-  return refs;
-}
-function compactV2StableRef(session: Session, doc: string, identity: string): string {
-  return compactV2RefAllocator(session).get(doc, identity);
-}
-
-/** Reconcile physical anchors once for the shared DOM/action inventory. */
-function compactV2Handles(
-  session: Session,
-  elements: readonly InteractiveElement[],
-  page: OAuthCompletionEvidence["page"] | undefined = compactV2SourcePage(session),
-): Map<InteractiveElement, string> {
-  const doc = compactV2EpochDoc(session, page);
-  return compactV2RefAllocator(session).actions(doc, elements);
-}
-
-/** The live skeleton for an element inventory, under the session's epoch. */
-function compactV2LiveControls(
-  session: Session,
-  elements: readonly InteractiveElement[],
-  page: OAuthCompletionEvidence["page"] | undefined = compactV2SourcePage(session),
-  handles: ReadonlyMap<InteractiveElement, string> = compactV2Handles(session, elements, page),
-): { rows: SafeControlV2[]; byRef: Map<string, string> } {
-  let pageOrigin = "";
-  try {
-    pageOrigin = new URL(page?.url() ?? session.browser.currentUrl()).origin;
-  } catch {}
-  const pageUrl = page?.url() ?? session.browser.currentUrl();
-  return buildSafeControlsV2({
-    elements,
-    legacyRefs: provisionElementRefs(elements),
-    handles,
-    pageOrigin,
-    pageUrl,
-    canonical: true,
-    anchorLabel: (ref, label) => compactV2RefAllocator(session).label(ref, label),
-  });
-}
-
-function parseCompactV2Cursor(
-  session: Session,
-  cursor: string,
-  expectedScope: string,
-): { snapshot: CompactV2PagingSnapshot; offset: number } {
-  const [body, signature, extra] = cursor.split(".");
-  if (body === undefined || signature === undefined || extra !== undefined)
-    throw new Error("invalid_cursor");
-  const expected = createHmac("sha256", session.compactV2Secret)
-    .update(body)
-    .digest("base64url")
-    .slice(0, 12);
-  if (signature !== expected) throw new Error("invalid_cursor");
-  const [id, revRaw, offsetRaw, scope, extraPart] = body.split(":");
-  if (
-    id === undefined ||
-    revRaw === undefined ||
-    offsetRaw === undefined ||
-    scope === undefined ||
-    extraPart !== undefined ||
-    scope !== expectedScope
-  ) {
-    throw new Error("invalid_cursor");
-  }
-  const rev = Number.parseInt(revRaw, 36);
-  const offset = Number.parseInt(offsetRaw, 36);
-  if (
-    !Number.isSafeInteger(rev) ||
-    !Number.isSafeInteger(offset) ||
-    offset < 0 ||
-    rev.toString(36) !== revRaw ||
-    offset.toString(36) !== offsetRaw
-  ) {
-    throw new Error("stale_cursor");
-  }
-  const snapshot = compactV2PagingSnapshots.get(session)?.snapshots.get(id);
-  if (
-    snapshot === undefined ||
-    snapshot.scope !== expectedScope ||
-    snapshot.epoch.rev !== rev ||
-    snapshot.expiresAt < Date.now()
-  ) {
-    throw new Error("stale_cursor");
-  }
-  return { snapshot, offset };
-}
-
-function compactV2HintPage(
-  session: Session,
-  snapshot: CompactV2PagingSnapshot,
-  offset: number,
-): Record<string, unknown> {
-  const hint = snapshot.hintPages[offset];
-  if (hint === undefined) throw new Error("invalid_cursor");
-  const nextOffset = offset + 1;
-  const remaining = snapshot.hintPages.length - nextOffset;
-  const payload = {
-    format: "browser-use-control-query",
-    url: "",
-    session_id: session.id,
-    stage: snapshot.stage,
-    hint,
-    ...(remaining > 0
-      ? {
-          hint_overflow: {
-            remaining,
-            next_cursor: compactV2Cursor(session, snapshot, nextOffset),
-          },
-        }
-      : {}),
-  };
-  // Start hints are routing metadata; degrade rather than fail the page.
-  const degraded = compactV2DegradeMetadata(payload);
-  if (degraded === null) throw new Error("compact-v2 budget metadata exceeded");
-  return degraded;
-}
-
-function compactV2PublicObservation(
-  session: Session,
-  fields: {
-    stage: SafeStageV2;
-    guidance?: string;
-    oauth?: Observation["oauth"];
-    observed?: ObserveDetail;
-    terminal?: Observation["terminal"];
-    url?: string;
-  },
-  outputFormat: "compact" | "full" = "full",
-): Observation {
-  session.compactV2Active = true;
-  const payload = {
-    format:
-      outputFormat === "compact"
-        ? ("browser-use-control-query" as const)
-        : ("browser-use-dom" as const),
-    session_id: session.id,
-    url: fields.url ?? session.browser.currentUrl(),
-    stage: fields.stage,
-    ...(outputFormat === "compact" ? { safe_table: [] } : {}),
-    ...(fields.guidance === undefined ? {} : { guidance: fields.guidance }),
-    ...(fields.oauth === undefined ? {} : { oauth: fields.oauth }),
-    ...(fields.observed === undefined ? {} : { observed: fields.observed }),
-    ...(fields.terminal === undefined ? {} : { terminal: fields.terminal }),
-  };
-  // Fixed metadata (long OAuth-shaped URLs) degrades before observation ever
-  // fails; the throw is unreachable from real pages.
-  const degraded = compactV2DegradeMetadata(payload as unknown as Record<string, unknown>);
-  if (degraded === null) throw new Error("compact-v2 budget metadata exceeded");
-  return degraded as unknown as Observation;
-}
-
-function compactV2Observation(
-  session: Session,
-  generation: number,
-  capture: BrowserUseCapture,
-  semanticSource: ObservationSemanticSourceV2,
-  startMetadata?: CompactV2StartMetadata,
-  sourcePage?: OAuthCompletionEvidence["page"],
-  outputFormat: "compact" | "full" = "full",
-  compactActionDelta = false,
-  compactMapEmitted = true,
-  forceFullDOM = false,
-): Observation {
-  rememberCompactV2SourcePage(session, sourcePage);
-  const elements = capture.elements;
-  if (startMetadata?.hintPages !== undefined)
-    session.compactV2HintPages = [...startMetadata.hintPages];
-  const pageUrl = sourcePage?.url() ?? session.browser.currentUrl();
-  const stage = safeStageV2(pageUrl, elements);
-  const epochDoc = compactV2EpochDoc(session, sourcePage);
-  const previous = session.compactV2Previous;
-  const sameDocument = previous !== null && previous.epoch.doc === epochDoc;
-  const sameFullDocument = sameDocument && previous.dom !== undefined;
-  const handles = compactV2Handles(session, elements, sourcePage);
-  const safe = compactV2LiveControls(session, elements, sourcePage, handles);
-  const targetableRefs = new Set(safe.rows.map((row) => row.ref));
-  const blockers = safeBlockersV2(capture.root, (node) => {
-    const element = capture.nodeElements.get(node.id);
-    const ref = element === undefined ? undefined : handles.get(element);
-    return ref !== undefined && targetableRefs.has(ref) ? ref : undefined;
-  });
-  const semantics = {
-    ...safePageSemanticsV2(semanticSource),
-    ...(blockers.length === 0 ? {} : { blockers, blocked: true as const }),
-  };
-  const rendered = serializeBrowserUseDOM(capture.root, {
-    ref: (node) => {
-      const element = capture.nodeElements.get(node.id);
-      const ref = element === undefined ? undefined : handles.get(element);
-      if (ref !== undefined) return ref;
-      // Display-only identities share the allocator but not the action namespace.
-      return {
-        ref: compactV2StableRef(session, epochDoc, `unbound\u001f${node.id}`),
-        targetable: false,
-      };
-    },
-    ...(sameFullDocument ? { previous: new Set(previous.renderedRefs ?? []) } : {}),
-  });
-  // Emit canonical names and text verbatim, preserving whitespace, line order
-  // and indentation; no prose extraction or byte-budget pruning.
-  const dom = rendered.dom;
-  // A changed URL, frame set, or closed-shadow/iframe structure is a real
-  // change even when the rendered text is byte-identical: the observation the
-  // host already holds describes a page that no longer exists.
-  const structurallyChanged =
-    previous !== null && (previous.dynamics !== capture.dynamics || previous.url !== pageUrl);
-  const changed = !sameFullDocument || previous.dom !== dom || structurallyChanged;
-  const epoch = { doc: epochDoc, rev: changed ? generation : previous.epoch.rev };
-  session.compactV2Active = true;
-  session.compactV2Index = {
-    epoch,
-    stage,
-    semantics,
-    rows: safe.rows,
-    byRef: safe.byRef,
-    expiresAt: Date.now() + 5 * 60_000,
-  };
-  const canCompactActionDelta =
-    outputFormat === "compact" &&
-    compactActionDelta &&
-    sameDocument &&
-    previous.compactMapEmitted === true;
-  const currentRefs = new Set(safe.rows.map((row) => row.ref));
-  const compactRows = canCompactActionDelta
-    ? safe.rows.filter((row) => {
-        const prior = previous.byRef.get(row.ref);
-        return prior === undefined || !sameCompactV2Control(prior, row);
-      })
-    : safe.rows;
-  const compactRemoved = canCompactActionDelta
-    ? [...previous.byRef.keys()].filter((ref) => !currentRefs.has(ref))
-    : [];
-  let controlSnapshot = retainCompactV2PagingSnapshot(
-    session,
-    session.compactV2Index,
-    compactV2ControlCursorScope(session),
-    pageUrl,
-    compactRows,
-  );
-  const hintSnapshot =
-    session.compactV2HintPages.length > 1
-      ? retainCompactV2PagingSnapshot(
-          session,
-          session.compactV2Index,
-          compactV2HintCursorScope(session),
-          pageUrl,
-          [],
-          session.compactV2HintPages,
-        )
-      : undefined;
-  session.compactV2Refs = safe.byRef;
-  session.compactV2Previous = {
-    epoch,
-    stage,
-    semantics,
-    byRef: new Map(safe.rows.map((row) => [row.ref, row])),
-    ...(outputFormat === "full"
-      ? { dom, renderedRefs: rendered.refs, url: pageUrl, dynamics: capture.dynamics }
-      : sameFullDocument
-        ? {
-            dom: previous.dom,
-            renderedRefs: previous.renderedRefs,
-            url: previous.url,
-            dynamics: previous.dynamics,
-          }
-        : {}),
-  };
-  if (outputFormat === "compact") {
-    const encodePage = (delta: boolean) =>
-      encodeV2QueryPage({
-        sessionId: session.id,
-        stage,
-        pageUrl,
-        semantics,
-        rows: delta ? compactRows : safe.rows,
-        ...(delta ? { delta: true as const, removed: compactRemoved } : {}),
-        cursorFor: (next) => compactV2Cursor(session, controlSnapshot, next),
-        ...(startMetadata === undefined
-          ? {}
-          : {
-              startMetadata: {
-                ...(startMetadata.hintPages?.[0] === undefined
-                  ? {}
-                  : { hint: startMetadata.hintPages[0] }),
-                ...(startMetadata.userEmail === undefined
-                  ? {}
-                  : { userEmail: startMetadata.userEmail }),
-                ...(session.compactV2HintPages.length <= 1
-                  ? {}
-                  : {
-                      hintOverflow: {
-                        remaining: session.compactV2HintPages.length - 1,
-                        next_cursor: compactV2Cursor(session, hintSnapshot!, 1),
-                      },
-                    }),
-              },
-            }),
-      });
-    let page;
-    try {
-      page = encodePage(canCompactActionDelta);
-    } catch (error) {
-      if (
-        !canCompactActionDelta ||
-        !(error instanceof Error) ||
-        error.message !== "compact-v2 budget metadata exceeded"
-      )
-        throw error;
-      controlSnapshot = retainCompactV2PagingSnapshot(
-        session,
-        session.compactV2Index,
-        compactV2ControlCursorScope(session),
-        pageUrl,
-        safe.rows,
-      );
-      page = encodePage(false);
-    }
-    if (compactMapEmitted && page.payload.overflow === undefined)
-      session.compactV2Previous.compactMapEmitted = true;
-    return {
-      ...page.payload,
-      ...(capture.omissions.length === 0 ? {} : { capture_omissions: capture.omissions }),
-    } as unknown as Observation;
-  }
-  const removed = sameDocument
-    ? (previous.renderedRefs ?? []).filter((ref) => !rendered.refs.includes(ref))
-    : [];
-  return {
-    format: "browser-use-dom",
-    session_id: session.id,
-    url: pageUrl,
-    stage,
-    ...(sameFullDocument ? { delta: true } : {}),
-    ...(changed || forceFullDOM ? { dom } : { dom_unchanged: true as const }),
-    ...(removed.length ? { removed } : {}),
-    more_above: capture.moreAbove,
-    more_below: capture.moreBelow,
-    ...(capture.omissions.length === 0 ? {} : { capture_omissions: capture.omissions }),
-    ...(startMetadata?.hintPages?.[0] ? { hint: startMetadata.hintPages[0] } : {}),
-    ...(startMetadata?.userEmail ? { user_email: startMetadata.userEmail } : {}),
-    ...(session.compactV2HintPages.length > 1 && startMetadata
-      ? {
-          hint_overflow: {
-            remaining: session.compactV2HintPages.length - 1,
-            next_cursor: compactV2Cursor(session, hintSnapshot!, 1),
-          },
-        }
-      : {}),
-  } as unknown as Observation;
-}
-
-export async function observeQuery(
-  sessionId: string,
-  query: string,
-  role?: SafeControlV2["role"],
-  cursor?: string,
-): Promise<Record<string, unknown>> {
-  const result = await observeQueryOwned(sessionId, query, role, cursor);
-  const oauth = await observedOAuthChallenge(sessionId);
-  const threeDs = await observedThreeDsChallenge(sessionId);
-  return {
-    ...result,
-    ...(oauth === undefined ? {} : { oauth }),
-    ...(threeDs === undefined ? {} : { three_ds: threeDs }),
-  };
-}
-
-async function observeQueryOwned(
-  sessionId: string,
-  query: string,
-  role?: SafeControlV2["role"],
-  cursor?: string,
-): Promise<Record<string, unknown>> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const sourcePage = operationPageForSession(session);
-  const needle = norm(query);
-  const unfiltered = needle.length === 0 && role === undefined;
-  const cursorScope = unfiltered
-    ? compactV2ControlCursorScope(session)
-    : compactV2QueryCursorScope(session, needle, role);
-  if (cursor !== undefined) {
-    if (unfiltered) {
-      try {
-        const parsed = parseCompactV2Cursor(session, cursor, compactV2HintCursorScope(session));
-        if (parsed.snapshot.epoch.doc !== compactV2EpochDoc(session, sourcePage))
-          throw new Error("stale_cursor");
-        return compactV2HintPage(session, parsed.snapshot, parsed.offset);
-      } catch (error) {
-        if (!(error instanceof Error) || error.message !== "invalid_cursor") throw error;
-      }
-    }
-    const parsed = parseCompactV2Cursor(session, cursor, cursorScope);
-    const snapshot = parsed.snapshot;
-    if (snapshot.epoch.doc !== compactV2EpochDoc(session, sourcePage)) {
-      throw new Error("stale_cursor");
-    }
-    const page = encodeV2QueryPage({
-      sessionId: session.id,
-      stage: snapshot.stage,
-      pageUrl: snapshot.pageUrl,
-      semantics: snapshot.semantics,
-      rows: snapshot.rows,
-      offset: parsed.offset,
-      cursorFor: (next) => compactV2Cursor(session, snapshot, next),
-    });
-    return page.payload;
-  }
-
-  // A cursorless query/role is always a fresh observation. Capture action rows
-  // and semantic page hints once, together, before filtering.
-  session.generation += 1;
-  const capture = await session.browser.extractBrowserUseObservation(sourcePage, true);
-  let semanticSource: ObservationSemanticSourceV2 = { title: "", headings: [] };
-  try {
-    semanticSource = await session.browser.extractObservationSemantics(sourcePage);
-  } catch {
-    // Semantics are optional; action membership comes from the canonical capture.
-  }
-  compactV2Observation(
-    session,
-    session.generation,
-    capture,
-    semanticSource,
-    undefined,
-    sourcePage,
-    "compact",
-    false,
-    false,
-  );
-  const index = session.compactV2Index;
-  if (index === null) throw new Error("stale_cursor");
-  const liveElements = capture.elements;
-  const liveByLegacy = new Map<string, InteractiveElement>();
-  for (const [element, legacy] of provisionElementRefs(liveElements)) {
-    liveByLegacy.set(legacy, element);
-  }
-  const ranked = index.rows.flatMap((row, position) => {
-    if (role !== undefined && row.role !== role) return [];
-    if (needle.length === 0) return [{ row, position, rank: 0 }];
-    const legacy = index.byRef.get(row.ref);
-    const element = legacy === undefined ? undefined : liveByLegacy.get(legacy);
-    const match = element === undefined ? null : controlQueryMatchV2(element, query);
-    const semanticMatch = [row.role, row.action, row.field].some(
-      (value) => value !== undefined && norm(value) === needle,
-    );
-    if (match === null && !semanticMatch) return [];
-    return [
-      {
-        row: { ...row, match: match?.provenance ?? ("text" as const) },
-        position,
-        rank: match?.rank ?? 2,
-      },
-    ];
-  });
-  ranked.sort((left, right) => left.rank - right.rank || left.position - right.position);
-  const rows = ranked.map(({ row }) => row);
-  const pageUrl = sourcePage?.url() ?? session.browser.currentUrl();
-  const snapshot = retainCompactV2PagingSnapshot(session, index, cursorScope, pageUrl, rows);
-  const page = encodeV2QueryPage({
-    sessionId: session.id,
-    stage: snapshot.stage,
-    pageUrl: snapshot.pageUrl,
-    semantics: index.semantics,
-    rows,
-    cursorFor: (next) => compactV2Cursor(session, snapshot, next),
-  });
-  return page.payload;
-}
-
-function terminalOAuthCompletionObservation(session: Session, url: string): Observation {
-  const terminal: NonNullable<Observation["terminal"]> = {
-    state: "oauth_completed",
-    refs: "unavailable",
-    next_action: "operate_observe",
-  };
-  rememberOAuthCompletionSourcePage(session, undefined);
-  rememberCompactV2SourcePage(session, undefined);
-  invalidateCompactV2Snapshot(session);
-  retainSessionElements(session, []);
-  const guidance =
-    "OAuth completed in a popup that closed before its controls could be observed. " +
-    "Call operate_observe to inspect the active product page.";
-  return compactV2PublicObservation(session, {
-    stage: safeStageV2(url, []),
-    guidance,
-    terminal,
-    url,
-  });
-}
-
-async function observeSession(
-  session: Session,
-  _detail: "compact" | "full" = "compact",
-  startMetadata?: CompactV2StartMetadata,
-  sourcePage?: OAuthCompletionEvidence["page"],
-  preserveSourceBinding = false,
-  outputFormat: "compact" | "full" = "full",
-  compactActionDelta = false,
-  compactMapEmitted = true,
-  forceFullDOM = false,
-): Promise<Observation> {
-  if (sourcePage === undefined) {
-    const hadOAuthCompletionSource =
-      oauthCompletionSourcePage(session) !== undefined ||
-      compactV2SourcePage(session) !== undefined;
-    session.browser.takeOAuthTerminalCompletionUrl();
-    rememberOAuthCompletionSourcePage(session, undefined);
-    rememberCompactV2SourcePage(session, undefined);
-    if (hadOAuthCompletionSource) invalidateCompactV2Snapshot(session);
-  }
-  if (!preserveSourceBinding) rememberOAuthCompletionSourcePage(session, sourcePage);
-  const oauthInProgress = (): Observation => {
-    invalidateCompactV2Snapshot(session);
-    const oauth = oauthTransitionStatus(session.browser);
-    const guidance =
-      "OAuth in progress: the provider detached or closed its page as expected. " +
-      "Do not switch login methods or close the session; call operate_observe again to read the retained product page.";
-    const state: NonNullable<Observation["oauth"]> = {
-      state: "in_progress",
-      provider_page: "closed_or_detached",
-      next_action: "operate_observe",
-    };
-    completeOAuthTransitionRecovery(session.browser);
-    return compactV2PublicObservation(
-      session,
-      {
-        stage: "auth",
-        guidance,
-        oauth: state,
-        url: oauth?.productUrl ?? session.startUrl,
-      },
-      outputFormat,
-    );
-  };
-  try {
-    if (sourcePage === undefined) {
-      session.browser.recoverActivePage();
-      const transition = oauthTransitionStatus(session.browser);
-      if (
-        transition?.providerPageClosed === true &&
-        transition.productPageViable &&
-        transition.browserConnected
-      ) {
-        return oauthInProgress();
-      }
-    }
-    if (sourcePage === undefined) {
-      widenAllowedHostsFromUrl(session, session.browser.currentUrl());
-    }
-    session.generation += 1;
-    const generation = session.generation;
-    const capture = await session.browser.extractBrowserUseObservation(sourcePage, true);
-    retainSessionElements(session, capture.elements);
-    let semanticSource: ObservationSemanticSourceV2 = { title: "", headings: [] };
-    try {
-      semanticSource = await session.browser.extractObservationSemantics(sourcePage);
-    } catch {
-      // Semantic context is optional availability-wise; it is independently
-      // sealed below and never changes action-map safety.
-    }
-    return compactV2Observation(
-      session,
-      generation,
-      capture,
-      semanticSource,
-      startMetadata,
-      sourcePage,
-      outputFormat,
-      compactActionDelta,
-      compactMapEmitted,
-      forceFullDOM,
-    );
-  } catch (err) {
-    const oauth = session.browser ? oauthTransitionStatus(session.browser) : undefined;
-    if (oauth?.providerPageClosed === true && oauth.productPageViable && oauth.browserConnected) {
-      // A read racing an expected provider-page close must not leak the raw
-      // Playwright "Target page, context or browser has been closed" exception
-      // into the model's plan. Discard the delta baseline because the next
-      // successful product-page read is a new authoritative snapshot.
-      return oauthInProgress();
-    }
-    throw err;
-  }
 }
 
 interface InternalActResult {

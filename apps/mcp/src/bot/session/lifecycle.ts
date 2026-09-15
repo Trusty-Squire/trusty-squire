@@ -46,7 +46,8 @@ import { hostStrings, registrableHost } from "./hosts.js";
 // compact-v2 start metadata are perception's shapes, and perception stays in
 // the facade until its own phase. The two start paths reach the live
 // implementations through SessionStartPorts below.
-import type { CompactV2StartMetadata, Observation } from "../provision-session.js";
+import type { CompactV2StartMetadata } from "../observe/observe.js";
+import type { Observation } from "../provision-session.js";
 
 // The perception collaborators the two start paths need. The facade supplies
 // the real implementations; nothing here may reach into perception directly.

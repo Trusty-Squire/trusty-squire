@@ -3,11 +3,7 @@ import type { InteractiveElement } from "../browser.js";
 import type { ApiClient } from "../../api-client.js";
 import {
   resolveTarget,
-  provisionElementRef,
-  provisionElementRefs,
-  stableElementId,
   AmbiguousProvisionTargetError,
-  elementRef,
   parseVerification,
   extractSenderEmail,
   expectedVerificationDomains,
@@ -25,6 +21,7 @@ import {
   findCredentialTokens,
   keyFamilyPrefix,
 } from "../credential-shape.js";
+import { provisionElementRefs, stableElementId } from "../observe/refs.js";
 
 // Credential-shaped test fixtures are assembled at runtime from harmless
 // fragments so no complete vendor-prefixed token literal appears in this
@@ -55,20 +52,6 @@ function el(partial: Partial<InteractiveElement>): InteractiveElement {
   };
 }
 
-
-describe("elementRef", () => {
-  it("prefers visibleText, then falls back through the label chain", () => {
-    expect(elementRef(el({ visibleText: "Continue with Google" }))).toBe("Continue with Google");
-    expect(elementRef(el({ visibleText: null, ariaLabel: "Show key" }))).toBe("Show key");
-    expect(elementRef(el({ visibleText: null, placeholder: "Organization name" }))).toBe(
-      "Organization name",
-    );
-  });
-
-  it("falls back to tag#index when there is no label at all", () => {
-    expect(elementRef(el({ tag: "input", index: 7 }))).toBe("input#7");
-  });
-});
 
 describe("resolveTarget", () => {
   const inv = [
@@ -131,7 +114,7 @@ describe("resolveTarget", () => {
   });
 
   it("resolves a generation-independent ref against live elements", () => {
-    const ref = provisionElementRef(inv[0] as InteractiveElement);
+    const ref = provisionElementRefs(inv).get(inv[0] as InteractiveElement) as string;
     // Stable "@e:<hash>_<ordinal>" — NO generation prefix, so the ref an earlier
     // observe minted still resolves against a later observe's elements.
     expect(ref).toMatch(/^@e:[A-Za-z0-9_-]+_1$/);
@@ -142,13 +125,13 @@ describe("resolveTarget", () => {
   it("still resolves a ref minted before an unrelated element list churned", () => {
     // The ref holds across observations because identity is the stable hash, not
     // a counter — the whole point of dropping the generation prefix.
-    const ref = provisionElementRef(inv[1] as InteractiveElement);
+    const ref = provisionElementRefs(inv).get(inv[1] as InteractiveElement) as string;
     const laterList = [el({ visibleText: "Toast appeared", selector: "#toast" }), ...inv];
     expect(resolveTarget(laterList, ref)?.selector).toBe("#gh");
   });
 
   it("returns null (graceful — host re-observes) when a ref's element is gone", () => {
-    const ref = provisionElementRef(inv[0] as InteractiveElement);
+    const ref = provisionElementRefs(inv).get(inv[0] as InteractiveElement) as string;
     // inv[0] removed: identity no longer matches anything → null, never a
     // mis-click on a recycled node.
     expect(resolveTarget(inv.slice(1), ref)).toBeNull();
