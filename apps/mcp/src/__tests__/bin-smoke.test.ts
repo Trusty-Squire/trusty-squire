@@ -26,8 +26,13 @@ const repoRoot = path.resolve(pkgRoot, "../..");
 const distBin = path.join(pkgRoot, "dist", "bin.js");
 const canonicalReadme = path.join(repoRoot, "README.md");
 const packageReadme = path.join(pkgRoot, "README.md");
-const descriptionTagline =
+// package.json / root package.json carry the long tagline; server.json
+// carries the registry listing description, shortened by #791 to fit the
+// MCP registry's 100-character limit.
+const packageDescription =
   "Trusty Squire gives coding agents the ability to provision, ship, and pay — without your keys or card ever leaving the vault.";
+const registryDescription =
+  "Provision, ship, and pay from your coding agent — keys and cards never leave the vault.";
 const readmeTagline = "Empower agents with auth and payments.";
 
 let tmpDir: string;
@@ -57,7 +62,7 @@ describe("package manifest", () => {
       keywords: string[];
     };
     expect(pkg.bin).toEqual({ mcp: "./dist/bin.js" });
-    expect(pkg.description).toBe(descriptionTagline);
+    expect(pkg.description).toBe(packageDescription);
     expect(pkg.homepage).toBe("https://trustysquire.ai");
     expect(pkg.keywords).toEqual(
       expect.arrayContaining([
@@ -75,8 +80,8 @@ describe("package manifest", () => {
     const registry = JSON.parse(await fs.readFile(path.join(pkgRoot, "server.json"), "utf8")) as {
       description: string;
     };
-    expect(rootPkg.description).toBe(descriptionTagline);
-    expect(registry.description).toBe(descriptionTagline);
+    expect(rootPkg.description).toBe(packageDescription);
+    expect(registry.description).toBe(registryDescription);
   });
 });
 

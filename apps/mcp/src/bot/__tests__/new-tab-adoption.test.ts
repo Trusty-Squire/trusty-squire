@@ -285,7 +285,9 @@ describe("operator new-tab adoption", () => {
   it("follows a target=_blank magic link into the tab it opens", async () => {
     const { context, controller, inbox, sessionId } = await inboxSession();
     try {
-      await act(sessionId, { kind: "click", target: "css=#magic" });
+      // V2 act targets are observed refs/labels; the legacy css= selector
+      // path is gone. The anchor's observed label drives the same adoption.
+      await act(sessionId, { kind: "click", target: "@log-in-to-product" });
 
       const adopted = activePage(controller);
       expect(adopted).not.toBe(inbox);
@@ -307,7 +309,8 @@ describe("operator new-tab adoption", () => {
   it("follows a window.open login window the same way", async () => {
     const { context, controller, inbox, sessionId } = await inboxSession();
     try {
-      const result = await act(sessionId, { kind: "click", target: "css=#popup" });
+      // V2: the button's observed label replaces the legacy css= selector.
+      const result = await act(sessionId, { kind: "click", target: "@open-login-window" });
 
       expect(activePage(controller)).not.toBe(inbox);
       expect(controller.currentUrl()).toBe("https://product.test/welcome");
@@ -342,7 +345,8 @@ describe("operator new-tab adoption", () => {
   it("leaves the active page alone when a click opens no tab", async () => {
     const { context, controller, inbox, sessionId } = await inboxSession();
     try {
-      const transition = await act(sessionId, { kind: "click", target: "css=#inert" });
+      // V2: the button's observed label replaces the legacy css= selector.
+      const transition = await act(sessionId, { kind: "click", target: "@mark-as-read" });
 
       expect(activePage(controller)).toBe(inbox);
       expect(controller.currentUrl()).toBe("https://mail.test/inbox");
