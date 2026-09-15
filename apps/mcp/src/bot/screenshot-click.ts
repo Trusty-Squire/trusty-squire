@@ -66,8 +66,9 @@ export class ScreenshotClickError extends Error {
   constructor(
     readonly code: "stale_screenshot" | "invalid_screenshot_point" | "screenshot_click_uncertain",
     readonly dispatch: "not_dispatched" | "dispatched" | "unknown",
+    cause?: unknown,
   ) {
-    super(code);
+    super(code, cause === undefined ? undefined : { cause });
   }
 }
 
@@ -222,6 +223,16 @@ export async function captureBoundScreenshot(
   bindings.delete(page);
   const cdp = await page.context().newCDPSession(page);
   try {
+    // Headed Chrome on the operator display returns "No node found at given
+    // location" for every DOM.getNodeForLocation until one real input event has
+    // primed the renderer's hit-testing (headless never needs this, which is why
+    // tests kept passing while live headed clicks failed). Dispatch a single
+    // pointer move here, at capture time: priming persists across navigations,
+    // and settling it BEFORE the before/after snapshots keeps any hover side
+    // effect out of the identity comparison a later click performs.
+    await cdp
+      .send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 0, y: 0 })
+      .catch(() => undefined);
     const before = await geometry(page, cdp).catch(() => null);
     const result = await capture();
     const after = await geometry(page, cdp).catch(() => null);
@@ -267,11 +278,17 @@ async function hitTarget(
   y: number,
   frameOriginOf: FrameOrigin,
 ): Promise<ScreenshotClickTarget> {
-  const hit = await cdp.send("DOM.getNodeForLocation", {
-    x: Math.round(x),
-    y: Math.round(y),
-    includeUserAgentShadowDOM: true,
-  });
+  // A miss here resolved NO node: typed so clickScreenshot can keep the binding
+  // alive instead of burning the image's one attempt on a hit-test failure.
+  const hit = await cdp
+    .send("DOM.getNodeForLocation", {
+      x: Math.round(x),
+      y: Math.round(y),
+      includeUserAgentShadowDOM: true,
+    })
+    .catch((error: unknown) => {
+      throw new ScreenshotClickError("invalid_screenshot_point", "not_dispatched", error);
+    });
   let nodeSession = cdp;
   let owned: CDPSession | undefined;
   try {
@@ -362,8 +379,12 @@ export async function clickScreenshot(
     point.y < 0 ||
     point.x >= width ||
     point.y >= height
-  )
+  ) {
+    // The image is untouched and valid: a point outside it resolved no node and
+    // must not burn the binding. Re-arm so a corrected point can reuse it.
+    bindings.set(page, binding);
     throw new ScreenshotClickError("invalid_screenshot_point", "not_dispatched");
+  }
   const cdp = await page.context().newCDPSession(page);
   let attempted = false;
   try {
@@ -402,6 +423,14 @@ export async function clickScreenshot(
     return "dispatched";
   } catch (error) {
     if (attempted) throw new ScreenshotClickError("screenshot_click_uncertain", "unknown");
+    // A failure that resolved no node (point outside the current viewport, or
+    // the hit test itself found nothing — e.g. hit-testing not yet primed in a
+    // headed browser) did not dispatch and did not consume the image. Re-arm so
+    // a corrected point can retry the same binding. Genuine staleness (state,
+    // occlusion, frame mismatch) keeps the binding consumed: the screenshot no
+    // longer describes the page.
+    if (error instanceof ScreenshotClickError && error.code === "invalid_screenshot_point")
+      bindings.set(page, binding);
     throw error;
   } finally {
     await cdp.detach().catch(() => undefined);

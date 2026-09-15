@@ -490,6 +490,12 @@ describe("screenshot-bound native pointer dispatch", () => {
       await expect(clickScreenshot(f.page, point(third, 900, 244), () => {})).rejects.toMatchObject(
         { code: "invalid_screenshot_point", dispatch: "not_dispatched" },
       );
+      // A point that resolves no node did not dispatch and did not consume the
+      // binding: a corrected point retries the SAME image without a fresh capture.
+      await expect(
+        clickScreenshot(f.page, point(third, 174, 244), () => {}),
+      ).resolves.toBe("dispatched");
+      expect(await f.frame.evaluate("window.events")).toHaveLength(2);
     } finally {
       await f.close();
     }

@@ -81,6 +81,52 @@ function element(overrides: Partial<InteractiveElement> = {}): InteractiveElemen
   };
 }
 
+describe("CDN/gateway error pages are named, not mistaken for a normal page", () => {
+  it("reports a CloudFront 403 block from its title", () => {
+    expect(
+      safePageSemanticsV2({
+        title: "ERROR: The request could not be satisfied",
+        headings: ["403 ERROR"],
+      }),
+    ).toEqual({
+      title: "ERROR: The request could not be satisfied",
+      headings: ["403 ERROR"],
+      blocked: true,
+      // safeDescriptionV2 truncates the long title before it can match, so the
+      // CloudFront h1 ("403 ERROR") is the candidate that grounds the blocker.
+      blockers: [{ kind: "error_page", text: "403 ERROR" }],
+    });
+  });
+
+  it("reports gateway error titles and vendor attribution headings", () => {
+    for (const title of ["403 Forbidden", "504 Gateway Time-out", "Access Denied"]) {
+      expect(safePageSemanticsV2({ title, headings: [] }).blocked).toBe(true);
+    }
+    expect(
+      safePageSemanticsV2({ title: "Example Domain", headings: ["Sorry, you have been blocked"] })
+        .blockers,
+    ).toEqual([{ kind: "error_page", text: "Sorry, you have been blocked" }]);
+  });
+
+  it("does not flag ordinary content that merely discusses HTTP errors", () => {
+    for (const source of [
+      { title: "403 Forbidden - HTTP | MDN", headings: ["403 Forbidden"] },
+      { title: "Handling request blocked events", headings: ["Overview"] },
+      { title: "CloudFront distributions", headings: ["Distribution settings"] },
+    ]) {
+      const semantics = safePageSemanticsV2(source);
+      expect(semantics.blocked).toBeUndefined();
+      expect(semantics.blockers).toBeUndefined();
+    }
+  });
+
+  it("ignores ordinary titles and headings", () => {
+    expect(
+      safePageSemanticsV2({ title: "Your Cart", headings: ["Review your order"] }).blocked,
+    ).toBeUndefined();
+  });
+});
+
 describe("compact observation v2", () => {
   it("advertises only Shopify's required address-line1 as the delivery-address field", () => {
     const address = element({
@@ -1924,7 +1970,16 @@ describe("safeBlockersV2 modal dialog", () => {
     ]);
     expect(
       safeBlockersV2(root, (candidate) => (candidate === close ? "@e:dialog-close" : undefined)),
-    ).toEqual([{ kind: "dialog", text: "Confirm it's you", ref: "@e:dialog-close" }]);
+    ).toEqual([
+      {
+        kind: "dialog",
+        text: "Confirm it's you",
+        ref: "@e:dialog-close",
+        options: [{ ref: "@e:dialog-close", label: "Close" }],
+        detail:
+          "Confirm it's you Sign in as customer@example.com to securely use your saved information",
+      },
+    ]);
   });
 
   it("marks alertdialog without a close control as blocked and unavailable", () => {
@@ -1936,7 +1991,12 @@ describe("safeBlockersV2 modal dialog", () => {
       }),
     ]);
     expect(safeBlockersV2(root)).toEqual([
-      { kind: "dialog", text: "Confirm it's you", target: "unavailable" },
+      {
+        kind: "dialog",
+        text: "Confirm it's you",
+        target: "unavailable",
+        detail: "Sign in to continue",
+      },
     ]);
   });
 
@@ -1959,7 +2019,57 @@ describe("safeBlockersV2 modal dialog", () => {
     const dismiss = dialog.children[1];
     expect(
       safeBlockersV2(root, (candidate) => (candidate === dismiss ? "@e:dismiss" : undefined)),
-    ).toEqual([{ kind: "dialog", text: "Confirm it's you", ref: "@e:dismiss" }]);
+    ).toEqual([
+      {
+        kind: "dialog",
+        text: "Confirm it's you",
+        ref: "@e:dismiss",
+        options: [{ ref: "@e:dismiss", label: "No thanks" }],
+        detail: "Confirm it's you",
+      },
+    ]);
+  });
+
+  it("surfaces EVERY dialog control including the close path, with the body delta", () => {
+    // Oura's address-verification shape: Confirm (which silently accepts the
+    // suggestion) plus a close X that keeps what was entered. The compact
+    // blocker must show both options in DOM order and the entered-vs-suggested
+    // text, so keeping the entry is discoverable and never reads as a cancel.
+    const dialog = node("dialog", {
+      attributes: { role: "dialog", "aria-modal": "true", "aria-label": "Verify your address" },
+      children: [
+        text(
+          "dialog-body",
+          "You entered: 12 Rue de la Paix, room 101, Paris. Suggested address: 12 Rue de la Paix, Paris.",
+        ),
+        node("dialog-confirm", { nodeName: "BUTTON", axRole: "button", children: [text("confirm-text", "Confirm address")] }),
+        node("dialog-x", {
+          nodeName: "BUTTON",
+          attributes: { "aria-label": "Close" },
+          axRole: "button",
+        }),
+      ],
+    });
+    const root = page([dialog]);
+    const confirm = dialog.children[1];
+    const close = dialog.children[2];
+    expect(
+      safeBlockersV2(root, (candidate) =>
+        candidate === confirm ? "@e:confirm" : candidate === close ? "@e:close" : undefined,
+      ),
+    ).toEqual([
+      {
+        kind: "dialog",
+        text: "Verify your address",
+        ref: "@e:close",
+        options: [
+          { ref: "@e:confirm", label: "Confirm address" },
+          { ref: "@e:close", label: "Close" },
+        ],
+        detail:
+          "You entered: 12 Rue de la Paix, room 101, Paris. Suggested address: 12 Rue de la Paix, Paris. Confirm address",
+      },
+    ]);
   });
 
   it("stops reporting the dialog blocker once the dialog is removed", () => {
