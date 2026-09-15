@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import type {
   CaptchaSolveResult,
   CaptchaKind,
-} from "../browser.js";
+} from "../captcha.js";
 
 describe("CaptchaSolveResult shape", () => {
   it("found:false has no kind field", () => {

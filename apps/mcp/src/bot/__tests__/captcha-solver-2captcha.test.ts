@@ -7,7 +7,7 @@ import {
   TwoCaptchaSolver,
   type TwoCaptchaVaultProxy,
   type TwoCaptchaVaultRequest,
-} from "../captcha-solver-2captcha.js";
+} from "../captcha.js";
 
 function mockFetch(scenario: {
   inResponse?: { status?: number; body?: unknown };

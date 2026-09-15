@@ -1055,7 +1055,11 @@ vi.mock("../browser.js", async (importOriginal) => ({
   },
 }));
 
-vi.mock("../captcha-solver-2captcha.js", () => ({
+// Captcha behaviour is a plain-function module now (captcha.ts), so the
+// session tests stub its entry points directly instead of the fake browser's
+// methods. The h.* flags and call counters are the same observations the
+// fake's methods used to make.
+vi.mock("../captcha.js", () => ({
   TwoCaptchaSolver: class {
     isAvailable(): boolean {
       return h.twoCaptchaAvailable;
@@ -1072,6 +1076,43 @@ vi.mock("../captcha-solver-2captcha.js", () => ({
       h.twoCaptchaCalls.push("turnstile");
       return h.twoCaptchaResult;
     }
+  },
+  waitForCaptchaChallengeToSettle: async () => h.captchaSettled,
+  waitForCaptchaResponseToken: async () => h.captchaToken,
+  detectCaptchaVariant: async () => ({
+    variant: h.captchaVariant,
+    challengeRendered: h.captchaChallengeRendered,
+  }),
+  solveVisibleCaptcha: async () => {
+    h.visibleSolveCalls += 1;
+    if (h.captchaVariant === "unknown") return { found: false };
+    if (h.captchaSolved) h.captchaToken = true;
+    return { found: true, solved: h.captchaSolved, kind: "recaptcha" };
+  },
+  triggerInvisibleRecaptcha: async () => {
+    h.invisibleTriggerCalls += 1;
+    if (h.invisibleTriggered) h.captchaToken = true;
+    return h.invisibleTriggered;
+  },
+  extractRecaptchaSitekey: async () => "6Lcaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  injectRecaptchaToken: async () => {
+    h.captchaToken = true;
+    return true;
+  },
+  extractHcaptchaSitekey: async () => "00000000-0000-0000-0000-000000000000",
+  getHcaptchaSolveContext: async () => ({
+    invisible: false,
+    userAgent: "test-agent",
+    rqdata: null,
+  }),
+  injectHcaptchaToken: async () => {
+    h.captchaToken = true;
+    return true;
+  },
+  extractTurnstileSitekey: async () => "0x4AAAAAAA",
+  injectTurnstileToken: async () => {
+    h.captchaToken = true;
+    return true;
   },
 }));
 
