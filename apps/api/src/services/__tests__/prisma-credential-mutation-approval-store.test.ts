@@ -60,7 +60,7 @@ describe("PrismaCredentialMutationApprovalStore", () => {
     } as unknown as ApiPrismaClient;
     const store = new PrismaCredentialMutationApprovalStore(prisma);
 
-    const commit = store.commit(approval.id, "mandate_1");
+    const commit = store.commit(approval.id, "mandate_1", "sdev_owner_signing_device");
     await Promise.resolve();
     releaseLock();
 
@@ -146,7 +146,9 @@ describe("PrismaCredentialMutationApprovalStore", () => {
     } as unknown as ApiPrismaClient;
     const store = new PrismaCredentialMutationApprovalStore(prisma);
 
-    await expect(store.commit(approval.id, "mandate_2")).resolves.toBe("metadata_changed");
+    await expect(store.commit(approval.id, "mandate_2", "sdev_owner_signing_device")).resolves.toBe(
+      "metadata_changed",
+    );
     expect(failedWith).toBe("credential_metadata_changed");
     expect(auditWrites).toBe(0);
   });

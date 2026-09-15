@@ -10,9 +10,12 @@
 // used by every ceremony.
 
 import type { FastifyReply } from "fastify";
+import type { JWTPayload } from "jose";
 import type { resolveCredentialForAccount } from "./credential-resolution.js";
+import type { VouchflowDeviceStore } from "./vouchflow-device-store.js";
 import {
   VouchMandateVerificationError,
+  type VouchMandateFailureCode,
   type VouchMandateVerificationInput,
   type VouchMandateVerifier,
 } from "./vouch-mandate.js";
@@ -49,6 +52,16 @@ export function sendResolutionFailure(
 }
 
 /**
+ * The ceremony's one refusal shape. Typing the parameter as the failure-code
+ * union is what keeps `VouchMandateFailureCode` the single owner of the set:
+ * every refusal a ceremony can send has to be a member, spelled once.
+ */
+function sendMandateFailure(reply: FastifyReply, code: VouchMandateFailureCode): null {
+  reply.code(code === "vouchflow_expected_audience_unset" ? 503 : 403).send({ error: code });
+  return null;
+}
+
+/**
  * Verify a Vouchflow assertion and, on failure, send the ceremony's standard
  * refusal. Returns the claims on success and `null` once it has replied — so a
  * caller cannot accidentally continue on an unverified mandate.
@@ -61,36 +74,47 @@ export async function verifyApprovalMandate(
   try {
     return await verify(input);
   } catch (error) {
-    const code =
-      error instanceof VouchMandateVerificationError ? error.code : "mandate_verification_failed";
-    reply.code(code === "vouchflow_expected_audience_unset" ? 503 : 403).send({ error: code });
-    return null;
+    return sendMandateFailure(
+      reply,
+      error instanceof VouchMandateVerificationError ? error.code : "mandate_verification_failed",
+    );
   }
 }
 
-export type ApprovalOwnership<R> =
-  | { kind: "owner"; record: R }
-  /** No such approval — or one whose existence this caller may not learn. */
-  | { kind: "not_found" }
-  /** The approval exists and belongs to SOMEONE ELSE. Never disclose more than not_found. */
-  | { kind: "foreign"; record: R };
+/** The signer an accepted assertion names, for the ledger row it produces. */
+export interface ApprovalMandateSigner {
+  signingDeviceId: string | null;
+}
 
 /**
- * The ownership predicate for a human-facing ceremony endpoint. An approval is
- * settled by the account that owns the credential, and by nobody else: holding
- * the (bearer) approval link is not authority, because the agent that requested
- * the fetch necessarily holds it too.
+ * The second half of "the passkey IS the authentication": a genuine Vouchflow
+ * assertion proves SOMEONE signed these exact bytes, never that it was the
+ * account whose approval it answers. Vouchflow names the signer in the signed
+ * claims; this resolves that device against the devices the owning account has
+ * claimed from a signed-in browser, so a stranger's entirely genuine passkey
+ * cannot settle someone else's approval now that the ceremony is sessionless.
  *
- * `foreign` is reported separately from `not_found` so the OWNER's audit ledger
- * can record that someone else tried; the HTTP answer must stay identical.
+ * Returns the signer on success and `null` once it has replied — so a caller
+ * cannot accidentally continue on an unattributable one.
  */
-export function approvalOwnership<R>(
-  record: R | null,
-  ownerAccountIdOf: (record: R) => string,
-  callerAccountId: string,
-): ApprovalOwnership<R> {
-  if (record === null) return { kind: "not_found" };
-  return ownerAccountIdOf(record) === callerAccountId
-    ? { kind: "owner", record }
-    : { kind: "foreign", record };
+export async function resolveApprovalMandateSigner(
+  devices: VouchflowDeviceStore,
+  claims: JWTPayload,
+  ownerAccountId: string,
+  reply: FastifyReply,
+): Promise<ApprovalMandateSigner | null> {
+  const deviceToken = typeof claims.device_token === "string" ? claims.device_token : "";
+  if (deviceToken.length === 0) {
+    return sendMandateFailure(reply, "missing_device_token");
+  }
+  const authorized = await devices.listTokensByAccount(ownerAccountId);
+  if (!authorized.includes(deviceToken)) {
+    return sendMandateFailure(reply, "mandate_signer_not_authorized");
+  }
+  return {
+    signingDeviceId:
+      typeof claims.signing_device_id === "string" && claims.signing_device_id.length > 0
+        ? claims.signing_device_id
+        : null,
+  };
 }

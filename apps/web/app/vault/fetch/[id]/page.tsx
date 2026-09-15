@@ -4,7 +4,14 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { AppShell } from "../../../components/AppShell";
 import { ApiError, apiGet, apiPost } from "../../../lib/api";
-import { getPairingState, pairDevice } from "../../../lib/pairing";
+import {
+  approvalErrorMessage,
+  getPairingState,
+  isUnlinkedSigningDevice,
+  pairDevice,
+  registerEnrolledDevice,
+  WRONG_ACCOUNT_DEVICE_MESSAGE,
+} from "../../../lib/pairing";
 import { getVouchflow } from "../../../lib/vouchflow";
 
 interface FetchCeremony {
@@ -36,6 +43,14 @@ export default function CredentialFetchApprovalPage() {
     [id],
   );
 
+  // A signed-in browser opening this link claims its passkey here, so an
+  // already-enrolled owner never has to detour through the vault to answer an
+  // approval. Without a session the endpoint refuses and nothing is claimed.
+  const [deviceClaimed, setDeviceClaimed] = useState(false);
+  useEffect(() => {
+    void registerEnrolledDevice().then(setDeviceClaimed, () => {});
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     void fetchCeremony()
@@ -44,19 +59,12 @@ export default function CredentialFetchApprovalPage() {
       })
       .catch((caught: unknown) => {
         if (cancelled) return;
-        // The ceremony is owner-authenticated now: an approval link opened in a
-        // signed-out browser is a login, not an error. `next` brings the human
-        // straight back to the approval they were sent.
-        if (caught instanceof ApiError && caught.status === 401) {
-          redirectToLogin();
-          return;
-        }
         setError(caught instanceof Error ? caught.message : "Failed to load approval.");
       });
     return () => {
       cancelled = true;
     };
-  }, [fetchCeremony, redirectToLogin]);
+  }, [fetchCeremony]);
 
   const approve = useCallback(async () => {
     if (ceremony === null || ceremony.status !== "pending") return;
@@ -75,22 +83,28 @@ export default function CredentialFetchApprovalPage() {
       });
       await apiPost(
         `/v1/vault/fetch-approvals/${encodeURIComponent(ceremony.approval_id)}/approve`,
-        {
-          jws: signed.assertion,
-        },
+        { jws: signed.assertion },
       );
       setCeremony(await fetchCeremony());
       setNeedsPasskeySetup(false);
     } catch (caught) {
-      if (caught instanceof ApiError && caught.status === 401) {
+      // An unclaimed passkey on a signed-OUT browser is recoverable: signing in
+      // claims it on the way back. Once the claim HAS landed, the same refusal
+      // means the session is a different account, so bouncing to login again
+      // would only repeat itself.
+      if (isUnlinkedSigningDevice(caught)) {
+        if (deviceClaimed) {
+          setError(WRONG_ACCOUNT_DEVICE_MESSAGE);
+          return;
+        }
         redirectToLogin();
         return;
       }
-      setError(caught instanceof Error ? caught.message : "Approval failed.");
+      setError(approvalErrorMessage(caught, "Approval failed."));
     } finally {
       setBusy(false);
     }
-  }, [ceremony, fetchCeremony, redirectToLogin]);
+  }, [ceremony, deviceClaimed, fetchCeremony, redirectToLogin]);
 
   const deny = useCallback(async () => {
     if (ceremony === null || ceremony.status !== "pending") return;
@@ -103,15 +117,11 @@ export default function CredentialFetchApprovalPage() {
       );
       setCeremony(await fetchCeremony());
     } catch (caught) {
-      if (caught instanceof ApiError && caught.status === 401) {
-        redirectToLogin();
-        return;
-      }
       setError(caught instanceof Error ? caught.message : "Denial failed.");
     } finally {
       setBusy(false);
     }
-  }, [ceremony, fetchCeremony, redirectToLogin]);
+  }, [ceremony, fetchCeremony]);
 
   const setUpPasskey = useCallback(async () => {
     setBusy(true);
@@ -119,6 +129,11 @@ export default function CredentialFetchApprovalPage() {
     try {
       await apiGet("/v1/vault/e2e");
       await pairDevice();
+      // Setting up here needed a session (the /v1/vault/e2e probe above), so
+      // this is the moment the new device can be claimed for the account — and
+      // a claim that lands here counts, or the next refusal would send a human
+      // who already has a session back through login for nothing.
+      setDeviceClaimed(await registerEnrolledDevice());
       setNeedsPasskeySetup(false);
     } catch (caught) {
       if (caught instanceof ApiError && caught.status === 401) {
@@ -145,7 +160,7 @@ export default function CredentialFetchApprovalPage() {
               : null;
 
   return (
-    <AppShell>
+    <AppShell anonymous>
       <div className="app-head">
         <div>
           <h1 className="app-title">Approve revealing a secret</h1>

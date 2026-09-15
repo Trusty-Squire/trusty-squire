@@ -19,6 +19,12 @@ import { buildServer } from "../server.js";
 
 const SESSION_SECRET = "credential-mutation-test-session-secret";
 const AUDIENCE = "credential-mutation-test-customer";
+// The ceremony is sessionless, so the SIGNER is what ties an assertion to the
+// owning account: Vouchflow names the device in the signed claims, and the
+// owner claims that device from a signed-in browser.
+const OWNER_DEVICE_TOKEN = "dev_owner_device_token";
+const OWNER_SIGNING_DEVICE_ID = "sdev_owner_signing_device";
+const FOREIGN_DEVICE_TOKEN = "dev_stranger_device_token";
 
 type SigningKey = Awaited<ReturnType<typeof generateKeyPair>>["privateKey"];
 
@@ -66,6 +72,7 @@ describe("vouch-gated credential mutations", () => {
     });
     await deps.sessionStore.insert(webSession.record);
     webCookie = `${SESSION_COOKIE_NAME}=${signSessionJwt(webSession.jwt, SESSION_SECRET)}`;
+    expect((await registerDevice(OWNER_DEVICE_TOKEN)).statusCode).toBe(204);
   });
 
   afterEach(async () => {
@@ -73,6 +80,15 @@ describe("vouch-gated credential mutations", () => {
     vi.unstubAllGlobals();
     await server.close();
   });
+
+  async function registerDevice(deviceToken: string, cookie: string | null = webCookie) {
+    return await server.inject({
+      method: "POST",
+      url: "/v1/vouchflow/devices",
+      ...(cookie !== null ? { headers: { cookie } } : {}),
+      payload: { device_token: deviceToken },
+    });
+  }
 
   async function storeCredential(
     service = "OpenAI",
@@ -120,12 +136,17 @@ describe("vouch-gated credential mutations", () => {
     context: string,
     mandateId: string,
     expiration: string | number = "10m",
+    device: { device_token?: string; signing_device_id?: string } = {
+      device_token: OWNER_DEVICE_TOKEN,
+      signing_device_id: OWNER_SIGNING_DEVICE_ID,
+    },
   ): Promise<string> {
     return await new SignJWT({
       context,
       payload_sha256: hash,
       confidence: "low",
       mandate_id: mandateId,
+      ...device,
     })
       .setProtectedHeader({ alg: "ES256", kid: "credential-mutation-test-key" })
       .setIssuer("https://vouchflow.dev")
@@ -161,7 +182,7 @@ describe("vouch-gated credential mutations", () => {
     return messages;
   }
 
-  it("binds ceremony and settlement to the owner web account", async () => {
+  it("binds ceremony and settlement to the account-bound payload, sessionless", async () => {
     const reference = await storeCredential();
     const created = await createMutation({ operation: "delete", reference });
     const id = (created.json() as { approval_id: string }).approval_id;
@@ -178,52 +199,142 @@ describe("vouch-gated credential mutations", () => {
       `mandate_${id}`,
     );
 
-    const intruder = await deps.accountStore.createAccount("intruder@example.test", "Intruder");
-    const intruderSession = issueSession({
-      account_id: intruder.id,
-      ip: null,
-      user_agent: null,
-      now: new Date(nowMs),
-    });
-    await deps.sessionStore.insert(intruderSession.record);
-    const intruderCookie = `${SESSION_COOKIE_NAME}=${signSessionJwt(
-      intruderSession.jwt,
-      SESSION_SECRET,
-    )}`;
-
-    const foreignCeremony = await server.inject({
+    // The human half is sessionless, like the payment path: no web session is
+    // needed to read the ceremony, and an agent token cannot settle anything
+    // without an assertion (an unsigned body is not one).
+    const anonymousCeremony = await server.inject({
       method: "GET",
       url: `/v1/vault/mutation-approvals/${id}/ceremony`,
-      headers: { cookie: intruderCookie },
     });
-    expect(foreignCeremony.statusCode).toBe(404);
-    expect(foreignCeremony.json()).toEqual({ error: "credential_mutation_approval_not_found" });
-    const foreignApprove = await server.inject({
+    expect(anonymousCeremony.statusCode, anonymousCeremony.body).toBe(200);
+    const agentAttempt = await server.inject({
       method: "POST",
       url: `/v1/vault/mutation-approvals/${id}/approve`,
-      headers: { cookie: intruderCookie },
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: {},
+    });
+    expect(agentAttempt.statusCode, agentAttempt.body).toBe(400);
+    expect((await deps.credentialMutationApprovalStore.getById(id))?.status).toBe("pending");
+
+    // A valid assertion over the account-bound payload settles it with no
+    // web session at all.
+    const anonymousApprove = await server.inject({
+      method: "POST",
+      url: `/v1/vault/mutation-approvals/${id}/approve`,
       payload: { jws },
     });
-    expect(foreignApprove.statusCode).toBe(404);
+    expect(anonymousApprove.statusCode, anonymousApprove.body).toBe(200);
+    expect(await deps.credentialStore.findActive(reference)).toBeNull();
+  });
 
-    for (const headers of [{}, { authorization: `Bearer ${agentToken}` }]) {
-      const ceremony = await server.inject({
-        method: "GET",
-        url: `/v1/vault/mutation-approvals/${id}/ceremony`,
-        headers,
-      });
-      expect(ceremony.statusCode, ceremony.body).toBe(401);
-      const approve = await server.inject({
-        method: "POST",
-        url: `/v1/vault/mutation-approvals/${id}/approve`,
-        headers,
-        payload: { jws },
-      });
-      expect(approve.statusCode, approve.body).toBe(401);
-    }
+  // With the web-session gate gone, the payload-hash binding is the gate that
+  // stops one approval's genuine assertion from settling a different one.
+  it("refuses an assertion signed over a DIFFERENT approval's payload", async () => {
+    const reference = await storeCredential();
+    const target = (
+      (await createMutation({ operation: "delete", reference })).json() as { approval_id: string }
+    ).approval_id;
+    const otherReference = await storeCredential("Stripe", "default", "sk-other");
+    const other = (
+      (await createMutation({ operation: "delete", reference: otherReference })).json() as {
+        approval_id: string;
+      }
+    ).approval_id;
 
+    const otherCeremony = await mutationCeremony(other);
+    const jws = await signHash(
+      otherCeremony.payload_sha256,
+      CREDENTIAL_MUTATION_VOUCH_CONTEXT,
+      `mandate_${other}`,
+    );
+    const crossed = await server.inject({
+      method: "POST",
+      url: `/v1/vault/mutation-approvals/${target}/approve`,
+      payload: { jws },
+    });
+    expect(crossed.statusCode, crossed.body).toBe(403);
+    expect(crossed.json()).toEqual({ error: "payload_hash_mismatch" });
+    expect((await deps.credentialMutationApprovalStore.getById(target))?.status).toBe("pending");
+    expect(await deps.credentialStore.findActive(reference)).not.toBeNull();
+    expect(await deps.credentialStore.findActive(otherReference)).not.toBeNull();
+  });
+
+  // A genuine assertion proves SOMEONE signed; only the device registry says
+  // it was this account. Without that, any enrolled passkey could commit a
+  // stranger's delete now that the ceremony takes no session.
+  it("refuses a correctly-bound assertion from a device the account never registered", async () => {
+    const reference = await storeCredential();
+    const id = (
+      (await createMutation({ operation: "delete", reference })).json() as { approval_id: string }
+    ).approval_id;
+    const ceremony = await mutationCeremony(id);
+
+    const strangerJws = await signHash(
+      ceremony.payload_sha256,
+      CREDENTIAL_MUTATION_VOUCH_CONTEXT,
+      `mandate_${id}`,
+      "10m",
+      { device_token: FOREIGN_DEVICE_TOKEN, signing_device_id: "sdev_stranger" },
+    );
+    const stranger = await server.inject({
+      method: "POST",
+      url: `/v1/vault/mutation-approvals/${id}/approve`,
+      payload: { jws: strangerJws },
+    });
+    expect(stranger.statusCode, stranger.body).toBe(403);
+    expect(stranger.json()).toEqual({ error: "mandate_signer_not_authorized" });
+
+    const anonymousJws = await signHash(
+      ceremony.payload_sha256,
+      CREDENTIAL_MUTATION_VOUCH_CONTEXT,
+      `mandate_${id}`,
+      "10m",
+      {},
+    );
+    const anonymous = await server.inject({
+      method: "POST",
+      url: `/v1/vault/mutation-approvals/${id}/approve`,
+      payload: { jws: anonymousJws },
+    });
+    expect(anonymous.statusCode, anonymous.body).toBe(403);
+    expect(anonymous.json()).toEqual({ error: "missing_device_token" });
+
+    // Neither attempt moved the approval or the credential.
     expect((await deps.credentialMutationApprovalStore.getById(id))?.status).toBe("pending");
     expect(await deps.credentialStore.findActive(reference)).not.toBeNull();
+
+    // Once the stranger's device IS the account's, the same assertion settles.
+    expect((await registerDevice(FOREIGN_DEVICE_TOKEN)).statusCode).toBe(204);
+    const accepted = await server.inject({
+      method: "POST",
+      url: `/v1/vault/mutation-approvals/${id}/approve`,
+      payload: { jws: strangerJws },
+    });
+    expect(accepted.statusCode, accepted.body).toBe(200);
+    expect(await deps.credentialStore.findActive(reference)).toBeNull();
+  });
+
+  it("registers a signing device only for a signed-in web caller, idempotently", async () => {
+    const anonymous = await registerDevice("dev_anonymous_attempt", null);
+    expect(anonymous.statusCode).toBe(401);
+
+    const agentAttempt = await server.inject({
+      method: "POST",
+      url: "/v1/vouchflow/devices",
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: { device_token: "dev_agent_attempt" },
+    });
+    expect(agentAttempt.statusCode).toBe(401);
+
+    expect(await deps.vouchflowDeviceStore.listTokensByAccount(accountId)).toEqual([
+      OWNER_DEVICE_TOKEN,
+    ]);
+
+    expect((await registerDevice(OWNER_DEVICE_TOKEN)).statusCode).toBe(204);
+    expect((await registerDevice(OWNER_DEVICE_TOKEN)).statusCode).toBe(204);
+    expect(await deps.vouchflowDeviceStore.listTokensByAccount(accountId)).toEqual([
+      OWNER_DEVICE_TOKEN,
+    ]);
   });
 
   it("requires a valid signed vouch and changes only allowed_hosts metadata", async () => {
@@ -517,7 +628,7 @@ describe("vouch-gated credential mutations", () => {
       deps,
       vouchVerifier: async () => {
         nowMs += 11 * 60 * 1000;
-        return { mandate_id: "mandate_slow_verification" };
+        return { mandate_id: "mandate_slow_verification", device_token: OWNER_DEVICE_TOKEN };
       },
     });
 

@@ -83,6 +83,11 @@ import {
   type TelegramLinkTokenStore,
 } from "./in-memory-telegram-link-token-store.js";
 import { PrismaTelegramLinkTokenStore } from "./prisma-telegram-link-token-store.js";
+import {
+  InMemoryVouchflowDeviceStore,
+  PrismaVouchflowDeviceStore,
+  type VouchflowDeviceStore,
+} from "./vouchflow-device-store.js";
 
 export interface ApiDeps {
   // Identity / auth
@@ -110,6 +115,9 @@ export interface ApiDeps {
   // Separate from the mutation store on purpose (see its module header).
   credentialFetchApprovalStore: CredentialFetchApprovalStore;
   telegramLinkTokenStore: TelegramLinkTokenStore;
+  // Which Vouchflow signing devices belong to which account — what the
+  // sessionless approval ceremonies check the assertion's signer against.
+  vouchflowDeviceStore: VouchflowDeviceStore;
   egressGrantStore: EgressGrantStore;
   machineTokenStore: MachineTokenStore;
   captchaEventStore: CaptchaEventStore;
@@ -323,6 +331,10 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     authPrisma !== null
       ? new PrismaTelegramLinkTokenStore(authPrisma)
       : new InMemoryTelegramLinkTokenStore(opts.now);
+  const vouchflowDeviceStore: VouchflowDeviceStore =
+    authPrisma !== null
+      ? new PrismaVouchflowDeviceStore(authPrisma)
+      : new InMemoryVouchflowDeviceStore();
   // Panel 1 funnel: Prisma-backed when the auth DB is wired, else a
   // zero store (the funnel is a prod operator feature).
   const funnelStatsStore: FunnelStatsStore =
@@ -427,6 +439,7 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     credentialMutationApprovalStore,
     credentialFetchApprovalStore,
     telegramLinkTokenStore,
+    vouchflowDeviceStore,
     egressGrantStore,
     machineTokenStore,
     captchaEventStore,

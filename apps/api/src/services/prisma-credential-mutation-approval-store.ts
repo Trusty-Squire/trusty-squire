@@ -67,7 +67,11 @@ export class PrismaCredentialMutationApprovalStore implements CredentialMutation
     return row === null ? null : toRecord(row);
   }
 
-  async commit(id: string, mandateId: string | null): Promise<CredentialMutationCommitResult> {
+  async commit(
+    id: string,
+    mandateId: string | null,
+    signingDeviceId: string | null,
+  ): Promise<CredentialMutationCommitResult> {
     try {
       return await this.prisma.$transaction(async (tx) => {
         const locked = await tx.$queryRaw<CredentialMutationApprovalRow[]>`
@@ -149,7 +153,7 @@ export class PrismaCredentialMutationApprovalStore implements CredentialMutation
           }
         }
 
-        const event = mutationAuditEvent(record);
+        const event = mutationAuditEvent(record, signingDeviceId);
         await tx.vaultAuditEvent.create({
           data: {
             id: ulid(),

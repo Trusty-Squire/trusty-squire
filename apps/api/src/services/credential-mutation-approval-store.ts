@@ -56,7 +56,14 @@ export interface CredentialMutationApprovalStore {
     id: string,
     accountId: string,
   ): Promise<CredentialMutationApprovalRecord | null>;
-  commit(id: string, mandateId: string | null): Promise<CredentialMutationCommitResult>;
+  // `signingDeviceId` names the Vouchflow device the approving assertion came
+  // from; it rides along so the audit row the commit writes can say WHICH
+  // registered device settled the mutation.
+  commit(
+    id: string,
+    mandateId: string | null,
+    signingDeviceId: string | null,
+  ): Promise<CredentialMutationCommitResult>;
 }
 
 export class InMemoryCredentialMutationApprovalStore implements CredentialMutationApprovalStore {
@@ -112,7 +119,11 @@ export class InMemoryCredentialMutationApprovalStore implements CredentialMutati
     return record === undefined || record.accountId !== accountId ? null : cloneRecord(record);
   }
 
-  async commit(id: string, mandateId: string | null): Promise<CredentialMutationCommitResult> {
+  async commit(
+    id: string,
+    mandateId: string | null,
+    signingDeviceId: string | null,
+  ): Promise<CredentialMutationCommitResult> {
     const record = this.records.get(id);
     if (record === undefined || this.committing.has(id)) return "not_pending";
     if (record.status === "approved") return "already_approved";
@@ -136,7 +147,7 @@ export class InMemoryCredentialMutationApprovalStore implements CredentialMutati
         markFailed(record, "credential_metadata_changed", now);
         return "metadata_changed";
       }
-      const event = mutationAuditEvent(record);
+      const event = mutationAuditEvent(record, signingDeviceId);
       if (record.operation === "edit") {
         if (record.after === null) throw new Error("credential edit approval missing after state");
         const nextMetadata = metadataAfterEdit(credential.metadata, record.after);
@@ -256,7 +267,10 @@ function sameArray(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-export function mutationAuditEvent(record: CredentialMutationApprovalRecord): VaultAuditEventInput {
+export function mutationAuditEvent(
+  record: CredentialMutationApprovalRecord,
+  signingDeviceId: string | null,
+): VaultAuditEventInput {
   return {
     account_id: record.accountId,
     type:
@@ -267,6 +281,7 @@ export function mutationAuditEvent(record: CredentialMutationApprovalRecord): Va
       ...(record.credentialService !== null ? { service: record.credentialService } : {}),
       label: record.operation === "edit" ? record.after!.label : record.credentialLabel,
       approval_id: record.id,
+      ...(signingDeviceId !== null ? { signing_device_id: signingDeviceId } : {}),
     },
   };
 }

@@ -791,9 +791,15 @@ it cannot be replayed into a reveal. Do NOT collapse it into
 Invariants, all covered by `apps/api/src/__tests__/credential-fetch.test.ts` —
 treat a failure there as a security regression, not a test to update:
 approval-bound to (account, credential, field); the human half
-(`ceremony`/`approve`/`deny`) is OWNER-authenticated (`requireWeb` + the record
-loaded for that account — a link-holder from another account gets 404 and an
-`approver_rejected` row in the owner's ledger); single-use delivery (the store's
+(`ceremony`/`approve`/`deny`) is sessionless, exactly like the payment path —
+the Vouchflow assertion over the account-bound payload is the authentication,
+and the record loads unscoped by id (no web session, no per-account 404). The
+assertion alone does not say WHO signed, so `approve` additionally resolves the
+signed `device_token` claim against the devices the owning account claimed from
+a signed-in browser (`POST /v1/vouchflow/devices` →
+`services/vouchflow-device-store.ts`), refusing `missing_device_token` /
+`mandate_signer_not_authorized` before any state moves — otherwise any enrolled
+passkey could answer a link-holder's approval. Single-use delivery (the store's
 `approved → consumed` conditional update IS the fence); expiry closes both the
 unsigned and the signed-but-unclaimed halves, and fences denial too (a lapsed
 approval settles as `expired`, never as a refusal the human never made); every
@@ -812,6 +818,35 @@ authentication, and link building are shared with the mutation ceremony
 (`services/approval-ceremony.ts`); only the STORES stay separate. `use_credential` and `extract { store }` are unchanged and remain the
 default routes — `apps/mcp/src/tools/__tests__/never-exposed-paths.test.ts`
 pins that.
+
+**Unvalidated premise — check this before the binding ships.** The signer check
+reads a `device_token` claim out of the VERIFIED assertion. Nothing in this repo
+has ever confirmed Vouchflow puts that claim INSIDE the JWS: in `@vouchflow/web`
+0.3.1 `deviceToken`/`signingDeviceId` are fields of the sign-complete HTTP
+response sitting beside `assertion`, and the only claims this codebase has
+proven live in the JWS are `payload_sha256`, `context`, `confidence` and
+`mandate_id`. Every device-bearing JWS in the test suite is minted by the
+suite's own `signHash`, so the tests cannot fail on this. The check fails
+CLOSED, so if the claim is absent EVERY `fetch_credential` reveal and EVERY
+`edit_credential`/`delete_credential` approval returns `403 missing_device_token`
+in production.
+
+Before deploying, run one real `signPayload` in a browser, decode the assertion
+with `JSON.parse(atob(assertion.split(".")[1]))`, and confirm ALL THREE — any
+one of them failing silently refuses every approval that browser could sign:
+
+1. `device_token` is present and non-empty (and `signing_device_id` too, which
+   the approved-outcome audit row records).
+2. `device_token` EQUALS `await getVouchflow().getEnrollmentState()` →
+   `deviceId`. That `deviceId` is the value `registerEnrolledDevice`
+   (`apps/web/app/lib/pairing.ts`) stores, and the binding compares the claim
+   against exactly what was stored — if Vouchflow names a different identifier
+   in the JWS, nothing ever matches.
+3. `device_token.length` is within the 8..256 bound
+   `POST /v1/vouchflow/devices` accepts, or the claim is rejected `400
+   invalid_request` and no binding is ever written.
+
+If any of the three fails, the binding must NOT ship as written.
 
 ### Vault security + lifecycle surface
 
