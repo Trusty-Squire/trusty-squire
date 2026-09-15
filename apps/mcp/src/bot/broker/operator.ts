@@ -46,7 +46,7 @@ const commandSchema = z
 // the collapse); the open request only names the three launch fields.
 const openSchema = z
   .object({
-    serviceUrl: z.string().optional(),
+    serviceUrl: z.string().min(1),
     format: z.enum(["compact", "full"]).optional(),
     proxy: z.string().optional(),
   })
@@ -172,7 +172,7 @@ export class OperatorBroker implements BrokerTransportPort {
     if (tool === null || !isOperatorCommand(tool.name))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     const args = tool.inputSchema.parse({
-      ...(input.serviceUrl !== undefined ? { service_url: input.serviceUrl } : {}),
+      service_url: input.serviceUrl,
       ...(input.format !== undefined ? { format: input.format } : {}),
       ...(input.proxy !== undefined ? { proxy: input.proxy } : {}),
     }) as Record<string, unknown>;

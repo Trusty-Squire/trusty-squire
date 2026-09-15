@@ -104,12 +104,14 @@ export class OperatorForwarder {
     };
     try {
       if (name === "operate_start") {
-        const openRequest: { [K in keyof OpenRequest]?: unknown } = {
+        if (typeof args.service_url !== "string")
+          throw new BrokerRefusal("invalid_arguments", "operate_start requires a service_url");
+        const openRequest: OpenRequest = {
           serviceUrl: args.service_url,
-          ...(args.format !== undefined ? { format: args.format } : {}),
-          ...(args.proxy !== undefined ? { proxy: args.proxy } : {}),
+          ...(args.format === "compact" || args.format === "full" ? { format: args.format } : {}),
+          ...(typeof args.proxy === "string" ? { proxy: args.proxy } : {}),
         };
-        const raw = await dispatch("open", openRequest);
+        const raw = await dispatch("open", { ...openRequest });
         if (!isRecord(raw))
           throw new ForwardedResultError("Broker returned a non-object open reply", {
             cleanup: "unknown",

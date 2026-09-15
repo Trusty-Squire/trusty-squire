@@ -141,11 +141,19 @@ it("drives two clients' sessions on one shared browser across the Contract B wir
     })),
   ]);
   try {
-    const startedA = (await run.a.invoke("operate_start", {}, "a-start")) as {
+    const startedA = (await run.a.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "a-start",
+    )) as {
       session_id: string;
       broker: { targetId: string };
     };
-    const startedB = (await run.b.invoke("operate_start", {}, "b-start")) as {
+    const startedB = (await run.b.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "b-start",
+    )) as {
       session_id: string;
       broker: { targetId: string };
     };
@@ -186,10 +194,18 @@ it("aborts only the dropped client's in-flight work and leaves the other session
     }),
   ]);
   try {
-    const startedA = (await run.a.invoke("operate_start", {}, "a-start")) as {
+    const startedA = (await run.a.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "a-start",
+    )) as {
       session_id: string;
     };
-    const startedB = (await run.b.invoke("operate_start", {}, "b-start")) as {
+    const startedB = (await run.b.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "b-start",
+    )) as {
       session_id: string;
     };
     expect(run.broker.authority.inventory().sessions).toBe(2);
@@ -221,7 +237,11 @@ it("does not execute a repeated command with the same request id twice", async (
     }),
   ]);
   try {
-    const started = (await run.a.invoke("operate_start", {}, "start")) as { session_id: string };
+    const started = (await run.a.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "start",
+    )) as { session_id: string };
     const first = await run.a.invoke(
       "operate_click",
       { session_id: started.session_id },
@@ -260,9 +280,21 @@ it("cancels one command without costing the caller its connection or its other s
   ]);
   try {
     // One agent owning two sessions (a composite chain) plus a second agent.
-    const first = (await run.a.invoke("operate_start", {}, "a-start-1")) as { session_id: string };
-    const second = (await run.a.invoke("operate_start", {}, "a-start-2")) as { session_id: string };
-    const other = (await run.b.invoke("operate_start", {}, "b-start")) as { session_id: string };
+    const first = (await run.a.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "a-start-1",
+    )) as { session_id: string };
+    const second = (await run.a.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "a-start-2",
+    )) as { session_id: string };
+    const other = (await run.b.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "b-start",
+    )) as { session_id: string };
     expect(run.broker.authority.inventory().sessions).toBe(3);
 
     const controller = new AbortController();

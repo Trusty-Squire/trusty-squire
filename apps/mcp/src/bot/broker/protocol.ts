@@ -26,6 +26,13 @@ import type { Observation } from "../provision-session.js";
 /** The four operations the wire expresses. */
 export type BrokerWireMethod = "connect" | "open" | "command" | "close";
 
+/**
+ * The contract's version. Bump it whenever the wire changes incompatibly: it
+ * keys the broker rendezvous socket, so a client never reaches a daemon that
+ * speaks a different contract.
+ */
+export const BROKER_WIRE_VERSION = 1;
+
 /** connect: authenticate the local MCP process and mint its connection id. */
 export interface ConnectRequest {
   token: string;
@@ -38,7 +45,7 @@ export interface ConnectRequest {
   maintain?: boolean;
 }
 export interface ConnectResult {
-  version: 1;
+  version: typeof BROKER_WIRE_VERSION;
   clientId: string;
   /** Present only when the connection requested `maintain`. */
   maintenance?: "ready" | "draining";

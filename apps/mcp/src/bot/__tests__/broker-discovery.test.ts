@@ -66,6 +66,14 @@ describe("broker discovery election", () => {
     await rm(path.slice(0, path.lastIndexOf("/")), { recursive: true });
   });
 
+  it("keys the rendezvous socket on the wire contract version", async () => {
+    const { discovery } = await modules();
+    const { BROKER_WIRE_VERSION } = await import("../broker/protocol.js");
+    const path = discovery.defaultBrokerSocket(profile);
+    const rendezvous = path.slice(0, path.lastIndexOf("/"));
+    expect(rendezvous.split("/").pop()).toContain(`-v${BROKER_WIRE_VERSION}-`);
+  });
+
   it("reclaims dead election and launch locks before a default-endpoint launch", async () => {
     const { discovery, profileModule, transport } = await modules();
     const roots = [discovery.brokerElectionRoot(profile), discovery.brokerLaunchRoot(profile)];

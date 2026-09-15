@@ -53,7 +53,13 @@ describe("MCP broker forwarding over the Contract B wire", () => {
       async (path) => {
         const forwarder = new OperatorForwarder(path, guard);
         try {
-          expect(await forwarder.invoke("operate_start", {}, "start")).toEqual({
+          expect(
+            await forwarder.invoke(
+              "operate_start",
+              { service_url: "https://service.test" },
+              "start",
+            ),
+          ).toEqual({
             session_id: "session-one",
           });
           expect(forwarder.sessionCount()).toBe(1);
@@ -106,7 +112,7 @@ describe("MCP broker forwarding over the Contract B wire", () => {
       async (path) => {
         const forwarder = new OperatorForwarder(path, guard);
         try {
-          await forwarder.invoke("operate_start", {}, "start");
+          await forwarder.invoke("operate_start", { service_url: "https://service.test" }, "start");
           await expect(forwarder.invoke("operate_click", {}, "click")).rejects.toBeInstanceOf(
             ProvenPreDispatchMutationError,
           );
@@ -124,9 +130,9 @@ describe("MCP broker forwarding over the Contract B wire", () => {
       async (path) => {
         const forwarder = new OperatorForwarder(path, guard);
         try {
-          await expect(forwarder.invoke("operate_start", {}, "start")).rejects.toBeInstanceOf(
-            ForwardedResultError,
-          );
+          await expect(
+            forwarder.invoke("operate_start", { service_url: "https://service.test" }, "start"),
+          ).rejects.toBeInstanceOf(ForwardedResultError);
         } finally {
           await forwarder.close();
         }
@@ -147,8 +153,8 @@ describe("MCP broker forwarding over the Contract B wire", () => {
         const second = new OperatorForwarder(path, guard);
         try {
           const [a, b] = await Promise.all([
-            first.invoke("operate_start", {}, "same-id"),
-            second.invoke("operate_start", {}, "same-id"),
+            first.invoke("operate_start", { service_url: "https://service.test" }, "same-id"),
+            second.invoke("operate_start", { service_url: "https://service.test" }, "same-id"),
           ]);
           expect(a).toMatchObject({ session_id: "session-one" });
           expect(b).toMatchObject({ session_id: "session-one" });
@@ -170,7 +176,7 @@ describe("MCP broker forwarding over the Contract B wire", () => {
       async (path) => {
         const forwarder = new OperatorForwarder(path, guard);
         try {
-          await forwarder.invoke("operate_start", {}, "start");
+          await forwarder.invoke("operate_start", { service_url: "https://service.test" }, "start");
           await forwarder.invoke("operate_finish", { session_id: "session-one" }, "finish");
           expect(forwarder.sessionCount()).toBe(0);
           await expect(
@@ -200,7 +206,11 @@ describe("MCP broker forwarding over the Contract B wire", () => {
     });
     const forwarder = new OperatorForwarder(path, guard);
     try {
-      const call = forwarder.invoke("operate_start", {}, "start");
+      const call = forwarder.invoke(
+        "operate_start",
+        { service_url: "https://service.test" },
+        "start",
+      );
       const rejected = expect(call).rejects.toMatchObject({ code: "broker_lost" });
       await started;
       await broker.close();

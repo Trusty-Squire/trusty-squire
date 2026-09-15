@@ -76,6 +76,11 @@ export async function runBrokerDaemon(): Promise<void> {
     runtime.claimProfile();
     maintenanceOwner = undefined;
   };
+  const releaseMaintenanceLease = async (clientId: string): Promise<void> => {
+    if (maintenanceOwner !== clientId) return;
+    if (await waitForProfileFree(CHROME_PROFILE_DIR, { deadlineMs: 0 })) await restoreMaintenance();
+    else maintenanceOwner = undefined;
+  };
   const listener = await listenBroker(path, {
     authenticate: async (token, agentId) => await operator.authenticate(token, agentId),
     connected: async (principal, params) => {
@@ -104,11 +109,7 @@ export async function runBrokerDaemon(): Promise<void> {
         // A session-less close is the lease boundary (formerly client_close):
         // resume the connect-scoped maintenance window before the socket goes.
         if (method === "close" && typeof params.sessionId !== "string") {
-          if (maintenanceOwner === principal.clientId) {
-            if (await waitForProfileFree(CHROME_PROFILE_DIR, { deadlineMs: 0 }))
-              await restoreMaintenance();
-            else maintenanceOwner = undefined;
-          }
+          await releaseMaintenanceLease(principal.clientId);
           return { closed: true };
         }
         if (method === "command") {
@@ -130,11 +131,7 @@ export async function runBrokerDaemon(): Promise<void> {
     disconnect: async (principal, explicit) => {
       await operator.disconnect(principal, explicit);
       connected.delete(principal.clientId);
-      if (maintenanceOwner === principal.clientId) {
-        if (await waitForProfileFree(CHROME_PROFILE_DIR, { deadlineMs: 0 }))
-          await restoreMaintenance();
-        else maintenanceOwner = undefined;
-      }
+      await releaseMaintenanceLease(principal.clientId);
       scheduleShutdownIfIdle();
     },
   });

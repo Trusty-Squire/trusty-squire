@@ -131,7 +131,11 @@ it("starts a session, remaps it, and routes later commands to the same internal 
     }),
   ]);
   try {
-    const started = (await run.forwarder.invoke("operate_start", {}, "start")) as {
+    const started = (await run.forwarder.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "start",
+    )) as {
       session_id: string;
       broker: { targetId: string };
     };
@@ -154,7 +158,9 @@ it("settles a start with no live page instead of retaining the session", async (
     })),
   ]);
   try {
-    await expect(run.forwarder.invoke("operate_start", {}, "start")).resolves.toMatchObject({
+    await expect(
+      run.forwarder.invoke("operate_start", { service_url: "https://service.test" }, "start"),
+    ).resolves.toMatchObject({
       needs_user: { provider: "google" },
     });
     expect(run.broker.authority.inventory().sessions).toBe(0);
@@ -170,7 +176,11 @@ it("retires the broker session when a terminal finish reports closed", async () 
     tool("operate_finish", async () => ({ closed: true, url: "https://a.test" })),
   ]);
   try {
-    const started = (await run.forwarder.invoke("operate_start", {}, "start")) as {
+    const started = (await run.forwarder.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "start",
+    )) as {
       session_id: string;
     };
     expect(run.broker.authority.inventory().sessions).toBe(1);
@@ -192,7 +202,11 @@ it("delivers a proven pre-dispatch failure as a retryable mutation error", async
     }),
   ]);
   try {
-    const started = (await run.forwarder.invoke("operate_start", {}, "start")) as {
+    const started = (await run.forwarder.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "start",
+    )) as {
       session_id: string;
     };
     await expect(
@@ -210,7 +224,11 @@ it("reports a lost browser transport to the caller without replaying the command
     tool("operate_click", async () => ({ clicked: true })),
   ]);
   try {
-    const started = (await run.forwarder.invoke("operate_start", {}, "start")) as {
+    const started = (await run.forwarder.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "start",
+    )) as {
       session_id: string;
     };
     await expect(
@@ -232,7 +250,11 @@ it("relays an in-flight approval notification to the calling client before the r
   ]);
   const notifications: string[] = [];
   try {
-    const started = (await run.forwarder.invoke("operate_start", {}, "start")) as {
+    const started = (await run.forwarder.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "start",
+    )) as {
       session_id: string;
     };
     await run.forwarder.invoke(
@@ -275,7 +297,11 @@ it("aborts an in-flight command when its connection drops, without replaying it"
     }),
   ]);
   try {
-    const started = (await run.forwarder.invoke("operate_start", {}, "start")) as {
+    const started = (await run.forwarder.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "start",
+    )) as {
       session_id: string;
     };
     const call = run.forwarder.invoke("operate_click", { session_id: started.session_id }, "click");
@@ -315,7 +341,11 @@ it("aborts only the caller's own request and keeps the connection and session us
     tool("operate_observe", async (args) => ({ session_id: args.session_id, dom: "intact" })),
   ]);
   try {
-    const started = (await run.forwarder.invoke("operate_start", {}, "start")) as {
+    const started = (await run.forwarder.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "start",
+    )) as {
       session_id: string;
     };
     const controller = new AbortController();
@@ -350,7 +380,11 @@ it("refuses operate_finish as a command; finish is the close operation", async (
     tool("operate_finish", async () => ({ closed: true })),
   ]);
   try {
-    const started = (await run.forwarder.invoke("operate_start", {}, "start")) as {
+    const started = (await run.forwarder.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "start",
+    )) as {
       session_id: string;
     };
     await expect(
