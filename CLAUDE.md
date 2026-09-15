@@ -829,11 +829,24 @@ proven live in the JWS are `payload_sha256`, `context`, `confidence` and
 suite's own `signHash`, so the tests cannot fail on this. The check fails
 CLOSED, so if the claim is absent EVERY `fetch_credential` reveal and EVERY
 `edit_credential`/`delete_credential` approval returns `403 missing_device_token`
-in production. Before deploying: run one real `signPayload` in a browser and
-decode the assertion —
-`JSON.parse(atob(assertion.split(".")[1]))` — and confirm a non-empty
-`device_token` (and `signing_device_id`). If either is absent, the binding must
-NOT ship as written.
+in production.
+
+Before deploying, run one real `signPayload` in a browser, decode the assertion
+with `JSON.parse(atob(assertion.split(".")[1]))`, and confirm ALL THREE — any
+one of them failing silently refuses every approval that browser could sign:
+
+1. `device_token` is present and non-empty (and `signing_device_id` too, which
+   the approved-outcome audit row records).
+2. `device_token` EQUALS `await getVouchflow().getEnrollmentState()` →
+   `deviceId`. That `deviceId` is the value `registerEnrolledDevice`
+   (`apps/web/app/lib/pairing.ts`) stores, and the binding compares the claim
+   against exactly what was stored — if Vouchflow names a different identifier
+   in the JWS, nothing ever matches.
+3. `device_token.length` is within the 8..256 bound
+   `POST /v1/vouchflow/devices` accepts, or the claim is rejected `400
+   invalid_request` and no binding is ever written.
+
+If any of the three fails, the binding must NOT ship as written.
 
 ### Vault security + lifecycle surface
 

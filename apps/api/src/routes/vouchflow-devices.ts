@@ -10,14 +10,12 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ApiDeps } from "../services/deps.js";
 
+// Length bounds only. The device token is an opaque Vouchflow value whose
+// alphabet this repo has never observed, and a charset guess that is wrong
+// rejects every claim — which silently refuses every approval that browser
+// would have signed.
 const registerBody = z
-  .object({
-    device_token: z
-      .string()
-      .min(8)
-      .max(256)
-      .regex(/^[A-Za-z0-9_.:-]+$/),
-  })
+  .object({ device_token: z.string().min(8).max(256) })
   .strict();
 
 export const registerVouchflowDeviceRoutes: FastifyPluginAsync<{

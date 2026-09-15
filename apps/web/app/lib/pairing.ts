@@ -45,11 +45,17 @@ export async function getPairingState(): Promise<{ enrolled: boolean; deviceId: 
  * sessionless approval ceremonies see an assertion from a signer they cannot
  * attribute and refuse it. `deviceId` is the same value the SDK sends as the
  * assertion's `device_token`. Idempotent; safe to call on every signed-in visit.
+ *
+ * Resolves `true` only when a claim actually landed — which also means this
+ * browser holds a live session. A later `mandate_signer_not_authorized` on a
+ * browser that DID claim is therefore a wrong-account session, not a missing
+ * one, and signing in again cannot fix it.
  */
-export async function registerEnrolledDevice(): Promise<void> {
+export async function registerEnrolledDevice(): Promise<boolean> {
   const { enrolled, deviceId } = await getPairingState();
-  if (!enrolled || deviceId === null) return;
+  if (!enrolled || deviceId === null) return false;
   await apiPost("/v1/vouchflow/devices", { device_token: deviceId });
+  return true;
 }
 
 /**
@@ -60,6 +66,16 @@ export async function registerEnrolledDevice(): Promise<void> {
 export function isUnlinkedSigningDevice(caught: unknown): boolean {
   return caught instanceof ApiError && caught.message === "mandate_signer_not_authorized";
 }
+
+/**
+ * This browser holds a session and its device IS claimed, yet the approval was
+ * still refused — so the session belongs to some other account than the one
+ * that owns this approval, and another trip through login changes nothing.
+ */
+export const WRONG_ACCOUNT_DEVICE_MESSAGE =
+  "This browser's passkey is linked to a different Trusty Squire account than the one " +
+  "that owns this approval. Sign in as the owning account at trustysquire.ai/vault to " +
+  "link it, then reopen the approval link.";
 
 // The assertion named no signing device at all, so there is nothing for a
 // signed-in visit to claim — unlike an unlinked device, signing in cannot help.

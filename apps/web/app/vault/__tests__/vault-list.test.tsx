@@ -75,7 +75,7 @@ function mockLists(cards: unknown[], creds: unknown[] = []) {
 beforeEach(() => {
   vi.clearAllMocks();
   mandate.getPairingState.mockResolvedValue({ enrolled: true });
-  mandate.registerEnrolledDevice.mockResolvedValue(undefined);
+  mandate.registerEnrolledDevice.mockResolvedValue(true);
   mandate.signPayload.mockResolvedValue({ assertion: "signed-mandate" });
 });
 afterEach(() => {

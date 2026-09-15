@@ -10,6 +10,7 @@ import {
   isUnlinkedSigningDevice,
   pairDevice,
   registerEnrolledDevice,
+  WRONG_ACCOUNT_DEVICE_MESSAGE,
 } from "../../../lib/pairing";
 import { getVouchflow } from "../../../lib/vouchflow";
 
@@ -82,8 +83,9 @@ export default function CredentialMutationApprovalPage() {
   // A signed-in browser opening this link claims its passkey here, so an
   // already-enrolled owner never has to detour through the vault to answer an
   // approval. Without a session the endpoint refuses and nothing is claimed.
+  const [deviceClaimed, setDeviceClaimed] = useState(false);
   useEffect(() => {
-    void registerEnrolledDevice().catch(() => {});
+    void registerEnrolledDevice().then(setDeviceClaimed, () => {});
   }, []);
 
   useEffect(() => {
@@ -123,10 +125,15 @@ export default function CredentialMutationApprovalPage() {
       setCeremony(await fetchCeremony());
       setNeedsPasskeySetup(false);
     } catch (caught) {
-      // This browser's passkey is enrolled but unclaimed. Signing in claims it
-      // on the way back, so send the human through login rather than leaving
-      // them on a page whose only button now always fails.
+      // An unclaimed passkey on a signed-OUT browser is recoverable: signing in
+      // claims it on the way back. Once the claim HAS landed, the same refusal
+      // means the session is a different account, so bouncing to login again
+      // would only repeat itself.
       if (isUnlinkedSigningDevice(caught)) {
+        if (deviceClaimed) {
+          setError(WRONG_ACCOUNT_DEVICE_MESSAGE);
+          return;
+        }
         redirectToLogin();
         return;
       }
@@ -134,7 +141,7 @@ export default function CredentialMutationApprovalPage() {
     } finally {
       setBusy(false);
     }
-  }, [ceremony, fetchCeremony, redirectToLogin]);
+  }, [ceremony, deviceClaimed, fetchCeremony, redirectToLogin]);
 
   const setUpPasskey = useCallback(async () => {
     setBusy(true);

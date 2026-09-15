@@ -76,7 +76,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   pairing.getPairingState.mockResolvedValue({ enrolled: true });
   pairing.pairDevice.mockResolvedValue(undefined);
-  pairing.registerEnrolledDevice.mockResolvedValue(undefined);
+  pairing.registerEnrolledDevice.mockResolvedValue(false);
   vouchflow.signPayload.mockResolvedValue({ assertion: "signed-mutation-jws" });
   let approved = false;
   api.apiGet.mockImplementation((path: string) => {
@@ -175,6 +175,23 @@ describe("credential mutation approval page", () => {
         ([path]: [string]) => path === "/v1/vault/mutation-approvals/mutation_1/approve",
       ),
     ).toHaveLength(1);
+  });
+
+  // Once the claim HAS landed this browser holds a session, so the same refusal
+  // means that session is a different account. Another trip to login would just
+  // return to the same 403, so the page has to stop and say so.
+  it("stops redirecting once the device is claimed and the refusal persists", async () => {
+    pairing.registerEnrolledDevice.mockResolvedValue(true);
+    api.apiPost.mockRejectedValue(new api.ApiError("mandate_signer_not_authorized", 403));
+    render(<CredentialMutationApprovalPage />);
+
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Approve edit" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/linked to a different Trusty Squire account/i)).toBeTruthy(),
+    );
+    expect(router.replace).not.toHaveBeenCalled();
+    expect(screen.queryByText(/mandate_signer_not_authorized/)).toBeNull();
   });
 
   // Unlike an unlinked device, an assertion that named no device at all is not

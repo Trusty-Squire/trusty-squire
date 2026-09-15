@@ -45,6 +45,15 @@ interface Cred {
   stale: boolean;
 }
 
+// The API's own host-validation codes. Matching on the code rather than a bare
+// 400 keeps a different 400 on this path — the device claim's `invalid_request`,
+// say — from being reported to the human as a bad hostname.
+const HOST_VALIDATION_ERRORS = new Set([
+  "invalid_allowed_host",
+  "invalid_login_host",
+  "login_hosts_required",
+]);
+
 export default function VaultPage() {
   const router = useRouter();
   const [creds, setCreds] = useState<Cred[] | null>(null);
@@ -69,10 +78,6 @@ export default function VaultPage() {
     (async () => {
       try {
         await load();
-        // A signed-in visit is the only moment we can learn that this
-        // browser's passkey belongs to this account — the sessionless approval
-        // ceremonies rely on that link. Never let it block the dashboard.
-        void registerEnrolledDevice().catch(() => {});
       } catch (err) {
         if (cancelled) return;
         if (err instanceof ApiError && err.status === 401) {
@@ -905,7 +910,7 @@ function EditModal({
       }
       onSaved();
     } catch (err) {
-      if (err instanceof ApiError && err.status === 400) {
+      if (err instanceof ApiError && HOST_VALIDATION_ERRORS.has(err.message)) {
         setError(
           "One of the hosts isn't valid — use a bare hostname like api.example.com (no https://, no path).",
         );

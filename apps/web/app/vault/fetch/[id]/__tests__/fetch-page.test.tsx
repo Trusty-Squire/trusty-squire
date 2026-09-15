@@ -67,7 +67,7 @@ beforeEach(() => {
   status = "pending";
   pairing.getPairingState.mockResolvedValue({ enrolled: true });
   pairing.pairDevice.mockResolvedValue(undefined);
-  pairing.registerEnrolledDevice.mockResolvedValue(undefined);
+  pairing.registerEnrolledDevice.mockResolvedValue(false);
   vouchflow.signPayload.mockResolvedValue({ assertion: "signed-fetch-jws" });
   api.apiGet.mockImplementation((path: string) => {
     if (path === "/v1/status") return Promise.resolve({ billing_enabled: false });
@@ -202,6 +202,23 @@ describe("credential fetch approval page", () => {
     );
     expect(screen.queryByText(/missing_device_token/)).toBeNull();
     expect(router.replace).not.toHaveBeenCalled();
+  });
+
+  // Once the claim HAS landed this browser holds a session, so the same refusal
+  // means that session is a different account. Another trip to login would just
+  // return to the same 403, so the page has to stop and say so.
+  it("stops redirecting once the device is claimed and the refusal persists", async () => {
+    pairing.registerEnrolledDevice.mockResolvedValue(true);
+    api.apiPost.mockRejectedValue(new api.ApiError("mandate_signer_not_authorized", 403));
+    render(<CredentialFetchApprovalPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Approve reveal" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/linked to a different Trusty Squire account/i)).toBeTruthy(),
+    );
+    expect(router.replace).not.toHaveBeenCalled();
+    expect(screen.queryByText(/mandate_signer_not_authorized/)).toBeNull();
   });
 
   it("surfaces any other approval failure in place", async () => {
