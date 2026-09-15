@@ -9,7 +9,7 @@
 // handle/frame entry points (`clickHandle`, `clickInFrame`, `typeHandle`,
 // `typeInFrame`, `selectInFrame`, …) into the single verbs: the driver owns
 // the frame-vs-page dispatch from here on, so the tooling layer keeps one
-// call site per verb (`executeAct` in provision-session.ts).
+// call site per verb (`executeAct` in bot/act/act.ts).
 
 import type { ElementHandle, Page } from "playwright";
 import type { BrowserUseCapture } from "../browser-use-capture.js";

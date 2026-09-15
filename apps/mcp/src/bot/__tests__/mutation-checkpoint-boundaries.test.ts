@@ -19,20 +19,27 @@ it("checkpoints handle, frame, select, and phone mutations before their first ef
     const resolver = vi.spyOn(internals, "resolveFrameElement");
     const cases = [
       {
-        run: () => controller.typeHandle(handle, "new"),
+        run: () => controller.type({ kind: "handle", handle }, "new"),
         read: () => page.locator("#text").inputValue(),
         old: "old",
         next: "new",
       },
       {
-        run: () => controller.typeInFrame(target, "#text", "frame", false, page),
+        run: () =>
+          controller.type(
+            { kind: "frame", frame: target, selector: "#text" },
+            "frame",
+            false,
+            page,
+          ),
         read: () => page.locator("#text").inputValue(),
         old: "new",
         next: "frame",
         handle,
       },
       {
-        run: () => controller.selectInFrame(target, "#select", "new", page),
+        run: () =>
+          controller.select({ kind: "frame", frame: target, selector: "#select" }, "new", page),
         read: () => page.locator("#select").inputValue(),
         old: "Old",
         next: "New",

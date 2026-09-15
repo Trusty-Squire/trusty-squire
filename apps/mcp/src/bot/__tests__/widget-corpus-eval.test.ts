@@ -392,7 +392,9 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
           if (details.options.length === 0) {
             // (c) loud failure: an option-less select must throw, never
             // report success.
-            await expect(ctrl.selectOption(s.selector)).rejects.toThrow(/no selectable option/);
+            await expect(ctrl.select({ kind: "selector", selector: s.selector })).rejects.toThrow(
+              /no selectable option/,
+            );
             stats.emptySelectThrows += 1;
             continue;
           }
@@ -406,7 +408,7 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
           const matcher = target.text.trim();
           const expected = expectedValueForMatcher(details, matcher);
           if (expected === null) continue; // whitespace-mangled text — skip, not a contract case
-          await ctrl.selectOption(s.selector, matcher);
+          await ctrl.select({ kind: "selector", selector: s.selector }, matcher);
           const after = await readSelect(page, s.selector);
           expect(after?.value, `${rec.service}: ${s.selector} matcher "${matcher}"`).toBe(expected);
           // The committed-select marker consumed by inventory rendering.
@@ -471,7 +473,7 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
         const expected = expectedValueForMatcher(driver.details, matcher);
         if (expected === null) continue;
         const others = detailed.filter((d) => d !== driver);
-        await ctrl.selectOption(driver.el.selector, matcher);
+        await ctrl.select({ kind: "selector", selector: driver.el.selector }, matcher);
         const after = await readSelect(page, driver.el.selector);
         expect(after?.value, `${rec.service}: driven select committed`).toBe(expected);
         for (const other of others) {
@@ -623,7 +625,9 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
     if (rec === undefined) return;
     const { ctrl, page } = await openRecord(rec);
     try {
-      await expect(ctrl.selectOption("#ts-widget-eval-does-not-exist")).rejects.toThrow();
+      await expect(
+        ctrl.select({ kind: "selector", selector: "#ts-widget-eval-does-not-exist" }),
+      ).rejects.toThrow();
     } finally {
       await page.close();
     }
@@ -671,7 +675,7 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
           `${rec.service}: combobox ${trigger.selector} must resolve uniquely`,
         ).toBe(1);
         await expect(
-          ctrl.selectOption(trigger.selector),
+          ctrl.select({ kind: "selector", selector: trigger.selector }),
           `${rec.service}: static combobox ${trigger.selector} must throw`,
         ).rejects.toThrow(/no options? (found|matched)|no single opened popup|not|disabled/i);
         attempted += 1;
@@ -713,7 +717,10 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
         const details = await readSelect(page, s.selector);
         if (details === null || details.disabled || details.options.length === 0) continue;
         await expect(
-          ctrl.selectOption(s.selector, "zz-ts-widget-eval-no-such-option"),
+          ctrl.select(
+            { kind: "selector", selector: s.selector },
+            "zz-ts-widget-eval-no-such-option",
+          ),
         ).rejects.toThrow(/no option matched/i);
         const after = await readSelect(page, s.selector);
         expect(after?.value, `${rec.service}: no-match must not change the select`).toBe(
@@ -751,7 +758,7 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
           const matcher = target.text.trim();
           const expected = expectedValueForMatcher(details, matcher);
           if (expected === null) continue;
-          await ctrl.selectOption(s.selector, matcher);
+          await ctrl.select({ kind: "selector", selector: s.selector }, matcher);
           const after = await readSelect(page, s.selector);
           expect(after?.value, `${rec.service}: ${s.selector} matcher "${matcher}"`).toBe(expected);
           expect(await page.locator(s.selector).first().getAttribute("data-ts-touched")).toBe("1");
