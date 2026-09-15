@@ -21,14 +21,14 @@ const guard = {
 
 async function withBroker<T>(
   prefix: string,
-  call: (params: Record<string, unknown>, method: string) => Promise<unknown>,
+  call: (method: string, params: Record<string, unknown>) => Promise<unknown>,
   run: (path: string) => Promise<T>,
 ): Promise<T> {
   const root = await mkdtemp(join(tmpdir(), prefix));
   const path = join(root, "b.sock");
   const broker = await listenBroker(path, {
     authenticate: async () => ({ accountId: "account", agentId: "agent" }),
-    call: async (_principal, method, params) => await call(params, method),
+    call: async (_principal, method, params) => await call(method, params),
     disconnect: async () => undefined,
   });
   try {
@@ -39,15 +39,15 @@ async function withBroker<T>(
   }
 }
 
-describe("MCP broker forwarding", () => {
-  it("forwards a start, tracks the session, and fills it into later calls", async () => {
-    const seen: Record<string, unknown>[] = [];
+describe("MCP broker forwarding over the Contract B wire", () => {
+  it("opens a session, tracks it, and fills it into later commands", async () => {
+    const seen: { method: string; params: Record<string, unknown> }[] = [];
     await withBroker(
       "ts-forward-start-",
-      async (params) => {
-        seen.push(params);
-        if (params.name === "operate_start")
-          return { capability: "session-one", result: { session_id: "session-one" } };
+      async (method, params) => {
+        seen.push({ method, params });
+        if (method === "open")
+          return { sessionId: "session-one", observation: { session_id: "session-one" } };
         return { result: { ok: true } };
       },
       async (path) => {
@@ -58,10 +58,14 @@ describe("MCP broker forwarding", () => {
           });
           expect(forwarder.sessionCount()).toBe(1);
           expect(await forwarder.invoke("operate_observe", {}, "observe")).toEqual({ ok: true });
+          expect(seen[0]).toMatchObject({ method: "open" });
           expect(seen[1]).toMatchObject({
-            name: "operate_observe",
-            args: { session_id: "session-one" },
-            capability: "session-one",
+            method: "command",
+            params: {
+              sessionId: "session-one",
+              name: "operate_observe",
+              args: { session_id: "session-one" },
+            },
           });
         } finally {
           await forwarder.close();
@@ -95,9 +99,9 @@ describe("MCP broker forwarding", () => {
   it("delivers a proven pre-dispatch failure as a retryable mutation error", async () => {
     await withBroker(
       "ts-forward-predispatch-",
-      async (params) =>
-        params.name === "operate_start"
-          ? { capability: "session-one", result: { session_id: "session-one" } }
+      async (method) =>
+        method === "open"
+          ? { sessionId: "session-one", observation: { session_id: "session-one" } }
           : { preDispatchFailure: { error: "stale_ref", dispatch: "not_dispatched" } },
       async (path) => {
         const forwarder = new OperatorForwarder(path, guard);
@@ -113,10 +117,10 @@ describe("MCP broker forwarding", () => {
     );
   });
 
-  it("rejects a malformed startup reply", async () => {
+  it("rejects a malformed open reply", async () => {
     await withBroker(
       "ts-forward-badstart-",
-      async () => ({ capability: "session-one", result: { session_id: "other-session" } }),
+      async () => ({ sessionId: "session-one", observation: { session_id: "other-session" } }),
       async (path) => {
         const forwarder = new OperatorForwarder(path, guard);
         try {
@@ -133,9 +137,10 @@ describe("MCP broker forwarding", () => {
   it("keeps matching request ids on separate connections independent", async () => {
     await withBroker(
       "ts-forward-namespace-",
-      async (params) => ({
-        capability: "session-one",
-        result: { session_id: "session-one", service: params.name },
+      async (method, params) => ({
+        sessionId: "session-one",
+        observation: { session_id: "session-one", service: method },
+        result: params,
       }),
       async (path) => {
         const first = new OperatorForwarder(path, guard);
@@ -158,10 +163,10 @@ describe("MCP broker forwarding", () => {
   it("drops a finished session and refuses to reuse it afterwards", async () => {
     await withBroker(
       "ts-forward-finish-",
-      async (params) =>
-        params.name === "operate_start"
-          ? { capability: "session-one", result: { session_id: "session-one" } }
-          : { result: { closed: true } },
+      async (method) =>
+        method === "open"
+          ? { sessionId: "session-one", observation: { session_id: "session-one" } }
+          : { closed: true, result: { closed: true } },
       async (path) => {
         const forwarder = new OperatorForwarder(path, guard);
         try {
@@ -196,9 +201,10 @@ describe("MCP broker forwarding", () => {
     const forwarder = new OperatorForwarder(path, guard);
     try {
       const call = forwarder.invoke("operate_start", {}, "start");
+      const rejected = expect(call).rejects.toMatchObject({ code: "broker_lost" });
       await started;
       await broker.close();
-      await expect(call).rejects.toMatchObject({ code: "broker_lost" });
+      await rejected;
     } finally {
       await forwarder.close();
       await rm(root, { recursive: true, force: true });

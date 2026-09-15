@@ -9,16 +9,21 @@ vi.mock("../../session-guard.js", () => ({
 import { withBrokerMaintenance } from "../broker/maintenance.js";
 import { BrokerClient, listenBroker } from "../broker/transport.js";
 
-describe("plain-login broker maintenance", () => {
-  it("closes Chrome before plain login, retains the connection, and resumes even when login fails", async () => {
+describe("plain-login broker maintenance over the connect path", () => {
+  it("drains at connect, holds the connection, and resumes on close even when login fails", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-maint-"));
     const path = join(root, "b.sock");
     const events: string[] = [];
     const broker = await listenBroker(path, {
-      authenticate: async (token) => (token === "test" ? { accountId: "account", agentId: "connect" } : null),
+      authenticate: async (token) =>
+        token === "test" ? { accountId: "account", agentId: "connect" } : null,
+      connected: async (_principal, params) => {
+        events.push(params.maintain === true ? "connect:maintain" : "connect:plain");
+        return params.maintain === true ? { maintenance: "ready" } : undefined;
+      },
       call: async (_principal, method) => {
         events.push(method);
-        return { state: method === "maintenance" ? "ready" : "resumed" };
+        return { closed: true };
       },
       disconnect: async () => {
         events.push("disconnect");
@@ -40,7 +45,7 @@ describe("plain-login broker maintenance", () => {
       await broker.close();
       await rm(root, { recursive: true, force: true });
     }
-    expect(events).toEqual(["maintenance", "plain-login", "resume", "disconnect"]);
+    expect(events).toEqual(["connect:maintain", "plain-login", "close", "disconnect"]);
   });
 
   it("refuses plain login while live sessions still own the browser", async () => {
@@ -49,6 +54,7 @@ describe("plain-login broker maintenance", () => {
     const events: string[] = [];
     const broker = await listenBroker(path, {
       authenticate: async () => ({ accountId: "account", agentId: "connect" }),
+      connected: async () => ({ maintenance: "draining" }),
       call: async (_principal, method) => {
         events.push(method);
         return { state: "draining" };
@@ -67,7 +73,7 @@ describe("plain-login broker maintenance", () => {
       await broker.close();
       await rm(root, { recursive: true, force: true });
     }
-    expect(events).toEqual(["maintenance", "disconnect"]);
+    expect(events).toEqual(["disconnect"]);
   });
 });
 

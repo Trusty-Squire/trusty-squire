@@ -782,6 +782,15 @@ The default broker custody, maintenance, and recovery
 contracts live in [`docs/browser-broker.md`](docs/browser-broker.md). Mechanical
 fixture acceptance does not qualify real Google auth or prove the current head.
 
+The client wire is the frozen Contract B (`connect` / `open` / `command` /
+`close`), owned by `apps/mcp/src/bot/broker/protocol.ts`. A tool name crosses
+the wire only inside `command`; `close` finishes a session or ends the
+connection; the plain-login maintenance window is the connect-only `maintain`
+intent; `cancel` does not exist (connection loss aborts that connection's
+in-flight work). The 512-entry retained-result replay guard and the 5 s
+connection-session grace stay internal policy behind the contract. Do not
+re-add `hello`/`tool`/`cancel`/`client_close`/`maintenance`/`resume` methods.
+
 ## Maintaining this file
 
 This file is a living contract, not a historical record. Keep it for durable,

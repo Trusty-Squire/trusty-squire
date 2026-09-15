@@ -48,12 +48,18 @@ Socket mode is 0600. No CDP endpoint or browser
 handle crosses IPC. `TRUSTY_SQUIRE_AGENT_IDENTITY` supplies a connection's agent
 label, which carries no authority.
 
-`connect` requests maintenance over the existing socket. The broker closes the
-shared Chrome once no session admits or owns it, and refuses the request with
-`maintenance` while live sessions remain. `connect` then runs the existing
-separate plain Google login lifecycle with no CDP, and resumes the broker on the
-same account when the connection ends. Resume requires that plain browser to be
-closed and preserves account binding.
+The client wire is the frozen Contract B — `connect`, `open`, `command`,
+`close` (`apps/mcp/src/bot/broker/protocol.ts`). A connect carries the
+connect-only `maintain` intent. The broker closes the shared Chrome once no
+session admits or owns it and answers `maintenance: "draining"` while live
+sessions remain. The client then runs the existing separate plain Google login
+lifecycle with no CDP, and `close{}` (the lease boundary, formerly
+`client_close`) resumes the broker on the same account when the connection ends.
+Resume requires that plain browser to be closed and preserves account binding.
+There are no `hello`/`tool`/`cancel`/`maintenance`/`resume` methods: a session
+command is `command{sessionId,name,args}` (the only place a tool name appears),
+and `close` either finishes a session (the `operate_finish` payload rides the
+same request) or ends the connection.
 
 ## Ownership and contracts
 

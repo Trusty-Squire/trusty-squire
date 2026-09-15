@@ -79,8 +79,12 @@ async function harness(tools: Tool[]) {
       );
     },
     call: async (principal, method, params, requestId) => {
-      if (method === "cancel")
-        return { cancelled: broker.cancel(principal, String(params.requestId)) };
+      // Mirror the daemon: open/command register before dispatch so a dropped
+      // connection aborts the in-flight request.
+      if (method === "open" || method === "command")
+        return await broker.withRegisteredRequest(principal, requestId, async (signal) =>
+          await broker.callRegistered(principal, method, params, requestId, signal),
+        );
       return await broker.call(principal, method, params, requestId);
     },
     disconnect: async (principal, explicit) => await broker.disconnect(principal, explicit),
@@ -247,35 +251,39 @@ it("relays an in-flight approval notification to the calling client before the r
   }
 });
 
-it("cancels an in-flight command registered under its request id", async () => {
+it("aborts an in-flight command when its connection drops, without replaying it", async () => {
   withSession("internal-six");
   let entered!: () => void;
   const enteredPromise = new Promise<void>((resolve) => {
     entered = resolve;
   });
+  let aborted = false;
   const run = await harness([
     tool("operate_start", async () => ({ session_id: "internal-six" })),
     tool("operate_click", async (_args, _api, context) => {
       entered();
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      if (context?.signal?.aborted) throw context.signal.reason;
-      return { clicked: true };
+      await new Promise<void>((resolve) => {
+        context?.signal?.addEventListener("abort", () => {
+          aborted = true;
+          resolve();
+        }, { once: true });
+      });
+      throw context?.signal?.reason ?? new Error("aborted");
     }),
   ]);
   try {
     const started = (await run.forwarder.invoke("operate_start", {}, "start")) as {
       session_id: string;
     };
-    const controller = new AbortController();
     const call = run.forwarder.invoke(
       "operate_click",
       { session_id: started.session_id },
       "click",
-      controller.signal,
     );
     await enteredPromise;
-    controller.abort();
-    await expect(call).rejects.toMatchObject({ code: "cancelled" });
+    await run.forwarder.close();
+    await expect(call).rejects.toMatchObject({ code: "broker_lost" });
+    await expect.poll(() => aborted).toBe(true);
   } finally {
     await run.close();
   }

@@ -112,7 +112,7 @@ describe("server shutdown call admission", () => {
           ? { accountId: account.account_id, agentId: "registry-test" }
           : null,
       call: async (_principal, method) => {
-        if (method === "tool") {
+        if (method === "open") {
           entered();
           return await new Promise<never>(() => undefined);
         }

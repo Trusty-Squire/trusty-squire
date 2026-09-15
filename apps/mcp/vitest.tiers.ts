@@ -89,6 +89,7 @@ export const REQUIRED_BEHAVIOR_FILES = [
   "src/bot/__tests__/broker-authority.test.ts",
   "src/bot/__tests__/broker-stdio-restart.test.ts",
   "src/bot/__tests__/broker-transport.test.ts",
+  "src/bot/__tests__/broker-wire-protocol.test.ts",
   "src/bot/__tests__/broker-routing.test.ts",
   "src/bot/__tests__/autocomplete-commit-confirm.test.ts",
   "src/bot/__tests__/browser-document-identity.test.ts",

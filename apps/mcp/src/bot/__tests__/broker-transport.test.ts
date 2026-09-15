@@ -1,5 +1,5 @@
 import { createServer, type Socket } from "node:net";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -218,11 +218,11 @@ describe("authenticated broker IPC", () => {
     try {
       client = await BrokerClient.connect(path, "test");
       for (let index = 0; index < 600; index += 1)
-        await client.call("tool", {}, `request-${index}`);
-      expect(await client.call("tool", {}, "request-599")).toBe(600);
+        await client.call("command", {}, `request-${index}`);
+      expect(await client.call("command", {}, "request-599")).toBe(600);
       expect(dispatches).toBe(600);
       // An evicted retry is dispatched again instead of being refused.
-      expect(await client.call("tool", {}, "request-0")).toBe(601);
+      expect(await client.call("command", {}, "request-0")).toBe(601);
       expect(dispatches).toBe(601);
     } finally {
       await client?.close();
