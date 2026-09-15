@@ -56,9 +56,14 @@ Visible verification instructions and structurally identified validation errors
 appear in `semantic.blockers`, with `semantic.blocked: true` independent of `stage`.
 Gateway/CDN block pages (CloudFront 403-style signatures in the title or
 headings) surface as an `error_page` blocker rather than a normal page. Dialog
-blockers additionally carry every rendered control as `options` (including the
-close affordance, so "keep entered address" paths are never invisible) and a
-bounded `detail` with the dialog's own context text.
+blockers additionally carry up to `DIALOG_MAX_OPTIONS` rendered controls as
+`options`, in DOM order, including the close affordance whenever the dialog
+renders one — so "keep entered address" paths are never invisible. When more
+controls qualify than fit, that dismiss path and the controls that resolve the
+dialog are kept ahead of anchors; a dialog offering only choices or links
+reports exactly those and `target: "unavailable"`. A bounded `detail` carries
+the dialog's own prose, excluding the name and the control labels the blocker
+already reports.
 A solved Turnstile widget no longer blocks when its associated hidden response
 input (`cf-turnstile-response` / `cf-chl-widget-*_response`) carries a non-empty
 token or capture confirms its iframe is no longer rendered. Viewport exclusion

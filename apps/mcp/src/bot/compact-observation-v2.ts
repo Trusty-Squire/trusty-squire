@@ -175,10 +175,11 @@ export interface SafeBlockerV2 {
   /**
    * Up to DIALOG_MAX_OPTIONS of the dialog's rendered controls in DOM order, so
    * a modal's option set is discoverable in compact mode — not just the one
-   * control `ref` points at. When the cap binds, the dismiss affordance is kept
-   * first, then the controls that resolve the dialog (buttons, checkboxes,
-   * radios, submits), then anchors; a fuller list needs a control query. This is
-   * additive evidence, never a gate.
+   * control `ref` points at. When the cap binds, a rendered dismiss affordance is
+   * kept first, then the controls that resolve the dialog (buttons, checkboxes,
+   * radios, submits), then anchors; a fuller list needs a control query. A
+   * dialog that renders no dismiss-shaped control reports exactly what it does
+   * offer and `target: "unavailable"`. This is additive evidence, never a gate.
    */
   options?: Array<{ ref: string; label?: string }>;
   /**
@@ -1103,11 +1104,18 @@ export function safePageSemanticsV2(source: ObservationSemanticSourceV2): SafePa
  * HTTP errors, passable challenge interstitials, and transient origin failures
  * a retry would clear never match.
  */
-const ERROR_PAGE_EXACT_TITLES = new Set(["403 forbidden", "access denied", "request blocked"]);
-const ERROR_PAGE_SIGNAL_RES = [
-  /the request could not be satisfied/i,
-  /sorry, you have been blocked/i,
-  /^403 error$/i,
+const ERROR_PAGE_SIGNATURES: ReadonlyArray<{ re: RegExp; headings: boolean }> = [
+  // Sentences only a block wall renders, so a heading carrying one names the
+  // wall as surely as a title does.
+  { re: /the request could not be satisfied/i, headings: true },
+  { re: /sorry, you have been blocked/i, headings: true },
+  { re: /^403 error$/i, headings: true },
+  // Bare status vocabulary. A reference page's h1 is legitimately exactly "403
+  // Forbidden", so these name a wall only as the whole document title — where a
+  // documentation page would carry a site suffix.
+  { re: /^403 forbidden$/i, headings: false },
+  { re: /^access denied$/i, headings: false },
+  { re: /^request blocked$/i, headings: false },
 ];
 
 function errorPageBlockerV2(
@@ -1116,19 +1124,18 @@ function errorPageBlockerV2(
 ): SafeBlockerV2 | undefined {
   const normalized = (value: string | undefined): string | undefined =>
     value === undefined ? undefined : value.normalize("NFKC").replace(/\s+/g, " ").trim();
-  const exactTitle = normalized(title);
-  const matched =
-    exactTitle !== undefined && ERROR_PAGE_EXACT_TITLES.has(exactTitle.toLowerCase())
-      ? exactTitle
-      : [title, ...headings]
-          .map(normalized)
-          .find(
-            (value): value is string =>
-              value !== undefined && ERROR_PAGE_SIGNAL_RES.some((signal) => signal.test(value)),
-          );
-  return matched === undefined
-    ? undefined
-    : { kind: "error_page", text: boundedBlockerTextV2(matched) ?? matched };
+  const sources = [
+    { value: normalized(title), isHeading: false },
+    ...headings.map((heading) => ({ value: normalized(heading), isHeading: true })),
+  ];
+  for (const { value, isHeading } of sources) {
+    if (value === undefined) continue;
+    const matches = ERROR_PAGE_SIGNATURES.some(
+      (signature) => (signature.headings || !isHeading) && signature.re.test(value),
+    );
+    if (matches) return { kind: "error_page", text: boundedBlockerTextV2(value) ?? value };
+  }
+  return undefined;
 }
 
 const BLOCKER_TEXT_MAX_CHARS = 160;
@@ -1608,7 +1615,7 @@ export function safeBlockersV2(
     );
     const emitted = controls.filter((candidate) => selected.has(candidate));
     const closeRef = close === undefined ? undefined : refForNode(close);
-    const excluded = new Set<BrowserUseNode>(emitted);
+    const excluded = new Set<BrowserUseNode>(controls);
     const heading = dialogHeadingNodeV2(node);
     if (heading !== undefined && blockerTextV2(heading) === name) excluded.add(heading);
     const holdingExcluded = new Set<BrowserUseNode>();

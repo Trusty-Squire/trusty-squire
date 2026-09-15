@@ -98,6 +98,15 @@ describe("CDN/gateway error pages are named, not mistaken for a normal page", ()
     });
   });
 
+  it("does not name a wall from a reference page's bare status heading", () => {
+    // MDN's h1 is exactly "403 Forbidden". Status vocabulary names a wall only
+    // as the whole document title, where a reference page carries a site suffix.
+    expect(
+      safePageSemanticsV2({ title: "HTTP response status codes", headings: ["403 Forbidden"] })
+        .blocked,
+    ).toBeUndefined();
+  });
+
   it("names the wall from the h1 when the title carries no signature", () => {
     expect(safePageSemanticsV2({ title: "example.com", headings: ["403 ERROR"] }).blockers).toEqual(
       [{ kind: "error_page", text: "403 ERROR" }],
@@ -2281,6 +2290,8 @@ describe("safeBlockersV2 modal dialog", () => {
     const refs = new Map(dialog.children.map((child, index) => [child, `@e:o${index}`]));
     const blocker = safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate))[0];
     expect(blocker?.ref).toBe("@e:o7");
+    // The anchors the cap dropped are still controls, not the dialog's prose.
+    expect(blocker?.detail).toBeUndefined();
     expect(blocker?.options).toEqual([
       { ref: "@e:o0", label: "Privacy Policy" },
       { ref: "@e:o1", label: "Cookie Policy" },
@@ -2318,6 +2329,7 @@ describe("safeBlockersV2 modal dialog", () => {
     const refs = new Map(dialog.children.map((child, index) => [child, `@e:c${index}`]));
     const blocker = safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate))[0];
     expect(blocker?.ref).toBe("@e:c7");
+    expect(blocker?.detail).toBeUndefined();
     expect(blocker?.options).toEqual([
       { ref: "@e:c0", label: "Accept all" },
       { ref: "@e:c1", label: "Reject all" },
