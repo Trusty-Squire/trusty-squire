@@ -61,6 +61,7 @@ export const REAL_BROWSER_FILES = [
   "src/bot/__tests__/picker-window.test.ts",
   "src/bot/__tests__/screenshot-click.test.ts",
   "src/bot/__tests__/screenshot-target-diagnostic.test.ts",
+  "src/bot/__tests__/select-option-ambiguity.test.ts",
   "src/bot/__tests__/shadow-dom-topmost.test.ts",
 ];
 

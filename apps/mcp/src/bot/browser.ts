@@ -2852,10 +2852,20 @@ export class BrowserController implements BrowserDriver {
               label.closest(".n-form-group__row") ??
               label.closest("label")?.parentElement ??
               label.parentElement;
-            const control = root?.querySelector<HTMLElement>(
-              'select,button[role="combobox"],input[role="combobox"],[role="combobox"]',
+            // Only fall back to a control found by row proximity when the
+            // row offers EXACTLY ONE candidate. Taking the first of several
+            // silently drove the wrong control (measured live: a "Phone
+            // country" label over a row holding an address select and a
+            // phone select committed the ADDRESS select and reported
+            // success). With several candidates the label is left as the
+            // target and the combobox path refuses loudly.
+            const controls = Array.from(
+              root?.querySelectorAll<HTMLElement>(
+                'select,button[role="combobox"],input[role="combobox"],[role="combobox"]',
+              ) ?? [],
             );
-            if (control === null || control === undefined) return null;
+            const control = controls.length === 1 ? controls[0] : undefined;
+            if (control === undefined) return null;
             const id = control.getAttribute("id");
             if (id !== null && id.length > 0) return `#${CSS.escape(id)}`;
             const testId =
@@ -2908,19 +2918,45 @@ export class BrowserController implements BrowserDriver {
       const firstReal = allValues.find((v) => v.length > 0);
       let chosenValue: string | undefined = firstReal !== undefined ? firstReal : allValues[0];
       if (optionMatcher !== undefined) {
-        const matcherLower = optionMatcher.toLowerCase();
-        // Returns either a matched value (may be "") or null when no
-        // option's text matches. Wrap in an object so we can
-        // distinguish "matched to empty value" from "no match".
+        // Whitespace-normalized on both sides so a matcher read from a
+        // wrapped inventory line still compares cleanly.
+        const matcherLower = optionMatcher.replace(/\s+/g, " ").trim().toLowerCase();
+        // Whitespace-normalized, case-insensitive. An EXACT match wins
+        // outright. A substring fallback is taken only when it is UNIQUE:
+        // `includes` + first-match silently committed the wrong option on
+        // any text collision (measured live: "Guinea" committed
+        // "Equatorial Guinea", "Korea" committed "North Korea"), and a
+        // silent wrong pick is worse than a loud refusal the planner can
+        // re-plan from. Ambiguity names the candidates and refuses.
+        // Returns either a chosen value (may be "") or the ambiguous texts.
         const matched = await optionLocator.evaluateAll((opts, needle) => {
-          const hit = opts
-            .filter((o): o is HTMLOptionElement => o instanceof HTMLOptionElement)
-            .find((o) => o.textContent?.toLowerCase().includes(needle));
-          return hit !== undefined ? { value: hit.value } : null;
+          const options = opts.filter(
+            (o): o is HTMLOptionElement => o instanceof HTMLOptionElement,
+          );
+          const text = (o: HTMLOptionElement): string =>
+            (o.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+          const exact = options.find((o) => text(o) === needle);
+          if (exact !== undefined) return { value: exact.value };
+          const partial = options.filter((o) => text(o).includes(needle));
+          const only = partial[0];
+          if (partial.length === 1 && only !== undefined) return { value: only.value };
+          if (partial.length > 1) {
+            return {
+              ambiguous: partial.slice(0, 6).map((o) => (o.textContent ?? "").trim()),
+            };
+          }
+          return null;
         }, matcherLower);
         if (matched === null) {
           throw new Error(
             `<select> ${activeSelector}: no option matched ${JSON.stringify(optionMatcher)}`,
+          );
+        }
+        if ("ambiguous" in matched) {
+          throw new Error(
+            `<select> ${activeSelector}: ${JSON.stringify(optionMatcher)} matches several options ` +
+              `(${matched.ambiguous.map((t) => JSON.stringify(t)).join(", ")}) — ` +
+              "pass the exact option text",
           );
         }
         chosenValue = matched.value;
@@ -3308,13 +3344,43 @@ export class BrowserController implements BrowserDriver {
       const options = page.locator("[data-ts-select-option-tier]");
       let target = options.first();
       if (optionMatcher !== undefined) {
-        const matching = options.filter({ hasText: optionMatcher });
-        if ((await matching.count()) === 0) {
+        // Same contract as the native <select> path: an EXACT option text
+        // wins, a substring fallback is taken only when it is UNIQUE, and
+        // ambiguity refuses loudly. Playwright's `hasText` substring +
+        // `.first()` silently committed the wrong option on a collision
+        // (measured live: "Vue" committed "Vue.js").
+        const matched = await options.evaluateAll((els, needle) => {
+          const text = (el: Element): string =>
+            ((el as HTMLElement).innerText ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+          const exact = els.findIndex((el) => text(el) === needle);
+          if (exact !== -1) return { index: exact };
+          const partial = els
+            .map((el, index) => ({ index, text: text(el) }))
+            .filter((o) => o.text.includes(needle));
+          const only = partial[0];
+          if (partial.length === 1 && only !== undefined) return { index: only.index };
+          if (partial.length > 1) {
+            return {
+              ambiguous: partial
+                .slice(0, 6)
+                .map((o) => ((els[o.index] as HTMLElement).innerText ?? "").trim()),
+            };
+          }
+          return null;
+        }, optionMatcher.replace(/\s+/g, " ").trim().toLowerCase());
+        if (matched === null) {
           throw new Error(
             `combobox ${triggerSelector}: no option matched ${JSON.stringify(optionMatcher)}`,
           );
         }
-        target = matching.first();
+        if ("ambiguous" in matched) {
+          throw new Error(
+            `combobox ${triggerSelector}: ${JSON.stringify(optionMatcher)} matches several options ` +
+              `(${matched.ambiguous.map((t) => JSON.stringify(t)).join(", ")}) — ` +
+              "pass the exact option text",
+          );
+        }
+        target = options.nth(matched.index);
       } else if ((await options.count()) === 0) {
         throw new Error(`combobox ${triggerSelector}: opened popup has no actionable options`);
       }
@@ -7403,11 +7469,32 @@ export class BrowserController implements BrowserDriver {
           // no matcher is given ("Select…" placeholders are the wrong pick).
           let chosen = options.find((option) => option.value.length > 0) ?? options[0]!;
           if (needle !== null) {
-            const hit = options.find((option) =>
-              (option.textContent ?? "").toLowerCase().includes(needle),
-            );
-            if (hit === undefined) return { ok: false as const, reason: "no option matched" };
-            chosen = hit;
+            // Same contract as the main-frame path: exact text wins, a
+            // substring fallback only when unique, ambiguity refuses loudly
+            // (see selectOptionInner).
+            const text = (option: HTMLOptionElement): string =>
+              (option.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+            const exact = options.find((option) => text(option) === needle);
+            if (exact !== undefined) {
+              chosen = exact;
+            } else {
+              const partial = options.filter((option) => text(option).includes(needle));
+              const only = partial[0];
+              if (partial.length === 1 && only !== undefined) {
+                chosen = only;
+              } else if (partial.length > 1) {
+                return {
+                  ok: false as const,
+                  reason:
+                    `option text is ambiguous (${partial
+                      .slice(0, 6)
+                      .map((option) => JSON.stringify((option.textContent ?? "").trim()))
+                      .join(", ")}) — pass the exact option text`,
+                };
+              } else {
+                return { ok: false as const, reason: "no option matched" };
+              }
+            }
           }
           control.value = chosen.value;
           if (control.value !== chosen.value) {
@@ -7425,7 +7512,9 @@ export class BrowserController implements BrowserDriver {
             text: (chosen.textContent ?? "").replace(/\s+/g, " ").trim(),
           };
         },
-        optionMatcher !== undefined ? optionMatcher.toLowerCase() : null,
+        optionMatcher !== undefined
+          ? optionMatcher.replace(/\s+/g, " ").trim().toLowerCase()
+          : null,
       );
       if (!result.ok) {
         const detail =
