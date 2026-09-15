@@ -61,6 +61,20 @@ export function isUnlinkedSigningDevice(caught: unknown): boolean {
   return caught instanceof ApiError && caught.message === "mandate_signer_not_authorized";
 }
 
+// The assertion named no signing device at all, so there is nothing for a
+// signed-in visit to claim — unlike an unlinked device, signing in cannot help.
+const UNVERIFIABLE_DEVICE_MESSAGE =
+  "We couldn't verify which device signed this approval, so it was not accepted. " +
+  "Nothing was released or changed. Please contact support.";
+
+/** One wording of an approval refusal the human cannot act on, shared by both ceremonies. */
+export function approvalErrorMessage(caught: unknown, fallback: string): string {
+  if (caught instanceof ApiError && caught.message === "missing_device_token") {
+    return UNVERIFIABLE_DEVICE_MESSAGE;
+  }
+  return caught instanceof Error ? caught.message : fallback;
+}
+
 export async function pairDevice(): Promise<void> {
   const client = getVouchflow();
 

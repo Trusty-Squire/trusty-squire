@@ -819,6 +819,22 @@ authentication, and link building are shared with the mutation ceremony
 default routes — `apps/mcp/src/tools/__tests__/never-exposed-paths.test.ts`
 pins that.
 
+**Unvalidated premise — check this before the binding ships.** The signer check
+reads a `device_token` claim out of the VERIFIED assertion. Nothing in this repo
+has ever confirmed Vouchflow puts that claim INSIDE the JWS: in `@vouchflow/web`
+0.3.1 `deviceToken`/`signingDeviceId` are fields of the sign-complete HTTP
+response sitting beside `assertion`, and the only claims this codebase has
+proven live in the JWS are `payload_sha256`, `context`, `confidence` and
+`mandate_id`. Every device-bearing JWS in the test suite is minted by the
+suite's own `signHash`, so the tests cannot fail on this. The check fails
+CLOSED, so if the claim is absent EVERY `fetch_credential` reveal and EVERY
+`edit_credential`/`delete_credential` approval returns `403 missing_device_token`
+in production. Before deploying: run one real `signPayload` in a browser and
+decode the assertion —
+`JSON.parse(atob(assertion.split(".")[1]))` — and confirm a non-empty
+`device_token` (and `signing_device_id`). If either is absent, the binding must
+NOT ship as written.
+
 ### Vault security + lifecycle surface
 
 The credential vault's operational runbook lives at

@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { AppShell } from "../../../components/AppShell";
 import { ApiError, apiGet, apiPost } from "../../../lib/api";
 import {
+  approvalErrorMessage,
   getPairingState,
   isUnlinkedSigningDevice,
   pairDevice,
@@ -129,7 +130,7 @@ export default function CredentialMutationApprovalPage() {
         redirectToLogin();
         return;
       }
-      setError(caught instanceof Error ? caught.message : "Approval failed.");
+      setError(approvalErrorMessage(caught, "Approval failed."));
     } finally {
       setBusy(false);
     }

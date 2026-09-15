@@ -177,6 +177,22 @@ describe("credential mutation approval page", () => {
     ).toHaveLength(1);
   });
 
+  // Unlike an unlinked device, an assertion that named no device at all is not
+  // something signing in can fix, so the page must say something a human can
+  // act on rather than echo the wire code.
+  it("explains an assertion that named no signing device, without redirecting", async () => {
+    api.apiPost.mockRejectedValue(new api.ApiError("missing_device_token", 403));
+    render(<CredentialMutationApprovalPage />);
+
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Approve edit" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/couldn't verify which device signed/i)).toBeTruthy(),
+    );
+    expect(screen.queryByText(/missing_device_token/)).toBeNull();
+    expect(router.replace).not.toHaveBeenCalled();
+  });
+
   it("does not submit when no passkey is enrolled", async () => {
     pairing.getPairingState.mockResolvedValue({ enrolled: false });
     render(<CredentialMutationApprovalPage />);

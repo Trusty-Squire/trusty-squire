@@ -607,6 +607,21 @@ Three things about it are load-bearing; do not "simplify" any of them:
   session-authenticated and keep `approve` refusing unregistered signers; do
   not weaken registration into a self-registering path, and do not answer a
   rollout complaint by putting session auth back on the ceremony.
+
+  **The signer half rests on an UNVALIDATED premise — check it before that
+  binding ships.** It reads a `device_token` claim out of the verified JWS, and
+  nothing here has confirmed Vouchflow puts that claim inside the JWS rather
+  than beside it in the sign-complete HTTP response (where `@vouchflow/web`
+  0.3.1 exposes `deviceToken`/`signingDeviceId`). The only claims this codebase
+  has proven live in the JWS are `payload_sha256`, `context`, `confidence` and
+  `mandate_id`; every device-bearing JWS in the suite is minted by the suite's
+  own `signHash`, so no test can fail on it. The check fails CLOSED: if the
+  claim is absent, every reveal and every credential mutation returns
+  `403 missing_device_token`. Validate by running one real `signPayload` in a
+  browser and decoding the assertion —
+  `JSON.parse(atob(assertion.split(".")[1]))` — confirming a non-empty
+  `device_token` and `signing_device_id`. If either is missing, the binding must
+  not ship as written.
 - **Its description is a security control.** It has to keep steering agents to
   `use_credential` first and keep saying that the value lands in the transcript.
   A shorter, friendlier description measurably makes the model reach for the

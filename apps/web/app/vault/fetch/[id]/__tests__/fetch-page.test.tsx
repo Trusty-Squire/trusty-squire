@@ -188,6 +188,22 @@ describe("credential fetch approval page", () => {
     ).toHaveLength(1);
   });
 
+  // Unlike an unlinked device, an assertion that named no device at all is not
+  // something signing in can fix, so the page must say something a human can
+  // act on rather than echo the wire code.
+  it("explains an assertion that named no signing device, without redirecting", async () => {
+    api.apiPost.mockRejectedValue(new api.ApiError("missing_device_token", 403));
+    render(<CredentialFetchApprovalPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Approve reveal" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/couldn't verify which device signed/i)).toBeTruthy(),
+    );
+    expect(screen.queryByText(/missing_device_token/)).toBeNull();
+    expect(router.replace).not.toHaveBeenCalled();
+  });
+
   it("surfaces any other approval failure in place", async () => {
     api.apiPost.mockRejectedValue(new api.ApiError("credential_fetch_approval_expired", 409));
     render(<CredentialFetchApprovalPage />);

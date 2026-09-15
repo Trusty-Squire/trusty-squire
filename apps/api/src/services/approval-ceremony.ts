@@ -15,6 +15,7 @@ import type { resolveCredentialForAccount } from "./credential-resolution.js";
 import type { VouchflowDeviceStore } from "./vouchflow-device-store.js";
 import {
   VouchMandateVerificationError,
+  type VouchMandateFailureCode,
   type VouchMandateVerificationInput,
   type VouchMandateVerifier,
 } from "./vouch-mandate.js";
@@ -51,6 +52,16 @@ export function sendResolutionFailure(
 }
 
 /**
+ * The ceremony's one refusal shape. Typing the parameter as the failure-code
+ * union is what keeps `VouchMandateFailureCode` the single owner of the set:
+ * every refusal a ceremony can send has to be a member, spelled once.
+ */
+function sendMandateFailure(reply: FastifyReply, code: VouchMandateFailureCode): null {
+  reply.code(code === "vouchflow_expected_audience_unset" ? 503 : 403).send({ error: code });
+  return null;
+}
+
+/**
  * Verify a Vouchflow assertion and, on failure, send the ceremony's standard
  * refusal. Returns the claims on success and `null` once it has replied — so a
  * caller cannot accidentally continue on an unverified mandate.
@@ -63,10 +74,10 @@ export async function verifyApprovalMandate(
   try {
     return await verify(input);
   } catch (error) {
-    const code =
-      error instanceof VouchMandateVerificationError ? error.code : "mandate_verification_failed";
-    reply.code(code === "vouchflow_expected_audience_unset" ? 503 : 403).send({ error: code });
-    return null;
+    return sendMandateFailure(
+      reply,
+      error instanceof VouchMandateVerificationError ? error.code : "mandate_verification_failed",
+    );
   }
 }
 
@@ -94,13 +105,11 @@ export async function resolveApprovalMandateSigner(
 ): Promise<ApprovalMandateSigner | null> {
   const deviceToken = typeof claims.device_token === "string" ? claims.device_token : "";
   if (deviceToken.length === 0) {
-    reply.code(403).send({ error: "missing_device_token" });
-    return null;
+    return sendMandateFailure(reply, "missing_device_token");
   }
   const authorized = await devices.listTokensByAccount(ownerAccountId);
   if (!authorized.includes(deviceToken)) {
-    reply.code(403).send({ error: "mandate_signer_not_authorized" });
-    return null;
+    return sendMandateFailure(reply, "mandate_signer_not_authorized");
   }
   return {
     signingDeviceId:
