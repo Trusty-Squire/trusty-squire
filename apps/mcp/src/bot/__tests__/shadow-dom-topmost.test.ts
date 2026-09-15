@@ -17,6 +17,10 @@ import { chromium, type Browser, type Page } from "playwright";
 import { BrowserController } from "../browser.js";
 import { provisionElementRefs, resolveTarget } from "../provision-session.js";
 
+// Contract C click/type verbs take a DriverTarget now.
+const clickTarget = (selector: string) =>
+  ({ kind: "selector", selector, method: "click" }) as const;
+
 // An open-shadow-root button that flips its own text on click, plus a plain
 // light-DOM button as the unchanged control. Nothing overlaps either button.
 const SHADOW_FIXTURE = `data:text/html,${encodeURIComponent(`
@@ -155,7 +159,7 @@ describe("extractInteractiveElements — open shadow root occlusion (real Chromi
       const resolved = resolveTarget(els, ref ?? "");
       expect(resolved).toBe(cta);
       expect(resolved?.visibleText ?? resolved?.ariaLabel).toBe("Add To Cart");
-      await ctrl.click(resolved?.selector ?? "");
+      await ctrl.click(clickTarget(resolved?.selector ?? ""));
       const flipped = await page.evaluate(
         () => document.querySelector("cart-widget")?.shadowRoot?.querySelector("#buy")?.textContent,
       );

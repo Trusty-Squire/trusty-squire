@@ -45,8 +45,12 @@ describe("operate_click internal fallback with a real browser", () => {
     );
     await page.goto(url);
     const controller = BrowserController.fromHarnessPage(page);
-    const plainClick = vi.spyOn(controller, "click");
-    const domClick = vi.spyOn(controller, "clickViaJs");
+    const controllerPriv = controller as unknown as {
+      clickActivePageSelector: (selector: string) => Promise<void>;
+      clickViaJs: (selector: string, index?: number) => Promise<void>;
+    };
+    const plainClick = vi.spyOn(controllerPriv, "clickActivePageSelector");
+    const domClick = vi.spyOn(controllerPriv, "clickViaJs");
     const started = await startHarnessProvisionSession({
       browser: controller,
       serviceUrl: url,

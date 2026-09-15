@@ -119,16 +119,21 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await product.goto(productUrl);
       const controller = BrowserController.fromHarnessPage(product);
       let sessionId: string | undefined;
-      const originalClick = controller.click.bind(controller);
-      const click = vi.spyOn(controller, "click").mockImplementation(async (...args) => {
-        const popup = mode === "popup" ? product.waitForEvent("popup") : null;
-        await originalClick(...args);
-        const target = popup === null ? product : await popup;
-        await target.waitForURL(destination === "pending" ? provider : destinationUrl);
-        // Fault injection at the driver return boundary, AFTER a real click and
-        // real routed navigation. The provider itself never contacts the network.
-        throw new Error("page click: Timeout 15000ms exceeded after navigation");
-      });
+      const controllerPriv = controller as unknown as {
+        clickActivePageSelector: (selector: string) => Promise<void>;
+      };
+      const originalClick = controllerPriv.clickActivePageSelector.bind(controller);
+      const click = vi
+        .spyOn(controllerPriv, "clickActivePageSelector")
+        .mockImplementation(async (...args) => {
+          const popup = mode === "popup" ? product.waitForEvent("popup") : null;
+          await originalClick(...args);
+          const target = popup === null ? product : await popup;
+          await target.waitForURL(destination === "pending" ? provider : destinationUrl);
+          // Fault injection at the driver return boundary, AFTER a real click and
+          // real routed navigation. The provider itself never contacts the network.
+          throw new Error("page click: Timeout 15000ms exceeded after navigation");
+        });
       try {
         const started = await startHarnessProvisionSession({
           browser: controller,
@@ -817,9 +822,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const scrollResume = new Promise<void>((resolve) => {
         resumeScroll = resolve;
       });
-      const originalScroll = controller.scrollViewport.bind(controller);
+      const originalScroll = controller.scroll.bind(controller);
       const scrollSpy = vi
-        .spyOn(controller, "scrollViewport")
+        .spyOn(controller, "scroll")
         .mockImplementation(async (direction = "down", page = null): Promise<void> => {
           await originalScroll(direction, page);
           scrollEntered();
@@ -1463,7 +1468,12 @@ describe("BrowserController OAuth popup lifecycle", () => {
         releaseClick = resolve;
       });
       let popup: Page | undefined;
-      vi.spyOn(controller, "click").mockImplementationOnce(async (selector) => {
+      vi
+        .spyOn(
+          controller as unknown as { clickActivePageSelector: (selector: string) => Promise<void> },
+          "clickActivePageSelector",
+        )
+        .mockImplementationOnce(async (selector: string) => {
         const opened = product.waitForEvent("popup");
         await product.locator(selector).click();
         popup = await opened;

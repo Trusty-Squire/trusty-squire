@@ -49,6 +49,7 @@ import {
   type OAuthCompletionEvidence,
 } from "./browser.js";
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
+import type { ClickMethod, DriverTarget } from "./driver/types.js";
 import {
   buildSafeControlsV2,
   compactV2LegacyRefForHandle,
@@ -2815,6 +2816,59 @@ export async function act(
   }
 }
 
+// ── Contract C act targets ──
+// The driver (BrowserController's Contract C verbs) owns frame-vs-page
+// dispatch; executeAct only resolves a fresh observation element to a
+// DriverTarget and picks the verb.
+
+function actDriverTarget(el: InteractiveElement): DriverTarget {
+  const frame = frameTargetFor(el);
+  if (frame !== null) return { kind: "frame", frame, selector: el.selector };
+  return { kind: "selector", selector: el.selector };
+}
+
+// Re-resolve against FRESH elements — never trust a stale index. Shared by the
+// type_secret / select / click-group ref paths; `internalLabel`/`noMatchPrefix`
+// keep each caller's error wording, `withVisibleCandidates` its candidate list.
+async function resolveFreshActTarget(
+  session: Session,
+  browser: BrowserController,
+  compactV2ActionPage: Page | undefined,
+  compactV2Authorization: CompactV2TargetAuthorization | undefined,
+  resolutionTarget: string,
+  internalAccess: boolean,
+  internalLabel: string,
+  noMatchPrefix: string,
+  actionTarget: string,
+  withVisibleCandidates: boolean,
+): Promise<{ el: InteractiveElement; fresh: InteractiveElement[] }> {
+  const fresh = (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements;
+  retainSessionElements(session, fresh);
+  // resolveTarget recomputes identities (incl. volatile positional-group
+  // fingerprints) from these FRESH elements, so a ref whose group fingerprint
+  // changed since the last observe resolves to null, not a survivor (#399).
+  const el =
+    compactV2Authorization === undefined
+      ? resolveTarget(fresh, resolutionTarget)
+      : resolveAuthorizedCompactV2Target(session, fresh, compactV2Authorization);
+  if (el !== null) return { el, fresh };
+  if (session.compactV2Active) {
+    if (!internalAccess) throwCompactV2StaleRef();
+    throw new Error(`${internalLabel}: internal live target changed`);
+  }
+  const stale = staleTargetError(session, actionTarget, fresh);
+  if (stale !== null) throw stale;
+  const prefix = noMatchPrefix === "" ? "" : `${noMatchPrefix}: `;
+  const visible = withVisibleCandidates
+    ? " Visible: " +
+      fresh
+        .map((e) => `"${e.screenPath ?? elementRef(e)}"`)
+        .slice(0, 20)
+        .join(", ")
+    : "";
+  throw new Error(`${prefix}no element matched target "${actionTarget}".${visible}`);
+}
+
 async function executeAct(
   sessionId: string,
   action: ProvisionAction,
@@ -2894,14 +2948,30 @@ async function executeAct(
     docBeforeAction = undefined;
   }
 
+  // Contract C dispatch: every browser action below goes through exactly one
+  // driver-verb call site per verb; the driver owns frame-vs-page dispatch.
+  // An action page that is NOT the active page is dispatched untracked
+  // (pre-existing semantics); the active page keeps dispatch tracking for
+  // ordinary clicks and js_click never tracks.
+  const actType = async (target: DriverTarget, text: string, sealed: boolean): Promise<void> => {
+    await browser.type(target, text, sealed, compactV2ActionPage);
+  };
+  const actClick = async (target: DriverTarget & { method: ClickMethod }): Promise<void> => {
+    const dispatchPage =
+      compactV2ActionPage !== undefined && !browser.isActivePage(compactV2ActionPage)
+        ? compactV2ActionPage
+        : undefined;
+    await browser.click(target, dispatchPage);
+  };
+
   try {
     switch (action.kind) {
       case "goto": {
-        await browser.goto(action.url, compactV2ActionPage);
+        await browser.navigate(action.url, compactV2ActionPage);
         break;
       }
       case "press": {
-        await browser.pressKey(action.key, compactV2ActionPage);
+        await browser.press(action.key, compactV2ActionPage);
         break;
       }
       case "oauth_settle": {
@@ -2910,7 +2980,7 @@ async function executeAct(
         break;
       }
       case "scroll": {
-        await browser.scrollViewport(action.direction ?? "down", compactV2ActionPage);
+        await browser.scroll(action.direction ?? "down", compactV2ActionPage);
         break;
       }
       case "type_secret": {
@@ -2951,32 +3021,21 @@ async function executeAct(
           });
           break;
         }
-        const fresh = (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements;
-        retainSessionElements(session, fresh);
-        // resolveTarget recomputes identities (incl. volatile positional-group
-        // fingerprints) from these FRESH elements, so a ref whose group fingerprint
-        // changed since the last observe resolves to null, not a survivor (#399).
-        const el =
-          compactV2Authorization === undefined
-            ? resolveTarget(fresh, resolutionTarget!)
-            : resolveAuthorizedCompactV2Target(session, fresh, compactV2Authorization);
-        if (el === null) {
-          if (session.compactV2Active) {
-            if (!internalAccess) throwCompactV2StaleRef();
-            throw new Error("type_secret: internal live target changed");
-          }
-          const stale = staleTargetError(session, action.target, fresh);
-          if (stale !== null) throw stale;
-          throw new Error(`type_secret: no element matched target "${action.target}".`);
-        }
+        const el = (await resolveFreshActTarget(
+          session,
+          browser,
+          compactV2ActionPage,
+          compactV2Authorization,
+          resolutionTarget!,
+          internalAccess,
+          "type_secret",
+          "type_secret",
+          action.target,
+          false,
+        )).el;
         // Type the REAL value into the page. It crosses only browser↔page; the
         // value is never returned to the host and never logged.
-        const target = frameTargetFor(el);
-        if (target !== null)
-          await browser.typeInFrame(target, el.selector, value, true, compactV2ActionPage);
-        else if (compactV2ActionPage !== undefined)
-          await browser.typeOnPage(compactV2ActionPage, el.selector, value, true);
-        else await browser.type(el.selector, value, true);
+        await actType(actDriverTarget(el), value, true);
         audit(sessionId, "type_secret", {
           slot: action.slot,
           target: auditTarget,
@@ -2985,42 +3044,23 @@ async function executeAct(
         break;
       }
       case "select": {
-        // Re-resolve against FRESH elements — the target may be the <select> or
-        // its <label>. Main-frame execution uses selectOption; frame execution
-        // uses selectInFrame. text is the fuzzy option matcher in both paths.
-        const fresh = (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements;
-        retainSessionElements(session, fresh);
-        const el =
-          compactV2Authorization === undefined
-            ? resolveTarget(fresh, resolutionTarget!)
-            : resolveAuthorizedCompactV2Target(session, fresh, compactV2Authorization);
-        if (el === null) {
-          if (session.compactV2Active) {
-            if (!internalAccess) throwCompactV2StaleRef();
-            throw new Error("select: internal live target changed");
-          }
-          const stale = staleTargetError(session, action.target, fresh);
-          if (stale !== null) throw stale;
-          throw new Error(
-            `select: no element matched target "${action.target}". Visible: ` +
-              fresh
-                .map((e) => `"${e.screenPath ?? elementRef(e)}"`)
-                .slice(0, 20)
-                .join(", "),
-          );
-        }
-        const selectFrame = frameTargetFor(el);
-        const committedText =
-          selectFrame !== null
-            ? await browser.selectInFrame(
-                selectFrame,
-                el.selector,
-                action.text,
-                compactV2ActionPage,
-              )
-            : compactV2ActionPage !== undefined
-              ? await browser.selectOptionOnPage(compactV2ActionPage, el.selector, action.text)
-              : await browser.selectOption(el.selector, action.text);
+        const el = (await resolveFreshActTarget(
+          session,
+          browser,
+          compactV2ActionPage,
+          compactV2Authorization,
+          resolutionTarget!,
+          internalAccess,
+          "select",
+          "select",
+          action.target,
+          true,
+        )).el;
+        const committedText = await browser.select(
+          actDriverTarget(el),
+          action.text,
+          compactV2ActionPage,
+        );
         session.committedSelectValues.set(
           compactV2CommittedSelectKey(session, el.selector),
           compactV2CommittedSelectValue(session, committedText),
@@ -3089,26 +3129,15 @@ async function executeAct(
           // the session promotable (see captureAndPromoteSession) (codex).
           try {
             if (action.kind === "click" || action.kind === "js_click") {
-              const method = action.kind;
-              if (compactV2ActionPage !== undefined && !browser.isActivePage(compactV2ActionPage)) {
-                actionPageAfter =
-                  (await adoptTabOpenedByClick(session, browser, async () => {
-                    if (method === "click") await browser.clickHandle(resolved.handle);
-                    else await browser.jsClickHandle(resolved.handle);
-                  })) ?? actionPageAfter;
-              } else {
-                actionPageAfter =
-                  (await adoptTabOpenedByClick(session, browser, async () => {
-                    if (method === "click")
-                      await browser.clickWithDispatchTracking({
-                        kind: "handle",
-                        handle: resolved.handle,
-                        method,
-                      });
-                    else await browser.jsClickHandle(resolved.handle);
-                  })) ?? actionPageAfter;
-              }
-            } else await browser.typeHandle(resolved.handle, action.text);
+              actionPageAfter =
+                (await adoptTabOpenedByClick(session, browser, async () => {
+                  await actClick({
+                    kind: "handle",
+                    handle: resolved.handle,
+                    method: action.kind,
+                  });
+                })) ?? actionPageAfter;
+            } else await actType({ kind: "handle", handle: resolved.handle }, action.text, false);
           } finally {
             await resolved.handle.dispose().catch(() => undefined);
           }
@@ -3128,91 +3157,32 @@ async function executeAct(
           break;
         }
         // Re-resolve against FRESH elements every act — never trust a stale index.
-        const fresh = (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements;
-        retainSessionElements(session, fresh);
-        // resolveTarget recomputes identities (incl. volatile positional-group
-        // fingerprints) from these FRESH elements, so a ref whose group fingerprint
-        // changed since the last observe resolves to null, not a survivor (#399).
-        const el =
-          compactV2Authorization === undefined
-            ? resolveTarget(fresh, resolutionTarget!)
-            : resolveAuthorizedCompactV2Target(session, fresh, compactV2Authorization);
-        if (el === null) {
-          if (session.compactV2Active) {
-            if (!internalAccess) throwCompactV2StaleRef();
-            throw new Error(`${action.kind}: internal live target changed`);
-          }
-          const stale = staleTargetError(session, action.target, fresh);
-          if (stale !== null) throw stale;
-          throw new Error(
-            `no element matched target "${action.target}". Visible: ` +
-              fresh
-                .map((e) => `"${e.screenPath ?? elementRef(e)}"`)
-                .slice(0, 20)
-                .join(", "),
-          );
-        }
+        const { el, fresh } = await resolveFreshActTarget(
+          session,
+          browser,
+          compactV2ActionPage,
+          compactV2Authorization,
+          resolutionTarget!,
+          internalAccess,
+          action.kind,
+          "",
+          action.target,
+          true,
+        );
         // Preserve frame identity (origin + path) for the frame-scoped fill.
         if (action.kind === "click" || action.kind === "js_click") {
-          const target = frameTargetFor(el);
-          const sourcePageIsActive =
-            compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage);
-          if (!sourcePageIsActive && compactV2ActionPage !== undefined) {
-            actionPageAfter =
-              (await adoptTabOpenedByClick(session, browser, async () => {
-                if (target !== null) {
-                  if (action.kind === "click") {
-                    await browser.clickInFrame(target, el.selector, compactV2ActionPage);
-                  } else {
-                    await browser.clickViaJsInFrame(target, el.selector, 0, compactV2ActionPage);
-                  }
-                } else if (action.kind === "click") {
-                  await browser.clickOnPage(compactV2ActionPage, el.selector);
-                } else {
-                  await browser.clickViaJsOnPage(compactV2ActionPage, el.selector);
-                }
-              })) ?? actionPageAfter;
-          } else if (action.kind === "click") {
-            actionPageAfter =
-              (await adoptTabOpenedByClick(session, browser, async () => {
-                await browser.clickWithDispatchTracking(
-                  target !== null
-                    ? { kind: "frame", frame: target, selector: el.selector, method: "click" }
-                    : { kind: "selector", selector: el.selector, method: "click" },
-                  undefined,
-                  async () => {
-                    if (target !== null) await browser.clickInFrame(target, el.selector);
-                    else await browser.click(el.selector);
-                  },
-                );
-              })) ?? actionPageAfter;
-          } else {
-            actionPageAfter =
-              (await adoptTabOpenedByClick(session, browser, async () => {
-                if (target !== null) await browser.clickViaJsInFrame(target, el.selector);
-                else await browser.clickViaJs(el.selector);
-              })) ?? actionPageAfter;
-          }
-        } else if (action.kind === "type" && frameTargetFor(el) !== null) {
-          clearCommittedSelectValue(session, el.selector);
-          await browser.typeInFrame(
-            frameTargetFor(el)!,
-            el.selector,
-            action.text,
-            false,
-            compactV2ActionPage,
-          );
+          actionPageAfter =
+            (await adoptTabOpenedByClick(session, browser, async () => {
+              await actClick({ ...actDriverTarget(el), method: action.kind });
+            })) ?? actionPageAfter;
         } else if (action.kind === "type") {
           clearCommittedSelectValue(session, el.selector);
-          if (compactV2ActionPage !== undefined) {
-            await browser.typeOnPage(compactV2ActionPage, el.selector, action.text);
-          } else {
-            await browser.type(el.selector, action.text);
-          }
+          const actTarget = actDriverTarget(el);
+          await actType(actTarget, action.text, false);
           // #635 fix (not a gate on typing): Shopify only enables delivery-rate
           // selection after the required address line is committed by
           // blur/change, not merely after the raw keystrokes land.
-          if (isRequiredShippingAddressLine1(el)) {
+          if (actTarget.kind === "selector" && isRequiredShippingAddressLine1(el)) {
             await browser.commitRequiredShippingAddressLine1(el.selector, compactV2ActionPage);
           }
         } else if (action.kind === "upload") {

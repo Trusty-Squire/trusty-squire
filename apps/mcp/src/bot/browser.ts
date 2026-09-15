@@ -1,7 +1,7 @@
 import type { CheckoutCard } from "./checkout.js";
 import { captureBoundScreenshot, type ScreenshotBinding } from "./screenshot-click.js";
 import { captureBrowserUseDOM, type BrowserUseCapture } from "./browser-use-capture.js";
-import type { BrowserDriver } from "./driver/types.js";
+import type { BrowserDriver, ClickMethod, DriverTarget, FrameTarget } from "./driver/types.js";
 import {
   CardValueOutputMask,
   compositePngCardMasks,
@@ -104,11 +104,7 @@ export function contextInitScriptsFor(options: {
   ];
 }
 
-export interface FrameTarget {
-  framePath: string;
-  frameOrigin: string;
-  frameUrl: string;
-}
+export type { FrameTarget };
 
 export type InjectCardField = "pan" | "cvv" | "exp_month" | "exp_year" | "exp" | "name";
 export type InjectCardFieldResult =
@@ -1445,16 +1441,24 @@ export class BrowserController implements BrowserDriver {
     return await this.goto(url, page);
   }
 
-  async select(selector: string, optionMatcher?: string): Promise<string> {
-    return await this.selectOption(selector, optionMatcher);
-  }
-
   async press(key: string, page?: Page | null): Promise<void> {
-    return await this.pressKey(key, page);
+    const target = page === undefined ? this.page : page;
+    if (!target) return;
+    await markOperatorMutationDispatchAttempted();
+    await target.keyboard.press(key).catch(() => {});
   }
 
   async scroll(direction: "up" | "down" | "top" | "bottom", page?: Page | null): Promise<void> {
-    return await this.scrollViewport(direction, page);
+    const target = page === undefined ? this.page : page;
+    if (!target) throw new Error("Browser not started");
+    await target.evaluate((dir: string) => {
+      const step = Math.round(window.innerHeight * 0.8);
+      if (dir === "bottom") window.scrollTo(0, document.body.scrollHeight);
+      else if (dir === "top") window.scrollTo(0, 0);
+      else if (dir === "up") window.scrollBy(0, -step);
+      else window.scrollBy(0, step);
+    }, direction);
+    await target.waitForTimeout(350);
   }
 
   async observe(page?: Page | null, settlePage?: boolean): Promise<BrowserUseCapture> {
@@ -1612,12 +1616,28 @@ export class BrowserController implements BrowserDriver {
     }
   }
 
-  async type(selector: string, text: string, sealed = false): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    await this.typeOnPage(this.page, selector, text, sealed);
+  // Contract C `type` verb: the driver owns the handle/frame/page dispatch.
+  async type(
+    target: DriverTarget,
+    text: string,
+    sealed = false,
+    page?: Page | null,
+  ): Promise<void> {
+    const p = page ?? undefined;
+    if (target.kind === "handle") {
+      await this.typeHandle(target.handle, text, sealed);
+      return;
+    }
+    if (target.kind === "frame") {
+      await this.typeInFrame(target.frame, target.selector, text, sealed, p);
+      return;
+    }
+    const active = p ?? this.page;
+    if (!active) throw new Error("Browser not started");
+    await this.typeOnPage(active, target.selector, text, sealed);
   }
 
-  async typeOnPage(page: Page, selector: string, text: string, sealed = false): Promise<void> {
+  private async typeOnPage(page: Page, selector: string, text: string, sealed = false): Promise<void> {
     await this.withModalInertNeutralized(
       selector,
       () => this.typeInner(page, selector, text, sealed),
@@ -2017,7 +2037,71 @@ export class BrowserController implements BrowserDriver {
     }
   }
 
-  async click(selector: string): Promise<void> {
+  // Contract C `click` verb: the driver owns the handle/frame/page dispatch
+  // and the tracked-vs-plain choice. Ordinary clicks on the active page run
+  // through dispatch tracking; js_click never does; an action page that is
+  // not the active page is dispatched untracked (pre-existing semantics).
+  async click(
+    target: DriverTarget & { method: ClickMethod },
+    page?: Page | null,
+  ): Promise<void> {
+    const p = page ?? undefined;
+    const tracked =
+      target.method === "click" && (p === undefined || this.isActivePage(p));
+    if (target.kind === "handle") {
+      if (tracked) {
+        await this.clickWithDispatchTracking({
+          kind: "handle",
+          handle: target.handle,
+          method: "click",
+        });
+      } else if (target.method === "click") {
+        await this.clickHandle(target.handle);
+      } else {
+        await this.jsClickHandle(target.handle);
+      }
+      return;
+    }
+    if (tracked) {
+      await this.clickWithDispatchTracking(
+        target.kind === "frame"
+          ? { kind: "frame", frame: target.frame, selector: target.selector, method: "click" }
+          : { kind: "selector", selector: target.selector, method: "click" },
+        undefined,
+        async () => {
+          if (target.kind === "frame") await this.clickInFrame(target.frame, target.selector, p);
+          else if (p !== undefined) await this.clickOnPage(p, target.selector);
+          else await this.clickActivePageSelector(target.selector);
+        },
+      );
+      return;
+    }
+    if (target.kind === "frame") {
+      if (target.method === "click") {
+        await this.clickInFrame(target.frame, target.selector, p);
+      } else {
+        await this.clickViaJsInFrame(target.frame, target.selector, 0, p);
+      }
+      return;
+    }
+    if (target.method === "click") {
+      if (p !== undefined) {
+        await this.clickOnPage(p, target.selector);
+      } else {
+        await this.clickActivePageSelector(target.selector);
+      }
+      return;
+    }
+    if (p !== undefined) {
+      await p.locator(target.selector).evaluate((element) => (element as HTMLElement).click());
+    } else {
+      await this.clickViaJs(target.selector);
+    }
+  }
+
+  // The positional main-page click with modal-inert neutralization: the
+  // tracked-click fallback and the OAuth dispatch path land here.
+  private async clickActivePageSelector(selector: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     await this.withModalInertNeutralized(selector, (modalActive) =>
       this.clickInner(selector, modalActive),
@@ -2769,10 +2853,6 @@ export class BrowserController implements BrowserDriver {
     await page.locator(selector).click({ timeout: 8000, noWaitAfter: true });
   }
 
-  async clickViaJsOnPage(page: Page, selector: string): Promise<void> {
-    await page.locator(selector).evaluate((element) => (element as HTMLElement).click());
-  }
-
   async typeHandle(handle: ElementHandle<Element>, text: string, sealed = false): Promise<void> {
     const ownerFrame = await handle.ownerFrame();
     if (ownerFrame === null) throw new Error("locator target has no owning frame");
@@ -2795,7 +2875,7 @@ export class BrowserController implements BrowserDriver {
   // "copy key": a JS click populated the clipboard in a probe where the
   // positional click did not). Used as a copy-extraction fallback; the preceding
   // real click supplies the transient user-activation writeText needs.
-  async clickViaJs(selector: string, index = 0): Promise<void> {
+  private async clickViaJs(selector: string, index = 0): Promise<void> {
     if (!this.page) return;
     const safeIndex = Math.max(0, Math.floor(index));
     await this.page
@@ -2868,7 +2948,7 @@ export class BrowserController implements BrowserDriver {
     // 0 or 1 match: the normal click path handles it (and surfaces a
     // clean "waiting for selector" timeout when the count is 0).
     if (count <= 1) {
-      await this.click(selector);
+      await this.clickActivePageSelector(selector);
       return;
     }
     const texts: string[] = [];
@@ -3238,21 +3318,6 @@ export class BrowserController implements BrowserDriver {
   // sit outside the viewport and so never enter the element inventory). Scrolls
   // the page by ~80% of a viewport (or to an extreme); the next observe picks
   // up the newly-visible elements.
-  async scrollViewport(
-    direction: "down" | "up" | "bottom" | "top" = "down",
-    page: Page | null = this.page,
-  ): Promise<void> {
-    if (!page) throw new Error("Browser not started");
-    await page.evaluate((dir: string) => {
-      const step = Math.round(window.innerHeight * 0.8);
-      if (dir === "bottom") window.scrollTo(0, document.body.scrollHeight);
-      else if (dir === "top") window.scrollTo(0, 0);
-      else if (dir === "up") window.scrollBy(0, -step);
-      else window.scrollBy(0, step);
-    }, direction);
-    await page.waitForTimeout(350);
-  }
-
   // Pick a valid option for either a native <select> OR a custom
   // ARIA combobox (Radix, Headless UI, React Aria, cmdk — F11). The
   // bot must not call type() on a select-shaped element (Sentry,
@@ -3272,6 +3337,24 @@ export class BrowserController implements BrowserDriver {
   // against the option's visible text. When undefined, picks the
   // first option — preserves the existing behavior for native
   // selects whose contents are interchangeable (country pickers).
+  // Contract C `select` verb: the driver owns the frame/page dispatch.
+  async select(
+    target: DriverTarget,
+    optionMatcher?: string,
+    page?: Page | null,
+  ): Promise<string> {
+    const p = page ?? undefined;
+    if (target.kind === "frame") {
+      return await this.selectInFrame(target.frame, target.selector, optionMatcher, p);
+    }
+    if (target.kind !== "selector") {
+      throw new Error("select: handle targets are not supported");
+    }
+    const active = p ?? this.page;
+    if (!active) throw new Error("Browser not started");
+    return await this.selectOptionOnPage(active, target.selector, optionMatcher);
+  }
+
   async selectOption(selector: string, optionMatcher?: string): Promise<string> {
     if (!this.page) throw new Error("Browser not started");
     return await this.selectOptionOnPage(this.page, selector, optionMatcher);
@@ -8103,7 +8186,7 @@ export class BrowserController implements BrowserDriver {
     this.oauthProviderPageClosed = false;
     // Only the current page's creation-attributed popup can carry this handshake.
     const popupPromise = this.page.waitForEvent("popup", { timeout: 8000 }).catch(() => null);
-    await this.click(selector);
+    await this.clickActivePageSelector(selector);
     const popup = await popupPromise;
     if (popup !== null && popup !== this.page && this.ownedPages.has(popup)) {
       this.page = popup;
@@ -8465,7 +8548,7 @@ export class BrowserController implements BrowserDriver {
             await this.clickWithDispatchTracking(
               { kind: "selector", selector, method: "click" },
               undefined,
-              () => this.click(selector),
+              () => this.clickActivePageSelector(selector),
             );
           } else {
             await dispatchAuthorizedClick(async (handle, confirmTarget) => {
@@ -9035,7 +9118,7 @@ export class BrowserController implements BrowserDriver {
       .then((p): Page | null => p)
       .catch((): Page | null => null);
 
-    await this.click(triggerSelector);
+    await this.clickActivePageSelector(triggerSelector);
 
     // On-demand One-Tap: when the page loaded the GSI client but rendered no
     // static button, the click above hits an in-page affordance that never
@@ -9136,12 +9219,6 @@ export class BrowserController implements BrowserDriver {
   // Press a keyboard key (e.g. "Escape" to dismiss a focus-trapped modal that
   // exposes no in-DOM close control). Best-effort. Used by the nav-search
   // overlay handler's dismiss fallback.
-  async pressKey(key: string, page: Page | null = this.page): Promise<void> {
-    if (!page) return;
-    await markOperatorMutationDispatchAttempted();
-    await page.keyboard.press(key).catch(() => {});
-  }
-
   async focusedElementLabels(page: Page | null = this.page): Promise<string[]> {
     if (!page) return [];
     const labels: string[] = [];

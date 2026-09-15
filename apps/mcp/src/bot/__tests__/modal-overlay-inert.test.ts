@@ -44,6 +44,11 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
 import { BrowserController } from "../browser.js";
 
+// Contract C click/type verbs take a DriverTarget now.
+const clickTarget = (selector: string) =>
+  ({ kind: "selector", selector, method: "click" }) as const;
+const typeTarget = (selector: string) => ({ kind: "selector", selector }) as const;
+
 let browser: Browser;
 
 async function pageFor(url: string): Promise<{ ctrl: BrowserController; page: Page }> {
@@ -258,7 +263,7 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
       // The dialog's button is actually clickable — pre-fix this call hung
       // until Playwright's actionability timeout because inert blocked hit
       // testing for the real click() path too.
-      await ctrl.click(confirmBtn!.selector);
+      await ctrl.click(clickTarget(confirmBtn!.selector));
       expect(await page.title()).toBe("CONFIRM_CLICKED");
 
       // inert is restored on the background wrapper after the click — the
@@ -291,7 +296,7 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
       // timeout rather than letting it hang the suite: the click must not
       // resolve within the window.
       const outcome = await Promise.race([
-        ctrl.click(bg.selector).then(() => "resolved" as const),
+        ctrl.click(clickTarget(bg.selector)).then(() => "resolved" as const),
         new Promise<"timed_out">((resolve) => setTimeout(() => resolve("timed_out"), 2000)),
       ]);
       expect(outcome).toBe("timed_out");
@@ -304,7 +309,7 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
   it("types into a field inside the inert-ancestor dialog", async () => {
     const { ctrl, page } = await pageFor(nonPortaledDialogFixture());
     try {
-      await ctrl.type("#transfer-note", "Ready to transfer");
+      await ctrl.type(typeTarget("#transfer-note"), "Ready to transfer");
       expect(await page.locator("#transfer-note").inputValue()).toBe("Ready to transfer");
       expect(
         await page.evaluate(
@@ -344,7 +349,7 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
       const closeConfirm = before.find((e) => e.id === "close-confirm-btn");
       expect(closeConfirm).toBeDefined();
 
-      await ctrl.click(closeConfirm!.selector);
+      await ctrl.click(clickTarget(closeConfirm!.selector));
       expect(await page.title()).toBe("CLOSE_CONFIRM_CLICKED");
       expect(
         await page.evaluate(
@@ -355,7 +360,7 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
       const after = await ctrl.extractInteractiveElements();
       const bg = after.find((e) => e.id === "bg-btn");
       expect(bg?.topmost).toBe(true);
-      await ctrl.click(bg!.selector);
+      await ctrl.click(clickTarget(bg!.selector));
       expect(await page.title()).toBe("BG_CLICKED");
     } finally {
       await page.close();
@@ -369,7 +374,7 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
       const closeBtn = before.find((e) => e.id === "remnant-close-btn");
       expect(closeBtn).toBeDefined();
 
-      await ctrl.click(closeBtn!.selector);
+      await ctrl.click(clickTarget(closeBtn!.selector));
       expect(await page.title()).toBe("REMNANT_CLOSE_CLICKED");
 
       // The click's handler hid the dialog via .close() (the <dialog> stays
@@ -391,7 +396,7 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
       const after = await ctrl.extractInteractiveElements();
       const bg = after.find((e) => e.id === "remnant-bg-btn");
       expect(bg?.topmost).toBe(true);
-      await ctrl.click(bg!.selector);
+      await ctrl.click(clickTarget(bg!.selector));
       expect(await page.title()).toBe("REMNANT_BG_CLICKED");
     } finally {
       await page.close();
@@ -401,7 +406,7 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
   it("does not re-lock the background when a dialog is hidden by its parent", async () => {
     const { ctrl, page } = await pageFor(ancestorHiddenDialogFixture());
     try {
-      await ctrl.click("#hide-parent-btn");
+      await ctrl.click(clickTarget("#hide-parent-btn"));
 
       expect(
         await page.evaluate(() => ({
@@ -412,7 +417,7 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
         })),
       ).toEqual({ overlayDisplay: "none", dialogDisplay: "block", wrapperInert: false });
 
-      await ctrl.click("#hidden-parent-bg");
+      await ctrl.click(clickTarget("#hidden-parent-bg"));
       expect(await page.title()).toBe("HIDDEN_PARENT_BG_CLICKED");
     } finally {
       await page.close();
@@ -426,7 +431,7 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
       const next = before.find((e) => e.id === "next-btn");
       expect(next).toBeDefined();
 
-      await ctrl.click(next!.selector);
+      await ctrl.click(clickTarget(next!.selector));
       expect(
         await page.evaluate(
           () => document.getElementById("app-wrapper")?.hasAttribute("inert") === true,
@@ -438,7 +443,7 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
       expect(stepTwo).toBeDefined();
       expect(stepTwo?.topmost).toBe(true);
 
-      await ctrl.click(stepTwo!.selector);
+      await ctrl.click(clickTarget(stepTwo!.selector));
       expect(await page.title()).toBe("STEP_TWO_CLICKED");
     } finally {
       await page.close();
@@ -453,7 +458,7 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
       expect(dialogOption).toBeDefined();
       expect(dialogOption?.topmost).toBe(true);
 
-      await ctrl.click(dialogOption!.selector);
+      await ctrl.click(clickTarget(dialogOption!.selector));
       expect(await page.title()).toBe("DIALOG_OPTION_CLICKED");
     } finally {
       await page.close();
@@ -474,7 +479,7 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
       expect(confirmBtn?.container).toMatch(/^form:/);
       expect(confirmBtn?.inDialog).toBe(true);
 
-      await ctrl.click(confirmBtn!.selector);
+      await ctrl.click(clickTarget(confirmBtn!.selector));
       expect(await page.title()).toBe("FORM_CONFIRM_CLICKED");
     } finally {
       await page.close();
@@ -490,7 +495,7 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
       expect(confirmBtn).toBeDefined();
       expect(confirmBtn?.topmost).toBe(true);
 
-      await ctrl.click(confirmBtn!.selector);
+      await ctrl.click(clickTarget(confirmBtn!.selector));
       expect(await page.title()).toBe("SHADOW_CONFIRM_CLICKED");
       expect(
         await page.evaluate(() => {
@@ -567,7 +572,7 @@ describe("modal overlay blindness — CDK sibling-portal dialog stays correct (r
       // occluded by the backdrop/dialog stacked visually on top of it —
       // ordinary occlusion, not the inert-hit-test-bypass case.
       expect(bg?.topmost).toBe(false);
-      await ctrl.click(okBtn!.selector);
+      await ctrl.click(clickTarget(okBtn!.selector));
     } finally {
       await page.close();
     }

@@ -289,6 +289,9 @@ vi.mock("../browser.js", async (importOriginal) => ({
         h.mainDocumentEpoch += 1;
       }
     }
+    async navigate(url: string, _page?: unknown): Promise<void> {
+      await this.goto(url);
+    }
     currentUrl(): string {
       return this.detached ? this.detachedUrl : h.currentUrl;
     }
@@ -420,10 +423,10 @@ vi.mock("../browser.js", async (importOriginal) => ({
       h.captchaToken = true;
       return true;
     }
-    async scrollViewport(direction: string): Promise<void> {
+    async scroll(direction: string, _page?: unknown): Promise<void> {
       h.scrolls.push(direction);
     }
-    async type(selector: string, text: string, sealed = false): Promise<string[]> {
+    async typeSelector(selector: string, text: string, sealed = false): Promise<string[]> {
       h.typed.push({ selector, text, ...(sealed ? { sealed: true as const } : {}) });
       if (h.typeError !== null) throw h.typeError;
       for (const element of h.elements as Array<Record<string, unknown>>) {
@@ -438,13 +441,25 @@ vi.mock("../browser.js", async (importOriginal) => ({
           )
         : [];
     }
-    async typeOnPage(
-      _page: unknown,
-      selector: string,
+    async type(
+      target: { kind: "selector" | "frame" | "handle"; selector?: string; frame?: unknown },
       text: string,
       sealed = false,
+      _page?: unknown,
     ): Promise<string[]> {
-      return await this.type(selector, text, sealed);
+      if (target.kind === "frame") {
+        return await this.typeInFrame(
+          target.frame as { frameUrl: string },
+          target.selector!,
+          text,
+          sealed,
+        );
+      }
+      if (target.kind === "handle") {
+        await this.typeHandle(target, text, sealed);
+        return [];
+      }
+      return await this.typeSelector(target.selector!, text, sealed);
     }
     async commitRequiredShippingAddressLine1(selector: string): Promise<void> {
       h.requiredShippingAddressCommits.push(selector);
@@ -472,8 +487,18 @@ vi.mock("../browser.js", async (importOriginal) => ({
       }
       return committed;
     }
-    async selectOptionOnPage(_page: unknown, selector: string, matcher?: string): Promise<string> {
-      return await this.selectOption(selector, matcher);
+    async select(
+      target: { kind: "selector" | "frame" | "handle"; selector?: string; frame?: unknown },
+      matcher?: string,
+      _page?: unknown,
+    ): Promise<string> {
+      if (target.kind === "frame") {
+        return await this.selectInFrame(target.frame as { frameUrl: string }, target.selector!, matcher);
+      }
+      if (target.kind !== "selector") {
+        throw new Error("select: handle targets are not supported");
+      }
+      return await this.selectOption(target.selector!, matcher);
     }
     async setPhoneCountry(country: string): Promise<void> {
       h.phoneCountries.push(country);
@@ -485,7 +510,42 @@ vi.mock("../browser.js", async (importOriginal) => ({
     async hasPhoneCountryControl(): Promise<boolean> {
       return h.phoneCountry !== null;
     }
-    async click(selector?: string): Promise<void> {
+    async click(
+      target: {
+        kind: "selector" | "frame" | "handle";
+        selector?: string;
+        frame?: { frameUrl: string };
+        method: "click" | "js_click";
+      },
+      page?: unknown,
+    ): Promise<void> {
+      if (target.kind === "handle") {
+        if (target.method === "click") {
+          await this.clickWithDispatchTracking(target, undefined, () => this.clickHandle());
+        } else {
+          await this.jsClickHandle();
+        }
+        return;
+      }
+      if (target.kind === "frame") {
+        if (target.method === "click") {
+          await this.clickWithDispatchTracking(target, undefined, () =>
+            this.clickInFrame(target.frame!, target.selector!, page),
+          );
+        } else {
+          await this.clickViaJsInFrame(target.frame!, target.selector!);
+        }
+        return;
+      }
+      if (target.method === "click") {
+        await this.clickWithDispatchTracking(target, undefined, () =>
+          this.clickSelector(target.selector, page),
+        );
+      } else {
+        await this.clickViaJs();
+      }
+    }
+    async clickSelector(selector?: string, _page?: unknown): Promise<void> {
       h.clickCalls += 1;
       await h.captureClick?.();
       if (selector !== undefined) {
@@ -516,10 +576,15 @@ vi.mock("../browser.js", async (importOriginal) => ({
     async clickViaJs(): Promise<void> {
       h.jsClickCalls += 1;
     }
-    async clickInFrame(target: { frameUrl: string }, selector: string): Promise<void> {
+    async clickInFrame(target: { frameUrl: string }, selector: string, _page?: unknown): Promise<void> {
       h.frameClicks.push(`${target.frameUrl}|${selector}`);
     }
-    async clickViaJsInFrame(target: { frameUrl: string }, selector: string): Promise<void> {
+    async clickViaJsInFrame(
+      target: { frameUrl: string },
+      selector: string,
+      _index?: number,
+      _page?: unknown,
+    ): Promise<void> {
       h.frameJsClicks.push(`${target.frameUrl}|${selector}`);
     }
     async clickWithDispatchTracking(
@@ -559,7 +624,7 @@ vi.mock("../browser.js", async (importOriginal) => ({
           if (target.method === "click") h.frameClicks.push(destination);
           else h.frameJsClicks.push(destination);
         } else {
-          await this.click();
+          await this.clickSelector();
         }
       }
       if (failure !== null) {
@@ -597,6 +662,7 @@ vi.mock("../browser.js", async (importOriginal) => ({
       target: { frameUrl: string },
       selector: string,
       matcher?: string,
+      _page?: unknown,
     ): Promise<string> {
       h.frameSelects.push({ frameUrl: target.frameUrl, selector, matcher });
       let committed = matcher ?? "";
@@ -713,6 +779,9 @@ vi.mock("../browser.js", async (importOriginal) => ({
     }
     async pressKey(key: string): Promise<void> {
       h.pressedKeys.push(key);
+    }
+    async press(key: string, _page?: unknown): Promise<void> {
+      await this.pressKey(key);
     }
     async focusedElementLabels(): Promise<string[]> {
       return h.focusedLabels;
@@ -1682,6 +1751,81 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/signup" });
     await act(started.session_id, { kind: "goto", url: "https://metrics.example.net/stats" });
     expect(h.gotos).toContain("https://metrics.example.net/stats");
+  });
+
+  it("dispatches each act kind through exactly one Contract C driver verb", async () => {
+    h.elements = [
+      elem({
+        index: 0,
+        tag: "button",
+        role: "button",
+        visibleText: "Continue",
+        selector: "#continue",
+      }),
+      elem({
+        index: 1,
+        tag: "input",
+        type: "text",
+        role: "textbox",
+        labelText: "Email",
+        selector: "#email",
+      }),
+      elem({
+        index: 2,
+        tag: "select",
+        role: "combobox",
+        labelText: "Country",
+        selector: "#country",
+        selectOptions: [{ value: "jp", text: "Japan" }],
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    const refs = domRefs(started);
+
+    // click → click
+    await act(started.session_id, { kind: "click", target: refs[0]! });
+    expect(h.clickCalls).toBe(1);
+    expect(h.jsClickCalls).toBe(0);
+
+    // js_click → click (driver-dispatched js path)
+    await act(started.session_id, { kind: "js_click", target: refs[0]! });
+    expect(h.jsClickCalls).toBe(1);
+
+    // type → type
+    await act(started.session_id, { kind: "type", target: refs[1]!, text: "person@example.test" });
+    expect(h.typed).toEqual([{ selector: "#email", text: "person@example.test" }]);
+
+    // select → select
+    await act(started.session_id, { kind: "select", target: refs[2]!, text: "Japan" });
+    expect(h.selected).toEqual([{ selector: "#country", matcher: "Japan" }]);
+
+    // type_secret → type (sealed)
+    stashSecretSlot(started.session_id, "card", "4111111111111111");
+    await act(started.session_id, { kind: "type_secret", target: refs[1]!, slot: "card" });
+    expect(h.typed[1]).toEqual({
+      selector: "#email",
+      text: "4111111111111111",
+      sealed: true,
+    });
+
+    // goto → navigate (last: it rolls the document epoch and stales the refs)
+    await act(started.session_id, { kind: "goto", url: "https://shop.example.com/next" });
+    expect(h.gotos).toContain("https://shop.example.com/next");
+
+    // scroll → scroll
+    await act(started.session_id, { kind: "scroll", direction: "down" });
+    expect(h.scrolls).toEqual(["down"]);
+
+    // press → press
+    await act(started.session_id, { kind: "press", key: "Enter" });
+    expect(h.pressedKeys).toEqual(["Enter"]);
+
+    // No act kind leaked into a frame/handle/locator primitive.
+    expect(h.frameClicks).toEqual([]);
+    expect(h.frameTypes).toEqual([]);
+    expect(h.frameSelects).toEqual([]);
+    expect(h.locatorClickCalls).toBe(0);
+    expect(h.locatorTypeCalls).toEqual([]);
   });
 
   it("keeps start metadata, rejects locators, and binds a handle to its current page snapshot", async () => {
