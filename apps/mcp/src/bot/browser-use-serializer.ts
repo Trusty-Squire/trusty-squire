@@ -39,6 +39,8 @@ export interface BrowserUseNode {
   formAssociated?: boolean;
   axRole: string | null;
   axProperties: Array<{ name: string; value: unknown }>;
+  /** Chrome's own `ignored` verdict for this node's AX representation. */
+  axIgnored?: boolean;
   axChildIds: unknown[] | null;
   shadowType: string | null;
   hiddenElements: Array<{
@@ -226,6 +228,68 @@ const cap = (s: string, n = 100): string =>
 const pyString = (v: unknown): string =>
   v === null ? "None" : typeof v === "boolean" ? (v ? "True" : "False") : String(v);
 
+/**
+ * Chrome's own accessibility description of an operable control (C1),
+ * resolved structurally instead of by role name. A node is operable when the
+ * AX tree presents it as unignored, not hidden, and focusable (or disabled —
+ * still a widget the tree announces) AND it has no operable descendant: the
+ * INNERMOST operable node is the control, its container is not. Whether "this
+ * node is not the click target, its children are" is a property of the TREE,
+ * which Chrome already gives us (children, contentDocument) — not of a role
+ * name. Composite-widget containers (radiogroup, menu, tablist, tree, grid,
+ * toolbar…) fall out because their items/tabs/cells are emitted individually;
+ * document/page surfaces fall out because their content is; a collapsed
+ * combobox with no operable children, an unfamiliar role, and a focusable
+ * `<img tabindex="0">` acting as a button all come through. CSS presentation
+ * such as `opacity:0` behind a styled label (Oura's payment-method chooser)
+ * must not remove a control from the observation. The browser's AX verdict
+ * decides what counts as a control — there is no role-name set anywhere in
+ * this predicate.
+ */
+export function browserUseAxOperable(n: BrowserUseNode): boolean {
+  return axSelfOperable(n) && !hasOperableAxDescendant(n);
+}
+
+/** The AX verdict for a single node, without the descendant check. */
+function axSelfOperable(
+  n: Pick<BrowserUseNode, "axRole" | "axProperties" | "axIgnored">,
+): boolean {
+  return (
+    n.axRole !== null &&
+    n.axIgnored !== true &&
+    !n.axProperties.some((p) => p.name === "hidden" && p.value) &&
+    (n.axProperties.some((p) => p.name === "focusable" && p.value === true) ||
+      n.axProperties.some((p) => p.name === "disabled" && p.value === true))
+  );
+}
+
+const operableDescendantCache = new WeakMap<BrowserUseNode, boolean>();
+
+/**
+ * Whether any AX-backed descendant of `n` would itself count as operable.
+ * Frame documents count through `contentDocument` (a frame's fields make the
+ * frame host a container, not a control); shadow-root children are ordinary
+ * `children`. Memoized per node — capture node objects are immutable
+ * projections of one snapshot, so a WeakMap is safe to share across captures.
+ */
+function hasOperableAxDescendant(n: BrowserUseNode): boolean {
+  const cached = operableDescendantCache.get(n);
+  if (cached !== undefined) return cached;
+  // Set before recursing: the DOM/AX projection is acyclic, and the
+  // placeholder makes a malformed tree fail closed (no emission) not loop.
+  operableDescendantCache.set(n, false);
+  let found = false;
+  const children = n.contentDocument ? [...n.children, n.contentDocument] : n.children;
+  for (const child of children) {
+    if (axSelfOperable(child) || hasOperableAxDescendant(child)) {
+      found = true;
+      break;
+    }
+  }
+  operableDescendantCache.set(n, found);
+  return found;
+}
+
 export function browserUseInteractive(n: BrowserUseNode, canonical = false): boolean {
   const t = tag(n),
     a = n.attributes;
@@ -257,7 +321,15 @@ export function browserUseInteractive(n: BrowserUseNode, canonical = false): boo
       ].some((key) => key in a) ||
       ["command", "commandfor", "popovertarget"].some((key) => key in a) ||
       customInteractiveRoles.has(a.role ?? "") ||
-      customInteractiveRoles.has(n.axRole ?? "") ||
+      // The AX conjunct reuses browserUseAxOperable's verdict (unignored, not
+      // hidden, focusable-or-disabled, no operable descendant), so a node the
+      // browser presents as operable (treeitem, menuitemcheckbox,
+      // ToggleButton…) is not re-filtered here by an allow-list two lines
+      // later. The authored-attribute allow-list is a deliberate supplement,
+      // not a contradiction: it reaches mouse-operable widgets whose role the
+      // author declared but which Chrome marks non-focusable (invisible to
+      // keyboard operation and therefore outside the AX charter).
+      browserUseAxOperable(n) ||
       n.axRole === "listbox" ||
       n.axProperties.some((p) => ["editable", "settable"].includes(p.name) && p.value === true)
     );
@@ -806,6 +878,7 @@ export function serializeBrowserUseDOM(
       !(
         (n.snapshot && n.visible) ||
         n.scrollable ||
+        (efficient && browserUseAxOperable(n)) ||
         children.length ||
         (t === "input" && n.attributes.type === "file")
       )
@@ -856,6 +929,7 @@ export function serializeBrowserUseDOM(
         n.interactive =
           isInteractive(o) &&
           ((o.snapshot && o.visible) ||
+            (efficient && browserUseAxOperable(o)) ||
             (t === "input" && a.type === "file") ||
             (!o.snapshot &&
               inShadow &&

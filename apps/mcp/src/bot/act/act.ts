@@ -1005,6 +1005,10 @@ async function executeAct(
             outputFormat,
             outputFormat === "compact",
             compactMapEmitted,
+            undefined,
+            // E4: echo the acted control's current row (w=acted) in the delta
+            // so a write is confirmable from its own result.
+            compactV2Authorization?.row?.ref,
           );
   const actionDocAfter = (() => {
     try {

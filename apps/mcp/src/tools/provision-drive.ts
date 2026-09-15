@@ -161,13 +161,14 @@ const CONTROL_QUERY_CONTRACT =
   "b=button, l=link, t=textbox, s=select, c=checkbox, r=radio, tb=tab, m=menuitem, or f=file; other roles are literal (e.g. slider or generic for a listener container). " +
   "facts is a `|`-joined `@label` alias followed by present s=state (c=checked, u=unchecked, d=disabled, r=required), " +
   "v=offscreen when outside the viewport, a=action, f=field, q=choice-position/total, and x=s same-origin or x=x cross-origin frame; absent x means main frame. " +
+  "nf=1 marks a listener container that carries a field name but is not itself fillable — its fillable field is emitted separately; fill that one. " +
   "Query matches include m=n (exact name), m=r (exact role), m=t (local text), or m=c (explicit form/fieldset/dialog context), ranked in that order. " +
   "semantic.blocked=true and semantic.blockers report visible verification instructions or validation errors independently of stage; stage=browse does not mean unblocked. " +
   "Cursors page an immutable snapshot and require the same query and role; document changes invalidate them. A cursorless query captures fresh controls and semantics. " +
   "Use overflow.next_cursor to page safe_table. A cursor from hint_overflow returns `hint` and pages with hint_overflow.next_cursor. ";
 
 const ACTION_FORMAT_NOTE =
-  "The action response is the compact `browser-use-control-query` control map by default: after a compact map on the same document, `delta:true` carries changed/new controls in `safe_table` and departed refs in `removed`, never the verbatim DOM. " +
+  "The action response is the compact `browser-use-control-query` control map by default: after a compact map on the same document, `delta:true` carries changed/new controls in `safe_table` and departed refs in `removed`, never the verbatim DOM. The acted control's own current row is always included, marked `w=acted`, so a write is confirmable from its own result. " +
   'Pass `format:"full"` to receive the `browser-use-dom` tree instead. After inject_card releases a card, its PAN (complete ordinary spellings and prefixes of at least eight digits) and security code are replaced in every normal observation; all other emitted content stays verbatim. ';
 
 const ACTION_FORMATS = ["compact", "full"] as const;

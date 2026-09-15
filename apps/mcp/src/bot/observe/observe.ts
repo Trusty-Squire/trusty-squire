@@ -26,6 +26,7 @@ import {
   type SafeObservationIndexV2,
   type SafePageSemanticsV2,
   type SafeStageV2,
+  wireRoleToSafeRoleV2,
 } from "../compact-observation-v2.js";
 import {
   completeOAuthTransitionRecovery,
@@ -117,7 +118,8 @@ function sameCompactV2Control(left: SafeControlV2, right: SafeControlV2): boolea
     left.label === right.label &&
     left.choice === right.choice &&
     left.frame === right.frame &&
-    left.match === right.match
+    left.match === right.match &&
+    left.notFillable === right.notFillable
   );
 }
 
@@ -537,6 +539,7 @@ function compactV2Observation(
   compactActionDelta = false,
   compactMapEmitted = true,
   forceFullDOM = false,
+  actedRef?: string,
 ): Observation {
   rememberCompactV2SourcePage(session, sourcePage);
   const elements = capture.elements;
@@ -599,9 +602,16 @@ function compactV2Observation(
     previous.compactMapEmitted === true;
   const currentRefs = new Set(safe.rows.map((row) => row.ref));
   const compactRows = canCompactActionDelta
-    ? safe.rows.filter((row) => {
+    ? safe.rows.flatMap((row) => {
+        // E4: the acted control's current row always travels in the action
+        // delta, marked w=acted, even when nothing wire-visible changed —
+        // otherwise a successful write returns an empty safe_table and the
+        // only way to confirm it is a full format:full re-read. The handle is
+        // minted from physical node identity, so it survives the benign
+        // re-render the action itself may have caused.
+        if (actedRef !== undefined && row.ref === actedRef) return [{ ...row, acted: true as const }];
         const prior = previous.byRef.get(row.ref);
-        return prior === undefined || !sameCompactV2Control(prior, row);
+        return prior === undefined || !sameCompactV2Control(prior, row) ? [row] : [];
       })
     : safe.rows;
   const compactRemoved = canCompactActionDelta
@@ -752,10 +762,15 @@ async function observeQueryOwned(
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const sourcePage = operationPageForSession(session);
   const needle = norm(query);
-  const unfiltered = needle.length === 0 && role === undefined;
+  // A role filter is stated in wire form — the letters (and literal roles) the
+  // compact map actually emits (C5): filtering `role:"s"` against the internal
+  // `"select"` word made every observation with a role filter return an empty
+  // safe_table for controls the same session had just emitted.
+  const roleFilter = role === undefined ? undefined : wireRoleToSafeRoleV2(role);
+  const unfiltered = needle.length === 0 && roleFilter === undefined;
   const cursorScope = unfiltered
     ? compactV2ControlCursorScope(session)
-    : compactV2QueryCursorScope(session, needle, role);
+    : compactV2QueryCursorScope(session, needle, roleFilter);
   if (cursor !== undefined) {
     if (unfiltered) {
       try {
@@ -813,7 +828,7 @@ async function observeQueryOwned(
     liveByLegacy.set(legacy, element);
   }
   const ranked = index.rows.flatMap((row, position) => {
-    if (role !== undefined && row.role !== role) return [];
+    if (roleFilter !== undefined && row.role !== roleFilter) return [];
     if (needle.length === 0) return [{ row, position, rank: 0 }];
     const legacy = index.byRef.get(row.ref);
     const element = legacy === undefined ? undefined : liveByLegacy.get(legacy);
@@ -917,6 +932,7 @@ export async function observeSession(
   compactActionDelta = false,
   compactMapEmitted = true,
   forceFullDOM = false,
+  actedRef?: string,
 ): Promise<Observation> {
   if (sourcePage === undefined) {
     const hadOAuthCompletionSource =
@@ -988,6 +1004,7 @@ export async function observeSession(
       compactActionDelta,
       compactMapEmitted,
       forceFullDOM,
+      actedRef,
     );
   } catch (err) {
     const oauth = session.browser ? oauthTransitionStatus(session.browser) : undefined;

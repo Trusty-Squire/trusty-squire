@@ -7018,6 +7018,13 @@ export interface InteractiveElement {
   disabled?: boolean | null;
   /** Native or ARIA required state captured with the interactive DOM record. */
   required?: boolean | null;
+  /**
+   * Per-field validation state (C7): the browser's AX `invalid` property or an
+   * authored `aria-invalid="true"`. Surfaced so the operator can confirm a
+   * card/field landed correctly before money moves, without rendering the
+   * value anywhere. Absent/null means "not captured or not invalid".
+   */
+  invalid?: boolean | null;
   // <select>-only: the visible text of the currently-selected option
   // and a short list of available option labels (capped to 8 — long
   // pickers like countries blow the inventory rendering). Lets the

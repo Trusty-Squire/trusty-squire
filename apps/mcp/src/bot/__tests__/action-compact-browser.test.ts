@@ -53,6 +53,12 @@ it("returns compact action payloads from a real reveal page and verbatim DOM on 
     transcript.push({tool: "operate_type", arguments: typeArgs, response: typed});
     expect(await page.locator("#name").inputValue()).toBe("Demo key");
     expect(typed).toMatchObject({format: "browser-use-control-query"});
+    // E4: typing changes nothing wire-visible, so the delta used to come back
+    // empty and the write could only be confirmed with a full re-read. The
+    // acted control's own row now travels in the delta, marked w=acted.
+    expect((typed as unknown as {safe_table: string[][]}).safe_table).toEqual([
+      [ref("@key-name"), "t", expect.stringContaining("w=acted")],
+    ]);
     const pressArgs = {session_id: sessionId, key: "Tab"};
     const pressed = await operatePressTool.handler(pressArgs, null);
     transcript.push({tool: "operate_press", arguments: pressArgs, response: pressed});

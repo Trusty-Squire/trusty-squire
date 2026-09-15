@@ -136,6 +136,19 @@ export interface SafeControlV2 {
   frame: "main" | "same_origin" | "cross_origin";
   /** Query-only match provenance; absent from the default action map. */
   match?: SafeQueryMatchV2;
+  /**
+   * Action-delta-only marker on the acted control's row. Emitted even when
+   * nothing wire-visible changed so a write is confirmable from its own
+   * result (E4) instead of forcing a full format:full re-read.
+   */
+  acted?: true;
+  /**
+   * E3: a listener container that carries a field name (f=) but is not
+   * itself fillable — its fillable field is emitted separately. The live
+   * Oura failure had the agent fill @card-number (the generic Braintree
+   * container) instead of the hosted textbox inside it.
+   */
+  notFillable?: true;
 }
 
 /** Raw DOM input is accepted only from title and visible heading elements. */
@@ -511,18 +524,32 @@ type WireControlV2 = [string, string, string?];
 // checked/unchecked, disabled, action, field, card choice, and frame context
 // remain distinguishable without paying for empty slots on every row. The
 // label grammar excludes `|` and `=`, so no escaping is needed.
+const WIRE_ROLE_LETTERS: Record<SafeRoleV2, string> = {
+  button: "b",
+  link: "l",
+  textbox: "t",
+  select: "s",
+  checkbox: "c",
+  radio: "r",
+  tab: "tb",
+  menuitem: "m",
+  file: "f",
+};
+
+/**
+ * The wire emits single-letter roles for the canonical control kinds and
+ * passes literal roles (slider, generic, switch…) through verbatim. A caller
+ * can only know roles from what the wire emitted (C5), so a role filter is
+ * stated in wire form: translate the letters back to the internal role words
+ * before comparing, and leave literal roles untouched.
+ */
+export function wireRoleToSafeRoleV2(role: string): SafeRoleV2 | string {
+  const entry = Object.entries(WIRE_ROLE_LETTERS).find(([, letter]) => letter === role);
+  return entry === undefined ? role : (entry[0] as SafeRoleV2);
+}
+
 function wireControl(row: SafeControlV2): WireControlV2 {
-  const role: Record<SafeRoleV2, string> = {
-    button: "b",
-    link: "l",
-    textbox: "t",
-    select: "s",
-    checkbox: "c",
-    radio: "r",
-    tab: "tb",
-    menuitem: "m",
-    file: "f",
-  };
+  const role = WIRE_ROLE_LETTERS;
   const facts = [
     row.label,
     ...(row.visibility === "near" ? ["v=offscreen"] : []),
@@ -531,6 +558,8 @@ function wireControl(row: SafeControlV2): WireControlV2 {
     ...(row.field === undefined ? [] : [`f=${row.field}`]),
     ...(row.choice === undefined ? [] : [`q=${row.choice}`]),
     ...(row.frame === "main" ? [] : [`x=${row.frame === "same_origin" ? "s" : "x"}`]),
+    ...(row.acted === true ? ["w=acted"] : []),
+    ...(row.notFillable === true ? ["nf=1"] : []),
     ...(row.match === undefined
       ? []
       : [`m=${{ name: "n", role: "r", text: "t", context: "c" }[row.match]}`]),
@@ -988,6 +1017,7 @@ export function sealRetainedInteractiveElementsV2(
     checked: element.checked ?? null,
     disabled: element.disabled ?? null,
     required: element.required ?? null,
+    invalid: element.invalid === true ? true : null,
     selectOptions: null,
     selectedOptionText: null,
     interactedThisRun: element.interactedThisRun === true,
@@ -1702,12 +1732,13 @@ function roleOf(el: InteractiveElement): SafeRoleV2 | null {
 
 function stateOf(el: InteractiveElement): string | undefined {
   // A compact code-owned bitset: c=checked, u=unchecked, d=disabled,
-  // r=required.  It is deliberately not a page-provided string.
+  // r=required, i=invalid.  It is deliberately not a page-provided string.
   let state = "";
   if (el.checked === true) state += "c";
   else if (el.checked === false) state += "u";
   if (el.disabled === true) state += "d";
   if (el.required === true) state += "r";
+  if (el.invalid === true) state += "i";
   return state || undefined;
 }
 
@@ -1979,6 +2010,10 @@ export function buildSafeControlsV2(args: {
     const action = intentOf(el);
     const field = fieldOf(el, paymentContext);
     const cardChoice = el.cardRadioGroup;
+    // E3: a generic listener container advertising a field fact (f=) names a
+    // field but cannot accept a fill — the fillable control is emitted
+    // separately. Say so explicitly instead of leaving the pair ambiguous.
+    const notFillable = role === "generic" && field !== undefined ? (true as const) : undefined;
     // Native TypeScript port of browse-use's compact DOM formatting: the
     // already CDP-derived interactive inventory supplies each visible control's
     // descendant/accessibility name. This pass binds that name to its own live
@@ -1995,6 +2030,7 @@ export function buildSafeControlsV2(args: {
       ...(cardChoice === null || cardChoice === undefined
         ? {}
         : { choice: `${cardChoice.position}/${cardChoice.total}` }),
+      ...(notFillable === undefined ? {} : { notFillable }),
     };
     // A signup/login action is the useful first move on a landing page. Put it
     // ahead of unlabeled navigation chrome while preserving the existing

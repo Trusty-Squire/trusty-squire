@@ -901,7 +901,10 @@ describe("interleaved observation DOM", () => {
       expect(capture.elements.find((el) => el.id === "sold-out")).toMatchObject({
         disabled: true,
       });
-      expect(capture.elements.some((el) => el.id === "focus-only")).toBe(false);
+      // The focus-only slide is emitted now: Chrome's AX tree reports it
+      // focusable with no operable descendant, and the tree-derived rule has
+      // no role-name list to suppress generic hosts (innermost-operable, 008).
+      expect(capture.elements.some((el) => el.id === "focus-only")).toBe(true);
       await page.locator(buy[0]!.selector).click();
       expect(await page.locator("#cart-form").getAttribute("data-submitted")).toBe("yes");
     } finally {
