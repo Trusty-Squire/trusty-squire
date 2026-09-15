@@ -60,10 +60,13 @@ blockers additionally carry up to `DIALOG_MAX_OPTIONS` rendered controls as
 `options`, in DOM order, including the close affordance whenever the dialog
 renders one — so "keep entered address" paths are never invisible. When more
 controls qualify than fit, that dismiss path and the controls that resolve the
-dialog are kept ahead of anchors; a dialog offering only choices or links
-reports exactly those and `target: "unavailable"`. A bounded `detail` carries
-the dialog's own prose, excluding the name and the control labels the blocker
-already reports.
+dialog are kept ahead of anchors. `ref` names a dismissal control or nothing: a
+dialog whose controls are only choices, links, or buttons that are not labelled
+as a dismissal (an address dialog offering "Use suggested address" / "Keep what
+I entered") reports those in `options` with `target: "unavailable"`, rather than
+advertising one of them as the way out. A bounded `detail` carries the dialog's
+own prose, excluding the control labels the blocker already reports and absent
+when it would only repeat `text`.
 A solved Turnstile widget no longer blocks when its associated hidden response
 input (`cf-turnstile-response` / `cf-chl-widget-*_response`) carries a non-empty
 token or capture confirms its iframe is no longer rendered. Viewport exclusion

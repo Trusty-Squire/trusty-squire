@@ -2048,7 +2048,7 @@ describe("safeBlockersV2 modal dialog", () => {
     ]);
   });
 
-  it("falls back to the dialog heading for the name and any dialog control for the ref", () => {
+  it("falls back to the dialog heading for the name and a dismiss control for the ref", () => {
     const dialog = node("dialog", {
       attributes: { "aria-modal": "true" },
       children: [
@@ -2155,6 +2155,65 @@ describe("safeBlockersV2 modal dialog", () => {
     expect(blocker?.detail).toBe(
       "You entered: 1234 Northwest Example Boulevard, Apartment 5B, Portland, Oregon 97209, United States. Suggested address: 1234 NW Example Blvd Apt 5B, Portland, OR 97209-1234, United States.",
     );
+    // Neither button dismisses the dialog. Naming the first one as ref would let
+    // an agent "clear the blocker" by accepting the correction and silently
+    // discarding what was entered — both stay reachable through options.
+    expect(blocker?.ref).toBeUndefined();
+    expect(blocker?.target).toBe("unavailable");
+    expect(blocker?.options).toEqual([
+      { ref: "@e:suggested", label: "Use suggested address" },
+      { ref: "@e:keep", label: "Keep what I entered" },
+    ]);
+  });
+
+  it("omits detail that only repeats a nameless dialog's own text", () => {
+    // With no aria-label and no heading, `text` is already the subtree prose, so
+    // detail would spend the compact page's bytes restating it.
+    const dialog = node("dialog", {
+      attributes: { role: "alertdialog" },
+      children: [
+        node("dialog-body", {
+          nodeName: "P",
+          children: [text("body-text", "Discard your changes?")],
+        }),
+        node("dialog-cancel", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("cancel-text", "Cancel")],
+        }),
+        node("dialog-discard", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("discard-text", "Discard")],
+        }),
+      ],
+    });
+    const refs = new Map(dialog.children.slice(1).map((child, index) => [child, `@e:d${index}`]));
+    const blocker = safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate))[0];
+    expect(blocker?.text).toBe("Discard your changes? Cancel Discard");
+    expect(blocker?.detail).toBeUndefined();
+  });
+
+  it("omits the repeated detail whichever side of the prose the buttons render", () => {
+    const dialog = node("dialog", {
+      attributes: { role: "alertdialog" },
+      children: [
+        node("dialog-cancel", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("cancel-text", "Cancel")],
+        }),
+        node("dialog-body", {
+          nodeName: "P",
+          children: [text("body-text", "Discard your changes?")],
+        }),
+      ],
+    });
+    const blocker = safeBlockersV2(page([dialog]), (candidate) =>
+      candidate === dialog.children[0] ? "@e:cancel" : undefined,
+    )[0];
+    expect(blocker?.text).toBe("Cancel Discard your changes?");
+    expect(blocker?.detail).toBeUndefined();
   });
 
   it("surfaces radio-based address pickers and anchor escape paths as options", () => {

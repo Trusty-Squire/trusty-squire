@@ -179,14 +179,16 @@ export interface SafeBlockerV2 {
    * kept first, then the controls that resolve the dialog (buttons, checkboxes,
    * radios, submits), then anchors; a fuller list needs a control query. A
    * dialog that renders no dismiss-shaped control reports exactly what it does
-   * offer and `target: "unavailable"`. This is additive evidence, never a gate.
+   * offer and `target: "unavailable"` — `ref` names a dismissal path or nothing.
+   * This is additive evidence, never a gate.
    */
   options?: Array<{ ref: string; label?: string }>;
   /**
    * The dialog's own prose, so what a suggestion would change relative to what
-   * was entered is visible without leaving compact mode. It excludes the name
-   * already in `text` and the labels already in `options[].label`, and carries
-   * the usual ellipsis when the body runs past DIALOG_DETAIL_MAX_CHARS.
+   * was entered is visible without leaving compact mode. It excludes the labels
+   * already in `options[].label`, is absent whenever it would only repeat
+   * `text`, and carries the usual ellipsis when the body runs past
+   * DIALOG_DETAIL_MAX_CHARS.
    */
   detail?: string;
 }
@@ -1596,13 +1598,14 @@ export function safeBlockersV2(
     const name = dialogNameV2(node);
     if (name === undefined || blockers.some((blocker) => blocker.text === name)) continue;
     const controls = dialogControlsV2(node, nodes, visibleFor, withinSubtree, refForNode);
-    // Radios and anchors belong in `options` but never in `ref`: a radio ACCEPTS
-    // a choice and an anchor navigates away, so neither dismisses the dialog.
-    // With no button-shaped candidate the honest answer stays "unavailable".
-    const dismissible = controls.filter(blockerControlV2);
-    const close =
-      dismissible.find((candidate) => DIALOG_DISMISS_RE.test(blockerTextV2(candidate) ?? "")) ??
-      dismissible[0];
+    // `ref` is the dismissal path, so only a dismiss-labelled button-shaped
+    // control earns it. A radio ACCEPTS a choice, an anchor navigates away, and
+    // the first button of an address dialog is "Use suggested address" — naming
+    // any of them here would hand the agent silent acceptance dressed as an
+    // escape. Every control stays reachable through `options`.
+    const close = controls
+      .filter(blockerControlV2)
+      .find((candidate) => DIALOG_DISMISS_RE.test(blockerTextV2(candidate) ?? ""));
     // The cap decides WHICH controls survive, never the order they are read in.
     // Policy anchors render before the buttons on a consent modal, so a plain
     // DOM-order cut reported "Privacy Policy" and dropped Accept/Reject.
@@ -1636,7 +1639,10 @@ export function safeBlockersV2(
       text: name,
       ...(closeRef === undefined ? { target: "unavailable" as const } : { ref: closeRef }),
       ...(options.length === 0 ? {} : { options }),
-      ...(detail === undefined ? {} : { detail }),
+      // A nameless dialog takes its `text` from the same subtree, so the field
+      // would only restate what the blocker already carries. Containment, not a
+      // prefix: the prose reads after the buttons when they render first.
+      ...(detail === undefined || name.includes(detail) ? {} : { detail }),
     });
   }
   return blockers;
