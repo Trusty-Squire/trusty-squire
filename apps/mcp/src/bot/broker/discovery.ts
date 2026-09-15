@@ -99,11 +99,7 @@ export function brokerEnvironment(env: NodeJS.ProcessEnv, path: string): NodeJS.
   return { ...env, TRUSTY_SQUIRE_BROKER_SOCKET: path };
 }
 
-
-export async function connectOrLaunchBroker(
-  path: string,
-  token: string,
-): Promise<BrokerClient> {
+export async function connectOrLaunchBroker(path: string, token: string): Promise<BrokerClient> {
   try {
     return await BrokerClient.connect(path, token);
   } catch (error) {

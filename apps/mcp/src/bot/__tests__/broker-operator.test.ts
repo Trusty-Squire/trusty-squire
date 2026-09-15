@@ -62,8 +62,7 @@ function tool(name: string, handler: Tool["handler"]): Tool {
 }
 
 function api(): ApiClient {
-  return {
-  } as unknown as ApiClient;
+  return {} as unknown as ApiClient;
 }
 
 async function harness(tools: Tool[]) {
@@ -73,16 +72,20 @@ async function harness(tools: Tool[]) {
   const listener = await listenBroker(join(root, "b.sock"), {
     authenticate: async (token, agentId) => await broker.authenticate(token, agentId),
     connected: (principal) => {
-      (broker as unknown as { apis: Map<string, ApiClient> }).apis.set(
-        principal.clientId,
-        api(),
-      );
+      (broker as unknown as { apis: Map<string, ApiClient> }).apis.set(principal.clientId, api());
     },
     call: async (principal, method, params, requestId) => {
-      if (method === "cancel")
-        return { cancelled: broker.cancel(principal, String(params.requestId)) };
+      // Mirror the daemon: open/command register before dispatch so a dropped
+      // connection aborts the in-flight request.
+      if (method === "open" || method === "command")
+        return await broker.withRegisteredRequest(
+          principal,
+          requestId,
+          async (signal) => await broker.call(principal, method, params, requestId, signal),
+        );
       return await broker.call(principal, method, params, requestId);
     },
+    abort: (principal, requestId) => broker.cancel(principal, requestId),
     disconnect: async (principal, explicit) => await broker.disconnect(principal, explicit),
   });
   const forwarder = new OperatorForwarder(join(root, "b.sock"), guard);
@@ -128,7 +131,11 @@ it("starts a session, remaps it, and routes later commands to the same internal 
     }),
   ]);
   try {
-    const started = (await run.forwarder.invoke("operate_start", {}, "start")) as {
+    const started = (await run.forwarder.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "start",
+    )) as {
       session_id: string;
       broker: { targetId: string };
     };
@@ -151,7 +158,9 @@ it("settles a start with no live page instead of retaining the session", async (
     })),
   ]);
   try {
-    await expect(run.forwarder.invoke("operate_start", {}, "start")).resolves.toMatchObject({
+    await expect(
+      run.forwarder.invoke("operate_start", { service_url: "https://service.test" }, "start"),
+    ).resolves.toMatchObject({
       needs_user: { provider: "google" },
     });
     expect(run.broker.authority.inventory().sessions).toBe(0);
@@ -167,7 +176,11 @@ it("retires the broker session when a terminal finish reports closed", async () 
     tool("operate_finish", async () => ({ closed: true, url: "https://a.test" })),
   ]);
   try {
-    const started = (await run.forwarder.invoke("operate_start", {}, "start")) as {
+    const started = (await run.forwarder.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "start",
+    )) as {
       session_id: string;
     };
     expect(run.broker.authority.inventory().sessions).toBe(1);
@@ -189,7 +202,11 @@ it("delivers a proven pre-dispatch failure as a retryable mutation error", async
     }),
   ]);
   try {
-    const started = (await run.forwarder.invoke("operate_start", {}, "start")) as {
+    const started = (await run.forwarder.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "start",
+    )) as {
       session_id: string;
     };
     await expect(
@@ -207,7 +224,11 @@ it("reports a lost browser transport to the caller without replaying the command
     tool("operate_click", async () => ({ clicked: true })),
   ]);
   try {
-    const started = (await run.forwarder.invoke("operate_start", {}, "start")) as {
+    const started = (await run.forwarder.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "start",
+    )) as {
       session_id: string;
     };
     await expect(
@@ -229,7 +250,11 @@ it("relays an in-flight approval notification to the calling client before the r
   ]);
   const notifications: string[] = [];
   try {
-    const started = (await run.forwarder.invoke("operate_start", {}, "start")) as {
+    const started = (await run.forwarder.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "start",
+    )) as {
       session_id: string;
     };
     await run.forwarder.invoke(
@@ -247,23 +272,80 @@ it("relays an in-flight approval notification to the calling client before the r
   }
 });
 
-it("cancels an in-flight command registered under its request id", async () => {
+it("aborts an in-flight command when its connection drops, without replaying it", async () => {
   withSession("internal-six");
   let entered!: () => void;
   const enteredPromise = new Promise<void>((resolve) => {
     entered = resolve;
   });
+  let aborted = false;
   const run = await harness([
     tool("operate_start", async () => ({ session_id: "internal-six" })),
     tool("operate_click", async (_args, _api, context) => {
       entered();
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      if (context?.signal?.aborted) throw context.signal.reason;
-      return { clicked: true };
+      await new Promise<void>((resolve) => {
+        context?.signal?.addEventListener(
+          "abort",
+          () => {
+            aborted = true;
+            resolve();
+          },
+          { once: true },
+        );
+      });
+      throw context?.signal?.reason ?? new Error("aborted");
     }),
   ]);
   try {
-    const started = (await run.forwarder.invoke("operate_start", {}, "start")) as {
+    const started = (await run.forwarder.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "start",
+    )) as {
+      session_id: string;
+    };
+    const call = run.forwarder.invoke("operate_click", { session_id: started.session_id }, "click");
+    await enteredPromise;
+    await run.forwarder.close();
+    await expect(call).rejects.toMatchObject({ code: "broker_lost" });
+    await expect.poll(() => aborted).toBe(true);
+  } finally {
+    await run.close();
+  }
+});
+
+it("aborts only the caller's own request and keeps the connection and session usable", async () => {
+  withSession("internal-seven");
+  let entered!: () => void;
+  const enteredPromise = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let aborted = false;
+  const run = await harness([
+    tool("operate_start", async () => ({ session_id: "internal-seven" })),
+    tool("operate_click", async (_args, _api, context) => {
+      entered();
+      await new Promise<void>((resolve) => {
+        if (context?.signal?.aborted) return resolve();
+        context?.signal?.addEventListener(
+          "abort",
+          () => {
+            aborted = true;
+            resolve();
+          },
+          { once: true },
+        );
+      });
+      throw context?.signal?.reason ?? new Error("aborted");
+    }),
+    tool("operate_observe", async (args) => ({ session_id: args.session_id, dom: "intact" })),
+  ]);
+  try {
+    const started = (await run.forwarder.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "start",
+    )) as {
       session_id: string;
     };
     const controller = new AbortController();
@@ -273,9 +355,50 @@ it("cancels an in-flight command registered under its request id", async () => {
       "click",
       controller.signal,
     );
+    const rejected = expect(call).rejects.toMatchObject({ code: "cancelled" });
     await enteredPromise;
     controller.abort();
-    await expect(call).rejects.toMatchObject({ code: "cancelled" });
+    await rejected;
+    await expect.poll(() => aborted).toBe(true);
+
+    // The socket was never dropped, so the lease and its session survive.
+    expect(run.forwarder.connected()).toBe(true);
+    expect(run.forwarder.sessionCount()).toBe(1);
+    expect(run.broker.authority.inventory().sessions).toBe(1);
+    await expect(
+      run.forwarder.invoke("operate_observe", { session_id: started.session_id }, "observe"),
+    ).resolves.toMatchObject({ dom: "intact" });
+  } finally {
+    await run.close();
+  }
+});
+
+it("refuses operate_finish as a command; finish is the close operation", async () => {
+  withSession("internal-eight");
+  const run = await harness([
+    tool("operate_start", async () => ({ session_id: "internal-eight" })),
+    tool("operate_finish", async () => ({ closed: true })),
+  ]);
+  try {
+    const started = (await run.forwarder.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "start",
+    )) as {
+      session_id: string;
+    };
+    await expect(
+      run.broker.call(
+        { accountId: "account", agentId: "agent", clientId: "direct" },
+        "command",
+        {
+          sessionId: started.session_id,
+          name: "operate_finish",
+          args: { session_id: started.session_id },
+        },
+        "finish-command",
+      ),
+    ).rejects.toMatchObject({ code: "unknown_tool" });
   } finally {
     await run.close();
   }

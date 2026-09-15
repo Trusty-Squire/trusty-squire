@@ -76,11 +76,26 @@ export async function runBrokerDaemon(): Promise<void> {
     runtime.claimProfile();
     maintenanceOwner = undefined;
   };
+  const releaseMaintenanceLease = async (clientId: string): Promise<void> => {
+    if (maintenanceOwner !== clientId) return;
+    if (await waitForProfileFree(CHROME_PROFILE_DIR, { deadlineMs: 0 })) await restoreMaintenance();
+    else maintenanceOwner = undefined;
+  };
   const listener = await listenBroker(path, {
     authenticate: async (token, agentId) => await operator.authenticate(token, agentId),
-    connected: async (principal) => {
-      connected.add(principal.clientId);
+    connected: async (principal, params) => {
       if (idleTimer !== undefined) clearTimeout(idleTimer);
+      // Maintenance is a connect-only concern: the plain-login window drains the
+      // shared browser and holds the lease until this connection closes.
+      if (params.maintain === true && maintenanceOwner !== undefined)
+        throw new BrokerRefusal("maintenance", "Identity maintenance is already owned");
+      connected.add(principal.clientId);
+      if (params.maintain !== true) return;
+      maintenanceOwner = principal.clientId;
+      // Never start closing the shared browser while a session still owns it:
+      // the plain-login owner retries once the sessions have ended.
+      if (!drained() || !(await runtime.close())) return { maintenance: "draining" };
+      return { maintenance: "ready" };
     },
     call: async (principal, method, params, id) => {
       const execute = async (registeredSignal?: AbortSignal): Promise<unknown> => {
@@ -91,56 +106,32 @@ export async function runBrokerDaemon(): Promise<void> {
             "broker_lost",
             "Broker is shutting down; no operator command was dispatched",
           );
-        if (method === "cancel") {
-          if (typeof params.requestId !== "string")
-            throw new Error("A broker cancellation requires its request ID");
-          return { cancelled: operator.cancel(principal, params.requestId) };
+        // A session-less close is the lease boundary (formerly client_close):
+        // resume the connect-scoped maintenance window before the socket goes.
+        if (method === "close" && typeof params.sessionId !== "string") {
+          await releaseMaintenanceLease(principal.clientId);
+          return { closed: true };
         }
-        if (method === "tool") {
+        if (method === "command") {
           const busy = operator.busyReadResult(principal, params);
           if (busy !== undefined) return busy;
         }
         const report = await guard.inspect();
         if (report.problem !== null) throw new Error(report.problem.message);
-        if (method === "maintenance") {
-          if (maintenanceOwner !== undefined && maintenanceOwner !== principal.clientId)
-            throw new BrokerRefusal("maintenance", "Identity maintenance is already owned");
-          maintenanceOwner = principal.clientId;
-          // Never start closing the shared browser while a session still owns it:
-          // the plain-login owner retries once the sessions have ended.
-          if (!drained() || !(await runtime.close()))
-            return { state: "draining" };
-          return { state: "ready" };
-        }
-        if (method === "resume") {
-          if (maintenanceOwner !== principal.clientId)
-            throw new BrokerRefusal(
-              "maintenance",
-              "Identity maintenance is not owned by this client",
-            );
-          if (!(await waitForProfileFree(CHROME_PROFILE_DIR, { deadlineMs: 0 })))
-            throw new Error("Plain login browser is still open");
-          await restoreMaintenance();
-          return { state: "resumed" };
-        }
-        return registeredSignal === undefined
-          ? await operator.call(principal, method, params, id)
-          : await operator.callRegistered(principal, method, params, id, registeredSignal);
+        return await operator.call(principal, method, params, id, registeredSignal);
       };
-      // Register before guard inspection or runtime awaits. Disconnect/cancel
-      // therefore always sees the actual in-flight request.
-      return method === "tool"
+      // Register before guard inspection or runtime awaits. A dropped connection
+      // or an `abort` control frame therefore always sees — and aborts — the
+      // actual in-flight request.
+      return method === "open" || method === "command"
         ? await operator.withRegisteredRequest(principal, id, execute)
         : await execute();
     },
+    abort: (principal, requestId) => operator.cancel(principal, requestId),
     disconnect: async (principal, explicit) => {
       await operator.disconnect(principal, explicit);
       connected.delete(principal.clientId);
-      if (maintenanceOwner === principal.clientId) {
-        if (await waitForProfileFree(CHROME_PROFILE_DIR, { deadlineMs: 0 }))
-          await restoreMaintenance();
-        else maintenanceOwner = undefined;
-      }
+      await releaseMaintenanceLease(principal.clientId);
       scheduleShutdownIfIdle();
     },
   });

@@ -5,6 +5,11 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { BrokerRefusal } from "./refusal.js";
 import type { BrokerPrincipal } from "./authority.js";
+import type { BrokerNotification, ConnectRequest, ConnectResult } from "./protocol.js";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 
 const MAX_FRAME = 8 * 1024 * 1024;
 /** How many request results one connection retains so a retried request id gets
@@ -20,7 +25,10 @@ const requestSchema = z
   })
   .strict();
 type Request = z.infer<typeof requestSchema>;
-export type BrokerNotifier = (message: string, data?: Record<string, unknown>) => Promise<void>;
+export type BrokerNotifier = (
+  message: BrokerNotification["message"],
+  data?: BrokerNotification["data"],
+) => Promise<void>;
 const notificationContext = new AsyncLocalStorage<BrokerNotifier | undefined>();
 export function brokerNotifier(): BrokerNotifier | undefined {
   return notificationContext.getStore();
@@ -67,13 +75,21 @@ function send(socket: Socket, value: unknown): void {
 
 export interface BrokerTransportPort {
   authenticate(token: string, agentId?: string): Promise<Omit<BrokerPrincipal, "clientId"> | null>;
-  connected?(principal: BrokerPrincipal): Promise<void> | void;
+  /** Extra fields (e.g. the connect-only maintenance state) are merged into the
+   * connect result. */
+  connected?(
+    principal: BrokerPrincipal,
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown> | void> | Record<string, unknown> | void;
   call(
     principal: BrokerPrincipal,
     method: string,
     params: Record<string, unknown>,
     requestId: string,
   ): Promise<unknown>;
+  /** Cancel one in-flight request of this connection by its frame id. Reports
+   * whether a live request was still registered under it. */
+  abort?(principal: BrokerPrincipal, requestId: string): boolean;
   disconnect(principal: BrokerPrincipal, explicit?: boolean): Promise<void>;
 }
 
@@ -165,7 +181,7 @@ export async function listenBroker(
     const dispatch = async (request: Request): Promise<unknown> => {
       if (principal === undefined) {
         if (
-          request.method !== "hello" ||
+          request.method !== "connect" ||
           authenticating ||
           typeof request.params.token !== "string"
         ) {
@@ -179,19 +195,44 @@ export async function listenBroker(
         const identity = await port.authenticate(request.params.token, agentId);
         if (identity === null) throw new BrokerRefusal("unauthorized", "Invalid broker credential");
         const candidate = { ...identity, clientId: randomUUID() };
-        await port.connected?.(candidate);
+        let extra: Record<string, unknown> | void;
+        try {
+          extra = await port.connected?.(candidate, request.params);
+        } catch (error) {
+          // The connect hook may refuse (e.g. maintenance already owned) after
+          // the candidate exists; retire it so no half-connected state lingers.
+          await port.disconnect(candidate);
+          throw error;
+        }
         if (closed) {
           await port.disconnect(candidate);
           throw new BrokerRefusal("cancelled", "Client disconnected");
         }
         principal = candidate;
-        return { version: 1, clientId: principal.clientId };
+        return {
+          version: 1,
+          clientId: principal.clientId,
+          ...(isRecord(extra) ? extra : {}),
+        };
       }
-      if (request.method === "hello")
+      if (request.method === "connect")
         throw new BrokerRefusal("unauthorized", "Connection already bound");
-      if (request.method === "client_close") {
+      // Reserved control frame, deliberately not one of the four operations: it
+      // cancels a single in-flight request by its frame id so one caller's
+      // cancellation never costs the connection or its other sessions. It never
+      // reaches port.call, so it is neither registered nor guard-inspected.
+      if (request.method === "abort") {
+        const target = request.params.requestId;
+        if (typeof target !== "string")
+          throw new BrokerRefusal("invalid_request", "Abort requires a requestId");
+        return { aborted: port.abort?.(principal, target) ?? false };
+      }
+      // A session-less close ends the connection: the lease boundary that used
+      // to be `client_close`. It still reaches the port so the owner can run
+      // its connect-scoped maintenance resume before the socket goes away.
+      if (request.method === "close" && typeof request.params.sessionId !== "string") {
         explicitClose = true;
-        return {};
+        return await port.call(principal, "close", request.params, request.id);
       }
       const owner = principal;
       const notify: BrokerNotifier | undefined = request.notifications
@@ -271,6 +312,8 @@ export class BrokerClient {
     }
   >();
   private ended = false;
+  /** The connect result, including the connect-only maintenance state. */
+  welcome: ConnectResult | undefined;
   private constructor(private readonly socket: Socket) {
     socket.on("error", () => undefined);
     socket.once("close", () => {
@@ -307,30 +350,37 @@ export class BrokerClient {
       }
     });
   }
-  static async connect(path: string, token: string): Promise<BrokerClient> {
+  static async connect(
+    path: string,
+    token: string,
+    options: { maintain?: boolean; handshakeTimeoutMs?: number } = {},
+  ): Promise<BrokerClient> {
     const socket = createConnection(path);
     const client = new BrokerClient(socket);
     let handshakeTimeout: BrokerRefusal | undefined;
     const deadline = setTimeout(() => {
       handshakeTimeout = new BrokerRefusal(
         "broker_handshake_timeout",
-        "Broker hello handshake timed out",
+        "Broker connect handshake timed out",
       );
       socket.destroy(handshakeTimeout);
-    }, 5_000);
+    }, options.handshakeTimeoutMs ?? 5_000);
     try {
       await new Promise<void>((resolve, reject) => {
         socket.once("connect", resolve);
         socket.once("error", reject);
       });
-      await client.call("hello", {
+      const request: ConnectRequest = {
         token,
         agentId: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "local-agent",
-      });
+        ...(options.maintain ? { maintain: true } : {}),
+      };
+      const welcome = await client.call("connect", { ...request });
+      client.welcome = isRecord(welcome) ? (welcome as unknown as ConnectResult) : undefined;
       return client;
     } catch (error) {
       socket.destroy();
-      // Socket close rejects pending calls as broker_lost. During hello only,
+      // Socket close rejects pending calls as broker_lost. During connect only,
       // preserve the deadline cause so discovery can retire a wedged owner.
       throw handshakeTimeout ?? error;
     } finally {
@@ -364,6 +414,12 @@ export class BrokerClient {
       });
     });
   }
+  /** Cancel one in-flight request without disturbing the connection. */
+  async abort(requestId: string): Promise<void> {
+    if (!this.isConnected()) return;
+    await this.call("abort", { requestId }).catch(() => undefined);
+  }
+
   isConnected(): boolean {
     return !this.ended && !this.socket.destroyed;
   }
@@ -378,7 +434,10 @@ export class BrokerClient {
 
   async release(): Promise<void> {
     if (this.ended) return;
-    await this.call("client_close", {});
-    await this.close();
+    try {
+      await this.call("close", {});
+    } finally {
+      await this.close();
+    }
   }
 }
