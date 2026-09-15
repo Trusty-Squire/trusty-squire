@@ -153,6 +153,47 @@ const rect = (v: number[] | undefined): DOMBounds | null =>
  */
 const isUncommittedFrameUrl = (url: string): boolean => url === "" || url === ":";
 
+/**
+ * The origin an element reports for the frame it lives in. An uncommitted
+ * frame's document is the initial empty document, whose origin has no
+ * serializable spelling — the same opaque `"null"` an about:blank frame
+ * already reports. The whole observation fails if this throws, so every
+ * caller goes through here rather than parsing a frame url itself.
+ */
+export function frameOriginOf(frame: { url(): string }): string {
+  try {
+    return new URL(frame.url()).origin;
+  } catch {
+    return "null";
+  }
+}
+
+/**
+ * Pair one CDP frame-tree child with the Playwright child frame it denotes.
+ * A committed frame is identified by its URL. A frame whose navigation has
+ * not committed has no stable URL to match on — the CDP tree reports ":"
+ * where Playwright reports "" — so string equality failed on every capture
+ * for as long as the navigation stayed pending, and a merchant iframe that
+ * renders before its navigation commits (ad/analytics frames, a 3-D Secure
+ * challenge) reported frame_binding_failed for the whole session while its
+ * siblings bound. Such a frame is paired with its OWN sibling position:
+ * their documents are all the initial empty document, so the pairing has no
+ * observable effect, and once a navigation commits the next capture re-binds
+ * by its real URL. Anything looser than the exact position — "the first
+ * remaining uncommitted candidate" — can hand one frame's slot to another
+ * and silently execute a later action in the wrong document.
+ */
+export function matchFrameChild<T extends { url(): string }>(
+  cdpChildUrl: string,
+  available: ReadonlySet<T>,
+  sibling: T | undefined,
+): T | undefined {
+  for (const candidate of available) if (candidate.url() === cdpChildUrl) return candidate;
+  if (!isUncommittedFrameUrl(cdpChildUrl)) return undefined;
+  if (sibling === undefined || !available.has(sibling)) return undefined;
+  return isUncommittedFrameUrl(sibling.url()) ? sibling : undefined;
+}
+
 type FrameOmission = BrowserUseCapture["omissions"][number];
 
 /** The one definition of "which iframe element this omission is about". */
@@ -299,26 +340,8 @@ export async function captureBrowserUseDOM(
       framePathById.set(tree.frame.id, frame === page.mainFrame() ? null : framePath(frame));
       const available = new Set(frame.childFrames());
       for (const [index, child] of (tree.childFrames ?? []).entries()) {
-        // A frame whose navigation has not committed has no stable URL to
-        // match on: the CDP tree reports ":" where Playwright reports "".
-        // String equality therefore fails on every capture for as long as
-        // the navigation stays pending, so a merchant iframe that renders
-        // before its navigation commits (ad/analytics frames, a 3-D Secure
-        // challenge) reported frame_binding_failed for the whole session
-        // while other frames bound. Pair such a frame with its OWN sibling
-        // position — their documents are all the initial empty document, so
-        // the pairing has no observable effect, and once a navigation
-        // commits the next capture re-binds by its real URL. Anything looser
-        // than the exact position could pair two frames across each other.
         const sibling = frame.childFrames()[index];
-        const matched =
-          [...available].find((candidate) => candidate.url() === child.frame.url) ??
-          (isUncommittedFrameUrl(child.frame.url) &&
-          sibling !== undefined &&
-          available.has(sibling) &&
-          isUncommittedFrameUrl(sibling.url())
-            ? sibling
-            : undefined);
+        const matched = matchFrameChild(child.frame.url, available, sibling);
         if (matched) {
           available.delete(matched);
           bindFrames(child, matched);
@@ -1183,7 +1206,7 @@ export async function captureBrowserUseDOM(
               a["data-ts-card-mask"] === "pan" || a["data-ts-card-mask"] === "cvv"
                 ? a["data-ts-card-mask"]
                 : null,
-            frameOrigin: frame === page.mainFrame() ? null : new URL(frame.url()).origin,
+            frameOrigin: frame === page.mainFrame() ? null : frameOriginOf(frame),
             frameUrl: frame === page.mainFrame() ? null : frame.url(),
             framePath: path,
             screenPath: syntheticScreenPath(n),

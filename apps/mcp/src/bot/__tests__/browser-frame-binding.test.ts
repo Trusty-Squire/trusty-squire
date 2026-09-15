@@ -79,6 +79,9 @@ beforeAll(async () => {
           "<!doctype html><html><body><button name=\"child-button\">Child</button></body></html>",
         );
       });
+    } else if (url === "/blank") {
+      res.setHeader("content-type", "text/html");
+      res.end("<!doctype html><html><body><main>Merchant</main></body></html>");
     } else if (url === "/xfo") {
       res.setHeader("X-Frame-Options", "DENY");
       res.setHeader("content-type", "text/html");
@@ -202,6 +205,97 @@ describe("frame binding during uncommitted navigations (real Chromium, real HTTP
         );
         expect(childButton).toBeDefined();
         expect(childButton?.framePath ?? null).not.toBeNull();
+      } finally {
+        await page.context().close();
+      }
+    },
+  );
+
+  it.skipIf(!available)(
+    "observes an uncommitted frame that already has content instead of failing the capture",
+    { timeout: 60_000 },
+    async () => {
+      const { page } = await newPage();
+      try {
+        pendingChildResponses = [];
+        await page.goto(`http://${PARENT_HOST}:${port}/blank`, { waitUntil: "domcontentloaded" });
+        // The 3-D Secure shape: the merchant points a frame at the ACS and
+        // renders a control into its initial empty document while that POST is
+        // still in flight. Binding the frame is what makes its content
+        // reachable at all — and an uncommitted frame has no parseable url, so
+        // every element built inside it has to report an origin anyway.
+        await page.evaluate(
+          ({ src }) => {
+            const f = document.createElement("iframe");
+            f.id = "threeds";
+            f.style.cssText = "width:300px;height:120px;border:0";
+            f.src = src;
+            document.body.appendChild(f);
+            const button = f.contentDocument!.createElement("button");
+            button.id = "continue";
+            button.textContent = "Continue";
+            f.contentDocument!.body.appendChild(button);
+          },
+          { src: `http://${PARENT_HOST}:${port}/hang` },
+        );
+        await page.waitForTimeout(600);
+
+        const observed = await capture(page);
+        expect(observed.omissions).toEqual([]);
+        const button = observed.elements.find((element) => element.id === "continue");
+        expect(button).toBeDefined();
+        // The initial empty document's origin has no serializable spelling;
+        // "null" is the same opaque origin an about:blank frame reports. A
+        // child-frame element must never report a null frameOrigin — that is
+        // the main frame's spelling.
+        expect(button!.frameOrigin).toBe("null");
+        expect(button!.framePath).not.toBeNull();
+      } finally {
+        await page.context().close();
+      }
+    },
+  );
+
+  it.skipIf(!available)(
+    "does not label a frame unread when its document did reach the tree",
+    { timeout: 60_000 },
+    async () => {
+      const { page } = await newPage();
+      try {
+        pendingChildResponses = [];
+        await page.goto(`http://${PARENT_HOST}:${port}/blank`, { waitUntil: "domcontentloaded" });
+        // document.write into a frame with a pending navigation gives the
+        // written document the PARENT's url, so the CDP tree and Playwright
+        // disagree in a way no sentinel covers and the frame cannot bind — yet
+        // the document is same-process, so it is pierced into the tree and
+        // serialized under the iframe row.
+        await page.evaluate(
+          ({ src }) => {
+            const f = document.createElement("iframe");
+            f.id = "written";
+            f.style.cssText = "width:300px;height:120px;border:0";
+            f.src = src;
+            document.body.appendChild(f);
+            f.contentDocument!.write(
+              "<!doctype html><html><body><button id='inside'>Inside</button></body></html>",
+            );
+            f.contentDocument!.close();
+          },
+          { src: `http://${PARENT_HOST}:${port}/hang` },
+        );
+        await page.waitForTimeout(600);
+
+        const observed = await capture(page);
+        const omission = observed.omissions.find((o) => o.source?.id === "written");
+        expect(omission).toBeDefined();
+        expect(omission!.kind).toBe("frame_binding_failed");
+
+        const row = iframes(observed.root).find((n) => n.attributes.id === "written");
+        expect(row).toBeDefined();
+        // Its content IS in the tree, so the row must keep its ordinary
+        // scroll affordance rather than claim the content was not read.
+        expect(row!.contentDocument).not.toBeNull();
+        expect(row!.scrollText).not.toContain("frame content not read");
       } finally {
         await page.context().close();
       }
