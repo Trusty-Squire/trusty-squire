@@ -54,6 +54,11 @@ roles are emitted literally (for example `slider` or `generic` for a listener
 container), never defaulted to `button`; role queries accept these literal roles.
 Visible verification instructions and structurally identified validation errors
 appear in `semantic.blockers`, with `semantic.blocked: true` independent of `stage`.
+Gateway/CDN block pages (CloudFront 403-style signatures in the title or
+headings) surface as an `error_page` blocker rather than a normal page. Dialog
+blockers additionally carry every rendered control as `options` (including the
+close affordance, so "keep entered address" paths are never invisible) and a
+bounded `detail` with the dialog's own context text.
 A solved Turnstile widget no longer blocks when its associated hidden response
 input (`cf-turnstile-response` / `cf-chl-widget-*_response`) carries a non-empty
 token or capture confirms its iframe is no longer rendered. Viewport exclusion

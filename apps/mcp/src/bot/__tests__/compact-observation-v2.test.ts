@@ -89,7 +89,10 @@ describe("CDN/gateway error pages are named, not mistaken for a normal page", ()
         headings: ["403 ERROR"],
       }),
     ).toEqual({
-      title: "ERROR: The request could not be satisfied",
+      // safeDescriptionV2 caps the title at 40 chars (+ ellipsis); the blocker
+      // grounds on the h1 "403 ERROR" because the truncated title no longer
+      // carries the full CloudFront sentence.
+      title: "ERROR: The request could not be satisfi…",
       headings: ["403 ERROR"],
       blocked: true,
       // safeDescriptionV2 truncates the long title before it can match, so the
