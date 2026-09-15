@@ -4,27 +4,35 @@
 // mechanics only: seven verbs plus one observe hook. Nothing page-behaviour
 // shaped belongs here.
 //
-// PR 3 of the layer-contracts plan introduces the contract and has
-// `BrowserController` declare that it satisfies it, with no behaviour change.
-// The five verbs that are not method names today (`navigate`, `select`,
-// `press`, `scroll`, `observe`) are one-line delegations on
-// `BrowserController`; `click`, `type` and `screenshot` already carry the
-// contract names and signatures. No caller changes in this PR.
+// PR 4 of the layer-contracts plan evolves `DriverTarget` from the bare
+// selector string into the report's target union and folds today's
+// handle/frame entry points (`clickHandle`, `clickInFrame`, `typeHandle`,
+// `typeInFrame`, `selectInFrame`, …) into the single verbs: the driver owns
+// the frame-vs-page dispatch from here on, so the tooling layer keeps one
+// call site per verb (`executeAct` in provision-session.ts).
 
-import type { Page } from "playwright";
+import type { ElementHandle, Page } from "playwright";
 import type { BrowserUseCapture } from "../browser-use-capture.js";
 
+/** Frame identity (origin + path) captured from a fresh observation. */
+export interface FrameTarget {
+  framePath: string;
+  frameOrigin: string;
+  frameUrl: string;
+}
+
 /**
- * What a driver verb acts on today: the CSS selector string the tooling layer
- * passes to the selector-based entry points.
- *
- * PR 4 evolves this into the report's `{kind:"ref"} | {kind:"handle"} |
- * {kind:"frame"}` union and folds today's handle/frame entry points
- * (`clickHandle`, `clickInFrame`, `typeHandle`, `typeInFrame`,
- * `selectInFrame`, …) into the single verbs, which is why no target-resolution
- * logic exists here yet.
+ * What a driver verb acts on. The tooling layer resolves session refs to one
+ * of these; how the verb reaches the element (page locator, frame handle,
+ * pre-resolved handle) is the driver's business.
  */
-export type DriverTarget = string;
+export type DriverTarget =
+  | { kind: "selector"; selector: string } // element on the action page
+  | { kind: "frame"; frame: FrameTarget; selector: string } // element inside a child frame
+  | { kind: "handle"; handle: ElementHandle<Element> }; // pre-resolved element handle
+
+/** How `click` dispatches. Only `click` reads this; the other verbs ignore it. */
+export type ClickMethod = "click" | "js_click";
 
 /** The page a verb acts on. `undefined` means the controller's active page. */
 export type PageHandle = Page;
@@ -38,12 +46,17 @@ export type PageCapture = BrowserUseCapture;
 export interface BrowserDriver {
   // 1 navigate
   navigate(url: string, page?: PageHandle): Promise<void>;
-  // 2 click
-  click(target: DriverTarget): Promise<void>;
+  // 2 click (dispatch evidence is the driver's business; never a page verdict)
+  click(target: DriverTarget & { method: ClickMethod }, page?: PageHandle | null): Promise<void>;
   // 3 type
-  type(target: DriverTarget, text: string, sealed?: boolean): Promise<void>;
+  type(
+    target: DriverTarget,
+    text: string,
+    sealed?: boolean,
+    page?: PageHandle | null,
+  ): Promise<void>;
   // 4 select (returns the committed option text)
-  select(target: DriverTarget, optionMatcher?: string): Promise<string>;
+  select(target: DriverTarget, optionMatcher?: string, page?: PageHandle | null): Promise<string>;
   // 5 press
   press(key: string, page?: PageHandle | null): Promise<void>;
   // 6 scroll

@@ -9,6 +9,9 @@ import { chromium, type Browser, type BrowserContext, type Page } from "playwrig
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BrowserController, type CheckoutCard } from "../browser.js";
 
+// Contract C click/type verbs take a DriverTarget now.
+const typeTarget = (selector: string) => ({ kind: "selector", selector }) as const;
+
 const SYNTHETIC_CARD: CheckoutCard = {
   pan: "4111111111111111",
   cvv: "123",
@@ -255,7 +258,7 @@ describe("operate_screenshot before card release (real browser)", () => {
         const page = await browser.newPage();
         await page.setContent('<input id="secret" style="width:400px">');
         const controller = BrowserController.fromHarnessPage(page);
-        await controller.type("#secret", sk("live-secret-value"), true);
+        await controller.type(typeTarget("#secret"), sk("live-secret-value"), true);
 
         const result = await controller.captureOperatorScreenshot();
 
