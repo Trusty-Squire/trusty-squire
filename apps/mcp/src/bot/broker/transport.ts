@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { BrokerRefusal } from "./refusal.js";
 import type { BrokerPrincipal } from "./authority.js";
-import type { ConnectResult } from "./protocol.js";
+import type { BrokerNotification, ConnectRequest, ConnectResult } from "./protocol.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -25,7 +25,10 @@ const requestSchema = z
   })
   .strict();
 type Request = z.infer<typeof requestSchema>;
-export type BrokerNotifier = (message: string, data?: Record<string, unknown>) => Promise<void>;
+export type BrokerNotifier = (
+  message: BrokerNotification["message"],
+  data?: BrokerNotification["data"],
+) => Promise<void>;
 const notificationContext = new AsyncLocalStorage<BrokerNotifier | undefined>();
 export function brokerNotifier(): BrokerNotifier | undefined {
   return notificationContext.getStore();
@@ -84,6 +87,9 @@ export interface BrokerTransportPort {
     params: Record<string, unknown>,
     requestId: string,
   ): Promise<unknown>;
+  /** Cancel one in-flight request of this connection by its frame id. Reports
+   * whether a live request was still registered under it. */
+  abort?(principal: BrokerPrincipal, requestId: string): boolean;
   disconnect(principal: BrokerPrincipal, explicit?: boolean): Promise<void>;
 }
 
@@ -211,6 +217,16 @@ export async function listenBroker(
       }
       if (request.method === "connect")
         throw new BrokerRefusal("unauthorized", "Connection already bound");
+      // Reserved control frame, deliberately not one of the four operations: it
+      // cancels a single in-flight request by its frame id so one caller's
+      // cancellation never costs the connection or its other sessions. It never
+      // reaches port.call, so it is neither registered nor guard-inspected.
+      if (request.method === "abort") {
+        const target = request.params.requestId;
+        if (typeof target !== "string")
+          throw new BrokerRefusal("invalid_request", "Abort requires a requestId");
+        return { aborted: port.abort?.(principal, target) ?? false };
+      }
       // A session-less close ends the connection: the lease boundary that used
       // to be `client_close`. It still reaches the port so the owner can run
       // its connect-scoped maintenance resume before the socket goes away.
@@ -354,11 +370,12 @@ export class BrokerClient {
         socket.once("connect", resolve);
         socket.once("error", reject);
       });
-      const welcome = await client.call("connect", {
+      const request: ConnectRequest = {
         token,
         agentId: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "local-agent",
         ...(options.maintain ? { maintain: true } : {}),
-      });
+      };
+      const welcome = await client.call("connect", { ...request });
       client.welcome = isRecord(welcome) ? (welcome as unknown as ConnectResult) : undefined;
       return client;
     } catch (error) {
@@ -397,6 +414,12 @@ export class BrokerClient {
       });
     });
   }
+  /** Cancel one in-flight request without disturbing the connection. */
+  async abort(requestId: string): Promise<void> {
+    if (!this.isConnected()) return;
+    await this.call("abort", { requestId }).catch(() => undefined);
+  }
+
   isConnected(): boolean {
     return !this.ended && !this.socket.destroyed;
   }

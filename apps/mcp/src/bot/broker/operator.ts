@@ -21,11 +21,7 @@ import { BrokerRefusal } from "./refusal.js";
 import type { BrokerTransportPort } from "./transport.js";
 import { provenPreDispatchMutationFailure } from "../mutation-dispatch-evidence.js";
 import { withOperatorRequestContext } from "../request-cancellation.js";
-import type {
-  CloseResult,
-  CommandResult,
-  OpenResult,
-} from "./protocol.js";
+import type { CloseResult, CommandResult, OpenResult } from "./protocol.js";
 
 class DeliveredPreDispatchFailure {
   constructor(readonly error: "stale_ref") {}
@@ -54,7 +50,7 @@ const openSchema = z
     format: z.enum(["compact", "full"]).optional(),
     proxy: z.string().optional(),
   })
-  .passthrough();
+  .strict();
 const closeSchema = z
   .object({
     sessionId: z.string().min(1),
@@ -132,19 +128,10 @@ export class OperatorBroker implements BrokerTransportPort {
     requestSignal?: AbortSignal,
   ): Promise<unknown> {
     if (method === "open") return await this.open(principal, params, requestId, requestSignal);
-    if (method === "command") return await this.command(principal, params, requestId, requestSignal);
+    if (method === "command")
+      return await this.command(principal, params, requestId, requestSignal);
     if (method === "close") return await this.closeSession(principal, params, requestId);
     throw new BrokerRefusal("unknown_method", "Unknown broker method");
-  }
-
-  async callRegistered(
-    principal: BrokerPrincipal,
-    method: string,
-    params: Record<string, unknown>,
-    requestId: string,
-    signal: AbortSignal,
-  ): Promise<unknown> {
-    return await this.call(principal, method, params, requestId, signal);
   }
 
   async withRegisteredRequest<T>(
@@ -162,6 +149,15 @@ export class OperatorBroker implements BrokerTransportPort {
     } finally {
       this.requestControllers.delete(key);
     }
+  }
+
+  /** Abort exactly one registered request. The connection, its lease and its
+   * other sessions are untouched. */
+  cancel(principal: BrokerPrincipal, requestId: string): boolean {
+    const active = this.requestControllers.get(JSON.stringify([principal.clientId, requestId]));
+    if (active === undefined) return false;
+    active.controller.abort(new BrokerRefusal("cancelled", "Caller cancelled the request"));
+    return true;
   }
 
   /** open: start one operator session on the shared browser. */
@@ -288,7 +284,8 @@ export class OperatorBroker implements BrokerTransportPort {
       async (id) => {
         const sessionId = internalId === "" ? id : internalId;
         const session = sessionForCall(sessionId);
-        if (session !== undefined && !(await finishProvisionSession(sessionId)).closed) return false;
+        if (session !== undefined && !(await finishProvisionSession(sessionId)).closed)
+          return false;
         return (await brokerBrowserCustody()?.cleanupAdmission(id)) ?? false;
       },
       async (id) => {
@@ -304,7 +301,9 @@ export class OperatorBroker implements BrokerTransportPort {
     );
     if (targetId === "no-page") {
       await this.authority.close(principal, sessionId);
-      return { observation: remapSession(observation, internalId, sessionId) as OpenResult["observation"] };
+      return {
+        observation: remapSession(observation, internalId, sessionId) as OpenResult["observation"],
+      };
     }
     const result = remapSession(observation, internalId, sessionId) as Record<string, unknown>;
     return {
@@ -334,7 +333,6 @@ export class OperatorBroker implements BrokerTransportPort {
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
     if (args.session_id !== input.sessionId)
       throw new BrokerRefusal("stale_lease", "An owned session is required");
-    this.apiFor(principal);
     const result = await this.authority.invoke(
       principal,
       input.sessionId,
@@ -355,12 +353,11 @@ export class OperatorBroker implements BrokerTransportPort {
     requestId: string,
   ): Promise<CloseResult> {
     const input = closeSchema.parse(params);
-    const result = await this.authority.finish(
-      principal,
-      input.sessionId,
-      requestId,
-      input.args ?? {},
-    );
+    const tool = findTool("operate_finish", this.tools);
+    if (tool === null || !isOperatorCommand(tool.name))
+      throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
+    const args = tool.inputSchema.parse(input.args ?? {}) as Record<string, unknown>;
+    const result = await this.authority.finish(principal, input.sessionId, requestId, args);
     if (result instanceof DeliveredPreDispatchFailure)
       return {
         closed: false,

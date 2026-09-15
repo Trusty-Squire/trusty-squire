@@ -62,8 +62,7 @@ function tool(name: string, handler: Tool["handler"]): Tool {
 }
 
 function api(): ApiClient {
-  return {
-  } as unknown as ApiClient;
+  return {} as unknown as ApiClient;
 }
 
 async function harness(tools: Tool[]) {
@@ -73,20 +72,20 @@ async function harness(tools: Tool[]) {
   const listener = await listenBroker(join(root, "b.sock"), {
     authenticate: async (token, agentId) => await broker.authenticate(token, agentId),
     connected: (principal) => {
-      (broker as unknown as { apis: Map<string, ApiClient> }).apis.set(
-        principal.clientId,
-        api(),
-      );
+      (broker as unknown as { apis: Map<string, ApiClient> }).apis.set(principal.clientId, api());
     },
     call: async (principal, method, params, requestId) => {
       // Mirror the daemon: open/command register before dispatch so a dropped
       // connection aborts the in-flight request.
       if (method === "open" || method === "command")
-        return await broker.withRegisteredRequest(principal, requestId, async (signal) =>
-          await broker.callRegistered(principal, method, params, requestId, signal),
+        return await broker.withRegisteredRequest(
+          principal,
+          requestId,
+          async (signal) => await broker.call(principal, method, params, requestId, signal),
         );
       return await broker.call(principal, method, params, requestId);
     },
+    abort: (principal, requestId) => broker.cancel(principal, requestId),
     disconnect: async (principal, explicit) => await broker.disconnect(principal, explicit),
   });
   const forwarder = new OperatorForwarder(join(root, "b.sock"), guard);
@@ -263,10 +262,14 @@ it("aborts an in-flight command when its connection drops, without replaying it"
     tool("operate_click", async (_args, _api, context) => {
       entered();
       await new Promise<void>((resolve) => {
-        context?.signal?.addEventListener("abort", () => {
-          aborted = true;
-          resolve();
-        }, { once: true });
+        context?.signal?.addEventListener(
+          "abort",
+          () => {
+            aborted = true;
+            resolve();
+          },
+          { once: true },
+        );
       });
       throw context?.signal?.reason ?? new Error("aborted");
     }),
@@ -275,11 +278,7 @@ it("aborts an in-flight command when its connection drops, without replaying it"
     const started = (await run.forwarder.invoke("operate_start", {}, "start")) as {
       session_id: string;
     };
-    const call = run.forwarder.invoke(
-      "operate_click",
-      { session_id: started.session_id },
-      "click",
-    );
+    const call = run.forwarder.invoke("operate_click", { session_id: started.session_id }, "click");
     await enteredPromise;
     await run.forwarder.close();
     await expect(call).rejects.toMatchObject({ code: "broker_lost" });
@@ -289,7 +288,7 @@ it("aborts an in-flight command when its connection drops, without replaying it"
   }
 });
 
-it("aborts an in-flight command when the caller's own signal aborts", async () => {
+it("aborts only the caller's own request and keeps the connection and session usable", async () => {
   withSession("internal-seven");
   let entered!: () => void;
   const enteredPromise = new Promise<void>((resolve) => {
@@ -313,6 +312,7 @@ it("aborts an in-flight command when the caller's own signal aborts", async () =
       });
       throw context?.signal?.reason ?? new Error("aborted");
     }),
+    tool("operate_observe", async (args) => ({ session_id: args.session_id, dom: "intact" })),
   ]);
   try {
     const started = (await run.forwarder.invoke("operate_start", {}, "start")) as {
@@ -325,11 +325,19 @@ it("aborts an in-flight command when the caller's own signal aborts", async () =
       "click",
       controller.signal,
     );
-    const rejected = expect(call).rejects.toMatchObject({ code: "broker_lost" });
+    const rejected = expect(call).rejects.toMatchObject({ code: "cancelled" });
     await enteredPromise;
     controller.abort();
     await rejected;
     await expect.poll(() => aborted).toBe(true);
+
+    // The socket was never dropped, so the lease and its session survive.
+    expect(run.forwarder.connected()).toBe(true);
+    expect(run.forwarder.sessionCount()).toBe(1);
+    expect(run.broker.authority.inventory().sessions).toBe(1);
+    await expect(
+      run.forwarder.invoke("operate_observe", { session_id: started.session_id }, "observe"),
+    ).resolves.toMatchObject({ dom: "intact" });
   } finally {
     await run.close();
   }

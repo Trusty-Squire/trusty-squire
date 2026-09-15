@@ -82,11 +82,7 @@ export async function runBrokerDaemon(): Promise<void> {
       if (idleTimer !== undefined) clearTimeout(idleTimer);
       // Maintenance is a connect-only concern: the plain-login window drains the
       // shared browser and holds the lease until this connection closes.
-      if (
-        params.maintain === true &&
-        maintenanceOwner !== undefined &&
-        maintenanceOwner !== principal.clientId
-      )
+      if (params.maintain === true && maintenanceOwner !== undefined)
         throw new BrokerRefusal("maintenance", "Identity maintenance is already owned");
       connected.add(principal.clientId);
       if (params.maintain !== true) return;
@@ -121,16 +117,16 @@ export async function runBrokerDaemon(): Promise<void> {
         }
         const report = await guard.inspect();
         if (report.problem !== null) throw new Error(report.problem.message);
-        return registeredSignal === undefined
-          ? await operator.call(principal, method, params, id)
-          : await operator.callRegistered(principal, method, params, id, registeredSignal);
+        return await operator.call(principal, method, params, id, registeredSignal);
       };
       // Register before guard inspection or runtime awaits. A dropped connection
-      // therefore always sees — and aborts — the actual in-flight request.
+      // or an `abort` control frame therefore always sees — and aborts — the
+      // actual in-flight request.
       return method === "open" || method === "command"
         ? await operator.withRegisteredRequest(principal, id, execute)
         : await execute();
     },
+    abort: (principal, requestId) => operator.cancel(principal, requestId),
     disconnect: async (principal, explicit) => {
       await operator.disconnect(principal, explicit);
       connected.delete(principal.clientId);

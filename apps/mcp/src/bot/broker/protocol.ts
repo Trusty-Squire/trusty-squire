@@ -10,24 +10,21 @@
 //   tool{name:"operate_finish"}  -> close{ sessionId, args }
 //   client_close                 -> close{}   (ends the connection: the lease boundary)
 //   maintenance / resume         -> the connect-only `maintain` intent on connect
-//   cancel                       -> removed; connection loss aborts in-flight work
+//   cancel                       -> the reserved `abort` control frame
 //
 // Framing, MAX_FRAME, the `{ id, error: { code, message } }` error shape, the
-// 512-entry retained-result replay guard and the 5 s connection-session grace
-// timer are transport/implementation policy, not part of this contract. They
-// stay behind it.
+// 512-entry retained-result replay guard, the 5 s connection-session grace
+// timer and the reserved `abort` control frame (per-request cancellation keyed
+// on the request frame id) are transport/implementation policy, not part of
+// this contract. They stay behind it.
 //
 // The session id is the only handle that crosses the wire; the broker keeps the
 // Page and Browser. Notifications travel on the originating command's stream.
 
 import type { Observation } from "../provision-session.js";
 
-/** A broker command name. The wire carries it only inside `command`. */
-export type OperateToolName = string;
-
 /** The four operations the wire expresses. */
-export const BROKER_WIRE_METHODS = ["connect", "open", "command", "close"] as const;
-export type BrokerWireMethod = (typeof BROKER_WIRE_METHODS)[number];
+export type BrokerWireMethod = "connect" | "open" | "command" | "close";
 
 /** connect: authenticate the local MCP process and mint its connection id. */
 export interface ConnectRequest {
@@ -65,7 +62,7 @@ export interface OpenResult {
 /** command: one operator verb against an owned session. */
 export interface CommandRequest {
   sessionId: string;
-  name: OperateToolName;
+  name: string;
   args: Record<string, unknown>;
 }
 export interface CommandResult {
@@ -95,18 +92,4 @@ export interface CloseResult {
 export interface BrokerNotification {
   message: string;
   data?: Record<string, unknown>;
-}
-
-/**
- * The frozen Contract B surface. The concrete request/result types above carry
- * the two additive fields (`maintain`, session-close `args`/`result`) that
- * preserve existing behaviour; the four operation names and the session id as
- * the only handle are the contract.
- */
-export interface BrokerWire {
-  connect(req: ConnectRequest): Promise<ConnectResult>;
-  open(req: OpenRequest): Promise<OpenResult>;
-  command(req: CommandRequest): Promise<CommandResult>;
-  close(req: CloseRequest): Promise<CloseResult>;
-  notification: BrokerNotification;
 }

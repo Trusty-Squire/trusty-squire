@@ -56,10 +56,13 @@ sessions remain. The client then runs the existing separate plain Google login
 lifecycle with no CDP, and `close{}` (the lease boundary, formerly
 `client_close`) resumes the broker on the same account when the connection ends.
 Resume requires that plain browser to be closed and preserves account binding.
-There are no `hello`/`tool`/`cancel`/`maintenance`/`resume` methods: a session
-command is `command{sessionId,name,args}` (the only place a tool name appears),
-and `close` either finishes a session (the `operate_finish` payload rides the
-same request) or ends the connection.
+There are no `hello`/`tool`/`cancel`/`maintenance`/`resume` operations: a
+session command is `command{sessionId,name,args}` (the only place a tool name
+appears), and `close` either finishes a session (the `operate_finish` payload
+rides the same request) or ends the connection. Cancelling one in-flight
+command is the reserved `abort{requestId}` transport control frame, not an
+operation: it aborts exactly that request and leaves the connection, its lease,
+and its other sessions intact.
 
 ## Ownership and contracts
 

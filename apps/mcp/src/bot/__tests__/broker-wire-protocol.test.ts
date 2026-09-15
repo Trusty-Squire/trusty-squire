@@ -95,11 +95,14 @@ async function harness(tools: Tool[]) {
       // Mirror the daemon: register open/command before dispatch so a dropped
       // connection aborts exactly that connection's in-flight work.
       if (method === "open" || method === "command")
-        return await broker.withRegisteredRequest(principal, requestId, async (signal) =>
-          await broker.callRegistered(principal, method, params, requestId, signal),
+        return await broker.withRegisteredRequest(
+          principal,
+          requestId,
+          async (signal) => await broker.call(principal, method, params, requestId, signal),
         );
       return await broker.call(principal, method, params, requestId);
     },
+    abort: (principal, requestId) => broker.cancel(principal, requestId),
     disconnect: async (principal, explicit) => await broker.disconnect(principal, explicit),
   });
   const a = new OperatorForwarder(socket, guard);
@@ -232,6 +235,62 @@ it("does not execute a repeated command with the same request id twice", async (
     );
     expect(second).toEqual(first);
     expect(state.dispatches).toBe(1);
+  } finally {
+    await run.close();
+  }
+});
+it("cancels one command without costing the caller its connection or its other session", async () => {
+  let blockedEntered!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    blockedEntered = resolve;
+  });
+  let blockedAborted = false;
+  const run = await harness([
+    startTool(),
+    tool("operate_observe", async (args) => ({ session_id: args.session_id, dom: "intact" })),
+    tool("operate_wait", async (_args, _api, context) => {
+      blockedEntered();
+      await new Promise<void>((resolve) => {
+        if (context?.signal?.aborted) return resolve();
+        context?.signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      blockedAborted = true;
+      throw context?.signal?.reason ?? new Error("aborted");
+    }),
+  ]);
+  try {
+    // One agent owning two sessions (a composite chain) plus a second agent.
+    const first = (await run.a.invoke("operate_start", {}, "a-start-1")) as { session_id: string };
+    const second = (await run.a.invoke("operate_start", {}, "a-start-2")) as { session_id: string };
+    const other = (await run.b.invoke("operate_start", {}, "b-start")) as { session_id: string };
+    expect(run.broker.authority.inventory().sessions).toBe(3);
+
+    const controller = new AbortController();
+    const inFlight = run.a.invoke(
+      "operate_wait",
+      { session_id: first.session_id },
+      "a-wait",
+      controller.signal,
+    );
+    const cancelled = expect(inFlight).rejects.toMatchObject({ code: "cancelled" });
+    await entered;
+    controller.abort();
+    await cancelled;
+    await expect.poll(() => blockedAborted).toBe(true);
+
+    // The cancel cost exactly one request: no session anywhere was closed.
+    expect(run.a.connected()).toBe(true);
+    expect(run.a.sessionCount()).toBe(2);
+    expect(run.broker.authority.inventory().sessions).toBe(3);
+    await expect(
+      run.a.invoke("operate_observe", { session_id: second.session_id }, "a-observe-2"),
+    ).resolves.toMatchObject({ dom: "intact" });
+    await expect(
+      run.a.invoke("operate_observe", { session_id: first.session_id }, "a-observe-1"),
+    ).resolves.toMatchObject({ dom: "intact" });
+    await expect(
+      run.b.invoke("operate_observe", { session_id: other.session_id }, "b-observe"),
+    ).resolves.toMatchObject({ dom: "intact" });
   } finally {
     await run.close();
   }

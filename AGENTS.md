@@ -786,10 +786,12 @@ The client wire is the frozen Contract B (`connect` / `open` / `command` /
 `close`), owned by `apps/mcp/src/bot/broker/protocol.ts`. A tool name crosses
 the wire only inside `command`; `close` finishes a session or ends the
 connection; the plain-login maintenance window is the connect-only `maintain`
-intent; `cancel` does not exist (connection loss aborts that connection's
-in-flight work). The 512-entry retained-result replay guard and the 5 s
-connection-session grace stay internal policy behind the contract. Do not
-re-add `hello`/`tool`/`cancel`/`client_close`/`maintenance`/`resume` methods.
+intent. The 512-entry retained-result replay guard, the 5 s connection-session
+grace, and the reserved `abort` control frame (cancel exactly one in-flight
+request by its frame id, leaving the connection and its other sessions alive)
+stay internal policy behind the contract. Do not re-add
+`hello`/`tool`/`cancel`/`client_close`/`maintenance`/`resume` as wire
+operations.
 
 ## Maintaining this file
 

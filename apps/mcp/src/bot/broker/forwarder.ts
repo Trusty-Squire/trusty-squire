@@ -5,6 +5,7 @@ import type { SessionGuard } from "../../session-guard.js";
 import type { BrokerClient, BrokerNotifier } from "./transport.js";
 import { BrokerRefusal } from "./refusal.js";
 import { ProvenPreDispatchMutationError } from "../mutation-dispatch-evidence.js";
+import type { BrokerWireMethod, CloseRequest, CommandRequest, OpenRequest } from "./protocol.js";
 
 export class ForwardedResultError extends BrokerRefusal {
   constructor(
@@ -86,26 +87,29 @@ export class OperatorForwarder {
       requested !== undefined && this.sessions.has(requested) ? requested : undefined;
     checkCancelled();
 
-    // Connection loss is the four-verb contract's cancellation: a dropped
-    // newline stream aborts that connection's in-flight work, and only this
-    // connection's sessions are affected. Other agents sharing the browser stay
-    // intact. There is no `cancel` wire method.
-    let dispatchedClient: BrokerClient | undefined;
+    // Cancellation is per request, keyed on the dispatched frame id: the broker
+    // aborts exactly that command. The socket stays up, so this connection keeps
+    // its other sessions and every other agent sharing the browser is untouched.
+    let dispatchedRequestId: string | undefined;
     const abortDispatched = (): void => {
-      void dispatchedClient?.close().catch(() => undefined);
+      if (dispatchedRequestId !== undefined) void client.abort(dispatchedRequestId);
     };
     signal?.addEventListener("abort", abortDispatched, { once: true });
-    const dispatch = async (method: string, params: Record<string, unknown>): Promise<unknown> => {
-      dispatchedClient = client;
+    const dispatch = async (
+      method: BrokerWireMethod,
+      params: Record<string, unknown>,
+    ): Promise<unknown> => {
+      dispatchedRequestId = requestId;
       return await client.call(method, params, requestId, notifyUser);
     };
     try {
       if (name === "operate_start") {
-        const raw = await dispatch("open", {
+        const openRequest: { [K in keyof OpenRequest]?: unknown } = {
           serviceUrl: args.service_url,
           ...(args.format !== undefined ? { format: args.format } : {}),
           ...(args.proxy !== undefined ? { proxy: args.proxy } : {}),
-        });
+        };
+        const raw = await dispatch("open", openRequest);
         if (!isRecord(raw))
           throw new ForwardedResultError("Broker returned a non-object open reply", {
             cleanup: "unknown",
@@ -132,7 +136,8 @@ export class OperatorForwarder {
       if (name === "operate_finish") {
         if (sessionId === undefined)
           throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
-        const raw = await dispatch("close", { sessionId, args });
+        const closeRequest: CloseRequest = { sessionId, args };
+        const raw = await dispatch("close", { ...closeRequest });
         if (!isRecord(raw))
           throw new ForwardedResultError("Broker returned a non-object close reply", {
             cleanup: "unknown",
@@ -152,7 +157,8 @@ export class OperatorForwarder {
 
       if (sessionId === undefined)
         throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
-      const rawReply = await dispatch("command", { sessionId, name, args });
+      const commandRequest: CommandRequest = { sessionId, name, args };
+      const rawReply = await dispatch("command", { ...commandRequest });
       if (!isRecord(rawReply))
         throw new ForwardedResultError("Broker returned a non-object command reply", {
           cleanup: "unknown",
