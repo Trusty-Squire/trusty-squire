@@ -161,7 +161,7 @@ describe("vouch-gated credential mutations", () => {
     return messages;
   }
 
-  it("binds ceremony and settlement to the owner web account", async () => {
+  it("binds ceremony and settlement to the account-bound payload, sessionless", async () => {
     const reference = await storeCredential();
     const created = await createMutation({ operation: "delete", reference });
     const id = (created.json() as { approval_id: string }).approval_id;
@@ -178,52 +178,32 @@ describe("vouch-gated credential mutations", () => {
       `mandate_${id}`,
     );
 
-    const intruder = await deps.accountStore.createAccount("intruder@example.test", "Intruder");
-    const intruderSession = issueSession({
-      account_id: intruder.id,
-      ip: null,
-      user_agent: null,
-      now: new Date(nowMs),
-    });
-    await deps.sessionStore.insert(intruderSession.record);
-    const intruderCookie = `${SESSION_COOKIE_NAME}=${signSessionJwt(
-      intruderSession.jwt,
-      SESSION_SECRET,
-    )}`;
-
-    const foreignCeremony = await server.inject({
+    // The human half is sessionless, like the payment path: no web session is
+    // needed to read the ceremony, and an agent token cannot settle anything
+    // without an assertion (an unsigned body is not one).
+    const anonymousCeremony = await server.inject({
       method: "GET",
       url: `/v1/vault/mutation-approvals/${id}/ceremony`,
-      headers: { cookie: intruderCookie },
     });
-    expect(foreignCeremony.statusCode).toBe(404);
-    expect(foreignCeremony.json()).toEqual({ error: "credential_mutation_approval_not_found" });
-    const foreignApprove = await server.inject({
+    expect(anonymousCeremony.statusCode, anonymousCeremony.body).toBe(200);
+    const agentAttempt = await server.inject({
       method: "POST",
       url: `/v1/vault/mutation-approvals/${id}/approve`,
-      headers: { cookie: intruderCookie },
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: {},
+    });
+    expect(agentAttempt.statusCode, agentAttempt.body).toBe(400);
+    expect((await deps.credentialMutationApprovalStore.getById(id))?.status).toBe("pending");
+
+    // A valid assertion over the account-bound payload settles it with no
+    // web session at all.
+    const anonymousApprove = await server.inject({
+      method: "POST",
+      url: `/v1/vault/mutation-approvals/${id}/approve`,
       payload: { jws },
     });
-    expect(foreignApprove.statusCode).toBe(404);
-
-    for (const headers of [{}, { authorization: `Bearer ${agentToken}` }]) {
-      const ceremony = await server.inject({
-        method: "GET",
-        url: `/v1/vault/mutation-approvals/${id}/ceremony`,
-        headers,
-      });
-      expect(ceremony.statusCode, ceremony.body).toBe(401);
-      const approve = await server.inject({
-        method: "POST",
-        url: `/v1/vault/mutation-approvals/${id}/approve`,
-        headers,
-        payload: { jws },
-      });
-      expect(approve.statusCode, approve.body).toBe(401);
-    }
-
-    expect((await deps.credentialMutationApprovalStore.getById(id))?.status).toBe("pending");
-    expect(await deps.credentialStore.findActive(reference)).not.toBeNull();
+    expect(anonymousApprove.statusCode, anonymousApprove.body).toBe(200);
+    expect(await deps.credentialStore.findActive(reference)).toBeNull();
   });
 
   it("requires a valid signed vouch and changes only allowed_hosts metadata", async () => {

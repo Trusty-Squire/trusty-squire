@@ -201,7 +201,6 @@ async function sendMutationTelegram(deps: ApiDeps, record: CredentialMutationApp
 export const registerCredentialMutationRoutes: FastifyPluginAsync<{
   deps: ApiDeps;
   requireAny: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
-  requireWeb: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
   vouchVerifier?: VouchMandateVerifier;
 }> = async (fastify, opts) => {
   const verifyVouch = opts.vouchVerifier ?? createVouchMandateVerifier();
@@ -307,14 +306,15 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
     },
   );
 
+  // The exact bytes the owner's passkey will sign. Sessionless like the
+  // payment ceremony: the payload names the owning account only through its
+  // opaque account binding, and SIGNING it is what authorizes — reading it
+  // authorizes nothing.
   fastify.get<{ Params: { id: string } }>(
     "/v1/vault/mutation-approvals/:id/ceremony",
-    { preHandler: opts.requireWeb },
+    {},
     async (req, reply) => {
-      const record = await opts.deps.credentialMutationApprovalStore.getByIdForAccount(
-        req.params.id,
-        req.auth!.account_id,
-      );
+      const record = await opts.deps.credentialMutationApprovalStore.getById(req.params.id);
       if (record === null) {
         reply.code(404).send({ error: "credential_mutation_approval_not_found" });
         return;
@@ -328,19 +328,19 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
     },
   );
 
+  // The human's YES, sessionless like the payment approve: the authority is
+  // the Vouchflow assertion itself, and it must be signed over this exact
+  // approval's account-bound payload — anything else fails verification.
   fastify.post<{ Params: { id: string } }>(
     "/v1/vault/mutation-approvals/:id/approve",
-    { preHandler: opts.requireWeb },
+    {},
     async (req, reply) => {
       const parsed = approveBody.safeParse(req.body);
       if (!parsed.success) {
         reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
         return;
       }
-      const record = await opts.deps.credentialMutationApprovalStore.getByIdForAccount(
-        req.params.id,
-        req.auth!.account_id,
-      );
+      const record = await opts.deps.credentialMutationApprovalStore.getById(req.params.id);
       if (record === null) {
         reply.code(404).send({ error: "credential_mutation_approval_not_found" });
         return;

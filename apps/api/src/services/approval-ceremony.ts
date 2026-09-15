@@ -67,30 +67,3 @@ export async function verifyApprovalMandate(
     return null;
   }
 }
-
-export type ApprovalOwnership<R> =
-  | { kind: "owner"; record: R }
-  /** No such approval — or one whose existence this caller may not learn. */
-  | { kind: "not_found" }
-  /** The approval exists and belongs to SOMEONE ELSE. Never disclose more than not_found. */
-  | { kind: "foreign"; record: R };
-
-/**
- * The ownership predicate for a human-facing ceremony endpoint. An approval is
- * settled by the account that owns the credential, and by nobody else: holding
- * the (bearer) approval link is not authority, because the agent that requested
- * the fetch necessarily holds it too.
- *
- * `foreign` is reported separately from `not_found` so the OWNER's audit ledger
- * can record that someone else tried; the HTTP answer must stay identical.
- */
-export function approvalOwnership<R>(
-  record: R | null,
-  ownerAccountIdOf: (record: R) => string,
-  callerAccountId: string,
-): ApprovalOwnership<R> {
-  if (record === null) return { kind: "not_found" };
-  return ownerAccountIdOf(record) === callerAccountId
-    ? { kind: "owner", record }
-    : { kind: "foreign", record };
-}

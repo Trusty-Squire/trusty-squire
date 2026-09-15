@@ -6,12 +6,13 @@
 //   POST /v1/vault/fetch-approvals/:id/approve  → passkey mandate lands here
 //   POST /v1/vault/fetch-approvals/:id/deny     → the human refuses
 //
-// The three human-facing endpoints are OWNER-AUTHENTICATED: a signed-in web
-// session whose account owns the credential, or nothing. Possession of the
-// approval link is not authority — the agent that requested the fetch
-// necessarily holds that link, so anyone it reaches could otherwise stand in
-// for the owner and authorize the release of the owner's secret with their own
-// genuine passkey.
+// The three human-facing endpoints are SESSIONLESS, exactly like the payment
+// approval path: the Vouchflow passkey assertion is the authentication, not a
+// signed-in web session. Release still requires an assertion signed over THIS
+// approval's payload — whose signed bytes carry an opaque binding to the
+// owning account, enforced at verification — so the link alone authorizes
+// nothing; a valid attestation over the account-bound payload is what answers
+// the approval.
 //
 // The vault is otherwise a write-only sink: `use_credential` spends a secret
 // server-side and `extract { store }` puts one in without either ever crossing
@@ -21,9 +22,9 @@
 //   * disclosure runs only on a Vouchflow assertion signed over THIS approval's
 //     payload under the fetch-only context — a mutation or payment mandate
 //     hashes differently AND carries a different context, so neither can land;
-//   * the human who signs is the credential's owner: the approve/deny/ceremony
-//     endpoints require the owner's web session, and the signed payload itself
-//     carries an opaque binding to the owning account;
+//   * the assertion that settles the approval is signed over THIS approval's
+//     payload, and those signed bytes carry an opaque binding to the owning
+//     account — verification rejects anything signed over a different payload;
 //   * the approval is bound to (account, credential, field) at mint, and the
 //     resume re-checks the account, so an approval minted by one account is
 //     invisible to another;
@@ -56,7 +57,6 @@ import {
   type CredentialFetchTerminalOutcome,
 } from "../services/credential-fetch-audit.js";
 import {
-  approvalOwnership,
   approvalPageUrl,
   sendResolutionFailure,
   verifyApprovalMandate,
@@ -205,38 +205,9 @@ function noStore(reply: FastifyReply): FastifyReply {
   return reply.header("cache-control", "no-store, private");
 }
 
-/**
- * Load an approval on behalf of the HUMAN settling it. Anything but the owner's
- * own live web session gets 404 — and a foreign, authenticated attempt is
- * written to the owner's ledger, because "somebody else tried to release your
- * secret" is precisely what an audit trail exists to show.
- */
-async function loadOwnedApproval(
-  deps: ApiDeps,
-  req: FastifyRequest,
-  reply: FastifyReply,
-  id: string,
-): Promise<CredentialFetchApprovalRecord | null> {
-  const auth = req.auth!;
-  const ownership = approvalOwnership(
-    await deps.credentialFetchApprovalStore.getById(id),
-    (record) => record.accountId,
-    auth.account_id,
-  );
-  if (ownership.kind === "owner") return ownership.record;
-  if (ownership.kind === "foreign") {
-    await recordOutcome(deps, ownership.record, "approver_rejected", auth.account_id);
-  }
-  reply.code(404).send({ error: "credential_fetch_approval_not_found" });
-  return null;
-}
-
 export const registerCredentialFetchRoutes: FastifyPluginAsync<{
   deps: ApiDeps;
   requireAny: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
-  // The human half of the ceremony is web-session only: an agent token is the
-  // requester's authority, never the approver's.
-  requireWeb: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
   vouchVerifier?: VouchMandateVerifier;
 }> = async (fastify, opts) => {
   const verifyVouch = opts.vouchVerifier ?? createVouchMandateVerifier();
@@ -390,11 +361,12 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
           record.accountId,
           record.id,
           approvedNames,
-          // Who released the secret. The approve endpoint is owner-authenticated
-          // (loadOwnedApproval), so the only account that can have signed this
-          // approval is the record's own — the same value the `approved` row
-          // carries. If approval on someone else's behalf is ever allowed, the
-          // approver has to be persisted on the record and read from there.
+          // Who released the secret. The approve endpoint accepts only an
+          // assertion signed over this approval's account-bound payload, so
+          // the only account that can have signed it is the record's own — the
+          // same value the `approved` row carries. If approval on someone
+          // else's behalf is ever allowed, the approver has to be persisted on
+          // the record and read from there.
           record.accountId,
           unattributedVaultAuditAttribution("reveal"),
         );
@@ -432,15 +404,19 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
     },
   );
 
-  // The exact bytes the owner's passkey will sign. Owner-authenticated like the
-  // decisions themselves: handing the ceremony payload to anyone holding the
-  // link is what lets a stranger produce a technically valid assertion.
+  // The exact bytes the owner's passkey will sign. Sessionless like the
+  // payment ceremony: the payload names the owning account only through its
+  // opaque account binding, and SIGNING it is what authorizes — reading it
+  // authorizes nothing.
   fastify.get<{ Params: { id: string } }>(
     "/v1/vault/fetch-approvals/:id/ceremony",
-    { preHandler: opts.requireWeb },
+    {},
     async (req, reply) => {
-      const record = await loadOwnedApproval(opts.deps, req, reply, req.params.id);
-      if (record === null) return;
+      const record = await opts.deps.credentialFetchApprovalStore.getById(req.params.id);
+      if (record === null) {
+        reply.code(404).send({ error: "credential_fetch_approval_not_found" });
+        return;
+      }
       const now = opts.deps.now?.() ?? new Date();
       return reply.code(200).send({
         ...approvalResponse(record, now),
@@ -450,21 +426,23 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
     },
   );
 
-  // The human's YES. Two independent fences stand here, and both are needed:
-  // the caller must hold the OWNING account's web session (a genuine passkey
-  // belonging to a different Trusty Squire user must not release this secret),
-  // and the assertion must be signed over this exact approval's payload.
+  // The human's YES, sessionless like the payment approve: the authority is
+  // the Vouchflow assertion itself, and it must be signed over this exact
+  // approval's account-bound payload — anything else fails verification.
   fastify.post<{ Params: { id: string } }>(
     "/v1/vault/fetch-approvals/:id/approve",
-    { preHandler: opts.requireWeb },
+    {},
     async (req, reply) => {
       const parsed = approveBody.safeParse(req.body);
       if (!parsed.success) {
         reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
         return;
       }
-      const record = await loadOwnedApproval(opts.deps, req, reply, req.params.id);
-      if (record === null) return;
+      const record = await opts.deps.credentialFetchApprovalStore.getById(req.params.id);
+      if (record === null) {
+        reply.code(404).send({ error: "credential_fetch_approval_not_found" });
+        return;
+      }
       const now = opts.deps.now?.() ?? new Date();
       const status = publicStatus(record, now);
       if (status === "expired") {
@@ -507,25 +485,27 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
       // WHO said it. An approval that is never claimed would otherwise leave no
       // trace of the decision until it lapsed.
       if (result === "approved") {
-        await recordOutcome(opts.deps, record, "approved", req.auth!.account_id);
+        await recordOutcome(opts.deps, record, "approved", record.accountId);
       }
       return reply.code(200).send({ status: "approved" });
     },
   );
 
-  // The human's NO. Owner-authenticated for the same reason as approve, plus
-  // one of its own: an anonymous deny is a denial-of-service against the
-  // owner's fetch, recorded in their ledger as if they had refused it.
+  // The human's NO, sessionless like the rest of the ceremony. Refusing is the
+  // conservative answer: it closes the approval without ever moving a value.
   fastify.post<{ Params: { id: string } }>(
     "/v1/vault/fetch-approvals/:id/deny",
-    { preHandler: opts.requireWeb },
+    {},
     async (req, reply) => {
-      const record = await loadOwnedApproval(opts.deps, req, reply, req.params.id);
-      if (record === null) return;
+      const record = await opts.deps.credentialFetchApprovalStore.getById(req.params.id);
+      if (record === null) {
+        reply.code(404).send({ error: "credential_fetch_approval_not_found" });
+        return;
+      }
       const now = opts.deps.now?.() ?? new Date();
       const result = await opts.deps.credentialFetchApprovalStore.deny(record.id, now);
       if (result === "denied") {
-        await recordOutcome(opts.deps, record, "denied", req.auth!.account_id);
+        await recordOutcome(opts.deps, record, "denied", record.accountId);
         return reply.code(200).send({ status: "denied" });
       }
       if (result === "already_denied") return reply.code(200).send({ status: "denied" });

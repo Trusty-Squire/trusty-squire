@@ -133,9 +133,9 @@ describe("credential fetch approval page", () => {
     expect(api.apiPost).toHaveBeenCalledWith("/v1/vault/fetch-approvals/fetch_1/deny", {});
   });
 
-  // The ceremony is owner-authenticated server-side; the page's job is to send
-  // a signed-out visitor to log in and bring them back to the SAME approval,
-  // instead of showing them an error for a link that is theirs.
+  // The ceremony is sessionless server-side now, but the page still routes a
+  // 401 to login and brings the visitor back to the SAME approval, instead of
+  // showing them an error for a link that is theirs.
   it("sends a signed-out visitor to log in, keeping the approval link", async () => {
     api.apiGet.mockImplementation((path: string) => {
       if (path === "/v1/vault/fetch-approvals/fetch_1/ceremony") {

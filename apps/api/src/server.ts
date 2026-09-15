@@ -294,7 +294,6 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   await fastify.register(registerCredentialMutationRoutes, {
     deps,
     requireAny: auth.requireAny,
-    requireWeb: auth.requireWeb,
     ...(opts.vouchVerifier !== undefined ? { vouchVerifier: opts.vouchVerifier } : {}),
   });
   // fetch_credential — the one approval-gated path that returns a raw
@@ -303,8 +302,9 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   await fastify.register(registerCredentialFetchRoutes, {
     deps,
     requireAny: auth.requireAny,
-    // approve/deny/ceremony are the human half — the OWNER's web session only.
-    requireWeb: auth.requireWeb,
+    // approve/deny/ceremony are the human half — sessionless, like payments;
+    // the passkey assertion over the account-bound payload is the
+    // authentication.
     ...(opts.vouchVerifier !== undefined ? { vouchVerifier: opts.vouchVerifier } : {}),
   });
   await fastify.register(registerTelegramRoute, {

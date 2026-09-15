@@ -44,9 +44,10 @@ export default function CredentialFetchApprovalPage() {
       })
       .catch((caught: unknown) => {
         if (cancelled) return;
-        // The ceremony is owner-authenticated now: an approval link opened in a
-        // signed-out browser is a login, not an error. `next` brings the human
-        // straight back to the approval they were sent.
+        // The ceremony is sessionless now, like the payment path: an approval
+        // link opened in a signed-out browser loads without a login. A 401 is
+        // not expected from this endpoint anymore; the redirect stays only as
+        // harmless defense if the API ever re-gates it.
         if (caught instanceof ApiError && caught.status === 401) {
           redirectToLogin();
           return;

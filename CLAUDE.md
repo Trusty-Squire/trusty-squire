@@ -791,9 +791,10 @@ it cannot be replayed into a reveal. Do NOT collapse it into
 Invariants, all covered by `apps/api/src/__tests__/credential-fetch.test.ts` —
 treat a failure there as a security regression, not a test to update:
 approval-bound to (account, credential, field); the human half
-(`ceremony`/`approve`/`deny`) is OWNER-authenticated (`requireWeb` + the record
-loaded for that account — a link-holder from another account gets 404 and an
-`approver_rejected` row in the owner's ledger); single-use delivery (the store's
+(`ceremony`/`approve`/`deny`) is sessionless, exactly like the payment path —
+the Vouchflow assertion over the account-bound payload is the authentication,
+and the record loads unscoped by id (no web session, no per-account 404);
+single-use delivery (the store's
 `approved → consumed` conditional update IS the fence); expiry closes both the
 unsigned and the signed-but-unclaimed halves, and fences denial too (a lapsed
 approval settles as `expired`, never as a refusal the human never made); every
