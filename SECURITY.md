@@ -41,21 +41,29 @@ same Vouchflow ceremony that gates credential mutations and payments, under its
 own `vault_credential_fetch` context so a mutation or payment mandate can never
 authorize a reveal. The approval is bound to one (account, credential, field),
 delivery is single-use, and expiry or denial releases nothing. The human who
-answers it is the credential's OWNER, and the passkey itself is what proves
-that: the ceremony, approve, and deny endpoints take no web session — the link
-opens in whatever browser the human has — but an approval is settled only by an
-assertion signed over that approval's account-bound payload whose signing
-device the owning account has registered from a signed-in browser
-(`POST /v1/vouchflow/devices`, web-session-authenticated). An assertion that
-names no signing device is refused `missing_device_token`; one signed by a
-device the account never registered is refused `mandate_signer_not_authorized`.
-So the approval link reaching anybody else — starting with the agent that
-requested it — is not authority to answer it, and neither is a stranger's own
-entirely genuine passkey. Every outcome — approved, delivered, denied, expired,
-or failed after the approval was spent — is audited under `purpose: "reveal"`
-with the credential reference, the approval id, and (for an approval) the
-approving account and its signing device, never the value. A denial carries no
-assertion and so names nobody. Implementation:
+APPROVES it is the credential's OWNER, and the passkey itself is what proves
+that. None of the ceremony, approve, or deny endpoints takes a web session —
+the link opens in whatever browser the human has — so the authority lives
+entirely in what `approve` demands: an assertion signed over that approval's
+account-bound payload, whose signing device the owning account has registered
+from a signed-in browser (`POST /v1/vouchflow/devices`,
+web-session-authenticated). An assertion that names no signing device is
+refused `missing_device_token`; one signed by a device the account never
+registered is refused `mandate_signer_not_authorized`. So the approval link
+reaching anybody else — starting with the agent that requested it — is not
+authority to release the value, and neither is a stranger's own entirely
+genuine passkey.
+
+Denial is deliberately open: `deny` takes no assertion, so anyone holding the
+approval id can refuse it. Refusing moves no value — it only closes the
+approval — so the conservative answer is the one any link-holder may give, and
+the `denied` row it writes names nobody. Reading the ceremony payload is
+likewise unauthenticated and discloses no secret, only the bytes to sign.
+
+Every outcome — approved, delivered, denied, expired, or failed after the
+approval was spent — is audited under `purpose: "reveal"` with the credential
+reference, the approval id, and — for an approval only — the approving account
+and its signing device, never the value. Implementation:
 [`apps/api/src/routes/credential-fetch.ts`](apps/api/src/routes/credential-fetch.ts).
 
 The property this preserves is not "the model can never see a secret" — it is

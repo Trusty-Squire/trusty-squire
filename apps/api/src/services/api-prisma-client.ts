@@ -459,7 +459,7 @@ export interface ApiPrismaClient {
   };
   vouchflowDevice: {
     upsert(args: {
-      where: { device_token: string };
+      where: { device_token_account_id: { device_token: string; account_id: string } };
       create: Record<string, unknown>;
       update: Record<string, unknown>;
     }): Promise<VouchflowDeviceRow>;

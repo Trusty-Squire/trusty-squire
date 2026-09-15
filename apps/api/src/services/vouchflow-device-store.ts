@@ -19,29 +19,28 @@ export interface VouchflowDeviceRecord {
 }
 
 export interface VouchflowDeviceStore {
-  // Idempotent. A device token is unique to one browser profile, not to one
-  // account, so re-registering it from a different signed-in account moves it:
-  // the browser the human is using now is the one that may sign for them. The
-  // previous account simply re-claims it on its next signed-in visit.
+  // Idempotent and ADDITIVE: a claim adds the (account, device) pair and never
+  // takes one away. A device token identifies a browser profile, not a person,
+  // so the same passkey can be claimed by every account its owner holds — and
+  // a second account claiming it must not strip the first account's binding,
+  // which would refuse that account's next approval for no reason a human did.
   register(accountId: string, deviceToken: string, now: Date): Promise<void>;
   listTokensByAccount(accountId: string): Promise<string[]>;
 }
 
 export class InMemoryVouchflowDeviceStore implements VouchflowDeviceStore {
+  // Keyed by the same pair the table is keyed by. Account ids are ULIDs, so
+  // the first colon is always the separator.
   private readonly rows = new Map<string, VouchflowDeviceRecord>();
 
   async register(accountId: string, deviceToken: string, now: Date): Promise<void> {
-    const existing = this.rows.get(deviceToken);
-    if (existing !== undefined && existing.account_id === accountId) {
-      existing.last_seen_at = now;
-      return;
-    }
+    const key = `${accountId}:${deviceToken}`;
+    const existing = this.rows.get(key);
     if (existing !== undefined) {
-      existing.account_id = accountId;
       existing.last_seen_at = now;
       return;
     }
-    this.rows.set(deviceToken, {
+    this.rows.set(key, {
       device_token: deviceToken,
       account_id: accountId,
       first_seen_at: now,
@@ -61,14 +60,14 @@ export class PrismaVouchflowDeviceStore implements VouchflowDeviceStore {
 
   async register(accountId: string, deviceToken: string, now: Date): Promise<void> {
     await this.prisma.vouchflowDevice.upsert({
-      where: { device_token: deviceToken },
+      where: { device_token_account_id: { device_token: deviceToken, account_id: accountId } },
       create: {
         device_token: deviceToken,
         account_id: accountId,
         first_seen_at: now,
         last_seen_at: now,
       },
-      update: { account_id: accountId, last_seen_at: now },
+      update: { last_seen_at: now },
     });
   }
 

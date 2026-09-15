@@ -686,6 +686,32 @@ describe("passkey-gated fetch_credential", () => {
     });
   });
 
+  // One physical passkey belongs to every account its owner holds, and the
+  // ceremony pages claim it on every signed-in visit. A device-keyed binding
+  // would let signing into a second account silently strip the first one's,
+  // refusing its very next approval for something no human did.
+  it("keeps a device bound to every account that claimed it, not just the last", async () => {
+    const second = await deps.accountStore.createAccount("second@example.test", "Second");
+    const secondCookie = await webCookie(second.id);
+    expect((await registerDevice(OWNER_DEVICE_TOKEN, secondCookie)).statusCode).toBe(204);
+
+    expect(await deps.vouchflowDeviceStore.listTokensByAccount(second.id)).toEqual([
+      OWNER_DEVICE_TOKEN,
+    ]);
+    expect(await deps.vouchflowDeviceStore.listTokensByAccount(accountId)).toEqual([
+      OWNER_DEVICE_TOKEN,
+    ]);
+
+    // The first account's approvals still settle on that same passkey.
+    const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
+    const approval = (await createFetch({ reference })).json() as { approval_id: string };
+    const settled = await approve(approval.approval_id);
+    expect(settled.statusCode, settled.body).toBe(200);
+    expect((await resume(approval.approval_id)).json()).toMatchObject({
+      fields: { value: SECRET_VALUE },
+    });
+  });
+
   // The human half is sessionless, exactly like the payment approval path:
   // the Telegram link opens in a browser with no Trusty Squire web session,
   // and the Vouchflow passkey assertion is what authenticates the decision.
