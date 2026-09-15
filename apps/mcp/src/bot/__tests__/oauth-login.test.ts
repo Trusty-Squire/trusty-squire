@@ -26,9 +26,7 @@ import {
   act,
   awaitVerification,
   captureScreenshot,
-  extractCredentials,
   finishProvisionSession,
-  formSelectMany,
   observe,
   preparePublicOAuthLoginTarget,
   startHarnessProvisionSession,
@@ -2583,7 +2581,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         });
       });
       await product.goto(productUrl);
-      const productCredentialBefore = await product.locator("#credential").textContent();
+      await product.locator("#credential").textContent();
       const controller = BrowserController.fromHarnessPage(product);
       let sessionId: string | undefined;
       try {
