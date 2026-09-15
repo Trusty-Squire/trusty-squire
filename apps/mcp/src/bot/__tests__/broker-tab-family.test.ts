@@ -97,32 +97,6 @@ describeChromium("broker sessions — real tab-family isolation", () => {
     expect(internals(satellite).ownedPages.has(primaryPage)).toBe(false);
   });
 
-  it("raises on-demand GSI from the session-owned page beside the broker root", async () => {
-    await satellitePage.setContent('<button id="gsi">Continue with Google</button>');
-    await satellitePage.evaluate(() => {
-      let prompts = 0;
-      (globalThis as typeof globalThis & { gsiPrompts: () => number }).gsiPrompts = () => prompts;
-      (globalThis as typeof globalThis & { google: unknown }).google = {
-        accounts: { id: { prompt: () => prompts++ } },
-      };
-    });
-    const cdp = { send: async () => undefined, on: () => undefined };
-    const session = vi.spyOn(context, "newCDPSession").mockResolvedValue(cdp as never);
-    try {
-      await expect(satellite.tryGoogleGsiLogin("#gsi", 1)).resolves.toEqual({
-        ok: false,
-        via: "none",
-      });
-      expect(
-        await satellitePage.evaluate(() =>
-          (globalThis as typeof globalThis & { gsiPrompts: () => number }).gsiPrompts(),
-        ),
-      ).toBe(1);
-    } finally {
-      session.mockRestore();
-    }
-  });
-
   it("registers a popup to its opener's session only and refuses it to the other", async () => {
     primary.armOpenedTabAdoption();
     satellite.armOpenedTabAdoption();

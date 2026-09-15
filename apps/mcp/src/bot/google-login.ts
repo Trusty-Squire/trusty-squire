@@ -33,11 +33,11 @@ import {
 } from "./profile.js";
 import {
   closeBrowserContextWithin,
-  extractGoogleAccountEmail,
   launchPlainLoginBrowser,
   registerLocalBrowserLaunch,
   resolveChannelBinary,
 } from "./browser.js";
+import { extractGoogleAccountEmail } from "./oauth-login.js";
 export { extractGoogleAccountEmail };
 import {
   startInstallCompletionListener,

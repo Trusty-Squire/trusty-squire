@@ -3,7 +3,7 @@
 // stale cached provider state drifts out of sync.
 
 import { describe, expect, it } from "vitest";
-import { sessionProvidersFromCookies } from "../browser.js";
+import { sessionProvidersFromCookies } from "../oauth-login.js";
 
 const c = (name: string, domain: string, value = "x".repeat(40)) => ({
   name,

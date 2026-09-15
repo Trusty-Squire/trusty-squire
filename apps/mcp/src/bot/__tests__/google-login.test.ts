@@ -19,6 +19,7 @@ import {
   type PlainLoginBrowser,
 } from "../browser.js";
 import { stopOwnerProcessReaper } from "../owner-process-reaper.js";
+import { detectGoogleAccountEmail } from "../oauth-login.js";
 import {
   acquireProfileOperationGuard,
   launchWithProfileGate,
@@ -943,7 +944,7 @@ describe("claimed worker Google identity", () => {
       "Google Account: Ada Lovelace (live-worker@example.com)",
     ]);
 
-    await expect(controller.detectGoogleAccountEmail()).resolves.toBe("live-worker@example.com");
+    await expect(detectGoogleAccountEmail(controller)).resolves.toBe("live-worker@example.com");
     expect(close).toHaveBeenCalledOnce();
   });
 
@@ -953,7 +954,7 @@ describe("claimed worker Google identity", () => {
       ["remembered@example.com"],
     );
 
-    await expect(controller.detectGoogleAccountEmail()).resolves.toBeNull();
+    await expect(detectGoogleAccountEmail(controller)).resolves.toBeNull();
     expect(close).toHaveBeenCalledOnce();
   });
 
@@ -962,7 +963,7 @@ describe("claimed worker Google identity", () => {
       "inactive-account@example.com",
     ]);
 
-    await expect(controller.detectGoogleAccountEmail()).resolves.toBeNull();
+    await expect(detectGoogleAccountEmail(controller)).resolves.toBeNull();
   });
 });
 
