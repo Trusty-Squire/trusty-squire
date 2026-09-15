@@ -70,7 +70,6 @@ import {
   throwIfOperatorRequestCancelled,
 } from "./request-cancellation.js";
 import { BrowserProcessOwner } from "./browser-process-owner.js";
-import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
 import {
   classifyGoogleAuthState,
   extractGoogleHumanChallenge,
@@ -323,16 +322,6 @@ export type CaptchaSolveResult =
   | { found: false }
   | { found: true; solved: true; kind: CaptchaKind }
   | { found: true; solved: false; kind: CaptchaKind };
-
-export type HcaptchaCoordinateSolveResult =
-  | { found: false; solved: false; reason: "no_visible_challenge" }
-  | {
-      found: true;
-      solved: boolean;
-      reason?: string;
-      clicks: number;
-      durationMs?: number;
-    };
 
 function pngDimensions(buf: Buffer): { width: number; height: number } | null {
   if (buf.length < 24) return null;
@@ -3825,10 +3814,12 @@ export class BrowserController implements BrowserDriver {
         return false;
       });
       if (solved) {
-        if (widget.kind === "hcaptcha") {
-          const settled = await this.waitForCaptchaChallengeToSettle(15_000, 10_000, page);
-          if (!settled) return { found: true, solved: false, kind: widget.kind };
-        }
+        // The minted response token IS the success signal (see the module's
+        // own comments and captchaGate's). The removed 5a018714 hCaptcha
+        // branch additionally required the challenge iframe to stay gone for
+        // 10 continuous seconds and returned `solved: false` otherwise —
+        // measured live to discard a genuinely minted hCaptcha token after
+        // 15.7s, and to spend 10.6s even when the frame did clear.
         return { found: true, solved: true, kind: widget.kind };
       }
     }
@@ -4672,6 +4663,15 @@ export class BrowserController implements BrowserDriver {
     return null;
   }
 
+  // True once no vendor challenge frame has been visible for `stableClearMs`
+  // within `timeoutMs` — a bounded page-shape observation, NOT a solve
+  // verdict. Introduced in 5a018714 to decide whether a minted hCaptcha
+  // token had "really" taken (the challenge image should disappear); that
+  // use was removed in the 2026-09-15 audit wave because it discarded a
+  // genuinely minted token (measured: `solved: false` after 15.7s with
+  // `h-captcha-response` populated). Callers today are wait/backoff uses
+  // (Gmail search retries, consent-banner hydrate retry) plus captchaGate's
+  // own `settled` verdict; the minted response token is the success signal.
   async waitForCaptchaChallengeToSettle(
     timeoutMs = 4000,
     stableClearMs = 2_500,
