@@ -1228,115 +1228,6 @@ export class BrowserController implements BrowserDriver {
     return await this.pageDriver.goto(url, page);
   }
 
-  // Pre-warm a domain by visiting its root. Useful before navigating
-  // to a deep signup URL on a strict-Cloudflare service: the root sets
-  // first-party cookies and lets the bot-scoring JS calibrate on a
-  // benign page before we hit anything sensitive.
-  //
-  // `mode`:
-  //   - "fast" (default): visit the root, dwell ~2s, jitter the mouse,
-  //     done. Cheap and adequate when the domain has been warmed
-  //     recently (cookies already in jar, prior session in the
-  //     scoring JS's memory).
-  //   - "referrer-chain": simulate a research session — Google search
-  //     → click the brand result → scroll the marketing site →
-  //     navigate. ~20-40s of wall clock, but builds a realistic
-  //     browsing-history signal that v3 weighs heavily. Use this on
-  //     first-attempt against strict services and after a captcha
-  //     failure.
-  async prewarm(url: string, mode: "fast" | "referrer-chain" = "fast"): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    if (mode === "referrer-chain") {
-      await this.prewarmViaReferrerChain(url);
-      return;
-    }
-    const root = new URL(url).origin;
-    await this.page.goto(root, { waitUntil: "domcontentloaded", timeout: 30000 });
-    if (this.humanize) {
-      await this.sleep(rand(1200, 2500));
-      // Tiny mouse jitter so cf_clearance JS sees pointer activity.
-      await this.jitterMouse();
-    }
-  }
-
-  // Simulates a research session that ends at the signup target.
-  //
-  // Why this is more than theater: reCAPTCHA v3 reads a "browsing
-  // history" signal that aggregates referrer + dwell + interaction
-  // across the prior 1-2 page loads in this context. A cold landing on
-  // `/sign_up` has none of that — score gets clamped near 0.3, which
-  // is the kill-floor for most v3-protected forms. A simulated
-  // Google → result-click → marketing-site → /sign_up chain lifts the
-  // score to 0.5-0.7 range, which is where real users sit.
-  //
-  // Best-effort throughout: if any step fails (Google rate-limits us,
-  // the brand's marketing site is down, etc.) we degrade to the fast
-  // prewarm rather than aborting the whole signup. Network surprises
-  // are common; the bot still works without this lift, just worse.
-  private async prewarmViaReferrerChain(url: string): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    const targetOrigin = new URL(url).origin;
-    // Strip "www." for the search query so "postmarkapp.com" becomes
-    // "postmarkapp" not "www postmarkapp"; reads more like what a
-    // human types into a search box.
-    const brand = new URL(url).hostname.replace(/^www\./, "").split(".")[0];
-    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(brand + " sign up")}`;
-
-    try {
-      await this.page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
-      if (this.humanize) await this.sleep(rand(2000, 4000));
-      // Look for a result link pointing at the target origin. Google
-      // wraps result hrefs but exposes the real destination as a child
-      // attribute or via the `href` itself for organic results — we
-      // grab whichever link's href starts with the target origin.
-      // Google SERPs often expose several anchors to the same origin
-      // (the organic result, "People also ask" related links, sitelinks
-      // like /pricing). Scope to the first match so Playwright's strict
-      // mode doesn't throw before we get to click.
-      const resultLocator = this.page.locator(`a[href^="${targetOrigin}"]`).first();
-      const hasResult = (await resultLocator.count()) > 0;
-      if (hasResult) {
-        // Use humanClick if available — moves the mouse along a bezier
-        // path to the link, which feeds the scoring JS pointer entropy
-        // as a side effect.
-        if (this.humanize) {
-          await this.humanClickLocator(resultLocator);
-        } else {
-          await resultLocator.click();
-        }
-        await this.page.waitForLoadState("domcontentloaded", { timeout: 30000 });
-      } else {
-        // Couldn't find an organic result (Google sometimes interposes
-        // an ad or "people also ask" block first). Navigate directly
-        // and accept that the referrer chain is shorter but still
-        // includes the search.
-        await this.page.goto(targetOrigin, { waitUntil: "domcontentloaded", timeout: 30000 });
-      }
-
-      // Marketing-site dwell: scroll a bit, pause, scroll back. The
-      // scroll events plus the wall clock build up the "this user is
-      // reading" signal. Magnitude is intentionally small — overshooting
-      // (scrolling to the bottom in 200ms, etc.) is itself bot-like.
-      if (this.humanize) {
-        await this.sleep(rand(1500, 3500));
-        await this.page.mouse.wheel(0, rand(200, 500));
-        await this.sleep(rand(800, 2000));
-        await this.page.mouse.wheel(0, rand(-200, 0));
-        await this.sleep(rand(1000, 2500));
-        await this.jitterMouse();
-      }
-    } catch (err) {
-      // Any step in the chain failing leaves us at *some* page (the
-      // search results, the marketing site, an error page) — that's
-      // still better than a cold landing on /sign_up. Log and proceed.
-      this.logOperatorDiagnostic(
-        `[operator] referrer-chain prewarm partial failure (non-fatal): ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
-  }
-
   // Contract C `type` verb: the driver owns the handle/frame/page dispatch.
   async type(
     target: DriverTarget,
@@ -4754,21 +4645,6 @@ export class BrowserController implements BrowserDriver {
       await this.sleep(250);
     }
     return false;
-  }
-
-  // Small mouse wiggle near the current position. Used during prewarm
-  // so the page sees pointer events before we navigate away.
-  private async jitterMouse(): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    const wiggles = rand(2, 5);
-    for (let i = 0; i < wiggles; i++) {
-      const nx = this.mouseX + rand(-50, 50);
-      const ny = this.mouseY + rand(-50, 50);
-      await this.page.mouse.move(nx, ny);
-      this.mouseX = nx;
-      this.mouseY = ny;
-      await this.sleep(rand(40, 120));
-    }
   }
 
   sleep(ms: number): Promise<void> {
