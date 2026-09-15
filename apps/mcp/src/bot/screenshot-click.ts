@@ -66,9 +66,8 @@ export class ScreenshotClickError extends Error {
   constructor(
     readonly code: "stale_screenshot" | "invalid_screenshot_point" | "screenshot_click_uncertain",
     readonly dispatch: "not_dispatched" | "dispatched" | "unknown",
-    cause?: unknown,
   ) {
-    super(code, cause === undefined ? undefined : { cause });
+    super(code);
   }
 }
 

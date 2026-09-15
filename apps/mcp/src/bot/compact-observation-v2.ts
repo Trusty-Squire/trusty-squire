@@ -1097,23 +1097,11 @@ export function safePageSemanticsV2(source: ObservationSemanticSourceV2): SafePa
  * the stage classifier only looks at the URL, so a CloudFront 403 "Request
  * blocked" on /cart still reported stage "cart". Name the wall from the
  * code-owned title/heading source. Signatures are deliberately narrow — anchored
- * CloudFront/gateway block vocabulary and exact error-page titles — so ordinary
- * content that merely discusses HTTP errors, and passable challenge
- * interstitials, never match.
+ * CDN block-wall vocabulary only — so ordinary content that merely discusses
+ * HTTP errors, passable challenge interstitials, and transient origin failures
+ * a retry would clear never match.
  */
-const ERROR_PAGE_EXACT_TITLES = new Set([
-  "403 forbidden",
-  "429 too many requests",
-  "500 internal server error",
-  "502 bad gateway",
-  "503 service unavailable",
-  "503 service temporarily unavailable",
-  "504 gateway time-out",
-  "504 gateway timeout",
-  "bad gateway",
-  "access denied",
-  "request blocked",
-]);
+const ERROR_PAGE_EXACT_TITLES = new Set(["403 forbidden", "access denied", "request blocked"]);
 const ERROR_PAGE_SIGNAL_RES = [
   /the request could not be satisfied/i,
   /sorry, you have been blocked/i,
@@ -1551,21 +1539,23 @@ export function safeBlockersV2(
     if (!isModalDialog) continue;
     const name = dialogNameV2(node);
     if (name === undefined || blockers.some((blocker) => blocker.text === name)) continue;
-    // `ref` is selected from the SAME slice the blocker publishes, so it always
-    // names one of its own options.
-    const controls = dialogControlsV2(node, nodes, visibleFor, withinSubtree, refForNode).slice(
-      0,
-      DIALOG_MAX_OPTIONS,
-    );
+    const controls = dialogControlsV2(node, nodes, visibleFor, withinSubtree, refForNode);
     const close =
       controls.find((candidate) => DIALOG_DISMISS_RE.test(blockerTextV2(candidate) ?? "")) ??
       controls[0];
+    // The dismiss path is the one control a blocked agent always needs, so it
+    // displaces the last capped entry rather than falling off the slice; `ref`
+    // therefore always names one of the emitted options.
+    const emitted =
+      close === undefined || controls.indexOf(close) < DIALOG_MAX_OPTIONS
+        ? controls.slice(0, DIALOG_MAX_OPTIONS)
+        : [...controls.slice(0, DIALOG_MAX_OPTIONS - 1), close];
     const closeRef = close === undefined ? undefined : refForNode(close);
     const detail = boundedBlockerTextV2(
       browserUseBoundedContextText(node, DIALOG_DETAIL_MAX_CHARS),
       DIALOG_DETAIL_MAX_CHARS,
     );
-    const options = controls.map((control) => {
+    const options = emitted.map((control) => {
       const label = boundedBlockerTextV2(blockerTextV2(control), DIALOG_OPTION_LABEL_MAX_CHARS);
       return { ref: refForNode(control)!, ...(label === undefined ? {} : { label }) };
     });

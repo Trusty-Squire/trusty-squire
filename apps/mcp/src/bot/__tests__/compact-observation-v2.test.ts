@@ -122,8 +122,22 @@ describe("CDN/gateway error pages are named, not mistaken for a normal page", ()
     }
   });
 
-  it("reports gateway error titles and vendor attribution headings", () => {
-    for (const title of ["403 Forbidden", "504 Gateway Time-out", "Access Denied"]) {
+  it("does not treat transient origin failures as walls", () => {
+    // A 5xx/429 is retry-and-continue; calling it a wall invites the host agent
+    // to abandon a recoverable step.
+    for (const title of [
+      "429 Too Many Requests",
+      "500 Internal Server Error",
+      "502 Bad Gateway",
+      "503 Service Unavailable",
+      "504 Gateway Time-out",
+    ]) {
+      expect(safePageSemanticsV2({ title, headings: [] }).blocked).toBeUndefined();
+    }
+  });
+
+  it("reports block-wall titles and vendor attribution headings", () => {
+    for (const title of ["403 Forbidden", "Access Denied", "Request blocked"]) {
       expect(safePageSemanticsV2({ title, headings: [] }).blocked).toBe(true);
     }
     expect(
@@ -2173,9 +2187,10 @@ describe("safeBlockersV2 modal dialog", () => {
     ]);
   });
 
-  it("always names one of its own options as ref", () => {
-    // A consent modal with more qualifying controls than the option cap: the
-    // dismiss control sits past the cap, so ref must come from the slice.
+  it("keeps the close affordance past the option cap and names it as ref", () => {
+    // A consent modal with more qualifying controls than the option cap. The
+    // close sits last; dropping it would leave ref pointing at Accept all, so a
+    // host agent told the blocker carries the close path grants consent instead.
     const labels = [
       "Accept all",
       "Reject all",
@@ -2198,8 +2213,15 @@ describe("safeBlockersV2 modal dialog", () => {
     });
     const refs = new Map(dialog.children.map((child, index) => [child, `@e:c${index}`]));
     const blocker = safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate))[0];
-    expect(blocker?.options).toHaveLength(6);
-    expect(blocker?.options?.map((option) => option.ref)).toContain(blocker?.ref);
+    expect(blocker?.ref).toBe("@e:c7");
+    expect(blocker?.options).toEqual([
+      { ref: "@e:c0", label: "Accept all" },
+      { ref: "@e:c1", label: "Reject all" },
+      { ref: "@e:c2", label: "Analytics" },
+      { ref: "@e:c3", label: "Marketing" },
+      { ref: "@e:c4", label: "Functional" },
+      { ref: "@e:c7", label: "Close" },
+    ]);
   });
 
   it("stops reporting the dialog blocker once the dialog is removed", () => {
