@@ -2155,15 +2155,69 @@ describe("safeBlockersV2 modal dialog", () => {
     expect(blocker?.detail).toBe(
       "You entered: 1234 Northwest Example Boulevard, Apartment 5B, Portland, Oregon 97209, United States. Suggested address: 1234 NW Example Blvd Apt 5B, Portland, OR 97209-1234, United States.",
     );
-    // Neither button dismisses the dialog. Naming the first one as ref would let
-    // an agent "clear the blocker" by accepting the correction and silently
-    // discarding what was entered — both stay reachable through options.
-    expect(blocker?.ref).toBeUndefined();
-    expect(blocker?.target).toBe("unavailable");
+    // The exit is the button that preserves the entry, never the one that
+    // accepts the correction: clearing the blocker through ref must not silently
+    // discard what was entered.
+    expect(blocker?.ref).toBe("@e:keep");
+    expect(blocker?.target).toBeUndefined();
     expect(blocker?.options).toEqual([
       { ref: "@e:suggested", label: "Use suggested address" },
       { ref: "@e:keep", label: "Keep what I entered" },
     ]);
+  });
+
+  it("refuses a destructive confirm that merely contains an exit word", () => {
+    // "Cancel subscription" contains "cancel" but performs the irreversible
+    // action. Advertising it as the way out would have an agent clear the
+    // blocker by cancelling the subscription.
+    const dialog = node("dialog", {
+      attributes: {
+        role: "dialog",
+        "aria-modal": "true",
+        "aria-label": "Cancel your subscription?",
+      },
+      children: [
+        text("dialog-body", "This cannot be undone."),
+        node("dialog-confirm", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("confirm-text", "Cancel subscription")],
+        }),
+        node("dialog-keep", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("keep-text", "Keep my subscription")],
+        }),
+      ],
+    });
+    const refs = new Map(dialog.children.slice(1).map((child, index) => [child, `@e:s${index}`]));
+    const blocker = safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate))[0];
+    expect(blocker?.ref).toBeUndefined();
+    expect(blocker?.target).toBe("unavailable");
+    expect(blocker?.options).toEqual([
+      { ref: "@e:s0", label: "Cancel subscription" },
+      { ref: "@e:s1", label: "Keep my subscription" },
+    ]);
+    expect(blocker?.detail).toBe("This cannot be undone.");
+  });
+
+  it("still names a plain close control as the exit", () => {
+    for (const label of ["Close", "Cancel", "No thanks", "Close dialog", "\u2715"]) {
+      const dialog = node("dialog", {
+        attributes: { role: "dialog", "aria-modal": "true", "aria-label": "Offer" },
+        children: [
+          node("dialog-close", {
+            nodeName: "BUTTON",
+            axRole: "button",
+            children: [text("close-text", label)],
+          }),
+        ],
+      });
+      const blocker = safeBlockersV2(page([dialog]), (candidate) =>
+        candidate === dialog.children[0] ? "@e:close" : undefined,
+      )[0];
+      expect(blocker?.ref).toBe("@e:close");
+    }
   });
 
   it("omits detail that only repeats a nameless dialog's own text", () => {
@@ -2191,6 +2245,31 @@ describe("safeBlockersV2 modal dialog", () => {
     const refs = new Map(dialog.children.slice(1).map((child, index) => [child, `@e:d${index}`]));
     const blocker = safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate))[0];
     expect(blocker?.text).toBe("Discard your changes? Cancel Discard");
+    expect(blocker?.detail).toBeUndefined();
+  });
+
+  it("omits the repeated detail when prose and controls interleave", () => {
+    // The prose is no longer one contiguous run inside `text`, but `text` is
+    // still the whole subtree, so detail can only restate it.
+    const dialog = node("dialog", {
+      attributes: { role: "alertdialog" },
+      children: [
+        node("dialog-lead", { nodeName: "P", children: [text("lead-text", "Are you sure?")] }),
+        node("dialog-cancel", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("cancel-text", "Cancel")],
+        }),
+        node("dialog-tail", {
+          nodeName: "P",
+          children: [text("tail-text", "This cannot be undone.")],
+        }),
+      ],
+    });
+    const blocker = safeBlockersV2(page([dialog]), (candidate) =>
+      candidate === dialog.children[1] ? "@e:cancel" : undefined,
+    )[0];
+    expect(blocker?.text).toBe("Are you sure? Cancel This cannot be undone.");
     expect(blocker?.detail).toBeUndefined();
   });
 

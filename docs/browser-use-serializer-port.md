@@ -60,13 +60,17 @@ blockers additionally carry up to `DIALOG_MAX_OPTIONS` rendered controls as
 `options`, in DOM order, including the close affordance whenever the dialog
 renders one — so "keep entered address" paths are never invisible. When more
 controls qualify than fit, that dismiss path and the controls that resolve the
-dialog are kept ahead of anchors. `ref` names a dismissal control or nothing: a
-dialog whose controls are only choices, links, or buttons that are not labelled
-as a dismissal (an address dialog offering "Use suggested address" / "Keep what
-I entered") reports those in `options` with `target: "unavailable"`, rather than
-advertising one of them as the way out. A bounded `detail` carries the dialog's
-own prose, excluding the control labels the blocker already reports and absent
-when it would only repeat `text`.
+dialog are kept ahead of anchors. `ref` names an exit or nothing: a button whose
+WHOLE label is a close/cancel form (`Close`, `Cancel`, `No thanks`, `Close
+dialog`, a ✕ glyph) or a keep-what-was-entered form (`Keep what I entered`, `Use
+the address you entered`), preferring the latter because it preserves the entry.
+A label that merely contains an exit word is not one: `Cancel subscription` and
+`Close account` are the destructive confirm, so a dialog offering only those —
+like one whose controls are only choices or links — reports them in `options`
+with `target: "unavailable"` rather than advertising one as the way out. A
+bounded `detail` carries the dialog's own prose, excluding the control labels the
+blocker already reports and absent when the dialog had no name of its own, since
+`text` is then that same prose.
 A solved Turnstile widget no longer blocks when its associated hidden response
 input (`cf-turnstile-response` / `cf-chl-widget-*_response`) carries a non-empty
 token or capture confirms its iframe is no longer rendered. Viewport exclusion

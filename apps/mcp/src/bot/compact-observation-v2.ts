@@ -177,18 +177,19 @@ export interface SafeBlockerV2 {
    * a modal's option set is discoverable in compact mode — not just the one
    * control `ref` points at. When the cap binds, a rendered dismiss affordance is
    * kept first, then the controls that resolve the dialog (buttons, checkboxes,
-   * radios, submits), then anchors; a fuller list needs a control query. A
-   * dialog that renders no dismiss-shaped control reports exactly what it does
-   * offer and `target: "unavailable"` — `ref` names a dismissal path or nothing.
-   * This is additive evidence, never a gate.
+   * radios, submits), then anchors; a fuller list needs a control query. `ref`
+   * names an exit or nothing: a button whose WHOLE label is a close/cancel form
+   * or a keep-what-was-entered form, preferring the latter. A dialog rendering
+   * no such control reports exactly what it does offer and
+   * `target: "unavailable"`. This is additive evidence, never a gate.
    */
   options?: Array<{ ref: string; label?: string }>;
   /**
    * The dialog's own prose, so what a suggestion would change relative to what
    * was entered is visible without leaving compact mode. It excludes the labels
-   * already in `options[].label`, is absent whenever it would only repeat
-   * `text`, and carries the usual ellipsis when the body runs past
-   * DIALOG_DETAIL_MAX_CHARS.
+   * already in `options[].label`, is absent when the dialog had no name of its
+   * own and `text` is therefore that same prose, and carries the usual ellipsis
+   * when the body runs past DIALOG_DETAIL_MAX_CHARS.
    */
   detail?: string;
 }
@@ -1186,7 +1187,22 @@ function blockerTextV2(node: BrowserUseNode): string | undefined {
     .find((candidate) => candidate !== undefined);
 }
 
-const DIALOG_DISMISS_RE = /\b(?:close|dismiss|cancel|no\s+thanks)\b|[✕×]/i;
+// Two bounded exit vocabularies, both whole-label. Substring matching promoted
+// "Cancel subscription" and "Close account" — the destructive confirm — to the
+// blocker's advertised way out, because they merely CONTAIN an exit word.
+const DIALOG_CLOSE_RES = [
+  /^[✕×]$/,
+  /^(?:cancel|no\s+thanks)$/i,
+  /^(?:close|dismiss)(?:\s+(?:this\s+)?(?:dialog|modal|window|popup|overlay|message|notification))?$/i,
+];
+// A suggestion dialog's exit keeps what the user typed, so it is named after the
+// entry rather than after closing. Preferred over a plain close when both exist.
+const DIALOG_KEEP_RES = [
+  /\bkeep\b.*\bentered\b/i,
+  /\bkeep\s+(?:this|my|the)\s+address\b/i,
+  /\buse\b.*\bas\s+entered\b/i,
+  /\buse\b.*\b(?:i|you)\s+entered\b/i,
+];
 const DIALOG_HEADING_TAGS = new Set(["h1", "h2", "h3", "h4", "h5", "h6"]);
 const DIALOG_MAX_OPTIONS = 6;
 const DIALOG_DETAIL_MAX_CHARS = 400;
@@ -1198,15 +1214,34 @@ const DIALOG_DETAIL_SOURCE_MAX_CHARS = DIALOG_DETAIL_MAX_CHARS * 2;
 // budget for the control rows a blocked observation still has to carry.
 const DIALOG_OPTION_LABEL_MAX_CHARS = 48;
 
-function dialogNameV2(dialog: BrowserUseNode): string | undefined {
+function dialogExitKindV2(node: BrowserUseNode): "keep" | "close" | undefined {
+  const label = blockerTextV2(node) ?? "";
+  if (DIALOG_KEEP_RES.some((signature) => signature.test(label))) return "keep";
+  if (DIALOG_CLOSE_RES.some((signature) => signature.test(label))) return "close";
+  return undefined;
+}
+
+/**
+ * The name plus WHERE it came from. A `subtree` name is the dialog's whole
+ * rendered text, so `detail` — that same subtree minus its controls — can only
+ * restate it; `blockerTextV2` returns undefined past its budget, so a defined
+ * subtree name is always the complete text and never a truncated prefix.
+ */
+function dialogNameV2(
+  dialog: BrowserUseNode,
+): { text: string; source: "explicit" | "heading" | "subtree" } | undefined {
   const explicit = [
     dialog.attributes["aria-label"],
     dialog.attributes.ax_name,
     dialog.attributes.title,
   ].find((value) => typeof value === "string" && value.trim() !== "");
-  if (explicit !== undefined) return boundedBlockerTextV2(explicit);
+  const explicitText = explicit === undefined ? undefined : boundedBlockerTextV2(explicit);
+  if (explicitText !== undefined) return { text: explicitText, source: "explicit" };
   const heading = dialogHeadingNodeV2(dialog);
-  return (heading === undefined ? undefined : blockerTextV2(heading)) ?? blockerTextV2(dialog);
+  const headingText = heading === undefined ? undefined : blockerTextV2(heading);
+  if (headingText !== undefined) return { text: headingText, source: "heading" };
+  const subtreeText = blockerTextV2(dialog);
+  return subtreeText === undefined ? undefined : { text: subtreeText, source: "subtree" };
 }
 
 function dialogHeadingNodeV2(dialog: BrowserUseNode): BrowserUseNode | undefined {
@@ -1596,16 +1631,18 @@ export function safeBlockersV2(
       node.attributes["aria-modal"]?.toLowerCase() === "true";
     if (!isModalDialog) continue;
     const name = dialogNameV2(node);
-    if (name === undefined || blockers.some((blocker) => blocker.text === name)) continue;
+    if (name === undefined || blockers.some((blocker) => blocker.text === name.text)) continue;
     const controls = dialogControlsV2(node, nodes, visibleFor, withinSubtree, refForNode);
-    // `ref` is the dismissal path, so only a dismiss-labelled button-shaped
-    // control earns it. A radio ACCEPTS a choice, an anchor navigates away, and
-    // the first button of an address dialog is "Use suggested address" — naming
-    // any of them here would hand the agent silent acceptance dressed as an
-    // escape. Every control stays reachable through `options`.
-    const close = controls
+    // `ref` is the exit, so only a button-shaped control whose whole label is one
+    // earns it — and a keep-what-I-entered exit outranks a plain close, since it
+    // preserves the entry. A radio ACCEPTS a choice and an anchor navigates away,
+    // so neither qualifies. Every control stays reachable through `options`.
+    const exits = controls
       .filter(blockerControlV2)
-      .find((candidate) => DIALOG_DISMISS_RE.test(blockerTextV2(candidate) ?? ""));
+      .map((candidate) => ({ candidate, kind: dialogExitKindV2(candidate) }));
+    const close =
+      exits.find((exit) => exit.kind === "keep")?.candidate ??
+      exits.find((exit) => exit.kind === "close")?.candidate;
     // The cap decides WHICH controls survive, never the order they are read in.
     // Policy anchors render before the buttons on a consent modal, so a plain
     // DOM-order cut reported "Privacy Policy" and dropped Accept/Reject.
@@ -1620,7 +1657,7 @@ export function safeBlockersV2(
     const closeRef = close === undefined ? undefined : refForNode(close);
     const excluded = new Set<BrowserUseNode>(controls);
     const heading = dialogHeadingNodeV2(node);
-    if (heading !== undefined && blockerTextV2(heading) === name) excluded.add(heading);
+    if (heading !== undefined && blockerTextV2(heading) === name.text) excluded.add(heading);
     const holdingExcluded = new Set<BrowserUseNode>();
     for (const member of excluded) {
       let current: BrowserUseNode | undefined = member;
@@ -1636,13 +1673,10 @@ export function safeBlockersV2(
     });
     blockers.push({
       kind: "dialog",
-      text: name,
+      text: name.text,
       ...(closeRef === undefined ? { target: "unavailable" as const } : { ref: closeRef }),
       ...(options.length === 0 ? {} : { options }),
-      // A nameless dialog takes its `text` from the same subtree, so the field
-      // would only restate what the blocker already carries. Containment, not a
-      // prefix: the prose reads after the buttons when they render first.
-      ...(detail === undefined || name.includes(detail) ? {} : { detail }),
+      ...(detail === undefined || name.source === "subtree" ? {} : { detail }),
     });
   }
   return blockers;
