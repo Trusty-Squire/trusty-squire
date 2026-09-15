@@ -6,7 +6,7 @@
 // `SignupResult` is the terminal outcome of a provision run; `PostVerifyStep`
 // is one planner-emitted action in the post-verification navigation loop.
 
-import type { CaptchaKind, CaptchaVariant } from "./browser.js";
+import type { CaptchaKind, CaptchaVariant } from "./captcha.js";
 import type { FailureStage } from "./failure-stage.js";
 
 export interface SignupResult {

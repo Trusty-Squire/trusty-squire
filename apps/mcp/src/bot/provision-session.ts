@@ -28,7 +28,22 @@ import type {
   InjectCardResolvedTarget,
 } from "./browser.js";
 import { completeOAuthTransitionRecovery, oauthTransitionStatus } from "./oauth-login.js";
-import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
+import {
+  TwoCaptchaSolver,
+  type TwoCaptchaVaultProxy,
+  detectCaptchaVariant,
+  extractHcaptchaSitekey,
+  extractRecaptchaSitekey,
+  extractTurnstileSitekey,
+  getHcaptchaSolveContext,
+  injectHcaptchaToken,
+  injectRecaptchaToken,
+  injectTurnstileToken,
+  solveVisibleCaptcha,
+  triggerInvisibleRecaptcha,
+  waitForCaptchaChallengeToSettle,
+  waitForCaptchaResponseToken,
+} from "./captcha.js";
 import {
   isCompactV2Handle,
   isCompactV2Label,
@@ -762,7 +777,7 @@ async function solveCaptchaWithTokenSolver(
   if (!solver.isAvailable()) return { solved: false, outcome: "no_key" };
 
   if (variant === "recaptcha_v2" || variant === "recaptcha_v3") {
-    const sitekey = await browser.extractRecaptchaSitekey(page);
+    const sitekey = await extractRecaptchaSitekey(browser, page);
     if (sitekey === null) return { solved: false, outcome: "missing_sitekey" };
     const res = await solver.solveRecaptchaV2({
       sitekey,
@@ -770,18 +785,18 @@ async function solveCaptchaWithTokenSolver(
       ...(variant === "recaptcha_v3" ? { invisible: true } : {}),
     });
     if (res.kind !== "ok") return { solved: false, outcome: res.kind };
-    const injected = await browser.injectRecaptchaToken(res.token, page);
+    const injected = await injectRecaptchaToken(browser, res.token, page);
     if (!injected) return { solved: false, outcome: "inject_failed" };
     return {
-      solved: await browser.waitForCaptchaResponseToken(2_000, page),
+      solved: await waitForCaptchaResponseToken(browser, 2_000, page),
       outcome: "ok",
     };
   }
 
   if (variant === "hcaptcha") {
-    const sitekey = await browser.extractHcaptchaSitekey(page);
+    const sitekey = await extractHcaptchaSitekey(browser, page);
     if (sitekey === null) return { solved: false, outcome: "missing_sitekey" };
-    const ctx = await browser.getHcaptchaSolveContext(page);
+    const ctx = await getHcaptchaSolveContext(browser, page);
     const res = await solver.solveHcaptcha({
       sitekey,
       pageUrl: page?.url() ?? browser.currentUrl(),
@@ -790,26 +805,26 @@ async function solveCaptchaWithTokenSolver(
       ...(ctx.rqdata !== null ? { data: ctx.rqdata } : {}),
     });
     if (res.kind !== "ok") return { solved: false, outcome: res.kind };
-    const injected = await browser.injectHcaptchaToken(res.token, page);
+    const injected = await injectHcaptchaToken(browser, res.token, page);
     if (!injected) return { solved: false, outcome: "inject_failed" };
     return {
-      solved: await browser.waitForCaptchaResponseToken(2_000, page),
+      solved: await waitForCaptchaResponseToken(browser, 2_000, page),
       outcome: "ok",
     };
   }
 
   if (variant === "turnstile") {
-    const sitekey = await browser.extractTurnstileSitekey(page);
+    const sitekey = await extractTurnstileSitekey(browser, page);
     if (sitekey === null) return { solved: false, outcome: "missing_sitekey" };
     const res = await solver.solveTurnstile({
       sitekey,
       pageUrl: page?.url() ?? browser.currentUrl(),
     });
     if (res.kind !== "ok") return { solved: false, outcome: res.kind };
-    const injected = await browser.injectTurnstileToken(res.token, page);
+    const injected = await injectTurnstileToken(browser, res.token, page);
     if (!injected) return { solved: false, outcome: "inject_failed" };
     return {
-      solved: await browser.waitForCaptchaResponseToken(2_000, page),
+      solved: await waitForCaptchaResponseToken(browser, 2_000, page),
       outcome: "ok",
     };
   }
@@ -825,14 +840,14 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const page = operationPageForSession(session);
   invalidateCompactV2Snapshot(session);
-  const det = await session.browser.detectCaptchaVariant(page);
+  const det = await detectCaptchaVariant(session.browser, page);
   const found = det.variant !== "unknown" || det.challengeRendered;
   if (!found) {
     audit(sessionId, "captcha_gate", { found: false });
     return { session_id: sessionId, found: false, variant: "none", settled: true };
   }
 
-  let token = await session.browser.waitForCaptchaResponseToken(750, page);
+  let token = await waitForCaptchaResponseToken(session.browser, 750, page);
   let solvedBySubstrate = false;
   let tokenSolverOutcome: string | null = null;
 
@@ -842,8 +857,8 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
     // #279). With NO solver configured, solveCaptchaWithTokenSolver returns
     // "no_key" and a v3 failure stays an IP/behavior scoring wall (needs_user →
     // captcha_wall below), NOT a "set up 2Captcha" prompt.
-    solvedBySubstrate = await session.browser.triggerInvisibleRecaptcha(9_000, page);
-    token = solvedBySubstrate || (await session.browser.waitForCaptchaResponseToken(2_000, page));
+    solvedBySubstrate = await triggerInvisibleRecaptcha(session.browser, 9_000, page);
+    token = solvedBySubstrate || (await waitForCaptchaResponseToken(session.browser, 2_000, page));
     if (!token) {
       const solver = await buildTwoCaptchaSolver(session);
       const tokenSolved = await solveCaptchaWithTokenSolver(
@@ -872,13 +887,15 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
     tokenSolverOutcome = tokenSolved.outcome;
     token = tokenSolved.solved;
     if (!token) {
-      const solved = await session.browser.solveVisibleCaptcha(30_000, page);
+      const solved = await solveVisibleCaptcha(session.browser, 30_000, page);
       solvedBySubstrate = solved.found && solved.solved;
-      token = solvedBySubstrate || (await session.browser.waitForCaptchaResponseToken(2_000, page));
+      token =
+        solvedBySubstrate || (await waitForCaptchaResponseToken(session.browser, 2_000, page));
     }
   }
 
-  const clear = await session.browser.waitForCaptchaChallengeToSettle(
+  const clear = await waitForCaptchaChallengeToSettle(
+    session.browser,
     token ? 5_000 : 15_000,
     2_500,
     page,
@@ -936,4 +953,3 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
     ...(needs_user !== undefined ? { needs_user } : {}),
   };
 }
-

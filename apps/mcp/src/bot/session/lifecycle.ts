@@ -31,6 +31,7 @@ import { brokerBrowserCustody } from "../broker/custody.js";
 import { randomUUID } from "node:crypto";
 import type { BrowserController } from "../browser.js";
 import { detectGoogleAccountEmail, detectSessionProviders } from "../oauth-login.js";
+import { waitForCaptchaChallengeToSettle } from "../captcha.js";
 import { compactV2AuditValue } from "../compact-observation-v2.js";
 import type { ApiClient } from "../../api-client.js";
 import { loginSessionGuidance } from "../skill-hint.js";
@@ -630,7 +631,7 @@ export async function startProvisionSession(
         audit(id, "consent_dismissed", { cta });
         break;
       }
-      if (attempt === 0) await browser.waitForCaptchaChallengeToSettle(800, 0).catch(() => false);
+      if (attempt === 0) await waitForCaptchaChallengeToSettle(browser, 800, 0).catch(() => false);
     }
     const loginHint = loginSessionGuidance(liveProviders);
     const observation = await ports.observeSession(

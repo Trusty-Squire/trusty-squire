@@ -10,6 +10,7 @@
 import type { Page } from "playwright";
 import type { BrowserController } from "../browser.js";
 import { withOAuthActionLease } from "../oauth-login.js";
+import { waitForCaptchaChallengeToSettle } from "../captcha.js";
 import { pickVerificationLink, type VerificationLinkCandidate } from "../email-verification.js";
 import { findOtpCredential } from "../credential-shape.js";
 import type { Session } from "../session/model.js";
@@ -233,15 +234,18 @@ async function readGmailSearchResultsResilient(
   let links: VerificationLinkCandidate[] = [];
   for (let retry = 0; retry <= GMAIL_TRANSIENT_MAX_RETRIES; retry++) {
     if (retry > 0) {
-      await browser
-        .waitForCaptchaChallengeToSettle(gmailTransientBackoffMs(retry - 1), 0, page)
-        .catch(() => false);
+      await waitForCaptchaChallengeToSettle(
+        browser,
+        gmailTransientBackoffMs(retry - 1),
+        0,
+        page,
+      ).catch(() => false);
       await browser.goto(searchUrl, page);
     }
     for (let i = 0; i < 6; i++) {
       text = await browser.extractVisibleText(page);
       if (text.length > 200) break;
-      await browser.waitForCaptchaChallengeToSettle(1200, 0, page).catch(() => false);
+      await waitForCaptchaChallengeToSettle(browser, 1200, 0, page).catch(() => false);
     }
     links = linkCandidatesOf(await browser.extractInteractiveElements(page));
     const transientOrEmpty =
@@ -301,7 +305,7 @@ export async function awaitVerification(
     for (let attempt = 0; attempt < 3 && code === null && link === null; attempt++) {
       sourceFrom = null;
       if (attempt > 0)
-        await browser.waitForCaptchaChallengeToSettle(4000, 0, inboxPage).catch(() => false);
+        await waitForCaptchaChallengeToSettle(browser, 4000, 0, inboxPage).catch(() => false);
       await browser.goto(searchUrl, inboxPage);
       const { text: listText, links: listLinks } = await readGmailSearchResultsResilient(
         browser,

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   extractHcaptchaResponseKeyFromToken,
   extractHcaptchaSitekeyFromHtml,
-} from "../browser.js";
+} from "../captcha.js";
 
 describe("extractHcaptchaSitekeyFromHtml", () => {
   it("extracts standard sitekey config", () => {

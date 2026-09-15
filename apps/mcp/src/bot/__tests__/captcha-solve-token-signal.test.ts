@@ -10,12 +10,17 @@
 //
 // `waitForCaptchaChallengeToSettle` itself is untouched and still reports
 // page shape — it is a wait/backoff primitive for other callers, not a solve
-// verdict (see its comment in browser.ts).
+// verdict (see its comment in captcha.ts).
 //
 // Synthetic fixtures only; no network, no credentials.
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
 import { BrowserController } from "../browser.js";
+import {
+  solveVisibleCaptcha,
+  waitForCaptchaChallengeToSettle,
+  waitForCaptchaResponseToken,
+} from "../captcha.js";
 
 let browser: Browser;
 
@@ -54,12 +59,12 @@ describe("solveVisibleCaptcha — the response token is the solve signal", () =>
     const { ctrl, page } = await pageFor(HCAPTCHA_TOKEN_WITH_LINGERING_CHALLENGE);
     try {
       const t0 = Date.now();
-      const result = await ctrl.solveVisibleCaptcha(25_000, page);
+      const result = await solveVisibleCaptcha(ctrl, 25_000, page);
       expect(result).toEqual({ found: true, solved: true, kind: "hcaptcha" });
       // The removed branch burned its full 15s budget here; the token check
       // is a single 500ms poll.
       expect(Date.now() - t0).toBeLessThan(5_000);
-      expect(await ctrl.waitForCaptchaResponseToken(750, page)).toBe(true);
+      expect(await waitForCaptchaResponseToken(ctrl, 750, page)).toBe(true);
     } finally {
       await page.close();
     }
@@ -68,7 +73,7 @@ describe("solveVisibleCaptcha — the response token is the solve signal", () =>
   it("reports solved for a minted Turnstile token (control — never had the branch)", async () => {
     const { ctrl, page } = await pageFor(TURNSTILE_TOKEN);
     try {
-      const result = await ctrl.solveVisibleCaptcha(25_000, page);
+      const result = await solveVisibleCaptcha(ctrl, 25_000, page);
       expect(result).toEqual({ found: true, solved: true, kind: "turnstile" });
     } finally {
       await page.close();
@@ -80,8 +85,8 @@ describe("solveVisibleCaptcha — the response token is the solve signal", () =>
     try {
       // Token present, challenge frame visible → the predicate still says
       // "not settled". It is the callers' business, not solveVisibleCaptcha's.
-      expect(await ctrl.waitForCaptchaChallengeToSettle(1500, 250, page)).toBe(false);
-      expect(await ctrl.waitForCaptchaResponseToken(750, page)).toBe(true);
+      expect(await waitForCaptchaChallengeToSettle(ctrl, 1500, 250, page)).toBe(false);
+      expect(await waitForCaptchaResponseToken(ctrl, 750, page)).toBe(true);
     } finally {
       await page.close();
     }
