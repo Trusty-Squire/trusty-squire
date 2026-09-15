@@ -5,12 +5,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { BrokerRefusal } from "./refusal.js";
 import type { BrokerPrincipal } from "./authority.js";
-import {
-  BROKER_WIRE_VERSION,
-  type BrokerNotification,
-  type ConnectRequest,
-  type ConnectResult,
-} from "./protocol.js";
+import type { BrokerNotification, ConnectRequest, ConnectResult } from "./protocol.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -215,7 +210,7 @@ export async function listenBroker(
         }
         principal = candidate;
         return {
-          version: BROKER_WIRE_VERSION,
+          version: 1,
           clientId: principal.clientId,
           ...(isRecord(extra) ? extra : {}),
         };

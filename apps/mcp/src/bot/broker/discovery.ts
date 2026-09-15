@@ -13,14 +13,11 @@ import {
 } from "../profile.js";
 import { BrokerClient } from "./transport.js";
 import { BrokerRefusal } from "./refusal.js";
-import { BROKER_WIRE_VERSION } from "./protocol.js";
 
 const BROKER_CONNECT_TIMEOUT_MS = 10_000;
 const BROKER_CONNECT_POLL_MS = 100;
 
-/** Canonical profile discovery is independent of cwd and each client's TMPDIR.
- * The wire version is part of the key so a client and a resident daemon that
- * speak different contracts never meet on one socket. */
+/** Canonical profile discovery is independent of cwd and each client's TMPDIR. */
 export function defaultBrokerSocket(profileDir = CHROME_PROFILE_DIR): string {
   const key = createHash("sha256")
     .update(profilePathIdentity(profileDir))
@@ -28,7 +25,7 @@ export function defaultBrokerSocket(profileDir = CHROME_PROFILE_DIR): string {
     .slice(0, 32);
   return join(
     "/tmp",
-    `trusty-squire-broker-v${BROKER_WIRE_VERSION}-${process.getuid?.() ?? "local"}-${key}`,
+    `trusty-squire-broker-${process.getuid?.() ?? "local"}-${key}`,
     "broker.sock",
   );
 }
