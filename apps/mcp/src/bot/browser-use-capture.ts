@@ -21,6 +21,7 @@ interface FrameTree {
 import type { InteractiveElement } from "./browser.js";
 import { isFrameworkRandomDomId } from "./element-fingerprint.js";
 import {
+  browserUseAxOperable,
   browserUseBoundedContextText,
   browserUseDynamicsSignature,
   browserUseInteractive,
@@ -666,6 +667,7 @@ export async function captureBrowserUseDOM(
         clickListener: listeners.has(raw.backendNodeId),
         formAssociated: frame !== null && formAssociatedTags.get(frame)?.has(t) === true,
         axRole: axNode?.role?.value ?? null,
+        axIgnored: axNode?.ignored ?? false,
         axProperties: (axNode?.properties ?? []).map((p) => ({
           name: p.name,
           value: p.value?.value ?? null,
@@ -1070,7 +1072,15 @@ export async function captureBrowserUseDOM(
             (bound !== undefined && ["IFRAME", "FRAME"].includes(n.nodeName))));
       n.actionOwned = ownsAction;
       let el = bound;
-      if (el && (!ownsAction || renderedNodes.get(n.id) !== true)) el = undefined;
+      // The browser's AX description outranks CSS presentation: a control
+      // Chrome presents as operable (unignored, focusable, interactive role)
+      // survives an opacity:0 style-hidden treatment (Oura's payment-method
+      // chooser), where the old rendered gate silently dropped it.
+      if (
+        el &&
+        (!ownsAction || (renderedNodes.get(n.id) !== true && !browserUseAxOperable(n)))
+      )
+        el = undefined;
       // Playwright selectors cannot enter closed shadow roots. Preserve their
       // nodes for display, but do not manufacture an unusable action binding.
       if (
@@ -1090,6 +1100,7 @@ export async function captureBrowserUseDOM(
             !(Number(l.styles.opacity ?? "1") <= 0);
         if (
           (cssVisible && renderedNodes.get(n.id) === true) ||
+          browserUseAxOperable(n) ||
           (n.nodeName === "INPUT" && n.attributes.type === "file")
         ) {
           const a = n.attributes,
@@ -1192,6 +1203,13 @@ export async function captureBrowserUseDOM(
       }
       if (el) {
         el.inViewport = n.visible;
+        if (renderedNodes.get(n.id) !== true) {
+          // Recovered by the browser's accessibility description rather than
+          // layout: carry Chrome's accessible name so queries and the full DOM
+          // can find the control by the name the browser gives it.
+          const axName = viewMetadata.get(n.id)?.name.trim();
+          if (axName) n.attributes.ax_name ??= axName;
+        }
         const semanticNode = proxyTarget ?? n;
         if (proxyTarget !== undefined) {
           el.type = proxyTarget.attributes.type ?? null;
@@ -1208,6 +1226,17 @@ export async function captureBrowserUseDOM(
         if (ownedLabel && !el.ariaLabel && !n.attributes["aria-labelledby"]) {
           el.ariaLabel = ownedLabel;
           n.attributes.ax_name ??= ownedLabel;
+        }
+        // C7 — per-field validation state straight from the browser: Chrome's
+        // AX `invalid` property (how Braintree hosted fields report a bad
+        // card) or an authored aria-invalid. Only "true" is captured so the
+        // fact stays sparse; absence means not invalid, not unknown.
+        const axInvalid =
+          n.axProperties.some((p) => p.name === "invalid" && (p.value === true || p.value === "true")) ||
+          n.attributes["aria-invalid"] === "true";
+        if (axInvalid) {
+          el.invalid = true;
+          n.attributes.invalid ??= "true";
         }
         el.compactNames = {
           ariaLabel: semanticNode.attributes["aria-label"]?.trim() || ownedLabel || null,

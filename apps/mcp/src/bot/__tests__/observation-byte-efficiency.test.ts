@@ -85,7 +85,9 @@ describe("observation byte efficiency", () => {
         { formAssociated: true },
         { attributes: { role: "button" } },
         { attributes: { onpointerdown: "buy()" } },
-        { axRole: "button" },
+        // The AX conjunct admits on the browser's verdict (unignored, not
+        // hidden, focusable) — real AX nodes carry the focusable property.
+        { axRole: "button", axProperties: [{ name: "focusable", value: true }] },
       ])
         expect(browserUseInteractive({ ...decorative, ...props })).toBe(true);
       expect(browserUseInteractive({ ...decorative, attributes: { tabindex: "0" } })).toBe(false);

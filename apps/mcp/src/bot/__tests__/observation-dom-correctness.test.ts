@@ -41,21 +41,34 @@ async function observe(page: Page) {
   return { capture, rows, full, wire, blockers: safeBlockersV2(capture.root) };
 }
 
-it("matches rendered visibility through hidden ancestors while preserving below-fold controls", async () => {
+it("emits what Chrome's AX description calls operable, even under opacity:0 or overflow clipping", async () => {
   const page = await browser.newPage();
   try {
     await page.setContent(`<button id="google">Google</button><label>Email<input id="email"></label>
       <div id="password-panel" style="opacity:0"><label>Password<input type="password" id="password"></label><button id="show">Show password</button></div>
       <div style="height:0;overflow:hidden"><button id="collapsed">Collapsed action</button></div>
-      <div style="height:1500px"></div><button id="below">Below fold action</button>`);
+      <div style="height:1500px"></div><button id="below">Below fold action</button>
+      <button id="gone" style="display:none">Never shown</button>`);
     // Browser-rendered oracle: opacity is not inherited by computed style.
     expect(
       await page.locator("#password").evaluate((e) => e.checkVisibility({ opacityProperty: true })),
     ).toBe(false);
     const hidden = await observe(page);
-    expect(hidden.full).not.toContain("Show password");
-    expect(hidden.rows.some((r) => r.label === "@show-password")).toBe(false);
-    expect(hidden.rows.some((r) => r.label === "@collapsed-action")).toBe(false);
+    // C1: the browser's own accessibility description — not shape recognition
+    // or CSS presentation — decides what counts as a control. Chrome's AX
+    // tree reports the opacity:0 panel's button and the overflow-collapsed
+    // button as unignored and focusable (a screen reader can operate both),
+    // so they are emitted under the browser's own names, with honest
+    // offscreen visibility.
+    expect(hidden.full).toContain("ax_name=Show password");
+    expect(hidden.full).toContain("ax_name=Collapsed action");
+    expect(hidden.rows.some((r) => r.label === "@show-password")).toBe(true);
+    expect(hidden.rows.some((r) => r.label === "@collapsed-action")).toBe(true);
+    expect(hidden.rows.find((r) => r.label === "@show-password")?.visibility).toBe("near");
+    // display:none is different: Chrome prunes it from the AX tree itself, so
+    // true absence still comes from the browser, not from our filtering.
+    expect(hidden.full).not.toContain("Never shown");
+    expect(hidden.rows.some((r) => r.label === "@never-shown")).toBe(false);
     expect(hidden.rows.find((r) => r.label === "@below-fold-action")?.visibility).toBe("near");
     expect(hidden.full).not.toContain("Below fold action");
     expect(JSON.stringify(hidden.wire)).toContain("@below-fold-action|v=offscreen");
@@ -183,8 +196,15 @@ it.each([
     });
     expect(hit).toBe(rendered);
     const result = await observe(page);
-    expect(result.rows.some((row) => row.label === "@signup-action")).toBe(rendered);
-    expect(result.full.includes("Signup action")).toBe(rendered);
+    // C1: emission follows Chrome's AX description, which still reports a
+    // clipped-out control as unignored and focusable — so the row exists
+    // even when no pointer could reach it (rendered=false). Visibility stays
+    // honest: hit-testable controls are viewport, clipped ones are near.
+    expect(result.rows.some((row) => row.label === "@signup-action")).toBe(true);
+    expect(result.full.includes("Signup action")).toBe(true);
+    expect(result.rows.find((row) => row.label === "@signup-action")?.visibility).toBe(
+      rendered ? "viewport" : "near",
+    );
     await fixtureEvidence(
       `containing-block-${position}-${rendered ? "visible" : "clipped"}`,
       { rendered, dom: result.full, wire: result.wire },

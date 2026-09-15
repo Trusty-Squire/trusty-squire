@@ -988,6 +988,7 @@ export function sealRetainedInteractiveElementsV2(
     checked: element.checked ?? null,
     disabled: element.disabled ?? null,
     required: element.required ?? null,
+    invalid: element.invalid === true ? true : null,
     selectOptions: null,
     selectedOptionText: null,
     interactedThisRun: element.interactedThisRun === true,
@@ -1702,12 +1703,13 @@ function roleOf(el: InteractiveElement): SafeRoleV2 | null {
 
 function stateOf(el: InteractiveElement): string | undefined {
   // A compact code-owned bitset: c=checked, u=unchecked, d=disabled,
-  // r=required.  It is deliberately not a page-provided string.
+  // r=required, i=invalid.  It is deliberately not a page-provided string.
   let state = "";
   if (el.checked === true) state += "c";
   else if (el.checked === false) state += "u";
   if (el.disabled === true) state += "d";
   if (el.required === true) state += "r";
+  if (el.invalid === true) state += "i";
   return state || undefined;
 }
 
