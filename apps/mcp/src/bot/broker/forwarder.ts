@@ -86,81 +86,90 @@ export class OperatorForwarder {
       requested !== undefined && this.sessions.has(requested) ? requested : undefined;
     checkCancelled();
 
-    if (name === "operate_start") {
-      const raw = await client.call(
-        "open",
-        {
+    // Connection loss is the four-verb contract's cancellation: a dropped
+    // newline stream aborts that connection's in-flight work, and only this
+    // connection's sessions are affected. Other agents sharing the browser stay
+    // intact. There is no `cancel` wire method.
+    let dispatchedClient: BrokerClient | undefined;
+    const abortDispatched = (): void => {
+      void dispatchedClient?.close().catch(() => undefined);
+    };
+    signal?.addEventListener("abort", abortDispatched, { once: true });
+    const dispatch = async (method: string, params: Record<string, unknown>): Promise<unknown> => {
+      dispatchedClient = client;
+      return await client.call(method, params, requestId, notifyUser);
+    };
+    try {
+      if (name === "operate_start") {
+        const raw = await dispatch("open", {
           serviceUrl: args.service_url,
           ...(args.format !== undefined ? { format: args.format } : {}),
           ...(args.proxy !== undefined ? { proxy: args.proxy } : {}),
-        },
-        requestId,
-        notifyUser,
-      );
-      if (!isRecord(raw))
-        throw new ForwardedResultError("Broker returned a non-object open reply", {
-          cleanup: "unknown",
-          closed: false,
         });
-      const observation = isRecord(raw.observation) ? raw.observation : undefined;
-      const returnedSessionId = observation?.session_id;
-      const owned = typeof raw.sessionId === "string" && raw.sessionId.length > 0;
-      const refusedStart = isRecord(observation?.needs_user);
-      const validStartResult =
-        typeof returnedSessionId === "string" &&
-        returnedSessionId.length > 0 &&
-        (owned ? returnedSessionId === raw.sessionId : refusedStart);
-      if (!validStartResult || observation === undefined)
-        throw new ForwardedResultError("Broker did not return a valid startup result", {
-          ...(owned ? { session_id: raw.sessionId } : {}),
-          cleanup: owned ? "open" : "unknown",
-          closed: false,
-        });
-      if (owned) this.sessions.add(raw.sessionId as string);
-      return observation;
-    }
+        if (!isRecord(raw))
+          throw new ForwardedResultError("Broker returned a non-object open reply", {
+            cleanup: "unknown",
+            closed: false,
+          });
+        const observation = isRecord(raw.observation) ? raw.observation : undefined;
+        const returnedSessionId = observation?.session_id;
+        const owned = typeof raw.sessionId === "string" && raw.sessionId.length > 0;
+        const refusedStart = isRecord(observation?.needs_user);
+        const validStartResult =
+          typeof returnedSessionId === "string" &&
+          returnedSessionId.length > 0 &&
+          (owned ? returnedSessionId === raw.sessionId : refusedStart);
+        if (!validStartResult || observation === undefined)
+          throw new ForwardedResultError("Broker did not return a valid startup result", {
+            ...(owned ? { session_id: raw.sessionId } : {}),
+            cleanup: owned ? "open" : "unknown",
+            closed: false,
+          });
+        if (owned) this.sessions.add(raw.sessionId as string);
+        return observation;
+      }
 
-    if (name === "operate_finish") {
+      if (name === "operate_finish") {
+        if (sessionId === undefined)
+          throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
+        const raw = await dispatch("close", { sessionId, args });
+        if (!isRecord(raw))
+          throw new ForwardedResultError("Broker returned a non-object close reply", {
+            cleanup: "unknown",
+            closed: false,
+          });
+        const preDispatchFailure = isRecord(raw.preDispatchFailure)
+          ? raw.preDispatchFailure
+          : undefined;
+        if (
+          preDispatchFailure?.error === "stale_ref" &&
+          preDispatchFailure.dispatch === "not_dispatched"
+        )
+          throw new ProvenPreDispatchMutationError("stale_ref");
+        if (raw.closed === true) this.sessions.delete(sessionId);
+        return raw.result;
+      }
+
       if (sessionId === undefined)
         throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
-      const raw = await client.call("close", { sessionId, args }, requestId, notifyUser);
-      if (!isRecord(raw))
-        throw new ForwardedResultError("Broker returned a non-object close reply", {
+      const rawReply = await dispatch("command", { sessionId, name, args });
+      if (!isRecord(rawReply))
+        throw new ForwardedResultError("Broker returned a non-object command reply", {
           cleanup: "unknown",
           closed: false,
         });
-      const preDispatchFailure = isRecord(raw.preDispatchFailure) ? raw.preDispatchFailure : undefined;
+      const preDispatchFailure = isRecord(rawReply.preDispatchFailure)
+        ? rawReply.preDispatchFailure
+        : undefined;
       if (
         preDispatchFailure?.error === "stale_ref" &&
         preDispatchFailure.dispatch === "not_dispatched"
       )
         throw new ProvenPreDispatchMutationError("stale_ref");
-      if (raw.closed === true) this.sessions.delete(sessionId);
-      return raw.result;
+      return rawReply.result;
+    } finally {
+      signal?.removeEventListener("abort", abortDispatched);
     }
-
-    if (sessionId === undefined)
-      throw new BrokerRefusal("stale_lease", "Session is not owned by this MCP connection");
-    const rawReply = await client.call(
-      "command",
-      { sessionId, name, args },
-      requestId,
-      notifyUser,
-    );
-    if (!isRecord(rawReply))
-      throw new ForwardedResultError("Broker returned a non-object command reply", {
-        cleanup: "unknown",
-        closed: false,
-      });
-    const preDispatchFailure = isRecord(rawReply.preDispatchFailure)
-      ? rawReply.preDispatchFailure
-      : undefined;
-    if (
-      preDispatchFailure?.error === "stale_ref" &&
-      preDispatchFailure.dispatch === "not_dispatched"
-    )
-      throw new ProvenPreDispatchMutationError("stale_ref");
-    return rawReply.result;
   }
 
   sessionCount(): number {

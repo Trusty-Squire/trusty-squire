@@ -67,8 +67,6 @@ export interface CommandRequest {
   sessionId: string;
   name: OperateToolName;
   args: Record<string, unknown>;
-  /** Optional idempotency key; the frame id is used when omitted. */
-  requestId?: string;
 }
 export interface CommandResult {
   result?: unknown;

@@ -44,7 +44,6 @@ const commandSchema = z
     sessionId: z.string().min(1),
     name: z.string(),
     args: z.record(z.unknown()),
-    requestId: z.string().optional(),
   })
   .strict();
 // The tool's own input schema stays the single validator (exactly as before
@@ -330,6 +329,8 @@ export class OperatorBroker implements BrokerTransportPort {
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
     if (tool.name === "operate_start")
       throw new BrokerRefusal("unknown_tool", "Start is the open operation");
+    if (tool.name === "operate_finish")
+      throw new BrokerRefusal("unknown_tool", "Finish is the close operation");
     const args = tool.inputSchema.parse(input.args) as Record<string, unknown>;
     if (args.session_id !== input.sessionId)
       throw new BrokerRefusal("stale_lease", "An owned session is required");

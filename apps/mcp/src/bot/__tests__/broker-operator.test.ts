@@ -288,3 +288,76 @@ it("aborts an in-flight command when its connection drops, without replaying it"
     await run.close();
   }
 });
+
+it("aborts an in-flight command when the caller's own signal aborts", async () => {
+  withSession("internal-seven");
+  let entered!: () => void;
+  const enteredPromise = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let aborted = false;
+  const run = await harness([
+    tool("operate_start", async () => ({ session_id: "internal-seven" })),
+    tool("operate_click", async (_args, _api, context) => {
+      entered();
+      await new Promise<void>((resolve) => {
+        if (context?.signal?.aborted) return resolve();
+        context?.signal?.addEventListener(
+          "abort",
+          () => {
+            aborted = true;
+            resolve();
+          },
+          { once: true },
+        );
+      });
+      throw context?.signal?.reason ?? new Error("aborted");
+    }),
+  ]);
+  try {
+    const started = (await run.forwarder.invoke("operate_start", {}, "start")) as {
+      session_id: string;
+    };
+    const controller = new AbortController();
+    const call = run.forwarder.invoke(
+      "operate_click",
+      { session_id: started.session_id },
+      "click",
+      controller.signal,
+    );
+    const rejected = expect(call).rejects.toMatchObject({ code: "broker_lost" });
+    await enteredPromise;
+    controller.abort();
+    await rejected;
+    await expect.poll(() => aborted).toBe(true);
+  } finally {
+    await run.close();
+  }
+});
+
+it("refuses operate_finish as a command; finish is the close operation", async () => {
+  withSession("internal-eight");
+  const run = await harness([
+    tool("operate_start", async () => ({ session_id: "internal-eight" })),
+    tool("operate_finish", async () => ({ closed: true })),
+  ]);
+  try {
+    const started = (await run.forwarder.invoke("operate_start", {}, "start")) as {
+      session_id: string;
+    };
+    await expect(
+      run.broker.call(
+        { accountId: "account", agentId: "agent", clientId: "direct" },
+        "command",
+        {
+          sessionId: started.session_id,
+          name: "operate_finish",
+          args: { session_id: started.session_id },
+        },
+        "finish-command",
+      ),
+    ).rejects.toMatchObject({ code: "unknown_tool" });
+  } finally {
+    await run.close();
+  }
+});

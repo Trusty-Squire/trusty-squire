@@ -4,6 +4,13 @@ import { BrokerClient } from "./transport.js";
 import { BrokerRefusal } from "./refusal.js";
 import { resolveBrokerSocket } from "./discovery.js";
 
+/** The maintenance connect carries the browser drain inside the handshake:
+ * `runtime.close()` quits Chrome gracefully under BROWSER_QUIT_DEADLINE_MS
+ * (10 s) plus its forced-close fallback, so the default 5 s handshake deadline
+ * would abort a legitimate drain. Give it room without moving the wait back
+ * onto the wire. */
+export const MAINTENANCE_HANDSHAKE_TIMEOUT_MS = 30_000;
+
 /** Connect retains the maintenance window throughout the existing plain,
  * no-CDP login lifecycle. It never opens a second automated browser.
  *
@@ -24,7 +31,10 @@ export async function withBrokerMaintenance<T>(operation: () => Promise<T>): Pro
     throw new BrokerRefusal("unauthorized", "Broker maintenance requires the enrolled account");
   let client: BrokerClient;
   try {
-    client = await BrokerClient.connect(path, session.agent_session_token, { maintain: true });
+    client = await BrokerClient.connect(path, session.agent_session_token, {
+      maintain: true,
+      handshakeTimeoutMs: MAINTENANCE_HANDSHAKE_TIMEOUT_MS,
+    });
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== "ECONNREFUSED" && code !== "broker_lost") throw error;

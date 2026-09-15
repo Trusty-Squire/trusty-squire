@@ -337,7 +337,7 @@ export class BrokerClient {
   static async connect(
     path: string,
     token: string,
-    options: { maintain?: boolean } = {},
+    options: { maintain?: boolean; handshakeTimeoutMs?: number } = {},
   ): Promise<BrokerClient> {
     const socket = createConnection(path);
     const client = new BrokerClient(socket);
@@ -348,7 +348,7 @@ export class BrokerClient {
         "Broker connect handshake timed out",
       );
       socket.destroy(handshakeTimeout);
-    }, 5_000);
+    }, options.handshakeTimeoutMs ?? 5_000);
     try {
       await new Promise<void>((resolve, reject) => {
         socket.once("connect", resolve);
