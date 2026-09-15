@@ -120,6 +120,18 @@ export interface InjectCardResolvedTarget {
   format?: string | undefined;
 }
 
+// inject_card resolves each hosted card field at its OWN write step, never once
+// up front from one shared snapshot. A hosted-field provider (Braintree) serves
+// each box from its own cross-origin iframe and remounts those frames on its
+// own schedule, so a snapshot walk is not atomic across the siblings — a frame
+// mid-remount contributes nothing and its field silently drops out, which
+// fields make it in is a race. A field that does not resolve is re-resolved on
+// this bounded window (a remount settles in well under a second) before it is
+// reported; `not_found` means "still absent after we waited", not "absent on
+// first glance". Internal constant — never a tool parameter or config knob.
+const CARD_FIELD_RESOLVE_WINDOW_MS = 1_500;
+const CARD_FIELD_RESOLVE_RETRY_MS = 100;
+
 export type ResolvedPageTarget =
   | {
       ok: true;
@@ -1318,13 +1330,22 @@ export class BrowserController implements BrowserDriver {
     else await locator.click({ timeout: 8000 }).catch(() => undefined);
     // Clear any prefilled value before typing. Only meaningful for
     // single-input fields; multi-input OTP forms ignore this since
-    // each box is its own input.
-    await locator.fill("").catch(() => {});
-    // Per-key delay matches the prior bursty distribution. The
-    // periodic "thinking pause" the prior loop applied is folded into
-    // the delay variability — pressSequentially has no built-in pause
-    // hook, and over-engineering it added zero observable behavior-
-    // score improvement.
+    // each box is its own input. The clear + single pressSequentially is
+    // the shared humanized typing core (see typeWithRealKeys).
+    await this.typeWithRealKeys(locator, text);
+  }
+
+  // Clear the field and type `text` with ONE pressSequentially call at a
+  // randomised per-key delay — the ordinary humanized typing core, shared by
+  // typeInner, typeInFrame, and the card-field writer. page.fill()/
+  // handle.fill() set the value with NO keydown/keypress events, and a
+  // hosted-field client (or any page watching real typing) can treat that as
+  // invalid even though the DOM value looks right; pressSequentially emits
+  // the real key events. Never a per-character loop (rc.29): a loop
+  // re-focused the locator on every call and stranded every character after
+  // the first.
+  private async typeWithRealKeys(locator: Locator, text: string): Promise<void> {
+    await locator.fill("").catch(() => undefined);
     await locator.pressSequentially(text, { delay: rand(40, 110) });
   }
 
@@ -7322,8 +7343,13 @@ export class BrowserController implements BrowserDriver {
     if (handle === null) return null;
     try {
       const origin = this.frameOrigin(frame);
-      await handle.evaluate((element) => element.isConnected);
-      if (origin !== target.frameOrigin) {
+      // A hosted-field remount can leave the OLD frame momentarily enumerable
+      // (not yet isDetached()) with its former input still resolvable but no
+      // longer in a document. Reading/writing that node silently reports an
+      // empty value, so a disconnected element must resolve to null and let
+      // the URL fallback find the live frame.
+      const connected = await handle.evaluate((element) => element.isConnected);
+      if (!connected || origin !== target.frameOrigin) {
         await handle.dispose().catch(() => undefined);
         return null;
       }
@@ -7420,8 +7446,7 @@ export class BrowserController implements BrowserDriver {
         return;
       }
       await handle.click({ timeout: 8000 }).catch(() => undefined);
-      await handle.fill("").catch(() => undefined);
-      await handle.type(text, { delay: rand(40, 110) });
+      await this.typeWithRealKeys(frame.locator(selector).first(), text);
     } finally {
       await handle.dispose().catch(() => undefined);
     }
@@ -7485,11 +7510,10 @@ export class BrowserController implements BrowserDriver {
               } else if (partial.length > 1) {
                 return {
                   ok: false as const,
-                  reason:
-                    `option text is ambiguous (${partial
-                      .slice(0, 6)
-                      .map((option) => JSON.stringify((option.textContent ?? "").trim()))
-                      .join(", ")}) — pass the exact option text`,
+                  reason: `option text is ambiguous (${partial
+                    .slice(0, 6)
+                    .map((option) => JSON.stringify((option.textContent ?? "").trim()))
+                    .join(", ")}) — pass the exact option text`,
                 };
               } else {
                 return { ok: false as const, reason: "no option matched" };
@@ -7533,11 +7557,20 @@ export class BrowserController implements BrowserDriver {
     card: CheckoutCard,
     targets: Partial<Record<InjectCardField, InjectCardResolvedTarget>>,
     page: Page | null = this.page,
+    // Optional live resolver. When supplied, every field is resolved HERE, at
+    // its own write step, instead of from the caller's shared snapshot: the
+    // resolver re-extracts the page on every call, so a hosted-field frame
+    // that was mid-remount a moment ago is seen in its settled state. Tests
+    // that hand in pre-resolved elements omit it and keep the old behaviour.
+    resolveTargetAtWriteTime?: (field: InjectCardField) => Promise<InjectCardResolvedTarget>,
   ): Promise<Record<InjectCardField, InjectCardFieldResult>> {
     if (page === null) throw new Error("Browser not started");
     // The mask is session-persistent and must exist before the first field write.
     this.registerCardValueOutputMask(card);
     const results = {} as Record<InjectCardField, InjectCardFieldResult>;
+    // The element each field actually resolved to at its write step. Later
+    // verification reads THIS, not the caller's one-shot snapshot.
+    const resolvedTargets: Partial<Record<InjectCardField, InjectCardResolvedTarget>> = {};
     const valueFor = (field: InjectCardField, format?: string): string => {
       switch (field) {
         case "pan":
@@ -7578,8 +7611,26 @@ export class BrowserController implements BrowserDriver {
             page,
           );
     const fillField = async (field: InjectCardField): Promise<InjectCardFieldResult> => {
-      const target = targets[field]!;
-      const element = target.element!;
+      // Resolve at write time. A miss is retried on a bounded window rather
+      // than reported on first glance; `detached` (the ref was live in the
+      // last observation, so its frame is remounting) and `not_found` (never
+      // observed) both retry, and the distinction survives into the status.
+      let target: InjectCardResolvedTarget;
+      if (resolveTargetAtWriteTime === undefined) {
+        target = targets[field]!;
+      } else {
+        target = await resolveTargetAtWriteTime(field);
+        const deadline = Date.now() + CARD_FIELD_RESOLVE_WINDOW_MS;
+        while (target.element === undefined && Date.now() < deadline) {
+          await page.waitForTimeout(CARD_FIELD_RESOLVE_RETRY_MS);
+          target = await resolveTargetAtWriteTime(field);
+        }
+      }
+      resolvedTargets[field] = target;
+      if (target.element === undefined) {
+        return { status: target.missing ?? "not_found" };
+      }
+      const element = target.element;
       if (field === "pan" || field === "cvv") {
         this.cardValueOutputMask.registerTarget({
           kind: field,
@@ -7613,7 +7664,17 @@ export class BrowserController implements BrowserDriver {
             await select.selectOption({ label: value }, { timeout: 3_000 });
           }
         } else {
-          await handle.fill(value, { timeout: 8_000 });
+          // A hosted-field client is a script watching its own input: a
+          // one-shot fill() sets the value with no key events and can leave
+          // the provider treating the field as invalid even though the DOM
+          // value looks right (the Oura/Braintree card-number input reported
+          // filled, then carried invalid=true and the order failed). Type
+          // through the same real-key path ordinary field typing uses, so
+          // the page sees normal key events. The value still goes straight
+          // from the vault into the page — never into a tool result or log.
+          const owner = await handle.ownerFrame();
+          if (owner === null) throw new Error("target has no owning frame");
+          await this.typeWithRealKeys(owner.locator(element.selector).first(), value);
         }
         return { status: "filled" };
       } catch (error) {
@@ -7630,15 +7691,12 @@ export class BrowserController implements BrowserDriver {
     // ONE uninterrupted pass over every targeted field.
     const attempted: InjectCardField[] = [];
     for (const field of ["pan", "cvv", "exp_month", "exp_year", "exp", "name"] as const) {
-      const target = targets[field];
-      if (target === undefined) {
+      if (targets[field] === undefined) {
         results[field] = { status: "not_found" };
         continue;
       }
-      if (target.element === undefined) {
-        results[field] = { status: target.missing ?? "not_found" };
-        continue;
-      }
+      // Requested but not natively resolved before this point is still
+      // attempted: fillField resolves it now and retries within its window.
       attempted.push(field);
       results[field] = await fillField(field);
     }
@@ -7658,7 +7716,8 @@ export class BrowserController implements BrowserDriver {
       // fields in write order so the last write governs.
       const groups = new Map<string, InjectCardField[]>();
       for (const field of attempted) {
-        const element = targets[field]!.element!;
+        const element = resolvedTargets[field]?.element;
+        if (element === undefined) continue;
         const key =
           element.framePath === null || element.framePath === undefined
             ? `main|${element.selector}`
@@ -7667,18 +7726,23 @@ export class BrowserController implements BrowserDriver {
         if (members === undefined) groups.set(key, [field]);
         else members.push(field);
       }
+      // Normalise ONLY formatting separators, on BOTH sides, then require
+      // equality. This keeps the legitimate reformat (a card number the page
+      // rewrites with spaces or dashes as you type) while refusing the loose
+      // match that let `filled` be a lie: a superset, a truncation, a doubled
+      // value, or any non-separator content the field does not hold fails.
       const holdsValue = async (field: InjectCardField): Promise<boolean> => {
-        const target = targets[field]!;
-        const handle = await resolveInjectTarget(target.element!);
+        const target = resolvedTargets[field];
+        if (target?.element === undefined) return false;
+        const handle = await resolveInjectTarget(target.element);
         if (handle === null) return false;
         try {
           const expected = valueFor(field, target.format);
           return await handle.evaluate((node, expected) => {
             const control = node as HTMLInputElement | HTMLSelectElement;
             const actual = control.value ?? "";
-            // Hosted fields may reformat what was typed (grouped PAN
-            // digits, padding); compare the literal value OR its digits.
-            return actual === expected || actual.replace(/\D/g, "") === expected.replace(/\D/g, "");
+            const normalize = (value: string) => value.replace(/[\s\-/.]+/g, "");
+            return normalize(actual) === normalize(expected);
           }, expected);
         } catch {
           return false;

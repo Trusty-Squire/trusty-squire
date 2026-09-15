@@ -623,6 +623,40 @@ Regression: `apps/mcp/src/bot/__tests__/browser-oopif-observation.test.ts`
 way). Live repro: `apps/mcp/scripts/oopif-live-diagnostics.ts` (manual
 diagnostics, never a test; hits the real whitejade checkout, never orders).
 
+### 20. Hosted card fields are resolved at write time, typed with real keys, and verified by normalised equality
+
+Braintree serves each card box from its own cross-origin iframe and remounts
+those frames on its own schedule, so a single `extractInteractiveElements`
+walk is not atomic across siblings: a frame mid-remount contributes nothing
+and its field silently drops out of a shared snapshot. `inject_card`
+(`injectCardIntoTargets` in `apps/mcp/src/bot/browser.ts`,
+`injectCardIntoSessionTargets` in `provision-session.ts`) must keep these four
+invariants; rc.28 violated the first two and shipped five consecutive live
+failures on the Oura/Ring purchase (session `6dcd7859`):
+
+- **Resolve each field at its own write step.** The caller supplies a live
+  resolver that re-extracts on every call; never resolve all fields once up
+  front from one shared snapshot.
+- **Retry a miss inside a bounded window.** `CARD_FIELD_RESOLVE_WINDOW_MS`.
+  `not_found` means "still absent after we waited", and `detached` (the ref was
+  live in the last observation, so its frame is remounting) is retried rather
+  than reported as a non-attempt. Do not turn this into a tool parameter or a
+  config knob.
+- **Type text fields through `typeWithRealKeys` (one `pressSequentially`, no
+  per-character loop).** `handle.fill()` emits no keydown/keypress, and a
+  hosted-field client can leave the field `invalid=true` even though the DOM
+  value looks right. The released value goes vault → page only; never through
+  `operate_type`, a tool result, or a log.
+- **Verify by normalising both sides for formatting separators, then requiring
+  equality.** `actual === expected || digits(actual) === digits(expected)`
+  accepts a superset/truncation; a field that is not genuinely equal must
+  report `cleared`, never `filled`.
+
+Regression: `apps/mcp/src/bot/__tests__/browser-hosted-field-remount.test.ts`
+(three site-isolated OOPIFs on different registrable domains, open shadow
+roots, child-driven sibling remounts; 20 consecutive single-call runs). Evidence
+ledger: `data/ts-hosted-field-fill-nondeterministic/findings.md`.
+
 ## Final note
 
 You are reading this file because a prior agent burned four version numbers, confused users, and forced a human to intervene. The agent was not malicious. It was not lazy. It was pattern-matching on its own prose instead of on tool output.

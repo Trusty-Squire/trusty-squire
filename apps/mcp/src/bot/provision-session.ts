@@ -442,24 +442,34 @@ export async function injectCardIntoSessionTargets(
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const page = operationPageForSession(session);
-  const fresh = await session.browser.extractInteractiveElements(page);
-  const resolved: Partial<Record<InjectCardField, InjectCardResolvedTarget>> = {};
-  for (const field of ["pan", "cvv", "exp_month", "exp_year", "exp", "name"] as const) {
+  // Every requested field is resolved at ITS OWN write step inside
+  // injectCardIntoTargets, from a snapshot taken immediately beforehand —
+  // never once up front from one shared extractInteractiveElements result.
+  // Braintree serves each card box from its own cross-origin iframe and
+  // remounts those frames on its own schedule, so a walk spanning them is not
+  // atomic: a frame remounting mid-walk contributes nothing and its field
+  // silently drops out of the shared snapshot. This resolver re-extracts on
+  // every call — including the bounded retry inside the write path — and keeps
+  // the `detached` vs `not_found` distinction the write path needs: `detached`
+  // is the retryable case (the ref existed in the last observation, so its
+  // frame is remounting), `not_found` means it was never observed.
+  const resolveField = async (field: InjectCardField): Promise<InjectCardResolvedTarget> => {
     const target = targets[field];
-    if (target === undefined) continue;
+    if (target === undefined) return { missing: "not_found" };
     const legacy = session.compactV2Active ? session.compactV2Refs.get(target.ref) : target.ref;
-    if (legacy === undefined) {
-      resolved[field] = { missing: "not_found", format: target.format };
-      continue;
-    }
+    if (legacy === undefined) return { missing: "not_found", format: target.format };
     const previouslyPresent = resolveTarget(session.lastElements, legacy) !== null;
+    const fresh = await session.browser.extractInteractiveElements(page);
     const element = resolveTarget(fresh, legacy);
-    resolved[field] =
-      element === null
-        ? { missing: previouslyPresent ? "detached" : "not_found", format: target.format }
-        : { element, format: target.format };
+    return element === null
+      ? { missing: previouslyPresent ? "detached" : "not_found", format: target.format }
+      : { element, format: target.format };
+  };
+  const requested: Partial<Record<InjectCardField, InjectCardResolvedTarget>> = {};
+  for (const field of ["pan", "cvv", "exp_month", "exp_year", "exp", "name"] as const) {
+    if (targets[field] !== undefined) requested[field] = { format: targets[field]!.format };
   }
-  return await session.browser.injectCardIntoTargets(card, resolved, page);
+  return await session.browser.injectCardIntoTargets(card, requested, page, resolveField);
 }
 
 export async function observeSubtree(
@@ -936,4 +946,3 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
     ...(needs_user !== undefined ? { needs_user } : {}),
   };
 }
-
