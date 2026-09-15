@@ -98,13 +98,16 @@ describe("CDN/gateway error pages are named, not mistaken for a normal page", ()
     });
   });
 
-  it("does not name a wall from a reference page's bare status heading", () => {
-    // MDN's h1 is exactly "403 Forbidden". Status vocabulary names a wall only
-    // as the whole document title, where a reference page carries a site suffix.
-    expect(
-      safePageSemanticsV2({ title: "HTTP response status codes", headings: ["403 Forbidden"] })
-        .blocked,
-    ).toBeUndefined();
+  it("does not name a bare status refusal as a CDN wall", () => {
+    // "403 Forbidden" is the canonical ORIGIN refusal (Apache, nginx, a
+    // framework permission page), whose remedy is a different identity or a
+    // re-submitted form — not the abandoned step error_page implies.
+    for (const source of [
+      { title: "403 Forbidden", headings: [] },
+      { title: "HTTP response status codes", headings: ["403 Forbidden"] },
+    ]) {
+      expect(safePageSemanticsV2(source).blocked).toBeUndefined();
+    }
   });
 
   it("names the wall from the h1 when the title carries no signature", () => {
@@ -154,8 +157,7 @@ describe("CDN/gateway error pages are named, not mistaken for a normal page", ()
     }
   });
 
-  it("reports block-wall titles and vendor attribution headings", () => {
-    expect(safePageSemanticsV2({ title: "403 Forbidden", headings: [] }).blocked).toBe(true);
+  it("reports vendor block-wall vocabulary from the title or the heading", () => {
     expect(
       safePageSemanticsV2({ title: "Example Domain", headings: ["Sorry, you have been blocked"] })
         .blockers,
@@ -439,6 +441,59 @@ describe("compact observation v2", () => {
 
     expect(page.payload.hint).toBeUndefined();
     expect(page.payload.semantic).toEqual({ blocked: true, blockers });
+    expect(Buffer.byteLength(JSON.stringify(page.payload), "utf8")).toBeLessThanOrEqual(
+      OBSERVE_V2_MAX_WIRE_BYTES,
+    );
+  });
+
+  it("sheds dialog detail and options before it would drop the blocked signal", () => {
+    // Two multi-byte dialog blockers overrun the byte budget the char caps do
+    // not track. Deleting `semantic` to fit emitted a blocked page as an
+    // UNBLOCKED one, which is the inverse of what the blocker exists to say.
+    const japanese = (count: number) => "住所を確認してください".repeat(count).slice(0, count);
+    const blockers = Array.from({ length: 3 }, (_, blocker) => ({
+      kind: "dialog" as const,
+      text: japanese(160),
+      ref: `@e:close-${blocker}`,
+      options: Array.from({ length: 6 }, (_, index) => ({
+        ref: `@e:opt-${blocker}-${index}`,
+        label: japanese(48),
+      })),
+      detail: japanese(400),
+    }));
+    // Shedding detail alone is not enough at this size, so options go too.
+    expect(
+      Buffer.byteLength(
+        JSON.stringify(blockers.map(({ detail: _detail, ...rest }) => rest)),
+        "utf8",
+      ),
+    ).toBeGreaterThan(OBSERVE_V2_MAX_WIRE_BYTES);
+    expect(Buffer.byteLength(JSON.stringify({ blockers }), "utf8")).toBeGreaterThan(
+      OBSERVE_V2_MAX_WIRE_BYTES,
+    );
+
+    const page = encodeV2QueryPage({
+      sessionId: "session",
+      stage: "checkout",
+      rows: [],
+      cursorFor: (offset) => `cursor-${offset}`,
+      semantics: { title: japanese(40), headings: [japanese(40)], blockers },
+    });
+
+    const semantic = page.payload.semantic as {
+      blocked?: true;
+      blockers?: Array<{ kind: string; detail?: string; options?: unknown }>;
+    };
+    expect(semantic?.blocked).toBe(true);
+    expect(semantic.blockers?.map((blocker) => blocker.kind)).toEqual([
+      "dialog",
+      "dialog",
+      "dialog",
+    ]);
+    for (const blocker of semantic.blockers ?? []) {
+      expect(blocker.detail).toBeUndefined();
+      expect(blocker.options).toBeUndefined();
+    }
     expect(Buffer.byteLength(JSON.stringify(page.payload), "utf8")).toBeLessThanOrEqual(
       OBSERVE_V2_MAX_WIRE_BYTES,
     );
@@ -2171,6 +2226,32 @@ describe("safeBlockersV2 modal dialog", () => {
       { ref: "@e:suggested", label: "Use suggested address" },
       { ref: "@e:keep", label: "Keep what I entered" },
     ]);
+  });
+
+  it("labels input-shaped dialog controls from their value attribute", () => {
+    // A push-button input renders `value` as its label and has no child text, so
+    // reading only aria-label/title left these controls unlabelled and the
+    // rendered Close unrecognised as the exit.
+    const dialog = node("dialog", {
+      attributes: { role: "dialog", "aria-modal": "true", "aria-label": "Verify your address" },
+      children: [
+        node("confirm-input", {
+          nodeName: "INPUT",
+          attributes: { type: "submit", value: "Confirm address" },
+        }),
+        node("close-input", {
+          nodeName: "INPUT",
+          attributes: { type: "button", value: "Close" },
+        }),
+      ],
+    });
+    const refs = new Map(dialog.children.map((child, index) => [child, `@e:i${index}`]));
+    const blocker = safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate))[0];
+    expect(blocker?.options).toEqual([
+      { ref: "@e:i0", label: "Confirm address" },
+      { ref: "@e:i1", label: "Close" },
+    ]);
+    expect(blocker?.ref).toBe("@e:i1");
   });
 
   it("refuses an accept button phrased around what was entered", () => {

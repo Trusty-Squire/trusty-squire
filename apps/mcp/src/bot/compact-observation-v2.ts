@@ -64,13 +64,54 @@ export function compactV2DegradeMetadata(
     candidate = rest;
     if (compactV2PayloadWithinBudget(candidate)) return candidate;
   }
+  // Last resort. Deleting `semantic` outright emitted a BLOCKED page as an
+  // unblocked one, so the dialog payload is shed first and `blocked: true` plus
+  // the blocker kinds outlive everything the blocker merely elaborates with.
   if ("semantic" in candidate) {
-    const rest = { ...candidate };
-    delete rest.semantic;
-    candidate = rest;
-    if (compactV2PayloadWithinBudget(candidate)) return candidate;
+    const blockers = compactV2BlockersOf(candidate.semantic);
+    if (blockers.length === 0) {
+      const rest = { ...candidate };
+      delete rest.semantic;
+      candidate = rest;
+      if (compactV2PayloadWithinBudget(candidate)) return candidate;
+      return null;
+    }
+    for (const shed of [["detail"], ["detail", "options"]]) {
+      candidate = {
+        ...candidate,
+        semantic: {
+          blocked: true,
+          blockers: blockers.map((blocker) => compactV2WithoutFields(blocker, shed)),
+        },
+      };
+      if (compactV2PayloadWithinBudget(candidate)) return candidate;
+    }
+    const bare = blockers.map((blocker) => compactV2WithoutFields(blocker, ["detail", "options"]));
+    for (let keep = bare.length - 1; keep >= 1; keep--) {
+      candidate = { ...candidate, semantic: { blocked: true, blockers: bare.slice(0, keep) } };
+      if (compactV2PayloadWithinBudget(candidate)) return candidate;
+    }
   }
   return null;
+}
+
+function compactV2BlockersOf(semantic: unknown): Array<Record<string, unknown>> {
+  if (typeof semantic !== "object" || semantic === null) return [];
+  const blockers = (semantic as { blockers?: unknown }).blockers;
+  if (!Array.isArray(blockers)) return [];
+  return blockers.filter(
+    (blocker): blocker is Record<string, unknown> =>
+      typeof blocker === "object" && blocker !== null,
+  );
+}
+
+function compactV2WithoutFields(
+  blocker: Record<string, unknown>,
+  fields: readonly string[],
+): Record<string, unknown> {
+  const rest = { ...blocker };
+  for (const field of fields) delete rest[field];
+  return rest;
 }
 
 export type SafeRoleV2 =
@@ -1115,16 +1156,14 @@ export function safePageSemanticsV2(source: ObservationSemanticSourceV2): SafePa
  * HTTP errors, passable challenge interstitials, and transient origin failures
  * a retry would clear never match.
  */
-const ERROR_PAGE_SIGNATURES: ReadonlyArray<{ re: RegExp; headings: boolean }> = [
-  // Sentences only a block wall renders, so a heading carrying one names the
-  // wall as surely as a title does.
-  { re: /the request could not be satisfied/i, headings: true },
-  { re: /sorry, you have been blocked/i, headings: true },
-  { re: /^403 error$/i, headings: true },
-  // Bare status vocabulary. A reference page's h1 is legitimately exactly "403
-  // Forbidden", so this names a wall only as the whole document title — where a
-  // documentation page would carry a site suffix.
-  { re: /^403 forbidden$/i, headings: false },
+// Vocabulary only a CDN block wall renders, matched against the title or the
+// first heading alike. A bare status title ("403 Forbidden") is the canonical
+// ORIGIN refusal — Apache, nginx, a framework permission page — whose remedy is
+// a different identity or a re-submitted form, not an abandoned step.
+const ERROR_PAGE_SIGNATURES = [
+  /the request could not be satisfied/i,
+  /sorry, you have been blocked/i,
+  /^403 error$/i,
 ];
 
 function errorPageBlockerV2(
@@ -1133,16 +1172,11 @@ function errorPageBlockerV2(
 ): SafeBlockerV2 | undefined {
   const normalized = (value: string | undefined): string | undefined =>
     value === undefined ? undefined : value.normalize("NFKC").replace(/\s+/g, " ").trim();
-  const sources = [
-    { value: normalized(title), isHeading: false },
-    ...headings.map((heading) => ({ value: normalized(heading), isHeading: true })),
-  ];
-  for (const { value, isHeading } of sources) {
+  for (const source of [title, ...headings]) {
+    const value = normalized(source);
     if (value === undefined) continue;
-    const matches = ERROR_PAGE_SIGNATURES.some(
-      (signature) => (signature.headings || !isHeading) && signature.re.test(value),
-    );
-    if (matches) return { kind: "error_page", text: boundedBlockerTextV2(value) ?? value };
+    if (ERROR_PAGE_SIGNATURES.some((signature) => signature.test(value)))
+      return { kind: "error_page", text: boundedBlockerTextV2(value) ?? value };
   }
   return undefined;
 }
@@ -1178,11 +1212,23 @@ function boundedBlockerTextV2(
     : `${characters.slice(0, maxChars - 1).join("")}…`;
 }
 
+// A push-button input renders its `value` as its visible label and has no child
+// text to read. Checkbox/radio `value` is a form value, never a label, so it
+// stays out.
+const VALUE_LABELLED_INPUT_TYPES = new Set(["button", "submit", "reset"]);
+
+function inputValueLabelV2(node: BrowserUseNode): string | undefined {
+  if (nodeTagV2(node) !== "input") return undefined;
+  const type = (node.attributes.type ?? "").toLowerCase();
+  return VALUE_LABELLED_INPUT_TYPES.has(type) ? node.attributes.value : undefined;
+}
+
 function blockerTextV2(node: BrowserUseNode): string | undefined {
   const candidates = [
     node.attributes["aria-label"],
     node.attributes.ax_name,
     node.attributes.title,
+    inputValueLabelV2(node),
     browserUseBoundedContextText(node, BLOCKER_TEXT_MAX_CHARS),
     node.contentDocument === null
       ? null
