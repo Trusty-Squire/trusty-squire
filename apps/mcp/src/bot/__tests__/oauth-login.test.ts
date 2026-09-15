@@ -903,7 +903,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       sessionId = started.session_id;
       const oauthRef = compactRows(started)[0]?.[0];
       expect(oauthRef).toBeDefined();
-      const returned = await act(sessionId, {
+      await act(sessionId, {
         kind: "oauth_login",
         target: oauthRef!,
         provider: "google",
@@ -2665,7 +2665,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       sessionId = started.session_id;
       const oauthRef = compactRows(started)[0]?.[0];
       expect(oauthRef).toBeDefined();
-      const returned = await act(sessionId, {
+      await act(sessionId, {
         kind: "oauth_login",
         target: oauthRef!,
         provider: "google",
@@ -2774,7 +2774,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       sessionId = started.session_id;
       const oauthRef = compactRows(started)[0]?.[0];
       expect(oauthRef).toBeDefined();
-      const returned = await act(sessionId, {
+      await act(sessionId, {
         kind: "oauth_login",
         target: oauthRef!,
         provider: "google",
