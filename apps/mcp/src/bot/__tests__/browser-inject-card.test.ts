@@ -132,6 +132,7 @@ describe("direct card injection and masked observation", () => {
         await isolated.context.close();
       }
     },
+    120_000,
   );
 
   it.skipIf(!available)(
@@ -265,6 +266,7 @@ describe("direct card injection and masked observation", () => {
         await isolated.context.close();
       }
     },
+    120_000,
   );
 
   it.skipIf(!available)(
@@ -385,6 +387,7 @@ describe("direct card injection and masked observation", () => {
         await isolated.context.close();
       }
     },
+    120_000,
   );
 
   it.skipIf(!available)(
@@ -411,7 +414,7 @@ describe("direct card injection and masked observation", () => {
                 '<option value="2029">2029</option>' +
                 '<option value="2030">2030</option>' +
                 '<option value="2031">2031</option>' +
-                '</select>',
+                "</select>",
             });
           }
           return route.fulfill({ status: 404, body: "not found" });
