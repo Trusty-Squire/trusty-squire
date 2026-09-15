@@ -272,6 +272,9 @@ export interface ScreenshotClickTarget {
 // retried on a short bounded schedule before giving up; nothing is dispatched
 // and the binding is not consumed either way (clickScreenshot re-arms).
 const HIT_TARGET_PROBE_DELAYS_MS = [0, 700, 1400];
+// The only rejection the readiness race produces. Every other protocol failure
+// (navigation, target close) is a different diagnosis and is not retried away.
+const HIT_TARGET_MISS_MESSAGE = "No node found at given location";
 
 async function hitTarget(
   page: Page,
@@ -292,7 +295,11 @@ async function hitTarget(
         y: Math.round(y),
         includeUserAgentShadowDOM: true,
       })
-      .catch(() => undefined);
+      .catch((error: unknown) => {
+        if (error instanceof Error && error.message.includes(HIT_TARGET_MISS_MESSAGE))
+          return undefined;
+        throw error;
+      });
     if (hit !== undefined) break;
   }
   if (hit === undefined)
@@ -380,6 +387,12 @@ export async function clickScreenshot(
   // Consume synchronously before any await: concurrent callers, dispatch failures,
   // and lost responses cannot replay this image's click.
   bindings.delete(page);
+  // Re-arming a binding that did not dispatch is a compare-and-set, never a
+  // write: a capture that lands during the retry window owns the page now, and
+  // this superseded image must not come back over it.
+  const rearmIfUnclaimed = (): void => {
+    if (!bindings.has(page)) bindings.set(page, binding);
+  };
   const { width, height } = binding.public;
   if (
     ![point.x, point.y].every(Number.isFinite) ||
@@ -390,7 +403,7 @@ export async function clickScreenshot(
   ) {
     // The image is untouched and valid: a point outside it resolved no node and
     // must not burn the binding. Re-arm so a corrected point can reuse it.
-    bindings.set(page, binding);
+    rearmIfUnclaimed();
     throw new ScreenshotClickError("invalid_screenshot_point", "not_dispatched");
   }
   const cdp = await page.context().newCDPSession(page);
@@ -438,7 +451,7 @@ export async function clickScreenshot(
     // occlusion, frame mismatch) keeps the binding consumed: the screenshot no
     // longer describes the page.
     if (error instanceof ScreenshotClickError && error.code === "invalid_screenshot_point")
-      bindings.set(page, binding);
+      rearmIfUnclaimed();
     throw error;
   } finally {
     await cdp.detach().catch(() => undefined);

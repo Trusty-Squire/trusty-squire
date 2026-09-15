@@ -89,16 +89,37 @@ describe("CDN/gateway error pages are named, not mistaken for a normal page", ()
         headings: ["403 ERROR"],
       }),
     ).toEqual({
-      // safeDescriptionV2 caps the title at 40 chars (+ ellipsis); the blocker
-      // grounds on the h1 "403 ERROR" because the truncated title no longer
-      // carries the full CloudFront sentence.
+      // The emitted title keeps the 40-char row budget; the signature matched
+      // against the untruncated title, so the blocker names the full sentence.
       title: "ERROR: The request could not be satisfi…",
       headings: ["403 ERROR"],
       blocked: true,
-      // safeDescriptionV2 truncates the long title before it can match, so the
-      // CloudFront h1 ("403 ERROR") is the candidate that grounds the blocker.
-      blockers: [{ kind: "error_page", text: "403 ERROR" }],
+      blockers: [{ kind: "error_page", text: "ERROR: The request could not be satisfied" }],
     });
+  });
+
+  it("names the wall from the h1 when the title carries no signature", () => {
+    expect(safePageSemanticsV2({ title: "example.com", headings: ["403 ERROR"] }).blockers).toEqual(
+      [{ kind: "error_page", text: "403 ERROR" }],
+    );
+  });
+
+  it("leaves a passable Cloudflare challenge interstitial as a challenge, not a wall", () => {
+    // "Attention Required! | Cloudflare" is the managed-challenge page the
+    // operator is built to clear; relabelling it error_page would tell the host
+    // agent it hit a wall on a page it can pass.
+    const semantics = safePageSemanticsV2({
+      title: "Attention Required! | Cloudflare",
+      headings: ["Verify you are human"],
+    });
+    expect(semantics.blocked).toBeUndefined();
+    expect(semantics.blockers).toBeUndefined();
+  });
+
+  it("does not treat content-missing pages as blocks", () => {
+    for (const title of ["404 Not Found", "410 Gone"]) {
+      expect(safePageSemanticsV2({ title, headings: [] }).blocked).toBeUndefined();
+    }
   });
 
   it("reports gateway error titles and vendor attribution headings", () => {
@@ -116,6 +137,8 @@ describe("CDN/gateway error pages are named, not mistaken for a normal page", ()
       { title: "403 Forbidden - HTTP | MDN", headings: ["403 Forbidden"] },
       { title: "Handling request blocked events", headings: ["Overview"] },
       { title: "CloudFront distributions", headings: ["Distribution settings"] },
+      { title: "Fixing Error - 403 on your bucket", headings: ["Troubleshooting"] },
+      { title: "Attention required: verify your identity", headings: ["Verify your identity"] },
     ]) {
       const semantics = safePageSemanticsV2(source);
       expect(semantics.blocked).toBeUndefined();
@@ -2045,7 +2068,11 @@ describe("safeBlockersV2 modal dialog", () => {
           "dialog-body",
           "You entered: 12 Rue de la Paix, room 101, Paris. Suggested address: 12 Rue de la Paix, Paris.",
         ),
-        node("dialog-confirm", { nodeName: "BUTTON", axRole: "button", children: [text("confirm-text", "Confirm address")] }),
+        node("dialog-confirm", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("confirm-text", "Confirm address")],
+        }),
         node("dialog-x", {
           nodeName: "BUTTON",
           attributes: { "aria-label": "Close" },
@@ -2073,6 +2100,106 @@ describe("safeBlockersV2 modal dialog", () => {
           "You entered: 12 Rue de la Paix, room 101, Paris. Suggested address: 12 Rue de la Paix, Paris. Confirm address",
       },
     ]);
+  });
+
+  it("keeps the entered-vs-suggested comparison intact past the blocker text budget", () => {
+    // A real address comparison runs past BLOCKER_TEXT_MAX_CHARS; cutting it
+    // there drops the "suggested" half, which is the whole point of detail.
+    const dialog = node("dialog", {
+      attributes: { role: "dialog", "aria-modal": "true", "aria-label": "Verify your address" },
+      children: [
+        text(
+          "dialog-body",
+          "You entered: 1234 Northwest Example Boulevard, Apartment 5B, Portland, Oregon 97209, United States. Suggested address: 1234 NW Example Blvd Apt 5B, Portland, OR 97209-1234, United States.",
+        ),
+        node("dialog-confirm", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("confirm-text", "Use suggested address")],
+        }),
+        node("dialog-keep", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("keep-text", "Keep what I entered")],
+        }),
+      ],
+    });
+    const blocker = safeBlockersV2(page([dialog]), (candidate) =>
+      candidate === dialog.children[1]
+        ? "@e:suggested"
+        : candidate === dialog.children[2]
+          ? "@e:keep"
+          : undefined,
+    )[0];
+    expect(blocker?.detail).toBe(
+      "You entered: 1234 Northwest Example Boulevard, Apartment 5B, Portland, Oregon 97209, United States. Suggested address: 1234 NW Example Blvd Apt 5B, Portland, OR 97209-1234, United States. Use suggested address Keep what I entered",
+    );
+  });
+
+  it("surfaces radio-based address pickers and anchor escape paths as options", () => {
+    // The USPS/Shopify shape: the choice is a radio pair and the way out is a
+    // link, so a button-only option set reported a strict subset.
+    const dialog = node("dialog", {
+      attributes: { role: "dialog", "aria-modal": "true", "aria-label": "Verify your address" },
+      children: [
+        node("pick-suggested", {
+          nodeName: "INPUT",
+          attributes: { type: "radio" },
+          axRole: "radio",
+          children: [text("pick-suggested-text", "Use suggested address")],
+        }),
+        node("pick-entered", {
+          nodeName: "INPUT",
+          attributes: { type: "radio" },
+          axRole: "radio",
+          children: [text("pick-entered-text", "Use the address you entered")],
+        }),
+        node("edit-link", {
+          nodeName: "A",
+          axRole: "link",
+          children: [text("edit-link-text", "Edit address")],
+        }),
+      ],
+    });
+    const refs = new Map([
+      [dialog.children[0], "@e:suggested"],
+      [dialog.children[1], "@e:entered"],
+      [dialog.children[2], "@e:edit"],
+    ]);
+    expect(safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate))[0]?.options).toEqual([
+      { ref: "@e:suggested", label: "Use suggested address" },
+      { ref: "@e:entered", label: "Use the address you entered" },
+      { ref: "@e:edit", label: "Edit address" },
+    ]);
+  });
+
+  it("always names one of its own options as ref", () => {
+    // A consent modal with more qualifying controls than the option cap: the
+    // dismiss control sits past the cap, so ref must come from the slice.
+    const labels = [
+      "Accept all",
+      "Reject all",
+      "Analytics",
+      "Marketing",
+      "Functional",
+      "Performance",
+      "Save preferences",
+      "Close",
+    ];
+    const dialog = node("dialog", {
+      attributes: { role: "dialog", "aria-modal": "true", "aria-label": "Cookie preferences" },
+      children: labels.map((label, index) =>
+        node(`control-${index}`, {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text(`control-${index}-text`, label)],
+        }),
+      ),
+    });
+    const refs = new Map(dialog.children.map((child, index) => [child, `@e:c${index}`]));
+    const blocker = safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate))[0];
+    expect(blocker?.options).toHaveLength(6);
+    expect(blocker?.options?.map((option) => option.ref)).toContain(blocker?.ref);
   });
 
   it("stops reporting the dialog blocker once the dialog is removed", () => {

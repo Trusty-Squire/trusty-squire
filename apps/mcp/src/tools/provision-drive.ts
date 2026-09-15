@@ -163,7 +163,9 @@ const CONTROL_QUERY_CONTRACT =
   "v=offscreen when outside the viewport, a=action, f=field, q=choice-position/total, and x=s same-origin or x=x cross-origin frame; absent x means main frame. " +
   "nf=1 marks a listener container that carries a field name but is not itself fillable — its fillable field is emitted separately; fill that one. " +
   "Query matches include m=n (exact name), m=r (exact role), m=t (local text), or m=c (explicit form/fieldset/dialog context), ranked in that order. " +
-  "semantic.blocked=true and semantic.blockers report visible verification instructions or validation errors independently of stage; stage=browse does not mean unblocked. " +
+  "semantic.blocked=true and semantic.blockers report what blocks the task independently of stage; stage=browse does not mean unblocked. " +
+  "Blocker kind is challenge (verification instructions), validation (a structurally identified field error), dialog (an open modal), or error_page (a CDN/gateway block wall named from the title/headings, so a blocked body is not read as a normal page). " +
+  "A dialog blocker also carries options — every rendered control in DOM order, including the close path that keeps what was entered — and a bounded detail with the dialog's own body text. " +
   "Cursors page an immutable snapshot and require the same query and role; document changes invalidate them. A cursorless query captures fresh controls and semantics. " +
   "Use overflow.next_cursor to page safe_table. A cursor from hint_overflow returns `hint` and pages with hint_overflow.next_cursor. ";
 
