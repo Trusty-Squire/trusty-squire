@@ -1,69 +1,87 @@
 // Pairing one CDP frame-tree child with the Playwright child frame it denotes.
-// Extracted from bindFrames so the asymmetric shapes that a real page produces
-// only under a timing race can be stated directly: the CDP tree and Playwright
-// disagree about a child's url for as long as its navigation stays pending, and
-// a rule looser than "the same sibling position" silently binds one frame's
-// slot to another — a later action then runs in the wrong document, with no
-// error to notice.
+// Extracted from bindFrames so the asymmetric shapes a real page produces can
+// be stated directly. The load-bearing property is that position is resolved
+// among the REMAINING candidates rather than by index into the full child
+// lists: Page.getFrameTree omits out-of-process children while childFrames()
+// includes them, so on a checkout page the two lists have different lengths.
 
 import { describe, expect, it } from "vitest";
 import { matchFrameChild } from "../browser-use-capture.js";
 
 const frame = (url: string): { url(): string } => ({ url: () => url });
 
+// bindFrames walks the CDP children in order and removes each frame it claims.
+const pairAll = (
+  cdpChildUrls: readonly string[],
+  playwrightChildren: readonly { url(): string }[],
+): Array<{ url(): string } | undefined> => {
+  const available = new Set(playwrightChildren);
+  return cdpChildUrls.map((url) => {
+    const matched = matchFrameChild(url, available);
+    if (matched) available.delete(matched);
+    return matched;
+  });
+};
+
 describe("matchFrameChild", () => {
-  it("pairs a committed child by its url regardless of sibling position", () => {
+  it("pairs a committed child by its url wherever it sits", () => {
     const a = frame("https://a.example/one");
     const b = frame("https://b.example/two");
-    const available = new Set([a, b]);
-    expect(matchFrameChild("https://b.example/two", available, a)).toBe(b);
+    expect(matchFrameChild("https://b.example/two", new Set([a, b]))).toBe(b);
+  });
+
+  it.each([":", ""])("pairs an uncommitted child (cdp %j) with a pending sibling", (sentinel) => {
+    const pending = frame("");
+    expect(matchFrameChild(sentinel, new Set([pending]))).toBe(pending);
   });
 
   it.each([":", ""])(
-    "pairs an uncommitted child (cdp %j) with its own sibling position",
+    "gives each uncommitted child (cdp %j) a distinct pending sibling, in order",
     (sentinel) => {
       const first = frame("");
       const second = frame("");
-      const available = new Set([first, second]);
-      expect(matchFrameChild(sentinel, available, second)).toBe(second);
+      expect(pairAll([sentinel, sentinel], [first, second])).toEqual([first, second]);
     },
   );
 
-  // Both CDP spellings of "no committed url" must pair identically. "" is also
-  // what Playwright reports for such a frame, so it is the spelling that an
-  // exact-url pass would silently accept against the WRONG sibling.
-  it.each([":", ""])(
-    "never hands an uncommitted child (cdp %j) the slot of an earlier unmatched sibling",
-    (sentinel) => {
-      // The live skew: CDP reports child 0 as committed while Playwright has
-      // not yet processed that navigation, so both Playwright children still
-      // read "". Child 0 matches nothing; child 1 is uncommitted. Pairing
-      // child 1 with the FIRST remaining "" candidate binds it to child 0.
-      const playwrightChild0 = frame("");
-      const playwrightChild1 = frame("");
-      const available = new Set([playwrightChild0, playwrightChild1]);
+  // The ouraring checkout shape, and the reason index-based pairing is wrong:
+  // the committed cross-site field is an OOPIF, so it is absent from the CDP
+  // child list entirely while Playwright still reports it at child 0.
+  it("pairs pending children when a committed out-of-process sibling is missing from the cdp list", () => {
+    const hostedField = frame("https://pay.example/card-field");
+    const pending0 = frame("");
+    const pending1 = frame("");
 
-      expect(matchFrameChild("https://a.example/committed", available, playwrightChild0)).toBe(
-        undefined,
-      );
-      expect(matchFrameChild(sentinel, available, playwrightChild1)).toBe(playwrightChild1);
-    },
-  );
+    const paired = pairAll([":", ":"], [hostedField, pending0, pending1]);
 
-  it("leaves an uncommitted child unpaired when its sibling position is already taken", () => {
-    const taken = frame("");
-    const available = new Set<{ url(): string }>();
-    expect(matchFrameChild(":", available, taken)).toBe(undefined);
+    expect(paired).toEqual([pending0, pending1]);
+    expect(paired).not.toContain(hostedField);
   });
 
-  it("leaves an uncommitted child unpaired when its sibling position has committed", () => {
+  it("claims a committed sibling by url before any pending child can take its slot", () => {
+    const hostedField = frame("https://pay.example/card-field");
+    const pending = frame("");
+
+    expect(pairAll(["https://pay.example/card-field", ":"], [hostedField, pending])).toEqual([
+      hostedField,
+      pending,
+    ]);
+  });
+
+  it("never pairs an uncommitted child with a committed sibling", () => {
     const committed = frame("https://a.example/one");
-    const available = new Set([committed]);
-    expect(matchFrameChild("", available, committed)).toBe(undefined);
+    expect(matchFrameChild(":", new Set([committed]))).toBe(undefined);
+    expect(matchFrameChild("", new Set([committed]))).toBe(undefined);
   });
 
-  it("leaves a child unpaired when the tree has no sibling at that position", () => {
-    const available = new Set([frame("")]);
-    expect(matchFrameChild(":", available, undefined)).toBe(undefined);
+  it("leaves an uncommitted child unpaired once every pending sibling is claimed", () => {
+    const onlyPending = frame("");
+    expect(pairAll([":", ":"], [onlyPending])).toEqual([onlyPending, undefined]);
+  });
+
+  it("leaves a committed child unpaired when no sibling carries its url", () => {
+    expect(
+      matchFrameChild("https://a.example/one", new Set([frame("https://b.example/two")])),
+    ).toBe(undefined);
   });
 });

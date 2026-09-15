@@ -21,13 +21,7 @@
 import { existsSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import {
-  chromium,
-  type Browser,
-  type BrowserContext,
-  type Frame,
-  type Page,
-} from "playwright";
+import { chromium, type Browser, type BrowserContext, type Frame, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { captureBrowserUseDOM, type BrowserUseCapture } from "../browser-use-capture.js";
 import type { BrowserUseNode } from "../browser-use-serializer.js";
@@ -65,10 +59,26 @@ beforeAll(async () => {
           'style="width:300px;height:120px;border:0"></iframe>' +
           "</body></html>",
       );
+    } else if (url === "/checkout") {
+      // The live checkout shape: a COMMITTED cross-site hosted field ahead of
+      // the pending frames. Page.getFrameTree omits the out-of-process child,
+      // so the CDP child list is shorter than Playwright's and the two are not
+      // index-aligned.
+      res.setHeader("content-type", "text/html");
+      res.end(
+        `<!doctype html><html><body><main>Checkout</main>` +
+          `<iframe id="hosted-field" src="http://${CHILD_HOST}:${port}/child" ` +
+          'style="width:300px;height:120px;border:0"></iframe>' +
+          `<iframe id="pending-one" src="http://${PARENT_HOST}:${port}/hang" ` +
+          'style="width:300px;height:120px;border:0"></iframe>' +
+          `<iframe id="pending-two" src="http://${PARENT_HOST}:${port}/hang" ` +
+          'style="width:300px;height:120px;border:0"></iframe>' +
+          "</body></html>",
+      );
     } else if (url === "/child") {
       res.setHeader("content-type", "text/html");
       res.end(
-        "<!doctype html><html><body><button name=\"child-button\">Child</button></body></html>",
+        '<!doctype html><html><body><button name="child-button">Child</button></body></html>',
       );
     } else if (url === "/hang") {
       // Never respond until the test releases the socket — the navigation
@@ -76,7 +86,7 @@ beforeAll(async () => {
       pendingChildResponses.push(() => {
         res.setHeader("content-type", "text/html");
         res.end(
-          "<!doctype html><html><body><button name=\"child-button\">Child</button></body></html>",
+          '<!doctype html><html><body><button name="child-button">Child</button></body></html>',
         );
       });
     } else if (url === "/blank") {
@@ -181,6 +191,53 @@ describe("frame binding during uncommitted navigations (real Chromium, real HTTP
   );
 
   it.skipIf(!available)(
+    "binds pending frames that sit behind a committed out-of-process sibling",
+    { timeout: 60_000 },
+    async () => {
+      const { page } = await newPage();
+      try {
+        pendingChildResponses = [];
+        await page.goto(`http://${PARENT_HOST}:${port}/checkout`, {
+          waitUntil: "domcontentloaded",
+        });
+        await page.waitForTimeout(1_500);
+
+        // Precondition — the lists really are skewed: Playwright sees the
+        // committed hosted field plus both pending frames, the CDP tree sees
+        // only the two pending ones. Pairing by index into these two lists
+        // would hand CDP child 0 to the hosted field and CDP child 1 to the
+        // FIRST pending frame.
+        const client = await page.context().newCDPSession(page);
+        const tree = await client.send("Page.getFrameTree");
+        const cdpChildUrls = (tree.frameTree.childFrames ?? []).map((c) => c.frame.url);
+        await client.detach();
+        const playwrightChildUrls = page
+          .mainFrame()
+          .childFrames()
+          .map((f) => f.url());
+        expect(cdpChildUrls).toEqual([":", ":"]);
+        expect(playwrightChildUrls).toHaveLength(3);
+        expect(playwrightChildUrls[0]).toContain(CHILD_HOST);
+
+        const observed = await capture(page);
+        expect(observed.omissions).toEqual([]);
+
+        // Every frame is bound, each to its own path — the committed field
+        // keeps its own content and neither pending frame is reported at it.
+        const rows = iframes(observed.root).map((n) => n.attributes.id);
+        expect(rows).toContain("hosted-field");
+        expect(rows).toContain("pending-one");
+        expect(rows).toContain("pending-two");
+        const hostedButton = observed.elements.find((element) => element.name === "child-button");
+        expect(hostedButton).toBeDefined();
+        expect(hostedButton!.framePath).toBe("0");
+      } finally {
+        await page.context().close();
+      }
+    },
+  );
+
+  it.skipIf(!available)(
     "re-reads a pending frame once its navigation commits as the page settles",
     { timeout: 60_000 },
     async () => {
@@ -200,9 +257,7 @@ describe("frame binding during uncommitted navigations (real Chromium, real HTTP
         expect(settled.omissions).toEqual([]);
         // A frame that was pending at first load is now bound through its own
         // session: its content is read, not merely tolerated as empty.
-        const childButton = settled.elements.find(
-          (element) => element.name === "child-button",
-        );
+        const childButton = settled.elements.find((element) => element.name === "child-button");
         expect(childButton).toBeDefined();
         expect(childButton?.framePath ?? null).not.toBeNull();
       } finally {

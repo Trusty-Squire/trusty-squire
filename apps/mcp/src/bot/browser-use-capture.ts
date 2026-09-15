@@ -169,30 +169,35 @@ export function frameOriginOf(frame: { url(): string }): string {
 }
 
 /**
- * Pair one CDP frame-tree child with the Playwright child frame it denotes.
+ * Pair one CDP frame-tree child with the Playwright child frame it denotes,
+ * given the siblings not yet claimed by an earlier child.
+ *
  * A committed frame is identified by its URL. A frame whose navigation has
  * not committed has no stable URL to match on — the CDP tree reports ":"
  * where Playwright reports "" — so string equality failed on every capture
  * for as long as the navigation stayed pending, and a merchant iframe that
  * renders before its navigation commits (ad/analytics frames, a 3-D Secure
  * challenge) reported frame_binding_failed for the whole session while its
- * siblings bound. Such a frame is paired with its OWN sibling position:
- * their documents are all the initial empty document, so the pairing has no
- * observable effect, and once a navigation commits the next capture re-binds
- * by its real URL. Anything looser than the exact position — "the first
- * remaining uncommitted candidate" — can hand one frame's slot to another
- * and silently execute a later action in the wrong document.
+ * siblings bound. Such a frame takes the FIRST still-unclaimed uncommitted
+ * sibling: their documents are all the initial empty document, so the
+ * pairing has no observable effect, and once a navigation commits the next
+ * capture re-binds by its real URL.
+ *
+ * Position is resolved among the REMAINING candidates, never by index into
+ * the full child lists. The two lists are not index-aligned:
+ * `Page.getFrameTree` on the page session omits out-of-process children
+ * (see outOfProcessFramesByCdpId above) while `childFrames()` includes them,
+ * so a checkout page with a committed hosted-field OOPIF ahead of its
+ * pending frames has a SHORTER CDP list. Running the URL pass first claims
+ * that OOPIF, which is what keeps the remaining sequences aligned.
  */
 export function matchFrameChild<T extends { url(): string }>(
   cdpChildUrl: string,
   available: ReadonlySet<T>,
-  sibling: T | undefined,
 ): T | undefined {
-  if (isUncommittedFrameUrl(cdpChildUrl)) {
-    if (sibling === undefined || !available.has(sibling)) return undefined;
-    return isUncommittedFrameUrl(sibling.url()) ? sibling : undefined;
-  }
   for (const candidate of available) if (candidate.url() === cdpChildUrl) return candidate;
+  if (!isUncommittedFrameUrl(cdpChildUrl)) return undefined;
+  for (const candidate of available) if (candidate.url() === "") return candidate;
   return undefined;
 }
 
@@ -342,12 +347,11 @@ export async function captureBrowserUseDOM(
       framePathById.set(tree.frame.id, frame === page.mainFrame() ? null : framePath(frame));
       const available = new Set(frame.childFrames());
       for (const [index, child] of (tree.childFrames ?? []).entries()) {
-        const sibling = frame.childFrames()[index];
-        const matched = matchFrameChild(child.frame.url, available, sibling);
+        const matched = matchFrameChild(child.frame.url, available);
         if (matched) {
           available.delete(matched);
           bindFrames(child, matched);
-        } else markUnboundFrameTree(child, sibling);
+        } else markUnboundFrameTree(child, frame.childFrames()[index]);
       }
     };
     bindFrames(frames.frameTree, owningFrame);
