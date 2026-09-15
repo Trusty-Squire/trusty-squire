@@ -348,7 +348,6 @@ export async function captureBrowserUseDOM(
     const frameById = new Map<string, Frame>();
     const framePathById = new Map<string, string | null>();
     const unboundFrames = new Set<Frame>();
-    const unboundFrameIds = new Set<string>();
     const isFrameUnbound = (frame: Frame | null): boolean => {
       if (frame === null) return true;
       let current: Frame | null = frame;
@@ -359,18 +358,21 @@ export async function captureBrowserUseDOM(
       return false;
     };
     const unboundOmissions = new Map<string, (typeof omissions)[number]>();
-    const markUnboundFrameTree = (tree: FrameTree, frame: Frame | undefined): void => {
-      unboundFrameIds.add(tree.frame.id);
-      if (frame) framePathById.set(tree.frame.id, framePath(frame));
+    // A CDP frame we could not pair has no known Playwright counterpart, so it
+    // is attributed by its own CDP identity alone. Naming one by sibling index
+    // would re-commit the index-alignment error pairFrameChildren exists to
+    // avoid: it would hand this failure another frame's framePath, and that
+    // frame may have bound perfectly well. `source` still names the region,
+    // resolved post-build from this frame id.
+    const markUnboundFrameTree = (tree: FrameTree): void => {
       const omission = {
         kind: "frame_binding_failed" as const,
-        framePath: frame === undefined ? null : framePath(frame),
+        framePath: null,
         url: tree.frame.url,
       };
       omissions.push(omission);
       unboundOmissions.set(tree.frame.id, omission);
-      for (const [index, child] of (tree.childFrames ?? []).entries())
-        markUnboundFrameTree(child, frame?.childFrames()[index]);
+      for (const child of tree.childFrames ?? []) markUnboundFrameTree(child);
     };
     const documentLoaders = new Map<Frame, string>();
     const bindFrames = (tree: FrameTree, frame: Frame): void => {
@@ -387,7 +389,7 @@ export async function captureBrowserUseDOM(
       for (const [index, child] of children.entries()) {
         const matched = paired[index];
         if (matched) bindFrames(child, matched);
-        else markUnboundFrameTree(child, siblings[index]);
+        else markUnboundFrameTree(child);
       }
     };
     bindFrames(frames.frameTree, owningFrame);
@@ -400,14 +402,6 @@ export async function captureBrowserUseDOM(
       for (let i = inventory.length - 1; i >= 0; i -= 1)
         if (belongsToFailedFrame(inventory[i]!.framePath)) inventory.splice(i, 1);
     };
-    for (const frameId of unboundFrameIds) {
-      const path = framePathById.get(frameId);
-      if (path === undefined) continue;
-      const belongsToUnboundFrame = (candidate: string | null | undefined): boolean =>
-        candidate === path || candidate?.startsWith(`${path}/`) === true;
-      for (let i = inventory.length - 1; i >= 0; i -= 1)
-        if (belongsToUnboundFrame(inventory[i]!.framePath)) inventory.splice(i, 1);
-    }
     for (const frameId of frameIds.slice(1)) {
       try {
         const tree = await client.send("Accessibility.getFullAXTree", { frameId });

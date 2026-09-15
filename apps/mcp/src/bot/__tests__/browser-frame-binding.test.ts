@@ -24,6 +24,7 @@ import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type BrowserContext, type Frame, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { captureBrowserUseDOM, type BrowserUseCapture } from "../browser-use-capture.js";
+import type { InteractiveElement } from "../browser.js";
 import type { BrowserUseNode } from "../browser-use-serializer.js";
 
 const PARENT_HOST = "example.com";
@@ -139,8 +140,11 @@ function iframes(n: BrowserUseNode): BrowserUseNode[] {
   ];
 }
 
-async function capture(page: Page): Promise<BrowserUseCapture> {
-  return captureBrowserUseDOM(page, [], (frame: Frame) => {
+async function capture(
+  page: Page,
+  existing: readonly InteractiveElement[] = [],
+): Promise<BrowserUseCapture> {
+  return captureBrowserUseDOM(page, existing, (frame: Frame) => {
     const path: string[] = [];
     let current: Frame | null = frame;
     while (current !== null && current !== page.mainFrame()) {
@@ -231,6 +235,83 @@ describe("frame binding during uncommitted navigations (real Chromium, real HTTP
         const hostedButton = observed.elements.find((element) => element.name === "child-button");
         expect(hostedButton).toBeDefined();
         expect(hostedButton!.framePath).toBe("0");
+      } finally {
+        await page.context().close();
+      }
+    },
+  );
+
+  it.skipIf(!available)(
+    "leaves a bound frame's elements alone when a sibling frame cannot be paired",
+    { timeout: 60_000 },
+    async () => {
+      const { page } = await newPage();
+      try {
+        pendingChildResponses = [];
+        await page.goto(`http://${PARENT_HOST}:${port}/blank`, { waitUntil: "domcontentloaded" });
+        // A committed cross-site hosted card field. It is an OOPIF, so it is
+        // absent from the CDP child list while Playwright reports it at 0.
+        await page.evaluate(
+          ({ src }) => {
+            const field = document.createElement("iframe");
+            field.id = "hosted-field";
+            field.style.cssText = "width:300px;height:120px;border:0";
+            field.src = src;
+            document.body.appendChild(field);
+          },
+          { src: `http://${CHILD_HOST}:${port}/child` },
+        );
+        await page.waitForTimeout(1_200);
+
+        const settled = await capture(page);
+        expect(settled.omissions).toEqual([]);
+        const before = settled.elements.find((element) => element.name === "child-button");
+        expect(before).toBeDefined();
+        expect(before!.framePath).toBe("0");
+
+        // Now add two frames whose pending remainders cannot correspond: a
+        // document.write'd one (CDP reports the PARENT's url, so it is not a
+        // sentinel) and a purely pending one (CDP ":"). One sentinel against
+        // two pending siblings, so pairing declines for both.
+        await page.evaluate(
+          ({ src }) => {
+            const written = document.createElement("iframe");
+            written.id = "written";
+            written.style.cssText = "width:200px;height:80px";
+            written.src = src;
+            document.body.appendChild(written);
+            written.contentDocument!.write(
+              "<!doctype html><html><body><button id='inside'>Inside</button></body></html>",
+            );
+            written.contentDocument!.close();
+
+            const pending = document.createElement("iframe");
+            pending.id = "pending";
+            pending.style.cssText = "width:200px;height:80px";
+            pending.src = src;
+            document.body.appendChild(pending);
+          },
+          { src: `http://${PARENT_HOST}:${port}/hang` },
+        );
+        await page.waitForTimeout(800);
+
+        const observed = await capture(page, settled.elements);
+
+        // The hosted field bound in both captures and was never involved in
+        // the pairing failure, so its control keeps the SAME ref identity. It
+        // used to be evicted — an unpaired CDP child was attributed to
+        // sibling 0, which is this frame — and re-emitted with a fresh index.
+        const after = observed.elements.find((element) => element.name === "child-button");
+        expect(after).toBeDefined();
+        expect(after!.framePath).toBe("0");
+        expect(after!.index).toBe(before!.index);
+
+        // The two frames that could not be paired are attributed to
+        // themselves: `source` names each iframe, and framePath is absent
+        // rather than borrowed from whichever sibling shared their position.
+        const unpaired = observed.omissions.filter((o) => o.kind === "frame_binding_failed");
+        expect(unpaired.map((o) => o.source?.id).sort()).toEqual(["pending", "written"]);
+        for (const omission of unpaired) expect(omission.framePath).toBeNull();
       } finally {
         await page.context().close();
       }
