@@ -136,6 +136,19 @@ export interface SafeControlV2 {
   frame: "main" | "same_origin" | "cross_origin";
   /** Query-only match provenance; absent from the default action map. */
   match?: SafeQueryMatchV2;
+  /**
+   * Action-delta-only marker on the acted control's row. Emitted even when
+   * nothing wire-visible changed so a write is confirmable from its own
+   * result (E4) instead of forcing a full format:full re-read.
+   */
+  acted?: true;
+  /**
+   * E3: a listener container that carries a field name (f=) but is not
+   * itself fillable — its fillable field is emitted separately. The live
+   * Oura failure had the agent fill @card-number (the generic Braintree
+   * container) instead of the hosted textbox inside it.
+   */
+  notFillable?: true;
 }
 
 /** Raw DOM input is accepted only from title and visible heading elements. */
@@ -545,6 +558,8 @@ function wireControl(row: SafeControlV2): WireControlV2 {
     ...(row.field === undefined ? [] : [`f=${row.field}`]),
     ...(row.choice === undefined ? [] : [`q=${row.choice}`]),
     ...(row.frame === "main" ? [] : [`x=${row.frame === "same_origin" ? "s" : "x"}`]),
+    ...(row.acted === true ? ["w=acted"] : []),
+    ...(row.notFillable === true ? ["nf=1"] : []),
     ...(row.match === undefined
       ? []
       : [`m=${{ name: "n", role: "r", text: "t", context: "c" }[row.match]}`]),
@@ -1995,6 +2010,10 @@ export function buildSafeControlsV2(args: {
     const action = intentOf(el);
     const field = fieldOf(el, paymentContext);
     const cardChoice = el.cardRadioGroup;
+    // E3: a generic listener container advertising a field fact (f=) names a
+    // field but cannot accept a fill — the fillable control is emitted
+    // separately. Say so explicitly instead of leaving the pair ambiguous.
+    const notFillable = role === "generic" && field !== undefined ? (true as const) : undefined;
     // Native TypeScript port of browse-use's compact DOM formatting: the
     // already CDP-derived interactive inventory supplies each visible control's
     // descendant/accessibility name. This pass binds that name to its own live
@@ -2011,6 +2030,7 @@ export function buildSafeControlsV2(args: {
       ...(cardChoice === null || cardChoice === undefined
         ? {}
         : { choice: `${cardChoice.position}/${cardChoice.total}` }),
+      ...(notFillable === undefined ? {} : { notFillable }),
     };
     // A signup/login action is the useful first move on a landing page. Put it
     // ahead of unlabeled navigation chrome while preserving the existing

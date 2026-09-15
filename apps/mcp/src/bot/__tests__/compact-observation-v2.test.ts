@@ -817,6 +817,54 @@ describe("compact observation v2", () => {
     expect(quantityRow?.field).toBe("quantity");
   });
 
+  it("marks a field-named generic container not fillable and never the hosted field itself (E3)", () => {
+    // Braintree's hosted-field presentation: a listener div whose id says
+    // "card-number" wrapping a cross-origin iframe with the real textbox.
+    const container = element({
+      tag: "div",
+      role: "generic",
+      id: "card-number",
+      visibleText: null,
+      selector: "#card-number",
+    });
+    const field = element({
+      tag: "input",
+      type: "text",
+      role: "textbox",
+      id: "credit-card-number",
+      ariaLabel: "Credit card number",
+      selector: "#credit-card-number",
+    });
+    const rows = safeControls({
+      elements: [container, field],
+      legacyRefs: new Map([
+        [container, "r1"],
+        [field, "r2"],
+      ]),
+      pageOrigin: "https://merchant.invalid",
+      pageUrl: "https://merchant.invalid/checkouts/c/token",
+    });
+    const containerRow = rows.rows.find((row) => row.ref === "@e:hhhhhhhhh1");
+    expect(containerRow, "container row").toBeDefined();
+    expect(containerRow?.role).toBe("generic");
+    expect(containerRow?.field).toBe("payment");
+    expect(containerRow?.notFillable).toBe(true);
+    const fieldRow = rows.rows.find((row) => row.ref === "@e:hhhhhhhhh2");
+    expect(fieldRow?.notFillable).toBeUndefined();
+    // The wire carries the fact in the row's facts string.
+    const page = encodeV2QueryPage({
+      sessionId: "s",
+      stage: safeStageV2("https://merchant.invalid/checkouts/c/token", []),
+      pageUrl: "https://merchant.invalid/checkouts/c/token",
+      rows: rows.rows,
+      cursorFor: () => "",
+    });
+    const wireRow = (page.payload.safe_table as string[][]).find(
+      (row) => row[0] === "@e:hhhhhhhhh1",
+    );
+    expect(wireRow?.[2]).toContain("nf=1");
+  });
+
   it("carries the minted handle and a slugified addressable label", () => {
     const button = element({ visibleText: "private merchant copy" });
     const refs = new Map<InteractiveElement, string>([[button, "@e:stable_button"]]);

@@ -118,7 +118,8 @@ function sameCompactV2Control(left: SafeControlV2, right: SafeControlV2): boolea
     left.label === right.label &&
     left.choice === right.choice &&
     left.frame === right.frame &&
-    left.match === right.match
+    left.match === right.match &&
+    left.notFillable === right.notFillable
   );
 }
 
@@ -538,6 +539,7 @@ function compactV2Observation(
   compactActionDelta = false,
   compactMapEmitted = true,
   forceFullDOM = false,
+  actedRef?: string,
 ): Observation {
   rememberCompactV2SourcePage(session, sourcePage);
   const elements = capture.elements;
@@ -600,9 +602,16 @@ function compactV2Observation(
     previous.compactMapEmitted === true;
   const currentRefs = new Set(safe.rows.map((row) => row.ref));
   const compactRows = canCompactActionDelta
-    ? safe.rows.filter((row) => {
+    ? safe.rows.flatMap((row) => {
+        // E4: the acted control's current row always travels in the action
+        // delta, marked w=acted, even when nothing wire-visible changed —
+        // otherwise a successful write returns an empty safe_table and the
+        // only way to confirm it is a full format:full re-read. The handle is
+        // minted from physical node identity, so it survives the benign
+        // re-render the action itself may have caused.
+        if (actedRef !== undefined && row.ref === actedRef) return [{ ...row, acted: true as const }];
         const prior = previous.byRef.get(row.ref);
-        return prior === undefined || !sameCompactV2Control(prior, row);
+        return prior === undefined || !sameCompactV2Control(prior, row) ? [row] : [];
       })
     : safe.rows;
   const compactRemoved = canCompactActionDelta
@@ -923,6 +932,7 @@ export async function observeSession(
   compactActionDelta = false,
   compactMapEmitted = true,
   forceFullDOM = false,
+  actedRef?: string,
 ): Promise<Observation> {
   if (sourcePage === undefined) {
     const hadOAuthCompletionSource =
@@ -994,6 +1004,7 @@ export async function observeSession(
       compactActionDelta,
       compactMapEmitted,
       forceFullDOM,
+      actedRef,
     );
   } catch (err) {
     const oauth = session.browser ? oauthTransitionStatus(session.browser) : undefined;
