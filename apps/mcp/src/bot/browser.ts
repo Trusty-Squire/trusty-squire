@@ -71,7 +71,6 @@ import {
 } from "./request-cancellation.js";
 import { BrowserProcessOwner } from "./browser-process-owner.js";
 import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
-import type { OAuthProviderId } from "./oauth-providers.js";
 import {
   classifyGoogleAuthState,
   extractGoogleHumanChallenge,
@@ -2530,86 +2529,6 @@ export class BrowserController implements BrowserDriver {
       .catch(() => undefined);
   }
 
-  // Click the form's submit button, disambiguating when the planned
-  // selector matches several elements. Signup pages routinely render
-  // OAuth buttons ("Continue with Google" / "GitHub") as
-  // button[type=submit] alongside the real submit — and a Playwright
-  // locator is strict-mode, so a plain click on a multi-match selector
-  // throws "strict mode violation". We score the candidates by visible
-  // text and click the best, or throw a clear error when none reads as
-  // a signup button (e.g. an OAuth-only page).
-  async clickSubmit(selector: string): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    // 0.8.3-rc.1 — wait for the submit selector to appear before
-    // querying count. Mixpanel-class SPAs (Next.js + heavy auth JS)
-    // race past the 10s `waitForSelector` in click() and bail with
-    // `locator.waitFor: Timeout 10000ms exceeded` even when the form
-    // is otherwise correct. Polling here gives the SPA time to
-    // mount the submit button BEFORE we check whether it's disabled.
-    // Best-effort: a genuine miss still surfaces as the click()'s
-    // own timeout downstream.
-    try {
-      await this.page.waitForSelector(selector, {
-        state: "attached",
-        timeout: 20000,
-      });
-    } catch {
-      // fall through — click() below will produce the canonical error
-    }
-    const locator = this.page.locator(selector);
-    // The count can throw "Execution context was destroyed" when an
-    // earlier fill already triggered a navigation/auto-submit (zilliz:
-    // typing email+password redirects before we reach the submit click).
-    // That race must NOT crash the whole signup — the page is already
-    // moving on, so treat the submit as effectively done and let the
-    // caller inspect the new page. MEASURED 2026-06-11 (zilliz /signup).
-    const count = await locator.count().catch(() => -1);
-    if (count < 0) {
-      await this.page.waitForLoadState("domcontentloaded").catch(() => {});
-      return;
-    }
-    // A disabled submit means a required field or agreement checkbox
-    // wasn't satisfied — throw a distinct `submit_disabled` so the
-    // caller can re-plan to fix it, rather than wait out a generic
-    // visibility timeout (SendPulse: #btn-reg stays disabled +
-    // hidden until the TOS box is ticked).
-    if (count >= 1) {
-      const disabled = await locator
-        .first()
-        .isDisabled()
-        .catch(() => false);
-      if (disabled) {
-        throw new Error(
-          `submit_disabled: the submit button (${selector}) is disabled — a ` +
-            `required field or agreement checkbox was not satisfied`,
-        );
-      }
-    }
-    // 0 or 1 match: the normal click path handles it (and surfaces a
-    // clean "waiting for selector" timeout when the count is 0).
-    if (count <= 1) {
-      await this.clickActivePageSelector(selector);
-      return;
-    }
-    const texts: string[] = [];
-    for (let i = 0; i < count; i++) {
-      texts.push(((await locator.nth(i).textContent()) ?? "").trim());
-    }
-    const best = pickSubmitButtonIndex(texts);
-    if (best === null) {
-      throw new Error(
-        `submit selector "${selector}" matched ${count} buttons, none scoring ` +
-          `as a signup button (texts: ${texts.map((t) => JSON.stringify(t)).join(", ")})`,
-      );
-    }
-    const chosen = locator.nth(best);
-    if (this.humanize) {
-      await this.humanClickLocator(chosen);
-    } else {
-      await chosen.click();
-    }
-  }
-
   async check(selector: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     // Use force:true because TOS checkboxes are sometimes visually covered by
@@ -2747,8 +2666,8 @@ export class BrowserController implements BrowserDriver {
   // adjacent data-storage card-radios as the whole cluster being
   // "ambiguous radios"), and amplitude does NOT disable submit when the
   // box is unticked — so the click silently no-ops and the bot then
-  // waits forever for a verification mail that never sends. This runs on
-  // EVERY submit, not only the `submit_disabled` path in clickSubmit().
+  // waits forever for a verification mail that never sends. This is a
+  // submit-path guard, independent of any particular submit selector.
   //
   // Returns the labels/testids it checked (for step logging); empty when
   // it ticked nothing.
@@ -3626,17 +3545,16 @@ export class BrowserController implements BrowserDriver {
     // and its inner text node, so a single id selector resolves to 2
     // elements. For a click that's harmless: every match is the same visual
     // affordance. Narrow to the first match (Playwright's documented
-    // disambiguation for clicks) when the selector isn't already unique,
-    // matching what clickSubmit already does.
+    // disambiguation for clicks) when the selector isn't already unique.
     const locator = this.page.locator(selector);
     const count = await locator.count().catch(() => 1);
     await this.humanClickLocator(pickClickLocator(locator, count));
   }
 
   // Locator-based core of humanClick. Taking a Locator (not a selector
-  // string) lets clickSubmit() hand us a `.nth(i)`-narrowed locator
-  // when a selector matched several elements — a bare selector through
-  // a strict-mode locator would throw before we could disambiguate.
+  // string) lets a caller hand us a `.nth(i)`-narrowed locator when a
+  // selector matched several elements — a bare selector through a
+  // strict-mode locator would throw before we could disambiguate.
   private async humanClickLocator(locator: Locator): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     // 0.8.3-rc.1 — widened from 10s to 20s for SPA-load races. The
@@ -8166,23 +8084,6 @@ export function pickPhoneCountryOption(
   return options.findIndex((o) => phoneCountryOptionMatches(query, o));
 }
 
-//
-// Exported for unit testing — the scoring is the load-bearing logic.
-export function pickSubmitButtonIndex(texts: readonly string[]): number | null {
-  let bestIndex: number | null = null;
-  let bestScore = 0;
-  texts.forEach((raw, i) => {
-    // Shared scorer (F3 Issue 8) — one keyword set for submit
-    // disambiguation, the chooser pick, and inventory ranking.
-    const score = scoreSignupButton(raw);
-    if (score > bestScore) {
-      bestScore = score;
-      bestIndex = i;
-    }
-  });
-  return bestIndex;
-}
-
 // ───────────── element inventory (F3) ─────────────
 
 // One interactive element the planner can target. `selector` is
@@ -8392,86 +8293,6 @@ export function assignCardRadioGroups(
     });
   }
   return result;
-}
-
-// Score a button/link by how much its text reads like a signup
-// action. Shared by submit-button disambiguation, the two-stage
-// chooser pick, and inventory button-ranking — one keyword set, no
-// drift (F3 Issue 8). OAuth provider names go firmly negative so the
-// bot never wanders into a Google/GitHub login dead end.
-//
-// `oauthProviders` (T6/T13 + auto-prefer) inverts that for OAuth-
-// candidate providers: the "Sign in with <provider>" affordance is a
-// PRIMARY target, not a dead end — so it must score positive enough to
-// survive inventory ranking/capping. Stated as a rule, not arithmetic:
-// a candidate provider's button outranks any form field. Only the
-// candidate providers flip positive; every other OAuth/SSO button
-// stays negative.
-export function scoreSignupButton(
-  text: string,
-  oauthProviders?: readonly OAuthProviderId[],
-): number {
-  const t = text.toLowerCase();
-  let score = 0;
-  if (t.includes("create account") || t.includes("create your account")) score += 12;
-  if (t.includes("sign up") || t.includes("signup")) score += 10;
-  if (t.includes("register")) score += 8;
-  if (t.includes("get started")) score += 6;
-  // rc.30 — "email" is a strong signal that this button is the
-  // signup path even when the page lacks a "Sign up" button (Railway,
-  // Vercel, lots of services combine signup + login on one page and
-  // label the email path "Log in using email" / "Sign in with email").
-  // Bump weight from +5 to +12 so the combined-flow button outranks
-  // generic nav anchors that score 0. The compensating auth-verb
-  // penalty below is also suppressed when email is present.
-  const hasEmail =
-    t.includes("continue with email") || t.includes("sign up with email") || t.includes("email");
-  if (hasEmail) {
-    score += 12;
-  }
-  // Weak positive: "Continue" is often the real submit on single-field
-  // forms; it should beat nothing but lose to OAuth markers.
-  if (t.includes("continue")) score += 2;
-  // "Next" / "Submit" / "Join" are the real form-submit verb on a multi-step
-  // signup (huggingface /join step 1's button is "Next"). Weak positive so the
-  // submit survives the button cap among many 0-scored nav anchors — otherwise
-  // the planner can't see it and hallucinates a submit_selector. Loses to any
-  // real signup CTA / OAuth marker. MEASURED 2026-06-23 (huggingface).
-  if (/\bnext\b/.test(t) || /\bsubmit\b/.test(t) || /\bjoin\b/.test(t)) score += 2;
-  // Post-signup dashboards reveal the key behind a "Create API Key" /
-  // "Add key" / "Generate key" / "Get API Key" CTA — the run's actual
-  // goal once the account exists. These score 0 on signup vocabulary, so
-  // on a busy dashboard (dozens of nav/account buttons) the inventory's
-  // button cap drops them: the OpenRouter "Get API Key" + fal.ai "Add key"
-  // suppression. Score them as a primary target so they survive ranking.
-  if (
-    /\b(?:add|create|generate|new|get|reveal|copy)\b[\s\w]{0,20}\b(?:api[\s-]?key|key|token|secret|credential)s?\b/.test(
-      t,
-    )
-  ) {
-    score += 14;
-  }
-  if (
-    oauthProviders !== undefined &&
-    oauthProviders.some((p) => new RegExp(`\\b${p}\\b`).test(t))
-  ) {
-    // OAuth-first: a candidate provider's button is the goal. Score it
-    // above every form-field-class button so ranking never caps it out.
-    score += 50;
-  } else if (/\b(google|github|gitlab|microsoft|apple|facebook|okta|sso|saml)\b/.test(t)) {
-    // OAuth / SSO buttons are submit-typed too — the provider name is
-    // the reliable discriminator, so drive those firmly negative.
-    score -= 20;
-  }
-  // rc.30 — auth-verb penalty applies only when the button is purely
-  // sign-in (no email). "Log in using email" / "Sign in with email"
-  // are combined paths where the same button serves signup AND login
-  // for first-time visitors. Penalizing them drops the actual signup
-  // route from the inventory (the Railway regression diagnosed via
-  // screenshots after rc.29).
-  const hasAuthVerb = t.includes("sign in") || t.includes("log in") || t.includes("login");
-  if (hasAuthVerb && !hasEmail) score -= 12;
-  return score;
 }
 
 export {

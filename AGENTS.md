@@ -720,6 +720,12 @@ Playwright serializes only the callback's source text into the page — the
 module's closure does not travel. Keep page callbacks self-contained and test the
 real browser path.
 
+A live repro harness run under `tsx` (as the wave-2 studies run theirs) needs a
+page-side shim for esbuild's `keepNames` helper, or production paths that call
+`elementHandle.evaluate` fail with `ReferenceError: __name is not defined` and
+look like a product fault:
+`await page.addInitScript({ content: "window.__name = window.__name || function(f){return f;};" })`.
+
 ---
 
 ## Never touch the operator's live local state from a test or a check
