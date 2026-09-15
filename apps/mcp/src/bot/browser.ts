@@ -1826,9 +1826,7 @@ export class BrowserController implements BrowserDriver {
   // tracked-click fallback and the OAuth dispatch path land here.
   private async clickActivePageSelector(selector: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
-    await this.withModalInertNeutralized(selector, (modalActive) =>
-      this.clickInner(selector, modalActive),
-    );
+    await this.withModalInertNeutralized(selector, () => this.clickInner(selector));
   }
 
   async bindOAuthClickTarget(
@@ -1885,125 +1883,34 @@ export class BrowserController implements BrowserDriver {
     }
   }
 
-  private async clickInner(selector: string, modalActive: boolean): Promise<void> {
+  private async clickInner(selector: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
-    // Radio/checkbox inputs — especially the visually-hidden kind behind a
-    // styled label (kinde's `kui-util-hide-visually` SDK-picker radios) — don't
-    // respond to a positional click: Playwright can't click an invisible
-    // element, and even a label click may not fire the `change` handler a gated
-    // control depends on (kinde's radio `kui-on-change` enables the otherwise-
-    // disabled Next button). Playwright's check() toggles the control AND
-    // dispatches input/change; `force` bypasses the visibility actionability
-    // gate for the sr-only pattern. MEASURED 2026-06-09 (kinde tech-stack step).
+    // ARIA toggle that ignores synthetic clicks: a <button role="switch"> whose
+    // handler binds to keydown only (Firebase's Google-provider "Enable"
+    // switch). A plain click() returns success but aria-checked never moves —
+    // a silent no-op the planner then loops on. MEASURED 2026-06-27 (Firebase
+    // auth capstone) and re-measured 2026-09-15 (ts-wave2 removal study): the
+    // keyboard activation (focus + Space) is the ARIA-correct fix and flips it.
+    // Click first (cheap); if aria-checked didn't move, focus and press Space.
+    // Scoped narrowly to role=switch (compliant widgets are unaffected: their
+    // click flips aria-checked and the read-back returns immediately).
     try {
-      const probe = await this.page
-        .$eval(selector, (el) => {
-          const t = el as HTMLInputElement;
-          const inputKind =
-            t.tagName === "INPUT" && (t.type === "radio" || t.type === "checkbox") ? t.type : "";
-          // The planner's selector often resolves to a CHILD of the real option
-          // (the inner <span> with the visible text, or a positional wrapper), not
-          // the role=option element itself. Walk up to the nearest combobox-option
-          // ancestor so the role-based re-resolution below fires. cmdk items carry
-          // role=option but the `[cmdk-item]` attribute is the most stable tell.
-          // MEASURED 2026-06-16 (meilisearch /welcome-informations cmdk multi-
-          // select): a plain getByRole("option",{name}).click() COMMITS the value
-          // — the trigger updates + Next un-gates — but only when we target the
-          // option element, not its child span (which a raw coordinate click drops).
-          const optEl = el.closest(
-            '[role="option"],[role="menuitem"],[role="menuitemradio"],[cmdk-item]',
-          );
-          const optRole = optEl !== null ? (optEl.getAttribute("role") ?? "option") : "";
-          const optText = optEl !== null ? (optEl.textContent ?? "").trim().slice(0, 80) : "";
-          return {
-            inputKind,
-            role: el.getAttribute("role") ?? "",
-            text: (el.textContent ?? "").trim().slice(0, 80),
-            optRole,
-            optText,
-          };
-        })
-        .catch(() => ({ inputKind: "", role: "", text: "", optRole: "", optText: "" }));
-      const inputKind = probe.inputKind;
-      // Custom-combobox / listbox options (role=option|menuitem) — react-select,
-      // Radix, downshift, cmdk, MUI. Two failure modes the humanized RAW-COORDINATE
-      // click hits: (1) the menu is a PORTAL that re-renders/repositions, so the
-      // captured POSITIONAL selector (e.g. `div…>> nth=42`) resolves to the wrong
-      // element at click time — nothing selects, planner loops (MEASURED
-      // 2026-06-11, meilisearch Radix combobox); (2) options bind pointer/select
-      // handlers a raw coordinate click misses. Fix: re-resolve by role+accessible
-      // name (robust to portal/positional drift + the planner targeting a child),
-      // and use the actionability-checked locator click. Options are post-load,
-      // NOT the anti-bot-scored gate.
-      const optRole =
-        probe.role === "option" || probe.role === "menuitem" || probe.role === "menuitemradio"
-          ? probe.role
-          : probe.optRole === "option" ||
-              probe.optRole === "menuitem" ||
-              probe.optRole === "menuitemradio"
-            ? probe.optRole
-            : "";
-      const optName = probe.role !== "" ? probe.text : probe.optText;
-      if (optRole !== "") {
-        const role = optRole as "option" | "menuitem" | "menuitemradio";
-        if (optName.length > 0) {
-          const byName = modalActive
-            ? this.page
-                .locator("[data-ts-inert-region-anchor]")
-                .getByRole(role, { name: optName, exact: false })
-                .first()
-            : this.page.getByRole(role, { name: optName, exact: false }).first();
-          if ((await byName.count().catch(() => 0)) > 0) {
-            await byName.click({ timeout: 8000 });
-            return;
-          }
-        }
-        await this.page.locator(selector).first().click({ timeout: 8000 });
-        return;
-      }
-      if (inputKind === "radio" || inputKind === "checkbox") {
-        // check() handles standard inputs; but a custom framework (kinde's kui)
-        // binds its change handler via event delegation, and a force-check on an
-        // sr-only radio may not fire a bubbling change. Belt-and-suspenders:
-        // check(), then JS-ensure checked + dispatch bubbling input/change so the
-        // delegated handler (e.g. enable-the-gated-Next-button) fires AND the
-        // value is included on submit. MEASURED 2026-06-09 (kinde SDK picker).
-        await this.page.check(selector, { force: true }).catch(() => undefined);
-        await this.page
-          .$eval(selector, (el) => {
-            const r = el as HTMLInputElement;
-            if (!r.checked) r.checked = true;
-            r.dispatchEvent(new Event("input", { bubbles: true }));
-            r.dispatchEvent(new Event("change", { bubbles: true }));
-            r.dispatchEvent(new Event("click", { bubbles: true }));
-          })
-          .catch(() => undefined);
-        return;
-      }
-      // ARIA toggle: a <button role="switch"> / role="checkbox" (Firebase's
-      // Google-provider "Enable" switch, MUI/Material toggles). A synthetic
-      // positional click frequently does NOT flip these — the handler binds to a
-      // keydown/pointer sequence the raw click misses, so click() returns but
-      // aria-checked never changes. The ARIA-correct activation is the keyboard:
-      // focus + Space. Click first (cheap); if aria-checked didn't move, focus
-      // and press Space. MEASURED 2026-06-27 (Firebase auth Enable switch).
-      if (probe.role === "switch" || probe.role === "checkbox") {
-        const node = this.page.locator(selector).first();
+      const node = this.page.locator(selector).first();
+      if ((await node.getAttribute("role").catch(() => null)) === "switch") {
         const readChecked = (): Promise<string | null> =>
           node.getAttribute("aria-checked").catch(() => null);
         const before = await readChecked();
         await node.click({ timeout: 8000 }).catch(() => undefined);
-        if ((await readChecked()) === before) {
+        // Only when aria-checked EXISTS can we observe the toggle; without it a
+        // Space press would blind-fire on top of a click that already worked.
+        if (before !== null && (await readChecked()) === before) {
           await node.focus().catch(() => undefined);
           await this.page.keyboard.press("Space").catch(() => undefined);
-          if ((await readChecked()) === before) {
-            await this.page.keyboard.press("Enter").catch(() => undefined);
-          }
         }
         return;
       }
     } catch {
-      // element vanished / selector didn't resolve — fall through to a click
+      // selector didn't resolve / element vanished — fall through to a click
     }
     if (!this.humanize) {
       await this.page.click(selector);
