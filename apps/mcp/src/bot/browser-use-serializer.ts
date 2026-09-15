@@ -229,143 +229,65 @@ const pyString = (v: unknown): string =>
   v === null ? "None" : typeof v === "boolean" ? (v ? "True" : "False") : String(v);
 
 /**
- * AX roles that are structure, text, landmarks, or composite-widget containers
- * rather than discrete operable controls. This is a DENY list: any role not in
- * it is admitted when the browser's accessibility description says the node is
- * operable (unignored, not hidden, focusable — or disabled, which the tree
- * still presents as a widget). An unfamiliar role we have never seen must come
- * through, not be dropped (C1: the browser's verdict, not our shape list).
- *
- * Justification by role family:
- * - Document/page surfaces and structure/text carry no operation.
- * - Landmarks/regions group content; the operable things inside them are
- *   emitted individually.
- * - Composite-widget containers (listbox, menu, tablist, tree, grid, table…)
- *   receive roving container focus while the real targets are their children
- *   (option, menuitem*, treeitem, tab, gridcell…), which are admitted
- *   individually; `listbox` additionally goes through the scrollable-container
- *   branch of the serializer, which owns its emission.
- * - Status surfaces (alert, dialog, tooltip…) are announced, not operated;
- *   their buttons are emitted individually.
+ * Chrome's own accessibility description of an operable control (C1),
+ * resolved structurally instead of by role name. A node is operable when the
+ * AX tree presents it as unignored, not hidden, and focusable (or disabled —
+ * still a widget the tree announces) AND it has no operable descendant: the
+ * INNERMOST operable node is the control, its container is not. Whether "this
+ * node is not the click target, its children are" is a property of the TREE,
+ * which Chrome already gives us (children, contentDocument) — not of a role
+ * name. Composite-widget containers (radiogroup, menu, tablist, tree, grid,
+ * toolbar…) fall out because their items/tabs/cells are emitted individually;
+ * document/page surfaces fall out because their content is; a collapsed
+ * combobox with no operable children, an unfamiliar role, and a focusable
+ * `<img tabindex="0">` acting as a button all come through. CSS presentation
+ * such as `opacity:0` behind a styled label (Oura's payment-method chooser)
+ * must not remove a control from the observation. The browser's AX verdict
+ * decides what counts as a control — there is no role-name set anywhere in
+ * this predicate.
  */
-const axStructuralRoles = new Set([
-  // Document/page surfaces and embedding boundaries.
-  "document",
-  "webArea",
-  "RootWebArea",
-  "rootWebArea",
-  "iframe",
-  "embeddedObject",
-  // Structure, text, and presentational nodes.
-  "none",
-  "presentation",
-  "generic",
-  "text",
-  "StaticText",
-  "InlineTextBox",
-  "lineBreak",
-  "paragraph",
-  "heading",
-  "label",
-  "legend",
-  "caption",
-  "blockquote",
-  "code",
-  "emphasis",
-  "strong",
-  "deletion",
-  "insertion",
-  "mark",
-  "sub",
-  "sup",
-  "time",
-  "term",
-  "definition",
-  "footnote",
-  "math",
-  "figure",
-  "image",
-  "imageMap",
-  "video",
-  "audio",
-  "canvas",
-  "svg",
-  "separator",
-  // Landmarks and regions.
-  "banner",
-  "complementary",
-  "contentinfo",
-  "form",
-  "main",
-  "navigation",
-  "region",
-  "article",
-  "aside",
-  "section",
-  "search",
-  "application",
-  // Composite-widget containers: focusable as a whole, but their discrete
-  // operable children are admitted individually (treeitem, option, tab…).
-  "group",
-  "radiogroup",
-  "list",
-  "listbox",
-  "menu",
-  "menubar",
-  "tablist",
-  "toolbar",
-  "tree",
-  "treegrid",
-  "grid",
-  "table",
-  "row",
-  "rowgroup",
-  "rowheader",
-  "columnheader",
-  "cell",
-  "gridcell",
-  "LayoutTable",
-  "LayoutTableRow",
-  "LayoutTableCell",
-  "LayoutTableColumn",
-  "details",
-  "fieldset",
-  // Status surfaces and overlays: announced, not operated.
-  "dialog",
-  "alertdialog",
-  "alert",
-  "status",
-  "log",
-  "marquee",
-  "timer",
-  "tooltip",
-  "progressbar",
-  "meter",
-]);
+export function browserUseAxOperable(n: BrowserUseNode): boolean {
+  return axSelfOperable(n) && !hasOperableAxDescendant(n);
+}
 
-/**
- * Chrome's own accessibility description of an operable control (C1). A node
- * is operable when the AX tree presents it as unignored, not hidden, and
- * focusable (or disabled — still a widget the tree announces), and its role is
- * NOT a known structural/presentational/container role. Default admits: an
- * unfamiliar role — treeitem, menuitemcheckbox, Blink spellings like
- * ToggleButton or MenuListOption — comes through, because a screen reader can
- * operate it. CSS presentation such as `opacity:0` behind a styled label
- * (Oura's payment-method chooser) must not remove it from the observation.
- * The browser's AX description, not shape recognition, decides what counts as
- * a control.
- */
-export function browserUseAxOperable(
+/** The AX verdict for a single node, without the descendant check. */
+function axSelfOperable(
   n: Pick<BrowserUseNode, "axRole" | "axProperties" | "axIgnored">,
 ): boolean {
   return (
     n.axRole !== null &&
-    !axStructuralRoles.has(n.axRole) &&
     n.axIgnored !== true &&
     !n.axProperties.some((p) => p.name === "hidden" && p.value) &&
     (n.axProperties.some((p) => p.name === "focusable" && p.value === true) ||
       n.axProperties.some((p) => p.name === "disabled" && p.value === true))
   );
+}
+
+const operableDescendantCache = new WeakMap<BrowserUseNode, boolean>();
+
+/**
+ * Whether any AX-backed descendant of `n` would itself count as operable.
+ * Frame documents count through `contentDocument` (a frame's fields make the
+ * frame host a container, not a control); shadow-root children are ordinary
+ * `children`. Memoized per node — capture node objects are immutable
+ * projections of one snapshot, so a WeakMap is safe to share across captures.
+ */
+function hasOperableAxDescendant(n: BrowserUseNode): boolean {
+  const cached = operableDescendantCache.get(n);
+  if (cached !== undefined) return cached;
+  // Set before recursing: the DOM/AX projection is acyclic, and the
+  // placeholder makes a malformed tree fail closed (no emission) not loop.
+  operableDescendantCache.set(n, false);
+  let found = false;
+  const children = n.contentDocument ? [...n.children, n.contentDocument] : n.children;
+  for (const child of children) {
+    if (axSelfOperable(child) || hasOperableAxDescendant(child)) {
+      found = true;
+      break;
+    }
+  }
+  operableDescendantCache.set(n, found);
+  return found;
 }
 
 export function browserUseInteractive(n: BrowserUseNode, canonical = false): boolean {
@@ -399,15 +321,14 @@ export function browserUseInteractive(n: BrowserUseNode, canonical = false): boo
       ].some((key) => key in a) ||
       ["command", "commandfor", "popovertarget"].some((key) => key in a) ||
       customInteractiveRoles.has(a.role ?? "") ||
-      // The AX-role conjunct uses the same deny-list verdict as
-      // browserUseAxOperable above, so a role the browser presents as operable
-      // (treeitem, menuitemcheckbox, ToggleButton…) is not re-filtered here by
-      // an allow-list two lines later. The authored-attribute allow-list is a
-      // deliberate supplement, not a contradiction: it reaches mouse-operable
-      // widgets whose role the author declared but which Chrome marks
-      // non-focusable (invisible to keyboard operation and therefore outside
-      // the AX charter); it cannot miss anything the AX verdict admits,
-      // because authored roles map into the AX tree's own role spelling.
+      // The AX conjunct reuses browserUseAxOperable's verdict (unignored, not
+      // hidden, focusable-or-disabled, no operable descendant), so a node the
+      // browser presents as operable (treeitem, menuitemcheckbox,
+      // ToggleButton…) is not re-filtered here by an allow-list two lines
+      // later. The authored-attribute allow-list is a deliberate supplement,
+      // not a contradiction: it reaches mouse-operable widgets whose role the
+      // author declared but which Chrome marks non-focusable (invisible to
+      // keyboard operation and therefore outside the AX charter).
       browserUseAxOperable(n) ||
       n.axRole === "listbox" ||
       n.axProperties.some((p) => ["editable", "settable"].includes(p.name) && p.value === true)

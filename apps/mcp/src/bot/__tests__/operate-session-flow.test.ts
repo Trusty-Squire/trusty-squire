@@ -6487,8 +6487,9 @@ describe("flat operator verbs", () => {
     expect(selectRef).toBeDefined();
 
     // Default action returns: the same browser-use-control-query shape as
-    // observe, with only changed/new refs. The raw value that appeared after
-    // the reveal click never enters that compact response.
+    // observe, with only changed/new refs plus the acted control's own row
+    // marked w=acted. The raw value that appeared after the reveal click
+    // never enters that compact response.
     h.elements = [
       elem({
         tag: "input",
@@ -6510,8 +6511,15 @@ describe("flat operator verbs", () => {
     expect(clicked.delta).toBe(true);
     expect(clicked).not.toHaveProperty("dom");
     expect(JSON.stringify(clicked)).not.toContain("sk-test-revealed");
-    expect(refsOf(clicked).size).toBe(1);
-    const [copyRef] = refsOf(clicked);
+    // The new Copy control and the acted Continue row (w=acted) — the acted
+    // echo is part of the documented contract, not a changed control.
+    expect(refsOf(clicked).size).toBe(2);
+    const actedRow = (clicked.safe_table as string[][]).find((row) =>
+      (row[2] ?? "").includes("w=acted"),
+    );
+    expect(actedRow, "acted control echoed with w=acted").toBeDefined();
+    expect(actedRow![0]).toBe(buttonRef);
+    const [copyRef] = [...refsOf(clicked)].filter((ref) => ref !== buttonRef);
     expect(copyRef).toBeDefined();
 
     const afterClick = await observe(started.session_id, "compact");

@@ -1230,10 +1230,15 @@ export async function captureBrowserUseDOM(
         // C7 — per-field validation state straight from the browser: Chrome's
         // AX `invalid` property (how Braintree hosted fields report a bad
         // card) or an authored aria-invalid. Only "true" is captured so the
-        // fact stays sparse; absence means not invalid, not unknown.
+        // fact stays sparse; absence means not invalid, not unknown. Reads
+        // the semantic node (proxyTarget ?? n), the same convention as every
+        // other semantic fact below — `n` alone is the proxy owner (the
+        // visible <label>) when a label proxy is in play, and the invalid
+        // state lives on the labeled input.
         const axInvalid =
-          n.axProperties.some((p) => p.name === "invalid" && (p.value === true || p.value === "true")) ||
-          n.attributes["aria-invalid"] === "true";
+          semanticNode.axProperties.some(
+            (p) => p.name === "invalid" && (p.value === true || p.value === "true"),
+          ) || semanticNode.attributes["aria-invalid"] === "true";
         if (axInvalid) {
           el.invalid = true;
           n.attributes.invalid ??= "true";

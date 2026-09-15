@@ -104,6 +104,32 @@ const COUNTRY = `<!doctype html><html><body><main>
   <button type="button">Continue to payment</button>
 </main></body></html>`;
 
+// Innermost-operable fixture: an <img tabindex="0"> acting as a button with a
+// click handler and no operable descendants. Chrome's AX tree reports it as
+// role Image, focusable — but the old role-name deny list contained "image",
+// so the old predicate silently dropped a real control (C1 reintroduced under
+// a different role name). The tree-derived rule must emit it.
+const IMG_BUTTON = `<!doctype html><html><body><main>
+  <h1>Store</h1>
+  <img id="buy" tabindex="0" src="https://fixture.test/buy.png" alt="Buy now"
+       style="width:96px;height:36px;display:block" onclick="this.dataset.clicked='yes'">
+  <button type="button">Checkout</button>
+</main></body></html>`;
+
+// C7 label-proxy fixture: invisible checkboxes emitted through their single
+// visible <label for>. The proxy row is built from the visible label node,
+// but the validation state (aria-invalid) lives on the input — the semantic
+// node — and must still surface in the state bitset.
+const PROXY_INVALID = `<!doctype html><html><head><style>
+  .off { position: absolute; opacity: 0; width: 20px; height: 20px; margin: 0; }
+</style></head><body><main>
+  <h1>Legal</h1>
+  <label for="terms">Terms of service</label>
+  <input type="checkbox" id="terms" class="off" aria-invalid="true">
+  <label for="fine">Fine print</label>
+  <input type="checkbox" id="fine" class="off">
+</main></body></html>`;
+
 let browser: Browser | undefined;
 
 beforeAll(async () => {
@@ -152,6 +178,14 @@ describe("AX-faithful control emission (C1) and per-field invalid state (C7)", (
         // Exactly one control per option: the visible label text does not
         // become a second, nameless control.
         expect(rows.filter((row) => (row[2] ?? "").toLowerCase().includes("credit-card"))).toHaveLength(1);
+        // The radiogroup container itself is NOT emitted: the innermost
+        // operable node is the control, and the radios are its operable
+        // descendants. A group row would pass its container role through
+        // verbatim on the wire.
+        expect(
+          rows.filter((row) => /group/i.test(row[1] ?? "")),
+          "no radiogroup container row",
+        ).toHaveLength(0);
 
         // The AX name travelled onto the emitted input, so the full DOM can
         // be queried by the name the browser gives it.
@@ -172,9 +206,9 @@ describe("AX-faithful control emission (C1) and per-field invalid state (C7)", (
         // its compact state bitset (s=…i…), sparse: absence means not invalid.
         const invalidRow = rowFor("card-number");
         expect(invalidRow, "compact row for the invalid card field").toBeDefined();
-        expect(invalidRow![2] ?? "").toMatch(/s=[^|]*\bi/);
+        expect(invalidRow![2] ?? "").toMatch(/s=[cudr]*i(?![a-z])/);
         // ...and a control whose browser state is not invalid carries no i bit.
-        expect(paypal![2] ?? "").not.toMatch(/s=[^|]*\bi/);
+        expect(paypal![2] ?? "").not.toMatch(/s=[cudr]*i(?![a-z])/);
       } finally {
         if (sessionId) await finishProvisionSession(sessionId).catch(() => {});
         await page.context().close();
@@ -260,6 +294,90 @@ describe("AX-faithful control emission (C1) and per-field invalid state (C7)", (
         expect(filtered.safe_table).toHaveLength(1);
         expect(filtered.safe_table[0]![0]).toBe(selectRow![0]);
         expect(filtered.safe_table[0]![1]).toBe("s");
+      } finally {
+        if (sessionId) await finishProvisionSession(sessionId).catch(() => {});
+        await page.context().close();
+      }
+    },
+    120000,
+  );
+
+  it(
+    "emits a focusable img-as-button with no operable children (innermost rule, no role-name list)",
+    async () => {
+      const page = await newPage(IMG_BUTTON);
+      let sessionId: string | undefined;
+      try {
+        const start = await startHarnessProvisionSession({
+          browser: BrowserController.fromHarnessPage(page),
+          serviceUrl: "https://fixture.test/store",
+          format: "compact",
+        });
+        sessionId = start.session_id;
+
+        const rows = (start as unknown as { safe_table: string[][] }).safe_table;
+        const rowFor = (needle: string): string[] | undefined =>
+          rows.find((row) => (row[2] ?? "").toLowerCase().includes(needle));
+
+        // Chrome's AX tree reports the <img tabindex=0> as role Image,
+        // focusable — a control built out of an image. The old role-name deny
+        // list silently dropped it (C1 again under a different role name);
+        // the innermost-operable rule admits it because the browser says it
+        // is operable and it has no operable descendant.
+        const buy = rowFor("buy-now");
+        expect(buy, "compact row for the focusable img-as-button").toBeDefined();
+
+        // It is a real action target: the click lands on the image.
+        const clicked = await operateClickTool.handler(
+          { session_id: sessionId, ref: buy![0]! },
+          null,
+        );
+        expect(JSON.stringify(clicked)).toBeDefined();
+        expect(await page.locator("#buy").getAttribute("data-clicked")).toBe("yes");
+      } finally {
+        if (sessionId) await finishProvisionSession(sessionId).catch(() => {});
+        await page.context().close();
+      }
+    },
+    120000,
+  );
+
+  it(
+    "carries the invalid state of a label-proxied checkbox from the semantic node (C7)",
+    async () => {
+      const page = await newPage(PROXY_INVALID);
+      let sessionId: string | undefined;
+      try {
+        const start = await startHarnessProvisionSession({
+          browser: BrowserController.fromHarnessPage(page),
+          serviceUrl: "https://fixture.test/terms",
+          format: "compact",
+        });
+        sessionId = start.session_id;
+
+        const rows = (start as unknown as { safe_table: string[][] }).safe_table;
+        const rowFor = (needle: string): string[] | undefined =>
+          rows.find((row) => (row[2] ?? "").toLowerCase().includes(needle));
+
+        // The invisible checkbox is emitted through its visible label proxy;
+        // aria-invalid lives on the input (the semantic node), not on the
+        // visible label the row is built from. The state must still surface.
+        const terms = rowFor("terms-of-service");
+        expect(terms, "compact row for the proxied terms checkbox").toBeDefined();
+        expect(terms![2] ?? "").toMatch(/s=[cudr]*i(?![a-z])/);
+
+        // A proxied checkbox without aria-invalid carries no i bit.
+        const fine = rowFor("fine-print");
+        expect(fine, "compact row for the non-invalid proxied checkbox").toBeDefined();
+        expect(fine![2] ?? "").not.toMatch(/s=[cudr]*i(?![a-z])/);
+
+        // The proxy row is a real action target on the underlying input.
+        const clicked = await operateClickTool.handler(
+          { session_id: sessionId, ref: terms![0]! },
+          null,
+        );
+        expect(JSON.stringify(clicked)).toBeDefined();
+        expect(await page.locator("#terms").isChecked()).toBe(true);
       } finally {
         if (sessionId) await finishProvisionSession(sessionId).catch(() => {});
         await page.context().close();
