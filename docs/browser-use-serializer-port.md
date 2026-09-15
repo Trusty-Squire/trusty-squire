@@ -54,6 +54,14 @@ roles are emitted literally (for example `slider` or `generic` for a listener
 container), never defaulted to `button`; role queries accept these literal roles.
 Visible verification instructions and structurally identified validation errors
 appear in `semantic.blockers`, with `semantic.blocked: true` independent of `stage`.
+Gateway/CDN block pages (CloudFront 403-style signatures in the title or
+headings) surface as an `error_page` blocker rather than a normal page. Dialog
+blockers additionally carry a bounded `options` list of the modal's own rendered
+controls and a bounded `detail` of its own prose, so "keep entered address"
+paths are never invisible; `ref` names an exit only when a control's whole label
+is one. The `SafeBlockerV2` JSDoc in `apps/mcp/src/bot/compact-observation-v2.ts`
+owns the exit vocabulary, the option cap and its priority order, and when
+`detail` is omitted.
 A solved Turnstile widget no longer blocks when its associated hidden response
 input (`cf-turnstile-response` / `cf-chl-widget-*_response`) carries a non-empty
 token or capture confirms its iframe is no longer rendered. Viewport exclusion

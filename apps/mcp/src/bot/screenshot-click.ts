@@ -260,6 +260,21 @@ export interface ScreenshotClickTarget {
 // CDP can resolve a closed-shadow node without manufacturing a CSS selector.
 // Reading the hit node's nearest control supplies the SAME existing action/payment
 // predicates used by DOM targeting; only the dispatch itself uses image coordinates.
+// Hit-test readiness race (established empirically, headed Chrome): a page
+// target created via context.newPage() can answer DOM.getNodeForLocation with
+// "No node found at given location" for its first seconds, then resolves with
+// TIME alone — independent of input events, focus, tab activation, and later
+// navigations (initial launch-time pages and self-launch/CDP-attached contexts
+// are ready immediately, which is why headless tests and simple harnesses never
+// saw it). Deterministic repro: Playwright launchPersistentContext + newPage +
+// immediate probe -> FAIL; same probe after ~2s -> OK. So a miss here is
+// retried on a short bounded schedule before giving up; nothing is dispatched
+// and the binding is not consumed either way (clickScreenshot re-arms).
+const HIT_TARGET_PROBE_DELAYS_MS = [0, 700, 1400];
+// The only rejection the readiness race produces. Every other protocol failure
+// (navigation, target close) is a different diagnosis and is not retried away.
+const HIT_TARGET_MISS_MESSAGE = "No node found at given location";
+
 async function hitTarget(
   page: Page,
   cdp: CDPSession,
@@ -267,11 +282,27 @@ async function hitTarget(
   y: number,
   frameOriginOf: FrameOrigin,
 ): Promise<ScreenshotClickTarget> {
-  const hit = await cdp.send("DOM.getNodeForLocation", {
-    x: Math.round(x),
-    y: Math.round(y),
-    includeUserAgentShadowDOM: true,
-  });
+  // A miss here resolved NO node: typed so clickScreenshot can keep the binding
+  // alive instead of burning the image's one attempt on a hit-test failure.
+  // Structural subset of the DOM.getNodeForLocation response actually consumed.
+  let hit: { backendNodeId: number; frameId: string } | undefined;
+  for (const delay of HIT_TARGET_PROBE_DELAYS_MS) {
+    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+    hit = await cdp
+      .send("DOM.getNodeForLocation", {
+        x: Math.round(x),
+        y: Math.round(y),
+        includeUserAgentShadowDOM: true,
+      })
+      .catch((error: unknown) => {
+        if (error instanceof Error && error.message.includes(HIT_TARGET_MISS_MESSAGE))
+          return undefined;
+        throw error;
+      });
+    if (hit !== undefined) break;
+  }
+  if (hit === undefined)
+    throw new ScreenshotClickError("invalid_screenshot_point", "not_dispatched");
   let nodeSession = cdp;
   let owned: CDPSession | undefined;
   try {
@@ -355,6 +386,12 @@ export async function clickScreenshot(
   // Consume synchronously before any await: concurrent callers, dispatch failures,
   // and lost responses cannot replay this image's click.
   bindings.delete(page);
+  // Re-arming a binding that did not dispatch is a compare-and-set, never a
+  // write: a capture that lands during the retry window owns the page now, and
+  // this superseded image must not come back over it.
+  const rearmIfUnclaimed = (): void => {
+    if (!bindings.has(page)) bindings.set(page, binding);
+  };
   const { width, height } = binding.public;
   if (
     ![point.x, point.y].every(Number.isFinite) ||
@@ -362,8 +399,12 @@ export async function clickScreenshot(
     point.y < 0 ||
     point.x >= width ||
     point.y >= height
-  )
+  ) {
+    // The image is untouched and valid: a point outside it resolved no node and
+    // must not burn the binding. Re-arm so a corrected point can reuse it.
+    rearmIfUnclaimed();
     throw new ScreenshotClickError("invalid_screenshot_point", "not_dispatched");
+  }
   const cdp = await page.context().newCDPSession(page);
   let attempted = false;
   try {
@@ -402,6 +443,14 @@ export async function clickScreenshot(
     return "dispatched";
   } catch (error) {
     if (attempted) throw new ScreenshotClickError("screenshot_click_uncertain", "unknown");
+    // A failure that resolved no node (point outside the current viewport, or
+    // the hit test itself found nothing — hit-test readiness race on newly
+    // created targets) did not dispatch and did not consume the image. Re-arm
+    // so a corrected point can retry the same binding. Genuine staleness (state,
+    // occlusion, frame mismatch) keeps the binding consumed: the screenshot no
+    // longer describes the page.
+    if (error instanceof ScreenshotClickError && error.code === "invalid_screenshot_point")
+      rearmIfUnclaimed();
     throw error;
   } finally {
     await cdp.detach().catch(() => undefined);

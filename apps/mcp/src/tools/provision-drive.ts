@@ -163,7 +163,9 @@ const CONTROL_QUERY_CONTRACT =
   "v=offscreen when outside the viewport, a=action, f=field, q=choice-position/total, and x=s same-origin or x=x cross-origin frame; absent x means main frame. " +
   "nf=1 marks a listener container that carries a field name but is not itself fillable — its fillable field is emitted separately; fill that one. " +
   "Query matches include m=n (exact name), m=r (exact role), m=t (local text), or m=c (explicit form/fieldset/dialog context), ranked in that order. " +
-  "semantic.blocked=true and semantic.blockers report visible verification instructions or validation errors independently of stage; stage=browse does not mean unblocked. " +
+  "semantic.blocked=true and semantic.blockers report what blocks the task independently of stage; stage=browse does not mean unblocked. " +
+  "Blocker kind is challenge (verification instructions), validation (a structurally identified field error), dialog (an open modal), or error_page (a CDN/gateway block wall named from the title/headings, so a blocked body is not read as a normal page). " +
+  "A dialog blocker also carries options — a bounded list of its rendered controls in DOM order, including the close path that keeps what was entered whenever the dialog renders one; when more controls exist than fit, that dismiss path and the controls that resolve the dialog are kept ahead of anchors, so query the control map for the rest. ref names the dialog's exit, matched on a control's whole label, or is absent with target=unavailable when the dialog renders none — act on an option rather than assuming one dismisses it. A bounded detail carries the dialog's own prose. " +
   "Cursors page an immutable snapshot and require the same query and role; document changes invalidate them. A cursorless query captures fresh controls and semantics. " +
   "Use overflow.next_cursor to page safe_table. A cursor from hint_overflow returns `hint` and pages with hint_overflow.next_cursor. ";
 
@@ -1146,7 +1148,7 @@ export const operateClickTool: Tool<z.infer<typeof clickSchema>> = {
   name: "operate_click",
   description:
     ACTION_FORMAT_NOTE +
-    "Prefer a current observation ref or unique @label. If a screenshot-visible control has no usable ref, pass screenshot:{screenshot_id,x,y} from operate_screenshot.click_binding, in original image pixels. Provide exactly one of ref or screenshot. target_unresolved means the label was never issued in this document; stale_ref means its reference or alias expired. stale_screenshot requires a new image. Each image binding permits one attempt; after an uncertain click, observe before deciding any new action. Dispatch does not guarantee challenge clearance. Use inject_card for saved-card field entry. A pointer-interception failure may use guarded DOM dispatch internally only when the executor proves no click was dispatched.",
+    "Prefer a current observation ref or unique @label. If a screenshot-visible control has no usable ref, pass screenshot:{screenshot_id,x,y} from operate_screenshot.click_binding, in original image pixels. Provide exactly one of ref or screenshot. target_unresolved means the label was never issued in this document; stale_ref means its reference or alias expired. stale_screenshot requires a new image. Each image binding permits one DISPATCHED attempt; invalid_screenshot_point (a point outside the image or one that resolves no node) does not consume the binding, so a corrected point may retry the same image. After an uncertain click, observe before deciding any new action. Dispatch does not guarantee challenge clearance. Use inject_card for saved-card field entry. A pointer-interception failure may use guarded DOM dispatch internally only when the executor proves no click was dispatched.",
   inputSchema: clickSchema,
   jsonInputSchema: {
     type: "object",

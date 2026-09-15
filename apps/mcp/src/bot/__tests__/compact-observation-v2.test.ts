@@ -81,6 +81,110 @@ function element(overrides: Partial<InteractiveElement> = {}): InteractiveElemen
   };
 }
 
+describe("CDN/gateway error pages are named, not mistaken for a normal page", () => {
+  it("reports a CloudFront 403 block from its title", () => {
+    expect(
+      safePageSemanticsV2({
+        title: "ERROR: The request could not be satisfied",
+        headings: ["403 ERROR"],
+      }),
+    ).toEqual({
+      // The emitted title keeps the 40-char row budget; the signature matched
+      // against the untruncated title, so the blocker names the full sentence.
+      title: "ERROR: The request could not be satisfi…",
+      headings: ["403 ERROR"],
+      blocked: true,
+      blockers: [{ kind: "error_page", text: "ERROR: The request could not be satisfied" }],
+    });
+  });
+
+  it("does not name a bare status refusal as a CDN wall", () => {
+    // "403 Forbidden" is the canonical ORIGIN refusal (Apache, nginx, a
+    // framework permission page), whose remedy is a different identity or a
+    // re-submitted form — not the abandoned step error_page implies.
+    for (const source of [
+      { title: "403 Forbidden", headings: [] },
+      { title: "HTTP response status codes", headings: ["403 Forbidden"] },
+    ]) {
+      expect(safePageSemanticsV2(source).blocked).toBeUndefined();
+    }
+  });
+
+  it("names the wall from the h1 when the title carries no signature", () => {
+    expect(safePageSemanticsV2({ title: "example.com", headings: ["403 ERROR"] }).blockers).toEqual(
+      [{ kind: "error_page", text: "403 ERROR" }],
+    );
+  });
+
+  it("leaves a passable Cloudflare challenge interstitial as a challenge, not a wall", () => {
+    // "Attention Required! | Cloudflare" is the managed-challenge page the
+    // operator is built to clear; relabelling it error_page would tell the host
+    // agent it hit a wall on a page it can pass.
+    const semantics = safePageSemanticsV2({
+      title: "Attention Required! | Cloudflare",
+      headings: ["Verify you are human"],
+    });
+    expect(semantics.blocked).toBeUndefined();
+    expect(semantics.blockers).toBeUndefined();
+  });
+
+  it("does not treat content-missing pages as blocks", () => {
+    for (const title of ["404 Not Found", "410 Gone"]) {
+      expect(safePageSemanticsV2({ title, headings: [] }).blocked).toBeUndefined();
+    }
+  });
+
+  it("does not treat transient origin failures as walls", () => {
+    // A 5xx/429 is retry-and-continue; calling it a wall invites the host agent
+    // to abandon a recoverable step.
+    for (const title of [
+      "429 Too Many Requests",
+      "500 Internal Server Error",
+      "502 Bad Gateway",
+      "503 Service Unavailable",
+      "504 Gateway Time-out",
+    ]) {
+      expect(safePageSemanticsV2({ title, headings: [] }).blocked).toBeUndefined();
+    }
+  });
+
+  it("does not name an app-authorization page as a CDN wall", () => {
+    // Jenkins and several admin consoles title their permission page exactly
+    // "Access Denied". The remedy is a different identity, not a bot wall, and
+    // calling it error_page invites abandoning a recoverable step.
+    for (const title of ["Access Denied", "Request blocked"]) {
+      expect(safePageSemanticsV2({ title, headings: [] }).blocked).toBeUndefined();
+    }
+  });
+
+  it("reports vendor block-wall vocabulary from the title or the heading", () => {
+    expect(
+      safePageSemanticsV2({ title: "Example Domain", headings: ["Sorry, you have been blocked"] })
+        .blockers,
+    ).toEqual([{ kind: "error_page", text: "Sorry, you have been blocked" }]);
+  });
+
+  it("does not flag ordinary content that merely discusses HTTP errors", () => {
+    for (const source of [
+      { title: "403 Forbidden - HTTP | MDN", headings: ["403 Forbidden"] },
+      { title: "Handling request blocked events", headings: ["Overview"] },
+      { title: "CloudFront distributions", headings: ["Distribution settings"] },
+      { title: "Fixing Error - 403 on your bucket", headings: ["Troubleshooting"] },
+      { title: "Attention required: verify your identity", headings: ["Verify your identity"] },
+    ]) {
+      const semantics = safePageSemanticsV2(source);
+      expect(semantics.blocked).toBeUndefined();
+      expect(semantics.blockers).toBeUndefined();
+    }
+  });
+
+  it("ignores ordinary titles and headings", () => {
+    expect(
+      safePageSemanticsV2({ title: "Your Cart", headings: ["Review your order"] }).blocked,
+    ).toBeUndefined();
+  });
+});
+
 describe("compact observation v2", () => {
   it("advertises only Shopify's required address-line1 as the delivery-address field", () => {
     const address = element({
@@ -337,6 +441,59 @@ describe("compact observation v2", () => {
 
     expect(page.payload.hint).toBeUndefined();
     expect(page.payload.semantic).toEqual({ blocked: true, blockers });
+    expect(Buffer.byteLength(JSON.stringify(page.payload), "utf8")).toBeLessThanOrEqual(
+      OBSERVE_V2_MAX_WIRE_BYTES,
+    );
+  });
+
+  it("sheds dialog detail and options before it would drop the blocked signal", () => {
+    // Two multi-byte dialog blockers overrun the byte budget the char caps do
+    // not track. Deleting `semantic` to fit emitted a blocked page as an
+    // UNBLOCKED one, which is the inverse of what the blocker exists to say.
+    const japanese = (count: number) => "住所を確認してください".repeat(count).slice(0, count);
+    const blockers = Array.from({ length: 3 }, (_, blocker) => ({
+      kind: "dialog" as const,
+      text: japanese(160),
+      ref: `@e:close-${blocker}`,
+      options: Array.from({ length: 6 }, (_, index) => ({
+        ref: `@e:opt-${blocker}-${index}`,
+        label: japanese(48),
+      })),
+      detail: japanese(400),
+    }));
+    // Shedding detail alone is not enough at this size, so options go too.
+    expect(
+      Buffer.byteLength(
+        JSON.stringify(blockers.map(({ detail: _detail, ...rest }) => rest)),
+        "utf8",
+      ),
+    ).toBeGreaterThan(OBSERVE_V2_MAX_WIRE_BYTES);
+    expect(Buffer.byteLength(JSON.stringify({ blockers }), "utf8")).toBeGreaterThan(
+      OBSERVE_V2_MAX_WIRE_BYTES,
+    );
+
+    const page = encodeV2QueryPage({
+      sessionId: "session",
+      stage: "checkout",
+      rows: [],
+      cursorFor: (offset) => `cursor-${offset}`,
+      semantics: { title: japanese(40), headings: [japanese(40)], blockers },
+    });
+
+    const semantic = page.payload.semantic as {
+      blocked?: true;
+      blockers?: Array<{ kind: string; detail?: string; options?: unknown }>;
+    };
+    expect(semantic?.blocked).toBe(true);
+    expect(semantic.blockers?.map((blocker) => blocker.kind)).toEqual([
+      "dialog",
+      "dialog",
+      "dialog",
+    ]);
+    for (const blocker of semantic.blockers ?? []) {
+      expect(blocker.detail).toBeUndefined();
+      expect(blocker.options).toBeUndefined();
+    }
     expect(Buffer.byteLength(JSON.stringify(page.payload), "utf8")).toBeLessThanOrEqual(
       OBSERVE_V2_MAX_WIRE_BYTES,
     );
@@ -1924,7 +2081,15 @@ describe("safeBlockersV2 modal dialog", () => {
     ]);
     expect(
       safeBlockersV2(root, (candidate) => (candidate === close ? "@e:dialog-close" : undefined)),
-    ).toEqual([{ kind: "dialog", text: "Confirm it's you", ref: "@e:dialog-close" }]);
+    ).toEqual([
+      {
+        kind: "dialog",
+        text: "Confirm it's you",
+        ref: "@e:dialog-close",
+        options: [{ ref: "@e:dialog-close", label: "Close" }],
+        detail: "Sign in as customer@example.com to securely use your saved information",
+      },
+    ]);
   });
 
   it("marks alertdialog without a close control as blocked and unavailable", () => {
@@ -1936,11 +2101,16 @@ describe("safeBlockersV2 modal dialog", () => {
       }),
     ]);
     expect(safeBlockersV2(root)).toEqual([
-      { kind: "dialog", text: "Confirm it's you", target: "unavailable" },
+      {
+        kind: "dialog",
+        text: "Confirm it's you",
+        target: "unavailable",
+        detail: "Sign in to continue",
+      },
     ]);
   });
 
-  it("falls back to the dialog heading for the name and any dialog control for the ref", () => {
+  it("falls back to the dialog heading for the name and a dismiss control for the ref", () => {
     const dialog = node("dialog", {
       attributes: { "aria-modal": "true" },
       children: [
@@ -1959,7 +2129,530 @@ describe("safeBlockersV2 modal dialog", () => {
     const dismiss = dialog.children[1];
     expect(
       safeBlockersV2(root, (candidate) => (candidate === dismiss ? "@e:dismiss" : undefined)),
-    ).toEqual([{ kind: "dialog", text: "Confirm it's you", ref: "@e:dismiss" }]);
+    ).toEqual([
+      {
+        kind: "dialog",
+        text: "Confirm it's you",
+        ref: "@e:dismiss",
+        options: [{ ref: "@e:dismiss", label: "No thanks" }],
+      },
+    ]);
+  });
+
+  it("surfaces EVERY dialog control including the close path, with the body delta", () => {
+    // Oura's address-verification shape: Confirm (which silently accepts the
+    // suggestion) plus a close X that keeps what was entered. The compact
+    // blocker must show both options in DOM order and the entered-vs-suggested
+    // text, so keeping the entry is discoverable and never reads as a cancel.
+    const dialog = node("dialog", {
+      attributes: { role: "dialog", "aria-modal": "true", "aria-label": "Verify your address" },
+      children: [
+        text(
+          "dialog-body",
+          "You entered: 12 Rue de la Paix, room 101, Paris. Suggested address: 12 Rue de la Paix, Paris.",
+        ),
+        node("dialog-confirm", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("confirm-text", "Confirm address")],
+        }),
+        node("dialog-x", {
+          nodeName: "BUTTON",
+          attributes: { "aria-label": "Close" },
+          axRole: "button",
+        }),
+      ],
+    });
+    const root = page([dialog]);
+    const confirm = dialog.children[1];
+    const close = dialog.children[2];
+    expect(
+      safeBlockersV2(root, (candidate) =>
+        candidate === confirm ? "@e:confirm" : candidate === close ? "@e:close" : undefined,
+      ),
+    ).toEqual([
+      {
+        kind: "dialog",
+        text: "Verify your address",
+        ref: "@e:close",
+        options: [
+          { ref: "@e:confirm", label: "Confirm address" },
+          { ref: "@e:close", label: "Close" },
+        ],
+        detail:
+          "You entered: 12 Rue de la Paix, room 101, Paris. Suggested address: 12 Rue de la Paix, Paris.",
+      },
+    ]);
+  });
+
+  it("keeps the entered-vs-suggested comparison intact past the blocker text budget", () => {
+    // A real address comparison runs past BLOCKER_TEXT_MAX_CHARS; cutting it
+    // there drops the "suggested" half, which is the whole point of detail.
+    const dialog = node("dialog", {
+      attributes: { role: "dialog", "aria-modal": "true", "aria-label": "Verify your address" },
+      children: [
+        text(
+          "dialog-body",
+          "You entered: 1234 Northwest Example Boulevard, Apartment 5B, Portland, Oregon 97209, United States. Suggested address: 1234 NW Example Blvd Apt 5B, Portland, OR 97209-1234, United States.",
+        ),
+        node("dialog-confirm", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("confirm-text", "Use suggested address")],
+        }),
+        node("dialog-keep", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("keep-text", "Keep what I entered")],
+        }),
+      ],
+    });
+    const blocker = safeBlockersV2(page([dialog]), (candidate) =>
+      candidate === dialog.children[1]
+        ? "@e:suggested"
+        : candidate === dialog.children[2]
+          ? "@e:keep"
+          : undefined,
+    )[0];
+    expect(blocker?.detail).toBe(
+      "You entered: 1234 Northwest Example Boulevard, Apartment 5B, Portland, Oregon 97209, United States. Suggested address: 1234 NW Example Blvd Apt 5B, Portland, OR 97209-1234, United States.",
+    );
+    // The exit is the button that preserves the entry, never the one that
+    // accepts the correction: clearing the blocker through ref must not silently
+    // discard what was entered.
+    expect(blocker?.ref).toBe("@e:keep");
+    expect(blocker?.target).toBeUndefined();
+    expect(blocker?.options).toEqual([
+      { ref: "@e:suggested", label: "Use suggested address" },
+      { ref: "@e:keep", label: "Keep what I entered" },
+    ]);
+  });
+
+  it("labels input-shaped dialog controls from their value attribute", () => {
+    // A push-button input renders `value` as its label and has no child text, so
+    // reading only aria-label/title left these controls unlabelled and the
+    // rendered Close unrecognised as the exit.
+    const dialog = node("dialog", {
+      attributes: { role: "dialog", "aria-modal": "true", "aria-label": "Verify your address" },
+      children: [
+        node("confirm-input", {
+          nodeName: "INPUT",
+          attributes: { type: "submit", value: "Confirm address" },
+        }),
+        node("close-input", {
+          nodeName: "INPUT",
+          attributes: { type: "button", value: "Close" },
+        }),
+      ],
+    });
+    const refs = new Map(dialog.children.map((child, index) => [child, `@e:i${index}`]));
+    const blocker = safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate))[0];
+    expect(blocker?.options).toEqual([
+      { ref: "@e:i0", label: "Confirm address" },
+      { ref: "@e:i1", label: "Close" },
+    ]);
+    expect(blocker?.ref).toBe("@e:i1");
+  });
+
+  it("refuses an accept button phrased around what was entered", () => {
+    // "…instead of the one you entered" ACCEPTS the correction. Matching it as a
+    // keep-style exit would outrank the real close and advertise the accept
+    // button as the path that preserves the entry.
+    const dialog = node("dialog", {
+      attributes: { role: "dialog", "aria-modal": "true", "aria-label": "Verify your address" },
+      children: [
+        node("dialog-accept", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [
+            text("accept-text", "Use the suggested address instead of the one you entered"),
+          ],
+        }),
+        node("dialog-close", {
+          nodeName: "BUTTON",
+          attributes: { "aria-label": "Close" },
+          axRole: "button",
+        }),
+      ],
+    });
+    const refs = new Map(dialog.children.map((child, index) => [child, `@e:a${index}`]));
+    const blocker = safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate))[0];
+    expect(blocker?.ref).toBe("@e:a1");
+  });
+
+  it("leaves a nested modal's controls and prose to that modal's own blocker", () => {
+    // IAB/TCF consent managers render the vendor panel as a nested role=dialog.
+    // Absorbing it made the outer blocker advertise vendor buttons as its own
+    // choices and resolve `ref` to the inner Close, which leaves the wall up.
+    const vendorPanel = node("vendor-panel", {
+      attributes: { role: "dialog", "aria-label": "Vendor list" },
+      children: [
+        node("vendor-body", {
+          nodeName: "P",
+          children: [text("vendor-body-text", "Select vendors.")],
+        }),
+        node("vendor-a", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("vendor-a-text", "Vendor A")],
+        }),
+        node("vendor-close", {
+          nodeName: "BUTTON",
+          attributes: { "aria-label": "Close" },
+          axRole: "button",
+        }),
+      ],
+    });
+    const dialog = node("dialog", {
+      attributes: { role: "dialog", "aria-modal": "true", "aria-label": "We value your privacy" },
+      children: [
+        node("outer-body", {
+          nodeName: "P",
+          children: [text("outer-body-text", "We and 412 partners store data.")],
+        }),
+        node("accept-all", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("accept-all-text", "Accept all")],
+        }),
+        vendorPanel,
+      ],
+    });
+    const refs = new Map<BrowserUseNode, string>([
+      [dialog.children[1]!, "@e:accept"],
+      [vendorPanel.children[1]!, "@e:vendor-a"],
+      [vendorPanel.children[2]!, "@e:vendor-close"],
+    ]);
+    const blockers = safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate));
+    expect(blockers[0]).toEqual({
+      kind: "dialog",
+      text: "We value your privacy",
+      target: "unavailable",
+      options: [{ ref: "@e:accept", label: "Accept all" }],
+      detail: "We and 412 partners store data.",
+    });
+    expect(blockers[1]).toEqual({
+      kind: "dialog",
+      text: "Vendor list",
+      ref: "@e:vendor-close",
+      options: [
+        { ref: "@e:vendor-a", label: "Vendor A" },
+        { ref: "@e:vendor-close", label: "Close" },
+      ],
+      detail: "Select vendors.",
+    });
+  });
+
+  it("refuses a destructive confirm that merely contains an exit word", () => {
+    // "Cancel subscription" contains "cancel" but performs the irreversible
+    // action. Advertising it as the way out would have an agent clear the
+    // blocker by cancelling the subscription.
+    const dialog = node("dialog", {
+      attributes: {
+        role: "dialog",
+        "aria-modal": "true",
+        "aria-label": "Cancel your subscription?",
+      },
+      children: [
+        text("dialog-body", "This cannot be undone."),
+        node("dialog-confirm", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("confirm-text", "Cancel subscription")],
+        }),
+        node("dialog-keep", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("keep-text", "Keep my subscription")],
+        }),
+      ],
+    });
+    const refs = new Map(dialog.children.slice(1).map((child, index) => [child, `@e:s${index}`]));
+    const blocker = safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate))[0];
+    expect(blocker?.ref).toBeUndefined();
+    expect(blocker?.target).toBe("unavailable");
+    expect(blocker?.options).toEqual([
+      { ref: "@e:s0", label: "Cancel subscription" },
+      { ref: "@e:s1", label: "Keep my subscription" },
+    ]);
+    expect(blocker?.detail).toBe("This cannot be undone.");
+  });
+
+  it("still names a plain close control as the exit", () => {
+    for (const label of ["Close", "Cancel", "No thanks", "Close dialog", "\u2715"]) {
+      const dialog = node("dialog", {
+        attributes: { role: "dialog", "aria-modal": "true", "aria-label": "Offer" },
+        children: [
+          node("dialog-close", {
+            nodeName: "BUTTON",
+            axRole: "button",
+            children: [text("close-text", label)],
+          }),
+        ],
+      });
+      const blocker = safeBlockersV2(page([dialog]), (candidate) =>
+        candidate === dialog.children[0] ? "@e:close" : undefined,
+      )[0];
+      expect(blocker?.ref).toBe("@e:close");
+    }
+  });
+
+  it("omits detail that only repeats a nameless dialog's own text", () => {
+    // With no aria-label and no heading, `text` is already the subtree prose, so
+    // detail would spend the compact page's bytes restating it.
+    const dialog = node("dialog", {
+      attributes: { role: "alertdialog" },
+      children: [
+        node("dialog-body", {
+          nodeName: "P",
+          children: [text("body-text", "Discard your changes?")],
+        }),
+        node("dialog-cancel", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("cancel-text", "Cancel")],
+        }),
+        node("dialog-discard", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("discard-text", "Discard")],
+        }),
+      ],
+    });
+    const refs = new Map(dialog.children.slice(1).map((child, index) => [child, `@e:d${index}`]));
+    const blocker = safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate))[0];
+    expect(blocker?.text).toBe("Discard your changes? Cancel Discard");
+    expect(blocker?.detail).toBeUndefined();
+  });
+
+  it("omits the repeated detail when prose and controls interleave", () => {
+    // The prose is no longer one contiguous run inside `text`, but `text` is
+    // still the whole subtree, so detail can only restate it.
+    const dialog = node("dialog", {
+      attributes: { role: "alertdialog" },
+      children: [
+        node("dialog-lead", { nodeName: "P", children: [text("lead-text", "Are you sure?")] }),
+        node("dialog-cancel", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("cancel-text", "Cancel")],
+        }),
+        node("dialog-tail", {
+          nodeName: "P",
+          children: [text("tail-text", "This cannot be undone.")],
+        }),
+      ],
+    });
+    const blocker = safeBlockersV2(page([dialog]), (candidate) =>
+      candidate === dialog.children[1] ? "@e:cancel" : undefined,
+    )[0];
+    expect(blocker?.text).toBe("Are you sure? Cancel This cannot be undone.");
+    expect(blocker?.detail).toBeUndefined();
+  });
+
+  it("omits the repeated detail whichever side of the prose the buttons render", () => {
+    const dialog = node("dialog", {
+      attributes: { role: "alertdialog" },
+      children: [
+        node("dialog-cancel", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("cancel-text", "Cancel")],
+        }),
+        node("dialog-body", {
+          nodeName: "P",
+          children: [text("body-text", "Discard your changes?")],
+        }),
+      ],
+    });
+    const blocker = safeBlockersV2(page([dialog]), (candidate) =>
+      candidate === dialog.children[0] ? "@e:cancel" : undefined,
+    )[0];
+    expect(blocker?.text).toBe("Cancel Discard your changes?");
+    expect(blocker?.detail).toBeUndefined();
+  });
+
+  it("surfaces radio-based address pickers and anchor escape paths as options", () => {
+    // The USPS/Shopify shape: the choice is a radio pair and the way out is a
+    // link, so a button-only option set reported a strict subset.
+    const dialog = node("dialog", {
+      attributes: { role: "dialog", "aria-modal": "true", "aria-label": "Verify your address" },
+      children: [
+        node("pick-suggested", {
+          nodeName: "INPUT",
+          attributes: { type: "radio" },
+          axRole: "radio",
+          children: [text("pick-suggested-text", "Use suggested address")],
+        }),
+        node("pick-entered", {
+          nodeName: "INPUT",
+          attributes: { type: "radio" },
+          axRole: "radio",
+          children: [text("pick-entered-text", "Use the address you entered")],
+        }),
+        node("edit-link", {
+          nodeName: "A",
+          axRole: "link",
+          children: [text("edit-link-text", "Edit address")],
+        }),
+      ],
+    });
+    const refs = new Map([
+      [dialog.children[0], "@e:suggested"],
+      [dialog.children[1], "@e:entered"],
+      [dialog.children[2], "@e:edit"],
+    ]);
+    const blocker = safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate))[0];
+    expect(blocker?.options).toEqual([
+      { ref: "@e:suggested", label: "Use suggested address" },
+      { ref: "@e:entered", label: "Use the address you entered" },
+      { ref: "@e:edit", label: "Edit address" },
+    ]);
+    // A radio ACCEPTS a choice and an anchor navigates away; neither dismisses
+    // the dialog, so naming one as ref would advertise accept-the-suggestion as
+    // the escape path. With no button-shaped control the answer stays honest.
+    expect(blocker?.ref).toBeUndefined();
+    expect(blocker?.target).toBe("unavailable");
+  });
+
+  it("marks a body past the budget as cut rather than reading as complete", () => {
+    const blurb = "This address could not be verified exactly. ".repeat(12);
+    const dialog = node("dialog", {
+      attributes: { role: "dialog", "aria-modal": "true", "aria-label": "Verify your address" },
+      children: [text("dialog-body", `${blurb}Suggested address: 1 Example Way, Portland, OR.`)],
+    });
+    const detail = safeBlockersV2(page([dialog]))[0]?.detail;
+    expect(detail).toHaveLength(400);
+    expect(detail?.endsWith("…")).toBe(true);
+  });
+
+  it("spends the detail budget on the body, not on the name and option labels", () => {
+    // Re-emitting the heading and every control label used to tip a realistic
+    // address dialog past the budget, and the body — the entered-vs-suggested
+    // comparison C4 exists to surface — was what got dropped.
+    const body =
+      "You entered: 1200 Northwest Example Boulevard, Apartment 5B, Portland, Oregon 97209, United States. " +
+      "Suggested address: 1200 NW Example Blvd Apt 5B, Portland, OR 97209-1234, United States. " +
+      "Delivery estimates and taxes are calculated from the address you confirm here, and changing it later may alter both. " +
+      "Choose which address to keep before continuing.";
+    const dialog = node("dialog", {
+      attributes: { role: "dialog", "aria-modal": "true" },
+      children: [
+        node("dialog-heading", {
+          nodeName: "H2",
+          children: [text("dialog-heading-text", "Verify your address")],
+        }),
+        text("dialog-body", body),
+        node("btn-suggested", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("btn-suggested-text", "Use the suggested address")],
+        }),
+        node("btn-entered", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("btn-entered-text", "Keep the address I entered")],
+        }),
+        node("btn-edit", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("btn-edit-text", "Edit the address I entered")],
+        }),
+        node("btn-close", {
+          nodeName: "BUTTON",
+          attributes: { "aria-label": "Close" },
+          axRole: "button",
+        }),
+      ],
+    });
+    const refs = new Map(dialog.children.slice(2).map((child, index) => [child, `@e:b${index}`]));
+    const blocker = safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate))[0];
+    expect(blocker?.text).toBe("Verify your address");
+    expect(blocker?.detail).toBe(body);
+  });
+
+  it("keeps the controls that resolve a consent modal ahead of its policy links", () => {
+    // The anchors render first, so a plain DOM-order cut reported five policy
+    // links and dropped Accept all / Reject all — the only controls that
+    // actually resolve the modal — with nothing marking the list as partial.
+    const anchors = [
+      "Privacy Policy",
+      "Cookie Policy",
+      "Vendor list",
+      "Legitimate interest",
+      "Learn more",
+    ];
+    const buttons = ["Accept all", "Reject all", "Close"];
+    const dialog = node("dialog", {
+      attributes: { role: "dialog", "aria-modal": "true", "aria-label": "We value your privacy" },
+      children: [
+        ...anchors.map((label, index) =>
+          node(`anchor-${index}`, {
+            nodeName: "A",
+            axRole: "link",
+            children: [text(`anchor-${index}-text`, label)],
+          }),
+        ),
+        ...buttons.map((label, index) =>
+          node(`button-${index}`, {
+            nodeName: "BUTTON",
+            axRole: "button",
+            children: [text(`button-${index}-text`, label)],
+          }),
+        ),
+      ],
+    });
+    const refs = new Map(dialog.children.map((child, index) => [child, `@e:o${index}`]));
+    const blocker = safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate))[0];
+    expect(blocker?.ref).toBe("@e:o7");
+    // The anchors the cap dropped are still controls, not the dialog's prose.
+    expect(blocker?.detail).toBeUndefined();
+    expect(blocker?.options).toEqual([
+      { ref: "@e:o0", label: "Privacy Policy" },
+      { ref: "@e:o1", label: "Cookie Policy" },
+      { ref: "@e:o2", label: "Vendor list" },
+      { ref: "@e:o5", label: "Accept all" },
+      { ref: "@e:o6", label: "Reject all" },
+      { ref: "@e:o7", label: "Close" },
+    ]);
+  });
+
+  it("keeps the close affordance past the option cap and names it as ref", () => {
+    // A consent modal with more qualifying controls than the option cap. The
+    // close sits last; dropping it would leave ref pointing at Accept all, so a
+    // host agent told the blocker carries the close path grants consent instead.
+    const labels = [
+      "Accept all",
+      "Reject all",
+      "Analytics",
+      "Marketing",
+      "Functional",
+      "Performance",
+      "Save preferences",
+      "Close",
+    ];
+    const dialog = node("dialog", {
+      attributes: { role: "dialog", "aria-modal": "true", "aria-label": "Cookie preferences" },
+      children: labels.map((label, index) =>
+        node(`control-${index}`, {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text(`control-${index}-text`, label)],
+        }),
+      ),
+    });
+    const refs = new Map(dialog.children.map((child, index) => [child, `@e:c${index}`]));
+    const blocker = safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate))[0];
+    expect(blocker?.ref).toBe("@e:c7");
+    expect(blocker?.detail).toBeUndefined();
+    expect(blocker?.options).toEqual([
+      { ref: "@e:c0", label: "Accept all" },
+      { ref: "@e:c1", label: "Reject all" },
+      { ref: "@e:c2", label: "Analytics" },
+      { ref: "@e:c3", label: "Marketing" },
+      { ref: "@e:c4", label: "Functional" },
+      { ref: "@e:c7", label: "Close" },
+    ]);
   });
 
   it("stops reporting the dialog blocker once the dialog is removed", () => {

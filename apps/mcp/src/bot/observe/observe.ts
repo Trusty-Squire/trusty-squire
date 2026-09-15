@@ -19,6 +19,7 @@ import {
   encodeV2QueryPage,
   safeBlockersV2,
   safePageSemanticsV2,
+  BLOCKER_MAX_ITEMS,
   safeStageV2,
   type ObservationEpochV2,
   type ObservationSemanticSourceV2,
@@ -554,13 +555,18 @@ function compactV2Observation(
   const handles = compactV2Handles(session, elements, sourcePage);
   const safe = compactV2LiveControls(session, elements, sourcePage, handles);
   const targetableRefs = new Set(safe.rows.map((row) => row.ref));
-  const blockers = safeBlockersV2(capture.root, (node) => {
+  const semanticBase = safePageSemanticsV2(semanticSource);
+  // Page-level error evidence (e.g. a CDN block page named from title/headings)
+  // leads the list; DOM-derived blockers follow, capped at the shared maximum.
+  const blockers = [
+    ...(semanticBase.blockers ?? []),
+    ...safeBlockersV2(capture.root, (node) => {
     const element = capture.nodeElements.get(node.id);
     const ref = element === undefined ? undefined : handles.get(element);
     return ref !== undefined && targetableRefs.has(ref) ? ref : undefined;
-  });
+  })].slice(0, BLOCKER_MAX_ITEMS);
   const semantics = {
-    ...safePageSemanticsV2(semanticSource),
+    ...semanticBase,
     ...(blockers.length === 0 ? {} : { blockers, blocked: true as const }),
   };
   const rendered = serializeBrowserUseDOM(capture.root, {

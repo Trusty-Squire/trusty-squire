@@ -64,13 +64,54 @@ export function compactV2DegradeMetadata(
     candidate = rest;
     if (compactV2PayloadWithinBudget(candidate)) return candidate;
   }
+  // Last resort. Deleting `semantic` outright emitted a BLOCKED page as an
+  // unblocked one, so the dialog payload is shed first and `blocked: true` plus
+  // the blocker kinds outlive everything the blocker merely elaborates with.
   if ("semantic" in candidate) {
-    const rest = { ...candidate };
-    delete rest.semantic;
-    candidate = rest;
-    if (compactV2PayloadWithinBudget(candidate)) return candidate;
+    const blockers = compactV2BlockersOf(candidate.semantic);
+    if (blockers.length === 0) {
+      const rest = { ...candidate };
+      delete rest.semantic;
+      candidate = rest;
+      if (compactV2PayloadWithinBudget(candidate)) return candidate;
+      return null;
+    }
+    for (const shed of [["detail"], ["detail", "options"]]) {
+      candidate = {
+        ...candidate,
+        semantic: {
+          blocked: true,
+          blockers: blockers.map((blocker) => compactV2WithoutFields(blocker, shed)),
+        },
+      };
+      if (compactV2PayloadWithinBudget(candidate)) return candidate;
+    }
+    const bare = blockers.map((blocker) => compactV2WithoutFields(blocker, ["detail", "options"]));
+    for (let keep = bare.length - 1; keep >= 1; keep--) {
+      candidate = { ...candidate, semantic: { blocked: true, blockers: bare.slice(0, keep) } };
+      if (compactV2PayloadWithinBudget(candidate)) return candidate;
+    }
   }
   return null;
+}
+
+function compactV2BlockersOf(semantic: unknown): Array<Record<string, unknown>> {
+  if (typeof semantic !== "object" || semantic === null) return [];
+  const blockers = (semantic as { blockers?: unknown }).blockers;
+  if (!Array.isArray(blockers)) return [];
+  return blockers.filter(
+    (blocker): blocker is Record<string, unknown> =>
+      typeof blocker === "object" && blocker !== null,
+  );
+}
+
+function compactV2WithoutFields(
+  blocker: Record<string, unknown>,
+  fields: readonly string[],
+): Record<string, unknown> {
+  const rest = { ...blocker };
+  for (const field of fields) delete rest[field];
+  return rest;
 }
 
 export type SafeRoleV2 =
@@ -166,12 +207,40 @@ export interface SafePageSemanticsV2 {
 }
 
 export interface SafeBlockerV2 {
-  kind: "challenge" | "validation" | "dialog";
+  kind: "challenge" | "validation" | "dialog" | "error_page";
   text: string;
   ref?: string;
   target?: "unavailable";
   focus?: "focused" | "focusable";
   keyboard?: "space" | "tab_space";
+  /**
+   * Up to DIALOG_MAX_OPTIONS of the dialog's rendered controls in DOM order, so
+   * a modal's option set is discoverable in compact mode — not just the one
+   * control `ref` points at. When the cap binds, a rendered dismiss affordance is
+   * kept first, then the controls that resolve the dialog (buttons, checkboxes,
+   * radios, submits), then anchors; a fuller list needs a control query. A nested
+   * modal's controls belong to that modal's own blocker, never to this one.
+   *
+   * `ref` names an exit or nothing. A control qualifies only when its WHOLE
+   * label is a close/cancel form (`Close`, `Cancel`, `No thanks`, `Close
+   * dialog`, a ✕ glyph) or a keep-what-was-entered form (`Keep what I entered`,
+   * `Use the address you entered`); the latter wins when both are present,
+   * because preserving the entry is the safer exit. A label that merely
+   * CONTAINS an exit word is not one — `Cancel subscription` and `Close
+   * account` are the destructive confirm, and `Use the suggested address
+   * instead of the one you entered` accepts the correction. A dialog rendering
+   * no qualifying control reports exactly what it does offer and
+   * `target: "unavailable"`. This is additive evidence, never a gate.
+   */
+  options?: Array<{ ref: string; label?: string }>;
+  /**
+   * The dialog's own prose, so what a suggestion would change relative to what
+   * was entered is visible without leaving compact mode. It excludes the labels
+   * already in `options[].label`, is absent when the dialog had no name of its
+   * own and `text` is therefore that same prose, and carries the usual ellipsis
+   * when the body runs past DIALOG_DETAIL_MAX_CHARS.
+   */
+  detail?: string;
 }
 
 /**
@@ -1060,19 +1129,60 @@ export function sealRetainedInteractiveElementsV2(
 
 export function safePageSemanticsV2(source: ObservationSemanticSourceV2): SafePageSemanticsV2 {
   const title = safeDescriptionV2(source.title);
-  const headings = source.headings
-    .map(safeDescriptionV2)
+  // Signatures match the UNTRUNCATED text: the row budget's 40-char cut lands
+  // mid-sentence on the canonical CloudFront title.
+  const fullHeadings = source.headings
+    .map(normalizeDescriptionV2)
     .filter((value): value is string => value !== undefined)
     .filter((value, index, all) => all.indexOf(value) === index)
     .slice(0, 1);
+  const headings = fullHeadings
+    .map(safeDescriptionV2)
+    .filter((value): value is string => value !== undefined);
+  const errorPage = errorPageBlockerV2(normalizeDescriptionV2(source.title), fullHeadings);
   return {
     ...(title === undefined ? {} : { title }),
     ...(headings.length === 0 ? {} : { headings }),
+    ...(errorPage === undefined ? {} : { blockers: [errorPage], blocked: true as const }),
   };
 }
 
+/**
+ * A CDN/gateway error body used to be indistinguishable from a normal page:
+ * the stage classifier only looks at the URL, so a CloudFront 403 "Request
+ * blocked" on /cart still reported stage "cart". Name the wall from the
+ * code-owned title/heading source. Signatures are deliberately narrow — anchored
+ * CDN block-wall vocabulary only — so ordinary content that merely discusses
+ * HTTP errors, passable challenge interstitials, and transient origin failures
+ * a retry would clear never match.
+ */
+// Vocabulary only a CDN block wall renders, matched against the title or the
+// first heading alike. A bare status title ("403 Forbidden") is the canonical
+// ORIGIN refusal — Apache, nginx, a framework permission page — whose remedy is
+// a different identity or a re-submitted form, not an abandoned step.
+const ERROR_PAGE_SIGNATURES = [
+  /the request could not be satisfied/i,
+  /sorry, you have been blocked/i,
+  /^403 error$/i,
+];
+
+function errorPageBlockerV2(
+  title: string | undefined,
+  headings: readonly string[],
+): SafeBlockerV2 | undefined {
+  const normalized = (value: string | undefined): string | undefined =>
+    value === undefined ? undefined : value.normalize("NFKC").replace(/\s+/g, " ").trim();
+  for (const source of [title, ...headings]) {
+    const value = normalized(source);
+    if (value === undefined) continue;
+    if (ERROR_PAGE_SIGNATURES.some((signature) => signature.test(value)))
+      return { kind: "error_page", text: boundedBlockerTextV2(value) ?? value };
+  }
+  return undefined;
+}
+
 const BLOCKER_TEXT_MAX_CHARS = 160;
-const BLOCKER_MAX_ITEMS = 3;
+export const BLOCKER_MAX_ITEMS = 3;
 const CHALLENGE_SIGNAL_RE =
   /\b(?:captcha|turnstile|verification challenge|security challenge|security verification|verify (?:that )?you are human|human verification|not a robot)\b/i;
 const CHALLENGE_MARKER_RE = /(?:captcha|turnstile|challenges?\.cloudflare\.com|cf[-_]challenge)/i;
@@ -1089,14 +1199,28 @@ function axBooleanV2(node: BrowserUseNode, name: string): boolean {
   return node.axProperties.some((property) => property.name === name && property.value === true);
 }
 
-function boundedBlockerTextV2(value: string | null | undefined): string | undefined {
+function boundedBlockerTextV2(
+  value: string | null | undefined,
+  maxChars: number = BLOCKER_TEXT_MAX_CHARS,
+): string | undefined {
   if (value === null || value === undefined) return undefined;
   const normalized = value.normalize("NFKC").replace(/\s+/g, " ").trim();
   if (normalized.length === 0) return undefined;
   const characters = Array.from(normalized);
-  return characters.length <= BLOCKER_TEXT_MAX_CHARS
+  return characters.length <= maxChars
     ? normalized
-    : `${characters.slice(0, BLOCKER_TEXT_MAX_CHARS - 1).join("")}…`;
+    : `${characters.slice(0, maxChars - 1).join("")}…`;
+}
+
+// A push-button input renders its `value` as its visible label and has no child
+// text to read. Checkbox/radio `value` is a form value, never a label, so it
+// stays out.
+const VALUE_LABELLED_INPUT_TYPES = new Set(["button", "submit", "reset"]);
+
+function inputValueLabelV2(node: BrowserUseNode): string | undefined {
+  if (nodeTagV2(node) !== "input") return undefined;
+  const type = (node.attributes.type ?? "").toLowerCase();
+  return VALUE_LABELLED_INPUT_TYPES.has(type) ? node.attributes.value : undefined;
 }
 
 function blockerTextV2(node: BrowserUseNode): string | undefined {
@@ -1104,6 +1228,7 @@ function blockerTextV2(node: BrowserUseNode): string | undefined {
     node.attributes["aria-label"],
     node.attributes.ax_name,
     node.attributes.title,
+    inputValueLabelV2(node),
     browserUseBoundedContextText(node, BLOCKER_TEXT_MAX_CHARS),
     node.contentDocument === null
       ? null
@@ -1114,53 +1239,172 @@ function blockerTextV2(node: BrowserUseNode): string | undefined {
     .find((candidate) => candidate !== undefined);
 }
 
-const DIALOG_DISMISS_RE = /\b(?:close|dismiss|cancel|no\s+thanks)\b|[✕×]/i;
+// Two bounded exit vocabularies, both whole-label. Substring matching promoted
+// "Cancel subscription" and "Close account" — the destructive confirm — to the
+// blocker's advertised way out, because they merely CONTAIN an exit word.
+const DIALOG_CLOSE_RES = [
+  /^[✕×]$/,
+  /^(?:cancel|no\s+thanks)$/i,
+  /^(?:close|dismiss)(?:\s+(?:this\s+)?(?:dialog|modal|window|popup|overlay|message|notification))?$/i,
+];
+// A suggestion dialog's exit keeps what the user typed, so it is named after the
+// entry rather than after closing. Preferred over a plain close when both exist.
+// Anchored like the close family: "Use the suggested address instead of the one
+// you entered" ACCEPTS the correction and must never win the exit slot.
+const DIALOG_KEEP_RES = [
+  /^(?:keep|use)\s+(?:what|(?:the\s+)?address)\s+(?:i|you)\s+entered$/i,
+  /^use\s+(?:the\s+)?address\s+as\s+entered$/i,
+  /^keep\s+(?:this|my|the)\s+address$/i,
+];
 const DIALOG_HEADING_TAGS = new Set(["h1", "h2", "h3", "h4", "h5", "h6"]);
+const DIALOG_MAX_OPTIONS = 6;
+const DIALOG_DETAIL_MAX_CHARS = 400;
+// Traversal bound only. Collapsing whitespace can shrink the source well below
+// the emitted bound, so reading a wider window is what lets boundedBlockerTextV2
+// own the cut and its ellipsis rather than silently landing one char short.
+const DIALOG_DETAIL_SOURCE_MAX_CHARS = DIALOG_DETAIL_MAX_CHARS * 2;
+// Option entries name controls, not prose; keeping them short leaves the wire
+// budget for the control rows a blocked observation still has to carry.
+const DIALOG_OPTION_LABEL_MAX_CHARS = 48;
 
-function dialogNameV2(dialog: BrowserUseNode): string | undefined {
+function dialogExitKindV2(node: BrowserUseNode): "keep" | "close" | undefined {
+  const label = blockerTextV2(node) ?? "";
+  if (DIALOG_KEEP_RES.some((signature) => signature.test(label))) return "keep";
+  if (DIALOG_CLOSE_RES.some((signature) => signature.test(label))) return "close";
+  return undefined;
+}
+
+/**
+ * The name plus WHERE it came from. A `subtree` name is the dialog's whole
+ * rendered text, so `detail` — that same subtree minus its controls — can only
+ * restate it; `blockerTextV2` returns undefined past its budget, so a defined
+ * subtree name is always the complete text and never a truncated prefix.
+ */
+function dialogNameV2(
+  dialog: BrowserUseNode,
+): { text: string; source: "explicit" | "heading" | "subtree" } | undefined {
   const explicit = [
     dialog.attributes["aria-label"],
     dialog.attributes.ax_name,
     dialog.attributes.title,
   ].find((value) => typeof value === "string" && value.trim() !== "");
-  if (explicit !== undefined) return boundedBlockerTextV2(explicit);
-  let heading: string | undefined;
+  const explicitText = explicit === undefined ? undefined : boundedBlockerTextV2(explicit);
+  if (explicitText !== undefined) return { text: explicitText, source: "explicit" };
+  const heading = dialogHeadingNodeV2(dialog);
+  const headingText = heading === undefined ? undefined : blockerTextV2(heading);
+  if (headingText !== undefined) return { text: headingText, source: "heading" };
+  const subtreeText = blockerTextV2(dialog);
+  return subtreeText === undefined ? undefined : { text: subtreeText, source: "subtree" };
+}
+
+function modalDialogV2(node: BrowserUseNode): boolean {
+  if (node.nodeType !== 1) return false;
+  const role = (node.attributes.role ?? node.axRole ?? "").toLowerCase();
+  return (
+    role === "dialog" ||
+    role === "alertdialog" ||
+    node.attributes["aria-modal"]?.toLowerCase() === "true"
+  );
+}
+
+function dialogHeadingNodeV2(dialog: BrowserUseNode): BrowserUseNode | undefined {
+  let heading: BrowserUseNode | undefined;
   const walk = (node: BrowserUseNode): void => {
     if (heading !== undefined) return;
     for (const child of descendantsV2(node)) {
+      if (modalDialogV2(child)) continue;
       if (
         DIALOG_HEADING_TAGS.has(nodeTagV2(child).toLowerCase()) ||
         (child.attributes.role ?? child.axRole ?? "").toLowerCase() === "heading"
       ) {
-        heading = blockerTextV2(child);
+        heading = child;
         return;
       }
       walk(child);
     }
   };
   walk(dialog);
-  return heading ?? blockerTextV2(dialog);
+  return heading;
 }
 
-function dialogDismissControlV2(
+/**
+ * The dialog's own prose — its subtree minus whatever the blocker already
+ * reports as `text` or `options[].label`. Sourcing it from the whole subtree
+ * re-emitted the name and every control label, which both inflated the compact
+ * page and spent the budget that the entered-vs-suggested body needs.
+ */
+function dialogDetailV2(
+  dialog: BrowserUseNode,
+  excluded: ReadonlySet<BrowserUseNode>,
+  holdingExcluded: ReadonlySet<BrowserUseNode>,
+): string | undefined {
+  const parts: string[] = [];
+  let budget = DIALOG_DETAIL_SOURCE_MAX_CHARS;
+  const walk = (node: BrowserUseNode): void => {
+    if (budget <= 0 || excluded.has(node)) return;
+    if (node !== dialog && modalDialogV2(node)) return;
+    if (!holdingExcluded.has(node)) {
+      const whole = browserUseBoundedContextText(node, budget);
+      if (whole !== null) {
+        budget -= whole.length;
+        if (whole !== "") parts.push(whole);
+        return;
+      }
+      if (node.nodeType === 3) {
+        parts.push(node.value.slice(0, budget));
+        budget = 0;
+        return;
+      }
+    }
+    for (const child of descendantsV2(node)) walk(child);
+  };
+  walk(dialog);
+  return boundedBlockerTextV2(parts.join(" "), DIALOG_DETAIL_MAX_CHARS);
+}
+
+/**
+ * Every interactive control the dialog really offers, in DOM order — Confirm,
+ * cancel, the close X, … — so the compact observation can surface the modal's
+ * FULL option set. A suggestion dialog whose only keep-my-entry path is the
+ * close control must show that path instead of reading like a cancel-only
+ * dialog with one obvious Confirm.
+ */
+function dialogControlsV2(
   dialog: BrowserUseNode,
   nodes: BrowserUseNode[],
   visibleFor: Map<BrowserUseNode, boolean>,
-  withinSubtree: (node: BrowserUseNode, ancestor: BrowserUseNode) => boolean,
+  enclosingDialog: (node: BrowserUseNode) => BrowserUseNode | undefined,
   refForNode: (node: BrowserUseNode) => string | undefined,
-): BrowserUseNode | undefined {
-  const candidates = nodes.filter(
+): BrowserUseNode[] {
+  // Nearest enclosing modal, not plain containment: a CMP renders its vendor
+  // panel as a nested dialog, whose buttons belong to that panel's own blocker.
+  return nodes.filter(
     (candidate) =>
       candidate !== dialog &&
       visibleFor.get(candidate) === true &&
-      withinSubtree(candidate, dialog) &&
-      blockerControlV2(candidate) &&
+      enclosingDialog(candidate) === dialog &&
+      dialogControlV2(candidate) &&
       refForNode(candidate) !== undefined,
   );
-  return (
-    candidates.find((candidate) => DIALOG_DISMISS_RE.test(blockerTextV2(candidate) ?? "")) ??
-    candidates[0]
-  );
+}
+
+/**
+ * Buttons and checkboxes plus the two shapes a dialog's real choices otherwise
+ * take: radio-based address pickers ("use what I entered") and anchor escape
+ * paths. Narrower than this reported a strict subset of the modal's options.
+ */
+function dialogControlV2(node: BrowserUseNode): boolean {
+  if (dialogActionControlV2(node)) return true;
+  const role = (node.attributes.role ?? node.axRole ?? "").toLowerCase();
+  return role === "link" || nodeTagV2(node) === "a";
+}
+
+/** A control that resolves the dialog, as opposed to an anchor that leaves it. */
+function dialogActionControlV2(node: BrowserUseNode): boolean {
+  if (blockerControlV2(node)) return true;
+  const role = (node.attributes.role ?? node.axRole ?? "").toLowerCase();
+  const type = (node.attributes.type ?? "").toLowerCase();
+  return role === "radio" || (nodeTagV2(node) === "input" && type === "radio");
 }
 
 function blockerControlV2(node: BrowserUseNode): boolean {
@@ -1285,6 +1529,14 @@ export function safeBlockersV2(
       current = parentFor.get(current);
     }
     return false;
+  };
+  const enclosingDialogV2 = (node: BrowserUseNode): BrowserUseNode | undefined => {
+    let current = parentFor.get(node);
+    while (current !== undefined) {
+      if (modalDialogV2(current)) return current;
+      current = parentFor.get(current);
+    }
+    return undefined;
   };
   const challengeFrames = nodes.filter(
     (node) =>
@@ -1446,23 +1698,54 @@ export function safeBlockersV2(
   // inert; surface them so the compact observation reports the blocked state.
   for (const node of nodes) {
     if (blockers.length >= BLOCKER_MAX_ITEMS) break;
-    if (node.nodeType !== 1 || visibleFor.get(node) !== true) continue;
-    const role = (node.attributes.role ?? node.axRole ?? "").toLowerCase();
-    const isModalDialog =
-      role === "dialog" ||
-      role === "alertdialog" ||
-      node.attributes["aria-modal"]?.toLowerCase() === "true";
-    if (!isModalDialog) continue;
+    if (visibleFor.get(node) !== true || !modalDialogV2(node)) continue;
     const name = dialogNameV2(node);
-    if (name === undefined || blockers.some((blocker) => blocker.text === name)) continue;
-    const close = dialogDismissControlV2(node, nodes, visibleFor, withinSubtree, refForNode);
+    if (name === undefined || blockers.some((blocker) => blocker.text === name.text)) continue;
+    const controls = dialogControlsV2(node, nodes, visibleFor, enclosingDialogV2, refForNode);
+    // `ref` is the exit, so only a button-shaped control whose whole label is one
+    // earns it — and a keep-what-I-entered exit outranks a plain close, since it
+    // preserves the entry. A radio ACCEPTS a choice and an anchor navigates away,
+    // so neither qualifies. Every control stays reachable through `options`.
+    const exits = controls
+      .filter(blockerControlV2)
+      .map((candidate) => ({ candidate, kind: dialogExitKindV2(candidate) }));
+    const close =
+      exits.find((exit) => exit.kind === "keep")?.candidate ??
+      exits.find((exit) => exit.kind === "close")?.candidate;
+    // The cap decides WHICH controls survive, never the order they are read in.
+    // Policy anchors render before the buttons on a consent modal, so a plain
+    // DOM-order cut reported "Privacy Policy" and dropped Accept/Reject.
+    const selected = new Set(
+      [
+        ...(close === undefined ? [] : [close]),
+        ...controls.filter((candidate) => candidate !== close && dialogActionControlV2(candidate)),
+        ...controls.filter((candidate) => candidate !== close && !dialogActionControlV2(candidate)),
+      ].slice(0, DIALOG_MAX_OPTIONS),
+    );
+    const emitted = controls.filter((candidate) => selected.has(candidate));
     const closeRef = close === undefined ? undefined : refForNode(close);
+    const excluded = new Set<BrowserUseNode>(controls);
+    const heading = dialogHeadingNodeV2(node);
+    if (heading !== undefined && blockerTextV2(heading) === name.text) excluded.add(heading);
+    const holdingExcluded = new Set<BrowserUseNode>();
+    for (const member of excluded) {
+      let current: BrowserUseNode | undefined = member;
+      while (current !== undefined && !holdingExcluded.has(current)) {
+        holdingExcluded.add(current);
+        current = parentFor.get(current);
+      }
+    }
+    const detail = dialogDetailV2(node, excluded, holdingExcluded);
+    const options = emitted.map((control) => {
+      const label = boundedBlockerTextV2(blockerTextV2(control), DIALOG_OPTION_LABEL_MAX_CHARS);
+      return { ref: refForNode(control)!, ...(label === undefined ? {} : { label }) };
+    });
     blockers.push({
       kind: "dialog",
-      text: name,
-      ...(closeRef === undefined
-        ? { target: "unavailable" as const }
-        : { ref: closeRef }),
+      text: name.text,
+      ...(closeRef === undefined ? { target: "unavailable" as const } : { ref: closeRef }),
+      ...(options.length === 0 ? {} : { options }),
+      ...(detail === undefined || name.source === "subtree" ? {} : { detail }),
     });
   }
   return blockers;

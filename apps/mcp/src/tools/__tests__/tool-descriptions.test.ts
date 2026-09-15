@@ -197,6 +197,6 @@ describe("current observation protocol documentation", () => {
     expect(description).toContain("safe_table");
     expect(description).toContain("[ref,role,facts?]");
     expect(description).not.toMatch(/observe_query/);
-    expect(description).not.toMatch(/\bdetail\b|card\/secret-shaped|never emitted/);
+    expect(description).not.toMatch(/state bitset|detail:full|card\/secret-shaped|never emitted/);
   });
 });
