@@ -173,19 +173,19 @@ export interface SafeBlockerV2 {
   focus?: "focused" | "focusable";
   keyboard?: "space" | "tab_space";
   /**
-   * Up to DIALOG_MAX_OPTIONS of the dialog's rendered controls (Confirm, cancel,
-   * close, a radio choice, an anchor escape path, …) in DOM order, so a modal's
-   * option set is discoverable in compact mode — not just the one control `ref`
-   * points at. The dismiss affordance is always present, sitting out of DOM
-   * position when it would otherwise fall past the bound; a fuller list needs a
-   * control query. This is additive evidence, never a gate.
+   * Up to DIALOG_MAX_OPTIONS of the dialog's rendered controls in DOM order, so
+   * a modal's option set is discoverable in compact mode — not just the one
+   * control `ref` points at. When the cap binds, the dismiss affordance is kept
+   * first, then the controls that resolve the dialog (buttons, checkboxes,
+   * radios, submits), then anchors; a fuller list needs a control query. This is
+   * additive evidence, never a gate.
    */
   options?: Array<{ ref: string; label?: string }>;
   /**
-   * Rendered text of the dialog body, so what a suggestion would change
-   * relative to what was entered is visible without leaving compact mode. It is
-   * whole or absent — a body past DIALOG_DETAIL_MAX_CHARS omits the field
-   * rather than emit a cut sentence that reads as the complete suggestion.
+   * The dialog's own prose, so what a suggestion would change relative to what
+   * was entered is visible without leaving compact mode. It excludes the name
+   * already in `text` and the labels already in `options[].label`, and carries
+   * the usual ellipsis when the body runs past DIALOG_DETAIL_MAX_CHARS.
    */
   detail?: string;
 }
@@ -1181,6 +1181,10 @@ const DIALOG_DISMISS_RE = /\b(?:close|dismiss|cancel|no\s+thanks)\b|[✕×]/i;
 const DIALOG_HEADING_TAGS = new Set(["h1", "h2", "h3", "h4", "h5", "h6"]);
 const DIALOG_MAX_OPTIONS = 6;
 const DIALOG_DETAIL_MAX_CHARS = 400;
+// Traversal bound only. Collapsing whitespace can shrink the source well below
+// the emitted bound, so reading a wider window is what lets boundedBlockerTextV2
+// own the cut and its ellipsis rather than silently landing one char short.
+const DIALOG_DETAIL_SOURCE_MAX_CHARS = DIALOG_DETAIL_MAX_CHARS * 2;
 // Option entries name controls, not prose; keeping them short leaves the wire
 // budget for the control rows a blocked observation still has to carry.
 const DIALOG_OPTION_LABEL_MAX_CHARS = 48;
@@ -1192,7 +1196,12 @@ function dialogNameV2(dialog: BrowserUseNode): string | undefined {
     dialog.attributes.title,
   ].find((value) => typeof value === "string" && value.trim() !== "");
   if (explicit !== undefined) return boundedBlockerTextV2(explicit);
-  let heading: string | undefined;
+  const heading = dialogHeadingNodeV2(dialog);
+  return (heading === undefined ? undefined : blockerTextV2(heading)) ?? blockerTextV2(dialog);
+}
+
+function dialogHeadingNodeV2(dialog: BrowserUseNode): BrowserUseNode | undefined {
+  let heading: BrowserUseNode | undefined;
   const walk = (node: BrowserUseNode): void => {
     if (heading !== undefined) return;
     for (const child of descendantsV2(node)) {
@@ -1200,14 +1209,48 @@ function dialogNameV2(dialog: BrowserUseNode): string | undefined {
         DIALOG_HEADING_TAGS.has(nodeTagV2(child).toLowerCase()) ||
         (child.attributes.role ?? child.axRole ?? "").toLowerCase() === "heading"
       ) {
-        heading = blockerTextV2(child);
+        heading = child;
         return;
       }
       walk(child);
     }
   };
   walk(dialog);
-  return heading ?? blockerTextV2(dialog);
+  return heading;
+}
+
+/**
+ * The dialog's own prose — its subtree minus whatever the blocker already
+ * reports as `text` or `options[].label`. Sourcing it from the whole subtree
+ * re-emitted the name and every control label, which both inflated the compact
+ * page and spent the budget that the entered-vs-suggested body needs.
+ */
+function dialogDetailV2(
+  dialog: BrowserUseNode,
+  excluded: ReadonlySet<BrowserUseNode>,
+  holdingExcluded: ReadonlySet<BrowserUseNode>,
+): string | undefined {
+  const parts: string[] = [];
+  let budget = DIALOG_DETAIL_SOURCE_MAX_CHARS;
+  const walk = (node: BrowserUseNode): void => {
+    if (budget <= 0 || excluded.has(node)) return;
+    if (!holdingExcluded.has(node)) {
+      const whole = browserUseBoundedContextText(node, budget);
+      if (whole !== null) {
+        budget -= whole.length;
+        if (whole !== "") parts.push(whole);
+        return;
+      }
+      if (node.nodeType === 3) {
+        parts.push(node.value.slice(0, budget));
+        budget = 0;
+        return;
+      }
+    }
+    for (const child of descendantsV2(node)) walk(child);
+  };
+  walk(dialog);
+  return boundedBlockerTextV2(parts.join(" "), DIALOG_DETAIL_MAX_CHARS);
 }
 
 /**
@@ -1240,13 +1283,17 @@ function dialogControlsV2(
  * paths. Narrower than this reported a strict subset of the modal's options.
  */
 function dialogControlV2(node: BrowserUseNode): boolean {
+  if (dialogActionControlV2(node)) return true;
+  const role = (node.attributes.role ?? node.axRole ?? "").toLowerCase();
+  return role === "link" || nodeTagV2(node) === "a";
+}
+
+/** A control that resolves the dialog, as opposed to an anchor that leaves it. */
+function dialogActionControlV2(node: BrowserUseNode): boolean {
   if (blockerControlV2(node)) return true;
-  const tag = nodeTagV2(node);
   const role = (node.attributes.role ?? node.axRole ?? "").toLowerCase();
   const type = (node.attributes.type ?? "").toLowerCase();
-  return (
-    role === "radio" || role === "link" || tag === "a" || (tag === "input" && type === "radio")
-  );
+  return role === "radio" || (nodeTagV2(node) === "input" && type === "radio");
 }
 
 function blockerControlV2(node: BrowserUseNode): boolean {
@@ -1549,18 +1596,30 @@ export function safeBlockersV2(
     const close =
       dismissible.find((candidate) => DIALOG_DISMISS_RE.test(blockerTextV2(candidate) ?? "")) ??
       dismissible[0];
-    // The dismiss path is the one control a blocked agent always needs, so it
-    // displaces the last capped entry rather than falling off the slice; `ref`
-    // therefore always names one of the emitted options.
-    const emitted =
-      close === undefined || controls.indexOf(close) < DIALOG_MAX_OPTIONS
-        ? controls.slice(0, DIALOG_MAX_OPTIONS)
-        : [...controls.slice(0, DIALOG_MAX_OPTIONS - 1), close];
-    const closeRef = close === undefined ? undefined : refForNode(close);
-    const detail = boundedBlockerTextV2(
-      browserUseBoundedContextText(node, DIALOG_DETAIL_MAX_CHARS),
-      DIALOG_DETAIL_MAX_CHARS,
+    // The cap decides WHICH controls survive, never the order they are read in.
+    // Policy anchors render before the buttons on a consent modal, so a plain
+    // DOM-order cut reported "Privacy Policy" and dropped Accept/Reject.
+    const selected = new Set(
+      [
+        ...(close === undefined ? [] : [close]),
+        ...controls.filter((candidate) => candidate !== close && dialogActionControlV2(candidate)),
+        ...controls.filter((candidate) => candidate !== close && !dialogActionControlV2(candidate)),
+      ].slice(0, DIALOG_MAX_OPTIONS),
     );
+    const emitted = controls.filter((candidate) => selected.has(candidate));
+    const closeRef = close === undefined ? undefined : refForNode(close);
+    const excluded = new Set<BrowserUseNode>(emitted);
+    const heading = dialogHeadingNodeV2(node);
+    if (heading !== undefined && blockerTextV2(heading) === name) excluded.add(heading);
+    const holdingExcluded = new Set<BrowserUseNode>();
+    for (const member of excluded) {
+      let current: BrowserUseNode | undefined = member;
+      while (current !== undefined && !holdingExcluded.has(current)) {
+        holdingExcluded.add(current);
+        current = parentFor.get(current);
+      }
+    }
+    const detail = dialogDetailV2(node, excluded, holdingExcluded);
     const options = emitted.map((control) => {
       const label = boundedBlockerTextV2(blockerTextV2(control), DIALOG_OPTION_LABEL_MAX_CHARS);
       return { ref: refForNode(control)!, ...(label === undefined ? {} : { label }) };

@@ -165,7 +165,7 @@ const CONTROL_QUERY_CONTRACT =
   "Query matches include m=n (exact name), m=r (exact role), m=t (local text), or m=c (explicit form/fieldset/dialog context), ranked in that order. " +
   "semantic.blocked=true and semantic.blockers report what blocks the task independently of stage; stage=browse does not mean unblocked. " +
   "Blocker kind is challenge (verification instructions), validation (a structurally identified field error), dialog (an open modal), or error_page (a CDN/gateway block wall named from the title/headings, so a blocked body is not read as a normal page). " +
-  "A dialog blocker also carries options — a bounded list of its rendered controls in DOM order, always including the close path that keeps what was entered (which may sit out of DOM position); query the control map when a dialog offers more — and a bounded detail with the dialog's own body text. " +
+  "A dialog blocker also carries options — a bounded list of its rendered controls in DOM order, always including the close path that keeps what was entered; when more controls exist than fit, the dismiss path and the controls that resolve the dialog are kept ahead of anchors, so query the control map for the rest — and a bounded detail carrying the dialog's own prose (not its name or its option labels, which the blocker already reports). " +
   "Cursors page an immutable snapshot and require the same query and role; document changes invalidate them. A cursorless query captures fresh controls and semantics. " +
   "Use overflow.next_cursor to page safe_table. A cursor from hint_overflow returns `hint` and pages with hint_overflow.next_cursor. ";
 

@@ -2016,8 +2016,7 @@ describe("safeBlockersV2 modal dialog", () => {
         text: "Confirm it's you",
         ref: "@e:dialog-close",
         options: [{ ref: "@e:dialog-close", label: "Close" }],
-        detail:
-          "Confirm it's you Sign in as customer@example.com to securely use your saved information",
+        detail: "Sign in as customer@example.com to securely use your saved information",
       },
     ]);
   });
@@ -2065,7 +2064,6 @@ describe("safeBlockersV2 modal dialog", () => {
         text: "Confirm it's you",
         ref: "@e:dismiss",
         options: [{ ref: "@e:dismiss", label: "No thanks" }],
-        detail: "Confirm it's you",
       },
     ]);
   });
@@ -2111,7 +2109,7 @@ describe("safeBlockersV2 modal dialog", () => {
           { ref: "@e:close", label: "Close" },
         ],
         detail:
-          "You entered: 12 Rue de la Paix, room 101, Paris. Suggested address: 12 Rue de la Paix, Paris. Confirm address",
+          "You entered: 12 Rue de la Paix, room 101, Paris. Suggested address: 12 Rue de la Paix, Paris.",
       },
     ]);
   });
@@ -2146,7 +2144,7 @@ describe("safeBlockersV2 modal dialog", () => {
           : undefined,
     )[0];
     expect(blocker?.detail).toBe(
-      "You entered: 1234 Northwest Example Boulevard, Apartment 5B, Portland, Oregon 97209, United States. Suggested address: 1234 NW Example Blvd Apt 5B, Portland, OR 97209-1234, United States. Use suggested address Keep what I entered",
+      "You entered: 1234 Northwest Example Boulevard, Apartment 5B, Portland, Oregon 97209, United States. Suggested address: 1234 NW Example Blvd Apt 5B, Portland, OR 97209-1234, United States.",
     );
   });
 
@@ -2193,18 +2191,103 @@ describe("safeBlockersV2 modal dialog", () => {
     expect(blocker?.target).toBe("unavailable");
   });
 
-  it("omits detail rather than cut a body past the budget mid-suggestion", () => {
-    // A legal blurb ahead of the addresses pushes the body past the budget. A
-    // prefix ending mid-address would read as the complete suggestion and the
-    // agent would compare against a sentence that was cut, so the field is
-    // dropped and the rest of the blocker still names the dialog.
+  it("marks a body past the budget as cut rather than reading as complete", () => {
     const blurb = "This address could not be verified exactly. ".repeat(12);
     const dialog = node("dialog", {
       attributes: { role: "dialog", "aria-modal": "true", "aria-label": "Verify your address" },
       children: [text("dialog-body", `${blurb}Suggested address: 1 Example Way, Portland, OR.`)],
     });
-    expect(safeBlockersV2(page([dialog]))).toEqual([
-      { kind: "dialog", text: "Verify your address", target: "unavailable" },
+    const detail = safeBlockersV2(page([dialog]))[0]?.detail;
+    expect(detail).toHaveLength(400);
+    expect(detail?.endsWith("…")).toBe(true);
+  });
+
+  it("spends the detail budget on the body, not on the name and option labels", () => {
+    // Re-emitting the heading and every control label used to tip a realistic
+    // address dialog past the budget, and the body — the entered-vs-suggested
+    // comparison C4 exists to surface — was what got dropped.
+    const body =
+      "You entered: 1200 Northwest Example Boulevard, Apartment 5B, Portland, Oregon 97209, United States. " +
+      "Suggested address: 1200 NW Example Blvd Apt 5B, Portland, OR 97209-1234, United States. " +
+      "Delivery estimates and taxes are calculated from the address you confirm here, and changing it later may alter both. " +
+      "Choose which address to keep before continuing.";
+    const dialog = node("dialog", {
+      attributes: { role: "dialog", "aria-modal": "true" },
+      children: [
+        node("dialog-heading", {
+          nodeName: "H2",
+          children: [text("dialog-heading-text", "Verify your address")],
+        }),
+        text("dialog-body", body),
+        node("btn-suggested", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("btn-suggested-text", "Use the suggested address")],
+        }),
+        node("btn-entered", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("btn-entered-text", "Keep the address I entered")],
+        }),
+        node("btn-edit", {
+          nodeName: "BUTTON",
+          axRole: "button",
+          children: [text("btn-edit-text", "Edit the address I entered")],
+        }),
+        node("btn-close", {
+          nodeName: "BUTTON",
+          attributes: { "aria-label": "Close" },
+          axRole: "button",
+        }),
+      ],
+    });
+    const refs = new Map(dialog.children.slice(2).map((child, index) => [child, `@e:b${index}`]));
+    const blocker = safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate))[0];
+    expect(blocker?.text).toBe("Verify your address");
+    expect(blocker?.detail).toBe(body);
+  });
+
+  it("keeps the controls that resolve a consent modal ahead of its policy links", () => {
+    // The anchors render first, so a plain DOM-order cut reported five policy
+    // links and dropped Accept all / Reject all — the only controls that
+    // actually resolve the modal — with nothing marking the list as partial.
+    const anchors = [
+      "Privacy Policy",
+      "Cookie Policy",
+      "Vendor list",
+      "Legitimate interest",
+      "Learn more",
+    ];
+    const buttons = ["Accept all", "Reject all", "Close"];
+    const dialog = node("dialog", {
+      attributes: { role: "dialog", "aria-modal": "true", "aria-label": "We value your privacy" },
+      children: [
+        ...anchors.map((label, index) =>
+          node(`anchor-${index}`, {
+            nodeName: "A",
+            axRole: "link",
+            children: [text(`anchor-${index}-text`, label)],
+          }),
+        ),
+        ...buttons.map((label, index) =>
+          node(`button-${index}`, {
+            nodeName: "BUTTON",
+            axRole: "button",
+            children: [text(`button-${index}-text`, label)],
+          }),
+        ),
+      ],
+    });
+    const refs = new Map(dialog.children.map((child, index) => [child, `@e:o${index}`]));
+    const blocker = safeBlockersV2(page([dialog]), (candidate) => refs.get(candidate))[0];
+    expect(blocker?.ref).toBe("@e:o7");
+    expect(blocker?.options).toEqual([
+      { ref: "@e:o0", label: "Privacy Policy" },
+      { ref: "@e:o1", label: "Cookie Policy" },
+      { ref: "@e:o2", label: "Vendor list" },
+      { ref: "@e:o5", label: "Accept all" },
+      { ref: "@e:o6", label: "Reject all" },
+      { ref: "@e:o7", label: "Close" },
     ]);
   });
 
