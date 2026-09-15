@@ -3358,7 +3358,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     );
     const controller = BrowserController.fromHarnessPage(provider);
     try {
-      await controller.selectOptionOnPage(product, "#region-label", "Product");
+      await controller.select({ kind: "selector", selector: "#region-label" }, "Product", product);
       expect(await product.locator("#product-region").inputValue()).toBe("Product");
       expect(await provider.locator("#provider-region").inputValue()).toBe("Provider");
     } finally {

@@ -327,7 +327,9 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
         </select>`),
     );
     try {
-      await expect(ctrl.selectOption("#country", "Atlantis")).rejects.toThrow(/no option matched/i);
+      await expect(
+        ctrl.select({ kind: "selector", selector: "#country" }, "Atlantis"),
+      ).rejects.toThrow(/no option matched/i);
       expect(await page.locator("#country").inputValue()).toBe("");
     } finally {
       await page.close();
@@ -347,7 +349,7 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
         </select>`),
     );
     try {
-      await ctrl.selectOption("select.country >> nth=1", "South Korea");
+      await ctrl.select({ kind: "selector", selector: "select.country >> nth=1" }, "South Korea");
       expect(await page.locator("select.country").nth(0).inputValue()).toBe("US");
       expect(await page.locator("select.country").nth(1).inputValue()).toBe("KR");
       expect(await page.locator("select.country").nth(1).getAttribute("data-ts-touched")).toBe("1");
@@ -369,7 +371,9 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
         </script>`),
     );
     try {
-      await expect(ctrl.selectOption("#country", "Japan")).rejects.toThrow(/did not stick/i);
+      await expect(
+        ctrl.select({ kind: "selector", selector: "#country" }, "Japan"),
+      ).rejects.toThrow(/did not stick/i);
       expect(await page.locator("#country").inputValue()).toBe("US");
     } finally {
       await page.close();
@@ -400,7 +404,9 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
         </script>`),
     );
     try {
-      await expect(ctrl.selectOption("#country", "Atlantis")).rejects.toThrow(/no option matched/i);
+      await expect(
+        ctrl.select({ kind: "selector", selector: "#country" }, "Atlantis"),
+      ).rejects.toThrow(/no option matched/i);
       expect(await picked(page)).toBeUndefined();
       expect(
         await page.evaluate(() => (window as unknown as { __wrong?: boolean }).__wrong),
@@ -432,9 +438,9 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
         </script>`),
     );
     try {
-      await expect(ctrl.selectOption("#country", "Atlantis")).rejects.toThrow(
-        /no single opened popup/i,
-      );
+      await expect(
+        ctrl.select({ kind: "selector", selector: "#country" }, "Atlantis"),
+      ).rejects.toThrow(/no single opened popup/i);
       expect(await picked(page)).toBeUndefined();
     } finally {
       await page.close();
@@ -468,7 +474,7 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
         </script>`),
     );
     try {
-      await ctrl.selectOption("#country", "Japan");
+      await ctrl.select({ kind: "selector", selector: "#country" }, "Japan");
       expect(await picked(page)).toBe("JP");
     } finally {
       await page.close();
@@ -498,7 +504,7 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
         </script>`),
     );
     try {
-      await ctrl.selectOption("#country", "South Korea");
+      await ctrl.select({ kind: "selector", selector: "#country" }, "South Korea");
       expect(await picked(page)).toBe("KR");
     } finally {
       await page.close();
@@ -531,7 +537,7 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
         </script>`),
     );
     try {
-      await ctrl.selectOption("#country", "Japan");
+      await ctrl.select({ kind: "selector", selector: "#country" }, "Japan");
       expect(await page.locator("#country").inputValue()).toBe("Japan");
       expect(await picked(page)).toBe("JP");
     } finally {
@@ -560,7 +566,7 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
         </script>`),
     );
     try {
-      await ctrl.selectOption("#country", "Japan");
+      await ctrl.select({ kind: "selector", selector: "#country" }, "Japan");
       expect(await picked(page)).toBe("JP");
     } finally {
       await page.close();
@@ -594,9 +600,9 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
         </script>`),
     );
     try {
-      await expect(ctrl.selectOption("#country", "South Korea")).rejects.toThrow(
-        /no option matched/i,
-      );
+      await expect(
+        ctrl.select({ kind: "selector", selector: "#country" }, "South Korea"),
+      ).rejects.toThrow(/no option matched/i);
       expect(await picked(page)).toBeUndefined();
     } finally {
       await page.close();

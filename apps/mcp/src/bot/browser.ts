@@ -1359,7 +1359,12 @@ export class BrowserController implements BrowserDriver {
     await this.typeOnPage(active, target.selector, text, sealed);
   }
 
-  private async typeOnPage(page: Page, selector: string, text: string, sealed = false): Promise<void> {
+  private async typeOnPage(
+    page: Page,
+    selector: string,
+    text: string,
+    sealed = false,
+  ): Promise<void> {
     await this.withModalInertNeutralized(
       selector,
       () => this.typeInner(page, selector, text, sealed),
@@ -1763,13 +1768,9 @@ export class BrowserController implements BrowserDriver {
   // and the tracked-vs-plain choice. Ordinary clicks on the active page run
   // through dispatch tracking; js_click never does; an action page that is
   // not the active page is dispatched untracked (pre-existing semantics).
-  async click(
-    target: DriverTarget & { method: ClickMethod },
-    page?: Page | null,
-  ): Promise<void> {
+  async click(target: DriverTarget & { method: ClickMethod }, page?: Page | null): Promise<void> {
     const p = page ?? undefined;
-    const tracked =
-      target.method === "click" && (p === undefined || this.isActivePage(p));
+    const tracked = target.method === "click" && (p === undefined || this.isActivePage(p));
     if (target.kind === "handle") {
       if (tracked) {
         await this.clickWithDispatchTracking({
@@ -3060,11 +3061,7 @@ export class BrowserController implements BrowserDriver {
   // first option — preserves the existing behavior for native
   // selects whose contents are interchangeable (country pickers).
   // Contract C `select` verb: the driver owns the frame/page dispatch.
-  async select(
-    target: DriverTarget,
-    optionMatcher?: string,
-    page?: Page | null,
-  ): Promise<string> {
+  async select(target: DriverTarget, optionMatcher?: string, page?: Page | null): Promise<string> {
     const p = page ?? undefined;
     if (target.kind === "frame") {
       return await this.selectInFrame(target.frame, target.selector, optionMatcher, p);
@@ -3075,11 +3072,6 @@ export class BrowserController implements BrowserDriver {
     const active = p ?? this.page;
     if (!active) throw new Error("Browser not started");
     return await this.selectOptionOnPage(active, target.selector, optionMatcher);
-  }
-
-  async selectOption(selector: string, optionMatcher?: string): Promise<string> {
-    if (!this.page) throw new Error("Browser not started");
-    return await this.selectOptionOnPage(this.page, selector, optionMatcher);
   }
 
   async selectOptionOnPage(page: Page, selector: string, optionMatcher?: string): Promise<string> {
@@ -7861,16 +7853,13 @@ export class BrowserController implements BrowserDriver {
         if (handle === null) return false;
         try {
           const expected = valueFor(field, target.format);
-          return await handle.evaluate(
-            (node, expected) => {
-              const control = node as HTMLInputElement | HTMLSelectElement;
-              const actual = control.value ?? "";
-              // Hosted fields may reformat what was typed (grouped PAN
-              // digits, padding); compare the literal value OR its digits.
-              return actual === expected || actual.replace(/\D/g, "") === expected.replace(/\D/g, "");
-            },
-            expected,
-          );
+          return await handle.evaluate((node, expected) => {
+            const control = node as HTMLInputElement | HTMLSelectElement;
+            const actual = control.value ?? "";
+            // Hosted fields may reformat what was typed (grouped PAN
+            // digits, padding); compare the literal value OR its digits.
+            return actual === expected || actual.replace(/\D/g, "") === expected.replace(/\D/g, "");
+          }, expected);
         } catch {
           return false;
         } finally {
