@@ -156,21 +156,25 @@ describe("credential mutation approval page", () => {
     expect(pairing.registerEnrolledDevice).toHaveBeenCalledTimes(1);
   });
 
-  it("explains an unlinked signing device after the retry also refuses", async () => {
+  // An unclaimed passkey is recoverable, not a dead end: signing in claims this
+  // browser's device on the way back, so the human returns to a link that works
+  // instead of reading an instruction to go do it themselves.
+  it("sends an unclaimed signing device through login and back to this approval", async () => {
     api.apiPost.mockRejectedValue(new api.ApiError("mandate_signer_not_authorized", 403));
     render(<CredentialMutationApprovalPage />);
 
     await userEvent.setup().click(await screen.findByRole("button", { name: "Approve edit" }));
 
-    await waitFor(() => expect(screen.getByText(/isn't linked to your/i)).toBeTruthy());
+    await waitFor(() =>
+      expect(router.replace).toHaveBeenCalledWith("/login?next=/vault/mutate/mutation_1"),
+    );
     expect(screen.queryByText(/mandate_signer_not_authorized/)).toBeNull();
-    expect(router.replace).not.toHaveBeenCalled();
-    // Exactly once more, never a loop.
+    // One attempt, never a retry loop.
     expect(
       api.apiPost.mock.calls.filter(
         ([path]: [string]) => path === "/v1/vault/mutation-approvals/mutation_1/approve",
       ),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
   });
 
   it("does not submit when no passkey is enrolled", async () => {

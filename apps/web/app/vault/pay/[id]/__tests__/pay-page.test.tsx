@@ -21,7 +21,6 @@ const vault = vi.hoisted(() => ({ decryptCard: vi.fn() }));
 const pairing = vi.hoisted(() => ({
   getPairingState: vi.fn(),
   pairDevice: vi.fn(),
-  registerEnrolledDevice: vi.fn(),
   isPaymentPasskeyUnavailable: vi.fn(() => false),
 }));
 
@@ -160,7 +159,6 @@ beforeEach(() => {
   vi.clearAllMocks();
   pairing.getPairingState.mockResolvedValue({ enrolled: true });
   pairing.pairDevice.mockResolvedValue(undefined);
-  pairing.registerEnrolledDevice.mockResolvedValue(undefined);
   pairing.isPaymentPasskeyUnavailable.mockReturnValue(false);
   vouchflow.signPayload.mockImplementation(async ({ payload }: { payload: unknown }) => ({
     assertion: "e30.synthetic.signature",

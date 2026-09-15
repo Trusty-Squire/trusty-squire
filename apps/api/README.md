@@ -29,8 +29,14 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `GET` | `/v1/vault/credentials` | web/agent | List vault credentials |
 | `POST` | `/v1/vault/mutation-approvals` | web/agent | Create a vouch-gated credential metadata edit or delete approval |
 | `GET` | `/v1/vault/mutation-approvals/:id` | web/agent | Read the account-owned mutation approval status |
-| `GET` | `/v1/vault/mutation-approvals/:id/ceremony` | web | Show the account-owned mutation intent for phone approval |
-| `POST` | `/v1/vault/mutation-approvals/:id/approve` | web | Verify the passkey-signed mandate, then atomically commit the mutation, audit, and terminal approval state |
+| `GET` | `/v1/vault/mutation-approvals/:id/ceremony` | none (approval link) | Show the mutation intent and the exact payload to sign |
+| `POST` | `/v1/vault/mutation-approvals/:id/approve` | Vouchflow assertion over the account-bound payload, signed by a device registered to that account (no web session) | Verify the passkey-signed mandate and its signer, then atomically commit the mutation, audit, and terminal approval state |
+| `POST` | `/v1/vault/fetch-approvals` | web/agent | Create an approval to reveal one credential field, returning NO value |
+| `GET` | `/v1/vault/fetch-approvals/:id` | web/agent | Resume an account-owned fetch approval; delivers the raw value ONCE on the approved → consumed transition |
+| `GET` | `/v1/vault/fetch-approvals/:id/ceremony` | none (approval link) | Show the reveal intent and the exact payload to sign |
+| `POST` | `/v1/vault/fetch-approvals/:id/approve` | Vouchflow assertion over the account-bound payload, signed by a device registered to that account (no web session) | Verify the passkey-signed mandate and its signer, then mark the approval approved |
+| `POST` | `/v1/vault/fetch-approvals/:id/deny` | none (approval link) | Close the approval without releasing a value; the ledger row names nobody |
+| `POST` | `/v1/vouchflow/devices` | web | Claim this browser's enrolled Vouchflow signing device for the signed-in account — the binding both `approve` rows above check |
 | `GET` | `/v1/vault/audit` | web/agent | List the account's secret-free Activity trail with keyset pagination and optional `type`/`reference` filters |
 | `POST` | `/v1/vault/e2e` | web | Store an opaque, client-encrypted card blob |
 | `GET` | `/v1/vault/e2e` | web/agent | List client-encrypted card metadata without blobs |
@@ -148,8 +154,11 @@ verifier as payment approvals, but use the distinct
 owner account through an opaque account binding, operation (`credential.edit` or
 `credential.delete`), exact vault reference, requesting agent, nonce, and complete
 editable before/after metadata. Web and agent sessions may create and poll their
-own account's approvals; the owner web ceremony endpoint only displays and verifies
-the account-owned approval. After
+own account's approvals; the ceremony and approve endpoints take no web session,
+so the assertion is the authority — it must be signed over that approval's
+payload by a signing device the owning account registered through
+`POST /v1/vouchflow/devices`, or it is refused `missing_device_token` /
+`mandate_signer_not_authorized` before anything moves. After
 signature verification, one database transaction locks the pending approval,
 rechecks expiry against the database clock, compares live metadata with the
 signed `before` snapshot, applies the mutation, writes its audit event, and marks

@@ -1,11 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { AppShell } from "../../../components/AppShell";
 import { ApiError, apiGet, apiPost } from "../../../lib/api";
 import {
-  approvalErrorMessage,
   getPairingState,
   isUnlinkedSigningDevice,
   pairDevice,
@@ -82,9 +81,8 @@ export default function CredentialMutationApprovalPage() {
   // A signed-in browser opening this link claims its passkey here, so an
   // already-enrolled owner never has to detour through the vault to answer an
   // approval. Without a session the endpoint refuses and nothing is claimed.
-  const deviceRegistration = useRef<Promise<void>>(Promise.resolve());
   useEffect(() => {
-    deviceRegistration.current = registerEnrolledDevice().catch(() => {});
+    void registerEnrolledDevice().catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -117,28 +115,25 @@ export default function CredentialMutationApprovalPage() {
         payload: ceremony.payload,
         minConfidence: "low",
       });
-      const submit = () =>
-        apiPost(
-          `/v1/vault/mutation-approvals/${encodeURIComponent(ceremony.approval_id)}/approve`,
-          { jws: signed.assertion },
-        );
-      try {
-        await submit();
-      } catch (caught) {
-        // Losing the race against the mount-time claim is the one refusal that
-        // answers itself: wait for it, then ask once more.
-        if (!isUnlinkedSigningDevice(caught)) throw caught;
-        await deviceRegistration.current;
-        await submit();
-      }
+      await apiPost(
+        `/v1/vault/mutation-approvals/${encodeURIComponent(ceremony.approval_id)}/approve`,
+        { jws: signed.assertion },
+      );
       setCeremony(await fetchCeremony());
       setNeedsPasskeySetup(false);
     } catch (caught) {
-      setError(approvalErrorMessage(caught, "Approval failed."));
+      // This browser's passkey is enrolled but unclaimed. Signing in claims it
+      // on the way back, so send the human through login rather than leaving
+      // them on a page whose only button now always fails.
+      if (isUnlinkedSigningDevice(caught)) {
+        redirectToLogin();
+        return;
+      }
+      setError(caught instanceof Error ? caught.message : "Approval failed.");
     } finally {
       setBusy(false);
     }
-  }, [ceremony, fetchCeremony]);
+  }, [ceremony, fetchCeremony, redirectToLogin]);
 
   const setUpPasskey = useCallback(async () => {
     setBusy(true);

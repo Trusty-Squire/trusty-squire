@@ -161,62 +161,43 @@ describe("credential fetch approval page", () => {
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Approve reveal" }));
 
-    await waitFor(() => expect(screen.getByText(/the agent can now read this secret/i)).toBeTruthy());
-    expect(screen.queryByText(/isn't linked to your/i)).toBeNull();
-  });
-
-  // Clicking before the mount-time claim lands is the one refusal that answers
-  // itself: the page waits for that claim and asks exactly once more.
-  it("retries approval once after the device claim settles", async () => {
-    let releaseRegistration = (): void => {};
-    pairing.registerEnrolledDevice.mockReturnValue(
-      new Promise<void>((resolve) => {
-        releaseRegistration = resolve;
-      }),
+    await waitFor(() =>
+      expect(screen.getByText(/the agent can now read this secret/i)).toBeTruthy(),
     );
-    let refusals = 1;
-    const approvals: string[] = [];
-    api.apiPost.mockImplementation((path: string) => {
-      if (path !== "/v1/vault/fetch-approvals/fetch_1/approve") {
-        return Promise.reject(new Error(`unexpected POST ${path}`));
-      }
-      approvals.push(path);
-      if (refusals-- > 0) {
-        return Promise.reject(new api.ApiError("mandate_signer_not_authorized", 403));
-      }
-      status = "approved";
-      return Promise.resolve({ status: "approved" });
-    });
-
-    render(<CredentialFetchApprovalPage />);
-    const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "Approve reveal" }));
-    await waitFor(() => expect(approvals).toHaveLength(1));
-    releaseRegistration();
-
-    await waitFor(() => expect(screen.getByText(/the agent can now read this secret/i)).toBeTruthy());
-    expect(approvals).toHaveLength(2);
-    expect(screen.queryByText(/isn't linked to your/i)).toBeNull();
+    expect(router.replace).not.toHaveBeenCalled();
   });
 
-  // The ceremony is sessionless, so a link opened signed-out is not a login
-  // problem — the only thing the visitor can be missing is a device this
-  // account has claimed, and the page has to say so in those words.
-  it("explains an unlinked signing device after the retry also refuses", async () => {
+  // An unclaimed passkey is recoverable, not a dead end: signing in claims this
+  // browser's device on the way back, so the human returns to a link that works
+  // instead of reading an instruction to go do it themselves.
+  it("sends an unclaimed signing device through login and back to this approval", async () => {
     api.apiPost.mockRejectedValue(new api.ApiError("mandate_signer_not_authorized", 403));
     render(<CredentialFetchApprovalPage />);
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Approve reveal" }));
 
-    await waitFor(() => expect(screen.getByText(/isn't linked to your/i)).toBeTruthy());
+    await waitFor(() =>
+      expect(router.replace).toHaveBeenCalledWith("/login?next=/vault/fetch/fetch_1"),
+    );
     expect(screen.queryByText(/mandate_signer_not_authorized/)).toBeNull();
-    expect(router.replace).not.toHaveBeenCalled();
-    // Exactly once more, never a loop.
+    // One attempt, never a retry loop.
     expect(
       api.apiPost.mock.calls.filter(
         ([path]: [string]) => path === "/v1/vault/fetch-approvals/fetch_1/approve",
       ),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
+  });
+
+  it("surfaces any other approval failure in place", async () => {
+    api.apiPost.mockRejectedValue(new api.ApiError("credential_fetch_approval_expired", 409));
+    render(<CredentialFetchApprovalPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Approve reveal" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/credential_fetch_approval_expired/)).toBeTruthy(),
+    );
+    expect(router.replace).not.toHaveBeenCalled();
   });
 
   it("shows a load failure in place rather than bouncing to login", async () => {
