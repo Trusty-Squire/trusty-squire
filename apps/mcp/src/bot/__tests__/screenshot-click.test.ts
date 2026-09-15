@@ -533,14 +533,16 @@ describe("native screenshot/click tool contract on an isolated session", () => {
       expect(result).toMatchObject({
         screenshot_click: { dispatch: "unknown", outcome: "unknown" },
       });
-      expect(started.dom).not.toContain("Show password");
+      // opacity:0 no longer hides an operable control — the accessibility tree
+      // keeps it and marks it operable (consistent with #812 and the Oura radios).
+      expect(started.dom).toContain("Show password");
       expect(started.dom).toContain("Performing security verification");
       const after = await observe(started.session_id);
       // The browser-use response may be a delta containing only the changed checkbox.
       expect(after.dom).toContain("checked=true");
       const query = await observeQuery(started.session_id, "");
       expect(query.semantic).toMatchObject({ blocked: true });
-      expect(JSON.stringify(query.safe_table)).not.toContain("Show password");
+      expect(JSON.stringify(query.safe_table)).toContain("@show-password");
       expect(JSON.stringify(query.safe_table)).toContain("slider");
       expect(mouse).toHaveBeenCalledTimes(1);
       expect(await f.frame.evaluate("window.events")).toEqual([{ trusted: true, checked: true }]);
