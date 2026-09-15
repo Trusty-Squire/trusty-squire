@@ -37,6 +37,7 @@ export const REAL_BROWSER_FILES = [
   "src/bot/__tests__/broker-tab-family.test.ts",
   "src/bot/__tests__/browser-close-cookie.test.ts",
   "src/bot/__tests__/browser-document-identity.test.ts",
+  "src/bot/__tests__/browser-frame-binding.test.ts",
   "src/bot/__tests__/browser-frame-support.test.ts",
   "src/bot/__tests__/browser-hosted-field-remount.test.ts",
   "src/bot/__tests__/browser-inject-card.test.ts",
