@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "ai.trustysquire/trusty-squire",
   "title": "Trusty Squire",
-  "description": "Trusty Squire gives coding agents the ability to provision, ship, and pay — without your keys or card ever leaving the vault.",
+  "description": "Provision, ship, and pay from your coding agent — keys and cards never leave the vault.",
   "repository": {
     "url": "https://github.com/Trusty-Squire/trusty-squire",
     "source": "github",
