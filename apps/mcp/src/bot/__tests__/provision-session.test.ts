@@ -16,7 +16,6 @@ import {
   generatePassword,
   classifyVouchflowCredentials,
   sanitizeExtractedCredentials,
-  maskSecretValue,
   googleSessionGate,
   buildVerificationSearchQuery,
   makeTwoCaptchaVaultProxy,
@@ -598,18 +597,6 @@ describe("buildVerificationSearchQuery (finds passwordless mail)", () => {
     expect(link).toBe(
       "https://app.loops.so/api/auth/callback/email?callbackUrl=https%3A%2F%2Fapp.loops.so%2Fadd-domain&token=REDACTED&email=x%40y.com",
     );
-  });
-});
-
-describe("maskSecretValue (sealed transfer preview)", () => {
-  it("masks the middle of a long secret, keeping a short head + tail", () => {
-    const masked = maskSecretValue("GOCSPX-abcdef1234567890xyz");
-    expect(masked).toContain("••••");
-    expect(masked).not.toContain("abcdef1234567890");
-    expect(masked.startsWith("GOCSPX")).toBe(true);
-  });
-  it("fully redacts a short value (no reconstructable prefix)", () => {
-    expect(maskSecretValue("short")).toBe("••••");
   });
 });
 

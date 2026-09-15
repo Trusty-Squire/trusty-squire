@@ -1,10 +1,11 @@
 // Phase 1 of the operator session-management restructure: the Session data
 // model and the single factory that builds it.
 //
-// This module owns the SHAPE of a live operator session and nothing else. The
-// registry, every mutation, and every operation over a Session stay in
-// provision-session.ts, which re-exports `Session` (and the host-source types)
-// so no caller import changes.
+// This module owns the SHAPE of a live operator session plus the pure
+// session-state helpers that only read and write a Session value: element
+// retention and the sealed <select> bookkeeping. The registry and every
+// operation that touches the browser or the page stay out — lifecycle.ts owns
+// the registry transaction, registry.ts the host-scope state.
 //
 // The factory exists because operate_start and the harness start built the
 // same ~60-field object twice, side by side, and a field added to one could
@@ -12,13 +13,14 @@
 // empty Maps/Sets, null overlays, a fresh random 32-byte compact-v2 secret,
 // `initializing: true`, and `api` ABSENT (never present-and-undefined) when
 // the tool layer passed none.
-import { randomBytes } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import type { Buffer } from "node:buffer";
 import type { BrowserController, CheckoutCard, InteractiveElement } from "../browser.js";
 import type { PendingApprovalWait } from "../card-release-approval.js";
-import type {
-  SafeObservationBaselineV2,
-  SafeObservationIndexV2,
+import {
+  sealRetainedInteractiveElementsV2,
+  type SafeObservationBaselineV2,
+  type SafeObservationIndexV2,
 } from "../compact-observation-v2.js";
 import type { ApiClient } from "../../api-client.js";
 import type { OperatorBrowserWatchdog } from "../operator-browser-watchdog.js";
@@ -122,6 +124,47 @@ export interface Session {
   // begin between complete action leases.
   watchdog: OperatorBrowserWatchdog | null;
   terminalTeardownOwner: SessionTerminalTeardownOwner | null;
+}
+
+// The last extracted elements are resealed on every retain so each retained
+// element carries the session-secret correlation selector act() re-resolves
+// against. Kept so resolveTarget can be unit-tested against a snapshot, but
+// act() always RE-extracts first (re-resolution).
+export function retainSessionElements(session: Session, elements: InteractiveElement[]): void {
+  session.lastElements = sealRetainedInteractiveElementsV2(elements, (element) =>
+    compactV2CorrelationSelector(session, element),
+  );
+}
+
+// Sealed <select> bookkeeping: committed option values are stored keyed by an
+// HMAC of the selector/value under the session's compact-v2 secret so raw
+// page text never round-trips through the observation state.
+export function compactV2CommittedSelectKey(session: Session, selector: string): string {
+  return createHmac("sha256", session.compactV2Secret)
+    .update(`select-key\0${selector}`)
+    .digest("base64url");
+}
+
+export function compactV2CommittedSelectValue(session: Session, value: string): string {
+  return createHmac("sha256", session.compactV2Secret)
+    .update(`select-value\0${value}`)
+    .digest("base64url");
+}
+
+export function clearCommittedSelectValue(session: Session, selector: string): void {
+  session.committedSelectValues.delete(compactV2CommittedSelectKey(session, selector));
+}
+
+function compactV2CorrelationSelector(session: Session, element: InteractiveElement): string {
+  const binding = JSON.stringify([
+    element.frameOrigin ?? null,
+    element.framePath ?? null,
+    element.selector,
+  ]);
+  return `@c:${createHmac("sha256", session.compactV2Secret)
+    .update(binding)
+    .digest("base64url")
+    .slice(0, 22)}`;
 }
 
 /** Everything the two starts genuinely differ on. Everything else is fixed. */
