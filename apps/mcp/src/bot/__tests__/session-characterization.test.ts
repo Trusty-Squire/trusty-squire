@@ -65,6 +65,14 @@ vi.mock("../broker/custody.js", async () => {
   };
 });
 
+// Provider-session detection is a module function now; the fake controller
+// below carries no context, so stub the module lifecycle.ts imports from.
+vi.mock("../oauth-login.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../oauth-login.js")>()),
+  detectSessionProviders: async (): Promise<string[]> => h.providers ?? [],
+  detectGoogleAccountEmail: async (): Promise<string | null> => h.workerEmail,
+}));
+
 vi.mock("../browser.js", async (importOriginal) => {
   const actual = await importOriginal<typeof BrowserModule>();
   return {
@@ -89,12 +97,6 @@ vi.mock("../browser.js", async (importOriginal) => {
       }
       async waitForThreeDsResolution(): Promise<string> {
         return "challenge_pending";
-      }
-      async detectSessionProviders(): Promise<string[]> {
-        return h.providers ?? [];
-      }
-      async detectGoogleAccountEmail(): Promise<string | null> {
-        return h.workerEmail;
       }
       async goto(url: string): Promise<void> {
         const first = h.gotos.length === 0;

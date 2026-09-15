@@ -14,6 +14,7 @@ import type { EventEmitter } from "node:events";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { BrowserController } from "../browser.js";
+import { detectGoogleAccountEmail, loginWithOAuth } from "../oauth-login.js";
 import {
   act,
   finishProvisionSession,
@@ -204,7 +205,7 @@ describe("operator new-tab adoption", () => {
     await inbox.evaluate(() => {
       document.querySelector("#popup")!.setAttribute("onclick", "oauthClickSeen()");
     });
-    const login = controller.loginWithOAuth("#popup", 3_000);
+    const login = loginWithOAuth(controller, "#popup", 3_000);
     try {
       // loginWithOAuth has already made its recovery page and armed its popup
       // listener. The next context page is foreign, created before the popup.
@@ -241,7 +242,7 @@ describe("operator new-tab adoption", () => {
       await held;
       await route.fulfill({ contentType: "text/html", body: "<main>Google identity</main>" });
     });
-    const detection = controller.detectGoogleAccountEmail();
+    const detection = detectGoogleAccountEmail(controller);
     try {
       await requestArrived;
       expect(context.pages()).toHaveLength(2);

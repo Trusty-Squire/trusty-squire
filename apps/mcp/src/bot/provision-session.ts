@@ -22,7 +22,7 @@ import { serializeBrowserUseDOM } from "./browser-use-serializer.js";
 //  - target elements by TEXT/ROLE with re-resolution every act, never by a
 //    positional index (indices drift as the SPA re-renders).
 //  - the OAuth popup is the fragile part; route OAuth clicks through the
-//    substrate's startOAuth/settleAfterOAuth, which already adopt the popup.
+//    substrate's loginWithOAuth/settleAfterOAuth, which already adopt the popup.
 //
 // Design notes:
 //  - browser egress has no host scope.
@@ -36,9 +36,6 @@ import type { ElementHandle, Page } from "playwright";
 import {
   BrowserClickDispatchError,
   clickDispatchStatusForError,
-  OAuthAwaitingHumanError,
-  OAuthFailedError,
-  OAuthOnboardingRequiredError,
   type BrowserController,
   type CheckoutCard,
   type FrameTarget,
@@ -46,8 +43,27 @@ import {
   type InjectCardFieldResult,
   type InjectCardResolvedTarget,
   type InteractiveElement,
-  type OAuthCompletionEvidence,
 } from "./browser.js";
+import {
+  completeOAuthTransitionRecovery,
+  loginWithOAuth,
+  oauthActionDeadline,
+  oauthActionRemainingMs,
+  oauthAutomatedActionTimeoutMs,
+  oauthHumanHandoffTimeoutMs,
+  oauthLoginLeaseCooldownMs,
+  oauthTransitionStatus,
+  refreshOAuthHumanChallenge,
+  resetOAuthActionDeadline,
+  settleAfterOAuth,
+  withOAuthActionLease,
+  withinOAuthActionDeadline,
+  type OAuthActionDeadline,
+  type OAuthCompletionEvidence,
+  OAuthAwaitingHumanError,
+  OAuthFailedError,
+  OAuthOnboardingRequiredError,
+} from "./oauth-login.js";
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import type { ClickMethod, DriverTarget } from "./driver/types.js";
 import {
@@ -93,8 +109,6 @@ import {
   resolveExtraction,
   type CandidateClass,
 } from "./extraction.js";
-
-
 
 export interface Observation {
   session_id: string;
@@ -193,7 +207,6 @@ export interface Observation {
   overflow?: { remaining: number; next_cursor: string };
   hint_overflow?: { remaining: number; next_cursor: string };
 }
-
 
 export type ProvisionAction =
   | { kind: "click"; target: string; screenshot?: ScreenshotPoint }
@@ -311,201 +324,6 @@ export {
 export type { HarnessStartOptions, NeedsUserLogin, StartOptions };
 export type { FinishResult, PreparedFinishResult } from "./session/lifecycle.js";
 
-let oauthActionLeaseTail: Promise<void> = Promise.resolve();
-
-const DEFAULT_OAUTH_LOGIN_LEASE_COOLDOWN_MS = 3_000;
-const DEFAULT_OAUTH_AUTOMATED_ACTION_TIMEOUT_MS = 30_000;
-const DEFAULT_OAUTH_HUMAN_HANDOFF_TIMEOUT_MS = 5 * 60_000;
-
-interface OAuthActionDeadline {
-  completionCheck?: () => Promise<OAuthCompletionEvidence | null>;
-  expiresAt: number;
-  timeoutMs: number;
-  provider: OAuthProviderId | undefined;
-  timedOut: boolean;
-  inFlight: Set<Promise<unknown>>;
-  phaseChanged: Promise<void>;
-  signalPhaseChanged: () => void;
-}
-
-function configuredOAuthActionTimeoutMs(): number | null {
-  const configured = Number(process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS);
-  return Number.isFinite(configured) && configured > 0 ? configured : null;
-}
-
-function oauthAutomatedActionTimeoutMs(): number {
-  const configured = configuredOAuthActionTimeoutMs();
-  return configured === null
-    ? DEFAULT_OAUTH_AUTOMATED_ACTION_TIMEOUT_MS
-    : Math.min(configured, DEFAULT_OAUTH_AUTOMATED_ACTION_TIMEOUT_MS);
-}
-
-function oauthHumanHandoffTimeoutMs(): number {
-  return configuredOAuthActionTimeoutMs() ?? DEFAULT_OAUTH_HUMAN_HANDOFF_TIMEOUT_MS;
-}
-
-function oauthActionDeadline(provider: OAuthProviderId | undefined): OAuthActionDeadline {
-  const timeoutMs = oauthAutomatedActionTimeoutMs();
-  let signalPhaseChanged!: () => void;
-  return {
-    expiresAt: Date.now() + timeoutMs,
-    timeoutMs,
-    provider,
-    timedOut: false,
-    inFlight: new Set(),
-    phaseChanged: new Promise<void>((resolve) => {
-      signalPhaseChanged = resolve;
-    }),
-    signalPhaseChanged,
-  };
-}
-
-function resetOAuthActionDeadline(deadline: OAuthActionDeadline, timeoutMs: number): void {
-  deadline.timeoutMs = timeoutMs;
-  deadline.expiresAt = Date.now() + timeoutMs;
-  deadline.timedOut = false;
-  deadline.signalPhaseChanged();
-  deadline.phaseChanged = new Promise<void>((resolve) => {
-    deadline.signalPhaseChanged = resolve;
-  });
-}
-
-function oauthActionRemainingMs(deadline: OAuthActionDeadline): number {
-  return Math.max(0, deadline.expiresAt - Date.now());
-}
-
-function trackOAuthActionPromise<T>(
-  deadline: OAuthActionDeadline,
-  promise: Promise<T>,
-): Promise<T> {
-  deadline.inFlight.add(promise);
-  void promise.then(
-    () => deadline.inFlight.delete(promise),
-    () => deadline.inFlight.delete(promise),
-  );
-  return promise;
-}
-
-function expireOAuthAction(deadline: OAuthActionDeadline): void {
-  if (deadline.timedOut) return;
-  deadline.timedOut = true;
-}
-
-async function waitForOAuthActionQuiescence(deadline: OAuthActionDeadline): Promise<void> {
-  for (;;) {
-    const pending = [...deadline.inFlight];
-    if (pending.length === 0) {
-      await Promise.resolve();
-      if (deadline.inFlight.size === 0) return;
-      continue;
-    }
-    await Promise.allSettled(pending);
-  }
-}
-
-// The backstop race itself only knows that its budget elapsed. The action
-// boundary checks attempt-local browser completion evidence before exposing
-// this fallback; without that evidence, report no guessed cause. Which fact depends on the phase: while the action was still
-// queued behind a prior OAuth call's lease it was never attempted at all,
-// whereas once running the inner browser.ts wait outlived its own deadline.
-// Both are recoverable, not failures.
-function oauthActionDeadlineError(
-  deadline: OAuthActionDeadline,
-  phase: "lease" | "action",
-): OAuthAwaitingHumanError {
-  const seconds = Math.ceil(deadline.timeoutMs / 1000);
-  return new OAuthAwaitingHumanError(
-    phase === "lease"
-      ? "OAuth has not been attempted yet: it was still waiting behind a prior OAuth call " +
-          `on this browser after ${seconds} seconds. Retry oauth_login.`
-      : `OAuth action did not complete within ${seconds} seconds. ` +
-          "Call operate_observe to check whether the pending step has resolved, rather than " +
-          "treating this as a failure.",
-    phase === "lease" ? "not_attempted" : "pending",
-  );
-}
-
-async function withinOAuthActionDeadline<T>(
-  promise: Promise<T>,
-  deadline: OAuthActionDeadline,
-  phase: "lease" | "action" = "action",
-): Promise<T> {
-  const tracked = trackOAuthActionPromise(deadline, promise);
-  const settled = tracked.then(
-    (value) => ({ kind: "settled" as const, value }),
-    (error: unknown) => ({ kind: "rejected" as const, error }),
-  );
-  for (;;) {
-    const remainingMs = oauthActionRemainingMs(deadline);
-    if (remainingMs <= 0 || deadline.timedOut) {
-      expireOAuthAction(deadline);
-      throw oauthActionDeadlineError(deadline, phase);
-    }
-    const phaseChanged = deadline.phaseChanged;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const outcome = await Promise.race([
-      settled,
-      phaseChanged.then(() => ({ kind: "phase_changed" as const })),
-      new Promise<{ kind: "timed_out" }>((resolve) => {
-        timer = setTimeout(() => resolve({ kind: "timed_out" }), remainingMs);
-      }),
-    ]);
-    if (timer !== undefined) clearTimeout(timer);
-    if (outcome.kind === "phase_changed") continue;
-    if (outcome.kind === "timed_out") {
-      expireOAuthAction(deadline);
-      throw oauthActionDeadlineError(deadline, phase);
-    }
-    if (outcome.kind === "rejected") throw outcome.error;
-    return outcome.value;
-  }
-}
-
-function oauthLoginLeaseCooldownMs(): number {
-  const configured = Number(process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS);
-  return Number.isFinite(configured) && configured >= 0
-    ? Math.min(configured, 60_000)
-    : DEFAULT_OAUTH_LOGIN_LEASE_COOLDOWN_MS;
-}
-
-async function waitForOAuthLeaseCooldown(cooldownMs: number): Promise<void> {
-  if (cooldownMs <= 0) return;
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, cooldownMs);
-    timer.unref();
-  });
-}
-
-async function withOAuthActionLease<T>(
-  deadline: OAuthActionDeadline | undefined,
-  run: () => Promise<T>,
-  releaseCooldownMs = 0,
-): Promise<T> {
-  let release!: () => void;
-  const previous = oauthActionLeaseTail;
-  const turn = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  oauthActionLeaseTail = previous.then(() => turn);
-  let acquired = false;
-  try {
-    if (deadline === undefined) await previous;
-    else await withinOAuthActionDeadline(previous, deadline, "lease");
-    acquired = true;
-    return await run();
-  } finally {
-    if (deadline === undefined) {
-      release();
-    } else if (!acquired) {
-      void previous.then(release, release);
-    } else {
-      void waitForOAuthActionQuiescence(deadline)
-        .then(() => waitForOAuthLeaseCooldown(releaseCooldownMs))
-        .then(release, release);
-    }
-  }
-}
-
 async function withOAuthActionBoundary(
   session: Session,
   provider: OAuthProviderId | undefined,
@@ -599,7 +417,8 @@ async function runSerializedOAuthBoundary(
     session,
     async (browser) => {
       const humanHandoffTimeoutMs = oauthHumanHandoffTimeoutMs();
-      await browser.loginWithOAuth(
+      await loginWithOAuth(
+        browser,
         authorizedElement.selector,
         oauthActionRemainingMs(deadline),
         provider,
@@ -1372,7 +1191,7 @@ async function observedOAuthChallenge(
   sessionId: string,
 ): Promise<Observation["oauth"] | undefined> {
   const session = sessionForCall(sessionId);
-  const error = await session?.browser.refreshOAuthHumanChallenge?.();
+  const error = await (session?.browser ? refreshOAuthHumanChallenge(session.browser) : undefined);
   if (error == null || error.challenge === undefined) return undefined;
   return {
     state: "awaiting_human",
@@ -1429,9 +1248,9 @@ async function observeOwned(sessionId: string, format?: "compact" | "full"): Pro
   const requestedFormat = format ?? "full";
   const completionSource = oauthCompletionSourcePage(session);
   if (completionSource?.isClosed() === true) {
-    session.browser.completeOAuthTransitionRecovery();
+    completeOAuthTransitionRecovery(session.browser);
   }
-  const transition = session.browser.oauthTransitionStatus?.();
+  const transition = oauthTransitionStatus(session.browser);
   const sourcePage =
     transition?.providerPageClosed === true &&
     transition.productPageViable &&
@@ -1608,7 +1427,6 @@ export function currentProvisionUrl(sessionId: string): string {
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   return operationPageForSession(session)?.url() ?? session.browser.currentUrl();
 }
-
 
 // PR3c — generate a strong signup password. Policy-compliant by construction
 // (>=1 lower/upper/digit/symbol) so it satisfies common signup validators, then
@@ -2369,10 +2187,12 @@ function terminalOAuthCompletionObservation(session: Session, url: string): Obse
   const guidance =
     "OAuth completed in a popup that closed before its controls could be observed. " +
     "Call operate_observe to inspect the active product page.";
-  return compactV2PublicObservation(
-    session,
-    { stage: safeStageV2(url, []), guidance, terminal, url },
-  );
+  return compactV2PublicObservation(session, {
+    stage: safeStageV2(url, []),
+    guidance,
+    terminal,
+    url,
+  });
 }
 
 async function observeSession(
@@ -2398,7 +2218,7 @@ async function observeSession(
   if (!preserveSourceBinding) rememberOAuthCompletionSourcePage(session, sourcePage);
   const oauthInProgress = (): Observation => {
     invalidateCompactV2Snapshot(session);
-    const oauth = session.browser.oauthTransitionStatus?.();
+    const oauth = oauthTransitionStatus(session.browser);
     const guidance =
       "OAuth in progress: the provider detached or closed its page as expected. " +
       "Do not switch login methods or close the session; call operate_observe again to read the retained product page.";
@@ -2407,7 +2227,7 @@ async function observeSession(
       provider_page: "closed_or_detached",
       next_action: "operate_observe",
     };
-    session.browser.completeOAuthTransitionRecovery();
+    completeOAuthTransitionRecovery(session.browser);
     return compactV2PublicObservation(
       session,
       {
@@ -2422,7 +2242,7 @@ async function observeSession(
   try {
     if (sourcePage === undefined) {
       session.browser.recoverActivePage();
-      const transition = session.browser.oauthTransitionStatus?.();
+      const transition = oauthTransitionStatus(session.browser);
       if (
         transition?.providerPageClosed === true &&
         transition.productPageViable &&
@@ -2458,7 +2278,7 @@ async function observeSession(
       forceFullDOM,
     );
   } catch (err) {
-    const oauth = session.browser.oauthTransitionStatus?.();
+    const oauth = session.browser ? oauthTransitionStatus(session.browser) : undefined;
     if (oauth?.providerPageClosed === true && oauth.productPageViable && oauth.browserConnected) {
       // A read racing an expected provider-page close must not leak the raw
       // Playwright "Target page, context or browser has been closed" exception
@@ -2872,7 +2692,7 @@ async function executeAct(
         break;
       }
       case "oauth_settle": {
-        actionPageAfter = await browser.settleAfterOAuth(compactV2ActionPage);
+        actionPageAfter = await settleAfterOAuth(browser, compactV2ActionPage);
         rememberOAuthCompletionSourcePage(session, actionPageAfter);
         break;
       }
@@ -2918,18 +2738,20 @@ async function executeAct(
           });
           break;
         }
-        const el = (await resolveFreshActTarget(
-          session,
-          browser,
-          compactV2ActionPage,
-          compactV2Authorization,
-          resolutionTarget!,
-          internalAccess,
-          "type_secret",
-          "type_secret",
-          action.target,
-          false,
-        )).el;
+        const el = (
+          await resolveFreshActTarget(
+            session,
+            browser,
+            compactV2ActionPage,
+            compactV2Authorization,
+            resolutionTarget!,
+            internalAccess,
+            "type_secret",
+            "type_secret",
+            action.target,
+            false,
+          )
+        ).el;
         // Type the REAL value into the page. It crosses only browser↔page; the
         // value is never returned to the host and never logged.
         await actType(actDriverTarget(el), value, true);
@@ -2941,18 +2763,20 @@ async function executeAct(
         break;
       }
       case "select": {
-        const el = (await resolveFreshActTarget(
-          session,
-          browser,
-          compactV2ActionPage,
-          compactV2Authorization,
-          resolutionTarget!,
-          internalAccess,
-          "select",
-          "select",
-          action.target,
-          true,
-        )).el;
+        const el = (
+          await resolveFreshActTarget(
+            session,
+            browser,
+            compactV2ActionPage,
+            compactV2Authorization,
+            resolutionTarget!,
+            internalAccess,
+            "select",
+            "select",
+            action.target,
+            true,
+          )
+        ).el;
         const committedText = await browser.select(
           actDriverTarget(el),
           action.text,
@@ -3481,7 +3305,6 @@ const normLabelKey = (label: string): string =>
     .replace(/[^a-z0-9_]/gi, "")
     .toLowerCase()
     .slice(0, 40);
-
 
 function firstTokenMatching(haystack: string, re: RegExp): string | null {
   const match = haystack.match(re);

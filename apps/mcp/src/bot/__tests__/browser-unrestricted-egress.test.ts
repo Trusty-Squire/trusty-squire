@@ -6,6 +6,14 @@ import { BrowserController } from "../browser.js";
 import { installBrokerBrowserCustody } from "../broker/custody.js";
 import { startProvisionSession, finishProvisionSession } from "../session/lifecycle.js";
 
+// The provider-session probes are module functions now; stub the module rather
+// than the controller so startProvisionSession's admission reads see the fixture.
+vi.mock("../oauth-login.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../oauth-login.js")>()),
+  detectSessionProviders: async () => ["google"],
+  detectGoogleAccountEmail: async () => "fixture@example.test",
+}));
+
 let browser: Browser;
 let active: BrowserController;
 beforeAll(async () => {
@@ -39,8 +47,6 @@ describe("operator egress", () => {
       });
     });
     active = BrowserController.fromHarnessPage(await context.newPage());
-    vi.spyOn(active, "detectSessionProviders").mockResolvedValue(["google"]);
-    vi.spyOn(active, "detectGoogleAccountEmail").mockResolvedValue("fixture@example.test");
     let sessionId: string | undefined;
     try {
       const result = await startProvisionSession(

@@ -39,7 +39,7 @@ export class PageDriver {
   // HAR, then remove that route before checkout becomes live.
   harnessAttachedPage = false;
 
-  // T6/T7 — OAuth handshake bookkeeping. Legacy startOAuth() adopts a
+  // T6/T7 — OAuth handshake bookkeeping. The OAuth login adopts a
   // popup window as the active page, so keep the product tab parked here
   // until settleAfterOAuth() restores it. The operator's oauth_login action
   // keeps the observed product page active for the click and opens a recovery

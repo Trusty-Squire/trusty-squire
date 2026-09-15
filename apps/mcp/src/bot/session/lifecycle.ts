@@ -30,6 +30,7 @@ import { brokerBrowserCustody } from "../broker/custody.js";
 // back-reference.
 import { randomUUID } from "node:crypto";
 import type { BrowserController } from "../browser.js";
+import { detectGoogleAccountEmail, detectSessionProviders } from "../oauth-login.js";
 import { compactV2AuditValue } from "../compact-observation-v2.js";
 import type { ApiClient } from "../../api-client.js";
 import { loginSessionGuidance } from "../skill-hint.js";
@@ -529,20 +530,11 @@ async function ensureProvisionPrimaryProviderSession(
   // surface is opened in this same context. Match the proven live-identity
   // path before reading the markers. The account lookup warms the context; it
   // is not itself the admission signal.
-  if (typeof browser.detectGoogleAccountEmail === "function") {
-    await browser.detectGoogleAccountEmail().catch(() => null);
-  }
-  if (typeof browser.detectSessionProviders !== "function") {
-    console.error(
-      "[operate] provider-session detection unavailable on this browser controller — " +
-        "treating as no live provider session",
-    );
-    return [];
-  }
+  await detectGoogleAccountEmail(browser).catch(() => null);
   // Fail closed, but never SILENTLY: an empty list refuses the start with the
   // same `google_session` wall as a genuinely signed-out profile, so a throwing
   // probe used to be indistinguishable from "not signed in". Say which it was.
-  return await browser.detectSessionProviders().catch((err: unknown) => {
+  return await detectSessionProviders(browser).catch((err: unknown) => {
     console.error(
       `[operate] provider-session detection failed: ${err instanceof Error ? err.message : String(err)}`,
     );
@@ -564,10 +556,7 @@ export async function startProvisionSession(
   try {
     const probe = async () => {
       const providers = await ensureProvisionPrimaryProviderSession(browser);
-      workerEmail =
-        typeof browser.detectGoogleAccountEmail === "function"
-          ? await browser.detectGoogleAccountEmail().catch(() => null)
-          : null;
+      workerEmail = await detectGoogleAccountEmail(browser).catch(() => null);
       return providers;
     };
     const custody = brokerBrowserCustody();
@@ -597,10 +586,7 @@ export async function startProvisionSession(
           };
     }
     if (custody === undefined)
-      workerEmail =
-        typeof browser.detectGoogleAccountEmail === "function"
-          ? await browser.detectGoogleAccountEmail().catch(() => null)
-          : null;
+      workerEmail = await detectGoogleAccountEmail(browser).catch(() => null);
   } catch (error) {
     await releaseWarmBrowserPage(browser, false);
     throw error;

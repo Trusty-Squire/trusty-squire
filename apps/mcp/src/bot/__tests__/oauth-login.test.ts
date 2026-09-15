@@ -9,13 +9,19 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type Page } from "playwright";
+import { BrowserController } from "../browser.js";
 import {
-  BrowserController,
+  advanceOAuthConsent,
+  detectGoogleAccountEmail,
+  detectSessionProviders,
+  loginWithOAuth,
+  oauthTransitionStatus,
+  settleAfterOAuth,
   OAuthAwaitingHumanError,
   OAuthFailedError,
   OAuthOnboardingRequiredError,
   oauthErrorFromReturnUrl,
-} from "../browser.js";
+} from "../oauth-login.js";
 import {
   act,
   awaitVerification,
@@ -51,7 +57,9 @@ function labelSlug(label: string): string {
 }
 function refByLabel(observation: { safe_table?: unknown }, label: string): string | undefined {
   const expected = labelSlug(label);
-  return compactRows(observation).find(([, , facts]) => (facts ?? "").split("|")[0] === expected)?.[0];
+  return compactRows(observation).find(
+    ([, , facts]) => (facts ?? "").split("|")[0] === expected,
+  )?.[0];
 }
 function hasLabel(observation: { safe_table?: unknown }, label: string): boolean {
   return refByLabel(observation, label) !== undefined;
@@ -73,6 +81,41 @@ async function controllerForProduct(): Promise<{ controller: BrowserController; 
   await product.goto(PRODUCT_URL);
   const controller = BrowserController.fromHarnessPage(product);
   return { controller, product };
+}
+
+// Stand-in for the deleted legacy `startOAuth` entry point: click the product's
+// OAuth control, adopt the provider popup, and arm the same controller state
+// the settle/observe paths expect. Test setup only — the live flow is
+// loginWithOAuth.
+async function legacyStartOAuth(
+  controller: BrowserController,
+  product: Page,
+  selector: string,
+): Promise<void> {
+  if (!controller.page || !controller.context) throw new Error("Browser not started");
+  if (
+    !/accounts\.google\.com|github\.com\/login|login\.microsoftonline\.com/i.test(
+      controller.page.url(),
+    )
+  ) {
+    controller.oauthProductPage = product;
+  }
+  controller.oauthProviderPage = null;
+  controller.oauthProviderPageClosed = false;
+  const page = controller.page;
+  const popupPromise = page.waitForEvent("popup", { timeout: 8000 }).catch(() => null);
+  await controller.click({ kind: "selector", selector, method: "click" });
+  const popup = await popupPromise;
+  if (popup !== null && popup !== page && controller.ownedPages.has(popup)) {
+    controller.page = popup;
+    controller.oauthProviderPage = popup;
+  }
+  controller.adoptLivePage();
+  try {
+    await controller.page?.waitForLoadState("domcontentloaded", { timeout: 30000 });
+  } catch {
+    // best-effort — the consent loop re-reads state regardless
+  }
 }
 
 describe("BrowserController OAuth popup lifecycle", () => {
@@ -155,10 +198,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
           await fixtureEvidence(`oauth-denied-${mode}`, {
             error: (failure as Error).message,
             initiatingClicks: click.mock.calls.length,
-            ownership: controller.oauthTransitionStatus(),
+            ownership: oauthTransitionStatus(controller),
           });
           expect(click).toHaveBeenCalledTimes(1);
-          expect(controller.oauthTransitionStatus()).toBeNull();
+          expect(oauthTransitionStatus(controller)).toBeNull();
           expect(product.isClosed()).toBe(false);
           await expect(observe(sessionId)).resolves.toMatchObject({ session_id: sessionId });
           return;
@@ -195,12 +238,12 @@ describe("BrowserController OAuth popup lifecycle", () => {
           expect(JSON.stringify(refreshed)).not.toContain("hidden-consent-action");
           expect(click).toHaveBeenCalledTimes(1);
           expect(controller.currentUrl()).toBe(provider);
-          await expect(controller.loginWithOAuth("#oauth", 100)).rejects.toBeInstanceOf(
+          await expect(loginWithOAuth(controller, "#oauth", 100)).rejects.toBeInstanceOf(
             OAuthAwaitingHumanError,
           );
           expect(click).toHaveBeenCalledTimes(1);
           if (mode === "popup") {
-            expect(controller.oauthTransitionStatus()).toMatchObject({
+            expect(oauthTransitionStatus(controller)).toMatchObject({
               productUrl,
               productPageViable: true,
               providerPageClosed: false,
@@ -238,12 +281,12 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await product.goto("https://product.test/login");
     const controller = BrowserController.fromHarnessPage(product);
     try {
-      await expect(controller.loginWithOAuth("#oauth", 1_500, "google")).rejects.toBeInstanceOf(
+      await expect(loginWithOAuth(controller, "#oauth", 1_500, "google")).rejects.toBeInstanceOf(
         OAuthOnboardingRequiredError,
       );
       expect(product.url()).toBe("https://product.test/required-information");
       expect(await product.locator("body").getAttribute("data-clicked")).toBeNull();
-      await expect(controller.advanceOAuthConsent("google", 50)).resolves.toBe(false);
+      await expect(advanceOAuthConsent(controller, "google", 50)).resolves.toBe(false);
       expect(await product.locator("body").getAttribute("data-clicked")).toBeNull();
     } finally {
       await context.close();
@@ -291,17 +334,17 @@ describe("BrowserController OAuth popup lifecycle", () => {
         reporter: undefined,
         reportedChallenges: new Map(),
       };
-      await expect(controller.advanceOAuthConsent("google", 500)).resolves.toBe(true);
+      await expect(advanceOAuthConsent(controller, "google", 500)).resolves.toBe(true);
       expect(await product.locator("body").getAttribute("data-clicks")).toBe("1");
-      await expect(controller.advanceOAuthConsent("google", 500)).resolves.toBe(false);
+      await expect(advanceOAuthConsent(controller, "google", 500)).resolves.toBe(false);
       expect(await product.locator("body").getAttribute("data-clicks")).toBe("1");
       await product.reload();
-      await expect(controller.advanceOAuthConsent("google", 500)).resolves.toBe(false);
+      await expect(advanceOAuthConsent(controller, "google", 500)).resolves.toBe(false);
       expect(await product.locator("body").getAttribute("data-clicks")).toBeNull();
       const driver = (controller as unknown as { pageDriver: Record<string, unknown> }).pageDriver;
       driver.oauthProductPage = product;
       driver.oauthProviderPage = product;
-      await expect(controller.loginWithOAuth("#oauth", 100, "google")).rejects.toMatchObject({
+      await expect(loginWithOAuth(controller, "#oauth", 100, "google")).rejects.toMatchObject({
         message: expect.stringContaining("second authorization attempt was not started"),
       });
       expect(await product.locator("body").getAttribute("data-clicks")).toBeNull();
@@ -340,18 +383,17 @@ describe("BrowserController OAuth popup lifecycle", () => {
       }),
     );
     try {
-      const error = await controller
-        .loginWithOAuth(
-          "#oauth",
-          2_000,
-          "google",
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          reporter,
-        )
-        .catch((caught: unknown) => caught);
+      const error = await loginWithOAuth(
+        controller,
+        "#oauth",
+        2_000,
+        "google",
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        reporter,
+      ).catch((caught: unknown) => caught);
       expect(error).toBeInstanceOf(OAuthAwaitingHumanError);
       expect(error).toMatchObject({
         challenge: {
@@ -482,7 +524,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         },
       ]);
 
-      await expect(controller.detectSessionProviders()).resolves.toEqual(["google"]);
+      await expect(detectSessionProviders(controller)).resolves.toEqual(["google"]);
     } finally {
       await context.close().catch(() => undefined);
     }
@@ -492,7 +534,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const { controller, product } = await controllerForProduct();
     const context = product.context();
     try {
-      await expect(controller.detectSessionProviders()).resolves.toEqual([]);
+      await expect(detectSessionProviders(controller)).resolves.toEqual([]);
     } finally {
       await context.close().catch(() => undefined);
     }
@@ -508,7 +550,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         serviceUrl: PRODUCT_URL,
       });
       sessionId = started.session_id;
-      await controller.startOAuth("#oauth");
+      await legacyStartOAuth(controller, product, "#oauth");
       const popup = (controller as unknown as { page: Page }).page;
       expect(popup).not.toBe(product);
 
@@ -594,7 +636,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await product.goto(delayedProductUrl);
     const controller = BrowserController.fromHarnessPage(product);
     try {
-      await expect(controller.loginWithOAuth("#oauth", 3_000)).rejects.toBeInstanceOf(
+      await expect(loginWithOAuth(controller, "#oauth", 3_000)).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
       expect(product.isClosed()).toBe(false);
@@ -613,9 +655,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const { controller, product } = await controllerForProduct();
     const context = product.context();
     try {
-      await controller.startOAuth("#oauth");
+      await legacyStartOAuth(controller, product, "#oauth");
       const popup = (controller as unknown as { page: Page }).page;
-      const settling = controller.settleAfterOAuth(popup);
+      const settling = settleAfterOAuth(controller, popup);
       await popup.close();
       await settling;
 
@@ -643,7 +685,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         serviceUrl: PRODUCT_URL,
       });
       sessionId = started.session_id;
-      await controller.startOAuth("#oauth");
+      await legacyStartOAuth(controller, product, "#oauth");
       const source = (controller as unknown as { page: Page }).page;
       await source.setContent(
         `<button id="open-foreign" onclick="window.open('${foreignUrl}')">Open foreign tab</button>`,
@@ -671,7 +713,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const { controller, product } = await controllerForProduct();
     const context = product.context();
     try {
-      await controller.startOAuth("#oauth");
+      await legacyStartOAuth(controller, product, "#oauth");
       const provider = (controller as unknown as { page: Page }).page;
       const unrelatedPromise = product.waitForEvent("popup");
       await product.evaluate(() => window.open("about:blank"));
@@ -679,7 +721,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await unrelated.setContent('<main id="unrelated-state">Unrelated tab</main>');
       await product.close();
 
-      await expect(controller.settleAfterOAuth(provider)).rejects.toThrow(
+      await expect(settleAfterOAuth(controller, provider)).rejects.toThrow(
         "OAuth lifecycle no longer matches the resolved operation page",
       );
       expect(provider.isClosed()).toBe(false);
@@ -696,14 +738,14 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const { controller, product } = await controllerForProduct();
     const context = product.context();
     try {
-      await controller.startOAuth("#oauth");
+      await legacyStartOAuth(controller, product, "#oauth");
       const provider = (controller as unknown as { page: Page }).page;
       const unrelatedPromise = product.waitForEvent("popup");
       await product.evaluate(() => window.open("about:blank"));
       const unrelated = await unrelatedPromise;
       await unrelated.setContent('<main id="unrelated-state">Unrelated tab</main>');
 
-      const settling = controller.settleAfterOAuth(provider);
+      const settling = settleAfterOAuth(controller, provider);
       await product.close();
       await expect(settling).rejects.toThrow("OAuth lifecycle product page became unavailable");
       expect(provider.isClosed()).toBe(false);
@@ -720,13 +762,13 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const { controller, product } = await controllerForProduct();
     const context = product.context();
     try {
-      await controller.startOAuth("#oauth");
+      await legacyStartOAuth(controller, product, "#oauth");
       const provider = (controller as unknown as { page: Page }).page;
       const sleepSpy = vi
         .spyOn(controller as unknown as { sleep(ms: number): Promise<void> }, "sleep")
         .mockResolvedValue();
       try {
-        await controller.settleAfterOAuth(provider);
+        await settleAfterOAuth(controller, provider);
 
         expect(product.isClosed()).toBe(false);
         expect(provider.isClosed()).toBe(true);
@@ -743,7 +785,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const { controller, product } = await controllerForProduct();
     const context = product.context();
     try {
-      await controller.startOAuth("#oauth");
+      await legacyStartOAuth(controller, product, "#oauth");
       const provider = (controller as unknown as { page: Page }).page;
       let sleeps = 0;
       const sleepSpy = vi
@@ -753,7 +795,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
           if (sleeps === 12) await product.close();
         });
       try {
-        await expect(controller.settleAfterOAuth(provider)).rejects.toThrow(
+        await expect(settleAfterOAuth(controller, provider)).rejects.toThrow(
           "OAuth lifecycle product page became unavailable",
         );
         expect(provider.isClosed()).toBe(false);
@@ -880,7 +922,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const controller = BrowserController.fromHarnessPage(product);
 
     try {
-      await expect(controller.loginWithOAuth("#oauth", 2_000)).rejects.toBeInstanceOf(
+      await expect(loginWithOAuth(controller, "#oauth", 2_000)).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
       expect(await product.locator("#oauth").count()).toBe(1);
@@ -929,10 +971,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const controller = BrowserController.fromHarnessPage(product);
 
     try {
-      await controller.loginWithOAuth("#oauth", 5_000, "google", "worker@example.com");
+      await loginWithOAuth(controller, "#oauth", 5_000, "google", "worker@example.com");
       await expect(product.locator("#state").textContent()).resolves.toBe("Signed in");
       expect(selectedAccount).toBe("worker@example.com");
-      await expect(controller.detectGoogleAccountEmail("worker@example.com")).resolves.toBe(
+      await expect(detectGoogleAccountEmail(controller, "worker@example.com")).resolves.toBe(
         "worker@example.com",
       );
       expect(identityAuthUser).toBe("worker@example.com");
@@ -970,7 +1012,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const controller = BrowserController.fromHarnessPage(product);
 
     try {
-      await controller.loginWithOAuth("#oauth", 5_000, "google");
+      await loginWithOAuth(controller, "#oauth", 5_000, "google");
       await expect(product.locator("#state").textContent()).resolves.toBe("Signed in");
       expect(selectedAccount).toBe("only@example.com");
       expect(controller.currentUrl()).toBe("https://product.test/callback");
@@ -1013,7 +1055,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const controller = BrowserController.fromHarnessPage(product);
 
     try {
-      await controller.loginWithOAuth("#oauth", 5_000, "google", "worker@example.com");
+      await loginWithOAuth(controller, "#oauth", 5_000, "google", "worker@example.com");
       await expect(product.locator("#state").textContent()).resolves.toBe("Signed in");
       expect(selectedAccount).toBe("worker@example.com");
       expect(controller.currentUrl()).toBe("https://product.test/callback");
@@ -1045,7 +1087,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const controller = BrowserController.fromHarnessPage(product);
 
     try {
-      await expect(controller.advanceOAuthConsent("google", 5)).resolves.toBe(false);
+      await expect(advanceOAuthConsent(controller, "google", 5)).resolves.toBe(false);
       await expect(product.locator("body").getAttribute("data-consent-clicks")).resolves.toBeNull();
     } finally {
       await context.close().catch(() => undefined);
@@ -1079,7 +1121,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await product.goto("https://product.test/login");
     const controller = BrowserController.fromHarnessPage(product);
     try {
-      await expect(controller.loginWithOAuth("#oauth", 1_500, "google")).resolves.toBeUndefined();
+      await expect(loginWithOAuth(controller, "#oauth", 1_500, "google")).resolves.toBeUndefined();
       expect(controller.currentUrl()).toBe("https://console.product.test/projects");
     } finally {
       await context.close();
@@ -1113,7 +1155,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await product.goto("https://product.test/login");
       const controller = BrowserController.fromHarnessPage(product);
       try {
-        await expect(controller.loginWithOAuth("#oauth", 500)).resolves.toBeUndefined();
+        await expect(loginWithOAuth(controller, "#oauth", 500)).resolves.toBeUndefined();
         expect(controller.completedOAuthPage()?.url()).toBe(expectedReturnUrl);
       } finally {
         await context.close();
@@ -1149,7 +1191,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await product.goto("https://product.test/login");
       const controller = BrowserController.fromHarnessPage(product);
       try {
-        await expect(controller.loginWithOAuth("#oauth", 500)).resolves.toBeUndefined();
+        await expect(loginWithOAuth(controller, "#oauth", 500)).resolves.toBeUndefined();
         expect(controller.completedOAuthPage()?.url()).toBe(expectedReturnUrl);
       } finally {
         await context.close();
@@ -1189,7 +1231,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await product.goto("https://product.test/login");
     const controller = BrowserController.fromHarnessPage(product);
     try {
-      const login = controller.loginWithOAuth("#oauth", 1_000);
+      const login = loginWithOAuth(controller, "#oauth", 1_000);
       await product.waitForFunction(
         () => (window as { oauthClicked?: boolean }).oauthClicked === true,
       );
@@ -1230,7 +1272,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await product.goto("https://product.test/login");
     const controller = BrowserController.fromHarnessPage(product);
     try {
-      await expect(controller.loginWithOAuth("#oauth", 500)).rejects.toBeInstanceOf(
+      await expect(loginWithOAuth(controller, "#oauth", 500)).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
     } finally {
@@ -1271,9 +1313,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         const started = await startHarnessProvisionSession({
           browser: controller,
           serviceUrl: "https://product.test/login",
-          ...(format === "browser-use-dom"
-            ? { format: "full" as const }
-            : {}),
+          ...(format === "browser-use-dom" ? { format: "full" as const } : {}),
         });
         sessionId = started.session_id;
         const oauthRef =
@@ -1337,9 +1377,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         const started = await startHarnessProvisionSession({
           browser: controller,
           serviceUrl: "https://product.test/login",
-          ...(format === "browser-use-dom"
-            ? { format: "full" as const }
-            : {}),
+          ...(format === "browser-use-dom" ? { format: "full" as const } : {}),
         });
         sessionId = started.session_id;
         const oauthRef =
@@ -1468,12 +1506,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
         releaseClick = resolve;
       });
       let popup: Page | undefined;
-      vi
-        .spyOn(
-          controller as unknown as { clickActivePageSelector: (selector: string) => Promise<void> },
-          "clickActivePageSelector",
-        )
-        .mockImplementationOnce(async (selector: string) => {
+      vi.spyOn(
+        controller as unknown as { clickActivePageSelector: (selector: string) => Promise<void> },
+        "clickActivePageSelector",
+      ).mockImplementationOnce(async (selector: string) => {
         const opened = product.waitForEvent("popup");
         await product.locator(selector).click();
         popup = await opened;
@@ -1562,33 +1598,41 @@ describe("BrowserController OAuth popup lifecycle", () => {
       );
       await product.goto("https://product.test/login");
       const controller = BrowserController.fromHarnessPage(product);
-      vi.spyOn(
-        controller as unknown as {
-          waitForOAuthLifecycle: (...args: unknown[]) => Promise<Page | null>;
-        },
-        "waitForOAuthLifecycle",
-      ).mockResolvedValueOnce(null);
       let releaseConsent!: () => void;
       let consentStarted = false;
       const consentGate = new Promise<boolean>((resolve) => {
         releaseConsent = () => resolve(true);
       });
-      vi.spyOn(controller, "advanceOAuthConsent").mockImplementation(async () => {
-        await product.goto("https://console.product.test/projects");
-        consentStarted = true;
-        return await consentGate;
-      });
+      // The consent loop sleeps between provider advances. Hold the real flow
+      // there — after a real product-page navigation — so the outer action
+      // deadline has to win while consent work is still pending.
+      const realSleep = controller.sleep.bind(controller);
+      let consentHoldArmed = true;
+      controller.sleep = async (ms: number) => {
+        if (
+          consentHoldArmed &&
+          ms >= 100 &&
+          controller.page?.url().startsWith("https://accounts.google.com/")
+        ) {
+          consentHoldArmed = false;
+          await product.goto("https://console.product.test/projects");
+          consentStarted = true;
+          await consentGate;
+        }
+        return realSleep(ms);
+      };
       let sessionId: string | undefined;
       try {
         const started = await startHarnessProvisionSession({
           browser: controller,
           serviceUrl: "https://product.test/login",
-          ...(format === "browser-use-dom"
-            ? { format: "full" as const }
-            : {}),
+          ...(format === "browser-use-dom" ? { format: "full" as const } : {}),
         });
         sessionId = started.session_id;
-        const refFrom = (observation: { dom?: string; safe_table?: unknown }): string | undefined =>
+        const refFrom = (observation: {
+          dom?: string;
+          safe_table?: unknown;
+        }): string | undefined =>
           format === "browser-use-dom"
             ? observation.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0]
             : compactRows(observation)[0]?.[0];
@@ -1673,7 +1717,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await product.goto("https://product.test/login");
     const controller = BrowserController.fromHarnessPage(product);
     try {
-      await expect(controller.loginWithOAuth("#oauth", 800, "google")).rejects.toBeInstanceOf(
+      await expect(loginWithOAuth(controller, "#oauth", 800, "google")).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
     } finally {
@@ -1703,7 +1747,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await product.goto("https://product.test/login");
       const controller = BrowserController.fromHarnessPage(product);
       try {
-        await expect(controller.loginWithOAuth("#oauth", 800, "google")).rejects.toBeInstanceOf(
+        await expect(loginWithOAuth(controller, "#oauth", 800, "google")).rejects.toBeInstanceOf(
           OAuthAwaitingHumanError,
         );
       } finally {
@@ -1734,7 +1778,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await product.goto("https://product.test/login");
     const controller = BrowserController.fromHarnessPage(product);
     try {
-      await expect(controller.loginWithOAuth("#oauth", 800, "google")).rejects.toBeInstanceOf(
+      await expect(loginWithOAuth(controller, "#oauth", 800, "google")).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
     } finally {
@@ -1764,7 +1808,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await product.goto("https://product.test/login");
     const controller = BrowserController.fromHarnessPage(product);
     try {
-      await expect(controller.loginWithOAuth("#oauth", 800, "google")).rejects.toBeInstanceOf(
+      await expect(loginWithOAuth(controller, "#oauth", 800, "google")).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
     } finally {
@@ -1793,7 +1837,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await product.goto("https://product.test/login");
     const controller = BrowserController.fromHarnessPage(product);
     try {
-      await expect(controller.loginWithOAuth("#oauth", 800, "google")).resolves.toBeUndefined();
+      await expect(loginWithOAuth(controller, "#oauth", 800, "google")).resolves.toBeUndefined();
       expect(controller.currentUrl()).toBe(returnedUrl);
     } finally {
       await context.close();
@@ -1823,7 +1867,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await product.goto("https://resend.test/signup");
     const controller = BrowserController.fromHarnessPage(product);
     try {
-      await expect(controller.loginWithOAuth("#oauth", 800, "google")).resolves.toBeUndefined();
+      await expect(loginWithOAuth(controller, "#oauth", 800, "google")).resolves.toBeUndefined();
       expect(controller.currentUrl()).toBe(dashboardUrl);
     } finally {
       await context.close();
@@ -2091,7 +2135,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await product.goto("https://resend.test/signup");
     const controller = BrowserController.fromHarnessPage(product);
     try {
-      await expect(controller.loginWithOAuth("#oauth", 500, "google")).rejects.toBeInstanceOf(
+      await expect(loginWithOAuth(controller, "#oauth", 500, "google")).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
       expect(controller.currentUrl()).toBe(dashboardUrl);
@@ -2124,7 +2168,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await product.goto("https://resend.test/signup");
     const controller = BrowserController.fromHarnessPage(product);
     try {
-      await expect(controller.loginWithOAuth("#oauth", 500, "google")).rejects.toBeInstanceOf(
+      await expect(loginWithOAuth(controller, "#oauth", 500, "google")).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
       expect(controller.currentUrl()).toBe(loginUrl);
@@ -2157,7 +2201,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await product.goto("https://resend.test/signup");
     const controller = BrowserController.fromHarnessPage(product);
     try {
-      await expect(controller.loginWithOAuth("#oauth", 500, "google")).rejects.toBeInstanceOf(
+      await expect(loginWithOAuth(controller, "#oauth", 500, "google")).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
       expect(controller.currentUrl()).toBe(unrelatedUrl);
@@ -2202,7 +2246,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const completion = { check: undefined as undefined | (() => Promise<unknown>) };
     try {
       await expect(
-        controller.loginWithOAuth("#oauth", 500, undefined, undefined, (check) => {
+        loginWithOAuth(controller, "#oauth", 500, undefined, undefined, (check) => {
           completion.check = check;
         }),
       ).rejects.toBeInstanceOf(OAuthAwaitingHumanError);
@@ -2238,7 +2282,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await product.goto("https://resend.test/signup");
     const controller = BrowserController.fromHarnessPage(product);
     try {
-      await expect(controller.loginWithOAuth("#oauth", 500, "google")).rejects.toBeInstanceOf(
+      await expect(loginWithOAuth(controller, "#oauth", 500, "google")).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
       expect(controller.currentUrl()).toBe(providerVariantUrl);
@@ -2274,7 +2318,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await product.goto("https://resend.test/signup");
     const controller = BrowserController.fromHarnessPage(product);
     try {
-      await expect(controller.loginWithOAuth("#oauth", 500)).rejects.toBeInstanceOf(
+      await expect(loginWithOAuth(controller, "#oauth", 500)).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
       expect(controller.currentUrl()).toBe(foreignProviderUrl);
@@ -2303,7 +2347,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await product.goto("https://app.resend.test/signup");
     const controller = BrowserController.fromHarnessPage(product);
     try {
-      await expect(controller.loginWithOAuth("#oauth", 500)).rejects.toBeInstanceOf(
+      await expect(loginWithOAuth(controller, "#oauth", 500)).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
       expect(controller.currentUrl()).toBe(providerUrl);
@@ -2334,7 +2378,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const completion = { check: undefined as undefined | (() => Promise<unknown>) };
     try {
       await expect(
-        controller.loginWithOAuth("#oauth", 500, "google", undefined, (check) => {
+        loginWithOAuth(controller, "#oauth", 500, "google", undefined, (check) => {
           completion.check = check;
         }),
       ).rejects.toBeInstanceOf(OAuthAwaitingHumanError);
@@ -2374,7 +2418,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const completion = { check: undefined as undefined | (() => Promise<unknown>) };
     try {
       await expect(
-        controller.loginWithOAuth("#oauth", 500, undefined, undefined, (check) => {
+        loginWithOAuth(controller, "#oauth", 500, undefined, undefined, (check) => {
           completion.check = check;
         }),
       ).rejects.toBeInstanceOf(OAuthAwaitingHumanError);
@@ -3036,9 +3080,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         const started = await startHarnessProvisionSession({
           browser: controller,
           serviceUrl: "https://product.test/login",
-          ...(format === "browser-use-dom"
-            ? { format: "full" as const }
-            : {}),
+          ...(format === "browser-use-dom" ? { format: "full" as const } : {}),
         });
         sessionId = started.session_id;
         const oauthRef =
@@ -3100,7 +3142,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       }
     });
     try {
-      await controller.loginWithOAuth("#oauth", 1_000);
+      await loginWithOAuth(controller, "#oauth", 1_000);
       expect(controller.takeOAuthTerminalCompletionUrl()).toBe(expectedReturnUrl);
       expect(controller.takeOAuthTerminalCompletionUrl()).toBeNull();
     } finally {
@@ -3127,47 +3169,51 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await context.route("https://accounts.google.com/**", (route) =>
       route.fulfill({
         contentType: "text/html",
-        body: "<main>Provider sign-in</main>",
+        // Navigate the popup to the return URL only after the controller has
+        // adopted it, so the return is observed live rather than at adoption.
+        body: `<script>setTimeout(() => location.href=${JSON.stringify(expectedReturnUrl)}, 300)</script>`,
       }),
     );
     await context.route("https://console.product.test/**", (route) =>
       route.fulfill({
         contentType: "text/html",
-        body: `<script>window.opener.location.href=${JSON.stringify(challengeUrl)}; window.close()</script>`,
+        body: `<script>window.opener.location.href=${JSON.stringify(challengeUrl)}</script>`,
       }),
     );
     await product.goto("https://product.test/login");
     const controller = BrowserController.fromHarnessPage(product);
-    const lifecycle = controller as unknown as {
-      waitForOAuthLifecycle: (...args: unknown[]) => Promise<Page | null>;
+    // The lifecycle evaluator must only ever see the fully choreographed end
+    // state — return observed, opener committed to the challenge, popup
+    // closed — never an intermediate "return recorded, popup already closed"
+    // state that reads as a terminal completion. Freeze its polling sleeps
+    // until the fixture sequence below has committed every step.
+    const realSleep = controller.sleep.bind(controller);
+    let holdSleeps = true;
+    controller.sleep = async (ms: number) => {
+      while (holdSleeps) await realSleep(20);
+      return realSleep(ms);
     };
-    const realWait = lifecycle.waitForOAuthLifecycle.bind(controller);
-    const wait = vi
-      .spyOn(lifecycle, "waitForOAuthLifecycle")
-      .mockImplementationOnce(async (...args) => {
-        // Begin the callback only after the controller owns the provider popup.
-        // Then commit the challenge before asking the real evaluator to settle.
-        const popup = context
-          .pages()
-          .find((page) => page.url().startsWith("https://accounts.google.com/"))!;
-        const closed = popup.waitForEvent("close");
-        await popup.evaluate((url) => {
-          location.href = url;
-        }, expectedReturnUrl);
-        await product.waitForURL(challengeUrl, { waitUntil: "domcontentloaded" });
-        await closed;
-        return realWait(...args);
-      });
+    product.on("popup", (popup) => {
+      void (async () => {
+        await popup.waitForURL(expectedReturnUrl, { timeout: 5_000 });
+        await product.waitForURL(challengeUrl, { waitUntil: "domcontentloaded", timeout: 5_000 });
+        await popup.close();
+      })()
+        .catch(() => undefined)
+        .finally(() => {
+          holdSleeps = false;
+        });
+    });
     try {
-      await expect(controller.loginWithOAuth("#oauth", 1_000)).rejects.toBeInstanceOf(
+      await expect(loginWithOAuth(controller, "#oauth", 1_000)).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
       expect(controller.takeOAuthTerminalCompletionUrl()).toBeNull();
     } finally {
-      wait.mockRestore();
+      holdSleeps = false;
       await context.close();
     }
-  });
+  }, 15_000);
 
   it("keeps a popup pending after its observed return navigates to a challenge", async () => {
     const context = await browser.newContext();
@@ -3200,7 +3246,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await product.goto("https://product.test/login");
     const controller = BrowserController.fromHarnessPage(product);
     try {
-      await expect(controller.loginWithOAuth("#oauth", 500)).rejects.toBeInstanceOf(
+      await expect(loginWithOAuth(controller, "#oauth", 500)).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
     } finally {
@@ -3235,7 +3281,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await product.goto("https://product.test/login");
     const controller = BrowserController.fromHarnessPage(product);
     try {
-      await expect(controller.loginWithOAuth("#oauth", 500)).rejects.toBeInstanceOf(
+      await expect(loginWithOAuth(controller, "#oauth", 500)).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
     } finally {
@@ -3268,7 +3314,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await product.goto("https://product.test/login");
     const controller = BrowserController.fromHarnessPage(product);
     try {
-      await expect(controller.loginWithOAuth("#oauth", 500)).resolves.toBeUndefined();
+      await expect(loginWithOAuth(controller, "#oauth", 500)).resolves.toBeUndefined();
       expect(controller.currentUrl()).toBe(responseUrl);
     } finally {
       await context.close();
@@ -3349,7 +3395,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     try {
       // Direct callers do not supply the facade's handoff callback, so their
       // explicit total budget must remain the whole lifecycle's ceiling.
-      const rejected = controller.loginWithOAuth("#oauth", budgetMs, "google");
+      const rejected = loginWithOAuth(controller, "#oauth", budgetMs, "google");
       await expect(rejected).rejects.toBeInstanceOf(OAuthAwaitingHumanError);
       await expect(rejected).rejects.toMatchObject({
         message: expect.stringMatching(/has not returned to https:\/\/product\.test/i),
@@ -3399,7 +3445,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const controller = BrowserController.fromHarnessPage(product);
 
     try {
-      const rejected = controller.loginWithOAuth("#oauth", 3_000);
+      const rejected = loginWithOAuth(controller, "#oauth", 3_000);
       await expect(rejected).rejects.toBeInstanceOf(OAuthFailedError);
       await expect(rejected).rejects.toMatchObject({
         message: expect.stringMatching(/error=access_denied/),
@@ -3429,7 +3475,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const budgetMs = 1_500;
 
     try {
-      const login = controller.loginWithOAuth("#oauth", budgetMs);
+      const login = loginWithOAuth(controller, "#oauth", budgetMs);
       setTimeout(() => void product.close().catch(() => undefined), budgetMs - 50);
       await expect(login).rejects.toBeInstanceOf(OAuthAwaitingHumanError);
       expect(product.isClosed()).toBe(true);
@@ -3461,7 +3507,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const controller = BrowserController.fromHarnessPage(product);
 
     try {
-      const rejected = controller.loginWithOAuth("#oauth", 3_000);
+      const rejected = loginWithOAuth(controller, "#oauth", 3_000);
       await expect(rejected).rejects.toBeInstanceOf(OAuthFailedError);
       await expect(rejected).rejects.toMatchObject({
         message: expect.stringMatching(/error=access_denied \(The user denied access\)/),
@@ -3490,7 +3536,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const controller = BrowserController.fromHarnessPage(product);
 
     try {
-      await expect(controller.loginWithOAuth("#oauth", 1_000)).rejects.toBeInstanceOf(
+      await expect(loginWithOAuth(controller, "#oauth", 1_000)).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
       expect(product.isClosed()).toBe(false);
@@ -3517,7 +3563,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
 
     try {
       await expect(
-        controller.loginWithOAuth("#oauth", 2_500, "google", undefined, undefined, handoff),
+        loginWithOAuth(controller, "#oauth", 2_500, "google", undefined, undefined, handoff),
       ).rejects.toBeInstanceOf(OAuthAwaitingHumanError);
       expect(handoff).not.toHaveBeenCalled();
     } finally {
@@ -3587,7 +3633,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const controller = BrowserController.fromHarnessPage(product);
 
     try {
-      await expect(controller.loginWithOAuth("#oauth", 1_000)).rejects.toBeInstanceOf(
+      await expect(loginWithOAuth(controller, "#oauth", 1_000)).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
       expect(controller.currentUrl()).toBe("https://product.test/login?error=access_denied");
@@ -3619,7 +3665,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const controller = BrowserController.fromHarnessPage(product);
 
     try {
-      await controller.loginWithOAuth("#oauth", 3_000);
+      await loginWithOAuth(controller, "#oauth", 3_000);
       expect(product.isClosed()).toBe(false);
       expect(controller.currentUrl()).toBe("https://product.test/callback");
       expect(await controller.extractVisibleText()).toContain("Signed in");
@@ -3656,7 +3702,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const controller = BrowserController.fromHarnessPage(product);
 
     try {
-      await controller.loginWithOAuth("#oauth", 1_500);
+      await loginWithOAuth(controller, "#oauth", 1_500);
       expect(controller.currentUrl()).toBe("https://product.test/callback");
       expect(await controller.extractVisibleText()).toContain("Signed in");
     } finally {

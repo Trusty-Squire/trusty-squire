@@ -20,7 +20,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { constants, publicEncrypt } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { chromium, type Page } from "playwright";
-import { BrowserClickDispatchError, OAuthFailedError } from "../browser.js";
+import { BrowserClickDispatchError } from "../browser.js";
+import { OAuthFailedError } from "../oauth-login.js";
 import type * as BrowserModule from "../browser.js";
 import type * as GoogleLoginModule from "../google-login.js";
 import type * as ProfileModule from "../profile.js";
@@ -71,6 +72,7 @@ const h = vi.hoisted(() => ({
   shippingMethodsLoaded: false,
   requiredShippingAddressCommits: [] as string[],
   clickCalls: 0,
+  dispatchTargets: [] as Array<string | null>,
   jsClickCalls: 0,
   clickError: null as Error | null,
   frameClicks: [] as string[],
@@ -96,6 +98,14 @@ const h = vi.hoisted(() => ({
   identityProbeExpectedGoogleAccountEmails: [] as Array<string | undefined>,
   googleIdentityByExpectedEmail: new Map<string, string | null>(),
   connections: [] as boolean[],
+  controllers: [] as Array<{
+    page: unknown;
+    oauthProductPage: unknown;
+    oauthProviderPage: unknown;
+    oauthProviderPageClosed: boolean;
+    oauthCompletionPage: unknown;
+    activeOAuthPage: unknown;
+  }>,
   profileDirs: [] as Array<string | undefined>,
   proxyUrls: [] as Array<string | undefined>,
   seededStorageStates: [] as unknown[],
@@ -221,8 +231,6 @@ vi.mock("../broker/custody.js", async () => {
 });
 
 vi.mock("../browser.js", async (importOriginal) => ({
-  OAuthOnboardingRequiredError: (await importOriginal<typeof BrowserModule>())
-    .OAuthOnboardingRequiredError,
   BrowserClickDispatchError: (await importOriginal<typeof BrowserModule>())
     .BrowserClickDispatchError,
   registerLocalBrowserLaunch: (
@@ -238,15 +246,33 @@ vi.mock("../browser.js", async (importOriginal) => ({
     private readonly opts: { profileDir?: string; proxyUrl?: string; storageState?: unknown };
     private readonly detached: boolean;
     private detachedUrl = "about:blank";
+    // OAuth page slots consumed by the plain oauth-login.ts helpers. They stay
+    // null until a test or a real OAuth helper assigns them.
+    page: unknown = null;
+    oauthProductPage: unknown = null;
+    oauthProviderPage: unknown = null;
+    oauthProviderPageClosed = false;
+    oauthCompletionPage: unknown = null;
+    oauthConsentAttemptedPhases = new Set<string>();
+    ownedPages = new Set<unknown>();
     constructor(opts: { profileDir?: string; proxyUrl?: string; storageState?: unknown } = {}) {
       this.index = h.connections.length;
       this.opts = opts;
       this.detached =
         this.index > 0 && opts.profileDir !== undefined && opts.profileDir !== h.profileDirs[0];
       h.connections.push(true);
+      h.controllers.push(this);
       h.profileDirs.push(opts.profileDir);
       h.proxyUrls.push(opts.proxyUrl);
       h.seededStorageStates.push(opts.storageState);
+    }
+    trackOpenedTabs(page: unknown): void {
+      this.ownedPages.add(page);
+    }
+    async sleep(ms: number): Promise<void> {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, ms);
+      });
     }
     async start(): Promise<void> {
       h.started += 1;
@@ -259,27 +285,93 @@ vi.mock("../browser.js", async (importOriginal) => ({
         h.startError = null;
         throw error;
       }
+      // A started browser always has a working page for the OAuth helpers.
+      this.page = this.activeOAuthPage;
     }
     isConnected(): boolean {
       return h.connections[this.index] === true;
     }
-    async detectSessionProviders(): Promise<string[]> {
-      h.controllerProviderProbeCalls += 1;
-      if (h.providers !== null) return h.providers;
-      const cookies = (this.opts.storageState as { cookies?: Array<{ name: string }> } | undefined)
-        ?.cookies;
-      return cookies?.some((cookie) => cookie.name === "__Secure-1PSID") ? ["google"] : [];
+    // The OAuth detection helpers moved to plain functions in oauth-login.ts
+    // that drive the controller's `context`, so the fake exposes one: cookies
+    // admit the providers h.providers names, and the identity probe page
+    // mimics myaccount.google.com for the configured worker email.
+    get context(): unknown {
+      const controller = this;
+      return {
+        cookies: async () => {
+          if (h.providers !== null) {
+            return h.providers.flatMap((provider: string) =>
+              provider === "google"
+                ? [
+                    {
+                      name: "__Secure-1PSID",
+                      value: "google-live-session-cookie",
+                      domain: ".google.com",
+                    },
+                  ]
+                : provider === "github"
+                  ? [{ name: "user_session", value: "github-live-session", domain: ".github.com" }]
+                  : [],
+            );
+          }
+          return (
+            (
+              controller.opts.storageState as
+                | { cookies?: Array<{ name: string; value: string; domain: string }> }
+                | undefined
+            )?.cookies ?? []
+          );
+        },
+        on: () => {},
+        off: () => {},
+        newPage: async () => {
+          const identityEmail = { value: null as string | null };
+          return {
+            goto: async (url: string) => {
+              let parsed: URL;
+              try {
+                parsed = new URL(url);
+              } catch {
+                identityEmail.value = h.workerEmail ?? h.liveGoogleEmail;
+                return;
+              }
+              if (parsed.hostname === "myaccount.google.com") h.identityProbeCalls += 1;
+              const authuser = parsed.searchParams.get("authuser") ?? undefined;
+              h.identityProbeExpectedGoogleAccountEmails.push(authuser);
+              identityEmail.value =
+                authuser !== undefined && h.googleIdentityByExpectedEmail.has(authuser)
+                  ? (h.googleIdentityByExpectedEmail.get(authuser) ?? null)
+                  : (h.workerEmail ?? h.liveGoogleEmail);
+            },
+            isClosed: () => false,
+            url: () =>
+              identityEmail.value === null
+                ? "https://accounts.google.com/ServiceLogin"
+                : "https://myaccount.google.com/",
+            waitForLoadState: async () => {},
+            locator: () => ({
+              evaluateAll: async () => [`Google Account: Operator (${identityEmail.value ?? ""})`],
+            }),
+            close: async () => {},
+          };
+        },
+      };
     }
-    async detectGoogleAccountEmail(expectedGoogleAccountEmail?: string): Promise<string | null> {
-      h.identityProbeCalls += 1;
-      h.identityProbeExpectedGoogleAccountEmails.push(expectedGoogleAccountEmail);
-      if (
-        expectedGoogleAccountEmail !== undefined &&
-        h.googleIdentityByExpectedEmail.has(expectedGoogleAccountEmail)
-      ) {
-        return h.googleIdentityByExpectedEmail.get(expectedGoogleAccountEmail) ?? null;
-      }
-      return h.workerEmail ?? h.liveGoogleEmail;
+    // The active working page the OAuth helpers treat as the product tab.
+    // Listeners are registrars only; tests choreograph outcomes via h state.
+    get activeOAuthPage(): unknown {
+      return {
+        isClosed: () => false,
+        url: () => this.currentUrl(),
+        mainFrame: () => ({ url: () => this.currentUrl() }),
+        on: () => {},
+        once: () => {},
+        off: () => {},
+        goto: async () => {},
+        waitForLoadState: async () => {},
+        bringToFront: async () => {},
+        close: async () => {},
+      };
     }
     async goto(url: string): Promise<void> {
       h.gotos.push(url);
@@ -493,7 +585,11 @@ vi.mock("../browser.js", async (importOriginal) => ({
       _page?: unknown,
     ): Promise<string> {
       if (target.kind === "frame") {
-        return await this.selectInFrame(target.frame as { frameUrl: string }, target.selector!, matcher);
+        return await this.selectInFrame(
+          target.frame as { frameUrl: string },
+          target.selector!,
+          matcher,
+        );
       }
       if (target.kind !== "selector") {
         throw new Error("select: handle targets are not supported");
@@ -576,7 +672,11 @@ vi.mock("../browser.js", async (importOriginal) => ({
     async clickViaJs(): Promise<void> {
       h.jsClickCalls += 1;
     }
-    async clickInFrame(target: { frameUrl: string }, selector: string, _page?: unknown): Promise<void> {
+    async clickInFrame(
+      target: { frameUrl: string },
+      selector: string,
+      _page?: unknown,
+    ): Promise<void> {
       h.frameClicks.push(`${target.frameUrl}|${selector}`);
     }
     async clickViaJsInFrame(
@@ -612,6 +712,7 @@ vi.mock("../browser.js", async (importOriginal) => ({
                 (label): label is string => typeof label === "string",
               );
       const tracked = shouldTrack(labels);
+      if (target.kind === "selector") h.dispatchTargets.push(target.selector ?? null);
       const failure = h.trackedClickFailure;
       if (failure?.dispatchStatus !== "not_dispatched") {
         if (performClick !== undefined) {
@@ -743,7 +844,6 @@ vi.mock("../browser.js", async (importOriginal) => ({
     async uploadFileOnPage(_page: unknown, selector: string, filePath: string): Promise<void> {
       await this.uploadFile(selector, filePath);
     }
-    async startOAuth(): Promise<void> {}
     async loginWithOAuth(
       selector: string,
       settleTimeoutMs?: number,
@@ -917,7 +1017,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ApiClient } from "../../api-client.js";
 import { dispatchOperatorBrowserProcessTermination } from "../operator-browser-watchdog.js";
-import { BrowserController, OAuthAwaitingHumanError } from "../browser.js";
+import { BrowserController } from "../browser.js";
+import { OAuthAwaitingHumanError } from "../oauth-login.js";
 import {} from "../profile.js";
 import {
   startProvisionSession,
@@ -1049,6 +1150,7 @@ beforeEach(() => {
   h.shippingMethodsLoaded = false;
   h.requiredShippingAddressCommits = [];
   h.clickCalls = 0;
+  h.dispatchTargets = [];
   h.clickError = null;
   h.jsClickCalls = 0;
   h.frameClicks = [];
@@ -1076,6 +1178,7 @@ beforeEach(() => {
   h.identityProbeExpectedGoogleAccountEmails = [];
   h.googleIdentityByExpectedEmail = new Map();
   h.connections = [];
+  h.controllers = [];
   h.profileDirs = [];
   h.proxyUrls = [];
   h.seededStorageStates = [];
@@ -1143,7 +1246,6 @@ beforeEach(() => {
   h.locatorResolveIntents = [];
   h.locatorDisposeCalls = 0;
 });
-
 
 afterEach(async () => {
   await h.capturePage?.context().browser()?.close();
@@ -1602,13 +1704,11 @@ describe("operate session — OAuth lifecycle", () => {
       }),
     ];
     h.oauthResultUrl = `https://accounts.google.com/signin/challenge/dp/2?continue=${"x".repeat(1_200)}`;
-    const { oauthAwaitingHumanMessage } = await vi.importActual<{
-      oauthAwaitingHumanMessage: (productOrigin: string, budgetMs: number) => string;
-    }>("../browser.js");
-    h.oauthLoginError = new OAuthAwaitingHumanError(
-      oauthAwaitingHumanMessage("https://app.example.com", 30_000),
-    );
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "10";
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+    // start() navigated to the service URL; the same-tab challenge URL below
+    // only exists once the OAuth click redirects the current page.
+    h.currentUrl = h.oauthResultUrl;
     const rows = (await observeQuery(started.session_id, "")).safe_table as Array<
       [string, string, string?]
     >;
@@ -1675,7 +1775,6 @@ describe("operate session — OAuth lifecycle", () => {
     releaseFirst();
     await finishProvisionSession(started.session_id);
   });
-
 });
 describe("operate_start — consent-overlay auto-dismiss", () => {
   // Regression: dismissConsentBanner() shipped as DEAD CODE (zero call sites), so
@@ -2154,13 +2253,24 @@ describe("Compact V2 action-map boundary", () => {
     const handle = (query.safe_table as Array<[string]>)[0]?.[0];
     expect(handle).toMatch(/^@e:/);
 
-    await act(started.session_id, {
+    // The moved plain loginWithOAuth drives the fake's real page/context
+    // surface: the click reaches the resolved Google control, then the short
+    // budget elapses with no provider transition, which is an awaiting_human
+    // observation — never an action failure.
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "200";
+    const pending = await act(started.session_id, {
       kind: "oauth_login",
       target: handle!,
       provider: "google",
     });
+    expect(pending.oauth).toMatchObject({ state: "awaiting_human" });
 
-    expect(h.oauthLoginCalls).toEqual(['form[action="google"] button']);
+    // Main's ordinary click() re-enters dispatch tracking, so the outer OAuth
+    // dispatch and the nested ordinary click each record the same selector.
+    expect(h.dispatchTargets).toEqual([
+      'form[action="google"] button',
+      'form[action="google"] button',
+    ]);
     await finishProvisionSession(started.session_id);
   });
 
@@ -3127,12 +3237,16 @@ describe("Compact V2 action-map boundary", () => {
     expect(await observe(started.session_id)).toMatchObject({ delta: true });
     const refreshedRef = ref;
 
-    h.oauthTransition = {
-      productUrl: secretUrl,
-      providerPageClosed: true,
-      productPageViable: true,
-      browserConnected: true,
+    // The plain oauthTransitionStatus reads the controller's OAuth page slots;
+    // a live provider popup that detached leaves the product page viable.
+    const controller = h.controllers[0]!;
+    const productStub = {
+      isClosed: () => false,
+      url: () => secretUrl,
     };
+    controller.oauthProductPage = productStub;
+    controller.oauthProviderPage = null;
+    controller.oauthProviderPageClosed = true;
     const transition = await observe(started.session_id);
     expect(transition).toMatchObject({
       format: "browser-use-dom",
@@ -3144,7 +3258,12 @@ describe("Compact V2 action-map boundary", () => {
         next_action: "operate_observe",
       },
     });
-    expect(h.oauthRecoveryCalls).toBe(1);
+    // completeOAuthTransitionRecovery restored the product page and reset the
+    // attempt slots.
+    expect(controller.page).toBe(productStub);
+    expect(controller.oauthProductPage).toBe(null);
+    expect(controller.oauthProviderPage).toBe(null);
+    expect(controller.oauthProviderPageClosed).toBe(false);
     await expect(act(started.session_id, { kind: "click", target: refreshedRef })).rejects.toThrow(
       "stale_ref",
     );
@@ -3899,7 +4018,6 @@ describe("operate_act — locator (text=/css=) resolution", () => {
     expect(full.dom).toContain(secret);
     expect(full.dom).toContain(sk("proj-1234567890abcdefghijklmnopqrstuv"));
   });
-
 });
 
 describe("operate session — sealed credential transfer", () => {
@@ -5575,7 +5693,6 @@ describe("frame targets — identity and credential boundaries (operator-frame-s
     ]);
     expect(h.selected).toEqual([]);
   });
-
 });
 
 describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", () => {
