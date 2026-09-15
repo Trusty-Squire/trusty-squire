@@ -381,4 +381,66 @@ describe("direct card injection and masked observation", () => {
       }
     },
   );
+
+  it.skipIf(!available)(
+    "pads a 2-digit stored exp_year to four digits for select option lists",
+    async () => {
+      const isolated = await page();
+      let sessionId: string | undefined;
+      try {
+        const topUrl = "https://merchant.test/checkout";
+        const frameUrl = "https://assets.braintreegateway.test/hosted-year";
+        await isolated.page.route("**/*", async (route) => {
+          const url = route.request().url();
+          if (url === topUrl) {
+            return route.fulfill({
+              contentType: "text/html",
+              body: `<iframe src="${frameUrl}"></iframe>`,
+            });
+          }
+          if (url === frameUrl) {
+            return route.fulfill({
+              contentType: "text/html",
+              body:
+                '<select name="year">' +
+                '<option value="2029">2029</option>' +
+                '<option value="2030">2030</option>' +
+                '<option value="2031">2031</option>' +
+                '</select>',
+            });
+          }
+          return route.fulfill({ status: 404, body: "not found" });
+        });
+        const controller = BrowserController.fromHarnessPage(isolated.page);
+        const started = await startHarnessProvisionSession({
+          browser: controller,
+          serviceUrl: topUrl,
+        });
+        sessionId = started.session_id;
+        const elements = await controller.extractInteractiveElements();
+        const frame = isolated.page.frames().find((candidate) => candidate.url() === frameUrl)!;
+
+        // A vault card stored with a 2-digit year must still fill a 4-digit
+        // option list when the caller asks for four_digit.
+        const twoDigitCard: CheckoutCard = { ...CARD, exp_year: "30" };
+        const padded = await controller.injectCardIntoTargets(twoDigitCard, {
+          exp_year: { element: byName(elements, "year"), format: "four_digit" },
+        });
+        expect(padded.exp_year).toMatchObject({ status: "filled" });
+        expect(await frame.locator('[name="year"]').inputValue()).toBe("2030");
+
+        // An already-4-digit stored year is unchanged by the same format.
+        await frame.locator('[name="year"]').selectOption("2029");
+        const fourDigitCard: CheckoutCard = { ...CARD, exp_year: "2030" };
+        const unchanged = await controller.injectCardIntoTargets(fourDigitCard, {
+          exp_year: { element: byName(elements, "year"), format: "four_digit" },
+        });
+        expect(unchanged.exp_year).toMatchObject({ status: "filled" });
+        expect(await frame.locator('[name="year"]').inputValue()).toBe("2030");
+      } finally {
+        if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
+        await isolated.context.close();
+      }
+    },
+  );
 });

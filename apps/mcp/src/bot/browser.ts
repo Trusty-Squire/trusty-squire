@@ -7979,7 +7979,9 @@ export class BrowserController implements BrowserDriver {
         case "exp_month":
           return format === "number" ? String(Number(card.exp_month)) : card.exp_month;
         case "exp_year":
-          return format === "two_digit" ? card.exp_year.slice(-2) : card.exp_year;
+          if (format === "two_digit") return card.exp_year.slice(-2);
+          if (format === "four_digit") return card.exp_year.padStart(4, "20");
+          return card.exp_year;
         case "exp": {
           const year =
             format === "mm/yyyy" ? card.exp_year.padStart(4, "20") : card.exp_year.slice(-2);
