@@ -130,8 +130,10 @@ export default function CredentialFetchApprovalPage() {
       await apiGet("/v1/vault/e2e");
       await pairDevice();
       // Setting up here needed a session (the /v1/vault/e2e probe above), so
-      // this is the moment the new device can be claimed for the account.
-      await registerEnrolledDevice();
+      // this is the moment the new device can be claimed for the account — and
+      // a claim that lands here counts, or the next refusal would send a human
+      // who already has a session back through login for nothing.
+      setDeviceClaimed(await registerEnrolledDevice());
       setNeedsPasskeySetup(false);
     } catch (caught) {
       if (caught instanceof ApiError && caught.status === 401) {
@@ -158,7 +160,7 @@ export default function CredentialFetchApprovalPage() {
               : null;
 
   return (
-    <AppShell>
+    <AppShell anonymous>
       <div className="app-head">
         <div>
           <h1 className="app-title">Approve revealing a secret</h1>

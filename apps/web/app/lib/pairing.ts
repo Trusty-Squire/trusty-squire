@@ -74,8 +74,8 @@ export function isUnlinkedSigningDevice(caught: unknown): boolean {
  */
 export const WRONG_ACCOUNT_DEVICE_MESSAGE =
   "This browser's passkey is linked to a different Trusty Squire account than the one " +
-  "that owns this approval. Sign in as the owning account at trustysquire.ai/vault to " +
-  "link it, then reopen the approval link.";
+  "that owns this approval. Sign in as the owning account, then reopen this approval " +
+  "link — opening it is what links this browser.";
 
 // The assertion named no signing device at all, so there is nothing for a
 // signed-in visit to claim — unlike an unlinked device, signing in cannot help.

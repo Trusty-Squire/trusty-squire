@@ -250,6 +250,42 @@ describe("credential fetch approval page", () => {
     expect(vouchflow.signPayload).not.toHaveBeenCalled();
   });
 
+  // This is the Telegram-link landing surface now: it loads with no session, so
+  // offering signed-in navigation (and a Sign out control) would send the human
+  // to a 401 from the one page whose whole job is to be legible.
+  it("renders no signed-in navigation on the sessionless approval link", async () => {
+    render(<CredentialFetchApprovalPage />);
+    await screen.findByRole("button", { name: "Approve reveal" });
+
+    for (const name of ["Vault", "Cards", "Activity", "Services", "Agents"]) {
+      expect(screen.queryByRole("link", { name })).toBeNull();
+    }
+    expect(screen.queryByText(/sign out/i)).toBeNull();
+    expect(screen.getByRole("link", { name: /Trusty Squire/i })).toBeTruthy();
+  });
+
+  // A passkey enrolled mid-flow claims this browser, so the refusal that
+  // follows is a wrong-account one — bouncing to login could not help.
+  it("treats a passkey enrolled mid-flow as a claim, then explains rather than redirects", async () => {
+    pairing.getPairingState.mockResolvedValueOnce({ enrolled: false, deviceId: null });
+    // The mount claim finds nothing enrolled yet; only the setup below claims.
+    pairing.registerEnrolledDevice.mockResolvedValueOnce(false).mockResolvedValue(true);
+    render(<CredentialFetchApprovalPage />);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("button", { name: "Approve reveal" }));
+    await user.click(await screen.findByRole("button", { name: /set up passkey/i }));
+    await waitFor(() => expect(pairing.registerEnrolledDevice).toHaveBeenCalled());
+
+    api.apiPost.mockRejectedValue(new api.ApiError("mandate_signer_not_authorized", 403));
+    await user.click(await screen.findByRole("button", { name: "Approve reveal" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/linked to a different Trusty Squire account/i)).toBeTruthy(),
+    );
+    expect(router.replace).not.toHaveBeenCalled();
+  });
+
   it("does not submit when no passkey is enrolled", async () => {
     pairing.getPairingState.mockResolvedValue({ enrolled: false });
     render(<CredentialFetchApprovalPage />);
