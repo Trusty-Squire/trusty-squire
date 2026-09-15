@@ -358,6 +358,70 @@ describe("frame binding during uncommitted navigations (real Chromium, real HTTP
   );
 
   it.skipIf(!available)(
+    "reports omissions instead of pairing when the pending frames do not correspond",
+    { timeout: 60_000 },
+    async () => {
+      const { page } = await newPage();
+      try {
+        pendingChildResponses = [];
+        await page.goto(`http://${PARENT_HOST}:${port}/blank`, { waitUntil: "domcontentloaded" });
+        // One written frame (CDP reports the PARENT's url, Playwright reports
+        // "") beside one purely pending frame (CDP ":"), so the CDP tree has
+        // one sentinel against two pending siblings. Pairing in order across
+        // that mismatch would bind the pending CDP frame to the WRITTEN
+        // frame's document and report its elements under the wrong path.
+        await page.evaluate(
+          ({ src }) => {
+            const written = document.createElement("iframe");
+            written.id = "written";
+            written.style.cssText = "width:300px;height:120px;border:0";
+            written.src = src;
+            document.body.appendChild(written);
+            written.contentDocument!.write(
+              "<!doctype html><html><body><button id='inside'>Inside</button></body></html>",
+            );
+            written.contentDocument!.close();
+
+            const pending = document.createElement("iframe");
+            pending.id = "pending";
+            pending.style.cssText = "width:300px;height:120px;border:0";
+            pending.src = src;
+            document.body.appendChild(pending);
+          },
+          { src: `http://${PARENT_HOST}:${port}/hang` },
+        );
+        await page.waitForTimeout(700);
+
+        // Precondition — the remainders really do disagree.
+        const client = await page.context().newCDPSession(page);
+        const tree = await client.send("Page.getFrameTree");
+        const cdpChildUrls = (tree.frameTree.childFrames ?? []).map((c) => c.frame.url);
+        await client.detach();
+        const playwrightChildUrls = page
+          .mainFrame()
+          .childFrames()
+          .map((f) => f.url());
+        expect(cdpChildUrls.filter((url) => url === ":" || url === "")).toHaveLength(1);
+        expect(playwrightChildUrls.filter((url) => url === "")).toHaveLength(2);
+
+        const observed = await capture(page);
+
+        // Neither frame is bound, and the pending one says so on its own row
+        // rather than appearing under some other frame's path.
+        expect(observed.omissions.map((o) => o.source?.id).sort()).toEqual(["pending", "written"]);
+        for (const omission of observed.omissions)
+          expect(omission.kind).toBe("frame_binding_failed");
+        // Nothing is attributed to a frame we declined to pair: the written
+        // frame's control is not emitted under the pending frame's path (nor
+        // any other), which is what pairing across the mismatch would do.
+        expect(observed.elements).toEqual([]);
+      } finally {
+        await page.context().close();
+      }
+    },
+  );
+
+  it.skipIf(!available)(
     "names what was not read when a frame still cannot be read",
     { timeout: 120_000 },
     async () => {
@@ -390,6 +454,9 @@ describe("frame binding during uncommitted navigations (real Chromium, real HTTP
 
         let named: BrowserUseCapture["omissions"][number] | undefined;
         let unread: BrowserUseNode[] = [];
+        // Bound deliberately raised from 24: the loop now waits for BOTH
+        // required signals (a source-carrying omission and an unread-marked
+        // row), not just the first omission.
         for (
           let attempt = 0;
           attempt < 40 && (named === undefined || unread.length === 0);

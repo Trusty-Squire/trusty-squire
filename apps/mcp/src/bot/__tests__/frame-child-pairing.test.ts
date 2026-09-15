@@ -1,38 +1,33 @@
-// Pairing one CDP frame-tree child with the Playwright child frame it denotes.
-// Extracted from bindFrames so the asymmetric shapes a real page produces can
-// be stated directly. The load-bearing property is that position is resolved
-// among the REMAINING candidates rather than by index into the full child
-// lists: Page.getFrameTree omits out-of-process children while childFrames()
-// includes them, so on a checkout page the two lists have different lengths.
+// Pairing a parent's CDP frame-tree children with the Playwright child frames
+// they denote. Extracted from bindFrames so the asymmetric shapes a real page
+// produces can be stated directly.
+//
+// Two properties carry the weight. Position among the pending frames is
+// resolved against the REMAINING siblings, never by index into the full child
+// lists — Page.getFrameTree omits out-of-process children while childFrames()
+// includes them, so on a checkout page the lists have different lengths. And
+// that in-order pairing applies only while the two remainders are the same
+// size, because a size mismatch means they no longer describe the same set of
+// frames and pairing across it would bind a CDP frame to a different document.
 
 import { describe, expect, it } from "vitest";
-import { matchFrameChild } from "../browser-use-capture.js";
+import { pairFrameChildren } from "../browser-use-capture.js";
 
 const frame = (url: string): { url(): string } => ({ url: () => url });
 
-// bindFrames walks the CDP children in order and removes each frame it claims.
-const pairAll = (
-  cdpChildUrls: readonly string[],
-  playwrightChildren: readonly { url(): string }[],
-): Array<{ url(): string } | undefined> => {
-  const available = new Set(playwrightChildren);
-  return cdpChildUrls.map((url) => {
-    const matched = matchFrameChild(url, available);
-    if (matched) available.delete(matched);
-    return matched;
-  });
-};
-
-describe("matchFrameChild", () => {
-  it("pairs a committed child by its url wherever it sits", () => {
+describe("pairFrameChildren", () => {
+  it("pairs committed children by url wherever they sit", () => {
     const a = frame("https://a.example/one");
     const b = frame("https://b.example/two");
-    expect(matchFrameChild("https://b.example/two", new Set([a, b]))).toBe(b);
+    expect(pairFrameChildren(["https://b.example/two", "https://a.example/one"], [a, b])).toEqual([
+      b,
+      a,
+    ]);
   });
 
   it.each([":", ""])("pairs an uncommitted child (cdp %j) with a pending sibling", (sentinel) => {
     const pending = frame("");
-    expect(matchFrameChild(sentinel, new Set([pending]))).toBe(pending);
+    expect(pairFrameChildren([sentinel], [pending])).toEqual([pending]);
   });
 
   it.each([":", ""])(
@@ -40,7 +35,7 @@ describe("matchFrameChild", () => {
     (sentinel) => {
       const first = frame("");
       const second = frame("");
-      expect(pairAll([sentinel, sentinel], [first, second])).toEqual([first, second]);
+      expect(pairFrameChildren([sentinel, sentinel], [first, second])).toEqual([first, second]);
     },
   );
 
@@ -52,7 +47,7 @@ describe("matchFrameChild", () => {
     const pending0 = frame("");
     const pending1 = frame("");
 
-    const paired = pairAll([":", ":"], [hostedField, pending0, pending1]);
+    const paired = pairFrameChildren([":", ":"], [hostedField, pending0, pending1]);
 
     expect(paired).toEqual([pending0, pending1]);
     expect(paired).not.toContain(hostedField);
@@ -62,26 +57,49 @@ describe("matchFrameChild", () => {
     const hostedField = frame("https://pay.example/card-field");
     const pending = frame("");
 
-    expect(pairAll(["https://pay.example/card-field", ":"], [hostedField, pending])).toEqual([
-      hostedField,
-      pending,
+    expect(
+      pairFrameChildren([":", "https://pay.example/card-field"], [hostedField, pending]),
+    ).toEqual([pending, hostedField]);
+  });
+
+  // A document.write'd frame reports its PARENT's url to CDP while Playwright
+  // reports "", so one pending frame beside it leaves 1 sentinel against 2
+  // pending siblings. Pairing in order there would bind the pending CDP frame
+  // to the written frame's document.
+  it("refuses to pair when more siblings are pending than the cdp tree has sentinels", () => {
+    const written = frame("");
+    const pending = frame("");
+
+    expect(
+      pairFrameChildren(["https://merchant.example/checkout", ":"], [written, pending]),
+    ).toEqual([undefined, undefined]);
+  });
+
+  it("refuses to pair when the cdp tree has more sentinels than there are pending siblings", () => {
+    const onlyPending = frame("");
+    expect(pairFrameChildren([":", ":"], [onlyPending])).toEqual([undefined, undefined]);
+  });
+
+  it("still pairs the committed children when the pending remainders disagree", () => {
+    const committed = frame("https://a.example/one");
+    const pending = frame("");
+
+    expect(pairFrameChildren(["https://a.example/one", ":", ":"], [committed, pending])).toEqual([
+      committed,
+      undefined,
+      undefined,
     ]);
   });
 
   it("never pairs an uncommitted child with a committed sibling", () => {
     const committed = frame("https://a.example/one");
-    expect(matchFrameChild(":", new Set([committed]))).toBe(undefined);
-    expect(matchFrameChild("", new Set([committed]))).toBe(undefined);
-  });
-
-  it("leaves an uncommitted child unpaired once every pending sibling is claimed", () => {
-    const onlyPending = frame("");
-    expect(pairAll([":", ":"], [onlyPending])).toEqual([onlyPending, undefined]);
+    expect(pairFrameChildren([":"], [committed])).toEqual([undefined]);
+    expect(pairFrameChildren([""], [committed])).toEqual([undefined]);
   });
 
   it("leaves a committed child unpaired when no sibling carries its url", () => {
-    expect(
-      matchFrameChild("https://a.example/one", new Set([frame("https://b.example/two")])),
-    ).toBe(undefined);
+    expect(pairFrameChildren(["https://a.example/one"], [frame("https://b.example/two")])).toEqual([
+      undefined,
+    ]);
   });
 });

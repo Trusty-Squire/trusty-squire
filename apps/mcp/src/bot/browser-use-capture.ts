@@ -55,10 +55,7 @@ function frameIdentity(frame: Frame): string {
  * without an iframe target (same-process children) are already bound by the
  * local frame tree and never probed.
  */
-async function outOfProcessFramesByCdpId(
-  page: Page,
-  cdp: CDPSession,
-): Promise<Map<string, Frame>> {
+async function outOfProcessFramesByCdpId(page: Page, cdp: CDPSession): Promise<Map<string, Frame>> {
   const frames = new Map<string, Frame>();
   let rootId: string | null = null;
   try {
@@ -169,36 +166,61 @@ export function frameOriginOf(frame: { url(): string }): string {
 }
 
 /**
- * Pair one CDP frame-tree child with the Playwright child frame it denotes,
- * given the siblings not yet claimed by an earlier child.
+ * Pair a parent's CDP frame-tree children with the Playwright child frames
+ * they denote, returning one entry per CDP child (undefined = no pairing).
  *
- * A committed frame is identified by its URL. A frame whose navigation has
- * not committed has no stable URL to match on — the CDP tree reports ":"
- * where Playwright reports "" — so string equality failed on every capture
- * for as long as the navigation stayed pending, and a merchant iframe that
- * renders before its navigation commits (ad/analytics frames, a 3-D Secure
- * challenge) reported frame_binding_failed for the whole session while its
- * siblings bound. Such a frame takes the FIRST still-unclaimed uncommitted
- * sibling: their documents are all the initial empty document, so the
- * pairing has no observable effect, and once a navigation commits the next
- * capture re-binds by its real URL.
+ * The URL pass runs over the WHOLE list first. A committed frame is
+ * identified by its URL, so that pass claims every sibling that has one —
+ * including a hosted-field OOPIF, which matters because the two lists are
+ * not index-aligned: `Page.getFrameTree` on the page session omits
+ * out-of-process children (see outOfProcessFramesByCdpId above) while
+ * `childFrames()` includes them, so a checkout page with a committed
+ * hosted field ahead of its pending frames has a SHORTER CDP list.
  *
- * Position is resolved among the REMAINING candidates, never by index into
- * the full child lists. The two lists are not index-aligned:
- * `Page.getFrameTree` on the page session omits out-of-process children
- * (see outOfProcessFramesByCdpId above) while `childFrames()` includes them,
- * so a checkout page with a committed hosted-field OOPIF ahead of its
- * pending frames has a SHORTER CDP list. Running the URL pass first claims
- * that OOPIF, which is what keeps the remaining sequences aligned.
+ * What is left are the frames whose navigation has not committed. Those have
+ * no stable URL to match on — the CDP tree reports ":" where Playwright
+ * reports "" — so string equality failed on every capture for as long as the
+ * navigation stayed pending, and a merchant iframe that renders before its
+ * navigation commits (ad/analytics frames, a 3-D Secure challenge) reported
+ * frame_binding_failed for the whole session while its siblings bound. They
+ * are paired in order against the still-unclaimed pending siblings: their
+ * documents are all the initial empty document, so the pairing has no
+ * observable effect, and once a navigation commits the next capture re-binds
+ * by the real URL.
+ *
+ * That in-order pairing is only meaningful while the two remainders describe
+ * the same set of frames, so it is applied ONLY when they are the same size.
+ * They can disagree — a frame whose CDP and Playwright urls diverge (a
+ * document.write'd frame reports its parent's url to CDP), or a frame-tree
+ * snapshot that went stale mid-capture. Pairing across a size mismatch would
+ * bind a CDP frame to a DIFFERENT document and report its elements under
+ * another frame's path with no error. Leaving them unpaired instead yields
+ * the frame_binding_failed omission this capture already knows how to make
+ * legible, and the next capture re-binds from a fresh tree.
  */
-export function matchFrameChild<T extends { url(): string }>(
-  cdpChildUrl: string,
-  available: ReadonlySet<T>,
-): T | undefined {
-  for (const candidate of available) if (candidate.url() === cdpChildUrl) return candidate;
-  if (!isUncommittedFrameUrl(cdpChildUrl)) return undefined;
-  for (const candidate of available) if (candidate.url() === "") return candidate;
-  return undefined;
+export function pairFrameChildren<T extends { url(): string }>(
+  cdpChildUrls: readonly string[],
+  playwrightChildren: readonly T[],
+): Array<T | undefined> {
+  const available = new Set(playwrightChildren);
+  const paired = cdpChildUrls.map((url) => {
+    if (isUncommittedFrameUrl(url)) return undefined;
+    for (const candidate of available)
+      if (candidate.url() === url) {
+        available.delete(candidate);
+        return candidate;
+      }
+    return undefined;
+  });
+  const pendingChildren = cdpChildUrls.flatMap((url, index) =>
+    isUncommittedFrameUrl(url) ? [index] : [],
+  );
+  const pendingSiblings = playwrightChildren.filter(
+    (child) => available.has(child) && child.url() === "",
+  );
+  if (pendingChildren.length !== pendingSiblings.length) return paired;
+  pendingChildren.forEach((index, order) => (paired[index] = pendingSiblings[order]));
+  return paired;
 }
 
 type FrameOmission = BrowserUseCapture["omissions"][number];
@@ -345,13 +367,16 @@ export async function captureBrowserUseDOM(
       frameIds.push(tree.frame.id);
       frameById.set(tree.frame.id, frame);
       framePathById.set(tree.frame.id, frame === page.mainFrame() ? null : framePath(frame));
-      const available = new Set(frame.childFrames());
-      for (const [index, child] of (tree.childFrames ?? []).entries()) {
-        const matched = matchFrameChild(child.frame.url, available);
-        if (matched) {
-          available.delete(matched);
-          bindFrames(child, matched);
-        } else markUnboundFrameTree(child, frame.childFrames()[index]);
+      const children = tree.childFrames ?? [];
+      const siblings = frame.childFrames();
+      const paired = pairFrameChildren(
+        children.map((child) => child.frame.url),
+        siblings,
+      );
+      for (const [index, child] of children.entries()) {
+        const matched = paired[index];
+        if (matched) bindFrames(child, matched);
+        else markUnboundFrameTree(child, siblings[index]);
       }
     };
     bindFrames(frames.frameTree, owningFrame);
