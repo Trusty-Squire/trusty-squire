@@ -6350,6 +6350,12 @@ export class BrowserController implements BrowserDriver {
   // to match) is acceptable because the strings we accept are
   // extremely banner-specific. We don't match bare "accept" / "ok" /
   // "continue" — too generic to be safe.
+  //
+  // 2026-09-15: an audit removal (which lumped this in with the Cloudflare
+  // interstitial stack) was WITHDRAWN on provenance: a consent overlay is
+  // not a bot gate, and this was introduced against two recorded real-site
+  // failures (Railway 7889ff0d/c773db55; Robinhood faucet fabb8a9f). See
+  // data/ts-wave2-cloudflare-interstitial/findings.md.
   async dismissConsentBanner(): Promise<string | null> {
     if (!this.page) return null;
     // Prefer-order: most specific (and most clearly consent-only)
@@ -6420,6 +6426,20 @@ export class BrowserController implements BrowserDriver {
   // Returns when the interstitial is gone, or after `timeoutMs` if it
   // never cleared. Best-effort: any unexpected error returns early
   // rather than failing the whole signup.
+  //
+  // 2026-09-15: an audit removal of this whole stack (plus
+  // clearCloudflareCookiesAndRetry, forceNavigatePastClearedChallenge,
+  // pollUntilInterstitialClears, classifyInterstitialText,
+  // stripCloudflareChallengeParams — ~300 lines) was attempted and WITHDRAWN
+  // on live-repro evidence (data/ts-wave2-cloudflare-interstitial/findings.md).
+  // Nothing here auto-surmounts a challenge: the wait observes, the cookie
+  // branch RE-ARMS a fresh challenge, and the token-strip branch fires only
+  // after a CONFIRMED pass to finish CF's own stalled redirect — each against
+  // a recorded real-site failure (codesandbox stale clearance / stuck
+  // redirect; 27436695, 555aec8f). Removing the stack was measured to leave
+  // the planner facing a challenge page with ZERO interactive elements (and
+  // the operate_* surface has no captcha verb), i.e. a stop nobody can act
+  // on. Every function was introduced against a named real-site failure.
   private async waitForAntiBotInterstitialToClear(timeoutMs: number): Promise<void> {
     if (!this.page) return;
     const first = await this.pollUntilInterstitialClears(timeoutMs);
