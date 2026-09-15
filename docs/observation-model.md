@@ -80,8 +80,19 @@ form intent, or documents still refuse adoption. `operator-click-fallback.test.t
 exercises click, type and select through real browser re-renders.
 
 Observation waits for bounded network/load and retries transient frame-binding
-omissions. Persistent binding failures remain explicit in `capture_omissions`;
-continuous churn never blocks indefinitely.
+omissions. A child frame whose navigation has not committed has no URL to match
+on, so it is paired in order with its still-pending sibling instead of being
+reported as a failure — applied only when both sides agree on how many such
+frames there are, and superseded by the committed URL on the next capture.
+Persistent binding failures remain explicit in `capture_omissions`; each entry
+names the iframe element it is about (`source`: `src`/`id`/`name`/`title`), and
+an entry for a frame that could not be paired carries no `framePath`, since
+attributing it to a sibling would name a frame that bound correctly. The row of
+any frame carrying an omission also replaces its `(scroll)` hint with `frame content not
+actionable — <reason>` (or `not read` when its document never reached the tree),
+so an unreadable region is distinguishable from a genuinely empty one. Binding
+failures never block an observation, and continuous churn never blocks
+indefinitely.
 A ref that fails to resolve before dispatch is `not_dispatched`, never
 `unknown`; the broker journal contract in [browser-broker.md](browser-broker.md)
 owns what that evidence does and does not fence.

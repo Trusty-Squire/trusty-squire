@@ -2198,6 +2198,11 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await expect(loginWithOAuth(controller, "#oauth", 500, "google")).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
+      // The page's own last hop is a 120ms timer behind four real navigations,
+      // so it can land after the budget the rejection is bound to. Wait for it
+      // rather than racing it: the assertion is that the operator left the
+      // product page showing wherever the chain went, not that it landed first.
+      await product.waitForURL(dashboardUrl);
       expect(controller.currentUrl()).toBe(dashboardUrl);
     } finally {
       await context.close();

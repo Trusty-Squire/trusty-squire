@@ -1,7 +1,11 @@
 import type { CheckoutCard } from "./checkout.js";
 import { isCaptchaFrameUrl } from "./captcha.js";
 import { captureBoundScreenshot, type ScreenshotBinding } from "./screenshot-click.js";
-import { captureBrowserUseDOM, type BrowserUseCapture } from "./browser-use-capture.js";
+import {
+  captureBrowserUseDOM,
+  frameOriginOf,
+  type BrowserUseCapture,
+} from "./browser-use-capture.js";
 import type { BrowserDriver, ClickMethod, DriverTarget, FrameTarget } from "./driver/types.js";
 import {
   CardValueOutputMask,
@@ -6070,11 +6074,7 @@ export class BrowserController implements BrowserDriver {
   // attach to is captured and addressable, and the released-card output mask
   // still covers every emitted value.
   private frameOrigin(frame: Frame): string {
-    try {
-      return new URL(frame.url()).origin;
-    } catch {
-      return "null";
-    }
+    return frameOriginOf(frame);
   }
 
   // Resolve a previously-tagged frame path back to its live Playwright Frame —
