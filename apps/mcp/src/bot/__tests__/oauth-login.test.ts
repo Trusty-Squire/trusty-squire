@@ -578,43 +578,97 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it("keeps the operator product tab alive when the provider redirects then closes its popup", async () => {
+    // What this proves, in one sentence: a real oauth_login whose provider
+    // popup redirects to a token-exchange page and then closes itself without
+    // completing must keep the operator's product tab alive, reattach the
+    // controller to it, and end the action as awaiting_human/operate_observe.
+    //
+    // Determinism: every ordered step waits on a signal the browser or the
+    // code under test actually emits — the popup event, the controller's
+    // adoption of the popup, the popup's navigation and self-close, the
+    // controller's reattachment to the product tab, and only then the action
+    // deadline that terminates the never-completing fixture. The deadline is
+    // purely an upper bound, never a step gate, so machine load cannot reorder
+    // the assertions; if it ever fires before a fixture step, the test fails
+    // with an explicit message instead of racing silently.
     const { controller, product } = await controllerForProduct();
     const context = product.context();
     const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
     const previousCooldown = process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
-    // The fixture never confirms OAuth completion, so the action deadline still
-    // produces awaiting_human. Leave enough time for the popup click under load.
+    // Generous on purpose: it must terminate the fixture, not race it.
     process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "8000";
     process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
-    const providerReturned = product.waitForEvent("popup").then(async (popup) => {
-      await popup.goto("data:text/html,provider-token-exchange");
-      await product.locator("#state").evaluate((el) => {
-        el.textContent = "Signed in";
-      });
-      await popup.close();
-    });
 
     let sessionId: string | null = null;
+    const controllerPriv = controller as unknown as { page: Page | null };
     try {
       const started = await startHarnessProvisionSession({
         browser: controller,
         serviceUrl: PRODUCT_URL,
       });
       sessionId = started.session_id;
+      // Compact-v2 targets must be an observed @e: handle or @label alias; a
+      // bare control name stale-refs before any browser work happens.
       const oauthRef = refByLabel(started, "Login with Provider");
       expect(oauthRef).toBeDefined();
-      const [result] = await Promise.all([
-        act(sessionId, { kind: "oauth_login", target: oauthRef! }),
-        providerReturned,
-      ]);
+      const login = act(sessionId, { kind: "oauth_login", target: oauthRef! });
+      const settledEarly = (why: string): Promise<never> =>
+        login.then(
+          () => {
+            throw new Error(`oauth_login ${why} before the fixture popup lifecycle completed`);
+          },
+          (error: unknown) => {
+            throw new Error(
+              `oauth_login ${why} before the fixture popup lifecycle completed: ${String(error)}`,
+            );
+          },
+        );
 
+      // Signal 1: the code under test clicked the OAuth control and the
+      // browser opened the provider popup.
+      const popup = await Promise.race([product.waitForEvent("popup"), settledEarly("settled")]);
+
+      // Signal 2: the controller adopted the popup as the active page.
+      await expect.poll(() => controllerPriv.page, { timeout: 5_000 }).toBe(popup);
+
+      // Signals 3-5: the provider redirects to its token-exchange page, the
+      // product records the sign-in, and the popup closes itself.
+      const choreography = (async () => {
+        await popup.goto("data:text/html,provider-token-exchange");
+        await product.locator("#state").evaluate((el) => {
+          el.textContent = "Signed in";
+        });
+        await popup.close();
+      })();
+      await Promise.race([choreography, settledEarly("settled")]);
+
+      // Signal 6: the popup close was observed as the provider-page transition
+      // and the controller reattached to the product tab while the action was
+      // still pending.
+      await expect
+        .poll(() => oauthTransitionStatus(controller), { timeout: 5_000 })
+        .toMatchObject({
+          productUrl: PRODUCT_URL,
+          providerPageClosed: true,
+          productPageViable: true,
+        });
+      expect(controllerPriv.page).toBe(product);
+
+      // The action itself ends only when the deadline expires, because the
+      // fixture never confirms completion; awaiting it here is a bounded wait,
+      // not a race.
+      const result = await login;
       expect(product.isClosed()).toBe(false);
-      expect((controller as unknown as { page: Page }).page).toBe(product);
+      expect(controllerPriv.page).toBe(product);
       expect(controller.currentUrl()).toBe(PRODUCT_URL);
       expect(result.oauth).toMatchObject({
         state: "awaiting_human",
         next_action: "operate_observe",
       });
+      // The next ordinary observation is back on the live product tab —
+      // the same signal operate_observe hands the planning model.
+      const recovered = await observe(sessionId);
+      expect(recovered.url).toBe(PRODUCT_URL);
     } finally {
       if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
       else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
