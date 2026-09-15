@@ -62,7 +62,7 @@ export interface CredentialMutationApprovalStore {
   commit(
     id: string,
     mandateId: string | null,
-    signingDeviceId?: string | null,
+    signingDeviceId: string | null,
   ): Promise<CredentialMutationCommitResult>;
 }
 
@@ -122,7 +122,7 @@ export class InMemoryCredentialMutationApprovalStore implements CredentialMutati
   async commit(
     id: string,
     mandateId: string | null,
-    signingDeviceId: string | null = null,
+    signingDeviceId: string | null,
   ): Promise<CredentialMutationCommitResult> {
     const record = this.records.get(id);
     if (record === undefined || this.committing.has(id)) return "not_pending";
@@ -269,7 +269,7 @@ function sameArray(left: readonly string[], right: readonly string[]): boolean {
 
 export function mutationAuditEvent(
   record: CredentialMutationApprovalRecord,
-  signingDeviceId: string | null = null,
+  signingDeviceId: string | null,
 ): VaultAuditEventInput {
   return {
     account_id: record.accountId,

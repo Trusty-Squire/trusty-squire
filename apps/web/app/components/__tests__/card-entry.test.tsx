@@ -37,6 +37,8 @@ import { CardEntry } from "../CardEntry";
 beforeEach(() => {
   vi.clearAllMocks();
   pairing.getPairingState.mockResolvedValue({ enrolled: true });
+  pairing.pairDevice.mockResolvedValue(undefined);
+  pairing.registerEnrolledDevice.mockResolvedValue(undefined);
 });
 afterEach(() => cleanup());
 
@@ -49,6 +51,19 @@ describe("CardEntry — the shared sensitive add-card flow", () => {
     // The overbroad whole-card claim is a lie now that last4 + brand are stored.
     expect(text).not.toContain("Your card is never readable");
     expect(text).toContain("Your full card number is encrypted here and never readable");
+  });
+
+  // Enrolling here is a signed-in moment, and it is the only one this surface
+  // gets: an unclaimed device signs assertions the sessionless approval
+  // ceremonies cannot attribute and refuse.
+  it("claims the newly enrolled device for the account", async () => {
+    pairing.getPairingState.mockResolvedValueOnce({ enrolled: false });
+    render(<CardEntry />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Set up" }));
+
+    await waitFor(() => expect(pairing.registerEnrolledDevice).toHaveBeenCalledTimes(1));
+    expect(pairing.pairDevice).toHaveBeenCalledTimes(1);
   });
 
   it("shows the honest trust copy (no false 'cannot decrypt' promise)", async () => {

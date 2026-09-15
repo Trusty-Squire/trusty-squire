@@ -581,13 +581,22 @@ Three things about it are load-bearing; do not "simplify" any of them:
   update is the fence; the decrypt happens only on that transition. Making the
   resume idempotent "for convenience" would turn one approval into unlimited
   reveals.
-- **The human half is owner-authenticated.** `ceremony`, `approve`, and `deny`
-  require the credential owner's web session, and a foreign attempt is refused
-  as `not_found` and written to the owner's ledger. Possession of the approval
-  link is not authority: the requesting agent necessarily holds that link, so
-  an unauthenticated approve endpoint lets anyone it reaches release the
-  owner's secret with their own genuine passkey. That was a real hole in the
-  first cut of this feature; do not reopen it for a "frictionless" link.
+- **The human half is signer-authenticated, not session-authenticated.**
+  `ceremony`, `approve`, and `deny` take no web session — the Telegram link
+  opens in whatever browser the human has, exactly like the payment path. The
+  authority is the Vouchflow assertion: it must be signed over THIS approval's
+  account-bound payload, AND its `device_token` claim must name a signing
+  device the owning account registered through the web-session-authenticated
+  `POST /v1/vouchflow/devices`. An assertion naming no device is refused
+  `missing_device_token`; one naming an unregistered device is refused
+  `mandate_signer_not_authorized`; both refuse before the approval moves at
+  all. Possession of the link is still not authority — the requesting agent
+  necessarily holds that link, and without the signer binding anyone it
+  reaches could release the owner's secret with their own genuine passkey.
+  Registration is what carries the owner's identity, so keep it
+  session-authenticated and keep refusing unregistered signers; do not weaken
+  registration into a self-registering path, and do not answer a rollout
+  complaint by putting session auth back on the ceremony.
 - **Its description is a security control.** It has to keep steering agents to
   `use_credential` first and keep saying that the value lands in the transcript.
   A shorter, friendlier description measurably makes the model reach for the

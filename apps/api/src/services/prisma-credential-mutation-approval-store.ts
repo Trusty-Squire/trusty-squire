@@ -70,7 +70,7 @@ export class PrismaCredentialMutationApprovalStore implements CredentialMutation
   async commit(
     id: string,
     mandateId: string | null,
-    signingDeviceId: string | null = null,
+    signingDeviceId: string | null,
   ): Promise<CredentialMutationCommitResult> {
     try {
       return await this.prisma.$transaction(async (tx) => {

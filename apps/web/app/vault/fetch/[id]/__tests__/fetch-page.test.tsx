@@ -33,7 +33,15 @@ vi.mock("../../../../lib/api", () => ({
   apiPost: api.apiPost,
 }));
 vi.mock("../../../../lib/vouchflow", () => ({ getVouchflow: () => vouchflow }));
-vi.mock("../../../../lib/pairing", () => pairing);
+// The unlinked-device wording and its predicate are pure and live in the
+// same module as the mocked device calls; keep the REAL ones so the page
+// tests exercise the shipped copy rather than a stub of it.
+vi.mock("../../../../lib/pairing", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../../lib/pairing")>()),
+  getPairingState: pairing.getPairingState,
+  pairDevice: pairing.pairDevice,
+  registerEnrolledDevice: pairing.registerEnrolledDevice,
+}));
 
 import CredentialFetchApprovalPage from "../page";
 
@@ -58,7 +66,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   status = "pending";
   pairing.getPairingState.mockResolvedValue({ enrolled: true });
-  pairing.pairDevice.mockResolvedValue("dev_token");
+  pairing.pairDevice.mockResolvedValue(undefined);
   pairing.registerEnrolledDevice.mockResolvedValue(undefined);
   vouchflow.signPayload.mockResolvedValue({ assertion: "signed-fetch-jws" });
   api.apiGet.mockImplementation((path: string) => {
@@ -138,10 +146,63 @@ describe("credential fetch approval page", () => {
     expect(api.apiPost).toHaveBeenCalledWith("/v1/vault/fetch-approvals/fetch_1/deny", {});
   });
 
+  // A signed-in browser opening the link claims its own passkey, so an owner
+  // who enrolled long before this binding existed can answer the approval
+  // without detouring through the vault to register first.
+  it("claims this browser's enrolled device on mount", async () => {
+    render(<CredentialFetchApprovalPage />);
+    await screen.findByRole("button", { name: "Approve reveal" });
+    expect(pairing.registerEnrolledDevice).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays usable when the mount-time device claim fails", async () => {
+    pairing.registerEnrolledDevice.mockRejectedValue(new api.ApiError("web_session_required", 401));
+    render(<CredentialFetchApprovalPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Approve reveal" }));
+
+    await waitFor(() => expect(screen.getByText(/the agent can now read this secret/i)).toBeTruthy());
+    expect(screen.queryByText(/isn't linked to your/i)).toBeNull();
+  });
+
+  // Clicking before the mount-time claim lands is the one refusal that answers
+  // itself: the page waits for that claim and asks exactly once more.
+  it("retries approval once after the device claim settles", async () => {
+    let releaseRegistration = (): void => {};
+    pairing.registerEnrolledDevice.mockReturnValue(
+      new Promise<void>((resolve) => {
+        releaseRegistration = resolve;
+      }),
+    );
+    let refusals = 1;
+    const approvals: string[] = [];
+    api.apiPost.mockImplementation((path: string) => {
+      if (path !== "/v1/vault/fetch-approvals/fetch_1/approve") {
+        return Promise.reject(new Error(`unexpected POST ${path}`));
+      }
+      approvals.push(path);
+      if (refusals-- > 0) {
+        return Promise.reject(new api.ApiError("mandate_signer_not_authorized", 403));
+      }
+      status = "approved";
+      return Promise.resolve({ status: "approved" });
+    });
+
+    render(<CredentialFetchApprovalPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Approve reveal" }));
+    await waitFor(() => expect(approvals).toHaveLength(1));
+    releaseRegistration();
+
+    await waitFor(() => expect(screen.getByText(/the agent can now read this secret/i)).toBeTruthy());
+    expect(approvals).toHaveLength(2);
+    expect(screen.queryByText(/isn't linked to your/i)).toBeNull();
+  });
+
   // The ceremony is sessionless, so a link opened signed-out is not a login
   // problem — the only thing the visitor can be missing is a device this
   // account has claimed, and the page has to say so in those words.
-  it("explains an unlinked signing device instead of the raw refusal code", async () => {
+  it("explains an unlinked signing device after the retry also refuses", async () => {
     api.apiPost.mockRejectedValue(new api.ApiError("mandate_signer_not_authorized", 403));
     render(<CredentialFetchApprovalPage />);
     const user = userEvent.setup();
@@ -150,6 +211,12 @@ describe("credential fetch approval page", () => {
     await waitFor(() => expect(screen.getByText(/isn't linked to your/i)).toBeTruthy());
     expect(screen.queryByText(/mandate_signer_not_authorized/)).toBeNull();
     expect(router.replace).not.toHaveBeenCalled();
+    // Exactly once more, never a loop.
+    expect(
+      api.apiPost.mock.calls.filter(
+        ([path]: [string]) => path === "/v1/vault/fetch-approvals/fetch_1/approve",
+      ),
+    ).toHaveLength(2);
   });
 
   it("shows a load failure in place rather than bouncing to login", async () => {

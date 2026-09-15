@@ -72,7 +72,6 @@ export async function verifyApprovalMandate(
 
 /** The signer an accepted assertion names, for the ledger row it produces. */
 export interface ApprovalMandateSigner {
-  deviceToken: string;
   signingDeviceId: string | null;
 }
 
@@ -104,7 +103,6 @@ export async function resolveApprovalMandateSigner(
     return null;
   }
   return {
-    deviceToken,
     signingDeviceId:
       typeof claims.signing_device_id === "string" && claims.signing_device_id.length > 0
         ? claims.signing_device_id

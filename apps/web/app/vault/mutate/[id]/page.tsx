@@ -1,26 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { AppShell } from "../../../components/AppShell";
 import { ApiError, apiGet, apiPost } from "../../../lib/api";
-import { getPairingState, pairDevice, registerEnrolledDevice } from "../../../lib/pairing";
+import {
+  approvalErrorMessage,
+  getPairingState,
+  isUnlinkedSigningDevice,
+  pairDevice,
+  registerEnrolledDevice,
+} from "../../../lib/pairing";
 import { getVouchflow } from "../../../lib/vouchflow";
-
-// The ceremony itself is sessionless, so a refusal here is about the SIGNER,
-// not about a missing login: the passkey on this device was never claimed by
-// the account that owns the credential.
-const UNLINKED_DEVICE_MESSAGE =
-  "This device isn't linked to your Trusty Squire account yet. Sign in at " +
-  "trustysquire.ai/vault on this device — that links it automatically — then " +
-  "come back and try again.";
-
-function approvalErrorMessage(caught: unknown, fallback: string): string {
-  if (caught instanceof ApiError && caught.message === "mandate_signer_not_authorized") {
-    return UNLINKED_DEVICE_MESSAGE;
-  }
-  return caught instanceof Error ? caught.message : fallback;
-}
 
 interface EditableMetadata {
   label: string;
@@ -88,6 +79,14 @@ export default function CredentialMutationApprovalPage() {
     [id],
   );
 
+  // A signed-in browser opening this link claims its passkey here, so an
+  // already-enrolled owner never has to detour through the vault to answer an
+  // approval. Without a session the endpoint refuses and nothing is claimed.
+  const deviceRegistration = useRef<Promise<void>>(Promise.resolve());
+  useEffect(() => {
+    deviceRegistration.current = registerEnrolledDevice().catch(() => {});
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     void fetchCeremony()
@@ -118,10 +117,20 @@ export default function CredentialMutationApprovalPage() {
         payload: ceremony.payload,
         minConfidence: "low",
       });
-      await apiPost(
-        `/v1/vault/mutation-approvals/${encodeURIComponent(ceremony.approval_id)}/approve`,
-        { jws: signed.assertion },
-      );
+      const submit = () =>
+        apiPost(
+          `/v1/vault/mutation-approvals/${encodeURIComponent(ceremony.approval_id)}/approve`,
+          { jws: signed.assertion },
+        );
+      try {
+        await submit();
+      } catch (caught) {
+        // Losing the race against the mount-time claim is the one refusal that
+        // answers itself: wait for it, then ask once more.
+        if (!isUnlinkedSigningDevice(caught)) throw caught;
+        await deviceRegistration.current;
+        await submit();
+      }
       setCeremony(await fetchCeremony());
       setNeedsPasskeySetup(false);
     } catch (caught) {

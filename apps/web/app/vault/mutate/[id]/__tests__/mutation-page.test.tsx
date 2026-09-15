@@ -34,7 +34,15 @@ vi.mock("../../../../lib/api", () => ({
   apiPost: api.apiPost,
 }));
 vi.mock("../../../../lib/vouchflow", () => ({ getVouchflow: () => vouchflow }));
-vi.mock("../../../../lib/pairing", () => pairing);
+// The unlinked-device wording and its predicate are pure and live in the
+// same module as the mocked device calls; keep the REAL ones so the page
+// tests exercise the shipped copy rather than a stub of it.
+vi.mock("../../../../lib/pairing", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../../lib/pairing")>()),
+  getPairingState: pairing.getPairingState,
+  pairDevice: pairing.pairDevice,
+  registerEnrolledDevice: pairing.registerEnrolledDevice,
+}));
 
 import CredentialMutationApprovalPage from "../page";
 
@@ -67,7 +75,7 @@ const ceremony = {
 beforeEach(() => {
   vi.clearAllMocks();
   pairing.getPairingState.mockResolvedValue({ enrolled: true });
-  pairing.pairDevice.mockResolvedValue("dev_token");
+  pairing.pairDevice.mockResolvedValue(undefined);
   pairing.registerEnrolledDevice.mockResolvedValue(undefined);
   vouchflow.signPayload.mockResolvedValue({ assertion: "signed-mutation-jws" });
   let approved = false;
@@ -139,7 +147,16 @@ describe("credential mutation approval page", () => {
 
   // The only thing a visitor can be missing on a sessionless ceremony is a
   // device this account has claimed — say that, not the raw refusal code.
-  it("explains an unlinked signing device instead of the raw refusal code", async () => {
+  // A signed-in browser opening the link claims its own passkey, so an owner
+  // who enrolled long before this binding existed can answer the approval
+  // without detouring through the vault to register first.
+  it("claims this browser's enrolled device on mount", async () => {
+    render(<CredentialMutationApprovalPage />);
+    await screen.findByRole("button", { name: "Approve edit" });
+    expect(pairing.registerEnrolledDevice).toHaveBeenCalledTimes(1);
+  });
+
+  it("explains an unlinked signing device after the retry also refuses", async () => {
     api.apiPost.mockRejectedValue(new api.ApiError("mandate_signer_not_authorized", 403));
     render(<CredentialMutationApprovalPage />);
 
@@ -148,6 +165,12 @@ describe("credential mutation approval page", () => {
     await waitFor(() => expect(screen.getByText(/isn't linked to your/i)).toBeTruthy());
     expect(screen.queryByText(/mandate_signer_not_authorized/)).toBeNull();
     expect(router.replace).not.toHaveBeenCalled();
+    // Exactly once more, never a loop.
+    expect(
+      api.apiPost.mock.calls.filter(
+        ([path]: [string]) => path === "/v1/vault/mutation-approvals/mutation_1/approve",
+      ),
+    ).toHaveLength(2);
   });
 
   it("does not submit when no passkey is enrolled", async () => {

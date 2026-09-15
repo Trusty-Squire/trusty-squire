@@ -1,4 +1,4 @@
-import { apiPost } from "./api";
+import { ApiError, apiPost } from "./api";
 import { getVouchflow } from "./vouchflow";
 
 const SUPPORT_ERROR =
@@ -68,7 +68,27 @@ export async function registerEnrolledDevice(): Promise<void> {
   await apiPost("/v1/vouchflow/devices", { device_token: deviceToken });
 }
 
-export async function pairDevice(): Promise<string> {
+/**
+ * The approval ceremonies are sessionless, so this refusal is never about a
+ * missing login: it means the passkey that signed was never claimed by the
+ * account whose approval it answers.
+ */
+export function isUnlinkedSigningDevice(caught: unknown): boolean {
+  return caught instanceof ApiError && caught.message === "mandate_signer_not_authorized";
+}
+
+const UNLINKED_DEVICE_MESSAGE =
+  "This device isn't linked to your Trusty Squire account yet. Sign in at " +
+  "trustysquire.ai/vault on this device — that links it automatically — then " +
+  "come back and try again.";
+
+/** One wording of the unlinked-device refusal, shared by every ceremony page. */
+export function approvalErrorMessage(caught: unknown, fallback: string): string {
+  if (isUnlinkedSigningDevice(caught)) return UNLINKED_DEVICE_MESSAGE;
+  return caught instanceof Error ? caught.message : fallback;
+}
+
+export async function pairDevice(): Promise<void> {
   const client = getVouchflow();
 
   try {
@@ -95,8 +115,7 @@ export async function pairDevice(): Promise<string> {
 
     // v0.3 requires an option object; this is the SDK's default user handle,
     // also used by getEnrollmentState() and evaluatePrf().
-    const { deviceToken } = await client.enroll({ userHandle: "__default__" });
-    return deviceToken;
+    await client.enroll({ userHandle: "__default__" });
   } catch (error) {
     switch (errorCode(error)) {
       case "platform_authenticator_unavailable":

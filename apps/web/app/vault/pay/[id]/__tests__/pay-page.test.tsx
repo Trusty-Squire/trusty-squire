@@ -159,7 +159,7 @@ beforeEach(() => {
   approvalCurrency = "USD";
   vi.clearAllMocks();
   pairing.getPairingState.mockResolvedValue({ enrolled: true });
-  pairing.pairDevice.mockResolvedValue("dev_token");
+  pairing.pairDevice.mockResolvedValue(undefined);
   pairing.registerEnrolledDevice.mockResolvedValue(undefined);
   pairing.isPaymentPasskeyUnavailable.mockReturnValue(false);
   vouchflow.signPayload.mockImplementation(async ({ payload }: { payload: unknown }) => ({

@@ -5,7 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { encryptCard } from "@trusty-squire/vault/e2e";
 import { ApiError, apiPost } from "../lib/api";
 import { COUNTRIES } from "../lib/countries";
-import { getPairingState, pairDevice } from "../lib/pairing";
+import { getPairingState, pairDevice, registerEnrolledDevice } from "../lib/pairing";
 import { evaluatePrf } from "../lib/passkey";
 import { CARD_TRUST_COPY, cardLast4, detectCardBrand } from "../lib/wallet";
 
@@ -79,6 +79,7 @@ export function CardEntry({ onSaved }: CardEntryProps) {
       if (!state.enrolled) {
         throw new Error("Passkey setup did not complete. Please try again.");
       }
+      await registerEnrolledDevice();
     } catch (err) {
       setPairingError(err instanceof Error ? err.message : "Failed to set up payments.");
     } finally {
