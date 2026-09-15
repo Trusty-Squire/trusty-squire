@@ -1644,6 +1644,16 @@ export class BrowserController implements BrowserDriver {
   // Ancestors are tagged with a marker attribute (not held as live handles)
   // so the restore step re-finds exactly what THIS call neutralized even
   // across the intervening await.
+  //
+  // 2026-09-15: an audit removal of this mutation was attempted and WITHDRAWN
+  // on live-repro evidence. It is the only guard for the #564 shape — without
+  // it, clicks inside such a modal fail until timeout (recovering only via
+  // operate_click's "intercepts pointer events" -> js_click fallback, a full
+  // actionability timeout later) and typing has NO mechanical recovery at all
+  // (fill() cannot focus an inert-nested control: the fast path silently
+  // no-ops, humanized typing errors). #771's semantic-blocker path covers only
+  // the PORTALED shape (proven live on Shop Pay), where the blocker's dismiss
+  // ref sits outside the inert subtree; here that ref is inert-nested itself.
   async withModalInertNeutralized<T>(
     selector: string,
     fn: (modalActive: boolean) => Promise<T>,
