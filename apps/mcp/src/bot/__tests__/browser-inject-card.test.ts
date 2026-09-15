@@ -62,7 +62,12 @@ describe("direct card injection and masked observation", () => {
       try {
         const topUrl = "https://merchant.test/checkout";
         await isolated.page.route(topUrl, (route) =>
-          route.fulfill({ contentType: "text/html", body: '<input name="number">' }),
+          route.fulfill({
+            contentType: "text/html",
+            // An explicit card-number signal so the compact map carries the
+            // f=payment fact the PAN ref is picked from.
+            body: '<input name="number" aria-label="Card number">',
+          }),
         );
         const controller = BrowserController.fromHarnessPage(isolated.page);
         const started = await startHarnessProvisionSession({
@@ -71,7 +76,7 @@ describe("direct card injection and masked observation", () => {
         });
         sessionId = started.session_id;
         const rows = started.safe_table as unknown as Array<[string, string, string?]>;
-        const panRef = rows.find(([, , facts]) => facts?.includes("f=card_number"))?.[0];
+        const panRef = rows.find(([, , facts]) => facts?.includes("f=payment"))?.[0];
         if (panRef === undefined) throw new Error("missing public PAN field ref");
         paymentSession(sessionId).releasedPaymentCard = {
           approvalId: "approval_same_purchase",

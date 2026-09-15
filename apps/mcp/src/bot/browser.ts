@@ -111,6 +111,9 @@ export type InjectCardField = "pan" | "cvv" | "exp_month" | "exp_year" | "exp" |
 export type InjectCardFieldResult =
   | { status: "filled" }
   | { status: "not_found" | "detached" }
+  // Written, then cleared again by the page before the call ended — the pass
+  // verified inside the live frame and could not keep the value present.
+  | { status: "cleared"; error: string }
   | { status: "native_error"; error: string };
 
 export interface InjectCardResolvedTarget {
@@ -7744,17 +7747,27 @@ export class BrowserController implements BrowserDriver {
           return card.name;
       }
     };
-    for (const field of ["pan", "cvv", "exp_month", "exp_year", "exp", "name"] as const) {
-      const target = targets[field];
-      if (target === undefined) {
-        results[field] = { status: "not_found" };
-        continue;
-      }
-      if (target.element === undefined) {
-        results[field] = { status: target.missing ?? "not_found" };
-        continue;
-      }
-      const element = target.element;
+    const resolveInjectTarget = async (
+      element: InteractiveElement,
+    ): Promise<ElementHandle<Element> | null> =>
+      element.framePath === null || element.framePath === undefined
+        ? await page
+            .locator(element.selector)
+            .elementHandle({ timeout: 3_000 })
+            .catch(() => null)
+        : await this.resolveFrameElement(
+            {
+              framePath: element.framePath,
+              frameOrigin: element.frameOrigin ?? "null",
+              frameUrl: element.frameUrl ?? "",
+            },
+            element.selector,
+            0,
+            page,
+          );
+    const fillField = async (field: InjectCardField): Promise<InjectCardFieldResult> => {
+      const target = targets[field]!;
+      const element = target.element!;
       if (field === "pan" || field === "cvv") {
         this.cardValueOutputMask.registerTarget({
           kind: field,
@@ -7764,25 +7777,9 @@ export class BrowserController implements BrowserDriver {
       }
       let handle: ElementHandle<Element> | null = null;
       try {
-        handle =
-          element.framePath === null || element.framePath === undefined
-            ? await page
-                .locator(element.selector)
-                .elementHandle({ timeout: 3_000 })
-                .catch(() => null)
-            : await this.resolveFrameElement(
-                {
-                  framePath: element.framePath,
-                  frameOrigin: element.frameOrigin ?? "null",
-                  frameUrl: element.frameUrl ?? "",
-                },
-                element.selector,
-                0,
-                page,
-              );
+        handle = await resolveInjectTarget(element);
         if (handle === null) {
-          results[field] = { status: "detached" };
-          continue;
+          return { status: "detached" };
         }
         await markOperatorMutationDispatchAttempted();
         if (field === "pan" || field === "cvv") {
@@ -7806,9 +7803,9 @@ export class BrowserController implements BrowserDriver {
         } else {
           await handle.fill(value, { timeout: 8_000 });
         }
-        results[field] = { status: "filled" };
+        return { status: "filled" };
       } catch (error) {
-        results[field] = {
+        return {
           status: "native_error",
           error: this.cardValueOutputMask.maskText(
             error instanceof Error ? error.message : String(error),
@@ -7816,6 +7813,112 @@ export class BrowserController implements BrowserDriver {
         };
       } finally {
         await handle?.dispose().catch(() => undefined);
+      }
+    };
+    // ONE uninterrupted pass over every targeted field.
+    const attempted: InjectCardField[] = [];
+    for (const field of ["pan", "cvv", "exp_month", "exp_year", "exp", "name"] as const) {
+      const target = targets[field];
+      if (target === undefined) {
+        results[field] = { status: "not_found" };
+        continue;
+      }
+      if (target.element === undefined) {
+        results[field] = { status: target.missing ?? "not_found" };
+        continue;
+      }
+      attempted.push(field);
+      results[field] = await fillField(field);
+    }
+    if (attempted.length > 0) {
+      // Hosted-field providers (Braintree) rebuild every card frame after the
+      // first input into any one field — asynchronously from the writes that
+      // triggered the rebuild — and a rebuilt frame reopens EMPTY. A per-field
+      // "filled" that does not survive to submit is a lie the caller cannot
+      // detect, so the pass ends by re-reading every written value INSIDE its
+      // live frame (the read returns a boolean; card values never leave the
+      // frame) and re-filling whatever the rebuild cleared — all within this
+      // same call. Two consecutive clean verifications, separated by a settle
+      // that lets an in-flight rebuild land, mean the values are stable.
+      // Several targeted fields can resolve to ONE element (a combined MM/YY
+      // input addressed as exp_month + exp_year): each element is verified
+      // against its LAST-written value, and a stale element re-fills its
+      // fields in write order so the last write governs.
+      const groups = new Map<string, InjectCardField[]>();
+      for (const field of attempted) {
+        const element = targets[field]!.element!;
+        const key =
+          element.framePath === null || element.framePath === undefined
+            ? `main|${element.selector}`
+            : `frame|${element.framePath}|${element.frameUrl ?? ""}|${element.selector}`;
+        const members = groups.get(key);
+        if (members === undefined) groups.set(key, [field]);
+        else members.push(field);
+      }
+      const holdsValue = async (field: InjectCardField): Promise<boolean> => {
+        const target = targets[field]!;
+        const handle = await resolveInjectTarget(target.element!);
+        if (handle === null) return false;
+        try {
+          const expected = valueFor(field, target.format);
+          return await handle.evaluate(
+            (node, expected) => {
+              const control = node as HTMLInputElement | HTMLSelectElement;
+              const actual = control.value ?? "";
+              // Hosted fields may reformat what was typed (grouped PAN
+              // digits, padding); compare the literal value OR its digits.
+              return actual === expected || actual.replace(/\D/g, "") === expected.replace(/\D/g, "");
+            },
+            expected,
+          );
+        } catch {
+          return false;
+        } finally {
+          await handle.dispose().catch(() => undefined);
+        }
+      };
+      const refillBudget = new Map<InjectCardField, number>(
+        attempted.map((f) => [f, 2] as [InjectCardField, number]),
+      );
+      const refill = async (field: InjectCardField): Promise<void> => {
+        if ((refillBudget.get(field) ?? 0) <= 0) return;
+        refillBudget.set(field, (refillBudget.get(field) ?? 0) - 1);
+        results[field] = await fillField(field);
+      };
+      let cleanRounds = 0;
+      for (let round = 0; round < 4 && cleanRounds < 2; round++) {
+        await page.waitForTimeout(300);
+        // Writes that never landed (frame mid-rebuild at write time) get
+        // another attempt before the value check.
+        for (const field of attempted) {
+          if (results[field].status !== "filled") await refill(field);
+        }
+        const stale: InjectCardField[] = [];
+        for (const members of groups.values()) {
+          const last = members[members.length - 1]!;
+          if (results[last].status !== "filled" || !(await holdsValue(last))) {
+            stale.push(...members);
+          }
+        }
+        if (stale.length === 0) {
+          cleanRounds++;
+          continue;
+        }
+        cleanRounds = 0;
+        for (const field of stale) await refill(field);
+      }
+      // Still not holding after the bounded pass: report it — "filled" would
+      // be the lie this verification exists to prevent.
+      for (const members of groups.values()) {
+        const last = members[members.length - 1]!;
+        if (results[last].status === "filled" && !(await holdsValue(last))) {
+          for (const field of members) {
+            results[field] = {
+              status: "cleared",
+              error: "value did not survive in the live frame",
+            };
+          }
+        }
       }
     }
     return results;
