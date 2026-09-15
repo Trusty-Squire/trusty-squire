@@ -122,8 +122,8 @@ record remains `draining` until cleanup completes or the configured
 `TRUSTY_SQUIRE_SERVER_SHUTDOWN_DEADLINE_MS` expires (30 seconds by default).
 
 Implementation entry points: `src/bot/broker/daemon.ts`, `discovery.ts`,
-`authority.ts`, `runtime.ts`, `operator.ts`, `forwarder.ts`, and `transport.ts`
-under `apps/mcp`.
+`authority.ts`, `runtime.ts`, `operator.ts`, `forwarder.ts`, `protocol.ts`, and
+`transport.ts` under `apps/mcp`.
 
 
 ## Executed mechanical acceptance

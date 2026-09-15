@@ -203,7 +203,6 @@ describe("authenticated broker IPC", () => {
     }
   }, 10_000);
 
-
   it("keeps a recent request result, and re-executes an evicted one, past the bound", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-ipc-bound-"));
     const path = join(root, "b.sock");
