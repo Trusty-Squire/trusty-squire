@@ -312,7 +312,7 @@ describe("frame binding during uncommitted navigations (real Chromium, real HTTP
   );
 
   it.skipIf(!available)(
-    "does not label a frame unread when its document did reach the tree",
+    "marks an unbound frame whose visible content cannot be acted on",
     { timeout: 60_000 },
     async () => {
       const { page } = await newPage();
@@ -347,10 +347,60 @@ describe("frame binding during uncommitted navigations (real Chromium, real HTTP
 
         const row = iframes(observed.root).find((n) => n.attributes.id === "written");
         expect(row).toBeDefined();
-        // Its content IS in the tree, so the row must keep its ordinary
-        // scroll affordance rather than claim the content was not read.
+        // The control inside is visible — it is in the tree and the serializer
+        // renders it — but the frame never bound, so it reached no ref and
+        // cannot be acted on. The row has to say so, or a rendered-but-dead
+        // control is indistinguishable from a live one.
         expect(row!.contentDocument).not.toBeNull();
-        expect(row!.scrollText).not.toContain("frame content not read");
+        expect(observed.elements.find((element) => element.id === "inside")).toBeUndefined();
+        expect(row!.scrollText).toBe("frame content not actionable — binding failed");
+        // Its content did reach the tree, so the row must not claim otherwise.
+        expect(row!.scrollText).not.toContain("not read");
+      } finally {
+        await page.context().close();
+      }
+    },
+  );
+
+  it.skipIf(!available)(
+    "leaves a bound frame's row alone even when its document was written into",
+    { timeout: 60_000 },
+    async () => {
+      const { page } = await newPage();
+      try {
+        pendingChildResponses = [];
+        await page.goto(`http://${PARENT_HOST}:${port}/blank`, { waitUntil: "domcontentloaded" });
+        // Same document.write, but the frame commits its own navigation first
+        // (to the parent's own url), so the written document keeps that url
+        // and both sides agree on it. The frame binds and its control reaches
+        // the inventory, so the row must stay an ordinary scrollable frame.
+        await page.evaluate(
+          ({ src }) => {
+            const f = document.createElement("iframe");
+            f.id = "written";
+            f.style.cssText = "width:300px;height:120px;border:0";
+            f.src = src;
+            document.body.appendChild(f);
+          },
+          { src: `http://${PARENT_HOST}:${port}/blank` },
+        );
+        await page.waitForTimeout(900);
+        await page.evaluate(() => {
+          const f = document.getElementById("written") as HTMLIFrameElement;
+          f.contentDocument!.write(
+            "<!doctype html><html><body><button id='inside'>Inside</button></body></html>",
+          );
+          f.contentDocument!.close();
+        });
+        await page.waitForTimeout(400);
+
+        const observed = await capture(page);
+        expect(observed.omissions).toEqual([]);
+        expect(observed.elements.find((element) => element.id === "inside")).toBeDefined();
+
+        const row = iframes(observed.root).find((n) => n.attributes.id === "written");
+        expect(row).toBeDefined();
+        expect(row!.scrollText).toBe("scroll");
       } finally {
         await page.context().close();
       }
@@ -415,6 +465,12 @@ describe("frame binding during uncommitted navigations (real Chromium, real HTTP
         // frame's control is not emitted under the pending frame's path (nor
         // any other), which is what pairing across the mismatch would do.
         expect(observed.elements).toEqual([]);
+        // And both rows say so rather than reading as ordinary frames.
+        for (const id of ["written", "pending"]) {
+          const row = iframes(observed.root).find((n) => n.attributes.id === id);
+          expect(row).toBeDefined();
+          expect(row!.scrollText).toBe("frame content not actionable — binding failed");
+        }
       } finally {
         await page.context().close();
       }

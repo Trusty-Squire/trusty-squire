@@ -233,12 +233,23 @@ const iframeSource = (n: BrowserUseNode): NonNullable<FrameOmission["source"]> =
   title: n.attributes.title ?? null,
 });
 
-/** Row text replacing "(scroll)" when a frame's content is absent from the tree. */
-const unreadFrameMarker: Record<FrameOmission["kind"], string> = {
-  frame_binding_failed: "frame content not read — binding failed",
-  frame_accessibility_failed: "frame content not read — accessibility failed",
-  frame_attach_failed: "frame content not read — attach failed",
+const frameFailureReason: Record<FrameOmission["kind"], string> = {
+  frame_binding_failed: "binding failed",
+  frame_accessibility_failed: "accessibility failed",
+  frame_attach_failed: "attach failed",
 };
+
+/**
+ * Row text replacing "(scroll)" on a frame that produced an omission. Such a
+ * frame contributed no elements to the inventory, so nothing inside it can be
+ * acted on — that is the fact the caller needs, and it holds whether or not
+ * its document reached the tree. Which of the two happened decides the
+ * wording only: `pierce: true` builds every same-process document into the
+ * tree regardless of binding, so its content is visible (and serialized)
+ * while being unusable, and claiming it was "not read" there would be false.
+ */
+const unreadFrameMarker = (kind: FrameOmission["kind"], contentInTree: boolean): string =>
+  `frame content ${contentInTree ? "not actionable" : "not read"} — ${frameFailureReason[kind]}`;
 
 /** Capture the three canonical Chrome trees. No page mutation and no Python runtime. */
 export async function captureBrowserUseDOM(
@@ -1406,7 +1417,7 @@ export async function captureBrowserUseDOM(
               source: iframeSource(n),
             });
             n.contentDocument = null;
-            n.scrollText = unreadFrameMarker.frame_attach_failed;
+            n.scrollText = unreadFrameMarker("frame_attach_failed", false);
           }
         } else if (frame === undefined) {
           // A rendered iframe whose child document never reached the capture
@@ -1419,7 +1430,7 @@ export async function captureBrowserUseDOM(
             url: n.attributes.src ?? "",
             source: iframeSource(n),
           });
-          n.scrollText = unreadFrameMarker.frame_attach_failed;
+          n.scrollText = unreadFrameMarker("frame_attach_failed", false);
         }
       }
       for (const c of n.children) await attachFrames(c, depth);
@@ -1427,7 +1438,7 @@ export async function captureBrowserUseDOM(
     };
     await attachFrames(root);
     for (const { node, kind } of unreadFrameRows)
-      if (node.contentDocument === null) node.scrollText = unreadFrameMarker[kind];
+      node.scrollText = unreadFrameMarker(kind, node.contentDocument !== null);
     const hints = async (n: BrowserUseNode): Promise<void> => {
       if (["IFRAME", "FRAME"].includes(n.nodeName) && n.contentDocument) {
         const viewportHeight = viewMetadata.get(n.id)?.layout?.client?.height ?? 0;
