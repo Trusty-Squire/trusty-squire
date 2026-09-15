@@ -255,6 +255,22 @@ export type ProvisionAction =
 export type { AllowedHostEntry, HostSource, Session } from "./session/model.js";
 import type { Session } from "./session/model.js";
 import { egressSeedHosts, hostStrings, registrableHost } from "./session/hosts.js";
+// Phase 3 — session state left the facade: the sealed <select> bookkeeping and
+// element retention moved to session/model.ts, the secret slots to
+// session/slots.ts, and the host-scope state to session/registry.ts. The
+// slots and the user-email lookup stay re-exported below (the tool layer's
+// import surface), as with the lifecycle names.
+import {
+  clearCommittedSelectValue,
+  compactV2CommittedSelectKey,
+  compactV2CommittedSelectValue,
+  retainSessionElements,
+} from "./session/model.js";
+import { widenAllowedHostsFromUrl } from "./session/registry.js";
+import { stashSecretSlot, type SlotHandle } from "./session/slots.js";
+
+export { getSessionUserEmail } from "./session/registry.js";
+export { readSecretSlotValue, stashSecretSlot, type SlotHandle } from "./session/slots.js";
 // Phase 2 — the lifecycle registry transaction moved to session/lifecycle.ts as
 // one unit (registry, real-profile lease, call leases and drains, watchdog,
 // bounded close, terminal owner, artifact cleanup, start/finish/shutdown).
@@ -1321,51 +1337,6 @@ function frameTargetFor(el: FrameScopedTarget): FrameTarget | null {
   };
 }
 
-function baseDomain(host: string): string {
-  const parts = host.toLowerCase().split(".").filter(Boolean);
-  if (parts.length <= 2) return parts.join(".");
-  return parts.slice(-2).join(".");
-}
-
-// Webmail hosts awaitVerification drives the browser INTO to read a code/link.
-// Actions taken while parked here must NOT enter the
-// replayable recipe: (a) replay re-fetches the code via awaitVerification, so a
-// recorded inbox click is dead weight, and (b) the clicked row's visible text
-// carries the email's subject/snippet — baking a user's inbox content into a
-// shareable recipe. Identity-provider hosts (accounts.google.com, github.com)
-// are NOT here — OAuth steps stay in the trace.
-const INBOX_READ_HOSTS = new Set([
-  "mail.google.com",
-  "outlook.live.com",
-  "outlook.office365.com",
-  "mail.yahoo.com",
-  "mail.proton.me",
-]);
-export function isInboxReadHost(url: string): boolean {
-  const host = registrableHost(url);
-  return host !== null && INBOX_READ_HOSTS.has(host);
-}
-
-function widenAllowedHostsFromUrl(session: Session, url: string): void {
-  const host = registrableHost(url);
-  if (host === null || session.allowedHosts.some((e) => e.host === host)) return;
-  const currentBase = baseDomain(host);
-  // Chain ONLY off START-sourced hosts: an organic redirect that shares a base
-  // domain with a host the user declared at start is trusted. We do NOT chain
-  // off mid_session or prior auto_widen hosts — that would let a single
-  // agent-declared host silently pull in a whole sibling tree (scope creep).
-  if (
-    session.allowedHosts.some((e) => e.source === "start" && baseDomain(e.host) === currentBase)
-  ) {
-    session.allowedHosts.push({ host, source: "auto_widen" });
-    audit(session.id, "scope_widen", {
-      host,
-      source: "auto_widen",
-      allowed_hosts: hostStrings(session),
-    });
-  }
-}
-
 // ── session lifecycle ──
 //
 // The transaction itself lives in session/lifecycle.ts. These two wrappers are
@@ -1624,60 +1595,12 @@ export function observedHostsForSession(sessionId: string): string[] {
   return [...new Set(egressSeedHosts(session))];
 }
 
-// Mask a secret for a host-facing preview: keep a short prefix + last few
-// chars, redact the middle. Never reveals enough to reconstruct the value.
-export function maskSecretValue(value: string): string {
-  const v = value.trim();
-  if (v.length <= 8) return "••••";
-  const head = v.slice(0, Math.min(6, v.length - 4));
-  const tail = v.slice(-3);
-  return `${head}••••${tail}`;
-}
-
-export interface SlotHandle {
-  slot: string;
-  preview: string;
-  length: number;
-}
-
-// Stash a secret into a session-local slot and return ONLY a handle + masked
-// preview. The raw value stays in the Session and is never returned to the
-// host — a later type_secret enters it into another site's form. Extends the
-// write-only-vault moat to in-session credential transfer.
-export function stashSecretSlot(sessionId: string, slot: string, value: string): SlotHandle {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  session.secretSlots.set(slot, value);
-  audit(sessionId, "secret_slot_set", { slot, length: value.length });
-  return { slot, preview: maskSecretValue(value), length: value.length };
-}
-
-// Internal MCP tool bridge: read a sealed slot so the tool layer can persist a
-// signup password to the vault after the service account is created. Never
-// expose this value in a tool response or recipe trace.
-export function readSecretSlotValue(sessionId: string, slot: string): string {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const value = session.secretSlots.get(slot);
-  if (value === undefined) throw new Error(`no sealed slot named "${slot}"`);
-  return value;
-}
-
 export function currentProvisionUrl(sessionId: string): string {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   return operationPageForSession(session)?.url() ?? session.browser.currentUrl();
 }
 
-
-// PR3c — the user's own email captured at login (the authoritative signup
-// address), or null when none was captured. The tool layer reads this to fill
-// username/password signups so the account is user-owned.
-export function getSessionUserEmail(sessionId: string): string | null {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  return session.userEmail;
-}
 
 // PR3c — generate a strong signup password. Policy-compliant by construction
 // (>=1 lower/upper/digit/symbol) so it satisfies common signup validators, then
@@ -1707,40 +1630,6 @@ export function generatePassword(length = 24): string {
 //   "compact" — the paged browser-use control map. The DEFAULT.
 //   "full"    — the browser-use DOM tree.
 export type ObserveDetail = "none" | "compact" | "full";
-
-function retainSessionElements(session: Session, elements: InteractiveElement[]): void {
-  session.lastElements = sealRetainedInteractiveElementsV2(elements, (element) =>
-    compactV2CorrelationSelector(session, element),
-  );
-}
-
-function compactV2CommittedSelectKey(session: Session, selector: string): string {
-  return createHmac("sha256", session.compactV2Secret)
-    .update(`select-key\0${selector}`)
-    .digest("base64url");
-}
-
-function compactV2CommittedSelectValue(session: Session, value: string): string {
-  return createHmac("sha256", session.compactV2Secret)
-    .update(`select-value\0${value}`)
-    .digest("base64url");
-}
-
-function clearCommittedSelectValue(session: Session, selector: string): void {
-  session.committedSelectValues.delete(compactV2CommittedSelectKey(session, selector));
-}
-
-function compactV2CorrelationSelector(session: Session, element: InteractiveElement): string {
-  const binding = JSON.stringify([
-    element.frameOrigin ?? null,
-    element.framePath ?? null,
-    element.selector,
-  ]);
-  return `@c:${createHmac("sha256", session.compactV2Secret)
-    .update(binding)
-    .digest("base64url")
-    .slice(0, 22)}`;
-}
 
 export interface CompactV2StartMetadata {
   hintPages?: string[];

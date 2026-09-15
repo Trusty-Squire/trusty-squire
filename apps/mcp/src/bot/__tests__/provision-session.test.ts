@@ -8,7 +8,6 @@ import {
   stableElementId,
   AmbiguousProvisionTargetError,
   elementRef,
-  isInboxReadHost,
   parseVerification,
   extractSenderEmail,
   expectedVerificationDomains,
@@ -17,7 +16,6 @@ import {
   generatePassword,
   classifyVouchflowCredentials,
   sanitizeExtractedCredentials,
-  maskSecretValue,
   googleSessionGate,
   buildVerificationSearchQuery,
   makeTwoCaptchaVaultProxy,
@@ -229,23 +227,6 @@ describe("resolveTarget", () => {
   });
 });
 
-
-describe("isInboxReadHost", () => {
-  it("flags the webmail hosts awaitVerification drives into", () => {
-    expect(isInboxReadHost("https://mail.google.com/mail/u/0/#search/x")).toBe(true);
-    expect(isInboxReadHost("https://outlook.live.com/mail/0/")).toBe(true);
-    expect(isInboxReadHost("https://mail.proton.me/u/0/inbox")).toBe(true);
-  });
-
-  it("does NOT flag the service or identity-provider hosts (those stay in the recipe)", () => {
-    expect(isInboxReadHost("https://next-app.useplunk.com/auth/verify-email?token=abc")).toBe(
-      false,
-    );
-    expect(isInboxReadHost("https://accounts.google.com/o/oauth2/v2/auth")).toBe(false);
-    expect(isInboxReadHost("https://github.com/login/oauth/authorize")).toBe(false);
-    expect(isInboxReadHost("not a url")).toBe(false);
-  });
-});
 
 describe("parseVerification (email OTP + link extraction)", () => {
   it("prefers a code adjacent to an OTP keyword", () => {
@@ -616,18 +597,6 @@ describe("buildVerificationSearchQuery (finds passwordless mail)", () => {
     expect(link).toBe(
       "https://app.loops.so/api/auth/callback/email?callbackUrl=https%3A%2F%2Fapp.loops.so%2Fadd-domain&token=REDACTED&email=x%40y.com",
     );
-  });
-});
-
-describe("maskSecretValue (sealed transfer preview)", () => {
-  it("masks the middle of a long secret, keeping a short head + tail", () => {
-    const masked = maskSecretValue("GOCSPX-abcdef1234567890xyz");
-    expect(masked).toContain("••••");
-    expect(masked).not.toContain("abcdef1234567890");
-    expect(masked.startsWith("GOCSPX")).toBe(true);
-  });
-  it("fully redacts a short value (no reconstructable prefix)", () => {
-    expect(maskSecretValue("short")).toBe("••••");
   });
 });
 
