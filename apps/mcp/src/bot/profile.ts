@@ -462,6 +462,24 @@ function profileOperationLockDir(profileDir: string, lockRoot: string): string {
   return join(lockRoot, `trusty-squire-profile-${digest}.lock`);
 }
 
+export interface ProfileOperationLockOwnerRead {
+  host: string;
+  pid: number;
+  start_time: string | null;
+}
+
+/** Reads the recorded owner of a profile operation lease without acquiring
+ * it. Returns null when no lease (or an unreadable artifact) sits at the
+ * lock path. */
+export function profileOperationLockOwner(
+  profileDir: string,
+  lockRoot: string,
+): ProfileOperationLockOwnerRead | null {
+  const owner = readProfileOperationOwner(profileOperationLockDir(profileDir, lockRoot));
+  if (owner === null) return null;
+  return { host: owner.host, pid: owner.pid, start_time: owner.start_time };
+}
+
 function readProfileOperationOwner(lockDir: string): ProfileOperationOwner | null {
   try {
     const ownerPath = lstatSync(lockDir).isDirectory() ? join(lockDir, "owner.json") : lockDir;
