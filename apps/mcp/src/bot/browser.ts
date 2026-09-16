@@ -136,6 +136,14 @@ export interface InjectCardResolvedTarget {
 // first glance". Internal constant — never a tool parameter or config knob.
 const CARD_FIELD_RESOLVE_WINDOW_MS = 1_500;
 const CARD_FIELD_RESOLVE_RETRY_MS = 100;
+// Bounded actionability wait for the hosted-field card WRITE itself. The
+// write's failure falls through to the bounded refill (which re-resolves the
+// live frame at its own write step), so per AGENTS.md rule 9 it must never
+// rely on Playwright's 30s default: a frame remounted mid-write leaves the
+// old frame's locator permanently unactionable and the default would burn
+// 30s per attempt — starving the refill budget — instead of failing in 3s
+// into the retry. Internal constant — never a tool parameter or config knob.
+const CARD_FIELD_WRITE_TIMEOUT_MS = 3_000;
 
 export type ResolvedPageTarget =
   | {
@@ -1260,10 +1268,19 @@ export class BrowserController implements BrowserDriver {
   // invalid even though the DOM value looks right; pressSequentially emits
   // the real key events. Never a per-character loop (rc.29): a loop
   // re-focused the locator on every call and stranded every character after
-  // the first.
-  private async typeWithRealKeys(locator: Locator, text: string): Promise<void> {
-    await locator.fill("").catch(() => undefined);
-    await locator.pressSequentially(text, { delay: rand(40, 110) });
+  // the first. opts.timeoutMs bounds the actionability waits for callers
+  // whose miss falls through to another attempt (the hosted-field card
+  // writer's bounded refill): a frame remounted mid-write leaves the old
+  // frame's locator permanently unactionable, and the 30s default would
+  // starve the refill budget instead of failing fast into the retry.
+  private async typeWithRealKeys(
+    locator: Locator,
+    text: string,
+    opts: { timeoutMs?: number } = {},
+  ): Promise<void> {
+    const timeout = opts.timeoutMs === undefined ? undefined : { timeout: opts.timeoutMs };
+    await locator.fill("", timeout).catch(() => undefined);
+    await locator.pressSequentially(text, { delay: rand(40, 110), ...timeout });
   }
 
   // Best-effort scan for the SPECIFIC unfilled required field(s) blocking a
@@ -6497,7 +6514,9 @@ export class BrowserController implements BrowserDriver {
           // from the vault into the page — never into a tool result or log.
           const owner = await handle.ownerFrame();
           if (owner === null) throw new Error("target has no owning frame");
-          await this.typeWithRealKeys(owner.locator(element.selector).first(), value);
+          await this.typeWithRealKeys(owner.locator(element.selector).first(), value, {
+            timeoutMs: CARD_FIELD_WRITE_TIMEOUT_MS,
+          });
         }
         return { status: "filled" };
       } catch (error) {
