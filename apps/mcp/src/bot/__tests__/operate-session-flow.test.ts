@@ -5467,6 +5467,11 @@ describe("operate session — captcha auto-solve on the general drive", () => {
     // poisoned with a value the site would reject.
     expect(h.injectCaptchaCalls).toEqual([]);
     expect(h.variantCaptchaTokens).toEqual([]);
+
+    // Nothing FAILED on step-2's challenge, so the discard must not back the
+    // new document off: that same observation buys it a token of its own.
+    await drainDetached();
+    expect(h.twoCaptchaCalls).toEqual(["hcaptcha", "hcaptcha"]);
     await finishProvisionSession(started.session_id);
   });
 

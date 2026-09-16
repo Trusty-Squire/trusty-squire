@@ -279,7 +279,6 @@ async function injectPendingCaptchaToken(session: Session, page?: Page): Promise
     // the response field with a value the site will reject.
     if (!sameDocument(pending.solvedUrl, page?.url() ?? session.browser.currentUrl())) {
       audit(session.id, "captcha_autosolve", { variant: pending.variant, outcome: "stale_page" });
-      state.lastFinishedAt = Date.now();
       return;
     }
     const res = await injectCaptchaToken(session.browser, pending.variant, pending.token, page);
