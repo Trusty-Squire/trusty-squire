@@ -191,8 +191,11 @@ agent re-observes and drives the checkout with generic browser actions
   -> partial fills can be retried under the same still-valid approval
   -> agent chooses currency, clicks place order, and waits
   -> when 3-D Secure appears, the operator detects the rendered challenge,
-     nudges the cardholder once, and reports `three_ds` in the result;
+     nudges the cardholder once, and reports `three_ds` challenge_detected;
      the human completes it in their bank app and the agent keeps observing
+  -> when the processor's SDK fails to launch that challenge at all, the
+     operator reports `three_ds` sdk_error_retryable instead — advisory only,
+     nothing notified or gated; a resubmit is expected to launch the challenge
   -> operator does not guess submit controls, validate totals, clear fields,
      arbitrate saved cards, or keep post-submit payment custody
 ```

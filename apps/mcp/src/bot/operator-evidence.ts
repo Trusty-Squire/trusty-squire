@@ -109,12 +109,15 @@ export class OperatorEvidenceCollector {
     return this.threeDsSdkErrorAt;
   }
 
-  /** Arm the latch from evidence the merchant page EMITS: a telemetry/error
-   * POST body, or a thrown BraintreeError's console/exception text. Fetched
-   * RESPONSE bodies are deliberately never passed here — braintree-web's own
-   * three-d-secure bundle ships the literal error code, so scanning script
-   * bodies would arm the latch on every Braintree 3DS checkout, failure or
-   * not. */
+  /** Arm the latch from evidence the merchant page EMITS. The primary class is
+   * a REQUEST body — the page's own error/telemetry POST reporting the code.
+   * Console text is a secondary signal: it arms only when the page prints the
+   * code itself, which a thrown BraintreeError does not do on its own (the
+   * code rides `BraintreeError.code`, while the captured exception text is
+   * only `error.message`). Fetched RESPONSE bodies are deliberately never
+   * passed here — braintree-web's own three-d-secure bundle ships the literal
+   * error code, so scanning script bodies would arm the latch on every
+   * Braintree 3DS checkout, failure or not. */
   private noteThreeDsSdkError(text: string | null): void {
     if (isThreeDsSdkErrorText(text)) this.threeDsSdkErrorAt = Date.now();
   }

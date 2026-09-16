@@ -912,8 +912,9 @@ export async function observedThreeDsChallenge(
 // After a card release, the processor's SDK can fail to launch the challenge
 // at all — Cardinal/Braintree's known race where the ACS render fires before
 // the SDK's UI-framework assets finish loading (THREEDS_CARDINAL_SDK_ERROR as
-// the page itself reports it — its telemetry POST or a thrown BraintreeError;
-// the rendered page usually shows only a generic checkout error). This is
+// the page itself reports it — primarily its own error/telemetry POST, and
+// secondarily console text when the page prints the code; the rendered page
+// usually shows only a generic checkout error). This is
 // observation, not custody: report the transient failure and that a
 // resubmitted payment is expected to launch the challenge,
 // and never block, wait on, or take over the retry. The marker is latched at
