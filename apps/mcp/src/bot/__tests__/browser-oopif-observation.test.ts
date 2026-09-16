@@ -71,7 +71,7 @@ beforeAll(async () => {
     const host = (req.headers.host ?? "").split(":")[0];
     if (host === PARENT_HOST) {
       res.end(
-        '<!doctype html><html><body><main>Checkout</main>' +
+        "<!doctype html><html><body><main>Checkout</main>" +
           // Pushes the iframe below the fold: rendered with real bounds, but
           // outside the initial viewport — the live whitejade failing shape.
           '<div style="height:2000px"></div>' +
@@ -128,7 +128,11 @@ async function childIsSeparateTarget(page: Page): Promise<boolean> {
     const client = await page.context().newCDPSession(page);
     try {
       const targets = await client.send("Target.getTargets");
-      if (targets.targetInfos.some((target) => target.type === "iframe" && target.url.includes(CHILD_HOST)))
+      if (
+        targets.targetInfos.some(
+          (target) => target.type === "iframe" && target.url.includes(CHILD_HOST),
+        )
+      )
         return true;
     } finally {
       await client.detach().catch(() => undefined);
@@ -287,7 +291,10 @@ describe("out-of-process iframe observation (real Chromium, real HTTP)", () => {
           return realNewCDPSession(target);
         };
 
-        const observed = (await observe(sessionId, "compact")) as unknown as Record<string, unknown>;
+        const observed = (await observe(sessionId, "compact")) as unknown as Record<
+          string,
+          unknown
+        >;
         const omissions = (observed.capture_omissions ?? []) as Array<{
           kind: string;
           url: string;
