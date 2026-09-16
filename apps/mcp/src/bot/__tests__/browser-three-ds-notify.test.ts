@@ -186,6 +186,15 @@ describe("3-D Secure detection and notification", () => {
         );
         sessionId = released.sessionId;
 
+        // The precedence decision is only exercised once the SDK-error
+        // evidence has actually landed, so wait for it before observing.
+        const session = paymentSession(sessionId);
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          if (session.browser.hasThreeDsSdkErrorEvidence()) break;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        expect(session.browser.hasThreeDsSdkErrorEvidence()).toBe(true);
+
         const observed = await observe(sessionId);
         expect(observed.three_ds).toMatchObject({ state: "challenge_detected" });
         expect(released.notifyThreeDs).toHaveBeenCalledTimes(1);

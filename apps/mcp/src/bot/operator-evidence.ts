@@ -68,6 +68,18 @@ type CdpFailure = {
   corsErrorStatus?: { corsError?: string };
 };
 
+/** braintree-web's stable error code for "the Cardinal 3-D Secure SDK could
+ * not run" — including its challenge-launch race, where the ACS render fires
+ * before the SDK's UI-framework chunks finish loading. The page's own
+ * telemetry carries it; the rendered page usually shows only a generic
+ * checkout error. */
+export const THREE_DS_SDK_ERROR_MARKER = "THREEDS_CARDINAL_SDK_ERROR";
+
+/** Pure per-record classifier: does this one captured text carry the marker? */
+export function isThreeDsSdkErrorText(text: string | null): boolean {
+  return text !== null && text.includes(THREE_DS_SDK_ERROR_MARKER);
+}
+
 /** Bounded, session-local evidence stream. It diagnoses nothing. */
 export class OperatorEvidenceCollector {
   private sequence = 0;
@@ -76,12 +88,26 @@ export class OperatorEvidenceCollector {
   private readonly screenshots: OperatorScreenshotRecord[] = [];
   private readonly attachments = new WeakMap<Page, Promise<void>>();
   private readonly sessions = new WeakMap<Page, CDPSession>();
+  private threeDsSdkErrorAt: number | null = null;
 
   constructor(private readonly mask: CardValueOutputMask) {}
 
   private next(): number {
     this.sequence += 1;
     return this.sequence;
+  }
+
+  /** Wall-clock time the 3-D Secure SDK-error marker was first captured, or
+   * null. Latched once at capture time so nothing has to rescan the buffer;
+   * freshness is the caller's to bound. */
+  threeDsSdkErrorSeenAt(): number | null {
+    return this.threeDsSdkErrorAt;
+  }
+
+  private noteThreeDsSdkError(text: string | null): void {
+    if (this.threeDsSdkErrorAt === null && isThreeDsSdkErrorText(text)) {
+      this.threeDsSdkErrorAt = Date.now();
+    }
   }
 
   private boundedPush<T>(target: T[], value: T): void {
@@ -99,21 +125,25 @@ export class OperatorEvidenceCollector {
 
   private async attachPage(page: Page): Promise<void> {
     const onConsole = (message: ConsoleMessage): void => {
+      const text = this.mask.maskText(message.text());
+      this.noteThreeDsSdkError(text);
       this.boundedPush(this.console, {
         seq: this.next(),
         kind: "console",
         level: message.type(),
-        text: this.mask.maskText(message.text()),
+        text,
         url: message.location().url || page.url(),
         at: Date.now(),
       });
     };
     const onPageError = (error: Error): void => {
+      const text = this.mask.maskText(error.message);
+      this.noteThreeDsSdkError(text);
       this.boundedPush(this.console, {
         seq: this.next(),
         kind: "exception",
         level: "error",
-        text: this.mask.maskText(error.message),
+        text,
         url: page.url(),
         at: Date.now(),
       });
@@ -154,6 +184,7 @@ export class OperatorEvidenceCollector {
         response_body: null,
         loading_failed: null,
       };
+      this.noteThreeDsSdkError(record.request_body);
       if (previous !== undefined && previous.state === "pending") previous.state = "completed";
       this.network.set(event.requestId, record);
       if (this.network.size > 500) this.network.delete(this.network.keys().next().value as string);
@@ -175,6 +206,7 @@ export class OperatorEvidenceCollector {
         .send("Network.getResponseBody", { requestId: event.requestId })
         .then((body) => {
           record.response_body = this.mask.maskText(body.body.slice(0, 65_536), "response_body");
+          this.noteThreeDsSdkError(record.response_body);
           record.seq = this.next();
         })
         .catch(() => undefined);
@@ -229,15 +261,5 @@ export class OperatorEvidenceCollector {
         .filter((record) => record.seq > since && requestId === undefined)
         .map((record) => this.mask.maskValue(record)),
     };
-  }
-
-  /** Internal, unmasked snapshot for boolean diagnostic scans only (see
-   * BrowserController.hasThreeDsSdkErrorEvidence). Not a public read API:
-   * values stay behind the mask in read(). */
-  diagnosticSnapshot(): {
-    network: OperatorNetworkRecord[];
-    console: OperatorConsoleRecord[];
-  } {
-    return { network: [...this.network.values()], console: [...this.console] };
   }
 }

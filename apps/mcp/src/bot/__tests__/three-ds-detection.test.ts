@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { threeDsChallengeUrlPattern, threeDsSdkErrorEvidence } from "../browser.js";
+import {
+  THREE_DS_SDK_ERROR_EVIDENCE_WINDOW_MS,
+  threeDsChallengeUrlPattern,
+  threeDsSdkErrorEvidenceIsFresh,
+} from "../browser.js";
+import { isThreeDsSdkErrorText } from "../operator-evidence.js";
 
 // The 3-D Secure challenge detector must recognize BOTH Cardinal ACS
 // generations. The modern Braintree/Cardinal 3DS2 flow serves the challenge
@@ -19,17 +24,18 @@ describe("threeDsChallengeUrlPattern", () => {
         "https://authentication.cardinalcommerce.com/ThreeDSecure/V2_1_0/CReq?jwt=eyJraWQi",
       ),
     ).toBe(true);
-  });
-
-  it("matches a generic ACS /CReq endpoint on any host", () => {
-    expect(threeDsChallengeUrlPattern.test("https://acs.otherbank.example/CReq?threeDSSessionData=1")).toBe(
-      true,
-    );
+    expect(
+      threeDsChallengeUrlPattern.test("https://authentication.cardinalcommerce.com/ThreeDSecure/CReq"),
+    ).toBe(true);
   });
 
   it("still matches the other cross-processor markers", () => {
     expect(threeDsChallengeUrlPattern.test("https://hooks.stripe.com/3d_secure/acc_1/host")).toBe(true);
     expect(threeDsChallengeUrlPattern.test("https://3ds.example.com/acs/step1")).toBe(true);
+  });
+
+  it("does not match a /CReq endpoint on a non-Cardinal host", () => {
+    expect(threeDsChallengeUrlPattern.test("https://assets.otherbank.example/CReq")).toBe(false);
   });
 
   it("does not match ordinary checkout or songbird asset URLs", () => {
@@ -46,47 +52,49 @@ describe("threeDsChallengeUrlPattern", () => {
 // When Cardinal's ACS render races its own UI-framework chunk load and loses,
 // braintree-web reports THREEDS_CARDINAL_SDK_ERROR through the page's own
 // telemetry — the only durable evidence the operator can read, since the
-// rendered page shows just a generic checkout error.
-describe("threeDsSdkErrorEvidence", () => {
-  it("detects the marker in a request body", () => {
+// rendered page shows just a generic checkout error. The collector classifies
+// each captured record once, at capture time.
+describe("isThreeDsSdkErrorText", () => {
+  it("detects the marker in a captured body", () => {
     expect(
-      threeDsSdkErrorEvidence({
-        network: [
-          {
-            request_body: '{"event":"3ds_verification.error","code":"THREEDS_CARDINAL_SDK_ERROR"}',
-            response_body: null,
-          },
-        ],
-        console: [],
-      }),
+      isThreeDsSdkErrorText('{"event":"3ds_verification.error","code":"THREEDS_CARDINAL_SDK_ERROR"}'),
     ).toBe(true);
   });
 
-  it("detects the marker in a response body", () => {
+  it("detects the marker in captured console output", () => {
+    expect(isThreeDsSdkErrorText("BraintreeError THREEDS_CARDINAL_SDK_ERROR: render failed")).toBe(
+      true,
+    );
+  });
+
+  it("returns false for unrelated errors and absent text", () => {
+    expect(isThreeDsSdkErrorText('{"code":"VALIDATION_ERROR"}')).toBe(false);
+    expect(isThreeDsSdkErrorText("Blocked script execution in about:blank")).toBe(false);
+    expect(isThreeDsSdkErrorText(null)).toBe(false);
+  });
+});
+
+// The SDK-error state tells the agent to resubmit the payment, so it must stop
+// being reported well before a later order confirmation could be read that way
+// — a double-purchase hazard. The capture-time latch is never cleared; the
+// freshness window alone bounds it.
+describe("threeDsSdkErrorEvidenceIsFresh", () => {
+  const now = 1_700_000_000_000;
+
+  it("is false when the marker was never captured", () => {
+    expect(threeDsSdkErrorEvidenceIsFresh(null, now)).toBe(false);
+  });
+
+  it("is true for a marker captured inside the window", () => {
+    expect(threeDsSdkErrorEvidenceIsFresh(now, now)).toBe(true);
     expect(
-      threeDsSdkErrorEvidence({
-        network: [{ request_body: null, response_body: "THREEDS_CARDINAL_SDK_ERROR" }],
-        console: [],
-      }),
+      threeDsSdkErrorEvidenceIsFresh(now - THREE_DS_SDK_ERROR_EVIDENCE_WINDOW_MS, now),
     ).toBe(true);
   });
 
-  it("detects the marker in console output", () => {
+  it("is false once the marker ages past the window", () => {
     expect(
-      threeDsSdkErrorEvidence({
-        network: [{ request_body: null, response_body: null }],
-        console: [{ text: "BraintreeError THREEDS_CARDINAL_SDK_ERROR: render failed" }],
-      }),
-    ).toBe(true);
-  });
-
-  it("returns false for unrelated errors and empty evidence", () => {
-    expect(
-      threeDsSdkErrorEvidence({
-        network: [{ request_body: '{"code":"VALIDATION_ERROR"}', response_body: null }],
-        console: [{ text: "Blocked script execution in about:blank" }],
-      }),
+      threeDsSdkErrorEvidenceIsFresh(now - THREE_DS_SDK_ERROR_EVIDENCE_WINDOW_MS - 1, now),
     ).toBe(false);
-    expect(threeDsSdkErrorEvidence({ network: [], console: [] })).toBe(false);
   });
 });

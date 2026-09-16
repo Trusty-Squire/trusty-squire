@@ -915,9 +915,10 @@ export async function observedThreeDsChallenge(
 // the page's own telemetry; the rendered page usually shows only a generic
 // checkout error). This is observation, not custody: report the transient
 // failure and that a resubmitted payment is expected to launch the challenge,
-// and never block, wait on, or take over the retry. The evidence marker rolls
-// out of the bounded evidence stream on its own. A detected challenge always
-// takes precedence over this state (checked first above).
+// and never block, wait on, or take over the retry. The marker is latched at
+// capture time and reported only inside a freshness window, so it stops well
+// before a later order confirmation could be read as "resubmit". A detected
+// challenge always takes precedence over this state (checked first above).
 function observedThreeDsSdkError(
   browser: { hasThreeDsSdkErrorEvidence(): boolean },
 ): Extract<Observation["three_ds"], { state: "sdk_error_retryable" }> | undefined {

@@ -256,36 +256,21 @@ export function classifyInterstitialText(text: string): {
 // URL/ACS markers for a rendered 3-D Secure challenge. Modern CardinalCommerce
 // ACS step-ups (Braintree's current 3DS2 flow) no longer use the legacy
 // `cruise/stepup` path: the challenge auto-post form targets
-// `https://<region>.cardinalcommerce.com/ThreeDSecure/V2_x/CReq?...`, and ACS
-// vendors generally serve a `/CReq` endpoint on their own host. Module-level
+// `https://<region>.cardinalcommerce.com/ThreeDSecure/V2_x/CReq?...`. Module-level
 // so unit tests can pin both the legacy and modern ACS paths. Exported.
 export const threeDsChallengeUrlPattern =
-  /(?:https?:\/\/(?:[^/]+\.)*cardinalcommerce\.com\/(?:v\d+\/)?cruise\/stepup(?:[/?#]|$)|https?:\/\/(?:[^/]+\.)*cardinalcommerce\.com\/ThreeDSecure\/(?:[/?#]|$)|https?:\/\/hooks\.stripe\.com\/3d_secure|https?:\/\/(?:[^/]+\.)*emvtds(?:[-.][^/]*)?(?:\/|$)|3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/(?:emvtds|emv-?3ds)(?:[-_/]|$)|\/3ds(?:2)?\/|\/acs\/|\/credit3d2\/Fep(?:ChargePaymentInfo|BridgeAuthority)[^/?#]*\.do(?:[?#]|$)|\/CReq(?:[?#]|$))/i;
+  /(?:https?:\/\/(?:[^/]+\.)*cardinalcommerce\.com\/(?:v\d+\/)?cruise\/stepup(?:[/?#]|$)|https?:\/\/(?:[^/]+\.)*cardinalcommerce\.com\/ThreeDSecure\/(?:V\d[^/?#]*\/)?CReq(?:[/?#]|$)|https?:\/\/hooks\.stripe\.com\/3d_secure|https?:\/\/(?:[^/]+\.)*emvtds(?:[-.][^/]*)?(?:\/|$)|3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/(?:emvtds|emv-?3ds)(?:[-_/]|$)|\/3ds(?:2)?\/|\/acs\/|\/credit3d2\/Fep(?:ChargePaymentInfo|BridgeAuthority)[^/?#]*\.do(?:[?#]|$))/i;
 
-// The retained evidence stream proves this failure mode even when the rendered
-// page shows only a generic checkout error: the processor surfaces its 3-D
-// Secure SDK failure through the page's own telemetry. THREEDS_CARDINAL_SDK_ERROR
-// is braintree-web's stable error code for "the Cardinal SDK could not run" —
-// including its known challenge-launch race, where the ACS render fires before
-// the SDK's UI-framework chunks finish loading (TypeError ... reading 'plugin'
-// → "Failed to render ACS window" → zero requests to the ACS host). Pure
-// boolean scan over the unmasked collector snapshot: it classifies, never
-// exposes evidence values. Exported for unit tests.
-export function threeDsSdkErrorEvidence(evidence: {
-  network: Array<{ request_body: string | null; response_body: string | null }>;
-  console: Array<{ text: string }>;
-}): boolean {
-  for (const record of evidence.network) {
-    if (
-      (record.request_body !== null &&
-        record.request_body.includes("THREEDS_CARDINAL_SDK_ERROR")) ||
-      (record.response_body !== null &&
-        record.response_body.includes("THREEDS_CARDINAL_SDK_ERROR"))
-    ) {
-      return true;
-    }
-  }
-  return evidence.console.some((record) => record.text.includes("THREEDS_CARDINAL_SDK_ERROR"));
+// How long a captured 3-D Secure SDK-error marker stays reportable. The state
+// tells the agent a resubmit is expected to launch the challenge, so it has to
+// stop long before a later order confirmation could be read as "resubmit" —
+// that would be a double-purchase hazard.
+export const THREE_DS_SDK_ERROR_EVIDENCE_WINDOW_MS = 180_000;
+
+// Pure freshness predicate over the evidence collector's capture-time latch.
+// Exported for unit tests.
+export function threeDsSdkErrorEvidenceIsFresh(seenAt: number | null, now: number): boolean {
+  return seenAt !== null && now - seenAt <= THREE_DS_SDK_ERROR_EVIDENCE_WINDOW_MS;
 }
 
 // After a Cloudflare managed challenge PASSES, the cf_clearance cookie is
@@ -697,12 +682,15 @@ export class BrowserController implements BrowserDriver {
     return this.operatorEvidence.read(since, requestId);
   }
 
-  /** Diagnostic-only boolean: does retained evidence show the processor's
-   * 3-D Secure SDK failing to launch its challenge (e.g. Braintree's
-   * THREEDS_CARDINAL_SDK_ERROR in the page's own telemetry)? Returns a
-   * classification and never exposes evidence values. */
+  /** Diagnostic-only boolean: did the processor's 3-D Secure SDK recently fail
+   * to launch its challenge (Braintree's THREEDS_CARDINAL_SDK_ERROR in the
+   * page's own telemetry)? Returns a classification and never exposes evidence
+   * values. */
   hasThreeDsSdkErrorEvidence(): boolean {
-    return threeDsSdkErrorEvidence(this.operatorEvidence.diagnosticSnapshot());
+    return threeDsSdkErrorEvidenceIsFresh(
+      this.operatorEvidence.threeDsSdkErrorSeenAt(),
+      Date.now(),
+    );
   }
 
   async brokerTargetId(): Promise<string> {
