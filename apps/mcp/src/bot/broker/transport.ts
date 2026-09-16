@@ -94,6 +94,7 @@ export interface BrokerTransportPort {
 }
 
 const ORPHAN_PROBE_TIMEOUT_MS = 2_000;
+const LEGACY_HANDSHAKE_PROBE_TIMEOUT_MS = 5_000;
 
 /** A stale Unix socket left behind by a SIGKILLed predecessor makes bind fail
  * with EADDRINUSE even though nothing is listening. A successful client connect
@@ -114,6 +115,60 @@ export async function brokerEndpointHasLiveListener(path: string): Promise<boole
     timer = setTimeout(() => finish(true), ORPHAN_PROBE_TIMEOUT_MS);
     socket.once("connect", () => finish(true));
     socket.once("error", () => finish(false));
+  });
+}
+
+/** Positive prior-contract identification for reclaim. Sends the
+ * pre-Contract-B `hello` handshake: only a resident prior-contract daemon
+ * answers it, because a Contract B broker refuses every pre-auth method that
+ * is not `connect`. The probe adds no wire operation to Contract B and is
+ * only sent after a `connect` refusal, never on a healthy connect path. */
+export async function brokerSpeaksLegacyWire(path: string, token: string): Promise<boolean> {
+  return await new Promise<boolean>((resolve) => {
+    const socket = createConnection(path);
+    const id = randomUUID();
+    let buffered = Buffer.alloc(0);
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    const finish = (value: boolean): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      socket.destroy();
+      resolve(value);
+    };
+    timer = setTimeout(() => finish(false), LEGACY_HANDSHAKE_PROBE_TIMEOUT_MS);
+    socket.on("data", (chunk: Buffer) => {
+      buffered = Buffer.concat([buffered, chunk]);
+      for (;;) {
+        const end = buffered.indexOf(10);
+        if (end < 0) break;
+        const frame = buffered.subarray(0, end);
+        buffered = buffered.subarray(end + 1);
+        let reply: Reply;
+        try {
+          reply = JSON.parse(frame.toString("utf8")) as Reply;
+        } catch {
+          continue;
+        }
+        if (reply.id !== id) continue;
+        finish(reply.error === undefined);
+        return;
+      }
+    });
+    socket.once("connect", () =>
+      send(socket, {
+        version: 1,
+        id,
+        method: "hello",
+        params: {
+          token,
+          agentId: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "local-agent",
+        },
+      }),
+    );
+    socket.once("error", () => finish(false));
+    socket.once("close", () => finish(false));
   });
 }
 

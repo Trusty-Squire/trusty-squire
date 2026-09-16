@@ -2,7 +2,7 @@ import { lstat } from "node:fs/promises";
 import { createSessionGuard } from "../../session-guard.js";
 import { BrokerClient } from "./transport.js";
 import { BrokerRefusal } from "./refusal.js";
-import { resolveBrokerSocket } from "./discovery.js";
+import { reclaimPriorContractBrokerIfPresent, resolveBrokerSocket } from "./discovery.js";
 
 /** The maintenance connect carries the browser drain inside the handshake:
  * `runtime.close()` quits Chrome gracefully under BROWSER_QUIT_DEADLINE_MS
@@ -37,10 +37,20 @@ export async function withBrokerMaintenance<T>(operation: () => Promise<T>): Pro
     });
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ECONNREFUSED" && code !== "broker_lost") throw error;
-    // Nothing answers on the socket path: a dead predecessor's orphan. The
-    // next broker's bind reclaims it; run the operation without a broker.
-    return await operation();
+    if (code === "ECONNREFUSED" || code === "broker_lost") {
+      // Nothing answers on the socket path: a dead predecessor's orphan. The
+      // next broker's bind reclaims it; run the operation without a broker.
+      return await operation();
+    }
+    // A live resident that refuses Contract B's maintain connect may be a
+    // prior-contract broker still holding the profile: reclaim (terminate)
+    // it so plain login drains the old broker instead of racing it, then run
+    // the operation bare exactly like the no-socket path. Unidentifiable
+    // residents are left alone and the original error propagates.
+    if (await reclaimPriorContractBrokerIfPresent(path, session.agent_session_token, error)) {
+      return await operation();
+    }
+    throw error;
   }
   if (client.welcome?.maintenance !== "ready") {
     await client.close();
