@@ -193,6 +193,26 @@ interface CredentialMutationApprovalRow {
   executed_at: Date | null;
 }
 
+interface CardMutationApprovalRow {
+  id: string;
+  account_id: string;
+  operation: string;
+  card_id: string;
+  card_label: string;
+  before_metadata: unknown;
+  after_metadata: unknown;
+  nonce: string;
+  agent: string;
+  requester_kind: string;
+  intent_hash: string;
+  status: string;
+  failure_code: string | null;
+  mandate_id: string | null;
+  created_at: Date;
+  expires_at: Date;
+  executed_at: Date | null;
+}
+
 interface CredentialFetchApprovalRow {
   id: string;
   account_id: string;
@@ -425,6 +445,17 @@ export interface ApiPrismaClient {
       data: Record<string, unknown>;
     }): Promise<{ count: number }>;
     deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
+  };
+  cardMutationApproval: {
+    create(args: { data: Record<string, unknown>; select: { id: true } }): Promise<{ id: string }>;
+    findFirst(args: {
+      where: Record<string, unknown>;
+      orderBy?: Record<string, unknown>;
+    }): Promise<CardMutationApprovalRow | null>;
+    updateMany(args: {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }): Promise<{ count: number }>;
   };
   credentialFetchApproval: {
     create(args: { data: Record<string, unknown>; select: { id: true } }): Promise<{ id: string }>;

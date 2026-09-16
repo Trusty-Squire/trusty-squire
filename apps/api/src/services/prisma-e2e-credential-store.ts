@@ -3,6 +3,7 @@ import type { VaultAuditEventInput } from "@trusty-squire/vault";
 import type { ApiPrismaClient } from "./api-prisma-client.js";
 import type {
   E2ECredentialCardMetadata,
+  E2ECredentialCardUpdate,
   E2ECredentialRecord,
   E2ECredentialStore,
   E2ECredentialSummary,
@@ -111,6 +112,23 @@ export class PrismaE2ECredentialStore implements E2ECredentialStore {
     const result = await this.prisma.e2ECredential.updateMany({
       where: { id, account_id: accountId },
       data: { label },
+    });
+    return result.count > 0;
+  }
+
+  async updateCardForAccount(
+    id: string,
+    accountId: string,
+    update: E2ECredentialCardUpdate,
+  ): Promise<boolean> {
+    const result = await this.prisma.e2ECredential.updateMany({
+      where: { id, account_id: accountId },
+      data: {
+        label: update.label,
+        blob: update.blob,
+        brand: update.brand,
+        last4: update.last4,
+      },
     });
     return result.count > 0;
   }
