@@ -281,6 +281,18 @@ async function injectPendingCaptchaToken(session: Session, page?: Page): Promise
       audit(session.id, "captcha_autosolve", { variant: pending.variant, outcome: "stale_page" });
       return;
     }
+    // The same question the fetch side asks before spending: a widget that
+    // settled while 2Captcha worked — the agent clicked the checkbox, or the
+    // substrate cleared it — needs nothing. Writing the bought token over it
+    // would re-fire the site's success callbacks, which on an ordinary
+    // integration submits the form a second time.
+    if (await hasCaptchaResponseTokenForVariant(session.browser, pending.variant, page)) {
+      audit(session.id, "captcha_autosolve", {
+        variant: pending.variant,
+        outcome: "already_settled",
+      });
+      return;
+    }
     const res = await injectCaptchaToken(session.browser, pending.variant, pending.token, page);
     // The settle check answers "does ANY provider hold a token", which a
     // co-resident widget can satisfy on its own. Confirm against the DETECTED

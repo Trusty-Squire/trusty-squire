@@ -5475,6 +5475,36 @@ describe("operate session — captcha auto-solve on the general drive", () => {
     await finishProvisionSession(started.session_id);
   });
 
+  it("discards a token for a widget that settled while 2Captcha was working", async () => {
+    h.captchaVariant = "hcaptcha";
+    h.captchaChallengeRendered = true;
+    h.twoCaptchaAvailable = true;
+    h.captureOverride = challengeCapture();
+    const gate = openGate();
+
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/signup",
+      api: vaultApi(),
+      format: "compact",
+    });
+    await gate.solveStarted;
+
+    // The agent did what a challenge blocker asks for and clicked the widget
+    // itself: h-captcha-response is populated, same document, same URL.
+    h.variantCaptchaTokens = ["hcaptcha"];
+    gate.release();
+    h.twoCaptchaGate = null;
+    await drainDetached();
+    await observe(started.session_id);
+    await drainDetached();
+
+    // Writing the bought token over a settled widget would re-fire the site's
+    // success callbacks and submit the form under the agent.
+    expect(h.injectCaptchaCalls).toEqual([]);
+    expect(h.twoCaptchaCalls).toEqual(["hcaptcha"]);
+    await finishProvisionSession(started.session_id);
+  });
+
   it("treats an injected token that never reached its own response field as a failed attempt", async () => {
     h.captchaVariant = "hcaptcha";
     h.captchaChallengeRendered = true;
