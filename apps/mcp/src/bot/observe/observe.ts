@@ -38,6 +38,7 @@ import {
 import type { Session } from "../session/model.js";
 import { retainSessionElements } from "../session/model.js";
 import { sessionForCall } from "../session/lifecycle.js";
+import { attemptOperateCaptchaAutoSolve } from "../captcha-solve.js";
 import { widenAllowedHostsFromUrl } from "../session/registry.js";
 import { norm, provisionElementRefs } from "./refs.js";
 import type { Observation } from "../provision-session.js";
@@ -1030,6 +1031,13 @@ export async function observeSession(
     if (sourcePage === undefined) {
       widenAllowedHostsFromUrl(session, session.browser.currentUrl());
     }
+    // Best-effort captcha auto-solve on the general drive (hCaptcha gap): if a
+    // challenge is RENDERED right now and the vaulted "2captcha" credential can
+    // clear it, do that BEFORE the capture so this very observation reflects the
+    // cleared page. No credential / solve failure / timeout → nothing changes;
+    // the challenge blocker below surfaces exactly as it does today. Never
+    // throws (see attemptOperateCaptchaAutoSolve).
+    await attemptOperateCaptchaAutoSolve(session, sourcePage);
     session.generation += 1;
     const generation = session.generation;
     const capture = await session.browser.extractBrowserUseObservation(sourcePage, true);

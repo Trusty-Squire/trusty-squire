@@ -175,6 +175,9 @@ const h = vi.hoisted(() => ({
     | { kind: "solve_timeout"; durationMs: number }
     | { kind: "solver_error"; reason: string },
   twoCaptchaCalls: [] as string[],
+  twoCaptchaCtorArgs: [] as Array<unknown>,
+  injectCaptchaCalls: [] as string[],
+  injectClearsCapture: false,
   consentDismissCalls: 0,
   consentCta: null as string | null,
   locatorResolve: {
@@ -1061,6 +1064,9 @@ vi.mock("../browser.js", async (importOriginal) => ({
 // fake's methods used to make.
 vi.mock("../captcha.js", () => ({
   TwoCaptchaSolver: class {
+    constructor(opts?: unknown) {
+      h.twoCaptchaCtorArgs.push(opts);
+    }
     isAvailable(): boolean {
       return h.twoCaptchaAvailable;
     }
@@ -1096,6 +1102,7 @@ vi.mock("../captcha.js", () => ({
   },
   extractRecaptchaSitekey: async () => "6Lcaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   injectRecaptchaToken: async () => {
+    h.injectCaptchaCalls.push("recaptcha");
     h.captchaToken = true;
     return true;
   },
@@ -1106,11 +1113,14 @@ vi.mock("../captcha.js", () => ({
     rqdata: null,
   }),
   injectHcaptchaToken: async () => {
+    h.injectCaptchaCalls.push("hcaptcha");
     h.captchaToken = true;
+    if (h.injectClearsCapture) h.captureOverride = null;
     return true;
   },
   extractTurnstileSitekey: async () => "0x4AAAAAAA",
   injectTurnstileToken: async () => {
+    h.injectCaptchaCalls.push("turnstile");
     h.captchaToken = true;
     return true;
   },
@@ -1367,6 +1377,9 @@ beforeEach(() => {
   h.twoCaptchaAvailable = false;
   h.twoCaptchaResult = { kind: "ok", token: "captcha-token", durationMs: 1 };
   h.twoCaptchaCalls = [];
+  h.twoCaptchaCtorArgs = [];
+  h.injectCaptchaCalls = [];
+  h.injectClearsCapture = false;
   h.locatorResolve = {
     ok: true,
     text: "Control",
@@ -5140,6 +5153,161 @@ describe("operate session — captcha gate", () => {
     expect(res).toMatchObject({ found: true, variant: "recaptcha_v3", settled: true });
     expect(h.invisibleTriggerCalls).toBe(1);
     expect(h.twoCaptchaCalls).toEqual(["recaptcha_v2"]);
+  });
+});
+
+describe("operate session — captcha auto-solve on the general drive", () => {
+  // A capture whose root carries a rendered challenge alert, so the observation
+  // computes a challenge blocker exactly like the live hCaptcha page does.
+  const challengeCapture = (): BrowserUseCapture => {
+    const capture = mockBrowserUseCapture([
+      elem({ tag: "input", type: "text", name: "email", id: "email" }),
+    ] as InteractiveElement[]);
+    const template = capture.root.children[0]!;
+    const node = (id: string, overrides: Partial<BrowserUseNode>): BrowserUseNode => ({
+      ...template,
+      id,
+      attributes: {},
+      children: [],
+      contentDocument: null,
+      ...overrides,
+    });
+    capture.root.children.unshift(
+      node("challenge-alert", {
+        nodeName: "P",
+        attributes: { role: "alert" },
+        axRole: "alert",
+        children: [
+          node("challenge-alert-text", {
+            nodeType: 3,
+            nodeName: "#text",
+            value: "Please complete the verification challenge.",
+          }),
+        ],
+      }),
+    );
+    return capture;
+  };
+
+  const vaultApi = (): ApiClient =>
+    ({
+      listCredentials: async () => ({ credentials: [{ service: "2captcha" }] }),
+      useCredential: async () => ({ response: { status: 200, body: "{}" } }),
+    }) as unknown as ApiClient;
+
+  it("auto-solves a rendered hCaptcha challenge during observation when a 2captcha credential is vaulted", async () => {
+    h.captchaVariant = "hcaptcha";
+    h.captchaChallengeRendered = true;
+    h.twoCaptchaAvailable = true;
+    // The injected token clears the challenge before the capture runs, so the
+    // very observation that triggered the solve comes back already cleared.
+    h.injectClearsCapture = true;
+    h.captureOverride = challengeCapture();
+
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/signup",
+      api: vaultApi(),
+      format: "compact",
+    });
+
+    expect(h.twoCaptchaCalls).toEqual(["hcaptcha"]);
+    expect(h.injectCaptchaCalls).toEqual(["hcaptcha"]);
+    expect(h.captchaToken).toBe(true);
+    // The solver is built on the vault proxy, not an env key.
+    expect(h.twoCaptchaCtorArgs).toEqual([
+      expect.objectContaining({ vaultProxy: expect.anything() }),
+    ]);
+    const payload = started as unknown as {
+      semantic?: { blocked?: boolean; blockers?: Array<Record<string, unknown>> };
+    };
+    expect(payload.semantic?.blockers ?? []).toEqual([]);
+  });
+
+  it("surfaces the challenge unchanged when no 2captcha credential is vaulted", async () => {
+    h.captchaVariant = "hcaptcha";
+    h.captchaChallengeRendered = true;
+    h.captureOverride = challengeCapture();
+
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/signup",
+      format: "compact",
+    });
+
+    expect(h.twoCaptchaCalls).toEqual([]);
+    expect(h.injectCaptchaCalls).toEqual([]);
+    const payload = started as unknown as {
+      semantic: { blocked: boolean; blockers: Array<Record<string, unknown>> };
+    };
+    expect(payload.semantic.blocked).toBe(true);
+    expect(payload.semantic.blockers).toEqual([
+      {
+        kind: "challenge",
+        text: "Please complete the verification challenge.",
+        target: "unavailable",
+      },
+    ]);
+  });
+
+  it("surfaces the challenge unchanged when the token solve fails", async () => {
+    h.captchaVariant = "hcaptcha";
+    h.captchaChallengeRendered = true;
+    h.twoCaptchaAvailable = true;
+    h.twoCaptchaResult = { kind: "solver_error", reason: "ERROR_BAD_KEY" };
+    h.captureOverride = challengeCapture();
+
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/signup",
+      api: vaultApi(),
+      format: "compact",
+    });
+
+    expect(h.twoCaptchaCalls).toEqual(["hcaptcha"]);
+    expect(h.injectCaptchaCalls).toEqual([]);
+    const payload = started as unknown as {
+      semantic: { blocked: boolean; blockers: Array<Record<string, unknown>> };
+    };
+    expect(payload.semantic.blocked).toBe(true);
+    expect(payload.semantic.blockers[0]).toMatchObject({ kind: "challenge" });
+  });
+
+  it("does not re-attempt a failed solve on the next observation before the cooldown elapses", async () => {
+    h.captchaVariant = "hcaptcha";
+    h.captchaChallengeRendered = true;
+    h.twoCaptchaAvailable = true;
+    h.twoCaptchaResult = { kind: "solve_timeout", durationMs: 1 };
+    h.captureOverride = challengeCapture();
+
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/signup",
+      api: vaultApi(),
+      format: "compact",
+    });
+    await observe(started.session_id);
+
+    // One attempt at start, none at the immediate re-observe: the 30s retry
+    // cooldown bounds how fast a failing challenge can burn the funded key.
+    expect(h.twoCaptchaCalls).toEqual(["hcaptcha"]);
+  });
+
+  it("leaves Turnstile to its managed challenge even when one is rendered", async () => {
+    h.captchaVariant = "turnstile";
+    h.captchaChallengeRendered = true;
+    h.twoCaptchaAvailable = true;
+    h.captureOverride = challengeCapture();
+
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/signup",
+      api: vaultApi(),
+      format: "compact",
+    });
+
+    expect(h.twoCaptchaCalls).toEqual([]);
+    expect(h.injectCaptchaCalls).toEqual([]);
+    const payload = started as unknown as {
+      semantic: { blocked: boolean; blockers: Array<Record<string, unknown>> };
+    };
+    expect(payload.semantic.blocked).toBe(true);
+    expect(payload.semantic.blockers[0]).toMatchObject({ kind: "challenge" });
   });
 });
 

@@ -19,7 +19,6 @@ import type { BrowserUseCapture } from "./browser-use-capture.js";
 //    `finish`/extract path; the vault stays write-only.
 
 import { randomInt } from "node:crypto";
-import type { Page } from "playwright";
 import type {
   BrowserController,
   CheckoutCard,
@@ -29,21 +28,16 @@ import type {
 } from "./browser.js";
 import { completeOAuthTransitionRecovery, oauthTransitionStatus } from "./oauth-login.js";
 import {
-  TwoCaptchaSolver,
-  type TwoCaptchaVaultProxy,
   detectCaptchaVariant,
-  extractHcaptchaSitekey,
-  extractRecaptchaSitekey,
-  extractTurnstileSitekey,
-  getHcaptchaSolveContext,
-  injectHcaptchaToken,
-  injectRecaptchaToken,
-  injectTurnstileToken,
   solveVisibleCaptcha,
   triggerInvisibleRecaptcha,
   waitForCaptchaChallengeToSettle,
   waitForCaptchaResponseToken,
 } from "./captcha.js";
+import {
+  buildTwoCaptchaSolver,
+  solveCaptchaWithTokenSolver,
+} from "./captcha-solve.js";
 import {
   isCompactV2Handle,
   isCompactV2Label,
@@ -52,7 +46,7 @@ import {
   type SafePageSemanticsV2,
   type SafeStageV2,
 } from "./compact-observation-v2.js";
-import type { ApiClient, HeightenedAuthNotificationResult } from "../api-client.js";
+import type { HeightenedAuthNotificationResult } from "../api-client.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 
 export interface Observation {
@@ -222,7 +216,6 @@ export type ProvisionAction =
   | { kind: "upload"; target: string; path: string };
 
 export type { AllowedHostEntry, HostSource, Session } from "./session/model.js";
-import type { Session } from "./session/model.js";
 import { egressSeedHosts } from "./session/hosts.js";
 // Phase 3 — session state left the facade: the sealed <select> bookkeeping and
 // element retention moved to session/model.ts, the secret slots to
@@ -737,121 +730,10 @@ export interface CaptchaGateResult {
   needs_user?: NeedsUserCaptcha;
 }
 
-// A TwoCaptchaVaultProxy backed by the MCP api-client: every 2Captcha call is
-// routed through use_credential against the vaulted "2captcha" credential, so
-// the raw key is injected server-side and never lives in this process. The
-// ${SECRET} placeholder goes in the query (`key`) or JSON body (`clientKey`)
-// per the request's keyInjection; the proxy substitutes it at the boundary.
-export function makeTwoCaptchaVaultProxy(api: ApiClient): TwoCaptchaVaultProxy {
-  return {
-    async request(req) {
-      const http: {
-        method: string;
-        url: string;
-        headers?: Record<string, string>;
-        body?: string;
-        query?: Record<string, string>;
-      } = { method: req.method, url: req.url };
-      if (req.keyInjection.in === "query") {
-        http.query = { ...(req.query ?? {}), [req.keyInjection.name]: "${SECRET}" };
-      } else {
-        http.headers = { "content-type": "application/json" };
-        http.body = JSON.stringify({
-          [req.keyInjection.name]: "${SECRET}",
-          ...(req.jsonBody ?? {}),
-        });
-      }
-      const { response } = await api.useCredential({ service: "2captcha", http });
-      return {
-        ok: response.status >= 200 && response.status < 300,
-        status: response.status,
-        json: async () => JSON.parse(response.body) as unknown,
-      };
-    },
-  };
-}
-
-// Build the right-transport solver for a session: vault-proxy when the install
-// vaulted a "2captcha" credential (key never in this process), else the env key
-// (TWOCAPTCHA_API_KEY, back-compat). Listing creds is metadata-only — no secret.
-async function buildTwoCaptchaSolver(session: Session): Promise<TwoCaptchaSolver> {
-  if (session.api !== undefined) {
-    try {
-      const { credentials } = await session.api.listCredentials();
-      const hasVaulted = credentials.some((c) => (c.service ?? "").toLowerCase() === "2captcha");
-      if (hasVaulted) {
-        return new TwoCaptchaSolver({ vaultProxy: makeTwoCaptchaVaultProxy(session.api) });
-      }
-    } catch {
-      // Listing failed (offline / transient) — fall back to the env key.
-    }
-  }
-  return new TwoCaptchaSolver();
-}
-
-async function solveCaptchaWithTokenSolver(
-  solver: TwoCaptchaSolver,
-  browser: BrowserController,
-  variant: string,
-  page?: Page,
-): Promise<{ solved: boolean; outcome: string }> {
-  if (!solver.isAvailable()) return { solved: false, outcome: "no_key" };
-
-  if (variant === "recaptcha_v2" || variant === "recaptcha_v3") {
-    const sitekey = await extractRecaptchaSitekey(browser, page);
-    if (sitekey === null) return { solved: false, outcome: "missing_sitekey" };
-    const res = await solver.solveRecaptchaV2({
-      sitekey,
-      pageUrl: page?.url() ?? browser.currentUrl(),
-      ...(variant === "recaptcha_v3" ? { invisible: true } : {}),
-    });
-    if (res.kind !== "ok") return { solved: false, outcome: res.kind };
-    const injected = await injectRecaptchaToken(browser, res.token, page);
-    if (!injected) return { solved: false, outcome: "inject_failed" };
-    return {
-      solved: await waitForCaptchaResponseToken(browser, 2_000, page),
-      outcome: "ok",
-    };
-  }
-
-  if (variant === "hcaptcha") {
-    const sitekey = await extractHcaptchaSitekey(browser, page);
-    if (sitekey === null) return { solved: false, outcome: "missing_sitekey" };
-    const ctx = await getHcaptchaSolveContext(browser, page);
-    const res = await solver.solveHcaptcha({
-      sitekey,
-      pageUrl: page?.url() ?? browser.currentUrl(),
-      invisible: ctx.invisible,
-      ...(ctx.userAgent !== null ? { userAgent: ctx.userAgent } : {}),
-      ...(ctx.rqdata !== null ? { data: ctx.rqdata } : {}),
-    });
-    if (res.kind !== "ok") return { solved: false, outcome: res.kind };
-    const injected = await injectHcaptchaToken(browser, res.token, page);
-    if (!injected) return { solved: false, outcome: "inject_failed" };
-    return {
-      solved: await waitForCaptchaResponseToken(browser, 2_000, page),
-      outcome: "ok",
-    };
-  }
-
-  if (variant === "turnstile") {
-    const sitekey = await extractTurnstileSitekey(browser, page);
-    if (sitekey === null) return { solved: false, outcome: "missing_sitekey" };
-    const res = await solver.solveTurnstile({
-      sitekey,
-      pageUrl: page?.url() ?? browser.currentUrl(),
-    });
-    if (res.kind !== "ok") return { solved: false, outcome: res.kind };
-    const injected = await injectTurnstileToken(browser, res.token, page);
-    if (!injected) return { solved: false, outcome: "inject_failed" };
-    return {
-      solved: await waitForCaptchaResponseToken(browser, 2_000, page),
-      outcome: "ok",
-    };
-  }
-
-  return { solved: false, outcome: "unsupported_variant" };
-}
+// Re-exported so existing callers (and the captcha-gate tests) keep importing
+// the shared solve plumbing from this module. The implementation lives in
+// captcha-solve.ts alongside the operate-path auto-solve that now reuses it.
+export { makeTwoCaptchaVaultProxy } from "./captcha-solve.js";
 
 // Detect a captcha and drive the substrate's provider-specific gate. A hidden
 // response token is the success signal; challenge disappearance alone is not
@@ -881,7 +763,7 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
     solvedBySubstrate = await triggerInvisibleRecaptcha(session.browser, 9_000, page);
     token = solvedBySubstrate || (await waitForCaptchaResponseToken(session.browser, 2_000, page));
     if (!token) {
-      const solver = await buildTwoCaptchaSolver(session);
+      const solver = await buildTwoCaptchaSolver(session.api);
       const tokenSolved = await solveCaptchaWithTokenSolver(
         solver,
         session.browser,
@@ -898,7 +780,7 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
     // #279: route a configured token solver FIRST for the checkbox-family
     // captchas; solveCaptchaWithTokenSolver returns outcome "no_key" when none
     // is configured, so we fall through to the visible-captcha click below.
-    const solver = await buildTwoCaptchaSolver(session);
+    const solver = await buildTwoCaptchaSolver(session.api);
     const tokenSolved = await solveCaptchaWithTokenSolver(
       solver,
       session.browser,
