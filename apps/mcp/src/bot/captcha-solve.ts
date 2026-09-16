@@ -100,15 +100,25 @@ export async function solveCaptchaWithTokenSolver(
 ): Promise<{ solved: boolean; outcome: string }> {
   if (!solver.isAvailable()) return { solved: false, outcome: "no_key" };
 
+  // A token is bound to the document it was solved for. 2Captcha answers tens
+  // of seconds later, by which time the agent may have submitted the form or
+  // the site may have re-rendered a FRESH challenge — writing the old token
+  // into that document poisons the response field with a value the site will
+  // reject, and makes the page look solved to every later check.
+  const solvedUrl = page?.url() ?? browser.currentUrl();
+  const stillOnSolvedDocument = (): boolean =>
+    sameDocument(solvedUrl, page?.url() ?? browser.currentUrl());
+
   if (variant === "recaptcha_v2" || variant === "recaptcha_v3") {
     const sitekey = await extractRecaptchaSitekey(browser, page);
     if (sitekey === null) return { solved: false, outcome: "missing_sitekey" };
     const res = await solver.solveRecaptchaV2({
       sitekey,
-      pageUrl: page?.url() ?? browser.currentUrl(),
+      pageUrl: solvedUrl,
       ...(variant === "recaptcha_v3" ? { invisible: true } : {}),
     });
     if (res.kind !== "ok") return { solved: false, outcome: res.kind };
+    if (!stillOnSolvedDocument()) return { solved: false, outcome: "stale_page" };
     const injected = await injectRecaptchaToken(browser, res.token, page);
     if (!injected) return { solved: false, outcome: "inject_failed" };
     return {
@@ -123,12 +133,13 @@ export async function solveCaptchaWithTokenSolver(
     const ctx = await getHcaptchaSolveContext(browser, page);
     const res = await solver.solveHcaptcha({
       sitekey,
-      pageUrl: page?.url() ?? browser.currentUrl(),
+      pageUrl: solvedUrl,
       invisible: ctx.invisible,
       ...(ctx.userAgent !== null ? { userAgent: ctx.userAgent } : {}),
       ...(ctx.rqdata !== null ? { data: ctx.rqdata } : {}),
     });
     if (res.kind !== "ok") return { solved: false, outcome: res.kind };
+    if (!stillOnSolvedDocument()) return { solved: false, outcome: "stale_page" };
     const injected = await injectHcaptchaToken(browser, res.token, page);
     if (!injected) return { solved: false, outcome: "inject_failed" };
     return {
@@ -140,11 +151,9 @@ export async function solveCaptchaWithTokenSolver(
   if (variant === "turnstile") {
     const sitekey = await extractTurnstileSitekey(browser, page);
     if (sitekey === null) return { solved: false, outcome: "missing_sitekey" };
-    const res = await solver.solveTurnstile({
-      sitekey,
-      pageUrl: page?.url() ?? browser.currentUrl(),
-    });
+    const res = await solver.solveTurnstile({ sitekey, pageUrl: solvedUrl });
     if (res.kind !== "ok") return { solved: false, outcome: res.kind };
+    if (!stillOnSolvedDocument()) return { solved: false, outcome: "stale_page" };
     const injected = await injectTurnstileToken(browser, res.token, page);
     if (!injected) return { solved: false, outcome: "inject_failed" };
     return {
@@ -154,6 +163,21 @@ export async function solveCaptchaWithTokenSolver(
   }
 
   return { solved: false, outcome: "unsupported_variant" };
+}
+
+// Same document, not same string: a fragment change never replaces the
+// document, anything else (path, query, origin) does.
+function sameDocument(a: string, b: string): boolean {
+  const withoutFragment = (url: string): string => {
+    try {
+      const parsed = new URL(url);
+      parsed.hash = "";
+      return parsed.toString();
+    } catch {
+      return url;
+    }
+  };
+  return withoutFragment(a) === withoutFragment(b);
 }
 
 // ── operate-path auto-solve ──
@@ -232,12 +256,19 @@ async function runDetachedAutoSolve(session: Session, page?: Page): Promise<void
       requestTimeoutMs: CAPTCHA_AUTOSOLVE_REQUEST_TIMEOUT_MS,
     });
     const res = await solveCaptchaWithTokenSolver(solver, session.browser, variant, page);
+    // The solver's own settle check answers "does ANY provider hold a token",
+    // which a co-resident widget can satisfy on its own. Confirm against the
+    // DETECTED provider's field, the same question the pre-check above asks, so
+    // a token that landed nowhere is a failed attempt that arms the cooldown
+    // rather than a recorded success that suppresses the next one.
+    const confirmed =
+      res.solved && (await hasCaptchaResponseTokenForVariant(session.browser, variant, page));
     audit(session.id, "captcha_autosolve", {
       variant,
-      outcome: res.outcome,
-      solved: res.solved,
+      outcome: res.solved && !confirmed ? "token_not_confirmed" : res.outcome,
+      solved: confirmed,
     });
-    if (!res.solved) failedAt = Date.now();
+    if (!confirmed) failedAt = Date.now();
   } catch (error) {
     // Best-effort: any solver or transport error — including the page or the
     // whole session going away mid-solve — leaves the challenge on the page for
