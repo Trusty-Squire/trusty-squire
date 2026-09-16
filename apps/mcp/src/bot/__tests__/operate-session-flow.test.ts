@@ -176,8 +176,14 @@ const h = vi.hoisted(() => ({
     | { kind: "solver_error"; reason: string },
   twoCaptchaCalls: [] as string[],
   twoCaptchaCtorArgs: [] as Array<unknown>,
+  // Holds a solve open so a test can observe while one is genuinely in flight.
+  twoCaptchaGate: null as Promise<void> | null,
   injectCaptchaCalls: [] as string[],
   injectClearsCapture: false,
+  // Which providers currently hold their OWN response token, so the
+  // variant-scoped pre-check can be exercised independently of captchaToken
+  // (the legacy any-provider flag).
+  variantCaptchaTokens: [] as string[],
   consentDismissCalls: 0,
   consentCta: null as string | null,
   locatorResolve: {
@@ -1076,6 +1082,7 @@ vi.mock("../captcha.js", () => ({
     }
     async solveHcaptcha(): Promise<typeof h.twoCaptchaResult> {
       h.twoCaptchaCalls.push("hcaptcha");
+      if (h.twoCaptchaGate !== null) await h.twoCaptchaGate;
       return h.twoCaptchaResult;
     }
     async solveTurnstile(): Promise<typeof h.twoCaptchaResult> {
@@ -1085,6 +1092,8 @@ vi.mock("../captcha.js", () => ({
   },
   waitForCaptchaChallengeToSettle: async () => h.captchaSettled,
   waitForCaptchaResponseToken: async () => h.captchaToken,
+  hasCaptchaResponseTokenForVariant: async (_browser: unknown, variant: string) =>
+    h.variantCaptchaTokens.includes(variant),
   detectCaptchaVariant: async () => ({
     variant: h.captchaVariant,
     challengeRendered: h.captchaChallengeRendered,
@@ -1104,6 +1113,7 @@ vi.mock("../captcha.js", () => ({
   injectRecaptchaToken: async () => {
     h.injectCaptchaCalls.push("recaptcha");
     h.captchaToken = true;
+    h.variantCaptchaTokens.push("recaptcha_v2", "recaptcha_v3");
     return true;
   },
   extractHcaptchaSitekey: async () => "00000000-0000-0000-0000-000000000000",
@@ -1115,6 +1125,7 @@ vi.mock("../captcha.js", () => ({
   injectHcaptchaToken: async () => {
     h.injectCaptchaCalls.push("hcaptcha");
     h.captchaToken = true;
+    h.variantCaptchaTokens.push("hcaptcha");
     if (h.injectClearsCapture) h.captureOverride = null;
     return true;
   },
@@ -1122,6 +1133,7 @@ vi.mock("../captcha.js", () => ({
   injectTurnstileToken: async () => {
     h.injectCaptchaCalls.push("turnstile");
     h.captchaToken = true;
+    h.variantCaptchaTokens.push("turnstile");
     return true;
   },
 }));
@@ -1378,8 +1390,10 @@ beforeEach(() => {
   h.twoCaptchaResult = { kind: "ok", token: "captcha-token", durationMs: 1 };
   h.twoCaptchaCalls = [];
   h.twoCaptchaCtorArgs = [];
+  h.twoCaptchaGate = null;
   h.injectCaptchaCalls = [];
   h.injectClearsCapture = false;
+  h.variantCaptchaTokens = [];
   h.locatorResolve = {
     ok: true,
     text: "Control",
@@ -3905,7 +3919,9 @@ describe("Compact V2 checkout copy stays unredacted", () => {
     const rows = (await observeQuery(started.session_id, "")).safe_table as Array<
       [string, string, string?]
     >;
-    const radioFacts = rows.filter(([, role]) => role === "r").map(([, , rowFacts]) => rowFacts ?? "");
+    const radioFacts = rows
+      .filter(([, role]) => role === "r")
+      .map(([, , rowFacts]) => rowFacts ?? "");
     expect(radioFacts.some((value) => value.startsWith("@standard-8-00"))).toBe(true);
   });
 
@@ -4374,9 +4390,7 @@ describe("operate session — sealed credential transfer", () => {
     const sizeRef = refreshed.find(([, , description]) => description?.startsWith("@size"))?.[0];
     expect(sizeRef).toMatch(/^@e:/);
     expect(sizeRef).not.toBe(staleRef);
-    expect(JSON.stringify({ staleRef, refreshed })).not.toContain(
-      "no element matched target",
-    );
+    expect(JSON.stringify({ staleRef, refreshed })).not.toContain("no element matched target");
   });
 
   it("serializes coupled selects, refreshes after variant DOM churn, and reports partial failure", async () => {
@@ -5181,7 +5195,7 @@ describe("operate session — captcha auto-solve on the general drive", () => {
           node("challenge-alert-text", {
             nodeType: 3,
             nodeName: "#text",
-            value: "Please complete the verification challenge.",
+            value: CHALLENGE_TEXT,
           }),
         ],
       }),
@@ -5189,21 +5203,43 @@ describe("operate session — captcha auto-solve on the general drive", () => {
     return capture;
   };
 
+  const CHALLENGE_TEXT = "Please complete the verification challenge.";
+
   const vaultApi = (): ApiClient =>
     ({
       listCredentials: async () => ({ credentials: [{ service: "2captcha" }] }),
       useCredential: async () => ({ response: { status: 200, body: "{}" } }),
     }) as unknown as ApiClient;
 
-  it("auto-solves a rendered hCaptcha challenge during observation when a 2captcha credential is vaulted", async () => {
+  // The auto-solve runs detached from the observation, so let its pending
+  // continuations run before asserting on what it did (or did not) do.
+  const drainDetached = async (): Promise<void> => {
+    for (let i = 0; i < 25; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+
+  // A solve held open until the test releases it.
+  const openGate = (): (() => void) => {
+    let release = (): void => {};
+    h.twoCaptchaGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return release;
+  };
+
+  const blockers = (payload: unknown): Array<Record<string, unknown>> =>
+    (payload as { semantic?: { blockers?: Array<Record<string, unknown>> } }).semantic?.blockers ??
+    [];
+
+  it("never blocks the observation on a solve and clears the page on a later observation", async () => {
     h.captchaVariant = "hcaptcha";
     h.captchaChallengeRendered = true;
     h.twoCaptchaAvailable = true;
-    // The injected token clears the challenge before the capture runs, so the
-    // very observation that triggered the solve comes back already cleared.
     h.injectClearsCapture = true;
     h.captureOverride = challengeCapture();
+    const releaseSolve = openGate();
 
+    // The solve is deliberately still running here: an awaited solve would
+    // hang this call (and hold its session-call lease) until the gate opens.
     const started = await startProvisionSession({
       serviceUrl: "https://app.example.com/signup",
       api: vaultApi(),
@@ -5211,16 +5247,31 @@ describe("operate session — captcha auto-solve on the general drive", () => {
     });
 
     expect(h.twoCaptchaCalls).toEqual(["hcaptcha"]);
-    expect(h.injectCaptchaCalls).toEqual(["hcaptcha"]);
-    expect(h.captchaToken).toBe(true);
+    expect(h.injectCaptchaCalls).toEqual([]);
+    expect(blockers(started)).toEqual([
+      { kind: "challenge", text: CHALLENGE_TEXT, target: "unavailable" },
+    ]);
     // The solver is built on the vault proxy, not an env key.
     expect(h.twoCaptchaCtorArgs).toEqual([
       expect.objectContaining({ vaultProxy: expect.anything() }),
     ]);
-    const payload = started as unknown as {
-      semantic?: { blocked?: boolean; blockers?: Array<Record<string, unknown>> };
-    };
-    expect(payload.semantic?.blockers ?? []).toEqual([]);
+
+    // An observation taken while the solve is in flight surfaces the challenge
+    // unchanged and does NOT start a second solver.
+    const during = await observe(started.session_id);
+    expect(h.twoCaptchaCalls).toEqual(["hcaptcha"]);
+    expect(String(during.dom ?? "")).toContain(CHALLENGE_TEXT);
+
+    releaseSolve();
+    await drainDetached();
+    expect(h.injectCaptchaCalls).toEqual(["hcaptcha"]);
+
+    // The later observation reflects the cleared page, and the variant-scoped
+    // token pre-check keeps it from spending the key a second time.
+    const after = await observe(started.session_id);
+    expect(String(after.dom ?? "")).not.toContain(CHALLENGE_TEXT);
+    expect(h.twoCaptchaCalls).toEqual(["hcaptcha"]);
+    await finishProvisionSession(started.session_id);
   });
 
   it("surfaces the challenge unchanged when no 2captcha credential is vaulted", async () => {
@@ -5232,6 +5283,7 @@ describe("operate session — captcha auto-solve on the general drive", () => {
       serviceUrl: "https://app.example.com/signup",
       format: "compact",
     });
+    await drainDetached();
 
     expect(h.twoCaptchaCalls).toEqual([]);
     expect(h.injectCaptchaCalls).toEqual([]);
@@ -5240,11 +5292,7 @@ describe("operate session — captcha auto-solve on the general drive", () => {
     };
     expect(payload.semantic.blocked).toBe(true);
     expect(payload.semantic.blockers).toEqual([
-      {
-        kind: "challenge",
-        text: "Please complete the verification challenge.",
-        target: "unavailable",
-      },
+      { kind: "challenge", text: CHALLENGE_TEXT, target: "unavailable" },
     ]);
   });
 
@@ -5260,6 +5308,7 @@ describe("operate session — captcha auto-solve on the general drive", () => {
       api: vaultApi(),
       format: "compact",
     });
+    await drainDetached();
 
     expect(h.twoCaptchaCalls).toEqual(["hcaptcha"]);
     expect(h.injectCaptchaCalls).toEqual([]);
@@ -5270,11 +5319,38 @@ describe("operate session — captcha auto-solve on the general drive", () => {
     expect(payload.semantic.blockers[0]).toMatchObject({ kind: "challenge" });
   });
 
-  it("does not re-attempt a failed solve on the next observation before the cooldown elapses", async () => {
+  it("does not re-attempt a FAILED solve on the next observation before the cooldown elapses", async () => {
     h.captchaVariant = "hcaptcha";
     h.captchaChallengeRendered = true;
     h.twoCaptchaAvailable = true;
     h.twoCaptchaResult = { kind: "solve_timeout", durationMs: 1 };
+    h.captureOverride = challengeCapture();
+    const releaseSolve = openGate();
+
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/signup",
+      api: vaultApi(),
+      format: "compact",
+    });
+    // Let the first attempt FINISH, so the next observation is gated by the
+    // retry cooldown rather than by the in-flight guard.
+    releaseSolve();
+    h.twoCaptchaGate = null;
+    await drainDetached();
+    expect(h.twoCaptchaCalls).toEqual(["hcaptcha"]);
+
+    await observe(started.session_id);
+    await drainDetached();
+
+    // The 30s retry cooldown bounds how fast a failing challenge burns the key.
+    expect(h.twoCaptchaCalls).toEqual(["hcaptcha"]);
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("attempts a fresh solve right after a SUCCESSFUL one, without waiting out the cooldown", async () => {
+    h.captchaVariant = "hcaptcha";
+    h.captchaChallengeRendered = true;
+    h.twoCaptchaAvailable = true;
     h.captureOverride = challengeCapture();
 
     const started = await startProvisionSession({
@@ -5282,11 +5358,42 @@ describe("operate session — captcha auto-solve on the general drive", () => {
       api: vaultApi(),
       format: "compact",
     });
-    await observe(started.session_id);
+    await drainDetached();
+    expect(h.injectCaptchaCalls).toEqual(["hcaptcha"]);
 
-    // One attempt at start, none at the immediate re-observe: the 30s retry
-    // cooldown bounds how fast a failing challenge can burn the funded key.
+    // Submitting navigates to a page carrying a DIFFERENT challenge: no token
+    // for this one yet. The cooldown bounds retries of a failing challenge, so
+    // it must not suppress this one.
+    h.variantCaptchaTokens = [];
+    h.captureOverride = challengeCapture();
+
+    await observe(started.session_id);
+    await drainDetached();
+
+    expect(h.twoCaptchaCalls).toEqual(["hcaptcha", "hcaptcha"]);
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("solves a rendered hCaptcha even when a co-resident reCAPTCHA already holds a token", async () => {
+    h.captchaVariant = "hcaptcha";
+    h.captchaChallengeRendered = true;
+    h.twoCaptchaAvailable = true;
+    h.captureOverride = challengeCapture();
+    // A v3 badge scored the page and filled g-recaptcha-response; the rendered
+    // hCaptcha gate is still unsolved and must not be read as already settled.
+    h.captchaToken = true;
+    h.variantCaptchaTokens = ["recaptcha_v3"];
+
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/signup",
+      api: vaultApi(),
+      format: "compact",
+    });
+    await drainDetached();
+
     expect(h.twoCaptchaCalls).toEqual(["hcaptcha"]);
+    expect(h.injectCaptchaCalls).toEqual(["hcaptcha"]);
+    await finishProvisionSession(started.session_id);
   });
 
   it("leaves Turnstile to its managed challenge even when one is rendered", async () => {
@@ -5300,6 +5407,7 @@ describe("operate session — captcha auto-solve on the general drive", () => {
       api: vaultApi(),
       format: "compact",
     });
+    await drainDetached();
 
     expect(h.twoCaptchaCalls).toEqual([]);
     expect(h.injectCaptchaCalls).toEqual([]);
@@ -6522,7 +6630,10 @@ describe("flat operator verbs", () => {
     h.elements = [elem({ labelText: "Name", selector: "#name" })];
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
     const nameRef = domRefs(started)[0]!;
-    await operateTypeTool.handler({ session_id: started.session_id, ref: nameRef, text: "Ada", submit: true }, null);
+    await operateTypeTool.handler(
+      { session_id: started.session_id, ref: nameRef, text: "Ada", submit: true },
+      null,
+    );
     expect(h.typed).toContainEqual({ selector: "#name", text: "Ada" });
     expect(h.pressedKeys).toEqual(["Enter"]);
     stashSecretSlot(started.session_id, "key", "private-slot-value");
@@ -6557,10 +6668,10 @@ describe("flat operator verbs", () => {
     expect(h.pressedKeys).toEqual(["Tab"]);
     await operateScrollTool.handler({ session_id: sid, direction: "bottom" }, null);
     expect(h.scrolls).toEqual(["bottom"]);
-    const waited = (await operateWaitTool.handler({ session_id: sid, milliseconds: 0 }, null)) as Record<
-      string,
-      unknown
-    >;
+    const waited = (await operateWaitTool.handler(
+      { session_id: sid, milliseconds: 0 },
+      null,
+    )) as Record<string, unknown>;
     expect(waited.session_id).toBe(sid);
   });
 

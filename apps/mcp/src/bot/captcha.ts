@@ -897,6 +897,38 @@ export async function waitForCaptchaResponseToken(
   return false;
 }
 
+// Each provider writes its token into its OWN response field.
+const VARIANT_RESPONSE_SELECTOR: Record<Exclude<CaptchaVariant, "unknown">, string> = {
+  recaptcha_v2: 'textarea[name="g-recaptcha-response"], textarea[id^="g-recaptcha-response"]',
+  recaptcha_v3: 'textarea[name="g-recaptcha-response"], textarea[id^="g-recaptcha-response"]',
+  hcaptcha: 'textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"]',
+  turnstile: 'input[name="cf-turnstile-response"], input[id^="cf-chl-widget"]',
+};
+
+// Whether the DETECTED provider already holds a token. Unlike
+// hasCaptchaResponseToken this does not answer true for a co-resident
+// provider's field, so a page running reCAPTCHA v3 for scoring alongside a
+// rendered hCaptcha gate is not mistaken for "already solved".
+export async function hasCaptchaResponseTokenForVariant(
+  browser: BrowserController,
+  variant: CaptchaVariant,
+  page: Page | null = browser.page,
+): Promise<boolean> {
+  if (variant === "unknown") return false;
+  if (!page) throw new Error("Browser not started");
+  const selector = VARIANT_RESPONSE_SELECTOR[variant];
+  return page
+    .evaluate(
+      ({ sel, turnstile }: { sel: string; turnstile: boolean }) => {
+        const el = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(sel);
+        if (el !== null && el.value.trim().length > 0) return true;
+        return turnstile && document.querySelector(".cf-turnstile[data-state='success']") !== null;
+      },
+      { sel: selector, turnstile: variant === "turnstile" },
+    )
+    .catch(() => false);
+}
+
 // Tier 3 hCaptcha support — extract the hCaptcha sitekey so 2Captcha
 // can solve it. hCaptcha publishes its key on `.h-captcha[data-sitekey]`
 // or in the checkbox iframe's `?sitekey=` query. Keys are UUIDs (the
@@ -1280,6 +1312,11 @@ export interface TwoCaptchaSolverOpts {
   sleepFn?: (ms: number) => Promise<void>;
   // Override max polling deadline (tests).
   resTimeoutMs?: number;
+  // Hard per-request bound for the calls that don't already carry one (the
+  // res/getTaskResult polls). Unset — the provision gate — leaves those polls
+  // bounded only by the overall deadline, which a transport that never settles
+  // can outlive; a caller that must not hang on one request sets it.
+  requestTimeoutMs?: number;
 }
 
 export type TwoCaptchaResult =
@@ -1299,6 +1336,7 @@ export class TwoCaptchaSolver {
   private readonly fetchFn: typeof globalThis.fetch;
   private readonly sleepFn: (ms: number) => Promise<void>;
   private readonly resTimeoutMs: number;
+  private readonly requestTimeoutMs: number | undefined;
 
   constructor(opts: TwoCaptchaSolverOpts = {}) {
     this.apiKey = opts.apiKey ?? process.env.TWOCAPTCHA_API_KEY;
@@ -1306,6 +1344,7 @@ export class TwoCaptchaSolver {
     this.fetchFn = opts.fetchFn ?? globalThis.fetch;
     this.sleepFn = opts.sleepFn ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.resTimeoutMs = opts.resTimeoutMs ?? RES_TIMEOUT_MS;
+    this.requestTimeoutMs = opts.requestTimeoutMs;
   }
 
   isAvailable(): boolean {
@@ -1350,7 +1389,8 @@ export class TwoCaptchaSolver {
       });
       return { ok: r.ok, status: r.status, json: () => r.json() };
     };
-    return req.timeoutMs !== undefined ? withTimeout(exec(), req.timeoutMs) : exec();
+    const timeoutMs = req.timeoutMs ?? this.requestTimeoutMs;
+    return timeoutMs !== undefined ? withTimeout(exec(), timeoutMs) : exec();
   }
 
   /**
@@ -1520,9 +1560,7 @@ export class TwoCaptchaSolver {
   // provider-specific fields (method + sitekey param name); everything
   // else (auth, json, the polling loop, timeouts) is identical across
   // reCAPTCHA and hCaptcha.
-  private async submitAndPoll(
-    params: Record<string, string>,
-  ): Promise<TwoCaptchaResult> {
+  private async submitAndPoll(params: Record<string, string>): Promise<TwoCaptchaResult> {
     if (!this.isAvailable()) return { kind: "no_key" };
     const startMs = Date.now();
 

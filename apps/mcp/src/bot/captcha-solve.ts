@@ -8,9 +8,10 @@
 // back-compat for installs without a vaulted credential.
 //
 // attemptOperateCaptchaAutoSolve is the operate-path entry: best-effort and
-// non-blocking in outcome — when no credential is vaulted, or the solve fails
-// or times out, the caller surfaces the challenge exactly as it does today.
-// It never throws and never hard-fails a session.
+// non-blocking — it starts the solve detached and returns at once, so when no
+// credential is vaulted, or the solve fails, stalls, or is still running, the
+// caller surfaces the challenge exactly as it does today. It never throws and
+// never hard-fails a session.
 
 import type { Page } from "playwright";
 import {
@@ -21,11 +22,13 @@ import {
   extractRecaptchaSitekey,
   extractTurnstileSitekey,
   getHcaptchaSolveContext,
+  hasCaptchaResponseTokenForVariant,
   injectHcaptchaToken,
   injectRecaptchaToken,
   injectTurnstileToken,
   waitForCaptchaResponseToken,
 } from "./captcha.js";
+import type { CaptchaVariant } from "./captcha.js";
 import type { ApiClient } from "../api-client.js";
 import type { BrowserController } from "./browser.js";
 import type { Session } from "./session/model.js";
@@ -71,19 +74,22 @@ export function makeTwoCaptchaVaultProxy(api: ApiClient): TwoCaptchaVaultProxy {
 // is metadata-only — no secret.
 export async function buildTwoCaptchaSolver(
   api: ApiClient | undefined,
+  opts: { requestTimeoutMs?: number } = {},
 ): Promise<TwoCaptchaSolver> {
+  const bounds =
+    opts.requestTimeoutMs !== undefined ? { requestTimeoutMs: opts.requestTimeoutMs } : {};
   if (api !== undefined) {
     try {
       const { credentials } = await api.listCredentials();
       const hasVaulted = credentials.some((c) => (c.service ?? "").toLowerCase() === "2captcha");
       if (hasVaulted) {
-        return new TwoCaptchaSolver({ vaultProxy: makeTwoCaptchaVaultProxy(api) });
+        return new TwoCaptchaSolver({ vaultProxy: makeTwoCaptchaVaultProxy(api), ...bounds });
       }
     } catch {
       // Listing failed (offline / transient) — fall back to the env key.
     }
   }
-  return new TwoCaptchaSolver();
+  return new TwoCaptchaSolver(bounds);
 }
 
 export async function solveCaptchaWithTokenSolver(
@@ -158,70 +164,95 @@ export async function solveCaptchaWithTokenSolver(
 // recaptcha_v3 is invisible scoring — included only because a rendered bframe
 // alongside a badge means the substrate path already failed and the solver is
 // the remaining escalation (same as the provision gate).
-const AUTOSOLVE_VARIANTS = new Set(["hcaptcha", "recaptcha_v2", "recaptcha_v3"]);
+const AUTOSOLVE_VARIANTS = new Set<CaptchaVariant>(["hcaptcha", "recaptcha_v2", "recaptcha_v3"]);
 
 // A solve takes tens of seconds on 2Captcha and each successful one costs the
-// operator's funded key. Bound retries: skip while one attempt is in flight
-// and for this long after the last attempt finished, so a failing challenge
-// surfaces to the agent immediately and re-attempts only on a later
-// observation instead of on every poll.
-export const CAPTCHA_AUTOSOLVE_RETRY_COOLDOWN_MS = 30_000;
+// operator's funded key. Bound RETRIES: skip while one attempt is in flight
+// and for this long after a FAILED attempt, so a failing challenge re-attempts
+// on a later observation instead of on every poll. A successful solve does not
+// arm it — the next challenge after a navigation is a different challenge.
+const CAPTCHA_AUTOSOLVE_RETRY_COOLDOWN_MS = 30_000;
+
+// Hard bound on a single 2Captcha request on the operate path. The transport is
+// Squire's injecting proxy, which carries no per-request deadline of its own, so
+// without this one stalled POST outlives the solver's overall deadline and the
+// session's auto-solve never re-arms.
+const CAPTCHA_AUTOSOLVE_REQUEST_TIMEOUT_MS = 20_000;
 
 // Weak ownership: attempt bookkeeping dies with the session object.
 const attemptState = new WeakMap<Session, { inFlight: boolean; lastFinishedAt: number }>();
 
 /**
  * Best-effort token solve for a captcha challenge detected during the general
- * operate_* drive. Call before an observation captures the page: a solved
- * challenge clears before the DOM is read, so the returned observation reflects
- * the post-solve page; an unsolved one surfaces the challenge blocker exactly
- * as before. Never throws; returns whether a token was injected and settled.
+ * operate_* drive. Starts the solve DETACHED and returns immediately: a
+ * 2Captcha solve takes tens of seconds, and the observation that noticed the
+ * challenge must never be gated on it (an operate_* call blocked on a solve
+ * holds its session-call lease, which wedges every later call and
+ * operate_finish). The observation therefore surfaces the challenge exactly as
+ * it does today; when the detached solve lands its token, the NEXT observation
+ * sees the cleared page — the in-flight guard and the variant-scoped token
+ * pre-check keep it from starting a second solver in the meantime. Never
+ * throws and never rejects.
  */
-export async function attemptOperateCaptchaAutoSolve(
-  session: Session,
-  page?: Page,
-): Promise<boolean> {
+export function attemptOperateCaptchaAutoSolve(session: Session, page?: Page): void {
   const state = attemptState.get(session);
   if (state !== undefined) {
-    if (state.inFlight) return false;
-    if (Date.now() - state.lastFinishedAt < CAPTCHA_AUTOSOLVE_RETRY_COOLDOWN_MS) return false;
+    if (state.inFlight) return;
+    if (
+      state.lastFinishedAt > 0 &&
+      Date.now() - state.lastFinishedAt < CAPTCHA_AUTOSOLVE_RETRY_COOLDOWN_MS
+    ) {
+      return;
+    }
   }
+  // Claim the slot SYNCHRONOUSLY. Observations are serialized by the session
+  // call lease, but the solve they start no longer is, so a later observation
+  // has to see the claim even while this one is still detecting.
+  attemptState.set(session, { inFlight: true, lastFinishedAt: 0 });
+  void runDetachedAutoSolve(session, page);
+}
 
-  let variant: string;
+async function runDetachedAutoSolve(session: Session, page?: Page): Promise<void> {
+  // Only a FAILED attempt arms the retry cooldown: nothing to solve, and a
+  // solve that landed its token, both leave the next observation free.
+  let failedAt = 0;
+  let variant: CaptchaVariant | null = null;
   try {
     const det = await detectCaptchaVariant(session.browser, page);
     // Only a RENDERED challenge escalates to the solver. A mere checkbox
     // (or a settled widget) with a response token needs nothing, and a
     // no-challenge page must never spend the funded key.
-    if (!det.challengeRendered || !AUTOSOLVE_VARIANTS.has(det.variant)) return false;
-    const token = await waitForCaptchaResponseToken(session.browser, 0, page).catch(() => false);
-    if (token) return false;
+    if (!det.challengeRendered || !AUTOSOLVE_VARIANTS.has(det.variant)) return;
+    // Scoped to the DETECTED provider: a co-resident reCAPTCHA v3 badge token
+    // must not read as "the rendered hCaptcha is already solved".
+    if (await hasCaptchaResponseTokenForVariant(session.browser, det.variant, page)) return;
     variant = det.variant;
-  } catch {
-    // Detection raced a navigation or a closed page — nothing to solve.
-    return false;
-  }
 
-  attemptState.set(session, { inFlight: true, lastFinishedAt: 0 });
-  try {
-    const solver = await buildTwoCaptchaSolver(session.api);
+    const solver = await buildTwoCaptchaSolver(session.api, {
+      requestTimeoutMs: CAPTCHA_AUTOSOLVE_REQUEST_TIMEOUT_MS,
+    });
     const res = await solveCaptchaWithTokenSolver(solver, session.browser, variant, page);
     audit(session.id, "captcha_autosolve", {
       variant,
       outcome: res.outcome,
       solved: res.solved,
     });
-    return res.solved;
+    if (!res.solved) failedAt = Date.now();
   } catch (error) {
-    // Best-effort: any solver or transport error leaves the challenge on the
-    // page for the agent to see, exactly as if no solver existed.
-    audit(session.id, "captcha_autosolve", {
-      variant,
-      outcome: "error",
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return false;
+    // Best-effort: any solver or transport error — including the page or the
+    // whole session going away mid-solve — leaves the challenge on the page for
+    // the agent to see, exactly as if no solver existed. A throw before a
+    // variant was settled on is detection racing a navigation: nothing was
+    // attempted, so there is nothing to audit and nothing to back off from.
+    if (variant !== null) {
+      audit(session.id, "captcha_autosolve", {
+        variant,
+        outcome: "error",
+        error: error instanceof Error ? error.message : String(error),
+      });
+      failedAt = Date.now();
+    }
   } finally {
-    attemptState.set(session, { inFlight: false, lastFinishedAt: Date.now() });
+    attemptState.set(session, { inFlight: false, lastFinishedAt: failedAt });
   }
 }

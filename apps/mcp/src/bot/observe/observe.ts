@@ -1033,11 +1033,11 @@ export async function observeSession(
     }
     // Best-effort captcha auto-solve on the general drive (hCaptcha gap): if a
     // challenge is RENDERED right now and the vaulted "2captcha" credential can
-    // clear it, do that BEFORE the capture so this very observation reflects the
-    // cleared page. No credential / solve failure / timeout → nothing changes;
-    // the challenge blocker below surfaces exactly as it does today. Never
-    // throws (see attemptOperateCaptchaAutoSolve).
-    await attemptOperateCaptchaAutoSolve(session, sourcePage);
+    // clear it, kick that off. Deliberately NOT awaited — a 2Captcha solve runs
+    // for tens of seconds and this observation holds a session-call lease. This
+    // capture surfaces the challenge blocker exactly as it does today; a later
+    // observation sees the cleared page once the token lands.
+    attemptOperateCaptchaAutoSolve(session, sourcePage);
     session.generation += 1;
     const generation = session.generation;
     const capture = await session.browser.extractBrowserUseObservation(sourcePage, true);
