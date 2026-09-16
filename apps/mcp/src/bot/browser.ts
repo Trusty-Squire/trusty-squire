@@ -110,7 +110,7 @@ export function contextInitScriptsFor(options: {
 
 export type { FrameTarget };
 
-export type InjectCardField = "pan" | "cvv" | "exp_month" | "exp_year" | "exp" | "name";
+export type InjectCardField = "pan" | "cvv";
 export type InjectCardFieldResult =
   | { status: "filled" }
   | { status: "not_found" | "detached" }
@@ -6413,19 +6413,6 @@ export class BrowserController implements BrowserDriver {
           return format === "groups4" ? card.pan.replace(/(.{4})(?=.)/g, "$1 ") : card.pan;
         case "cvv":
           return card.cvv;
-        case "exp_month":
-          return format === "number" ? String(Number(card.exp_month)) : card.exp_month;
-        case "exp_year":
-          if (format === "two_digit") return card.exp_year.slice(-2);
-          if (format === "four_digit") return card.exp_year.padStart(4, "20");
-          return card.exp_year;
-        case "exp": {
-          const year =
-            format === "mm/yyyy" ? card.exp_year.padStart(4, "20") : card.exp_year.slice(-2);
-          return format === "mmyy" ? `${card.exp_month}${year}` : `${card.exp_month}/${year}`;
-        }
-        case "name":
-          return card.name;
       }
     };
     const resolveInjectTarget = async (
@@ -6524,9 +6511,12 @@ export class BrowserController implements BrowserDriver {
         await handle?.dispose().catch(() => undefined);
       }
     };
-    // ONE uninterrupted pass over every targeted field.
+    // ONE uninterrupted pass over every targeted field. Expiry and cardholder
+    // name are NOT secret and are not inject_card fields: the agent fills
+    // them with ordinary operate_type/operate_select, or places the masked
+    // per-digit card tokens ({{pan}}, {{cvv}}, {{pan:N}}, {{cvv:N}}) itself.
     const attempted: InjectCardField[] = [];
-    for (const field of ["pan", "cvv", "exp_month", "exp_year", "exp", "name"] as const) {
+    for (const field of ["pan", "cvv"] as const) {
       if (targets[field] === undefined) {
         results[field] = { status: "not_found" };
         continue;
@@ -6546,8 +6536,8 @@ export class BrowserController implements BrowserDriver {
       // frame) and re-filling whatever the rebuild cleared — all within this
       // same call. Two consecutive clean verifications, separated by a settle
       // that lets an in-flight rebuild land, mean the values are stable.
-      // Several targeted fields can resolve to ONE element (a combined MM/YY
-      // input addressed as exp_month + exp_year): each element is verified
+      // Several targeted fields can resolve to ONE element (e.g. a combined
+      // card box addressed as both pan and cvv): each element is verified
       // against its LAST-written value, and a stale element re-fills its
       // fields in write order so the last write governs.
       const groups = new Map<string, InjectCardField[]>();

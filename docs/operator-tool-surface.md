@@ -22,7 +22,9 @@ Use an action `ref` from the current observation. `operate_start` and
 `operate_observe` default to `format: "compact"`, a paged control map;
 `format: "full"` is the explicit DOM view. After `inject_card` releases a card,
 both modes replace that card's complete PAN and security code while leaving all
-other content verbatim. `operate_screenshot` composites covers over only the
+other content verbatim — including a CVV the agent typed itself via the masked
+per-digit tokens (`{{pan}}`, `{{cvv}}`, `{{pan:N}}`, `{{cvv:N}}`) into any
+textbox ref. `operate_screenshot` composites covers over only the
 injected controls and identified ordinary displayed copies that contain those
 two values. Payment approval and vault write-only boundaries remain separate.
 
@@ -348,7 +350,11 @@ job without exposing plaintext to the agent.
   write-only vault boundary. `fetch_credential` has the separate passkey gate
   above.
 - `inject_card` retains the existing single purchase approval and fills only
-  caller-named refs. It does not submit or interpret the checkout. Use
+  caller-named `pan`/`cvv` refs. Expiry, cardholder name, and billing are NOT
+  inject targets and are not secret: fill them with ordinary `operate_type`/
+  `operate_select`, or place the masked per-digit tokens returned in the
+  inject_card result (`card_tokens`) into any ref yourself. It does not submit
+  or interpret the checkout. Use
   `operate_observe`, `operate_network`, and masked screenshots as evidence, then
   drive the page with ordinary actions. A rendered 3-D Secure challenge is
   detected on observation/action results; the operator notifies the cardholder

@@ -179,18 +179,23 @@ describe("direct card injection and masked observation", () => {
         const results = await controller.injectCardIntoTargets(CARD, {
           pan: { element: byName(elements, "number") },
           cvv: { element: byName(elements, "cvv") },
-          exp_month: { element: byName(elements, "month") },
-          exp_year: { element: byName(elements, "year"), format: "two_digit" },
-          name: { element: byName(elements, "cardholder") },
         });
         expect(results).toMatchObject({
           pan: { status: "filled" },
           cvv: { status: "filled" },
-          exp_month: { status: "filled" },
-          exp_year: { status: "filled" },
-          name: { status: "filled" },
-          exp: { status: "not_found" },
         });
+
+        // Expiry and cardholder name are NOT secret and NOT inject_card
+        // fields: the agent fills them with ordinary tools (here: direct page
+        // writes standing in for operate_type/operate_select).
+        await isolated.page
+          .locator("#host")
+          .evaluate((host) => {
+            const input = host.shadowRoot!.querySelector("input") as HTMLInputElement;
+            input.value = "Daeun Lee";
+          });
+        const frame = isolated.page.frames().find((candidate) => candidate.url() === frameUrl)!;
+        await frame.locator('[name="year"]').fill("12/30");
 
         // Internal verification of writes; these values are never returned by a tool.
         expect(await isolated.page.locator('[name="number"]').inputValue()).toBe(CARD.pan);
@@ -200,8 +205,7 @@ describe("direct card injection and masked observation", () => {
             .evaluate(
               (host) => (host.shadowRoot!.querySelector("input") as HTMLInputElement).value,
             ),
-        ).toBe(CARD.name);
-        const frame = isolated.page.frames().find((candidate) => candidate.url() === frameUrl)!;
+        ).toBe("Daeun Lee");
         expect(await frame.locator('[name="cvv"]').inputValue()).toBe(CARD.cvv);
 
         await isolated.page.locator('[name="number"]').evaluate((node, card) => {
@@ -259,6 +263,9 @@ describe("direct card injection and masked observation", () => {
         expect(dom).toContain("[security code]");
         expect(visible).toContain("Total 123 JPY");
         expect(visible).toContain("3-D Secure authentication");
+        // Expiry and cardholder name stay fully visible — they are not secret.
+        expect(dom).toContain("Daeun Lee");
+        expect(dom).toContain("12/30");
         expect(JSON.stringify(evidence)).toContain("401");
         expect(JSON.stringify(evidence)).toContain("api-visible");
       } finally {
@@ -330,13 +337,21 @@ describe("direct card injection and masked observation", () => {
         const frame = isolated.page.frames().find((candidate) => candidate.url() === frameUrl)!;
 
         // operate_type resolves the compact ref to the hosted frame itself.
+        // Expiry and cardholder name are ordinary agent fills — never masked,
+        // never inject_card fields.
         await operateTypeTool.handler(
           { session_id: sessionId, ref: expiryRow[0], text: "12/30" },
           null,
         );
         expect(await frame.locator('[name="expiry"]').inputValue()).toBe("12/30");
+        await operateTypeTool.handler(
+          { session_id: sessionId, ref: nameRow[0], text: "Daeun Lee" },
+          null,
+        );
+        expect(await frame.locator('[name="cardholder"]').inputValue()).toBe("Daeun Lee");
 
-        // inject_card fills pan/cvv/name from COMPACT refs, not el_table.
+        // inject_card fills pan/cvv from COMPACT refs and exposes the masked
+        // per-digit token vocabulary in its result.
         paymentSession(sessionId).releasedPaymentCard = {
           approvalId: "approval_compact",
           approvalUrl: "https://approve.test/approval_compact",
@@ -351,7 +366,7 @@ describe("direct card injection and masked observation", () => {
           deadline: Date.now() + 60_000,
           card: CARD,
         };
-        const result = await injectCardTool.handler(
+        const result = (await injectCardTool.handler(
           injectCardTool.inputSchema.parse({
             session_id: sessionId,
             merchant: "Synthetic Merchant",
@@ -364,24 +379,36 @@ describe("direct card injection and masked observation", () => {
             fields: {
               pan: { ref: numberRow[0] },
               cvv: { ref: cvvRow[0] },
-              exp_month: { ref: expiryRow[0] },
-              name: { ref: nameRow[0] },
             },
           }),
           {} as ApiClient,
-        );
+        )) as { fields: Record<string, { status: string }>; card_tokens: Record<string, unknown> };
         expect(result).toMatchObject({
           status: "card_injected",
           fields: {
             pan: { status: "filled" },
             cvv: { status: "filled" },
-            exp_month: { status: "filled" },
-            name: { status: "filled" },
+          },
+          card_tokens: {
+            pan: "{{pan}}",
+            pan_digit: "{{pan:N}}",
+            cvv: "{{cvv}}",
+            cvv_digit: "{{cvv:N}}",
+            pan_length: 16,
+            cvv_length: 3,
           },
         });
+        // The checkout total (123 JPY) legitimately contains the CVV digits,
+        // so the no-leak check covers the secret-bearing parts of the result.
+        const secretBearing = JSON.stringify({
+          fields: result.fields,
+          card_tokens: result.card_tokens,
+        });
+        expect(secretBearing).not.toContain(CARD.pan);
+        expect(secretBearing).not.toContain(CARD.cvv);
         expect(await frame.locator('[name="number"]').inputValue()).toBe(CARD.pan);
         expect(await frame.locator('[name="verification_value"]').inputValue()).toBe(CARD.cvv);
-        expect(await frame.locator('[name="cardholder"]').inputValue()).toBe(CARD.name);
+        expect(await frame.locator('[name="cardholder"]').inputValue()).toBe("Daeun Lee");
       } finally {
         if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
         await isolated.context.close();
@@ -391,30 +418,30 @@ describe("direct card injection and masked observation", () => {
   );
 
   it.skipIf(!available)(
-    "pads a 2-digit stored exp_year to four digits for select option lists",
+    "places whole-value and per-digit masked tokens into arbitrary fields and masks every read",
     async () => {
       const isolated = await page();
       let sessionId: string | undefined;
       try {
         const topUrl = "https://merchant.test/checkout";
-        const frameUrl = "https://assets.braintreegateway.test/hosted-year";
+        const frameUrl = "https://assets.braintreegateway.test/hosted-digits";
         await isolated.page.route("**/*", async (route) => {
           const url = route.request().url();
           if (url === topUrl) {
             return route.fulfill({
               contentType: "text/html",
-              body: `<iframe src="${frameUrl}"></iframe>`,
+              body: `<iframe src="${frameUrl}" style="width:480px;height:120px"></iframe>`,
             });
           }
           if (url === frameUrl) {
             return route.fulfill({
               contentType: "text/html",
               body:
-                '<select name="year">' +
-                '<option value="2029">2029</option>' +
-                '<option value="2030">2030</option>' +
-                '<option value="2031">2031</option>' +
-                "</select>",
+                '<input name="d1" maxlength="1" aria-label="Digit 1">' +
+                '<input name="d2" maxlength="1" aria-label="Digit 2">' +
+                '<input name="d3" maxlength="1" aria-label="Digit 3">' +
+                '<input name="d4" maxlength="1" aria-label="Digit 4">' +
+                '<input name="cvvbox" maxlength="3" aria-label="CVV box">',
             });
           }
           return route.fulfill({ status: 404, body: "not found" });
@@ -423,32 +450,194 @@ describe("direct card injection and masked observation", () => {
         const started = await startHarnessProvisionSession({
           browser: controller,
           serviceUrl: topUrl,
+          format: "compact",
         });
         sessionId = started.session_id;
-        const elements = await controller.extractInteractiveElements();
+        // Register the session's output mask exactly as the real release path
+        // does (injectCardIntoTargets registers it before any token exists),
+        // then mark the card released so operate_type substitutes tokens.
+        await controller.injectCardIntoTargets(CARD, {});
+        paymentSession(sessionId).releasedPaymentCard = {
+          approvalId: "approval_tokens",
+          approvalUrl: "https://approve.test/approval_tokens",
+          checkout: {
+            merchant: "Synthetic Merchant",
+            checkout_origin: "https://merchant.test",
+            amount_cents: 123,
+            currency: "JPY",
+          },
+          cardRef: "card_synthetic",
+          last4: "1111",
+          deadline: Date.now() + 60_000,
+          card: CARD,
+        };
         const frame = isolated.page.frames().find((candidate) => candidate.url() === frameUrl)!;
+        const refFor = async (label: string): Promise<string> => {
+          const query = await observeQuery(sessionId!, label);
+          const rows = query.safe_table as Array<[string, string, string?]>;
+          const row = rows.find(
+            (candidate) => candidate[1] === "t" && (candidate[2] ?? "").includes(`@${label}`),
+          );
+          if (row === undefined) throw new Error(`compact map is missing textbox ${label}`);
+          return row[0];
+        };
 
-        // A vault card stored with a 2-digit year must still fill a 4-digit
-        // option list when the caller asks for four_digit.
-        const twoDigitCard: CheckoutCard = { ...CARD, exp_year: "30" };
-        const padded = await controller.injectCardIntoTargets(twoDigitCard, {
-          exp_year: { element: byName(elements, "year"), format: "four_digit" },
-        });
-        expect(padded.exp_year).toMatchObject({ status: "filled" });
-        expect(await frame.locator('[name="year"]').inputValue()).toBe("2030");
+        // Per-digit placement: one token per single-digit box.
+        for (const [label, token] of [
+          ["digit-1", "{{pan:1}}"],
+          ["digit-2", "{{pan:2}}"],
+          ["digit-3", "{{pan:3}}"],
+          ["digit-4", "{{pan:4}}"],
+        ] as const) {
+          await operateTypeTool.handler(
+            { session_id: sessionId, ref: await refFor(label), text: token },
+            null,
+          );
+        }
+        await operateTypeTool.handler(
+          { session_id: sessionId, ref: await refFor("cvv-box"), text: "{{cvv}}" },
+          null,
+        );
+        expect(await frame.locator('[name="d1"]').inputValue()).toBe(CARD.pan[0]);
+        expect(await frame.locator('[name="d2"]').inputValue()).toBe(CARD.pan[1]);
+        expect(await frame.locator('[name="d3"]').inputValue()).toBe(CARD.pan[2]);
+        expect(await frame.locator('[name="d4"]').inputValue()).toBe(CARD.pan[3]);
+        expect(await frame.locator('[name="cvvbox"]').inputValue()).toBe(CARD.cvv);
 
-        // An already-4-digit stored year is unchanged by the same format.
-        await frame.locator('[name="year"]').selectOption("2029");
-        const fourDigitCard: CheckoutCard = { ...CARD, exp_year: "2030" };
-        const unchanged = await controller.injectCardIntoTargets(fourDigitCard, {
-          exp_year: { element: byName(elements, "year"), format: "four_digit" },
-        });
-        expect(unchanged.exp_year).toMatchObject({ status: "filled" });
-        expect(await frame.locator('[name="year"]').inputValue()).toBe("2030");
+        // Mixed per-digit tokens compose in one field too (a non-secret
+        // prefix of the PAN — ordering is what matters, not the values).
+        await operateTypeTool.handler(
+          { session_id: sessionId, ref: await refFor("cvv-box"), text: "{{pan:1}}{{pan:2}}{{pan:3}}" },
+          null,
+        );
+        expect(await frame.locator('[name="cvvbox"]').inputValue()).toBe(
+          CARD.pan.slice(0, 3),
+        );
+
+        // Re-arm: a second full-value write replaces the field contents.
+        await operateTypeTool.handler(
+          { session_id: sessionId, ref: await refFor("cvv-box"), text: "{{cvv}}" },
+          null,
+        );
+        expect(await frame.locator('[name="cvvbox"]').inputValue()).toBe(CARD.cvv);
+
+        // Out-of-range tokens fail loudly WITHOUT leaking digits.
+        await expect(
+          operateTypeTool.handler(
+            { session_id: sessionId, ref: await refFor("digit-1"), text: "{{pan:17}}" },
+            null,
+          ),
+        ).rejects.toThrow(/out of range/);
+
+        // No operator output carries real digits. The per-digit boxes show
+        // single digits (individually meaningless); the complete CVV box is
+        // masked by value equality; a mirror of the full PAN is masked.
+        await isolated.page.evaluate((card) => {
+          const mirror = document.createElement("div");
+          mirror.textContent = `copied ${card.pan}`;
+          document.body.append(mirror);
+        }, CARD);
+        const full = await observe(sessionId, "full");
+        const compact = await observe(sessionId, "compact");
+        const dom = serializeBrowserUseDOM((await controller.extractBrowserUseObservation()).root)
+          .dom;
+        for (const output of [JSON.stringify(full), JSON.stringify(compact), dom]) {
+          expect(output).not.toContain(CARD.pan);
+          expect(output).not.toContain(CARD.pan.slice(0, 10));
+          expect(output).not.toMatch(new RegExp(`(?:cvv|security code)[^\\n]{0,20}${CARD.cvv}`, "i"));
+        }
+        expect(dom).toContain("[security code]");
+        expect(dom).toContain("[card number]");
+        // Expiry/name-like ordinary values (single digits here) stay visible.
+        expect(dom).toContain(CARD.pan[0]);
       } finally {
         if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
         await isolated.context.close();
       }
     },
+    120_000,
+  );
+
+  it.skipIf(!available)(
+    "per-digit token placement survives a hosted-field remount",
+    async () => {
+      const isolated = await page();
+      let sessionId: string | undefined;
+      try {
+        const topUrl = "https://merchant.test/checkout";
+        const frameUrl = "https://assets.braintreegateway.test/hosted-remount-digits";
+        await isolated.page.route("**/*", async (route) => {
+          const url = route.request().url();
+          if (url === topUrl) {
+            return route.fulfill({
+              contentType: "text/html",
+              body: `<iframe src="${frameUrl}" style="width:240px;height:80px"></iframe>`,
+            });
+          }
+          if (url === frameUrl) {
+            return route.fulfill({
+              contentType: "text/html",
+              body: '<input name="d1" maxlength="1" aria-label="Digit 1">',
+            });
+          }
+          return route.fulfill({ status: 404, body: "not found" });
+        });
+        const controller = BrowserController.fromHarnessPage(isolated.page);
+        const started = await startHarnessProvisionSession({
+          browser: controller,
+          serviceUrl: topUrl,
+          format: "compact",
+        });
+        sessionId = started.session_id;
+        // Same release-path mask registration as the token test above.
+        await controller.injectCardIntoTargets(CARD, {});
+        paymentSession(sessionId).releasedPaymentCard = {
+          approvalId: "approval_remount",
+          approvalUrl: "https://approve.test/approval_remount",
+          checkout: {
+            merchant: "Synthetic Merchant",
+            checkout_origin: "https://merchant.test",
+            amount_cents: 123,
+            currency: "JPY",
+          },
+          cardRef: "card_synthetic",
+          last4: "1111",
+          deadline: Date.now() + 60_000,
+          card: CARD,
+        };
+        const frame = isolated.page.frames().find((candidate) => candidate.url() === frameUrl)!;
+        const refFor = async (label: string): Promise<string> => {
+          const query = await observeQuery(sessionId!, label);
+          const rows = query.safe_table as Array<[string, string, string?]>;
+          const row = rows.find(
+            (candidate) => candidate[1] === "t" && (candidate[2] ?? "").includes(`@${label}`),
+          );
+          if (row === undefined) throw new Error(`compact map is missing textbox ${label}`);
+          return row[0];
+        };
+
+        await operateTypeTool.handler(
+          { session_id: sessionId, ref: await refFor("digit-1"), text: "{{pan:1}}" },
+          null,
+        );
+        expect(await frame.locator('[name="d1"]').inputValue()).toBe(CARD.pan[0]);
+
+        // The provider rebuilds its frame: the element is replaced with a new
+        // identity and reopens EMPTY. The agent re-observes and re-places the
+        // same token — per-field, per-digit retry.
+        await frame.evaluate(() => {
+          document.body.innerHTML = '<input name="d1" maxlength="1" aria-label="Digit 1">';
+        });
+        await operateTypeTool.handler(
+          { session_id: sessionId, ref: await refFor("digit-1"), text: "{{pan:1}}" },
+          null,
+        );
+        expect(await frame.locator('[name="d1"]').inputValue()).toBe(CARD.pan[0]);
+      } finally {
+        if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
+        await isolated.context.close();
+      }
+    },
+    120_000,
   );
 });

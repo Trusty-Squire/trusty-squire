@@ -216,6 +216,18 @@ rerenders, navigation, partial fills, or cleared controls.
   currency, DCC text, OTP/3DS controls, HTTP error bodies, API keys, cookies, PII,
   and all unrelated three- or four-digit values remain visible. This is not a
   general secret scanner and does not apply Luhn-wide masking.
+- **Agent-directed placement.** `inject_card` targets only `pan` and `cvv` refs;
+  expiry, cardholder name, and billing are ordinary `operate_type`/
+  `operate_select` fills. After release the agent references the secrets as
+  opaque per-digit tokens (`{{pan}}`, `{{cvv}}`, `{{pan:N}}`, `{{cvv:N}}`, see
+  `card-secret-tokens.ts`) that it may place into ANY ref with any timing; the
+  broker substitutes the real digits only at the keystroke boundary inside the
+  type action, and type results echo no typed text. Because the agent may type
+  the CVV into an arbitrary control, the mask ALSO covers any textbox
+  (input/textarea — never a `<select>`, whose option values are merchant data)
+  whose complete digit value equals a released CVV, with or without a CVV-named
+  identity — the same value-equality rule the screenshot pixel scan applies.
+  PAN coverage (≥8-digit prefixes, any formatting) is string-wide and unchanged.
 - The browser-use DOM format's `url` is the live page URL, path and query included. Its DOM
   attributes follow canonical browser-use's selection and ordering; see the
   pinned serializer contract in `browser-use-serializer-port.md`.
