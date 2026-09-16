@@ -190,6 +190,9 @@ const h = vi.hoisted(() => ({
   // variant-scoped pre-check can be exercised independently of captchaToken
   // (the legacy any-provider flag).
   variantCaptchaTokens: [] as string[],
+  // The hCaptcha drop-in shape: the page carries no h-captcha-response field,
+  // so an injected token lands in the g-recaptcha-response compat textarea.
+  hcaptchaCompatOnly: false,
   consentDismissCalls: 0,
   consentCta: null as string | null,
   locatorResolve: {
@@ -1107,6 +1110,10 @@ vi.mock("../captcha.js", async (importOriginal) => ({
   waitForCaptchaResponseToken: async () => h.captchaToken,
   hasCaptchaResponseTokenForVariant: async (_browser: unknown, variant: string) =>
     h.variantCaptchaTokens.includes(variant),
+  hasHcaptchaResponseTokenWithCompat: async () =>
+    h.hcaptchaCompatOnly
+      ? h.variantCaptchaTokens.includes("recaptcha_v2")
+      : h.variantCaptchaTokens.includes("hcaptcha"),
   detectCaptchaVariant: async () => ({
     variant: h.captchaVariant,
     challengeRendered: h.captchaChallengeRendered,
@@ -1138,7 +1145,9 @@ vi.mock("../captcha.js", async (importOriginal) => ({
   injectHcaptchaToken: async () => {
     h.injectCaptchaCalls.push("hcaptcha");
     h.captchaToken = true;
-    if (h.injectLandsVariantToken) h.variantCaptchaTokens.push("hcaptcha");
+    if (h.injectLandsVariantToken) {
+      h.variantCaptchaTokens.push(h.hcaptchaCompatOnly ? "recaptcha_v2" : "hcaptcha");
+    }
     if (h.injectClearsCapture) h.captureOverride = null;
     return true;
   },
@@ -1408,6 +1417,7 @@ beforeEach(() => {
   h.twoCaptchaGate = null;
   h.onTwoCaptchaSolveStart = null;
   h.injectLandsVariantToken = true;
+  h.hcaptchaCompatOnly = false;
   h.injectCaptchaCalls = [];
   h.injectClearsCapture = false;
   h.variantCaptchaTokens = [];
@@ -5249,6 +5259,18 @@ describe("operate session — captcha auto-solve on the general drive", () => {
     return { release, solveStarted };
   };
 
+  // Moves the wall clock forward for the code under test without touching the
+  // real timers drainDetached relies on.
+  const advanceClock = async (ms: number, run: () => Promise<void>): Promise<void> => {
+    const real = Date.now;
+    Date.now = () => real() + ms;
+    try {
+      await run();
+    } finally {
+      Date.now = real;
+    }
+  };
+
   const blockers = (payload: unknown): Array<Record<string, unknown>> =>
     (payload as { semantic?: { blockers?: Array<Record<string, unknown>> } }).semantic?.blockers ??
     [];
@@ -5588,6 +5610,69 @@ describe("operate session — captcha auto-solve on the general drive", () => {
     expect(h.twoCaptchaCalls).toEqual(["hcaptcha"]);
     const blocked = await observe(started.session_id, "compact");
     expect(blockers(blocked)).toHaveLength(1);
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("discards a bought token that has outlived the provider's token lifetime", async () => {
+    h.captchaVariant = "hcaptcha";
+    h.captchaChallengeRendered = true;
+    h.twoCaptchaAvailable = true;
+    h.captureOverride = challengeCapture();
+    const gate = openGate();
+
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/signup",
+      api: vaultApi(),
+      format: "compact",
+    });
+    await gate.solveStarted;
+    gate.release();
+    h.twoCaptchaGate = null;
+    await drainDetached();
+    expect(h.injectCaptchaCalls).toEqual([]);
+
+    // The agent spent the next few minutes filling fields with detail:"none",
+    // so nothing observed until well past the token's ~120s life.
+    await advanceClock(150_000, async () => {
+      await observe(started.session_id);
+      await drainDetached();
+    });
+
+    // A dead token must not be written: it would fill the response field, read
+    // back as solved, and leave nothing to retry.
+    expect(h.injectCaptchaCalls).toEqual([]);
+    // Nothing failed on the still-rendered challenge, so a fresh token is bought.
+    expect(h.twoCaptchaCalls).toEqual(["hcaptcha", "hcaptcha"]);
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("counts a drop-in-compat solve as settled instead of re-buying every cooldown", async () => {
+    h.captchaVariant = "hcaptcha";
+    h.captchaChallengeRendered = true;
+    h.twoCaptchaAvailable = true;
+    h.captureOverride = challengeCapture();
+    // The page swapped hCaptcha in for reCAPTCHA: its only response field is
+    // the g-recaptcha-response compat textarea, which is where the token lands.
+    h.hcaptchaCompatOnly = true;
+
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/signup",
+      api: vaultApi(),
+      format: "compact",
+    });
+    await drainDetached();
+    await observe(started.session_id);
+    await drainDetached();
+    expect(h.injectCaptchaCalls).toEqual(["hcaptcha"]);
+
+    // Long past any retry cooldown. The solve WORKED, so the still-rendered
+    // widget must not trigger another purchase.
+    await advanceClock(120_000, async () => {
+      await observe(started.session_id);
+      await drainDetached();
+    });
+
+    expect(h.twoCaptchaCalls).toEqual(["hcaptcha"]);
     await finishProvisionSession(started.session_id);
   });
 

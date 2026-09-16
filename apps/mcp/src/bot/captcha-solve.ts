@@ -23,6 +23,7 @@ import {
   extractTurnstileSitekey,
   getHcaptchaSolveContext,
   hasCaptchaResponseTokenForVariant,
+  hasHcaptchaResponseTokenWithCompat,
   injectHcaptchaToken,
   injectRecaptchaToken,
   injectTurnstileToken,
@@ -228,12 +229,38 @@ const CAPTCHA_AUTOSOLVE_RETRY_COOLDOWN_MS = 30_000;
 // and the session's auto-solve never re-arms.
 const CAPTCHA_AUTOSOLVE_REQUEST_TIMEOUT_MS = 20_000;
 
+// hCaptcha and reCAPTCHA tokens expire about two minutes after they are minted.
+// A 2Captcha solve can take most of that on its own, and the stash then waits
+// for the next observation — which the agent controls. Past this the token is
+// dead: injecting it would report a solve the site rejects.
+const CAPTCHA_TOKEN_LIFETIME_MS = 120_000;
+
 interface AutoSolveState {
   inFlight: boolean;
   lastFinishedAt: number;
   // A bought token waiting for a lease-holding caller to inject it, with the
-  // document it was bought for.
-  pending: { variant: CaptchaVariant; token: string; solvedUrl: string } | null;
+  // document it was bought for and when it was minted.
+  pending: {
+    variant: CaptchaVariant;
+    token: string;
+    solvedUrl: string;
+    fetchedAt: number;
+  } | null;
+}
+
+// One question, asked at every point the operate path decides whether a
+// challenge still needs a token: before spending, before injecting a stashed
+// token, and to confirm the injection landed. Asking it differently anywhere
+// would make an attempt buy a token it then discards, or record a solve the
+// page never took.
+function variantTokenPresent(
+  session: Session,
+  variant: CaptchaVariant,
+  page?: Page,
+): Promise<boolean> {
+  return variant === "hcaptcha"
+    ? hasHcaptchaResponseTokenWithCompat(session.browser, page)
+    : hasCaptchaResponseTokenForVariant(session.browser, variant, page);
 }
 
 // Weak ownership: attempt bookkeeping dies with the session object.
@@ -279,6 +306,17 @@ async function injectPendingCaptchaToken(session: Session, page?: Page): Promise
   state.pending = null;
 
   try {
+    // The token itself has a shelf life, and both the solve and the wait for a
+    // lease-holding caller eat into it. A dead token must not be written: it
+    // would fill the response field, read back as solved, and leave the agent
+    // submitting a value the site rejects with nothing left to retry.
+    if (Date.now() - pending.fetchedAt > CAPTCHA_TOKEN_LIFETIME_MS) {
+      audit(session.id, "captcha_autosolve", {
+        variant: pending.variant,
+        outcome: "token_expired",
+      });
+      return;
+    }
     // A token is bound to the document it was bought for. The agent kept
     // driving while 2Captcha worked, so the form may have been submitted or
     // re-rendered — writing the old token into a different document poisons
@@ -292,7 +330,7 @@ async function injectPendingCaptchaToken(session: Session, page?: Page): Promise
     // substrate cleared it — needs nothing. Writing the bought token over it
     // would re-fire the site's success callbacks, which on an ordinary
     // integration submits the form a second time.
-    if (await hasCaptchaResponseTokenForVariant(session.browser, pending.variant, page)) {
+    if (await variantTokenPresent(session, pending.variant, page)) {
       audit(session.id, "captcha_autosolve", {
         variant: pending.variant,
         outcome: "already_settled",
@@ -300,13 +338,11 @@ async function injectPendingCaptchaToken(session: Session, page?: Page): Promise
       return;
     }
     const res = await injectCaptchaToken(session.browser, pending.variant, pending.token, page);
-    // The settle check answers "does ANY provider hold a token", which a
-    // co-resident widget can satisfy on its own. Confirm against the DETECTED
-    // provider's field, the same question the fetch pre-check asks, so a token
-    // that landed nowhere backs off instead of suppressing the next attempt.
-    const confirmed =
-      res.solved &&
-      (await hasCaptchaResponseTokenForVariant(session.browser, pending.variant, page));
+    // injectCaptchaToken's own settle check answers "does ANY provider hold a
+    // token", which a co-resident widget can satisfy on its own. Confirm where
+    // this variant's token actually belongs, so a token that landed nowhere
+    // backs off instead of suppressing the next attempt.
+    const confirmed = res.solved && (await variantTokenPresent(session, pending.variant, page));
     audit(session.id, "captcha_autosolve", {
       variant: pending.variant,
       outcome: res.solved && !confirmed ? "token_not_confirmed" : res.outcome,
@@ -351,7 +387,7 @@ async function runDetachedTokenFetch(session: Session, page?: Page): Promise<voi
     if (!det.challengeRendered || !AUTOSOLVE_VARIANTS.has(det.variant)) return;
     // Scoped to the DETECTED provider: a co-resident reCAPTCHA v3 badge token
     // must not read as "the rendered hCaptcha is already solved".
-    if (await hasCaptchaResponseTokenForVariant(session.browser, det.variant, page)) return;
+    if (await variantTokenPresent(session, det.variant, page)) return;
     variant = det.variant;
 
     const solvedUrl = page?.url() ?? session.browser.currentUrl();
@@ -368,7 +404,7 @@ async function runDetachedTokenFetch(session: Session, page?: Page): Promise<voi
       failedAt = Date.now();
       return;
     }
-    state.pending = { variant, token: fetched.token, solvedUrl };
+    state.pending = { variant, token: fetched.token, solvedUrl, fetchedAt: Date.now() };
   } catch (error) {
     // Best-effort: any solver or transport error — including the page or the
     // whole session going away mid-fetch — leaves the challenge on the page for

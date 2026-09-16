@@ -865,22 +865,40 @@ export async function triggerInvisibleRecaptcha(
   return false;
 }
 
-async function hasCaptchaResponseToken(page: Page | null): Promise<boolean> {
+// The provider → response-field rule, in ONE place: both the any-provider
+// check and the variant-scoped one below fold over it.
+const VARIANT_RESPONSE_SELECTOR: Record<Exclude<CaptchaVariant, "unknown">, string> = {
+  recaptcha_v2: 'textarea[name="g-recaptcha-response"], textarea[id^="g-recaptcha-response"]',
+  recaptcha_v3: 'textarea[name="g-recaptcha-response"], textarea[id^="g-recaptcha-response"]',
+  hcaptcha: 'textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"]',
+  turnstile: 'input[name="cf-turnstile-response"], input[id^="cf-chl-widget"]',
+};
+
+// Turnstile also marks its host element on success, with no value anywhere.
+const TURNSTILE_SUCCESS_SELECTOR = ".cf-turnstile[data-state='success']";
+
+async function hasResponseTokenIn(
+  page: Page | null,
+  selectors: string[],
+  turnstile: boolean,
+): Promise<boolean> {
   if (!page) throw new Error("Browser not started");
   return page
-    .evaluate(() => {
-      const hasValue = (selector: string): boolean => {
-        const el = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector);
-        return el !== null && el.value.trim().length > 0;
-      };
-      return (
-        hasValue('textarea[name="g-recaptcha-response"], textarea[id^="g-recaptcha-response"]') ||
-        hasValue('textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"]') ||
-        hasValue('input[name="cf-turnstile-response"], input[id^="cf-chl-widget"]') ||
-        document.querySelector(".cf-turnstile[data-state='success']") !== null
-      );
-    })
+    .evaluate(
+      ({ sels, cf }: { sels: string[]; cf: string | null }) => {
+        for (const sel of sels) {
+          const el = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(sel);
+          if (el !== null && el.value.trim().length > 0) return true;
+        }
+        return cf !== null && document.querySelector(cf) !== null;
+      },
+      { sels: selectors, cf: turnstile ? TURNSTILE_SUCCESS_SELECTOR : null },
+    )
     .catch(() => false);
+}
+
+async function hasCaptchaResponseToken(page: Page | null): Promise<boolean> {
+  return hasResponseTokenIn(page, Object.values(VARIANT_RESPONSE_SELECTOR), true);
 }
 
 export async function waitForCaptchaResponseToken(
@@ -897,14 +915,6 @@ export async function waitForCaptchaResponseToken(
   return false;
 }
 
-// Each provider writes its token into its OWN response field.
-const VARIANT_RESPONSE_SELECTOR: Record<Exclude<CaptchaVariant, "unknown">, string> = {
-  recaptcha_v2: 'textarea[name="g-recaptcha-response"], textarea[id^="g-recaptcha-response"]',
-  recaptcha_v3: 'textarea[name="g-recaptcha-response"], textarea[id^="g-recaptcha-response"]',
-  hcaptcha: 'textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"]',
-  turnstile: 'input[name="cf-turnstile-response"], input[id^="cf-chl-widget"]',
-};
-
 // Whether the DETECTED provider already holds a token. Unlike
 // hasCaptchaResponseToken this does not answer true for a co-resident
 // provider's field, so a page running reCAPTCHA v3 for scoring alongside a
@@ -915,16 +925,32 @@ export async function hasCaptchaResponseTokenForVariant(
   page: Page | null = browser.page,
 ): Promise<boolean> {
   if (variant === "unknown") return false;
+  return hasResponseTokenIn(page, [VARIANT_RESPONSE_SELECTOR[variant]], variant === "turnstile");
+}
+
+// The same question for hCaptcha, allowing for its DROP-IN shape: a page that
+// swapped hCaptcha in for reCAPTCHA carries no h-captcha-response field at all,
+// and injectHcaptchaToken legitimately lands the token in the g-recaptcha-response
+// compat field instead. Only a page with NO own field of its own answers from
+// the compat one — where both exist, the co-resident reCAPTCHA's token is not
+// hCaptcha's answer.
+export async function hasHcaptchaResponseTokenWithCompat(
+  browser: BrowserController,
+  page: Page | null = browser.page,
+): Promise<boolean> {
   if (!page) throw new Error("Browser not started");
-  const selector = VARIANT_RESPONSE_SELECTOR[variant];
   return page
     .evaluate(
-      ({ sel, turnstile }: { sel: string; turnstile: boolean }) => {
-        const el = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(sel);
-        if (el !== null && el.value.trim().length > 0) return true;
-        return turnstile && document.querySelector(".cf-turnstile[data-state='success']") !== null;
+      ({ own, compat }: { own: string; compat: string }) => {
+        const value = (selector: string): string | null => {
+          const el = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector);
+          return el === null ? null : el.value.trim();
+        };
+        const ownValue = value(own);
+        if (ownValue !== null) return ownValue.length > 0;
+        return (value(compat) ?? "").length > 0;
       },
-      { sel: selector, turnstile: variant === "turnstile" },
+      { own: VARIANT_RESPONSE_SELECTOR.hcaptcha, compat: VARIANT_RESPONSE_SELECTOR.recaptcha_v2 },
     )
     .catch(() => false);
 }

@@ -10,7 +10,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
 import { BrowserController } from "../browser.js";
-import { injectHcaptchaToken } from "../captcha.js";
+import { hasHcaptchaResponseTokenWithCompat, injectHcaptchaToken } from "../captcha.js";
 
 let browser: Browser;
 
@@ -72,5 +72,41 @@ describe("injectHcaptchaToken and a co-resident reCAPTCHA response field", () =>
     } finally {
       await page.close();
     }
+  });
+});
+
+describe("hasHcaptchaResponseTokenWithCompat", () => {
+  const answerFor = async (body: string): Promise<boolean> => {
+    const { ctrl, page } = await pageFor(dataUrl(body));
+    try {
+      return await hasHcaptchaResponseTokenWithCompat(ctrl, page);
+    } finally {
+      await page.close();
+    }
+  };
+
+  it("counts a filled compat field on a page with no h-captcha-response of its own", async () => {
+    // The drop-in shape: hCaptcha replaced reCAPTCHA, so the compat textarea is
+    // the site's only response field and holds the solve.
+    expect(await answerFor('<textarea name="g-recaptcha-response">token</textarea>')).toBe(true);
+  });
+
+  it("ignores the compat field when the page has its own h-captcha-response", async () => {
+    // Co-resident: that token belongs to the page's reCAPTCHA, not to hCaptcha.
+    expect(
+      await answerFor(`
+        <textarea name="h-captcha-response"></textarea>
+        <textarea name="g-recaptcha-response">v3-score-token</textarea>
+      `),
+    ).toBe(false);
+  });
+
+  it("answers from its own field when that is filled", async () => {
+    expect(
+      await answerFor(`
+        <textarea name="h-captcha-response">token</textarea>
+        <textarea name="g-recaptcha-response"></textarea>
+      `),
+    ).toBe(true);
   });
 });
