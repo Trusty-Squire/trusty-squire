@@ -25,6 +25,7 @@ import { registerPayApprovalsRoute } from "./routes/pay-approvals.js";
 import { registerTelegramRoute } from "./routes/telegram.js";
 import { registerVaultAccessRoute } from "./routes/vault-access.js";
 import { registerCredentialMutationRoutes } from "./routes/credential-mutations.js";
+import { registerCardMutationRoutes } from "./routes/card-mutations.js";
 import { registerCredentialFetchRoutes } from "./routes/credential-fetch.js";
 import { registerVouchflowDeviceRoutes } from "./routes/vouchflow-devices.js";
 import { registerEgressRoutes } from "./routes/egress.js";
@@ -302,6 +303,12 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   await fastify.register(registerCredentialMutationRoutes, {
     deps,
     requireAny: auth.requireAny,
+    ...(opts.vouchVerifier !== undefined ? { vouchVerifier: opts.vouchVerifier } : {}),
+  });
+  await fastify.register(registerCardMutationRoutes, {
+    deps,
+    requireAny: auth.requireAny,
+    requireWeb: auth.requireWeb,
     ...(opts.vouchVerifier !== undefined ? { vouchVerifier: opts.vouchVerifier } : {}),
   });
   // fetch_credential — the one approval-gated path that returns a raw

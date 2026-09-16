@@ -74,6 +74,11 @@ import {
 } from "./credential-mutation-approval-store.js";
 import { PrismaCredentialMutationApprovalStore } from "./prisma-credential-mutation-approval-store.js";
 import {
+  InMemoryCardMutationApprovalStore,
+  type CardMutationApprovalStore,
+} from "./card-mutation-approval-store.js";
+import { PrismaCardMutationApprovalStore } from "./prisma-card-mutation-approval-store.js";
+import {
   InMemoryCredentialFetchApprovalStore,
   type CredentialFetchApprovalStore,
 } from "./credential-fetch-approval-store.js";
@@ -111,6 +116,9 @@ export interface ApiDeps {
   paymentAuditStore: PaymentAuditStore;
   pendingPaymentApprovalStore: PendingPaymentApprovalStore;
   credentialMutationApprovalStore: CredentialMutationApprovalStore;
+  // edit_payment_card's approval records — the passkey-gated saved-card
+  // edit (browser-side decrypt/re-encrypt; see the store's module header).
+  cardMutationApprovalStore: CardMutationApprovalStore;
   // fetch_credential's approval records — the raw-value disclosure path.
   // Separate from the mutation store on purpose (see its module header).
   credentialFetchApprovalStore: CredentialFetchApprovalStore;
@@ -298,11 +306,13 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
   let e2eCredentialStore: E2ECredentialStore;
   let pendingPaymentApprovalStore: PendingPaymentApprovalStore;
   let credentialMutationApprovalStore: CredentialMutationApprovalStore;
+  let cardMutationApprovalStore: CardMutationApprovalStore;
   let credentialFetchApprovalStore: CredentialFetchApprovalStore;
   if (authPrisma !== null) {
     e2eCredentialStore = new PrismaE2ECredentialStore(authPrisma);
     pendingPaymentApprovalStore = new PrismaPendingPaymentApprovalStore(authPrisma);
     credentialMutationApprovalStore = new PrismaCredentialMutationApprovalStore(authPrisma);
+    cardMutationApprovalStore = new PrismaCardMutationApprovalStore(authPrisma);
     credentialFetchApprovalStore = new PrismaCredentialFetchApprovalStore(
       authPrisma,
       opts.now ?? (() => new Date()),
@@ -316,6 +326,11 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     );
     credentialMutationApprovalStore = new InMemoryCredentialMutationApprovalStore(
       credentialStore,
+      persistedVaultAuditStore,
+      opts.now ?? (() => new Date()),
+    );
+    cardMutationApprovalStore = new InMemoryCardMutationApprovalStore(
+      inMemoryE2ECredentialStore,
       persistedVaultAuditStore,
       opts.now ?? (() => new Date()),
     );
@@ -437,6 +452,7 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     paymentAuditStore,
     pendingPaymentApprovalStore,
     credentialMutationApprovalStore,
+    cardMutationApprovalStore,
     credentialFetchApprovalStore,
     telegramLinkTokenStore,
     vouchflowDeviceStore,

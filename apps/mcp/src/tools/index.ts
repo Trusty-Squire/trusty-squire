@@ -21,6 +21,7 @@ import { OPERATE_TOOLS } from "./provision-drive.js";
 import { listPaymentCardsTool } from "./list-payment-cards.js";
 import { injectCardTool } from "./inject-card.js";
 import { deleteCredentialTool, editCredentialTool } from "./credential-mutations.js";
+import { editPaymentCardTool } from "./card-mutations.js";
 import { fetchCredentialTool } from "./fetch-credential.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
@@ -93,6 +94,8 @@ export function buildToolRegistry(env: NodeJS.ProcessEnv = process.env): Tool[] 
     auditLogTool,
     ...(diagnosticsProfileEnabled(env) ? diagnosticsTools : []),
     listPaymentCardsTool,
+    // Saved-card edit: same passkey ceremony, browser-side decrypt/re-encrypt.
+    editPaymentCardTool,
     injectCardTool,
     // Interactive host-driven provisioning through discoverable flat verbs,
     // plus the unchanged recipe save/run tools.
@@ -127,5 +130,6 @@ export {
   listExtractFailuresTool,
   getExtractFailureTool,
   listPaymentCardsTool,
+  editPaymentCardTool,
   injectCardTool,
 };

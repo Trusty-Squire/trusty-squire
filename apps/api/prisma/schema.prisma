@@ -177,6 +177,7 @@ model Account {
   payment_audit_events          PaymentAuditEvent[]
   payment_approvals             PendingPaymentApproval[]
   credential_mutation_approvals CredentialMutationApproval[]
+  card_mutation_approvals       CardMutationApproval[]
   credential_fetch_approvals    CredentialFetchApproval[]
   telegram_link_tokens          TelegramLinkToken[]
   vouchflow_devices             VouchflowDevice[]
@@ -402,6 +403,37 @@ model CredentialMutationApproval {
   @@index([account_id, intent_hash, status])
   @@index([expires_at])
   @@map("credential_mutation_approvals")
+}
+
+// Passkey-gated saved-card edit approvals (edit_payment_card). The agent
+// proposes only the target card; the human edits the card fields in the
+// browser, which decrypts locally and re-encrypts with the same sealed key —
+// the server stores just the new opaque blob at approve time. Metadata only:
+// no card value is ever stored here.
+model CardMutationApproval {
+  id              String    @id @db.VarChar(26)
+  account_id      String    @db.VarChar(26)
+  operation       String
+  card_id         String    @db.VarChar(26)
+  card_label      String
+  before_metadata Json
+  after_metadata  Json?
+  nonce           String
+  agent           String
+  requester_kind  String    @default("agent")
+  intent_hash     String
+  status          String
+  failure_code    String?
+  mandate_id      String?
+  created_at      DateTime  @default(now())
+  expires_at      DateTime
+  executed_at     DateTime?
+
+  account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
+
+  @@index([account_id, intent_hash, status])
+  @@index([expires_at])
+  @@map("card_mutation_approvals")
 }
 
 // Approval record for `fetch_credential` — the one path that returns a raw

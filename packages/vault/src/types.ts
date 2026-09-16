@@ -250,6 +250,10 @@ export const VAULT_AUDIT_TYPES = {
   // the server, so nothing sensitive can land here by construction.
   cardStored: "vault.card_stored",
   cardDeleted: "vault.card_deleted",
+  // A saved card's sealed blob + display metadata replaced behind a signed
+  // passkey approval (edit_payment_card). Payload carries only display
+  // metadata (label/brand/last4) — same boundary as card_stored.
+  cardUpdated: "vault.card_updated",
   // A stored-card payment event: either operate_pay's outcome report or a
   // caller-placed order attempt. Metadata only — never a PAN.
   paymentExecuted: "vault.payment_executed",

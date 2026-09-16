@@ -118,6 +118,21 @@ export interface CredentialMutationApproval {
   error?: string;
 }
 
+// edit_payment_card's approval record. The agent never sees card values:
+// `card`/`before`/`after` carry display metadata only (label/brand/last4),
+// and the sealed blob stays behind the browser ceremony.
+export interface CardMutationApproval {
+  approval_id: string;
+  approval_url: string;
+  status: "pending" | "approved" | "failed" | "expired";
+  operation: "edit_card";
+  card: { id: string; label: string; brand: string | null; last4: string | null };
+  before: { label: string; brand: string | null; last4: string | null };
+  after: { label: string; brand: string | null; last4: string | null } | null;
+  expires_at: string;
+  error?: string;
+}
+
 // fetch_credential's approval record. `fields` is present ONLY on the single
 // delivery that follows a passkey-signed approval; every other status carries
 // no value at all.
@@ -383,6 +398,19 @@ export class ApiClient {
 
   async getCredentialMutationApproval(id: string): Promise<CredentialMutationApproval> {
     return this.get(`/v1/vault/mutation-approvals/${encodeURIComponent(id)}`);
+  }
+
+  // edit_payment_card — start (card selector) or resume (approval_id).
+  async createCardMutationApproval(input: {
+    operation: "edit_card";
+    card_id?: string;
+    label?: string;
+  }): Promise<CardMutationApproval> {
+    return this.post("/v1/vault/card-mutation-approvals", input);
+  }
+
+  async getCardMutationApproval(id: string): Promise<CardMutationApproval> {
+    return this.get(`/v1/vault/card-mutation-approvals/${encodeURIComponent(id)}`);
   }
 
   async createCredentialFetchApproval(input: {

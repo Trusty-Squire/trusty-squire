@@ -25,6 +25,16 @@ export interface E2ECredentialCardMetadata {
   last4: string | null;
 }
 
+// The full replacement a passkey-approved card edit writes: new sealed blob
+// (encrypted client-side) plus the display metadata the browser re-derived
+// from the edited PAN. The server cannot read any of the card values.
+export interface E2ECredentialCardUpdate {
+  label: string;
+  blob: string;
+  brand: string | null;
+  last4: string | null;
+}
+
 export interface E2ECredentialStore {
   create(
     accountId: string,
@@ -43,6 +53,13 @@ export interface E2ECredentialStore {
   exportAll(accountId: string): Promise<E2ECredentialRecord[]>;
   getByIdForAccount(id: string, accountId: string): Promise<E2ECredentialRecord | null>;
   updateLabelForAccount(id: string, accountId: string, label: string): Promise<boolean>;
+  // Whole-card replacement behind a signed approval (edit_payment_card):
+  // blob + label + display metadata move together, account-scoped.
+  updateCardForAccount(
+    id: string,
+    accountId: string,
+    update: E2ECredentialCardUpdate,
+  ): Promise<boolean>;
   deleteForAccount(id: string, accountId: string): Promise<boolean>;
   deleteForAccountWithAudit?(
     id: string,
@@ -115,6 +132,21 @@ export class InMemoryE2ECredentialStore implements E2ECredentialStore {
     const record = this.records.get(id);
     if (record === undefined || record.accountId !== accountId) return false;
     record.label = label;
+    record.updatedAt = this.now();
+    return true;
+  }
+
+  async updateCardForAccount(
+    id: string,
+    accountId: string,
+    update: E2ECredentialCardUpdate,
+  ): Promise<boolean> {
+    const record = this.records.get(id);
+    if (record === undefined || record.accountId !== accountId) return false;
+    record.label = update.label;
+    record.blob = update.blob;
+    record.brand = update.brand;
+    record.last4 = update.last4;
     record.updatedAt = this.now();
     return true;
   }
