@@ -1,15 +1,18 @@
 // Captcha widget detection, solving, and 2Captcha token injection.
 //
-// Moved out of browser.ts (design PR 7, layer-contracts): every piece of
-// captcha logic lives here. Functions take the live BrowserController as
-// their first argument for the operations that need the humanized mouse
-// path and request-lease-aware sleeps; the pure page readers/writers take
-// only the page. The controller keeps no captcha state.
+// Moved out of browser.ts (design PR 7, layer-contracts): every captcha
+// primitive — detection, the substrate solves, token injection — lives here.
+// Functions take the live BrowserController as their first argument for the
+// operations that need the humanized mouse path and request-lease-aware
+// sleeps; the pure page readers/writers take only the page. The controller
+// keeps no captcha state.
 //
 // Tier 2 is the click-and-wait solve (Turnstile/reCAPTCHA v2 checkbox);
 // Tier 3 is the 2Captcha token solver merged verbatim from
 // captcha-solver-2captcha.ts at the bottom of this file. browser.ts imports
-// back only isCaptchaFrameUrl for its frame walk.
+// back only isCaptchaFrameUrl for its frame walk. What ORCHESTRATES a Tier 3
+// solve lives in captcha-solve.ts: the vault-backed transport both callers
+// share, plus the operate-path auto-solve.
 
 import type { Page } from "playwright";
 

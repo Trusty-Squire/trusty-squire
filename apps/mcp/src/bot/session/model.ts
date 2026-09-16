@@ -83,9 +83,10 @@ export interface Session {
   // PR3 — the user's own email (Google identity captured at login), or null when
   // unknown. The authoritative signup email + the identity whose inbox is read.
   userEmail: string | null;
-  // The MCP api-client (when the tool layer passed one through). Lets the captcha
-  // gate spend a VAULTED 2Captcha key through the injecting proxy instead of a
-  // raw env key. Undefined → the gate falls back to TWOCAPTCHA_API_KEY.
+  // The MCP api-client (when the tool layer passed one through). Lets the
+  // provision captcha gate and the operate drive's auto-solve spend a VAULTED
+  // 2Captcha key through the injecting proxy instead of a raw env key.
+  // Undefined → both fall back to TWOCAPTCHA_API_KEY.
   api?: ApiClient;
   // The human has not approved or denied yet. A later inject_card call resumes
   // the same approval. A terminal outcome clears this, so the next call mints

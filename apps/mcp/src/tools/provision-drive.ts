@@ -211,7 +211,8 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
       format: args.format ?? "compact",
       consentInboxRead,
       ...(args.proxy !== undefined ? { proxyUrl: args.proxy } : {}),
-      // Thread the api-client so the captcha gate can spend a vaulted 2Captcha key.
+      // Thread the api-client so the captcha paths — the provision gate and the
+      // operate drive's best-effort auto-solve — can spend a vaulted 2Captcha key.
       ...(api !== null ? { api } : {}),
     });
   },

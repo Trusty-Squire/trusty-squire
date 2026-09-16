@@ -34,10 +34,7 @@ import {
   waitForCaptchaChallengeToSettle,
   waitForCaptchaResponseToken,
 } from "./captcha.js";
-import {
-  buildTwoCaptchaSolver,
-  solveCaptchaWithTokenSolver,
-} from "./captcha-solve.js";
+import { buildTwoCaptchaSolver, solveCaptchaWithTokenSolver } from "./captcha-solve.js";
 import {
   isCompactV2Handle,
   isCompactV2Label,
