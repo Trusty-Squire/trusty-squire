@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ConsoleMessage, Page } from "playwright";
 import { CardValueOutputMask } from "../card-value-output-mask.js";
 import { OperatorEvidenceCollector } from "../operator-evidence.js";
@@ -151,5 +151,48 @@ describe("operator evidence stream", () => {
     expect(selected.network.map((record) => record.request_id)).toEqual(["pending"]);
     expect(selected.console).toEqual([]);
     expect(selected.screenshots).toEqual([]);
+  });
+
+  // The SDK-error latch drives a time-bounded observation, so a repeat failure
+  // during a resubmit has to re-arm it: keeping only the FIRST sighting ages
+  // the report out while the marker is being emitted right now.
+  it("re-arms the 3-D Secure SDK-error latch on every marker sighting", async () => {
+    const cdp = new FakeCdp();
+    const page = fakePage(cdp);
+    const evidence = new OperatorEvidenceCollector(new CardValueOutputMask());
+    await evidence.attach(page);
+    expect(evidence.threeDsSdkErrorSeenAt()).toBeNull();
+
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_000_000);
+      cdp.emit("Network.requestWillBeSent", {
+        requestId: "telemetry-1",
+        frameId: "frame-1",
+        timestamp: 1,
+        request: {
+          method: "POST",
+          url: "https://merchant.test/log",
+          postData: '{"event":"3ds_verification.error","code":"THREEDS_CARDINAL_SDK_ERROR"}',
+        },
+      });
+      expect(evidence.threeDsSdkErrorSeenAt()).toBe(1_000_000);
+
+      vi.setSystemTime(1_200_000);
+      (page as unknown as { emit: (event: string, value: unknown) => void }).emit(
+        "pageerror",
+        new Error("BraintreeError THREEDS_CARDINAL_SDK_ERROR: Failed to render ACS window"),
+      );
+      expect(evidence.threeDsSdkErrorSeenAt()).toBe(1_200_000);
+
+      vi.setSystemTime(1_300_000);
+      (page as unknown as { emit: (event: string, value: unknown) => void }).emit(
+        "pageerror",
+        new Error("unrelated checkout failure"),
+      );
+      expect(evidence.threeDsSdkErrorSeenAt()).toBe(1_200_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

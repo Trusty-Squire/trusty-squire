@@ -97,17 +97,17 @@ export class OperatorEvidenceCollector {
     return this.sequence;
   }
 
-  /** Wall-clock time the 3-D Secure SDK-error marker was first captured, or
-   * null. Latched once at capture time so nothing has to rescan the buffer;
-   * freshness is the caller's to bound. */
+  /** Wall-clock time the 3-D Secure SDK-error marker was MOST RECENTLY
+   * captured, or null. Every sighting re-arms it, so a repeat failure during a
+   * resubmit refreshes the timestamp instead of aging out behind the first
+   * one. Latched at capture time so nothing has to rescan the buffer, and
+   * never cleared; freshness is the caller's to bound. */
   threeDsSdkErrorSeenAt(): number | null {
     return this.threeDsSdkErrorAt;
   }
 
   private noteThreeDsSdkError(text: string | null): void {
-    if (this.threeDsSdkErrorAt === null && isThreeDsSdkErrorText(text)) {
-      this.threeDsSdkErrorAt = Date.now();
-    }
+    if (isThreeDsSdkErrorText(text)) this.threeDsSdkErrorAt = Date.now();
   }
 
   private boundedPush<T>(target: T[], value: T): void {

@@ -931,7 +931,9 @@ function observedThreeDsSdkError(
       "THREEDS_CARDINAL_SDK_ERROR). This failure is transient: the checkout re-arms " +
       "after it and a resubmitted payment is expected to launch the challenge. " +
       "Resubmit the payment with ordinary actions, then operate_observe for the " +
-      "challenge; the cardholder completes it in their bank app.",
+      "challenge; the cardholder completes it in their bank app. This report " +
+      "reflects evidence from the last few minutes; if the checkout has since " +
+      "completed, do not resubmit.",
     next_action: "operate_observe",
   };
 }

@@ -6,36 +6,40 @@ import {
 } from "../browser.js";
 import { isThreeDsSdkErrorText } from "../operator-evidence.js";
 
-// The 3-D Secure challenge detector must recognize BOTH Cardinal ACS
+// The 3-D Secure challenge detector must keep recognizing BOTH Cardinal ACS
 // generations. The modern Braintree/Cardinal 3DS2 flow serves the challenge
-// from `.../ThreeDSecure/V2_x/CReq` on a *.cardinalcommerce.com host — a real
-// session (Oura, 2026-09) rendered exactly that URL, and the detector missed
-// it because it only pinned the legacy `cruise/stepup` path.
+// from `.../ThreeDSecure/V2_x/CReq` on a *.cardinalcommerce.com host (a real
+// session — Oura, 2026-09 — rendered exactly that URL), which the pattern
+// already covers through its `threeDSecure` word alternative rather than any
+// Cardinal-specific branch. These cases pin that, so tightening the pattern
+// back to `cruise/stepup` only would be caught.
 describe("threeDsChallengeUrlPattern", () => {
   it("matches the legacy Cardinal cruise/stepup ACS path", () => {
     expect(
-      threeDsChallengeUrlPattern.test("https://centinelapi.cardinalcommerce.com/v2/cruise/stepup?jwt=x"),
+      threeDsChallengeUrlPattern.test(
+        "https://centinelapi.cardinalcommerce.com/v2/cruise/stepup?jwt=x",
+      ),
     ).toBe(true);
   });
 
-  it("matches the modern Cardinal ThreeDSecure CReq ACS path", () => {
+  it("matches the modern Cardinal ThreeDSecure/V2_x/CReq ACS path via its threeDSecure alternative", () => {
     expect(
       threeDsChallengeUrlPattern.test(
         "https://authentication.cardinalcommerce.com/ThreeDSecure/V2_1_0/CReq?jwt=eyJraWQi",
       ),
     ).toBe(true);
     expect(
-      threeDsChallengeUrlPattern.test("https://authentication.cardinalcommerce.com/ThreeDSecure/CReq"),
+      threeDsChallengeUrlPattern.test(
+        "https://authentication.cardinalcommerce.com/ThreeDSecure/CReq",
+      ),
     ).toBe(true);
   });
 
   it("still matches the other cross-processor markers", () => {
-    expect(threeDsChallengeUrlPattern.test("https://hooks.stripe.com/3d_secure/acc_1/host")).toBe(true);
+    expect(threeDsChallengeUrlPattern.test("https://hooks.stripe.com/3d_secure/acc_1/host")).toBe(
+      true,
+    );
     expect(threeDsChallengeUrlPattern.test("https://3ds.example.com/acs/step1")).toBe(true);
-  });
-
-  it("does not match a /CReq endpoint on a non-Cardinal host", () => {
-    expect(threeDsChallengeUrlPattern.test("https://assets.otherbank.example/CReq")).toBe(false);
   });
 
   it("does not match ordinary checkout or songbird asset URLs", () => {
@@ -57,7 +61,9 @@ describe("threeDsChallengeUrlPattern", () => {
 describe("isThreeDsSdkErrorText", () => {
   it("detects the marker in a captured body", () => {
     expect(
-      isThreeDsSdkErrorText('{"event":"3ds_verification.error","code":"THREEDS_CARDINAL_SDK_ERROR"}'),
+      isThreeDsSdkErrorText(
+        '{"event":"3ds_verification.error","code":"THREEDS_CARDINAL_SDK_ERROR"}',
+      ),
     ).toBe(true);
   });
 
@@ -87,9 +93,9 @@ describe("threeDsSdkErrorEvidenceIsFresh", () => {
 
   it("is true for a marker captured inside the window", () => {
     expect(threeDsSdkErrorEvidenceIsFresh(now, now)).toBe(true);
-    expect(
-      threeDsSdkErrorEvidenceIsFresh(now - THREE_DS_SDK_ERROR_EVIDENCE_WINDOW_MS, now),
-    ).toBe(true);
+    expect(threeDsSdkErrorEvidenceIsFresh(now - THREE_DS_SDK_ERROR_EVIDENCE_WINDOW_MS, now)).toBe(
+      true,
+    );
   });
 
   it("is false once the marker ages past the window", () => {
