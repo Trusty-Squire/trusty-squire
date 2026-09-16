@@ -485,7 +485,8 @@ export interface StartOptions {
   // explicit false makes awaitVerification hand the code request back instead.
   consentInboxRead?: boolean;
   // The MCP api-client, threaded from the operate_* tool layer. Enables the
-  // captcha gate to spend a VAULTED 2Captcha key via the injecting proxy.
+  // provision captcha gate and the operate drive's auto-solve to spend a
+  // VAULTED 2Captcha key via the injecting proxy.
   api?: ApiClient;
 }
 

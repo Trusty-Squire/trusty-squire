@@ -1,15 +1,18 @@
 // Captcha widget detection, solving, and 2Captcha token injection.
 //
-// Moved out of browser.ts (design PR 7, layer-contracts): every piece of
-// captcha logic lives here. Functions take the live BrowserController as
-// their first argument for the operations that need the humanized mouse
-// path and request-lease-aware sleeps; the pure page readers/writers take
-// only the page. The controller keeps no captcha state.
+// Moved out of browser.ts (design PR 7, layer-contracts): every captcha
+// primitive — detection, the substrate solves, token injection — lives here.
+// Functions take the live BrowserController as their first argument for the
+// operations that need the humanized mouse path and request-lease-aware
+// sleeps; the pure page readers/writers take only the page. The controller
+// keeps no captcha state.
 //
 // Tier 2 is the click-and-wait solve (Turnstile/reCAPTCHA v2 checkbox);
 // Tier 3 is the 2Captcha token solver merged verbatim from
 // captcha-solver-2captcha.ts at the bottom of this file. browser.ts imports
-// back only isCaptchaFrameUrl for its frame walk.
+// back only isCaptchaFrameUrl for its frame walk. What ORCHESTRATES a Tier 3
+// solve lives in captcha-solve.ts: the vault-backed transport both callers
+// share, plus the operate-path auto-solve.
 
 import type { Page } from "playwright";
 
@@ -865,22 +868,40 @@ export async function triggerInvisibleRecaptcha(
   return false;
 }
 
-async function hasCaptchaResponseToken(page: Page | null): Promise<boolean> {
+// The provider → response-field rule, in ONE place: both the any-provider
+// check and the variant-scoped one below fold over it.
+const VARIANT_RESPONSE_SELECTOR: Record<Exclude<CaptchaVariant, "unknown">, string> = {
+  recaptcha_v2: 'textarea[name="g-recaptcha-response"], textarea[id^="g-recaptcha-response"]',
+  recaptcha_v3: 'textarea[name="g-recaptcha-response"], textarea[id^="g-recaptcha-response"]',
+  hcaptcha: 'textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"]',
+  turnstile: 'input[name="cf-turnstile-response"], input[id^="cf-chl-widget"]',
+};
+
+// Turnstile also marks its host element on success, with no value anywhere.
+const TURNSTILE_SUCCESS_SELECTOR = ".cf-turnstile[data-state='success']";
+
+async function hasResponseTokenIn(
+  page: Page | null,
+  selectors: string[],
+  turnstile: boolean,
+): Promise<boolean> {
   if (!page) throw new Error("Browser not started");
   return page
-    .evaluate(() => {
-      const hasValue = (selector: string): boolean => {
-        const el = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector);
-        return el !== null && el.value.trim().length > 0;
-      };
-      return (
-        hasValue('textarea[name="g-recaptcha-response"], textarea[id^="g-recaptcha-response"]') ||
-        hasValue('textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"]') ||
-        hasValue('input[name="cf-turnstile-response"], input[id^="cf-chl-widget"]') ||
-        document.querySelector(".cf-turnstile[data-state='success']") !== null
-      );
-    })
+    .evaluate(
+      ({ sels, cf }: { sels: string[]; cf: string | null }) => {
+        for (const sel of sels) {
+          const el = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(sel);
+          if (el !== null && el.value.trim().length > 0) return true;
+        }
+        return cf !== null && document.querySelector(cf) !== null;
+      },
+      { sels: selectors, cf: turnstile ? TURNSTILE_SUCCESS_SELECTOR : null },
+    )
     .catch(() => false);
+}
+
+async function hasCaptchaResponseToken(page: Page | null): Promise<boolean> {
+  return hasResponseTokenIn(page, Object.values(VARIANT_RESPONSE_SELECTOR), true);
 }
 
 export async function waitForCaptchaResponseToken(
@@ -895,6 +916,46 @@ export async function waitForCaptchaResponseToken(
     await browser.sleep(250);
   } while (Date.now() - start < timeoutMs);
   return false;
+}
+
+// Whether the DETECTED provider already holds a token. Unlike
+// hasCaptchaResponseToken this does not answer true for a co-resident
+// provider's field, so a page running reCAPTCHA v3 for scoring alongside a
+// rendered hCaptcha gate is not mistaken for "already solved".
+export async function hasCaptchaResponseTokenForVariant(
+  browser: BrowserController,
+  variant: CaptchaVariant,
+  page: Page | null = browser.page,
+): Promise<boolean> {
+  if (variant === "unknown") return false;
+  return hasResponseTokenIn(page, [VARIANT_RESPONSE_SELECTOR[variant]], variant === "turnstile");
+}
+
+// The same question for hCaptcha, allowing for its DROP-IN shape: a page that
+// swapped hCaptcha in for reCAPTCHA carries no h-captcha-response field at all,
+// and injectHcaptchaToken legitimately lands the token in the g-recaptcha-response
+// compat field instead. Only a page with NO own field of its own answers from
+// the compat one — where both exist, the co-resident reCAPTCHA's token is not
+// hCaptcha's answer.
+export async function hasHcaptchaResponseTokenWithCompat(
+  browser: BrowserController,
+  page: Page | null = browser.page,
+): Promise<boolean> {
+  if (!page) throw new Error("Browser not started");
+  return page
+    .evaluate(
+      ({ own, compat }: { own: string; compat: string }) => {
+        const value = (selector: string): string | null => {
+          const el = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector);
+          return el === null ? null : el.value.trim();
+        };
+        const ownValue = value(own);
+        if (ownValue !== null) return ownValue.length > 0;
+        return (value(compat) ?? "").length > 0;
+      },
+      { own: VARIANT_RESPONSE_SELECTOR.hcaptcha, compat: VARIANT_RESPONSE_SELECTOR.recaptcha_v2 },
+    )
+    .catch(() => false);
 }
 
 // Tier 3 hCaptcha support — extract the hCaptcha sitekey so 2Captcha
@@ -1039,6 +1100,11 @@ export async function injectHcaptchaToken(
           ),
         );
         for (const input of inputs) {
+          // g-recaptcha-response is hCaptcha's DROP-IN compat field: filling it
+          // is right when hCaptcha replaced reCAPTCHA, and wrong when the two
+          // are co-resident — there it holds a live reCAPTCHA score token an
+          // hCaptcha token would invalidate. Fill it only when it is empty.
+          if (input.name === "g-recaptcha-response" && input.value.trim().length > 0) continue;
           input.value = tok;
           input.dispatchEvent(new Event("input", { bubbles: true }));
           input.dispatchEvent(new Event("change", { bubbles: true }));
@@ -1280,6 +1346,11 @@ export interface TwoCaptchaSolverOpts {
   sleepFn?: (ms: number) => Promise<void>;
   // Override max polling deadline (tests).
   resTimeoutMs?: number;
+  // Hard per-request bound for the calls that don't already carry one (the
+  // res/getTaskResult polls). Unset — the provision gate — leaves those polls
+  // bounded only by the overall deadline, which a transport that never settles
+  // can outlive; a caller that must not hang on one request sets it.
+  requestTimeoutMs?: number;
 }
 
 export type TwoCaptchaResult =
@@ -1299,6 +1370,7 @@ export class TwoCaptchaSolver {
   private readonly fetchFn: typeof globalThis.fetch;
   private readonly sleepFn: (ms: number) => Promise<void>;
   private readonly resTimeoutMs: number;
+  private readonly requestTimeoutMs: number | undefined;
 
   constructor(opts: TwoCaptchaSolverOpts = {}) {
     this.apiKey = opts.apiKey ?? process.env.TWOCAPTCHA_API_KEY;
@@ -1306,6 +1378,7 @@ export class TwoCaptchaSolver {
     this.fetchFn = opts.fetchFn ?? globalThis.fetch;
     this.sleepFn = opts.sleepFn ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.resTimeoutMs = opts.resTimeoutMs ?? RES_TIMEOUT_MS;
+    this.requestTimeoutMs = opts.requestTimeoutMs;
   }
 
   isAvailable(): boolean {
@@ -1350,7 +1423,8 @@ export class TwoCaptchaSolver {
       });
       return { ok: r.ok, status: r.status, json: () => r.json() };
     };
-    return req.timeoutMs !== undefined ? withTimeout(exec(), req.timeoutMs) : exec();
+    const timeoutMs = req.timeoutMs ?? this.requestTimeoutMs;
+    return timeoutMs !== undefined ? withTimeout(exec(), timeoutMs) : exec();
   }
 
   /**
@@ -1520,9 +1594,7 @@ export class TwoCaptchaSolver {
   // provider-specific fields (method + sitekey param name); everything
   // else (auth, json, the polling loop, timeouts) is identical across
   // reCAPTCHA and hCaptcha.
-  private async submitAndPoll(
-    params: Record<string, string>,
-  ): Promise<TwoCaptchaResult> {
+  private async submitAndPoll(params: Record<string, string>): Promise<TwoCaptchaResult> {
     if (!this.isAvailable()) return { kind: "no_key" };
     const startMs = Date.now();
 
@@ -1596,7 +1668,7 @@ export class TwoCaptchaSolver {
 
 // Race a promise against a hard timeout. 2Captcha's in.php should
 // answer in <2s; a 10s cap is generous.
-async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+export async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const t = setTimeout(() => reject(new Error(`timeout after ${ms}ms`)), ms);
     p.then(
