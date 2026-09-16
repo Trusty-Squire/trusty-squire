@@ -70,12 +70,15 @@ type CdpFailure = {
 
 /** braintree-web's stable error code for "the Cardinal 3-D Secure SDK could
  * not run" — including its challenge-launch race, where the ACS render fires
- * before the SDK's UI-framework chunks finish loading. The page's own
- * telemetry carries it; the rendered page usually shows only a generic
- * checkout error. */
+ * before the SDK's UI-framework chunks finish loading. The rendered page
+ * usually shows only a generic checkout error, so the marker is the operator's
+ * only durable evidence. */
 export const THREE_DS_SDK_ERROR_MARKER = "THREEDS_CARDINAL_SDK_ERROR";
 
-/** Pure per-record classifier: does this one captured text carry the marker? */
+/** Pure per-record classifier: does this one captured text carry the marker?
+ * Only ever applied to text the merchant page EMITS (see noteThreeDsSdkError)
+ * — a bare substring test cannot tell an emitted failure from source that
+ * merely names the code. */
 export function isThreeDsSdkErrorText(text: string | null): boolean {
   return text !== null && text.includes(THREE_DS_SDK_ERROR_MARKER);
 }
@@ -106,6 +109,12 @@ export class OperatorEvidenceCollector {
     return this.threeDsSdkErrorAt;
   }
 
+  /** Arm the latch from evidence the merchant page EMITS: a telemetry/error
+   * POST body, or a thrown BraintreeError's console/exception text. Fetched
+   * RESPONSE bodies are deliberately never passed here — braintree-web's own
+   * three-d-secure bundle ships the literal error code, so scanning script
+   * bodies would arm the latch on every Braintree 3DS checkout, failure or
+   * not. */
   private noteThreeDsSdkError(text: string | null): void {
     if (isThreeDsSdkErrorText(text)) this.threeDsSdkErrorAt = Date.now();
   }
@@ -206,7 +215,6 @@ export class OperatorEvidenceCollector {
         .send("Network.getResponseBody", { requestId: event.requestId })
         .then((body) => {
           record.response_body = this.mask.maskText(body.body.slice(0, 65_536), "response_body");
-          this.noteThreeDsSdkError(record.response_body);
           record.seq = this.next();
         })
         .catch(() => undefined);

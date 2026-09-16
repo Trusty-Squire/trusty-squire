@@ -56,10 +56,11 @@ describe("threeDsChallengeUrlPattern", () => {
 // When Cardinal's ACS render races its own UI-framework chunk load and loses,
 // braintree-web reports THREEDS_CARDINAL_SDK_ERROR through the page's own
 // telemetry — the only durable evidence the operator can read, since the
-// rendered page shows just a generic checkout error. The collector classifies
-// each captured record once, at capture time.
+// rendered page shows just a generic checkout error. This classifier is pure
+// text; WHICH records it is applied to is the collector's boundary, pinned in
+// operator-evidence.test.ts.
 describe("isThreeDsSdkErrorText", () => {
-  it("detects the marker in a captured body", () => {
+  it("detects the marker in a captured telemetry request body", () => {
     expect(
       isThreeDsSdkErrorText(
         '{"event":"3ds_verification.error","code":"THREEDS_CARDINAL_SDK_ERROR"}',

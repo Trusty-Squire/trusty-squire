@@ -7,12 +7,14 @@ import { OperatorEvidenceCollector } from "../operator-evidence.js";
 const CARD = { pan: "4111111111111111", cvv: "123" };
 
 class FakeCdp extends EventEmitter {
+  constructor(
+    private readonly responseBody = `{"card_number":"${CARD.pan}","cvv":"${CARD.cvv}","status":401}`,
+  ) {
+    super();
+  }
+
   async send(method: string): Promise<Record<string, unknown>> {
-    if (method === "Network.getResponseBody") {
-      return {
-        body: `{"card_number":"${CARD.pan}","cvv":"${CARD.cvv}","status":401}`,
-      };
-    }
+    if (method === "Network.getResponseBody") return { body: this.responseBody };
     return {};
   }
 
@@ -194,5 +196,32 @@ describe("operator evidence stream", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+  // braintree-web's own three-d-secure bundle ships the literal
+  // THREEDS_CARDINAL_SDK_ERROR code (js.braintreegateway.com 3.103.0 carries it
+  // at byte 48,837, inside the 64KB slice this collector captures). Fetched
+  // script bodies therefore must never arm the latch, or every Braintree 3DS
+  // checkout would report a challenge-launch failure that never happened.
+  it("does not arm the 3-D Secure SDK-error latch from a fetched response body", async () => {
+    const bundle = new FakeCdp("default:r=new s(d.THREEDS_CARDINAL_SDK_ERROR)}r.details={}");
+    const page = fakePage(bundle);
+    const evidence = new OperatorEvidenceCollector(new CardValueOutputMask());
+    await evidence.attach(page);
+
+    bundle.emit("Network.requestWillBeSent", {
+      requestId: "three-d-secure-js",
+      frameId: "frame-1",
+      timestamp: 1,
+      request: {
+        method: "GET",
+        url: "https://js.braintreegateway.com/web/3.103.0/js/three-d-secure.min.js",
+      },
+    });
+    bundle.emit("Network.loadingFinished", { requestId: "three-d-secure-js", timestamp: 2 });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(evidence.read().network[0]?.response_body).toContain("THREEDS_CARDINAL_SDK_ERROR");
+    expect(evidence.threeDsSdkErrorSeenAt()).toBeNull();
   });
 });
