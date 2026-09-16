@@ -210,6 +210,34 @@ const SIMPLE_PAGES: Record<string, string> = {
     el.addEventListener("keydown", () => { keys++; evaluate(); });
     el.addEventListener("input", evaluate);
     </script></body></html>`,
+  // The Braintree hosted-field authoring shape, verified against the served
+  // hosted-fields frame and the braintree-web/restricted-input sources: when
+  // the merchant sets no custom field type, the number input is authored
+  // type="text" pattern="\d*" inputmode="numeric" (constructAttributes in
+  // components/base-input.js), the provider's own formatter (RestrictedInput)
+  // rewrites the value with spaces, and the provider NEVER authors
+  // aria-invalid (its verdict is a valid/invalid class toggle over its own
+  // model). Chrome folds the resulting patternMismatch into the AX `invalid`
+  // property on EVERY well-formed number, human- or agent-typed. Contrast
+  // inputs: an authored aria-invalid verdict and a native email type mismatch
+  // must keep surfacing as invalid.
+  braintreeAuthored: `<!doctype html><html><body>
+    <input id="number" name="card-number" aria-label="Card number"
+      type="text" pattern="\\d*" inputmode="numeric"
+      autocomplete="cc-number" maxlength="19">
+    <input id="locked" aria-label="Broken field" aria-invalid="true">
+    <input id="email" aria-label="Email" type="email" value="not-an-email">
+    <script>
+    const el = document.getElementById("number");
+    el.addEventListener("input", () => {
+      const digits = el.value.replace(/\\D/g, "");
+      const grouped = digits.replace(/(.{4})(?=.)/g, "$1 ");
+      if (el.value !== grouped) {
+        el.value = grouped;
+        el.setSelectionRange(el.value.length, el.value.length);
+      }
+    });
+    </script></body></html>`,
 };
 
 beforeAll(async () => {
@@ -760,6 +788,108 @@ describe("inject_card write path and verification (real Chromium)", () => {
       } finally {
         await finishProvisionSession(typed.sessionId).catch(() => undefined);
         await typed.context.close();
+      }
+    },
+    120_000,
+  );
+});
+
+// Regression for the rc.31 false `s=i` on Braintree hosted card fields
+// (ouraring.com, two known-good vaulted cards, both clean single fills
+// reporting complete:true): the observation showed the credit-card-number
+// control with `s=i` for every card, the operator read it as "Braintree
+// rejected this card", and never submitted — the write itself was fine.
+//
+// Mechanism, proven against the served hosted-fields frame and the
+// braintree-web/restricted-input sources: Braintree's default number input
+// is AUTHORED with pattern="\d*" while its own formatter rewrites the value
+// with spaces ("4111 1111 1111 1111"), so Chrome's native constraint
+// validation reports patternMismatch on every well-formed number — typed by
+// a human or injected — and folds that into the accessibility tree's
+// `invalid` property. The capture read that as a page verdict. Braintree
+// never authors aria-invalid; its verdict lives in its own model and a
+// valid/invalid class toggle, so the fold-in carried nothing but the
+// formatter artifact on these fields.
+//
+// The fix suppresses the fold-in ONLY when the element's own validity says
+// patternMismatch is the sole failing flag; an authored aria-invalid and a
+// genuine native type mismatch (email/url) still surface.
+describe("C7 invalid readout on Braintree-authored hosted fields (real Chromium)", () => {
+  it.skipIf(!available)(
+    "never reports the formatted card number invalid, while authored and genuine invalids still surface",
+    async () => {
+      const isolated = await page();
+      let sessionId: string | undefined;
+      const stateFor = (
+        rows: Array<[string, string, string?]>,
+        label: string,
+      ): string | undefined =>
+        rows.find((row) => row[1] === "t" && (row[2] ?? '').includes(`@${label}`))?.[2];
+      try {
+        const topUrl = `http://${PARENT_HOST}:${port}/simple?mode=braintreeAuthored`;
+        await isolated.page.goto(topUrl);
+        await isolated.page.waitForLoadState("domcontentloaded");
+        const controller = BrowserController.fromHarnessPage(isolated.page);
+        const started = await startHarnessProvisionSession({
+          browser: controller,
+          serviceUrl: topUrl,
+          format: "compact",
+        });
+        sessionId = started.session_id;
+
+        const observeState = async (): Promise<Record<string, string | undefined>> => {
+          const rows = (
+            (await observe(sessionId!, "compact")) as unknown as Record<string, unknown>
+          ).safe_table as Array<[string, string, string?]>;
+          console.log("ROWS", JSON.stringify(rows));
+          return {
+            number: stateFor(rows, "card-number"),
+            broken: stateFor(rows, "broken-field"),
+            email: stateFor(rows, "email"),
+          };
+        };
+
+        // Before any write: the pattern-bearing empty field is clean, and both
+        // genuine invalid verdicts surface — the contrast is live in the
+        // harness, not just in the fix.
+        const before = await observeState();
+        expect(before.number ?? "").not.toContain("s=i");
+        expect(before.broken).toContain("s=i");
+        expect(before.email).toContain("s=i");
+
+        // Write the PAN through the ordinary inject path (typeWithRealKeys),
+        // exactly the write that shipped clean on rc.31.
+        const elements = await controller.extractInteractiveElements();
+        const input = elements.find((element) => element.name === "card-number");
+        if (input === undefined) throw new Error("missing card-number input");
+        const results = await controller.injectCardIntoTargets(CARD, {
+          pan: { element: input },
+        });
+        expect(results.pan.status).toBe("filled");
+
+        // Harness honesty: the formatter really rewrote the value (otherwise a
+        // bare digit string matches \d* and the artifact could not fire), and
+        // Chrome really is folding patternMismatch into the AX tree here.
+        const value = await isolated.page.locator("#number").inputValue();
+        expect(value).toBe("4111 1111 1111 1111");
+        expect(
+          await isolated.page.evaluate(
+            () => (document.getElementById("number") as HTMLInputElement).validity.patternMismatch,
+          ),
+        ).toBe(true);
+
+        // THE assertion: the observation must not present the formatter
+        // artifact as a page verdict — no s=i on the card number after a good
+        // write. (Pre-fix this read s=i on every card and blocked submission.)
+        const after = await observeState();
+        expect(after.number ?? "").not.toContain("s=i");
+        // Genuine verdicts keep surfacing after the fix: the authored
+        // aria-invalid and the email type mismatch are unchanged.
+        expect(after.broken).toContain("s=i");
+        expect(after.email).toContain("s=i");
+      } finally {
+        if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
+        await isolated.context.close();
       }
     },
     120_000,

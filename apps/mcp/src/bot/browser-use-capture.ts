@@ -423,6 +423,10 @@ export async function captureBrowserUseDOM(
     const listeners = new Set<number>();
     const formAssociatedTags = new Map<Frame, Set<string>>();
     const bindings = new Map<number, InteractiveElement>();
+    // Per-control native validity flags (same selection as `bindings`), so the
+    // C7 readout can tell Chrome's constraint-validation fold-in apart from a
+    // page verdict. See the C7 block below for why this is load-bearing.
+    const validityByBackendNode = new Map<number, string>();
     const baseUris = new Map<Frame, string>();
     const baseTargets = new Map<Frame, string>();
     const formOwners = new Map<number, number | null>();
@@ -443,6 +447,7 @@ export async function captureBrowserUseDOM(
       const candidates = inventory.filter((e) => (e.framePath ?? null) === path);
       const frameBindings = new Map<number, InteractiveElement>();
       const frameListeners = new Set<number>();
+      const validitySelections = new Map<number, string>();
       let formAssociated = new Set<string>();
       if (containsCustomElements)
         try {
@@ -488,7 +493,7 @@ export async function captureBrowserUseDOM(
         // backend identities without guessing from tag names or accessible names.
         const selectors = candidates.map((e) => e.selector);
         const objects = await client.send("Runtime.evaluate", {
-          expression: `(() => { const roots=[document],getShadowRoot=Object.getOwnPropertyDescriptor(Element.prototype,'shadowRoot')?.get; for(let i=0;i<roots.length;i++) for(const e of roots[i].querySelectorAll('*')) { const shadowRoot=getShadowRoot?.call(e); if(shadowRoot) roots.push(shadowRoot); } const found=${JSON.stringify(selectors)}.map(s => { const p=s.split(' >> nth='); const matches=roots.flatMap(r=>{try{return [...r.querySelectorAll(p[0])]}catch{return []}}); return matches[Number(p[1]||0)] || null; }); const formOwners=roots.flatMap(r=>[...r.querySelectorAll('[form]')]).flatMap(e=>[e,e.form||null]); return Object.assign(found,{viewport:JSON.stringify({width:innerWidth,height:innerHeight,x:scrollX,y:scrollY}),baseURI:document.baseURI,baseTarget:document.querySelector('base[target]')?.getAttribute('target'),formOwners}); })()`,
+          expression: `(() => { const roots=[document],getShadowRoot=Object.getOwnPropertyDescriptor(Element.prototype,'shadowRoot')?.get; for(let i=0;i<roots.length;i++) for(const e of roots[i].querySelectorAll('*')) { const shadowRoot=getShadowRoot?.call(e); if(shadowRoot) roots.push(shadowRoot); } const found=${JSON.stringify(selectors)}.map(s => { const p=s.split(' >> nth='); const matches=roots.flatMap(r=>{try{return [...r.querySelectorAll(p[0])]}catch{return []}}); return matches[Number(p[1]||0)] || null; }); const formOwners=roots.flatMap(r=>[...r.querySelectorAll('[form]')]).flatMap(e=>[e,e.form||null]); const validity=found.map(el => { const v=el&&el.validity; return v ? [v.valueMissing,v.typeMismatch,v.patternMismatch,v.tooLong,v.tooShort,v.rangeOverflow,v.rangeUnderflow,v.stepMismatch,v.badInput].map(f=>f?1:0).join('') : null; }); return Object.assign(found,{viewport:JSON.stringify({width:innerWidth,height:innerHeight,x:scrollX,y:scrollY}),baseURI:document.baseURI,baseTarget:document.querySelector('base[target]')?.getAttribute('target'),formOwners,validity}); })()`,
           contextId: context.executionContextId,
           objectGroup: "ts-observation",
         });
@@ -503,6 +508,16 @@ export async function captureBrowserUseDOM(
           baseUris.set(frame, typeof baseUri === "string" ? baseUri : frame.url());
           const baseTarget = props.result.find((p) => p.name === "baseTarget")?.value?.value;
           if (typeof baseTarget === "string") baseTargets.set(frame, baseTarget);
+          const validityObjects = props.result.find((p) => p.name === "validity")?.value?.objectId;
+          if (validityObjects) {
+            const validityProps = await client.send("Runtime.getProperties", {
+              objectId: validityObjects,
+              ownProperties: true,
+            });
+            for (const p of validityProps.result)
+              if (/^\d+$/.test(p.name) && typeof p.value?.value === "string")
+                validitySelections.set(Number(p.name), p.value.value);
+          }
           const ownerObjects = props.result.find((p) => p.name === "formOwners")?.value?.objectId;
           if (ownerObjects) {
             const ownerProps = await client.send("Runtime.getProperties", {
@@ -536,6 +551,8 @@ export async function captureBrowserUseDOM(
                 const d = await client.send("DOM.describeNode", { objectId: p.value!.objectId! });
                 const el = candidates[Number(p.name)];
                 if (el) frameBindings.set(d.node.backendNodeId, el);
+                const validity = validitySelections.get(Number(p.name));
+                if (validity) validityByBackendNode.set(d.node.backendNodeId, validity);
               }),
             );
         }
@@ -1345,19 +1362,41 @@ export async function captureBrowserUseDOM(
           el.ariaLabel = ownedLabel;
           n.attributes.ax_name ??= ownedLabel;
         }
-        // C7 — per-field validation state straight from the browser: Chrome's
-        // AX `invalid` property (how Braintree hosted fields report a bad
-        // card) or an authored aria-invalid. Only "true" is captured so the
-        // fact stays sparse; absence means not invalid, not unknown. Reads
-        // the semantic node (proxyTarget ?? n), the same convention as every
-        // other semantic fact below — `n` alone is the proxy owner (the
+        // C7 — per-field validation state straight from the browser: an
+        // authored aria-invalid, or Chrome's AX `invalid` property, which
+        // folds native constraint validation in. Only "true" is captured so
+        // the fact stays sparse; absence means not invalid, not unknown.
+        // Reads the semantic node (proxyTarget ?? n), the same convention as
+        // every other semantic fact below — `n` alone is the proxy owner (the
         // visible <label>) when a label proxy is in play, and the invalid
         // state lives on the labeled input.
-        const axInvalid =
-          semanticNode.axProperties.some(
-            (p) => p.name === "invalid" && (p.value === true || p.value === "true"),
-          ) || semanticNode.attributes["aria-invalid"] === "true";
-        if (axInvalid) {
+        //
+        // The AX fold-in is NOT how Braintree hosted fields report a bad
+        // card: their client keeps validation internal (a valid/invalid class
+        // toggle over its own model) and never authors aria-invalid. What the
+        // fold-in DOES carry for them is structural noise — Braintree's
+        // default number input authors pattern="\d*" and its own formatter
+        // rewrites the value with spaces, so patternMismatch fires on every
+        // well-formed number, typed by a human or injected, and Chrome
+        // reports invalid=true however good the write was. Measured matrix
+        // (apps/mcp/scripts/ax-invalid-matrix.mjs): Chrome folds only
+        // patternMismatch and typeMismatch into AX invalid, never
+        // valueMissing. So the fold-in is surfaced unless the element's own
+        // validity says patternMismatch is the sole failing flag — exactly
+        // the formatter-artifact signature; a genuine email/url type mismatch
+        // (no pattern defeated) still surfaces, and an authored aria-invalid
+        // always does. Elements we hold no validity readout for (not among
+        // the interactive candidates) keep the conservative fold-in.
+        const authoredInvalid = semanticNode.attributes["aria-invalid"] === "true";
+        const semanticRaw = semanticNode === n ? raw : rawById.get(semanticNode.id);
+        const validity = semanticRaw
+          ? validityByBackendNode.get(semanticRaw.backendNodeId)
+          : undefined;
+        let axInvalid = semanticNode.axProperties.some(
+          (p) => p.name === "invalid" && (p.value === true || p.value === "true"),
+        );
+        if (axInvalid && validity && /^001000000$/.test(validity)) axInvalid = false;
+        if (authoredInvalid || axInvalid) {
           el.invalid = true;
           n.attributes.invalid ??= "true";
         }
