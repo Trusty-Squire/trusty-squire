@@ -124,6 +124,44 @@ describe("still-true contracts survive the cleanup", () => {
     expect(injectCardTool.description).toContain("detects a rendered 3-D Secure challenge");
     expect(injectCardTool.description).toContain("do not solve or wait on the challenge");
   });
+
+  it("inject_card accepts only pan/cvv targets and steers expiry/name to ordinary tools", () => {
+    // Expiry and cardholder name are not secret: the schema must not accept
+    // them as release-and-inject targets, and the description must point the
+    // agent at operate_type/operate_select plus the masked tokens.
+    const fields = (
+      injectCardTool.inputSchema as unknown as {
+        shape: { fields: { shape: Record<string, unknown> } };
+      }
+    ).shape.fields.shape;
+    expect(Object.keys(fields).sort()).toEqual(["cvv", "pan"]);
+    const base = {
+      session_id: "00000000-0000-4000-8000-000000000000",
+      merchant: "Synthetic Merchant",
+      amount_cents: 123,
+      currency: "JPY",
+      item: "Synthetic item",
+      reason: "Synthetic test purchase",
+      card_ref: "card_synthetic",
+    };
+    for (const field of ["exp_month", "exp_year", "exp", "name"]) {
+      const parsed = injectCardTool.inputSchema.safeParse({
+        ...base,
+        fields: { [field]: { ref: "e1" } },
+      });
+      expect(parsed.success, `${field} must not be an inject_card target`).toBe(false);
+    }
+    expect(
+      injectCardTool.inputSchema.safeParse({
+        ...base,
+        fields: { pan: { ref: "e1" }, cvv: { ref: "e2" } },
+      }).success,
+    ).toBe(true);
+    expect(injectCardTool.description).toContain("operate_type/operate_select");
+    expect(injectCardTool.description).toContain("{{pan}}");
+    expect(injectCardTool.description).toContain("{{cvv:N}}");
+    expect(injectCardTool.description).toContain("masked from all normal operator output");
+  });
 });
 
 describe("descriptions do not promise guards that #663 removed", () => {

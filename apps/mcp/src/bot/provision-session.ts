@@ -492,7 +492,7 @@ export async function injectCardIntoSessionTargets(
       : { element, format: target.format };
   };
   const requested: Partial<Record<InjectCardField, InjectCardResolvedTarget>> = {};
-  for (const field of ["pan", "cvv", "exp_month", "exp_year", "exp", "name"] as const) {
+  for (const field of ["pan", "cvv"] as const) {
     if (targets[field] !== undefined) requested[field] = { format: targets[field]!.format };
   }
   return await session.browser.injectCardIntoTargets(card, requested, page, resolveField);

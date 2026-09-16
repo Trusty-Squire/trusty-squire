@@ -70,6 +70,20 @@ function nodeHasReleasedCvv(node: BrowserUseNode, records: readonly RegisteredCa
       .map((property) => (typeof property.value === "string" ? property.value : "")),
   ].filter((value): value is string => typeof value === "string");
   if (!identity.some((value) => cvvKeyPattern.test(value))) return false;
+  return nodeHoldsReleasedCvvValue(node, records);
+}
+
+/** Textbox controls only: a <select>'s option values are merchant data (a year
+ * option can be 3-4 digits) and are never masked by value equality. */
+function isTextboxNode(node: BrowserUseNode): boolean {
+  const tag = node.nodeName.toLowerCase();
+  return tag === "input" || tag === "textarea";
+}
+
+function nodeHoldsReleasedCvvValue(
+  node: BrowserUseNode,
+  records: readonly RegisteredCardMask[],
+): boolean {
   const values = [
     node.value,
     node.attributes.value,
@@ -107,7 +121,17 @@ function maskNode(
   const kind: CardMaskKind | undefined =
     ownKind === "pan" || ownKind === "cvv"
       ? ownKind
-      : (targetKinds.get(node.id) ?? (nodeHasReleasedCvv(node, records) ? "cvv" : inheritedKind));
+      : (targetKinds.get(node.id) ??
+         // Agent-directed placement: the agent may type the CVV (via masked
+         // tokens) into ANY field, so identity-based inference alone is not
+         // enough. Any textbox whose complete digit value equals a released
+         // CVV is masked — the same value-equality rule the screenshot
+         // pixel scan has always applied, mirrored here for the DOM/AX read.
+         (isTextboxNode(node) && nodeHoldsReleasedCvvValue(node, records)
+           ? "cvv"
+           : nodeHasReleasedCvv(node, records)
+             ? "cvv"
+             : inheritedKind));
   node.value =
     kind === "pan"
       ? CARD_NUMBER_MASK
@@ -229,6 +253,16 @@ export class CardValueOutputMask {
     const digits = (element.value ?? "").replace(/\D/g, "");
     if (
       identity.some((value) => cvvKeyPattern.test(value)) &&
+      this.records.some((record) => record.cvv === digits)
+    ) {
+      return "cvv";
+    }
+    // Agent-directed placement: a textbox holding the complete released CVV
+    // is masked even with no CVV-named identity (mirrors the screenshot
+    // scan's value equality; selects stay visible — years are 4 digits).
+    if (
+      (element.tag === "input" || element.tag === "textarea") &&
+      digits.length > 0 &&
       this.records.some((record) => record.cvv === digits)
     ) {
       return "cvv";

@@ -13,6 +13,7 @@ import {
   type ReleasedCardApproval,
 } from "../bot/card-release-approval.js";
 import { assertApi, type Tool } from "./index.js";
+import { cardTokenVocabulary } from "../bot/card-secret-tokens.js";
 
 const APPROVAL_WAIT_MS = 60_000;
 
@@ -30,14 +31,14 @@ const inputSchema = z.object({
   reason: z.string().trim().min(1).max(500),
   card_ref: z.string().trim().min(1).max(64),
   approval_id: z.string().trim().min(1).max(128).optional(),
-  fields: z.object({
-    pan: targetSchema.optional(),
-    cvv: targetSchema.optional(),
-    exp_month: targetSchema.optional(),
-    exp_year: targetSchema.optional(),
-    exp: targetSchema.optional(),
-    name: targetSchema.optional(),
-  }),
+  fields: z
+    .object({
+      pan: targetSchema.optional(),
+      cvv: targetSchema.optional(),
+    })
+    // Expiry and cardholder name are NOT inject targets: reject them loudly
+    // instead of silently stripping, so the agent reroutes to operate_type.
+    .strict(),
 });
 
 type InjectCardInput = z.infer<typeof inputSchema>;
@@ -82,6 +83,7 @@ async function injectReleasedCard(session: Session, args: InjectCardInput) {
     approval_url: released.approvalUrl,
     approved_terms: released.checkout,
     last4: released.last4,
+    card_tokens: cardTokenVocabulary(released.card),
     ...fieldSummary(results, args.fields),
   };
 }
@@ -100,7 +102,7 @@ function pendingResult(session: Session, result: Record<string, unknown>): Recor
 export const injectCardTool: Tool<InjectCardInput> = {
   name: "inject_card",
   description:
-    "Release one saved card under the existing single human purchase approval and fill only the supplied observation refs. Supply session_id and refs for pan/cvv/expiry/name from operate_observe; each may target the main document or any reachable frame. Avoid provider helper/autofill/focus inputs and choose the actual card control. This tool never searches for payment providers, chooses a card UI, reads or validates the total, clicks submit, clears fields, or diagnoses the checkout. Partial results are ordinary browser outcomes; retry changed refs with the same approval_id. Before placing the order, re-observe and confirm no competing saved-card control is selected. The operator detects a rendered 3-D Secure challenge on observation or action results and notifies the cardholder once; do not solve or wait on the challenge yourself — keep observing until the checkout resolves. The released PAN/CVV are masked from all normal operator output before the first write.",
+    "Release one saved card under the existing single human purchase approval and fill only the supplied observation refs. Supply session_id and refs for pan/cvv from operate_observe; each may target the main document or any reachable frame. Expiry, cardholder name, and billing are NOT part of this tool and are not secret: fill them yourself with operate_type/operate_select. After approval the session also exposes the card as opaque per-digit masked tokens you can place into ANY field ref yourself with operate_type: {{pan}} and {{cvv}} type the whole value, {{pan:N}} and {{cvv:N}} type one digit (1-based, N up to the returned pan_length/cvv_length); the broker substitutes the real digit at the keystroke boundary and the digits are never shown to you or masked out of every observation, screenshot, and error. Use the refs for the ordinary path and the tokens for arbitrary layouts, single-digit boxes, remounts, re-validation, or post-error re-arm. Avoid provider helper/autofill/focus inputs and choose the actual card control. This tool never searches for payment providers, chooses a card UI, reads or validates the total, clicks submit, clears fields, or diagnoses the checkout. Partial results are ordinary browser outcomes; retry changed refs with the same approval_id. Before placing the order, re-observe and confirm no competing saved-card control is selected. The operator detects a rendered 3-D Secure challenge on observation or action results and notifies the cardholder once; do not solve or wait on the challenge yourself — keep observing until the checkout resolves. The released PAN/CVV are masked from all normal operator output before the first write.",
   inputSchema,
   jsonInputSchema: {
     type: "object",
@@ -126,7 +128,7 @@ export const injectCardTool: Tool<InjectCardInput> = {
       fields: {
         type: "object",
         properties: Object.fromEntries(
-          ["pan", "cvv", "exp_month", "exp_year", "exp", "name"].map((field) => [
+          ["pan", "cvv"].map((field) => [
             field,
             {
               type: "object",
@@ -219,6 +221,7 @@ export const injectCardTool: Tool<InjectCardInput> = {
         approval_url: approved.approval_url,
         approved_terms: approved.checkout,
         last4: approved.last4,
+        card_tokens: cardTokenVocabulary(releasedCard),
         ...fieldSummary(fieldResults, args.fields),
       };
     });

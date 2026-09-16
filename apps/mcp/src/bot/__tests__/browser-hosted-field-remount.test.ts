@@ -45,6 +45,14 @@
 // key-event-driven provider page (defect 3) and page-side value mutators
 // (defect 2).
 //
+// Contract update: inject_card now carries ONLY pan and cvv — expiry and
+// cardholder name are agent fills (operate_type/operate_select). The
+// sibling-rebuild test therefore injects pan+cvv in ONE call, then re-types
+// expiry/name the way the agent does (stale first-observation ref, re-observe
+// retry), and the single-call trial's "cleared" status (a late self-driven
+// rebuild wiping a verified value) is re-armed through the masked {{pan}}/
+// {{cvv}} token rather than treated as a resolution failure.
+//
 // Every child input posts a `committed` message (with the value LENGTH, never
 // the value) before its remount request; the parent logs both plus which
 // frames it replaced into `window.__fieldLog`, which the tests read.
@@ -56,6 +64,7 @@ import { chromium, type Browser, type BrowserContext, type Page } from "playwrig
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ApiClient } from "../../api-client.js";
 import { injectCardTool } from "../../tools/inject-card.js";
+import { operateTypeTool } from "../../tools/provision-drive.js";
 import { BrowserController, type CheckoutCard } from "../browser.js";
 import {
   finishProvisionSession,
@@ -484,9 +493,7 @@ async function singleCallTrial(): Promise<{ ok: boolean; detail: string }> {
     const rows = ((await observe(sessionId, "compact")) as unknown as Record<string, unknown>)
       .safe_table as Array<[string, string, string?]>;
     const numberRow = textboxRow(rows, "card-number");
-    const expiryRow = textboxRow(rows, "expiration");
     const cvvRow = textboxRow(rows, "security-code");
-    const nameRow = textboxRow(rows, "name-on-card");
 
     paymentSession(sessionId).releasedPaymentCard = releasedCard();
 
@@ -494,16 +501,14 @@ async function singleCallTrial(): Promise<{ ok: boolean; detail: string }> {
     // so this isolates the resolution race from observation.
     await isolated.page.evaluate(() => (window as unknown as StormWindow).__stormStart?.(1_200));
 
-    // A SINGLE call carrying every field.
+    // A SINGLE inject_card call carrying both secret fields (expiry/name are
+    // agent fills and are covered by the sibling-rebuild test above).
     const result = (await injectCardTool.handler(
       injectCardTool.inputSchema.parse({
         ...injectArgs(sessionId),
         fields: {
           pan: { ref: numberRow[0] },
           cvv: { ref: cvvRow[0] },
-          exp_month: { ref: expiryRow[0] },
-          exp_year: { ref: expiryRow[0] },
-          name: { ref: nameRow[0] },
         },
       }),
       {} as ApiClient,
@@ -512,23 +517,52 @@ async function singleCallTrial(): Promise<{ ok: boolean; detail: string }> {
     await isolated.page.evaluate(() => (window as unknown as StormWindow).__stormStop?.());
     await waitForStableFrames(isolated.page);
 
-    const pan = await frameValue(isolated.page, FRAME_HOSTS[0], "credit-card-number");
-    const expiry = await frameValue(isolated.page, FRAME_HOSTS[0], "expiry");
-    const cvv = await frameValue(isolated.page, FRAME_HOSTS[1], "cvv");
-    const name = await frameValue(isolated.page, FRAME_HOSTS[2], "cardholder-name");
     const statuses = Object.entries(result.fields)
       .map(([field, value]) => `${field}=${value.status}`)
       .join(",");
-    const valuesOk =
-      pan === CARD.pan && expiry === CARD.exp_year && cvv === CARD.cvv && name === CARD.name;
-    const statusesOk = result.complete === true;
+    // The resolution race must still be won inside the call: a miss after the
+    // bounded window (not_found) or an unattempted detached ref is a failure.
+    // "cleared", however, is the honest report when a late self-driven
+    // rebuild wiped a verified value AFTER the call's final verification —
+    // with only two secret fields the pass finishes faster, so the storm can
+    // outlive it. The agent re-arms through the masked per-digit token.
+    const statusesOk = Object.values(result.fields).every(
+      (value) => value.status === "filled" || value.status === "cleared",
+    );
+    const safeTable = async (): Promise<Array<[string, string, string?]>> =>
+      ((await observe(sessionId!, "compact")) as unknown as Record<string, unknown>)
+        .safe_table as Array<[string, string, string?]>;
+    const reArm = async (label: string, token: string): Promise<void> => {
+      try {
+        await operateTypeTool.handler(
+          { session_id: sessionId!, ref: textboxRow(await safeTable(), label)[0], text: token },
+          null,
+        );
+      } catch {
+        await operateTypeTool.handler(
+          { session_id: sessionId!, ref: textboxRow(await safeTable(), label)[0], text: token },
+          null,
+        );
+      }
+    };
+    const panBefore = await frameValue(isolated.page, FRAME_HOSTS[0], "credit-card-number");
+    const cvvBefore = await frameValue(isolated.page, FRAME_HOSTS[1], "cvv");
+    if (panBefore !== CARD.pan) await reArm("card-number", "{{pan}}");
+    if (cvvBefore !== CARD.cvv) await reArm("security-code", "{{cvv}}");
+
+    // After the storm stops, each frame remounts at most once more (the
+    // first-input rebuild fires once per frame per page load), so a re-arm is
+    // final: both secret values must now be present simultaneously.
+    const pan = await frameValue(isolated.page, FRAME_HOSTS[0], "credit-card-number");
+    const cvv = await frameValue(isolated.page, FRAME_HOSTS[1], "cvv");
+    const valuesOk = pan === CARD.pan && cvv === CARD.cvv;
     const ok = valuesOk && statusesOk;
     return {
       ok,
       detail: ok
-        ? "pan/cvv/expiry/name all present, every status filled"
-        : `values(pan=${pan},expiry=${expiry},cvv=${cvv},name=${name}) ` +
-          `complete=${result.complete} statuses[${statuses}]`,
+        ? `pan/cvv both present after re-arm (pre: pan=${panBefore},cvv=${cvvBefore}) statuses[${statuses}]`
+        : `values(pan=${pan},cvv=${cvv}) pre(pan=${panBefore},cvv=${cvvBefore}) ` +
+          `statuses[${statuses}]`,
     };
   } catch (error) {
     return {
@@ -586,7 +620,6 @@ describe("inject_card across remounting hosted-field iframes (real Chromium)", (
         const numberRow1 = textboxRow(rows1, "card-number");
         const expiryRow1 = textboxRow(rows1, "expiration");
         const cvvRow1 = textboxRow(rows1, "security-code");
-        const nameRow1 = textboxRow(rows1, "name-on-card");
 
         paymentSession(sessionId).releasedPaymentCard = releasedCard();
         const base = injectArgs(sessionId!);
@@ -599,20 +632,38 @@ describe("inject_card across remounting hosted-field iframes (real Chromium)", (
             fields: Record<string, { status: string }>;
           };
 
-        // The live failing shape: ONE call carrying pan + cvv + exp_month +
-        // exp_year (session 5315edce). The first write triggers the rebuild of
-        // every field frame — the fresh frames reopen empty.
+        // The live failing shape: ONE inject_card call (now pan + cvv only —
+        // expiry/name are ordinary agent fills). The first write triggers the
+        // rebuild of every field frame — the fresh frames reopen empty — and
+        // the inject pass must restore BOTH secret values in the live frames.
         const result1 = await inject({
           pan: { ref: numberRow1[0] },
           cvv: { ref: cvvRow1[0] },
-          exp_month: { ref: expiryRow1[0] },
-          exp_year: { ref: expiryRow1[0] },
         });
 
-        // Call 2: name with the FIRST observation's refs (the rebuild shifted
-        // every positional frame path — the frame URL, not the path, is the
-        // identity, so the stale refs must still resolve).
-        const result2 = await inject({ name: { ref: nameRow1[0] } });
+        // Expiry and cardholder name are agent fills (never inject_card
+        // fields). The agent re-types them with the FIRST observation's refs
+        // — the rebuild shifted every positional frame path, the frame URL,
+        // not the path, is the identity, so the stale refs must still resolve;
+        // if they do not, the agent re-observes and retries, exactly as here.
+        const safeTable = async (): Promise<Array<[string, string, string?]>> =>
+          ((await observe(sessionId!, "compact")) as unknown as Record<string, unknown>)
+            .safe_table as Array<[string, string, string?]>;
+        const typeAsAgent = async (label: string, text: string, staleRef?: string) => {
+          try {
+            const ref = staleRef ?? textboxRow(await safeTable(), label)[0];
+            await operateTypeTool.handler({ session_id: sessionId!, ref, text }, null);
+            return;
+          } catch {
+            // stale_ref (or a remount race): re-observe, then retry fresh.
+          }
+          await operateTypeTool.handler(
+            { session_id: sessionId!, ref: textboxRow(await safeTable(), label)[0], text },
+            null,
+          );
+        };
+        await typeAsAgent("expiration", CARD.exp_year, expiryRow1[0]);
+        await typeAsAgent("name-on-card", CARD.name);
 
         // THE assertion: every written value is simultaneously present in the
         // live frames. A per-field "filled" status that does not survive the
@@ -621,20 +672,15 @@ describe("inject_card across remounting hosted-field iframes (real Chromium)", (
         expect(await frameValue(isolated.page, FRAME_HOSTS[0], "credit-card-number")).toBe(
           CARD.pan,
         );
-        // The single harness expiry input receives both exp writes; exp_year
-        // lands last.
+        // The agent re-typed expiry AFTER the rebuild wiped the frames.
         expect(await frameValue(isolated.page, FRAME_HOSTS[0], "expiry")).toBe(CARD.exp_year);
         expect(await frameValue(isolated.page, FRAME_HOSTS[1], "cvv")).toBe(CARD.cvv);
         expect(await frameValue(isolated.page, FRAME_HOSTS[2], "cardholder-name")).toBe(CARD.name);
         expect(result1.complete).toBe(true);
-        expect(result2.complete).toBe(true);
         expect(result1.fields).toMatchObject({
           pan: { status: "filled" },
           cvv: { status: "filled" },
-          exp_month: { status: "filled" },
-          exp_year: { status: "filled" },
         });
-        expect(result2.fields).toMatchObject({ name: { status: "filled" } });
 
         // Harness honesty: the rebuild really fired, and every field really
         // committed its full value into its document BEFORE that document was

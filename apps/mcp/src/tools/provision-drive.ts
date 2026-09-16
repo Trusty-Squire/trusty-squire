@@ -186,7 +186,7 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
     'Use `format:"full"` only when the page DOM and text are needed. A released card\'s PAN (complete ordinary spellings and prefixes of at least eight digits) and security code are masked; all other emitted content stays verbatim. ' +
     DOM_OBSERVATION_CONTRACT +
     "YOU are the planner — read the observation, then drive the signup, setup, or " +
-    "checkout with operate_click, operate_type, operate_select, operate_navigate, operate_scroll, and operate_login (inject_card releases a saved card into named fields), re-read with " +
+    "checkout with operate_click, operate_type, operate_select, operate_navigate, operate_scroll, and operate_login (inject_card releases a saved card into pan/cvv refs and exposes masked {{pan}}/{{cvv}} per-digit tokens for operate_type placement), re-read with " +
     "operate_observe, and call operate_extract " +
     "when you reach the credentials. Always operate_finish when done. The " +
     "browser has unrestricted egress.",

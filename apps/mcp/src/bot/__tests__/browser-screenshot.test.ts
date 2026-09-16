@@ -409,6 +409,41 @@ describe("operate_screenshot card-value output mask (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "masks an agent-typed field with no card identity and no registered target (mid-fill placement)",
+    async () => {
+      // The agent types the masked per-digit tokens into ANY field it chooses
+      // (operate_type), so the released PAN can render in a control the mask
+      // never registered. The value-based scan must still composite it —
+      // same guarantee as the DOM read, mirrored for pixels.
+      const browser = await launchIsolatedTestBrowser();
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <style>body{font:24px sans-serif} input{display:block;width:420px;height:44px;margin:8px}</style>
+          <input id="agent-typed" aria-label="Phone extension">
+          <div id="total" style="display:inline-block">Total: 123 JPY</div>
+        `);
+        await page.locator("#agent-typed").fill("4111111111111111");
+        const controller = BrowserController.fromHarnessPage(page);
+        controller.registerCardValueOutputMask(SYNTHETIC_CARD);
+
+        const result = await controller.screenshotForOperator();
+
+        const points = await Promise.all(
+          ["#agent-typed", "#total"].map(
+            async (selector) => await centerOf(page, selector),
+          ),
+        );
+        const [agentTyped, total] = await samplePixels(page, result.base64, points);
+        expect(isCompositeGray(agentTyped ?? [])).toBe(true);
+        expect(isCompositeGray(total ?? [])).toBe(false);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "masks both pre-capture and post-capture layout positions",
     async () => {
       const browser = await launchIsolatedTestBrowser();

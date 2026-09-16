@@ -59,6 +59,7 @@ import {
 } from "../observe/observe.js";
 import { elementRef, provisionElementRefs } from "../observe/refs.js";
 import { audit, sessionForCall } from "../session/lifecycle.js";
+import { substituteCardTokens } from "../card-secret-tokens.js";
 import { clickScreenshot, ScreenshotClickError } from "../screenshot-click.js";
 import {
   composeOperatorSignals,
@@ -774,6 +775,19 @@ async function executeAct(
       case "type":
       case "upload":
       case "oauth_click": {
+        // Masked-secret boundary: a released card's PAN/CVV reach this path
+        // only as opaque per-digit tokens ({{pan}}, {{pan:5}}, {{cvv}}, …).
+        // Substitute the real digits HERE — after target resolution begins,
+        // immediately before the keystroke write — so the agent's text never
+        // carries them and the substituted value is never echoed (type
+        // results carry no typed text). A session without a released card
+        // leaves the text byte-identical.
+        const typedText =
+          action.kind !== "type"
+            ? undefined
+            : session.releasedPaymentCard === null
+              ? action.text
+              : substituteCardTokens(session.releasedPaymentCard.card, action.text);
         if (action.kind === "click" && action.screenshot) {
           if (!compactV2ActionPage)
             throw new ScreenshotClickError("stale_screenshot", "not_dispatched");
@@ -831,7 +845,7 @@ async function executeAct(
                     method: action.kind,
                   });
                 })) ?? actionPageAfter;
-            } else await actType({ kind: "handle", handle: resolved.handle }, action.text, false);
+            } else await actType({ kind: "handle", handle: resolved.handle }, typedText!, false);
           } finally {
             await resolved.handle.dispose().catch(() => undefined);
           }
@@ -872,7 +886,7 @@ async function executeAct(
         } else if (action.kind === "type") {
           clearCommittedSelectValue(session, el.selector);
           const actTarget = actDriverTarget(el);
-          await actType(actTarget, action.text, false);
+          await actType(actTarget, typedText!, false);
           // #635 fix (not a gate on typing): Shopify only enables delivery-rate
           // selection after the required address line is committed by
           // blur/change, not merely after the raw keystrokes land.
