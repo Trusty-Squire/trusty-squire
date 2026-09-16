@@ -62,7 +62,9 @@ export function rememberCompactV2SourcePage(
   else compactV2SourcePages.set(session, page);
 }
 
-export function oauthCompletionSourcePage(session: object): OAuthCompletionEvidence["page"] | undefined {
+export function oauthCompletionSourcePage(
+  session: object,
+): OAuthCompletionEvidence["page"] | undefined {
   return oauthCompletionSourcePages.get(session);
 }
 
@@ -561,10 +563,11 @@ function compactV2Observation(
   const blockers = [
     ...(semanticBase.blockers ?? []),
     ...safeBlockersV2(capture.root, (node) => {
-    const element = capture.nodeElements.get(node.id);
-    const ref = element === undefined ? undefined : handles.get(element);
-    return ref !== undefined && targetableRefs.has(ref) ? ref : undefined;
-  })].slice(0, BLOCKER_MAX_ITEMS);
+      const element = capture.nodeElements.get(node.id);
+      const ref = element === undefined ? undefined : handles.get(element);
+      return ref !== undefined && targetableRefs.has(ref) ? ref : undefined;
+    }),
+  ].slice(0, BLOCKER_MAX_ITEMS);
   const semantics = {
     ...semanticBase,
     ...(blockers.length === 0 ? {} : { blockers, blocked: true as const }),
@@ -615,7 +618,8 @@ function compactV2Observation(
         // only way to confirm it is a full format:full re-read. The handle is
         // minted from physical node identity, so it survives the benign
         // re-render the action itself may have caused.
-        if (actedRef !== undefined && row.ref === actedRef) return [{ ...row, acted: true as const }];
+        if (actedRef !== undefined && row.ref === actedRef)
+          return [{ ...row, acted: true as const }];
         const prior = previous.byRef.get(row.ref);
         return prior === undefined || !sameCompactV2Control(prior, row) ? [row] : [];
       })
@@ -890,7 +894,7 @@ export async function observedThreeDsChallenge(
   if (released === null) return undefined;
   const challenge = await session.browser.detectThreeDsChallenge().catch(() => null);
   if (challenge === null) {
-    return observedThreeDsSdkError(session.browser);
+    return released.threeDsNotified === true ? undefined : observedThreeDsSdkError(session.browser);
   }
   let notified: boolean | undefined;
   if (released.threeDsNotified !== true) {
@@ -914,16 +918,21 @@ export async function observedThreeDsChallenge(
 // the SDK's UI-framework assets finish loading (THREEDS_CARDINAL_SDK_ERROR as
 // the page itself reports it — primarily its own error/telemetry POST, and
 // secondarily console text when the page prints the code; the rendered page
-// usually shows only a generic checkout error). This is
-// observation, not custody: report the transient failure and that a
-// resubmitted payment is expected to launch the challenge,
-// and never block, wait on, or take over the retry. The marker is latched at
-// capture time and reported only inside a freshness window, so it stops well
-// before a later order confirmation could be read as "resubmit". A detected
-// challenge always takes precedence over this state (checked first above).
-function observedThreeDsSdkError(
-  browser: { hasThreeDsSdkErrorEvidence(): boolean },
-): Extract<Observation["three_ds"], { state: "sdk_error_retryable" }> | undefined {
+// usually shows only a generic checkout error). This is observation, not
+// custody: report the transient failure and that a resubmitted payment is
+// expected to launch the challenge, and never block, wait on, or take over the
+// retry. Two things bound the report. A detected challenge always takes
+// precedence (checked first above). And once a challenge has rendered in this
+// session — which is exactly what `threeDsNotified` records — a LATER absence
+// of one means it resolved (completed, declined, or dismissed) and the
+// checkout is settling; the resubmit advisory must never ride that state or it
+// tells the agent to resubmit a payment that already went through. Before any
+// challenge ever rendered, which is the failure this targets, `threeDsNotified`
+// is still false and the advisory fires as designed. The marker is also latched
+// at capture time and reported only inside a freshness window.
+function observedThreeDsSdkError(browser: {
+  hasThreeDsSdkErrorEvidence(): boolean;
+}): Extract<Observation["three_ds"], { state: "sdk_error_retryable" }> | undefined {
   if (!browser.hasThreeDsSdkErrorEvidence()) return undefined;
   return {
     state: "sdk_error_retryable",

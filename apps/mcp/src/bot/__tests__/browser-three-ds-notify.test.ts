@@ -150,7 +150,7 @@ describe("3-D Secure detection and notification", () => {
       try {
         const released = await releasedCardSession(
           isolated,
-          '<div>Verification details were not entered correctly.</div>' +
+          "<div>Verification details were not entered correctly.</div>" +
             '<script>fetch("/log", { method: "POST", body: JSON.stringify({ "event": "3ds_verification.error", "code": "THREEDS_CARDINAL_SDK_ERROR" }) });</script>',
         );
         sessionId = released.sessionId;
@@ -173,21 +173,53 @@ describe("3-D Secure detection and notification", () => {
 
   // A detected challenge always wins over the stale SDK-error evidence: after
   // a resubmit the challenge is live and the cardholder nudge is what matters.
+  it.skipIf(!available)("prefers a rendered challenge over stale SDK-error evidence", async () => {
+    const isolated = await page();
+    let sessionId: string | undefined;
+    try {
+      const released = await releasedCardSession(
+        isolated,
+        '<script>fetch("/log", { method: "POST", body: JSON.stringify({ "code": "THREEDS_CARDINAL_SDK_ERROR" }) });</script>' +
+          '<div>Verify your identity to continue</div><form action="/acs/challenge"><button>Approve</button></form>',
+      );
+      sessionId = released.sessionId;
+
+      // The precedence decision is only exercised once the SDK-error
+      // evidence has actually landed, so wait for it before observing.
+      const session = paymentSession(sessionId);
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if (session.browser.hasThreeDsSdkErrorEvidence()) break;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      expect(session.browser.hasThreeDsSdkErrorEvidence()).toBe(true);
+
+      const observed = await observe(sessionId);
+      expect(observed.three_ds).toMatchObject({ state: "challenge_detected" });
+      expect(released.notifyThreeDs).toHaveBeenCalledTimes(1);
+    } finally {
+      if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
+      await isolated.context.close();
+    }
+  });
+
+  // Once a challenge has rendered in this session, a LATER absence of one means
+  // it resolved and the checkout is settling — often on the order-confirmation
+  // page. The SDK-launch-failure advisory must not ride that state: telling the
+  // agent to resubmit a payment that already went through is a double-purchase
+  // hazard. `threeDsNotified` is the existing record that a challenge launched.
   it.skipIf(!available)(
-    "prefers a rendered challenge over stale SDK-error evidence",
+    "suppresses the SDK-error advisory once a challenge already rendered this session",
     async () => {
       const isolated = await page();
       let sessionId: string | undefined;
       try {
         const released = await releasedCardSession(
           isolated,
-          '<script>fetch("/log", { method: "POST", body: JSON.stringify({ "code": "THREEDS_CARDINAL_SDK_ERROR" }) });</script>' +
-            '<div>Verify your identity to continue</div><form action="/acs/challenge"><button>Approve</button></form>',
+          "<div>Thank you — your order is confirmed.</div>" +
+            '<script>fetch("/log", { method: "POST", body: JSON.stringify({ "code": "THREEDS_CARDINAL_SDK_ERROR" }) });</script>',
         );
         sessionId = released.sessionId;
 
-        // The precedence decision is only exercised once the SDK-error
-        // evidence has actually landed, so wait for it before observing.
         const session = paymentSession(sessionId);
         for (let attempt = 0; attempt < 20; attempt += 1) {
           if (session.browser.hasThreeDsSdkErrorEvidence()) break;
@@ -195,9 +227,12 @@ describe("3-D Secure detection and notification", () => {
         }
         expect(session.browser.hasThreeDsSdkErrorEvidence()).toBe(true);
 
+        // A challenge launched earlier and the cardholder was nudged for it.
+        session.releasedPaymentCard!.threeDsNotified = true;
+
         const observed = await observe(sessionId);
-        expect(observed.three_ds).toMatchObject({ state: "challenge_detected" });
-        expect(released.notifyThreeDs).toHaveBeenCalledTimes(1);
+        expect(observed.three_ds).toBeUndefined();
+        expect(released.notifyThreeDs).not.toHaveBeenCalled();
       } finally {
         if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
         await isolated.context.close();

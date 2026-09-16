@@ -181,10 +181,15 @@ describe("operator evidence stream", () => {
       expect(evidence.threeDsSdkErrorSeenAt()).toBe(1_000_000);
 
       vi.setSystemTime(1_200_000);
-      (page as unknown as { emit: (event: string, value: unknown) => void }).emit(
-        "pageerror",
-        new Error("BraintreeError THREEDS_CARDINAL_SDK_ERROR: Failed to render ACS window"),
-      );
+      (page as unknown as { emit: (event: string, value: unknown) => void }).emit("console", {
+        type: () => "error",
+        text: () => "3DS setup failed, code: THREEDS_CARDINAL_SDK_ERROR",
+        location: () => ({
+          url: "https://merchant.test/checkout.js",
+          lineNumber: 1,
+          columnNumber: 1,
+        }),
+      } satisfies Partial<ConsoleMessage>);
       expect(evidence.threeDsSdkErrorSeenAt()).toBe(1_200_000);
 
       vi.setSystemTime(1_300_000);
