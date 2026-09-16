@@ -71,9 +71,25 @@ and its other sessions intact.
   held through maintenance. A separate physical-profile lease coordinates Chrome
   and the existing plain-login path. Profile enrollment pins the account on disk.
 - Default discovery is probe then unlink then bind: a socket path with no live
-  listener is a dead predecessor's orphan and is removed and rebound. There is no
-  owner record and no process signaling; a broker that still answers keeps the
-  endpoint. Neither path replays a mutation.
+  listener is a dead predecessor's orphan and is removed and rebound; that orphan
+  path has no owner record and no process signaling. A same-contract broker that
+  still answers keeps the endpoint. Neither path replays a mutation.
+- After an upgrade, a client that finds a resident prior-contract broker reclaims
+  the profile before launching a new-contract daemon. Positive identification is
+  required before any signal: the resident must refuse Contract B's `connect`
+  with the legacy `unauthorized` refusal, still authenticate the pre-Contract-B
+  `hello` handshake (sent only as this post-refusal probe, never a re-added wire
+  operation), and hold this profile's election lease with a live,
+  broker-argv-corroborated owner pid on this host. Reclaim is SIGTERM, then a
+  bounded wait for both the election lease and the socket endpoint to clear,
+  then SIGKILL; if reclaim cannot complete, the client fails with a
+  `broker_unavailable` refusal naming the pid. A same-contract daemon — including
+  a just-started lease holder and a credential-rejected one — is never a reclaim
+  target, and a provably-reborn lease pid is left to the ordinary stale-owner
+  scavenge. The same reclaim runs on the maintenance path before the
+  bare-operation fallback. Reclaim timings are internal, never a tool parameter
+  or config knob. `broker-prior-contract-reclaim.test.ts` pins the mechanism
+  with real child processes, signals, lease files, and sockets.
 - Each session owns a target family and a serialized command queue. A service
   URL does not reserve a site; one authenticated client drives the shared profile.
   Several connections to the same profile attach at once, one per client process,
