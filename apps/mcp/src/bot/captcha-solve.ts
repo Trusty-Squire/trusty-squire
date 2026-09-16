@@ -262,6 +262,12 @@ function autoSolveState(session: Session): AutoSolveState {
  * Never throws and never rejects.
  */
 export async function attemptOperateCaptchaAutoSolve(session: Session, page?: Page): Promise<void> {
+  // A released card is live in the page. Injecting a token fires the site's own
+  // success callbacks, which on a checkout is the order submit — and a payment
+  // advances only through the operator's explicit actions, after the
+  // re-observation the payment contract expects. The challenge surfaces
+  // unchanged here.
+  if (session.releasedPaymentCard !== null) return;
   await injectPendingCaptchaToken(session, page);
   startDetachedTokenFetch(session, page);
 }

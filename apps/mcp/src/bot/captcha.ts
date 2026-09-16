@@ -1071,6 +1071,11 @@ export async function injectHcaptchaToken(
           ),
         );
         for (const input of inputs) {
+          // g-recaptcha-response is hCaptcha's DROP-IN compat field: filling it
+          // is right when hCaptcha replaced reCAPTCHA, and wrong when the two
+          // are co-resident — there it holds a live reCAPTCHA score token an
+          // hCaptcha token would invalidate. Fill it only when it is empty.
+          if (input.name === "g-recaptcha-response" && input.value.trim().length > 0) continue;
           input.value = tok;
           input.dispatchEvent(new Event("input", { bubbles: true }));
           input.dispatchEvent(new Event("change", { bubbles: true }));

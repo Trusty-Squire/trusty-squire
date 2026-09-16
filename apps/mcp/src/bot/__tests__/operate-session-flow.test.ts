@@ -534,6 +534,9 @@ vi.mock("../browser.js", async (importOriginal) => ({
     async waitForCaptchaChallengeToSettle(): Promise<boolean> {
       return h.captchaSettled;
     }
+    async detectThreeDsChallenge(): Promise<{ url: string } | null> {
+      return null;
+    }
     async dismissConsentBanner(): Promise<string | null> {
       h.consentDismissCalls += 1;
       return h.consentCta;
@@ -5532,6 +5535,59 @@ describe("operate session — captcha auto-solve on the general drive", () => {
     // Recorded as failed, so the cooldown bounds the spend instead of every
     // later observation buying another token.
     expect(h.twoCaptchaCalls).toEqual(["hcaptcha"]);
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("never injects a bought token once a payment card has been released", async () => {
+    h.captchaVariant = "hcaptcha";
+    h.captchaChallengeRendered = true;
+    h.twoCaptchaAvailable = true;
+    h.captureOverride = challengeCapture();
+    const gate = openGate();
+
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+      api: vaultApi(),
+      format: "compact",
+    });
+    await gate.solveStarted;
+    gate.release();
+    h.twoCaptchaGate = null;
+    await drainDetached();
+
+    // The agent released a card into the checkout while 2Captcha worked.
+    paymentSession(started.session_id).releasedPaymentCard = {
+      approvalId: "approval_checkout",
+      approvalUrl: "https://approve.test/approval_checkout",
+      checkout: {
+        merchant: "Synthetic Merchant",
+        checkout_origin: "https://shop.example.com",
+        amount_cents: 4200,
+        currency: "USD",
+      },
+      cardRef: "card_synthetic",
+      last4: "1111",
+      deadline: Date.now() + 60_000,
+      threeDsNotified: true,
+      card: {
+        pan: "4111111111111111",
+        cvv: "123",
+        exp_month: "12",
+        exp_year: "2030",
+        name: "Synthetic Buyer",
+        billing: { line1: "1 Test Street", city: "Testville", postal_code: "10000", country: "US" },
+      },
+    };
+
+    await observe(started.session_id);
+    await drainDetached();
+
+    // Injecting fires the site's success callback, which on a checkout places
+    // the order. A payment advances only through the operator's own actions.
+    expect(h.injectCaptchaCalls).toEqual([]);
+    expect(h.twoCaptchaCalls).toEqual(["hcaptcha"]);
+    const blocked = await observe(started.session_id, "compact");
+    expect(blockers(blocked)).toHaveLength(1);
     await finishProvisionSession(started.session_id);
   });
 
