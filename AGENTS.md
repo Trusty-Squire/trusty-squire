@@ -581,13 +581,44 @@ Three things about it are load-bearing; do not "simplify" any of them:
   update is the fence; the decrypt happens only on that transition. Making the
   resume idempotent "for convenience" would turn one approval into unlimited
   reveals.
-- **The human half is owner-authenticated.** `ceremony`, `approve`, and `deny`
-  require the credential owner's web session, and a foreign attempt is refused
-  as `not_found` and written to the owner's ledger. Possession of the approval
-  link is not authority: the requesting agent necessarily holds that link, so
-  an unauthenticated approve endpoint lets anyone it reaches release the
-  owner's secret with their own genuine passkey. That was a real hole in the
-  first cut of this feature; do not reopen it for a "frictionless" link.
+- **The human half is signer-authenticated, not session-authenticated — and
+  the three endpoints do NOT share one rule.** None of them takes a web
+  session; the Telegram link opens in whatever browser the human has, exactly
+  like the payment path. What differs is what each one demands:
+  - `ceremony` is a read. It discloses the bytes to be signed and nothing
+    else — no value, no session, no assertion. Reading it authorizes nothing.
+  - `approve` is the only one with an authority check, and it is the whole
+    control: the Vouchflow assertion must be signed over THIS approval's
+    account-bound payload, AND its `device_token` claim must name a signing
+    device the owning account registered through the web-session-authenticated
+    `POST /v1/vouchflow/devices`. An assertion naming no device is refused
+    `missing_device_token`; one naming an unregistered device is refused
+    `mandate_signer_not_authorized`; both refuse before the approval moves at
+    all. Possession of the link is not authority — the requesting agent
+    necessarily holds that link, and without the signer binding anyone it
+    reaches could release the owner's secret with their own genuine passkey.
+  - `deny` carries NO assertion and asks for no proof. Any caller holding the
+    approval id closes it, and the `denied` row it writes names nobody. That
+    is deliberate: refusing moves no value, so the conservative answer is the
+    one anybody reaching the link may give. Do not "fix" it by demanding an
+    assertion, and do not describe it as signer-authenticated.
+
+  Registration is what carries the owner's identity, so keep it
+  session-authenticated and keep `approve` refusing unregistered signers; do
+  not weaken registration into a self-registering path, and do not answer a
+  rollout complaint by putting session auth back on the ceremony.
+
+  **The signer half rests on an UNVALIDATED premise — check it before that
+  binding ships.** It reads a `device_token` claim out of the verified JWS, and
+  nothing here has confirmed Vouchflow puts that claim inside the JWS rather
+  than beside it in the sign-complete HTTP response. The check fails CLOSED: if
+  the claim is absent, every reveal and every credential mutation returns
+  `403 missing_device_token` — and no test can catch it, because every
+  device-bearing JWS in the suite is minted by the suite's own `signHash`. The
+  pre-deploy validation (decode one real assertion, confirm three things about
+  the claim) and the refusal to ship if any of it fails are owned by
+  [`CLAUDE.md`](CLAUDE.md)'s "Unvalidated premise" block — run it before this
+  binding ships.
 - **Its description is a security control.** It has to keep steering agents to
   `use_credential` first and keep saying that the value lands in the transcript.
   A shorter, friendlier description measurably makes the model reach for the

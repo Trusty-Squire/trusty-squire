@@ -4,6 +4,7 @@
 // made against the whole response body, not just a status field.
 
 import type { FastifyInstance } from "fastify";
+import { createHash } from "node:crypto";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { VAULT_AUDIT_TYPES, VAULT_REVEAL_PURPOSE } from "@trusty-squire/vault";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -23,6 +24,12 @@ import { HttpProxyExecutor } from "../services/http-proxy.js";
 const SESSION_SECRET = "credential-fetch-test-session-secret";
 const AUDIENCE = "credential-fetch-test-customer";
 const SECRET_VALUE = "sk-live-this-must-never-leak";
+// The ceremony is sessionless, so the SIGNER is what ties an assertion to the
+// owning account: Vouchflow names the device in the signed claims, and the
+// owner claims that device from a signed-in browser.
+const OWNER_DEVICE_TOKEN = "dev_owner_device_token";
+const OWNER_SIGNING_DEVICE_ID = "sdev_owner_signing_device";
+const FOREIGN_DEVICE_TOKEN = "dev_stranger_device_token";
 
 type SigningKey = Awaited<ReturnType<typeof generateKeyPair>>["privateKey"];
 
@@ -51,6 +58,7 @@ describe("passkey-gated fetch_credential", () => {
     const account = await deps.accountStore.createAccount("fetcher@example.test", "Fetcher");
     accountId = account.id;
     agentToken = await issueAgentToken(accountId, "codex");
+    expect((await registerDevice(OWNER_DEVICE_TOKEN)).statusCode).toBe(204);
   });
 
   afterEach(async () => {
@@ -97,6 +105,15 @@ describe("passkey-gated fetch_credential", () => {
     return `${SESSION_COOKIE_NAME}=${signSessionJwt(jwt, SESSION_SECRET)}`;
   }
 
+  async function registerDevice(deviceToken: string, cookie?: string) {
+    return await server.inject({
+      method: "POST",
+      url: "/v1/vouchflow/devices",
+      headers: { cookie: cookie ?? (await webCookie()) },
+      payload: { device_token: deviceToken },
+    });
+  }
+
   async function createFetch(payload: Record<string, unknown>, token = agentToken) {
     return await server.inject({
       method: "POST",
@@ -129,12 +146,17 @@ describe("passkey-gated fetch_credential", () => {
     context: string,
     mandateId: string,
     expiration: string | number = "10m",
+    device: { device_token?: string; signing_device_id?: string } = {
+      device_token: OWNER_DEVICE_TOKEN,
+      signing_device_id: OWNER_SIGNING_DEVICE_ID,
+    },
   ): Promise<string> {
     return await new SignJWT({
       context,
       payload_sha256: hash,
       confidence: "low",
       mandate_id: mandateId,
+      ...device,
     })
       .setProtectedHeader({ alg: "ES256", kid: "credential-fetch-test-key" })
       .setIssuer("https://vouchflow.dev")
@@ -144,16 +166,14 @@ describe("passkey-gated fetch_credential", () => {
       .sign(signingKey);
   }
 
-  // The human half of the ceremony is the OWNER's browser session — the same
-  // account that owns the credential, holding a live web cookie.
+  // The human half of the ceremony is sessionless: the assertion, signed over
+  // this approval's payload by a device the owner registered, is the authority.
   async function approve(id: string, context = CREDENTIAL_FETCH_VOUCH_CONTEXT) {
-    const cookie = await webCookie();
-    const signed = await ceremony(id, cookie);
+    const signed = await ceremony(id);
     const jws = await signHash(signed.payload_sha256, context, `mandate_${id}`);
     return await server.inject({
       method: "POST",
       url: `/v1/vault/fetch-approvals/${id}/approve`,
-      headers: { cookie },
       payload: { jws },
     });
   }
@@ -231,6 +251,9 @@ describe("passkey-gated fetch_credential", () => {
       purpose: "reveal",
       approval_id: approval.approval_id,
       approver_account_id: accountId,
+      // The device the assertion came from, which is what let the route
+      // attribute the approval to this account at all.
+      signing_device_id: OWNER_SIGNING_DEVICE_ID,
     });
     // The delivery row names the approver too. A ledger where only the decision
     // carries it cannot answer "who released this secret?" from the row that
@@ -327,14 +350,16 @@ describe("passkey-gated fetch_credential", () => {
 
     const audit = await revealAudit();
     expect(audit).toHaveLength(1);
-    // The ledger names the outcome, the credential, and WHO refused it.
+    // The ledger names the outcome and the credential. It does NOT name a
+    // refuser: deny carries no assertion, so the route knows only that someone
+    // holding the link said no — claiming the owner did would be a fiction.
     expect(audit[0]!.payload).toMatchObject({
       outcome: "denied",
       reference,
       purpose: "reveal",
       approval_id: approval.approval_id,
-      approver_account_id: accountId,
     });
+    expect(audit[0]!.payload).not.toHaveProperty("approver_account_id");
     expect(JSON.stringify(audit)).not.toContain(SECRET_VALUE);
   });
 
@@ -547,111 +572,203 @@ describe("passkey-gated fetch_credential", () => {
     expectNoValueAnywhere(second.body);
   });
 
-  // The hole this suite exists to close: holding the approval link is not
-  // authority to answer it. The requesting agent necessarily holds that link,
-  // so anyone it reaches would otherwise be able to release the owner's secret
-  // with their own entirely genuine passkey.
-  it("refuses an approval settled by ANOTHER account, and records the attempt", async () => {
+  // Holding the approval link alone is still not authority to RELEASE the
+  // secret: the assertion must be signed over THIS approval's account-bound
+  // payload, and verification rejects anything else. What the removal of the
+  // web-session gate changed is who may PRESENT a valid assertion — the
+  // sessionless Telegram-link browser, like payments — not what counts as one.
+  it("refuses an approval settled by an assertion over a DIFFERENT account-bound payload", async () => {
     const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
     const approval = (await createFetch({ reference })).json() as { approval_id: string };
 
-    const intruder = await deps.accountStore.createAccount("intruder@example.test", "Intruder");
-    const intruderCookie = await webCookie(intruder.id);
-
-    // They cannot even read the bytes the ceremony asks a passkey to sign.
+    // The sessionless ceremony names the owning account only through its
+    // opaque account binding.
     const peeked = await server.inject({
       method: "GET",
       url: `/v1/vault/fetch-approvals/${approval.approval_id}/ceremony`,
-      headers: { cookie: intruderCookie },
     });
-    expect(peeked.statusCode).toBe(404);
-    expect(peeked.json()).toEqual({ error: "credential_fetch_approval_not_found" });
+    expect(peeked.statusCode).toBe(200);
+    const signed = peeked.json() as { payload_sha256: string; payload: Record<string, unknown> };
+    expect(signed.payload).toMatchObject({
+      account_binding: createHash("sha256")
+        .update("trusty-squire/credential-fetch/account/v1\n")
+        .update(accountId)
+        .digest("base64url"),
+    });
 
-    // …and a genuine, correctly-bound assertion over the REAL payload — the
-    // exact artifact the owner's own browser would produce — is still refused
-    // when the account presenting it is not the credential's owner.
-    const signed = await ceremony(approval.approval_id);
+    // An assertion over a DIFFERENT approval's payload — however genuine —
+    // never settles this one, session or no session.
+    const otherReference = await storeCredential({ service: "Stripe", value: "sk-other-secret" });
+    const second = (await createFetch({ reference: otherReference })).json() as {
+      approval_id: string;
+    };
+    const foreignCeremony = await ceremony(second.approval_id);
     const jws = await signHash(
-      signed.payload_sha256,
+      foreignCeremony.payload_sha256,
       CREDENTIAL_FETCH_VOUCH_CONTEXT,
-      `mandate_${approval.approval_id}`,
+      `mandate_${second.approval_id}`,
     );
     const crossed = await server.inject({
       method: "POST",
       url: `/v1/vault/fetch-approvals/${approval.approval_id}/approve`,
-      headers: { cookie: intruderCookie },
       payload: { jws },
     });
-    expect(crossed.statusCode).toBe(404);
-    expect(crossed.json()).toEqual({ error: "credential_fetch_approval_not_found" });
-
-    // Nor can a stranger with the link deny it out from under the owner.
-    const refused = await deny(approval.approval_id, intruderCookie);
-    expect(refused.statusCode).toBe(404);
+    expect(crossed.statusCode).toBe(403);
+    expect(crossed.json()).toEqual({ error: "payload_hash_mismatch" });
 
     // The owner's approval is untouched, and no value moved.
     const polled = await resume(approval.approval_id);
     expect((polled.json() as { status: string }).status).toBe("pending");
     expectNoValueAnywhere(polled.body);
-
-    // All three attempts — the peek, the approve, the deny — land in the
-    // OWNER's ledger, naming who tried.
-    expect(await revealOutcomes()).toEqual([
-      "approver_rejected",
-      "approver_rejected",
-      "approver_rejected",
-    ]);
-    const attempt = (await revealAudit())[0]!;
-    expect(attempt.account_id).toBe(accountId);
-    expect(attempt.payload).toMatchObject({
-      reference,
-      purpose: "reveal",
-      outcome: "approver_rejected",
-      approval_id: approval.approval_id,
-      approver_account_id: intruder.id,
-    });
+    expect(await revealAudit()).toEqual([]);
     expect(JSON.stringify(await revealAudit())).not.toContain(SECRET_VALUE);
   });
 
-  it("requires a web session — an agent token is the requester's authority, not the approver's", async () => {
+  // The hole the payload binding alone does NOT close, now that the ceremony
+  // takes no session: an assertion over the RIGHT payload, produced by someone
+  // else's entirely genuine passkey. Only the account's own registered signing
+  // devices may answer its approvals.
+  it("refuses a correctly-bound assertion from a device the account never registered", async () => {
     const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
     const approval = (await createFetch({ reference })).json() as { approval_id: string };
     const signed = await ceremony(approval.approval_id);
+
+    const strangerJws = await signHash(
+      signed.payload_sha256,
+      CREDENTIAL_FETCH_VOUCH_CONTEXT,
+      `mandate_${approval.approval_id}`,
+      "10m",
+      { device_token: FOREIGN_DEVICE_TOKEN, signing_device_id: "sdev_stranger" },
+    );
+    const stranger = await server.inject({
+      method: "POST",
+      url: `/v1/vault/fetch-approvals/${approval.approval_id}/approve`,
+      payload: { jws: strangerJws },
+    });
+    expect(stranger.statusCode, stranger.body).toBe(403);
+    expect(stranger.json()).toEqual({ error: "mandate_signer_not_authorized" });
+
+    // An assertion that names no signer at all is equally unattributable.
+    const unnamedJws = await signHash(
+      signed.payload_sha256,
+      CREDENTIAL_FETCH_VOUCH_CONTEXT,
+      `mandate_${approval.approval_id}`,
+      "10m",
+      {},
+    );
+    const unnamed = await server.inject({
+      method: "POST",
+      url: `/v1/vault/fetch-approvals/${approval.approval_id}/approve`,
+      payload: { jws: unnamedJws },
+    });
+    expect(unnamed.statusCode, unnamed.body).toBe(403);
+    expect(unnamed.json()).toEqual({ error: "missing_device_token" });
+
+    // The approval never moved, nothing was revealed, and the ledger has no
+    // settlement to report.
+    const polled = await resume(approval.approval_id);
+    expect((polled.json() as { status: string }).status).toBe("pending");
+    expectNoValueAnywhere(polled.body);
+    expect(await revealAudit()).toEqual([]);
+
+    // Once the owner claims that device from a signed-in browser, the SAME
+    // assertion settles the approval — the binding is the only thing that
+    // was missing.
+    expect((await registerDevice(FOREIGN_DEVICE_TOKEN)).statusCode).toBe(204);
+    const accepted = await server.inject({
+      method: "POST",
+      url: `/v1/vault/fetch-approvals/${approval.approval_id}/approve`,
+      payload: { jws: strangerJws },
+    });
+    expect(accepted.statusCode, accepted.body).toBe(200);
+    expect((await resume(approval.approval_id)).json()).toMatchObject({
+      fields: { value: SECRET_VALUE },
+    });
+  });
+
+  // One physical passkey belongs to every account its owner holds, and the
+  // ceremony pages claim it on every signed-in visit. A device-keyed binding
+  // would let signing into a second account silently strip the first one's,
+  // refusing its very next approval for something no human did.
+  it("keeps a device bound to every account that claimed it, not just the last", async () => {
+    const second = await deps.accountStore.createAccount("second@example.test", "Second");
+    const secondCookie = await webCookie(second.id);
+    expect((await registerDevice(OWNER_DEVICE_TOKEN, secondCookie)).statusCode).toBe(204);
+
+    expect(await deps.vouchflowDeviceStore.listTokensByAccount(second.id)).toEqual([
+      OWNER_DEVICE_TOKEN,
+    ]);
+    expect(await deps.vouchflowDeviceStore.listTokensByAccount(accountId)).toEqual([
+      OWNER_DEVICE_TOKEN,
+    ]);
+
+    // The first account's approvals still settle on that same passkey.
+    const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
+    const approval = (await createFetch({ reference })).json() as { approval_id: string };
+    const settled = await approve(approval.approval_id);
+    expect(settled.statusCode, settled.body).toBe(200);
+    expect((await resume(approval.approval_id)).json()).toMatchObject({
+      fields: { value: SECRET_VALUE },
+    });
+  });
+
+  // The human half is sessionless, exactly like the payment approval path:
+  // the Telegram link opens in a browser with no Trusty Squire web session,
+  // and the Vouchflow passkey assertion is what authenticates the decision.
+  it("settles the ceremony with no web session — the signed assertion is the authority", async () => {
+    const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
+    const approval = (await createFetch({ reference })).json() as { approval_id: string };
+
+    // The ceremony is readable with no session at all: the payload binds the
+    // owning account only through its opaque account_binding, and reading it
+    // authorizes nothing.
+    const anonymousCeremony = await server.inject({
+      method: "GET",
+      url: `/v1/vault/fetch-approvals/${approval.approval_id}/ceremony`,
+    });
+    expect(anonymousCeremony.statusCode).toBe(200);
+    const signed = anonymousCeremony.json() as { payload_sha256: string };
     const jws = await signHash(
       signed.payload_sha256,
       CREDENTIAL_FETCH_VOUCH_CONTEXT,
       `mandate_${approval.approval_id}`,
     );
 
-    for (const headers of [{}, { authorization: `Bearer ${agentToken}` }]) {
-      const anonymousCeremony = await server.inject({
-        method: "GET",
-        url: `/v1/vault/fetch-approvals/${approval.approval_id}/ceremony`,
-        headers,
-      });
-      expect(anonymousCeremony.statusCode).toBe(401);
+    // An agent token is the requester's authority, never the approver's: it
+    // cannot settle anything without an assertion. An unsigned body is not
+    // one.
+    const agentAttempt = await server.inject({
+      method: "POST",
+      url: `/v1/vault/fetch-approvals/${approval.approval_id}/approve`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: {},
+    });
+    expect(agentAttempt.statusCode).toBe(400);
+    expect((await resume(approval.approval_id)).json()).toMatchObject({ status: "pending" });
 
-      const anonymousApprove = await server.inject({
-        method: "POST",
-        url: `/v1/vault/fetch-approvals/${approval.approval_id}/approve`,
-        headers,
-        payload: { jws },
-      });
-      expect(anonymousApprove.statusCode).toBe(401);
+    // The sessionless human half approves, and the value becomes claimable.
+    const anonymousApprove = await server.inject({
+      method: "POST",
+      url: `/v1/vault/fetch-approvals/${approval.approval_id}/approve`,
+      payload: { jws },
+    });
+    expect(anonymousApprove.statusCode).toBe(200);
+    const delivered = await resume(approval.approval_id);
+    expect((delivered.json() as { fields: Record<string, string> }).fields).toEqual({
+      value: SECRET_VALUE,
+    });
+    expectNoValueAnywhere(anonymousApprove.body);
 
-      const anonymousDeny = await server.inject({
-        method: "POST",
-        url: `/v1/vault/fetch-approvals/${approval.approval_id}/deny`,
-        headers,
-        payload: {},
-      });
-      expect(anonymousDeny.statusCode).toBe(401);
-    }
-
-    const polled = await resume(approval.approval_id);
-    expect((polled.json() as { status: string }).status).toBe("pending");
-    expectNoValueAnywhere(polled.body);
-    expect(await revealAudit()).toEqual([]);
+    // Denial is sessionless too — it is the conservative answer and moves no
+    // value.
+    const second = (await createFetch({ reference })).json() as { approval_id: string };
+    const anonymousDeny = await server.inject({
+      method: "POST",
+      url: `/v1/vault/fetch-approvals/${second.approval_id}/deny`,
+      payload: {},
+    });
+    expect(anonymousDeny.statusCode).toBe(200);
+    expectNoValueAnywhere((await resume(second.approval_id)).body);
   });
 
   it("settles a lapsed approval as expired rather than logging a denial nobody made", async () => {

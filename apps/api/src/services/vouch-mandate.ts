@@ -24,7 +24,12 @@ export type VouchMandateFailureCode =
   | "invalid_mandate_context"
   | "insufficient_mandate_confidence"
   | "mandate_assertion_expired"
-  | "mandate_verification_failed";
+  | "mandate_verification_failed"
+  // The signer-identity half, checked by the ceremony rather than here: this
+  // module knows the assertion is genuine, only the caller knows whose
+  // approval it is meant to settle.
+  | "missing_device_token"
+  | "mandate_signer_not_authorized";
 
 export class VouchMandateVerificationError extends Error {
   constructor(public readonly code: VouchMandateFailureCode) {

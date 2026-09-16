@@ -9,7 +9,7 @@ import { CardIcon } from "../components/CardIcon";
 import { Modal } from "../components/Modal";
 import { CredentialFields, type FieldsResult } from "../components/CredentialFields";
 import { parseHostList } from "../lib/hosts";
-import { getPairingState } from "../lib/pairing";
+import { getPairingState, registerEnrolledDevice } from "../lib/pairing";
 import { getVouchflow } from "../lib/vouchflow";
 import { type CardMeta, isLegacyCard } from "../lib/wallet";
 import { ApiError, apiDelete, apiGet, apiPatch, apiPost, timeAgo } from "../lib/api";
@@ -44,6 +44,15 @@ interface Cred {
   age_days: number;
   stale: boolean;
 }
+
+// The API's own host-validation codes. Matching on the code rather than a bare
+// 400 keeps a different 400 on this path — the device claim's `invalid_request`,
+// say — from being reported to the human as a bad hostname.
+const HOST_VALIDATION_ERRORS = new Set([
+  "invalid_allowed_host",
+  "invalid_login_host",
+  "login_hosts_required",
+]);
 
 export default function VaultPage() {
   const router = useRouter();
@@ -877,6 +886,7 @@ function EditModal({
         if (!pairing.enrolled) {
           throw new Error("Set up a passkey before changing credential metadata.");
         }
+        await registerEnrolledDevice();
         const approval = await apiPost<{ approval_id: string }>("/v1/vault/mutation-approvals", {
           operation: "edit",
           reference: cred.reference,
@@ -900,7 +910,7 @@ function EditModal({
       }
       onSaved();
     } catch (err) {
-      if (err instanceof ApiError && err.status === 400) {
+      if (err instanceof ApiError && HOST_VALIDATION_ERRORS.has(err.message)) {
         setError(
           "One of the hosts isn't valid — use a bare hostname like api.example.com (no https://, no path).",
         );
