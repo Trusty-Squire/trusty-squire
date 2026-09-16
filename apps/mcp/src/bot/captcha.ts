@@ -1634,7 +1634,7 @@ export class TwoCaptchaSolver {
 
 // Race a promise against a hard timeout. 2Captcha's in.php should
 // answer in <2s; a 10s cap is generous.
-async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+export async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const t = setTimeout(() => reject(new Error(`timeout after ${ms}ms`)), ms);
     p.then(

@@ -1074,7 +1074,10 @@ vi.mock("../browser.js", async (importOriginal) => ({
 // session tests stub its entry points directly instead of the fake browser's
 // methods. The h.* flags and call counters are the same observations the
 // fake's methods used to make.
-vi.mock("../captcha.js", () => ({
+vi.mock("../captcha.js", async (importOriginal) => ({
+  // withTimeout is the real one: the credential-listing bound is the behaviour
+  // under test, not something to re-implement here.
+  withTimeout: (await importOriginal<typeof CaptchaModule>()).withTimeout,
   TwoCaptchaSolver: class {
     constructor(opts?: unknown) {
       h.twoCaptchaCtorArgs.push(opts);
@@ -1178,6 +1181,8 @@ import { dispatchOperatorBrowserProcessTermination } from "../operator-browser-w
 import { BrowserController } from "../browser.js";
 import { OAuthAwaitingHumanError } from "../oauth-login.js";
 import {} from "../profile.js";
+import { buildTwoCaptchaSolver } from "../captcha-solve.js";
+import type * as CaptchaModule from "../captcha.js";
 import {
   startProvisionSession,
   startHarnessProvisionSession,
@@ -5245,7 +5250,7 @@ describe("operate session — captcha auto-solve on the general drive", () => {
     (payload as { semantic?: { blockers?: Array<Record<string, unknown>> } }).semantic?.blockers ??
     [];
 
-  it("never blocks the observation on a solve and clears the page on a later observation", async () => {
+  it("buys the token detached, then injects it under the next observation's lease", async () => {
     h.captchaVariant = "hcaptcha";
     h.captchaChallengeRendered = true;
     h.twoCaptchaAvailable = true;
@@ -5253,7 +5258,7 @@ describe("operate session — captcha auto-solve on the general drive", () => {
     h.captureOverride = challengeCapture();
     const gate = openGate();
 
-    // The solve is deliberately still running here: an awaited solve would
+    // The fetch is deliberately still running here: an awaited solve would
     // hang this call (and hold its session-call lease) until the gate opens.
     const started = await startProvisionSession({
       serviceUrl: "https://app.example.com/signup",
@@ -5272,19 +5277,24 @@ describe("operate session — captcha auto-solve on the general drive", () => {
       expect.objectContaining({ vaultProxy: expect.anything() }),
     ]);
 
-    // An observation taken while the solve is in flight surfaces the challenge
-    // unchanged and does NOT start a second solver.
+    // An observation taken while the fetch is in flight surfaces the challenge
+    // unchanged and does NOT start a second fetch.
     const during = await observe(started.session_id);
     expect(h.twoCaptchaCalls).toEqual(["hcaptcha"]);
     expect(String(during.dom ?? "")).toContain(CHALLENGE_TEXT);
 
+    // The token arrives while NO operator call holds the lease. It must be
+    // stashed, not written into the live page: injectHcaptchaToken fires the
+    // site's own success callbacks, which would submit the form under the
+    // agent mid-drive.
     gate.release();
     await drainDetached();
-    expect(h.injectCaptchaCalls).toEqual(["hcaptcha"]);
+    expect(h.injectCaptchaCalls).toEqual([]);
 
-    // The later observation reflects the cleared page, and the variant-scoped
-    // token pre-check keeps it from spending the key a second time.
+    // The next observation injects it while holding the lease, so the clear is
+    // reflected in that very observation and no second token is bought.
     const after = await observe(started.session_id);
+    expect(h.injectCaptchaCalls).toEqual(["hcaptcha"]);
     expect(String(after.dom ?? "")).not.toContain(CHALLENGE_TEXT);
     expect(h.twoCaptchaCalls).toEqual(["hcaptcha"]);
     await finishProvisionSession(started.session_id);
@@ -5310,6 +5320,22 @@ describe("operate session — captcha auto-solve on the general drive", () => {
     expect(payload.semantic.blockers).toEqual([
       { kind: "challenge", text: CHALLENGE_TEXT, target: "unavailable" },
     ]);
+  });
+
+  it("does not hang the attempt when the credential listing never answers", async () => {
+    // The listing carries no deadline of its own; unbounded it would hold the
+    // in-flight claim for the life of the session and silently disable
+    // auto-solve. Bounded, it falls back to the env-key solver and settles.
+    const hangingApi = {
+      listCredentials: () => new Promise<never>(() => {}),
+    } as unknown as ApiClient;
+
+    const solver = await buildTwoCaptchaSolver(hangingApi, { requestTimeoutMs: 20 });
+
+    expect(solver).toBeDefined();
+    // Fell back to the env-key transport — no vault proxy was built from an
+    // answer that never came.
+    expect(h.twoCaptchaCtorArgs).toEqual([{ requestTimeoutMs: 20 }]);
   });
 
   it("surfaces the challenge unchanged when the token solve fails", async () => {
@@ -5376,11 +5402,12 @@ describe("operate session — captcha auto-solve on the general drive", () => {
       format: "compact",
     });
     await drainDetached();
+    await observe(started.session_id);
     expect(h.injectCaptchaCalls).toEqual(["hcaptcha"]);
 
-    // Submitting navigates to a page carrying a DIFFERENT challenge: no token
-    // for this one yet. The cooldown bounds retries of a failing challenge, so
-    // it must not suppress this one.
+    // Submitting re-renders a DIFFERENT challenge: no token for this one yet.
+    // The cooldown bounds retries of a FAILING challenge, so it must not
+    // suppress this one.
     h.variantCaptchaTokens = [];
     h.captureOverride = challengeCapture();
 
@@ -5407,6 +5434,7 @@ describe("operate session — captcha auto-solve on the general drive", () => {
       format: "compact",
     });
     await drainDetached();
+    await observe(started.session_id);
 
     expect(h.twoCaptchaCalls).toEqual(["hcaptcha"]);
     expect(h.injectCaptchaCalls).toEqual(["hcaptcha"]);
@@ -5433,6 +5461,7 @@ describe("operate session — captcha auto-solve on the general drive", () => {
     gate.release();
     h.twoCaptchaGate = null;
     await drainDetached();
+    await observe(started.session_id);
 
     // The stale token is dropped, so the new document's response field is not
     // poisoned with a value the site would reject.
@@ -5458,13 +5487,15 @@ describe("operate session — captcha auto-solve on the general drive", () => {
       format: "compact",
     });
     await drainDetached();
+    await observe(started.session_id);
+    expect(h.injectCaptchaCalls).toEqual(["hcaptcha"]);
     expect(h.twoCaptchaCalls).toEqual(["hcaptcha"]);
 
     await observe(started.session_id);
     await drainDetached();
 
     // Recorded as failed, so the cooldown bounds the spend instead of every
-    // later observation starting another paid solve.
+    // later observation buying another token.
     expect(h.twoCaptchaCalls).toEqual(["hcaptcha"]);
     await finishProvisionSession(started.session_id);
   });
@@ -5481,6 +5512,7 @@ describe("operate session — captcha auto-solve on the general drive", () => {
       format: "compact",
     });
     await drainDetached();
+    await observe(started.session_id);
 
     expect(h.twoCaptchaCalls).toEqual([]);
     expect(h.injectCaptchaCalls).toEqual([]);

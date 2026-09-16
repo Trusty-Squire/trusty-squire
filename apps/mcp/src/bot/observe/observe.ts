@@ -1031,13 +1031,14 @@ export async function observeSession(
     if (sourcePage === undefined) {
       widenAllowedHostsFromUrl(session, session.browser.currentUrl());
     }
-    // Best-effort captcha auto-solve on the general drive (hCaptcha gap): if a
-    // challenge is RENDERED right now and the vaulted "2captcha" credential can
-    // clear it, kick that off. Deliberately NOT awaited — a 2Captcha solve runs
-    // for tens of seconds and this observation holds a session-call lease. This
-    // capture surfaces the challenge blocker exactly as it does today; a later
-    // observation sees the cleared page once the token lands.
-    attemptOperateCaptchaAutoSolve(session, sourcePage);
+    // Best-effort captcha auto-solve on the general drive (hCaptcha gap). The
+    // awaited half injects a token an earlier observation's fetch already
+    // bought, so the injection (and the site callbacks it fires) happen inside
+    // this call's lease and clear before the capture below. Buying a token is
+    // detached — a 2Captcha solve runs for tens of seconds and this observation
+    // holds the lease — so the first observation to see a challenge still
+    // surfaces the blocker exactly as it does today.
+    await attemptOperateCaptchaAutoSolve(session, sourcePage);
     session.generation += 1;
     const generation = session.generation;
     const capture = await session.browser.extractBrowserUseObservation(sourcePage, true);
