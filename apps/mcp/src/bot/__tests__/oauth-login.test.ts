@@ -233,7 +233,16 @@ describe("BrowserController OAuth popup lifecycle", () => {
               ]),
             },
           });
-          expect(JSON.stringify(refreshed)).not.toContain("hidden-consent-action");
+          // #812 made control emission AX-faithful: the browser's accessibility
+          // tree keeps an opacity:0 operable control (the Oura payment radios
+          // rely on this), so the hidden consent action IS surfaced — but
+          // annotated v=offscreen: reported for faithfulness, not offered as an
+          // ordinary in-viewport action target.
+          const hiddenConsentRows = compactRows(refreshed).filter(([, , facts]) =>
+            (facts ?? "").includes(labelSlug("Hidden consent action")),
+          );
+          expect(hiddenConsentRows).toHaveLength(1);
+          expect(hiddenConsentRows[0]![2]).toContain("v=offscreen");
           expect(click).toHaveBeenCalledTimes(1);
           expect(controller.currentUrl()).toBe(provider);
           await expect(loginWithOAuth(controller, "#oauth", 100)).rejects.toBeInstanceOf(
@@ -1713,7 +1722,16 @@ describe("BrowserController OAuth popup lifecycle", () => {
           format === "browser-use-dom"
             ? [...(result.dom ?? "").matchAll(/\[(@e:[^\]]+)\]</g)].map((match) => match[1]!)
             : compactRows(result).map((row) => row[0]);
-        const [typeRef, selectRef, productRef] = productRefs;
+        // #812 made control emission AX-faithful, so a native <select>'s
+        // <option> children are now surfaced as their own rows between the
+        // select and the button in dom order. Anchor each act's target on the
+        // fixture's element ids instead of dom position.
+        const refById = (id: string): string | undefined =>
+          (result.dom ?? "").match(new RegExp(`\\[(@e:[^\\]]+)\\]<[a-z]+ id=${id}[\\s>]`))?.[1];
+        const typeRef = refById("project-name");
+        const selectRef = refById("region");
+        const productRef = refById("new-project");
+        expect(productRefs.length).toBeGreaterThan(0);
         expect(typeRef).toBeDefined();
         expect(selectRef).toBeDefined();
         expect(productRef).toBeDefined();

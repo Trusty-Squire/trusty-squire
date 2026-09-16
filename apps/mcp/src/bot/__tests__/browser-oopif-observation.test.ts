@@ -196,8 +196,16 @@ describe("out-of-process iframe observation (real Chromium, real HTTP)", () => {
           null,
         );
         expect(await frame.locator('[name="expiry"]').inputValue()).toBe("12/30");
+        await operateTypeTool.handler(
+          { session_id: sessionId, ref: nameRow[0], text: CARD.name },
+          null,
+        );
+        expect(await frame.locator('[name="cardholder"]').inputValue()).toBe(CARD.name);
 
-        // inject_card fills pan/cvv/name from COMPACT refs, not el_table.
+        // inject_card fills pan/cvv from COMPACT refs, not el_table. Expiry and
+        // cardholder name are NOT inject targets (the tool was deliberately
+        // narrowed to the secret fields): they go through the ordinary
+        // operate_type path with the same COMPACT refs.
         paymentSession(sessionId).releasedPaymentCard = {
           approvalId: "approval_oopif",
           approvalUrl: "https://approve.test/approval_oopif",
@@ -225,8 +233,6 @@ describe("out-of-process iframe observation (real Chromium, real HTTP)", () => {
             fields: {
               pan: { ref: numberRow[0] },
               cvv: { ref: cvvRow[0] },
-              exp_month: { ref: expiryRow[0] },
-              name: { ref: nameRow[0] },
             },
           }),
           {} as ApiClient,
@@ -236,13 +242,10 @@ describe("out-of-process iframe observation (real Chromium, real HTTP)", () => {
           fields: {
             pan: { status: "filled" },
             cvv: { status: "filled" },
-            exp_month: { status: "filled" },
-            name: { status: "filled" },
           },
         });
         expect(await frame.locator('[name="number"]').inputValue()).toBe(CARD.pan);
         expect(await frame.locator('[name="verification_value"]').inputValue()).toBe(CARD.cvv);
-        expect(await frame.locator('[name="cardholder"]').inputValue()).toBe(CARD.name);
       } finally {
         if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
         await isolated.context.close();
