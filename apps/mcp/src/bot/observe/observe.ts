@@ -889,7 +889,9 @@ export async function observedThreeDsChallenge(
   const released = session.releasedPaymentCard;
   if (released === null) return undefined;
   const challenge = await session.browser.detectThreeDsChallenge().catch(() => null);
-  if (challenge === null) return undefined;
+  if (challenge === null) {
+    return observedThreeDsSdkError(session.browser);
+  }
   let notified: boolean | undefined;
   if (released.threeDsNotified !== true) {
     released.threeDsNotified = true;
@@ -904,6 +906,32 @@ export async function observedThreeDsChallenge(
     state: "challenge_detected",
     url: challenge.url,
     ...(notified === undefined ? {} : { notified }),
+  };
+}
+
+// After a card release, the processor's SDK can fail to launch the challenge
+// at all — Cardinal/Braintree's known race where the ACS render fires before
+// the SDK's UI-framework assets finish loading (THREEDS_CARDINAL_SDK_ERROR in
+// the page's own telemetry; the rendered page usually shows only a generic
+// checkout error). This is observation, not custody: report the transient
+// failure and that a resubmitted payment is expected to launch the challenge,
+// and never block, wait on, or take over the retry. The evidence marker rolls
+// out of the bounded evidence stream on its own. A detected challenge always
+// takes precedence over this state (checked first above).
+function observedThreeDsSdkError(
+  browser: { hasThreeDsSdkErrorEvidence(): boolean },
+): Extract<Observation["three_ds"], { state: "sdk_error_retryable" }> | undefined {
+  if (!browser.hasThreeDsSdkErrorEvidence()) return undefined;
+  return {
+    state: "sdk_error_retryable",
+    reason:
+      "The processor's 3-D Secure SDK failed to launch the authentication challenge " +
+      "(its challenge UI lost a race loading its own assets — e.g. Braintree " +
+      "THREEDS_CARDINAL_SDK_ERROR). This failure is transient: the checkout re-arms " +
+      "after it and a resubmitted payment is expected to launch the challenge. " +
+      "Resubmit the payment with ordinary actions, then operate_observe for the " +
+      "challenge; the cardholder completes it in their bank app.",
+    next_action: "operate_observe",
   };
 }
 

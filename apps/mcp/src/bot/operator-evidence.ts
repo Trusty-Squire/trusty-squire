@@ -230,4 +230,14 @@ export class OperatorEvidenceCollector {
         .map((record) => this.mask.maskValue(record)),
     };
   }
+
+  /** Internal, unmasked snapshot for boolean diagnostic scans only (see
+   * BrowserController.hasThreeDsSdkErrorEvidence). Not a public read API:
+   * values stay behind the mask in read(). */
+  diagnosticSnapshot(): {
+    network: OperatorNetworkRecord[];
+    console: OperatorConsoleRecord[];
+  } {
+    return { network: [...this.network.values()], console: [...this.console] };
+  }
 }

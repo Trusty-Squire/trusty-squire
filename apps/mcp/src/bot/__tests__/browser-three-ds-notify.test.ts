@@ -106,7 +106,9 @@ describe("3-D Secure detection and notification", () => {
         // is not repeated.
         const second = await observe(sessionId);
         expect(second.three_ds).toMatchObject({ state: "challenge_detected" });
-        expect(second.three_ds?.notified).toBeUndefined();
+        expect(
+          second.three_ds?.state === "challenge_detected" ? second.three_ds.notified : undefined,
+        ).toBeUndefined();
         expect(released.notifyThreeDs).toHaveBeenCalledTimes(1);
       } finally {
         if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
@@ -133,4 +135,64 @@ describe("3-D Secure detection and notification", () => {
       await isolated.context.close();
     }
   });
+
+  // A real Cardinal/Braintree failure mode (Oura, 2026-09): the ACS render
+  // races the SDK's own UI-framework chunk load, loses, and the processor
+  // surfaces THREEDS_CARDINAL_SDK_ERROR through the page's telemetry while the
+  // rendered page shows only a generic checkout error. The observation must
+  // report the transient, retryable failure — never notify (no challenge is
+  // up yet) and never take over the retry.
+  it.skipIf(!available)(
+    "reports a Cardinal SDK challenge-launch failure as retryable, without notifying",
+    async () => {
+      const isolated = await page();
+      let sessionId: string | undefined;
+      try {
+        const released = await releasedCardSession(
+          isolated,
+          '<div>Verification details were not entered correctly.</div>' +
+            '<script>fetch("/log", { method: "POST", body: JSON.stringify({ "event": "3ds_verification.error", "code": "THREEDS_CARDINAL_SDK_ERROR" }) });</script>',
+        );
+        sessionId = released.sessionId;
+
+        // Wait until the telemetry POST actually reached the evidence stream.
+        let observed: Awaited<ReturnType<typeof observe>> | undefined;
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          observed = await observe(sessionId);
+          if (observed.three_ds !== undefined) break;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        expect(observed?.three_ds).toMatchObject({ state: "sdk_error_retryable" });
+        expect(released.notifyThreeDs).not.toHaveBeenCalled();
+      } finally {
+        if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
+        await isolated.context.close();
+      }
+    },
+  );
+
+  // A detected challenge always wins over the stale SDK-error evidence: after
+  // a resubmit the challenge is live and the cardholder nudge is what matters.
+  it.skipIf(!available)(
+    "prefers a rendered challenge over stale SDK-error evidence",
+    async () => {
+      const isolated = await page();
+      let sessionId: string | undefined;
+      try {
+        const released = await releasedCardSession(
+          isolated,
+          '<script>fetch("/log", { method: "POST", body: JSON.stringify({ "code": "THREEDS_CARDINAL_SDK_ERROR" }) });</script>' +
+            '<div>Verify your identity to continue</div><form action="/acs/challenge"><button>Approve</button></form>',
+        );
+        sessionId = released.sessionId;
+
+        const observed = await observe(sessionId);
+        expect(observed.three_ds).toMatchObject({ state: "challenge_detected" });
+        expect(released.notifyThreeDs).toHaveBeenCalledTimes(1);
+      } finally {
+        if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
+        await isolated.context.close();
+      }
+    },
+  );
 });

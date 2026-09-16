@@ -115,6 +115,7 @@ export const REQUIRED_BEHAVIOR_FILES = [
   "src/bot/__tests__/phone-country-widget.test.ts",
   "src/bot/__tests__/screenshot-click.test.ts",
   "src/bot/__tests__/screenshot-target-diagnostic.test.ts",
+  "src/bot/__tests__/three-ds-detection.test.ts",
 ];
 
 // Every file here gates every stable release (its non-browser half also gates
