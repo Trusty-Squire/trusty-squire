@@ -71,7 +71,7 @@ beforeAll(async () => {
     const host = (req.headers.host ?? "").split(":")[0];
     if (host === PARENT_HOST) {
       res.end(
-        '<!doctype html><html><body><main>Checkout</main>' +
+        "<!doctype html><html><body><main>Checkout</main>" +
           // Pushes the iframe below the fold: rendered with real bounds, but
           // outside the initial viewport — the live whitejade failing shape.
           '<div style="height:2000px"></div>' +
@@ -128,7 +128,11 @@ async function childIsSeparateTarget(page: Page): Promise<boolean> {
     const client = await page.context().newCDPSession(page);
     try {
       const targets = await client.send("Target.getTargets");
-      if (targets.targetInfos.some((target) => target.type === "iframe" && target.url.includes(CHILD_HOST)))
+      if (
+        targets.targetInfos.some(
+          (target) => target.type === "iframe" && target.url.includes(CHILD_HOST),
+        )
+      )
         return true;
     } finally {
       await client.detach().catch(() => undefined);
@@ -196,8 +200,16 @@ describe("out-of-process iframe observation (real Chromium, real HTTP)", () => {
           null,
         );
         expect(await frame.locator('[name="expiry"]').inputValue()).toBe("12/30");
+        await operateTypeTool.handler(
+          { session_id: sessionId, ref: nameRow[0], text: CARD.name },
+          null,
+        );
+        expect(await frame.locator('[name="cardholder"]').inputValue()).toBe(CARD.name);
 
-        // inject_card fills pan/cvv/name from COMPACT refs, not el_table.
+        // inject_card fills pan/cvv from COMPACT refs, not el_table. Expiry and
+        // cardholder name are NOT inject targets (the tool was deliberately
+        // narrowed to the secret fields): they go through the ordinary
+        // operate_type path with the same COMPACT refs.
         paymentSession(sessionId).releasedPaymentCard = {
           approvalId: "approval_oopif",
           approvalUrl: "https://approve.test/approval_oopif",
@@ -225,8 +237,6 @@ describe("out-of-process iframe observation (real Chromium, real HTTP)", () => {
             fields: {
               pan: { ref: numberRow[0] },
               cvv: { ref: cvvRow[0] },
-              exp_month: { ref: expiryRow[0] },
-              name: { ref: nameRow[0] },
             },
           }),
           {} as ApiClient,
@@ -236,13 +246,10 @@ describe("out-of-process iframe observation (real Chromium, real HTTP)", () => {
           fields: {
             pan: { status: "filled" },
             cvv: { status: "filled" },
-            exp_month: { status: "filled" },
-            name: { status: "filled" },
           },
         });
         expect(await frame.locator('[name="number"]').inputValue()).toBe(CARD.pan);
         expect(await frame.locator('[name="verification_value"]').inputValue()).toBe(CARD.cvv);
-        expect(await frame.locator('[name="cardholder"]').inputValue()).toBe(CARD.name);
       } finally {
         if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
         await isolated.context.close();
@@ -284,7 +291,10 @@ describe("out-of-process iframe observation (real Chromium, real HTTP)", () => {
           return realNewCDPSession(target);
         };
 
-        const observed = (await observe(sessionId, "compact")) as unknown as Record<string, unknown>;
+        const observed = (await observe(sessionId, "compact")) as unknown as Record<
+          string,
+          unknown
+        >;
         const omissions = (observed.capture_omissions ?? []) as Array<{
           kind: string;
           url: string;
