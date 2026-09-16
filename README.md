@@ -54,7 +54,9 @@ notified, because the processor's own SDK failed to launch its challenge UI
 (e.g. `THREEDS_CARDINAL_SDK_ERROR` in the page's error telemetry). That failure
 is transient — the checkout re-arms, and resubmitting the payment is expected
 to launch the challenge. It is advisory only: nothing is gated, and a detected
-challenge always takes precedence.
+challenge always takes precedence. Once a challenge has rendered in the
+session, the advisory is never reported again, so a resubmit prompt can never
+ride a checkout that already completed one.
 
 Before the first card write, the operator installs a session-lifetime output
 mask for that released PAN and security code. Normal DOM/AX observations, raw
