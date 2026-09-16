@@ -253,6 +253,27 @@ export function classifyInterstitialText(text: string): {
   return { onInterstitial, verificationPassed };
 }
 
+// URL/ACS markers for a rendered 3-D Secure challenge, across processors.
+// Module-level so unit tests can pin the paths it has to keep matching — both
+// the legacy CardinalCommerce `cruise/stepup` path and the modern
+// `.../ThreeDSecure/V2_x/CReq` one (the latter through the `threeDSecure` word
+// alternative, not a Cardinal-specific branch). Exported.
+export const threeDsChallengeUrlPattern =
+  /(?:https?:\/\/(?:[^/]+\.)*cardinalcommerce\.com\/(?:v\d+\/)?cruise\/stepup(?:[/?#]|$)|https?:\/\/hooks\.stripe\.com\/3d_secure|https?:\/\/(?:[^/]+\.)*emvtds(?:[-.][^/]*)?(?:\/|$)|3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/(?:emvtds|emv-?3ds)(?:[-_/]|$)|\/3ds(?:2)?\/|\/acs\/|\/credit3d2\/Fep(?:ChargePaymentInfo|BridgeAuthority)[^/?#]*\.do(?:[?#]|$))/i;
+
+// How long a captured 3-D Secure SDK-error marker stays reportable. The state
+// tells the agent a resubmit is expected to launch the challenge, so it has to
+// stop long before a later order confirmation could be read as "resubmit" —
+// that would be a double-purchase hazard. The report only has to survive from
+// the error to the agent's next observe, which is seconds.
+export const THREE_DS_SDK_ERROR_EVIDENCE_WINDOW_MS = 90_000;
+
+// Pure freshness predicate over the evidence collector's capture-time latch.
+// Exported for unit tests.
+export function threeDsSdkErrorEvidenceIsFresh(seenAt: number | null, now: number): boolean {
+  return seenAt !== null && now - seenAt <= THREE_DS_SDK_ERROR_EVIDENCE_WINDOW_MS;
+}
+
 // After a Cloudflare managed challenge PASSES, the cf_clearance cookie is
 // set but the URL still carries Cloudflare's single-use challenge token
 // (`__cf_chl_rt_tk`, `__cf_chl_tk`, `__cf_chl_f_tk`, …). Cloudflare's own
@@ -660,6 +681,17 @@ export class BrowserController implements BrowserDriver {
 
   readOperatorEvidence(since = 0, requestId?: string) {
     return this.operatorEvidence.read(since, requestId);
+  }
+
+  /** Diagnostic-only boolean: did the processor's 3-D Secure SDK recently fail
+   * to launch its challenge (Braintree's THREEDS_CARDINAL_SDK_ERROR in the
+   * page's own telemetry)? Returns a classification and never exposes evidence
+   * values. */
+  hasThreeDsSdkErrorEvidence(): boolean {
+    return threeDsSdkErrorEvidenceIsFresh(
+      this.operatorEvidence.threeDsSdkErrorSeenAt(),
+      Date.now(),
+    );
   }
 
   async brokerTargetId(): Promise<string> {
@@ -6034,15 +6066,14 @@ export class BrowserController implements BrowserDriver {
     if (page === null) return null;
     // Cross-processor markers (CardinalCommerce backs many processors, not
     // just Stripe): the URL/ACS path, the structural forms/frames, and the
-    // rendered challenge copy.
-    const urlPattern =
-      /(?:https?:\/\/(?:[^/]+\.)*cardinalcommerce\.com\/(?:v\d+\/)?cruise\/stepup(?:[/?#]|$)|https?:\/\/hooks\.stripe\.com\/3d_secure|https?:\/\/(?:[^/]+\.)*emvtds(?:[-.][^/]*)?(?:\/|$)|3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/(?:emvtds|emv-?3ds)(?:[-_/]|$)|\/3ds(?:2)?\/|\/acs\/|\/credit3d2\/Fep(?:ChargePaymentInfo|BridgeAuthority)[^/?#]*\.do(?:[?#]|$))/i;
+    // rendered challenge copy. The URL pattern is module-level
+    // (threeDsChallengeUrlPattern) so tests can pin the ACS paths it covers.
     const challengeText =
       /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i;
     for (const frame of page.frames()) {
       if (this.frameWithinCaptcha(frame)) continue;
       const url = frame.url();
-      if (urlPattern.test(url)) return { url };
+      if (threeDsChallengeUrlPattern.test(url)) return { url };
       const structural = await frame
         .locator(
           'iframe[title*="3d secure" i],form[action*="acs" i],form:has(input[name="creq" i]),form[name="credit3d2FepBuyAuthenticateActionForm" i],form:has(input[name="md" i]):has([name="resSumbitButtonId" i],#resSumbitButtonId)',

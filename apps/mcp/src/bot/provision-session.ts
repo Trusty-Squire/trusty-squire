@@ -91,11 +91,22 @@ export interface Observation {
   // that call succeeded); the challenge itself is never blocked, waited on, or
   // taken into custody. The human completes it in their bank app and the agent
   // keeps observing the live checkout.
-  three_ds?: {
-    state: "challenge_detected";
-    url: string;
-    notified?: boolean;
-  };
+  //
+  // `sdk_error_retryable` is the observation-only complement: the processor's
+  // SDK failed to LAUNCH the challenge (its own asset-load race — never an
+  // operator action). The checkout re-arms and a resubmitted payment is
+  // expected to launch the challenge. No state is owned; nothing is gated.
+  three_ds?:
+    | {
+        state: "challenge_detected";
+        url: string;
+        notified?: boolean;
+      }
+    | {
+        state: "sdk_error_retryable";
+        reason: string;
+        next_action: "operate_observe";
+      };
   // A provider-owned OAuth popup closed while a legacy two-step OAuth action
   // was still settling. This is an expected browser lifecycle transition, not
   // a failed login or a reason to abandon the session. The host should simply

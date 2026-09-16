@@ -47,8 +47,16 @@ card control, not a helper input. Before placing the order, re-observe and
 confirm that no competing merchant-saved-card radio or option remains selected.
 If a 3-D Secure challenge appears, the operator detects it on the next
 observation or action result, notifies the cardholder once through the purchase
-notification path, and reports `three_ds`; keep observing the live checkout
-while the cardholder completes it.
+notification path, and reports `three_ds` with state `challenge_detected`; keep
+observing the live checkout while the cardholder completes it. `three_ds` can
+also carry state `sdk_error_retryable`: no challenge rendered and nothing
+notified, because the processor's own SDK failed to launch its challenge UI
+(e.g. `THREEDS_CARDINAL_SDK_ERROR` in the page's error telemetry). That failure
+is transient — the checkout re-arms, and resubmitting the payment is expected
+to launch the challenge. It is advisory only: nothing is gated, and a detected
+challenge always takes precedence. Once a challenge has rendered in the
+session, the advisory is never reported again, so a resubmit prompt can never
+ride a checkout that already completed one.
 
 Before the first card write, the operator installs a session-lifetime output
 mask for that released PAN and security code. Normal DOM/AX observations, raw
@@ -308,8 +316,11 @@ in [browser-use-serializer-port.md](docs/browser-use-serializer-port.md).
   the real visible field rather than a hosted-provider autofill/focus helper;
   before placing the order, re-observe for a competing selected saved card. A
   rendered 3-D Secure challenge is detected by the operator, which notifies the
-  cardholder once and reports `three_ds`; keep observing while the cardholder
-  completes it.
+  cardholder once and reports `three_ds` with state `challenge_detected`; keep
+  observing while the cardholder completes it. The other state,
+  `sdk_error_retryable`, reports that the processor's SDK failed to launch the
+  challenge UI at all — nothing is notified and nothing is gated; the checkout
+  re-arms and a resubmitted payment is expected to launch the challenge.
 - `operate_finish` closes the session with a flat `outcome` enum — never a
   nested union. `none` only closes; `credentials` requires `store` and preserves
   credential extraction and vault storage; `result` requires `summary` or

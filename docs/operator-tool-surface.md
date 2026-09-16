@@ -352,7 +352,13 @@ job without exposing plaintext to the agent.
   `operate_observe`, `operate_network`, and masked screenshots as evidence, then
   drive the page with ordinary actions. A rendered 3-D Secure challenge is
   detected on observation/action results; the operator notifies the cardholder
-  once and reports `three_ds` without waiting on or gating the challenge.
+  once and reports `three_ds` state `challenge_detected` without waiting on or
+  gating the challenge. The same key also carries state `sdk_error_retryable`
+  — no challenge rendered and nothing notified, because the processor's SDK
+  failed to launch its challenge UI (e.g. `THREEDS_CARDINAL_SDK_ERROR` in the
+  page's error telemetry). It is observation-only advice that the failure is
+  transient, the checkout re-arms, and a resubmitted payment is expected to
+  launch the challenge; a detected challenge always takes precedence.
 
 Legacy union verbs and aliases are not part of this contract. Use the flat names
 shown above, and use the installed server’s `tools/list` schema for optional

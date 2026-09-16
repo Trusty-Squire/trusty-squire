@@ -68,6 +68,21 @@ type CdpFailure = {
   corsErrorStatus?: { corsError?: string };
 };
 
+/** braintree-web's stable error code for "the Cardinal 3-D Secure SDK could
+ * not run" — including its challenge-launch race, where the ACS render fires
+ * before the SDK's UI-framework chunks finish loading. The rendered page
+ * usually shows only a generic checkout error, so the marker is the operator's
+ * only durable evidence. */
+export const THREE_DS_SDK_ERROR_MARKER = "THREEDS_CARDINAL_SDK_ERROR";
+
+/** Pure per-record classifier: does this one captured text carry the marker?
+ * Only ever applied to text the merchant page EMITS (see noteThreeDsSdkError)
+ * — a bare substring test cannot tell an emitted failure from source that
+ * merely names the code. */
+export function isThreeDsSdkErrorText(text: string | null): boolean {
+  return text !== null && text.includes(THREE_DS_SDK_ERROR_MARKER);
+}
+
 /** Bounded, session-local evidence stream. It diagnoses nothing. */
 export class OperatorEvidenceCollector {
   private sequence = 0;
@@ -76,12 +91,35 @@ export class OperatorEvidenceCollector {
   private readonly screenshots: OperatorScreenshotRecord[] = [];
   private readonly attachments = new WeakMap<Page, Promise<void>>();
   private readonly sessions = new WeakMap<Page, CDPSession>();
+  private threeDsSdkErrorAt: number | null = null;
 
   constructor(private readonly mask: CardValueOutputMask) {}
 
   private next(): number {
     this.sequence += 1;
     return this.sequence;
+  }
+
+  /** Wall-clock time the 3-D Secure SDK-error marker was MOST RECENTLY
+   * captured, or null. Every sighting re-arms it, so a repeat failure during a
+   * resubmit refreshes the timestamp instead of aging out behind the first
+   * one. Latched at capture time so nothing has to rescan the buffer, and
+   * never cleared; freshness is the caller's to bound. */
+  threeDsSdkErrorSeenAt(): number | null {
+    return this.threeDsSdkErrorAt;
+  }
+
+  /** Arm the latch from evidence the merchant page EMITS. The primary class is
+   * a REQUEST body — the page's own error/telemetry POST reporting the code.
+   * Console text is a secondary signal: it arms only when the page prints the
+   * code itself, which a thrown BraintreeError does not do on its own (the
+   * code rides `BraintreeError.code`, while the captured exception text is
+   * only `error.message`). Fetched RESPONSE bodies are deliberately never
+   * passed here — braintree-web's own three-d-secure bundle ships the literal
+   * error code, so scanning script bodies would arm the latch on every
+   * Braintree 3DS checkout, failure or not. */
+  private noteThreeDsSdkError(text: string | null): void {
+    if (isThreeDsSdkErrorText(text)) this.threeDsSdkErrorAt = Date.now();
   }
 
   private boundedPush<T>(target: T[], value: T): void {
@@ -99,21 +137,25 @@ export class OperatorEvidenceCollector {
 
   private async attachPage(page: Page): Promise<void> {
     const onConsole = (message: ConsoleMessage): void => {
+      const text = this.mask.maskText(message.text());
+      this.noteThreeDsSdkError(text);
       this.boundedPush(this.console, {
         seq: this.next(),
         kind: "console",
         level: message.type(),
-        text: this.mask.maskText(message.text()),
+        text,
         url: message.location().url || page.url(),
         at: Date.now(),
       });
     };
     const onPageError = (error: Error): void => {
+      const text = this.mask.maskText(error.message);
+      this.noteThreeDsSdkError(text);
       this.boundedPush(this.console, {
         seq: this.next(),
         kind: "exception",
         level: "error",
-        text: this.mask.maskText(error.message),
+        text,
         url: page.url(),
         at: Date.now(),
       });
@@ -154,6 +196,7 @@ export class OperatorEvidenceCollector {
         response_body: null,
         loading_failed: null,
       };
+      this.noteThreeDsSdkError(record.request_body);
       if (previous !== undefined && previous.state === "pending") previous.state = "completed";
       this.network.set(event.requestId, record);
       if (this.network.size > 500) this.network.delete(this.network.keys().next().value as string);
