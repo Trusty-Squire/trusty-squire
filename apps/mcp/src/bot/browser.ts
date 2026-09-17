@@ -1622,14 +1622,16 @@ export class BrowserController implements BrowserDriver {
     }
     // Register the chooser waiter BEFORE the click so the event can't be missed.
     // The catch must attach at creation, not after the click resolves: the click
-    // actionability-waits up to 30s (e.g. an occluded button), so the waiter's
-    // 15s timeout can reject while the click is still pending — a bare rejection
-    // here is an unhandledRejection that kills the whole MCP server process.
+    // actionability-waits (e.g. an occluded button), so the waiter's 15s timeout
+    // can reject while the click is still pending — a bare rejection here is an
+    // unhandledRejection that kills the whole MCP server process. The click is
+    // bounded to 8s like the other click paths so it resolves before the 15s
+    // waiter instead of racing it.
     const chooserPromise: Promise<FileChooser | null> = page
       .waitForEvent("filechooser", { timeout: 15_000 })
       .then((c): FileChooser | null => c)
       .catch((): null => null);
-    await locator.click();
+    await locator.click({ timeout: 8000 });
     const chooser = await chooserPromise;
     if (chooser === null) {
       throw new Error(
@@ -1936,7 +1938,14 @@ export class BrowserController implements BrowserDriver {
       // selector didn't resolve / element vanished — fall through to a click
     }
     if (!this.humanize) {
-      await this.page.click(selector);
+      // Bounded to match clickHandle/clickOnPage below: an unbounded
+      // page.click burns the Playwright default 30s when the target never
+      // becomes actionable (occluded/animating one-page checkout submit),
+      // turning a fast re-observe/retry cycle into a half-minute stall
+      // (measured: 3×33.6s burns in one checkout drive). Slow-but-real
+      // navigations measured ≤3.7s, so 8s leaves ~2× headroom. noWaitAfter
+      // matches clickHandle semantics — the settle path reports navigation.
+      await this.page.click(selector, { timeout: 8000, noWaitAfter: true });
       return;
     }
     await this.humanClick(selector);
@@ -3118,7 +3127,12 @@ export class BrowserController implements BrowserDriver {
       if (chosenValue === undefined) {
         throw new Error(`<select> ${activeSelector} has no selectable option`);
       }
-      await selectLocator.selectOption(chosenValue);
+      // Bounded like every other click path: selectOption's actionability
+      // retry loop otherwise runs the Playwright default 30s when the select
+      // was unmounted/hidden by a re-render between the fresh extract and
+      // this write (measured: 31.0s ok:false select burn on a remounting
+      // address-autocomplete element). 8s = the click-path bound.
+      await selectLocator.selectOption(chosenValue, { timeout: 8000 });
       const committedValue = await selectLocator.inputValue();
       if (committedValue !== chosenValue) {
         throw new Error(
@@ -3749,8 +3763,9 @@ export class BrowserController implements BrowserDriver {
     if (box === null) {
       // Element exists but isn't in the layout (e.g., display:none).
       // Fall back to the regular click which will fail loudly with a
-      // useful error.
-      await locator.click();
+      // useful error. Bounded like the rest of the click paths — an
+      // unbounded click here burns the Playwright default 30s.
+      await locator.click({ timeout: 8000 });
       return;
     }
     // Aim for a random point inside the bounding box (not always the
