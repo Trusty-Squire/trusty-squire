@@ -289,6 +289,15 @@ export function parseMailRowDate(dateTitle: string | null): number | null {
   return Number.isFinite(ts) ? ts : null;
 }
 
+// Pure: whether the row's parsed date is within 24h of `now` — the same
+// recency scope the search query enforces server-side (newer_than:1d in
+// buildVerificationSearchQuery). Rows without a parseable date never
+// qualify. Exported for unit tests.
+export function mailRowIsRecent(row: Pick<MailResultRow, "dateTitle">, now: number): boolean {
+  const ts = parseMailRowDate(row.dateTitle);
+  return ts !== null && now - ts <= 24 * 60 * 60 * 1000;
+}
+
 // Gmail search results are ordered by RELEVANCE, not date ("Showing most
 // relevant"), so the first row is not the newest mail. MEASURED 2026-09-17
 // (rc.35 stale-code defect, #831): the unfiltered query ranked an 11:39 PM
@@ -330,11 +339,16 @@ export function chooseMailRow(
   return searchPick;
 }
 
-// Reads the All Mail listing's sender-matching rows with bounded settle
-// retries — a transient render can yield zero rows before Gmail finishes
-// drawing the list. Bounded: a genuinely empty mailbox must still resolve in
-// finite time. Any extraction failure resolves to zero rows; the search
-// listing's own result then stands.
+// Reads the All Mail listing's sender-matching, last-24h rows with bounded
+// settle retries — a transient render can yield zero rows before Gmail
+// finishes drawing the list. The pool is recency-bound client-side
+// (mailRowIsRecent) to the search query's newer_than:1d scope: the listing is
+// real-time but unbounded in age, and an unbounded pool would let last week's
+// same-sender mail (its single-use link long expired) win as found:true during
+// the stale-index window instead of retrying toward honest not-found.
+// Bounded: a genuinely empty mailbox must still resolve in finite time. Any
+// extraction failure resolves to zero rows; the search listing's own result
+// then stands.
 async function readAllMailMatchingRows(
   browser: BrowserController,
   page: Page,
@@ -348,7 +362,8 @@ async function readAllMailMatchingRows(
     if (rows.length > 0) break;
     await waitForCaptchaChallengeToSettle(browser, 1200, 0, page).catch(() => false);
   }
-  return rows.filter((r) => mailRowMatchesSender(r, sender));
+  const now = Date.now();
+  return rows.filter((r) => mailRowMatchesSender(r, sender) && mailRowIsRecent(r, now));
 }
 
 // Gmail's own search backend intermittently throws a transient error —

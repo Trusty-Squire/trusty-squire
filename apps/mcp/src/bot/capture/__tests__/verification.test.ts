@@ -13,9 +13,9 @@ import {
   isGmailChromeLink,
   mailRowMatchesSender,
   parseMailRowDate,
+  mailRowIsRecent,
   pickNewestMailRow,
   chooseMailRow,
-  GMAIL_ALL_MAIL_URL,
   type MailResultRow,
 } from "../verification.js";
 
@@ -368,7 +368,33 @@ describe("chooseMailRow (real-time All Mail supplement vs eventually-consistent 
     const allMail = row({ dateTitle: "Sep 17, 2026, 5:10 AM", visibleText: "all-mail" });
     expect(chooseMailRow(search, allMail)).toBe(allMail);
   });
-  it("GMAIL_ALL_MAIL_URL is the non-category-limited whole-mailbox listing", () => {
-    expect(GMAIL_ALL_MAIL_URL).toBe("https://mail.google.com/mail/u/0/#all");
+});
+
+describe("mailRowIsRecent (All Mail supplement's newer_than:1d pool bound)", () => {
+  const row = (dateTitle: string | null): MailResultRow => ({
+    selector: '[data-ts-mail-row="0"]',
+    fromEmail: null,
+    fromName: null,
+    subject: null,
+    dateTitle,
+    visibleText: "",
+  });
+  it("accepts a row within 24h of now", () => {
+    const now = Date.now();
+    expect(mailRowIsRecent(row(new Date(now - 60_000).toString()), now)).toBe(true);
+    expect(mailRowIsRecent(row(new Date(now - 23.5 * 60 * 60 * 1000).toString()), now)).toBe(
+      true,
+    );
+  });
+  it("rejects a row older than 24h", () => {
+    const now = Date.now();
+    expect(mailRowIsRecent(row(new Date(now - 25 * 60 * 60 * 1000).toString()), now)).toBe(
+      false,
+    );
+  });
+  it("rejects rows without a parseable date", () => {
+    const now = Date.now();
+    expect(mailRowIsRecent(row(null), now)).toBe(false);
+    expect(mailRowIsRecent(row("Not starred"), now)).toBe(false);
   });
 });

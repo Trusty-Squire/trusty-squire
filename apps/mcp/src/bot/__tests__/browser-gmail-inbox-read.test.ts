@@ -142,6 +142,22 @@ const gRow = (
   `<span class="bq3">${visibleDate}</span></span></td>` +
   `</tr>`;
 
+// Gmail's full date-cell timestamp shape ("Sep 17, 2026, 5:10 AM") from a
+// Date relative to now. Dates are generated, not hard-coded: the All Mail
+// supplement's candidate pool is recency-bound to the last 24h, so fixed
+// fixture dates would silently age out of the pool as the wall clock moves.
+const gmailDateTitle = (d: Date): string => {
+  const months = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  ];
+  let h = d.getHours();
+  const ampm = h >= 12 ? "PM" : "AM";
+  h = h % 12 || 12;
+  const min = String(d.getMinutes()).padStart(2, "0");
+  return `${months[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}, ${h}:${min} ${ampm}`;
+};
+
 const MULTI_ROW_LIST =
   `<table><tbody>` +
   gRow(
@@ -150,7 +166,7 @@ const MULTI_ROW_LIST =
     "Proton",
     "Proton Verification Code",
     "Enter this code to finish the process: 934870. Stay secure, the Proton Team.",
-    "Sep 16, 2026, 11:39 PM",
+    gmailDateTitle(new Date(Date.now() - 21 * 60_000)),
     "11:39 PM",
   ) +
   gRow(
@@ -159,7 +175,7 @@ const MULTI_ROW_LIST =
     "Cal.com",
     "Cal.com: Verify your account",
     "Please verify your email address by clicking the button below.",
-    "Sep 17, 2026, 5:03 AM",
+    gmailDateTitle(new Date(Date.now() - 14 * 60_000)),
     "5:03 AM",
   ) +
   gRow(
@@ -168,7 +184,7 @@ const MULTI_ROW_LIST =
     "craigslist",
     "craigslist account sign-up",
     "to complete your craigslist account. complete account sign-up",
-    "Sep 17, 2026, 5:10 AM",
+    gmailDateTitle(new Date(Date.now() - 7 * 60_000)),
     "5:10 AM",
   ) +
   `</tbody></table>`;
@@ -529,7 +545,16 @@ const OPEN_ROW_SCRIPT = `<script>
   }
 </script>`;
 
-function staleSearchIndexHandler(): (url: string) => string {
+function staleSearchIndexHandler(
+  opts: { craigslistDate?: Date } = {},
+): (url: string) => string {
+  // Default: the fresh craigslist mail delivered minutes ago; the search
+  // rows keep their relative order (proton < calcom < craigslist).
+  const craigslistTitle = gmailDateTitle(
+    opts.craigslistDate ?? new Date(Date.now() - 7 * 60_000),
+  );
+  const calcomTitle = gmailDateTitle(new Date(Date.now() - 14 * 60_000));
+  const protonTitle = gmailDateTitle(new Date(Date.now() - 21 * 60_000));
   return (_url) => {
     const searchRows =
       gRow(
@@ -538,7 +563,7 @@ function staleSearchIndexHandler(): (url: string) => string {
         "Proton",
         "Proton Verification Code",
         "Enter this code to finish the process: 934870. Stay secure, the Proton Team.",
-        "Sep 16, 2026, 11:39 PM",
+        protonTitle,
         "11:39 PM",
       ) +
       gRow(
@@ -547,7 +572,7 @@ function staleSearchIndexHandler(): (url: string) => string {
         "Cal.com",
         "Cal.com: Verify your account",
         "Please verify your email address by clicking the button below.",
-        "Sep 17, 2026, 5:03 AM",
+        calcomTitle,
         "5:03 AM",
       );
     const craigslistRow = gRow(
@@ -556,7 +581,7 @@ function staleSearchIndexHandler(): (url: string) => string {
       "craigslist",
       "craigslist account sign-up",
       "to complete your craigslist account. complete account sign-up",
-      "Sep 17, 2026, 5:10 AM",
+      craigslistTitle,
       "5:10 AM",
     );
     return (
@@ -584,10 +609,12 @@ function staleSearchIndexHandler(): (url: string) => string {
   };
 }
 
-async function staleIndexHarness(): Promise<{ context: BrowserContext }> {
+async function staleIndexHarness(
+  opts: { craigslistDate?: Date } = {},
+): Promise<{ context: BrowserContext }> {
   if (browser === undefined) throw new Error("Chromium unavailable");
   const context = await browser.newContext();
-  const handler = staleSearchIndexHandler();
+  const handler = staleSearchIndexHandler(opts);
   await context.route("https://mail.google.com/**", (route) =>
     route.fulfill({ contentType: "text/html", body: handler(route.request().url()) }),
   );
@@ -630,6 +657,29 @@ describe("operate_read_inbox supplements the search listing with the real-time A
     const { context } = await staleIndexHarness();
     try {
       const res = await readInbox(context, { sender: "github.com" });
+      expect(res.found).toBe(false);
+      expect(res.code).toBeNull();
+      expect(res.link).toBeNull();
+      expect(res.needs_user?.resume).toBe("code");
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+
+  it("an old (>1d) same-sender row in All Mail never satisfies a sender-filtered read", async () => {
+    if (!available) return;
+    // The #all listing is the WHOLE mailbox: a reused mailbox holds last
+    // attempt's craigslist sign-up mail (its single-use activation link has
+    // long expired) while the search listing (newer_than:1d) correctly lacks
+    // it. Without the supplement's recency bound, chooseMailRow would open
+    // that stale row and return its dead link as found:true — ending the
+    // retries that should return honest not-found until the fresh mail
+    // arrives.
+    const { context } = await staleIndexHarness({
+      craigslistDate: new Date(Date.now() - 30 * 60 * 60 * 1000),
+    });
+    try {
+      const res = await readInbox(context, { sender: "craigslist" });
       expect(res.found).toBe(false);
       expect(res.code).toBeNull();
       expect(res.link).toBeNull();
