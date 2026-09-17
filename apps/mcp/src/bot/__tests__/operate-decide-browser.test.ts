@@ -119,7 +119,13 @@ it("operate_decide on a live fixture page: expected ref with confidence, absent 
     const revealed = (await operateDecideTool.handler(
       { session_id: sessionId, goal: "Click the control that reveals the API key" },
       stubbedJevApi(jevCalls),
-    )) as { decision: string; ref: string; role: string; confidence: number; stuck: { noul: number } };
+    )) as {
+      decision: string;
+      ref: string;
+      role: string;
+      confidence: number;
+      stuck: { noul: number };
+    };
     expect(revealed.decision).toBe("pick_ref");
     expect(revealed.ref).toBe(liveRef("@reveal"));
     expect(revealed.role).toBe("button");

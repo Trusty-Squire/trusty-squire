@@ -193,13 +193,13 @@ for the system and data flows.
 
 ## MCP tools
 
-The default MCP registry exposes 29 tools (31 when maintainer diagnostics are
-enabled). The 20-tool operator driving surface uses flat, single-purpose verbs:
+The default MCP registry exposes 30 tools (32 when maintainer diagnostics are
+enabled). The 21-tool operator driving surface uses flat, single-purpose verbs:
 `operate_start`, `operate_finish`, `operate_observe`, `operate_screenshot`,
 `operate_network`, `operate_navigate`, `operate_click`, `operate_type`, `operate_select`,
 `operate_press`, `operate_scroll`, `operate_wait`, `operate_read_inbox`, `operate_login`,
-`operate_fill_credential`, `operate_extract`, `inject_card`, `list_credentials`,
-`list_payment_cards`, and `edit_payment_card`.
+`operate_fill_credential`, `operate_extract`, `operate_decide`, `inject_card`,
+`list_credentials`, `list_payment_cards`, and `edit_payment_card`.
 Recipe and vault/account tools remain separate surfaces. The complete migration
 table and input contracts are in [operator-tool-surface.md](docs/operator-tool-surface.md).
 The evidence required to qualify an operator build is in
@@ -215,7 +215,7 @@ For controls visible only in the image, see
 The maintainer-only `list_extract_failures` → `get_extract_failure`
 DOM-diagnostics pair is excluded from that surface; set
 `TRUSTY_SQUIRE_DIAGNOSTICS=1` in the MCP server environment to opt into the
-22-tool diagnostics profile.
+23-tool diagnostics profile.
 
 Operate sessions default to `format:"compact"` observations: a bounded,
 paged `browser-use-control-query` control map containing every actionable

@@ -91,7 +91,8 @@ export class JevRequestError extends Error {
 }
 
 function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
-  if (signal?.aborted) return Promise.reject(signal.reason ?? new Error("operator_request_cancelled"));
+  if (signal?.aborted)
+    return Promise.reject(signal.reason ?? new Error("operator_request_cancelled"));
   return new Promise((resolve, reject) => {
     const timer = setTimeout(resolve, ms);
     signal?.addEventListener(
@@ -201,7 +202,9 @@ function parseJevResult(body: string): JevResult {
   try {
     parsed = JSON.parse(body);
   } catch {
-    throw new Error(`jev_invalid_response: TypeSafe System One returned non-JSON body: ${bodySnippet(body)}`);
+    throw new Error(
+      `jev_invalid_response: TypeSafe System One returned non-JSON body: ${bodySnippet(body)}`,
+    );
   }
   const answers = (parsed as { answers?: unknown }).answers;
   if (typeof answers !== "object" || answers === null) {

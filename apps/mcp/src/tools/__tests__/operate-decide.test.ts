@@ -20,16 +20,12 @@ import {
 
 const observe = vi.fn();
 const withProvisionSessionCall = vi.fn(
-  async (
-    _sessionId: string,
-    fn: (session: unknown) => Promise<unknown>,
-    _signal?: AbortSignal,
-  ) => await fn(undefined),
+  async (_sessionId: string, fn: (session: unknown) => Promise<unknown>, _signal?: AbortSignal) =>
+    await fn(undefined),
 );
 
 vi.mock("../../bot/provision-session.js", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof ProvisionSessionModule>();
+  const actual = await importOriginal<typeof ProvisionSessionModule>();
   return {
     ...actual,
     observe: (...args: Parameters<typeof observe>) => observe(...args),
@@ -144,7 +140,10 @@ describe("operate_decide request mapping", () => {
     const body = JSON.parse(input.http.body!) as {
       model: string;
       state: string;
-      questions: Record<string, { type: string; instructions: string; criteria?: Record<string, string> }>;
+      questions: Record<
+        string,
+        { type: string; instructions: string; criteria?: Record<string, string> }
+      >;
     };
     expect(body.model).toBe(JEV_MODEL);
     expect(body.state).toContain("https://fixture.test/keys");
@@ -152,10 +151,7 @@ describe("operate_decide request mapping", () => {
     expect(body.questions.pick!.type).toBe("choice");
     expect(body.questions.pick!.instructions).toBe("Reveal the API key");
     // Criteria object keyed by ref, with an `options` array never sent.
-    expect(Object.keys(body.questions.pick!.criteria!)).toEqual([
-      "@e:reveal",
-      "@e:key-name",
-    ]);
+    expect(Object.keys(body.questions.pick!.criteria!)).toEqual(["@e:reveal", "@e:key-name"]);
     expect(JSON.stringify(body)).not.toContain('"options":[');
     expect(body.questions.stuck!.type).toBe("noul");
     // The stuck question is self-contained: it carries the goal text and the
@@ -167,7 +163,9 @@ describe("operate_decide request mapping", () => {
 
   it("excludes payment elements, offscreen controls, and notFillable containers", async () => {
     observe.mockResolvedValue(observation(PAGE_ROWS));
-    const api = mockApi(() => Promise.resolve(jevOk({ answers: { pick: { choice: "@e:reveal" } } })));
+    const api = mockApi(() =>
+      Promise.resolve(jevOk({ answers: { pick: { choice: "@e:reveal" } } })),
+    );
     await operateDecideTool.handler({ session_id: "s1", goal: "g" }, api);
     const body = JSON.parse(vi.mocked(api.useCredential).mock.calls[0]![0]!.http.body!) as {
       questions: { pick: { criteria: Record<string, string> } };
@@ -274,9 +272,9 @@ describe("operate_decide answer mapping", () => {
   it("fails honestly when the model answers with an unoffered option", async () => {
     observe.mockResolvedValue(observation(PAGE_ROWS));
     const api = mockApi(() => Promise.resolve(jevOk({ answers: { pick: { choice: "@e:pay" } } })));
-    await expect(
-      operateDecideTool.handler({ session_id: "s1", goal: "g" }, api),
-    ).rejects.toThrow(/jev_invalid_response.*@e:pay/);
+    await expect(operateDecideTool.handler({ session_id: "s1", goal: "g" }, api)).rejects.toThrow(
+      /jev_invalid_response.*@e:pay/,
+    );
   });
 
   it("rejects prototype names as an unoffered option", async () => {
@@ -284,9 +282,9 @@ describe("operate_decide answer mapping", () => {
     const api = mockApi(() =>
       Promise.resolve(jevOk({ answers: { pick: { choice: "constructor" } } })),
     );
-    await expect(
-      operateDecideTool.handler({ session_id: "s1", goal: "g" }, api),
-    ).rejects.toThrow(/jev_invalid_response.*"constructor"/);
+    await expect(operateDecideTool.handler({ session_id: "s1", goal: "g" }, api)).rejects.toThrow(
+      /jev_invalid_response.*"constructor"/,
+    );
     await expect(
       operateDecideTool.handler(
         {
@@ -304,15 +302,15 @@ describe("operate_decide answer mapping", () => {
     const api = mockApi(() => {
       throw new Error("must not be called");
     });
-    await expect(
-      operateDecideTool.handler({ session_id: "s1", goal: "g" }, api),
-    ).rejects.toThrow(/nothing to decide/);
+    await expect(operateDecideTool.handler({ session_id: "s1", goal: "g" }, api)).rejects.toThrow(
+      /nothing to decide/,
+    );
   });
 
   it("requires the api-client (the vaulted credential path)", async () => {
-    await expect(
-      operateDecideTool.handler({ session_id: "s1", goal: "g" }, null),
-    ).rejects.toThrow(/connect/);
+    await expect(operateDecideTool.handler({ session_id: "s1", goal: "g" }, null)).rejects.toThrow(
+      /connect/,
+    );
   });
 });
 
@@ -363,7 +361,9 @@ describe("operate_decide retry on transient unavailability", () => {
             },
           });
         }
-        return Promise.resolve(jevOk({ answers: { pick: { choice: "@e:reveal", confidence: 0.9 } } }));
+        return Promise.resolve(
+          jevOk({ answers: { pick: { choice: "@e:reveal", confidence: 0.9 } } }),
+        );
       });
       const outcome = await advanceUntilSettled(
         operateDecideTool.handler({ session_id: "s1", goal: "g" }, api) as Promise<unknown>,
@@ -383,7 +383,12 @@ describe("operate_decide retry on transient unavailability", () => {
       const api = mockApi(() => {
         calls++;
         return Promise.resolve({
-          response: { status: 503, headers: {}, body: '{"detail":{"error_type":"model_unavailable"}}', truncated: false },
+          response: {
+            status: 503,
+            headers: {},
+            body: '{"detail":{"error_type":"model_unavailable"}}',
+            truncated: false,
+          },
         });
       });
       const outcome = await advanceUntilSettled(
@@ -415,9 +420,9 @@ describe("operate_decide retry on transient unavailability", () => {
         response: { status: 401, headers: {}, body: '{"detail":"unauthorized"}', truncated: false },
       }),
     );
-    await expect(
-      operateDecideTool.handler({ session_id: "s1", goal: "g" }, api),
-    ).rejects.toThrow(/jev_request_failed.*401/);
+    await expect(operateDecideTool.handler({ session_id: "s1", goal: "g" }, api)).rejects.toThrow(
+      /jev_request_failed.*401/,
+    );
     expect(api.useCredential).toHaveBeenCalledTimes(1);
   });
 });

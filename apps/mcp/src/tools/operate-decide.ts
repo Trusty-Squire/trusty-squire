@@ -21,11 +21,7 @@
 import { z } from "zod";
 import type { Tool } from "./index.js";
 import { assertApi } from "./assert-api.js";
-import {
-  observe,
-  withProvisionSessionCall,
-  type Observation,
-} from "../bot/provision-session.js";
+import { observe, withProvisionSessionCall, type Observation } from "../bot/provision-session.js";
 import type { SafeControlV2 } from "../bot/compact-observation-v2.js";
 import {
   askJev,
@@ -158,9 +154,10 @@ function pageState(obs: Observation): string {
   );
 }
 
-function collectPageOptions(
-  obs: Observation,
-): { criteria: Record<string, string>; rows: ParsedRow[] } {
+function collectPageOptions(obs: Observation): {
+  criteria: Record<string, string>;
+  rows: ParsedRow[];
+} {
   const rows = (obs.safe_table ?? [])
     .map(parseRow)
     .filter((row): row is ParsedRow => row !== null && row.offscreen === false)
@@ -182,11 +179,7 @@ function requireAnswer(result: JevResult, name: string): JevResult["answers"][st
   return answer;
 }
 
-function requireChoice(
-  result: JevResult,
-  name: string,
-  criteria: Record<string, string>,
-): string {
+function requireChoice(result: JevResult, name: string, criteria: Record<string, string>): string {
   const answer = requireAnswer(result, name);
   const choice = answer.choice;
   if (typeof choice !== "string" || !Object.hasOwn(criteria, choice)) {
@@ -305,9 +298,9 @@ export const operateDecideTool: Tool<z.infer<typeof decideSchema>> = {
     "observation. Three shapes: omit `decision` to pick which element ref on the current page " +
     "best advances `goal` (built from a fresh compact control map; payment elements are " +
     "excluded by construction and a stuck/none-of-these reading comes back alongside); " +
-    "`decision:{type:\"choice\",options}` assigns a value FROM the provided option keys — Jev " +
+    '`decision:{type:"choice",options}` assigns a value FROM the provided option keys — Jev ' +
     "only assigns, it never authors values or plans, so keep that with you; " +
-    "`decision:{type:\"noul\"}` answers a yes/no validation of `goal` against the page. " +
+    '`decision:{type:"noul"}` answers a yes/no validation of `goal` against the page. ' +
     "The response carries the chosen ref (or option key / yes-no probability), per-option " +
     "probabilities, and a CONFIDENCE value straight from the model. Confidence is first-class " +
     "and yours to gate: act on the decision when YOUR confidence threshold is met and escalate " +
