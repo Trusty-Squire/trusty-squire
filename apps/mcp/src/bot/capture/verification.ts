@@ -441,10 +441,18 @@ export async function awaitVerification(
           }
           chosen = pickNewestMailRow(matches);
         }
-        const opened =
-          chosen !== null && openMailRowOf !== undefined
-            ? await openMailRowOf(inboxTab, chosen.selector).catch(() => false)
-            : await browser.openFirstMailResult(inboxTab).catch(() => false);
+        // The legacy first-row open fires ONLY on capability detection — the
+        // controller lacks the row extraction (older mock surface) — never
+        // when extraction exists and returns no rows: a transient evaluate
+        // failure or markup drift then keeps its bounded retries and ends in
+        // the honest not-found parse below, instead of blind-opening
+        // whatever row Gmail ranked first (the #831 stale-row harm).
+        let opened = false;
+        if (chosen !== null && openMailRowOf !== undefined) {
+          opened = await openMailRowOf(inboxTab, chosen.selector).catch(() => false);
+        } else if (mailRowsOf === undefined) {
+          opened = await browser.openFirstMailResult(inboxTab).catch(() => false);
+        }
         if (opened) {
           // Read the opened message's OWN container (card + body) when Gmail
           // renders one, so page chrome never enters the code parse, the link
