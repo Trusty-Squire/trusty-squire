@@ -949,9 +949,7 @@ export class BrowserController implements BrowserDriver {
           } catch {
             errPreview = `status=${resp.status()}`;
           }
-          this.logOperatorDiagnostic(
-            `[captcha-trace] createAccount ${errPreview}`,
-          );
+          this.logOperatorDiagnostic(`[captcha-trace] createAccount ${errPreview}`);
           return;
         }
         if (

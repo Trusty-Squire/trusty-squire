@@ -167,12 +167,8 @@ export async function fetchCaptchaToken(
   return { token: null, outcome: "unsupported_variant" };
 }
 
-function nonOkReason(
-  res: Exclude<TwoCaptchaResult, { kind: "ok" }>,
-): string | undefined {
-  return res.kind === "submission_failed" || res.kind === "solver_error"
-    ? res.reason
-    : undefined;
+function nonOkReason(res: Exclude<TwoCaptchaResult, { kind: "ok" }>): string | undefined {
+  return res.kind === "submission_failed" || res.kind === "solver_error" ? res.reason : undefined;
 }
 
 // The page half: write the token into the variant's widget and settle. This is
@@ -249,7 +245,6 @@ const GATE_POST_SETTLE_MS = 4_000;
 
 // One surface dump per page: the SDK shape does not change under us.
 const hcaptchaSurfaceDumped = new WeakSet<object>();
-
 
 // Hard bound on a single API/2Captcha request on the operate path. Neither the
 // vault proxy nor the credential listing carries a deadline of its own, so
@@ -541,16 +536,12 @@ async function deliverGateHandoff(page: Page, variant: string): Promise<void> {
       }
       const paramNames = Array.from(url.searchParams.keys());
       const code = url.searchParams.get("code");
-      frameDesc.push(
-        `${url.host}${url.pathname}?[${paramNames.join(",")}]${code ? "+CODE" : ""}`,
-      );
+      frameDesc.push(`${url.host}${url.pathname}?[${paramNames.join(",")}]${code ? "+CODE" : ""}`);
       if (code && url.searchParams.has("state") && !handoffUrl) {
         handoffUrl = frame.url();
       }
     }
-    console.error(
-      `[captcha-postinject-diag] frames=${JSON.stringify(frameDesc)}`,
-    );
+    console.error(`[captcha-postinject-diag] frames=${JSON.stringify(frameDesc)}`);
     if (!handoffUrl) return;
     const mainFrame = page.mainFrame();
     const delivered = await mainFrame
@@ -645,9 +636,7 @@ async function runDetachedTokenFetch(session: Session, page?: Page): Promise<voi
                 textareas: deepCount(
                   'textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"], textarea[name="g-recaptcha-response"]',
                 ),
-                hosts: deepCount(
-                  ".h-captcha, [data-hcaptcha-widget-id], [data-hcaptcha-response]",
-                ),
+                hosts: deepCount(".h-captcha, [data-hcaptcha-widget-id], [data-hcaptcha-response]"),
                 iframes: deepCount('iframe[src*="hcaptcha.com"], iframe[id^="captcha"]'),
               };
             });

@@ -1053,8 +1053,7 @@ export async function extractHcaptchaSitekey(
       try {
         const parsed = new URL(url);
         const hash = parsed.hash.startsWith("#") ? parsed.hash.slice(1) : parsed.hash;
-        const k =
-          parsed.searchParams.get("sitekey") ?? new URLSearchParams(hash).get("sitekey");
+        const k = parsed.searchParams.get("sitekey") ?? new URLSearchParams(hash).get("sitekey");
         if (k !== null && k.length > 10) return k;
       } catch {
         // not a parseable URL — skip this frame
@@ -1092,8 +1091,7 @@ export async function findHcaptchaWidgetPageUrl(
     if (/hcaptcha\.com|newassets\.hcaptcha\.com/.test(url)) continue;
     try {
       const hosts = await frame.evaluate(() => ({
-        container:
-          document.querySelector<HTMLElement>("[data-sitekey], .h-captcha") !== null,
+        container: document.querySelector<HTMLElement>("[data-sitekey], .h-captcha") !== null,
         textarea:
           document.querySelector<HTMLTextAreaElement>(
             'textarea[name="h-captcha-response"], textarea[name="g-recaptcha-response"]',
@@ -1242,218 +1240,211 @@ export function hcaptchaInjectScript({
   hasHcaptchaGlobal: boolean;
 } {
   {
-        // Shadow-DOM-aware: the widget host and its response textarea can sit
-        // inside an open shadow root, invisible to document.querySelector.
-        const deepAll = (selector: string): Element[] => {
-          const out: Element[] = [];
-          const walk = (root: Document | ShadowRoot): void => {
-            for (const el of Array.from(root.querySelectorAll(selector))) out.push(el);
-            for (const el of Array.from(root.querySelectorAll("*"))) {
-              const sr = (el as HTMLElement).shadowRoot;
-              if (sr) walk(sr);
-            }
-          };
-          walk(document);
-          return out;
-        };
-        const widgetIds = new Set<string>();
-        const inputs = deepAll(
-          'textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"], textarea[name="g-recaptcha-response"]',
-        ) as HTMLTextAreaElement[];
+    // Shadow-DOM-aware: the widget host and its response textarea can sit
+    // inside an open shadow root, invisible to document.querySelector.
+    const deepAll = (selector: string): Element[] => {
+      const out: Element[] = [];
+      const walk = (root: Document | ShadowRoot): void => {
+        for (const el of Array.from(root.querySelectorAll(selector))) out.push(el);
+        for (const el of Array.from(root.querySelectorAll("*"))) {
+          const sr = (el as HTMLElement).shadowRoot;
+          if (sr) walk(sr);
+        }
+      };
+      walk(document);
+      return out;
+    };
+    const widgetIds = new Set<string>();
+    const inputs = deepAll(
+      'textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"], textarea[name="g-recaptcha-response"]',
+    ) as HTMLTextAreaElement[];
+    for (const input of inputs) {
+      // g-recaptcha-response is hCaptcha's DROP-IN compat field: filling it
+      // is right when hCaptcha replaced reCAPTCHA, and wrong when the two
+      // are co-resident — there it holds a live reCAPTCHA score token an
+      // hCaptcha token would invalidate. Fill it only when it is empty.
+      if (input.name === "g-recaptcha-response" && input.value.trim().length > 0) continue;
+      input.value = tok;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    for (const host of Array.from(
+      deepAll(".h-captcha, [data-hcaptcha-widget-id], [data-hcaptcha-response]"),
+    )) {
+      host.setAttribute("data-hcaptcha-response", tok);
+      const id =
+        host.getAttribute("data-hcaptcha-widget-id") ??
+        host.getAttribute("data-hcaptcha-widget-id".toLowerCase());
+      if (id !== null && id.length > 0) widgetIds.add(id);
+      host.dispatchEvent(new Event("input", { bubbles: true }));
+      host.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    for (const iframe of Array.from(
+      document.querySelectorAll<HTMLIFrameElement>('iframe[src*="hcaptcha.com"]'),
+    )) {
+      try {
+        const url = new URL(iframe.src);
+        const params = new URLSearchParams(url.hash.startsWith("#") ? url.hash.slice(1) : url.hash);
+        const id = params.get("id");
+        if (id !== null && id.length > 0) widgetIds.add(id);
+      } catch {
+        // ignore malformed extension/proxy iframe URLs
+      }
+    }
+
+    const win = window as unknown as Record<string, unknown>;
+    const hcaptcha = win.hcaptcha as
+      | {
+          getResponse?: (id?: string) => string;
+          getRespKey?: (id?: string) => string;
+        }
+      | undefined;
+    if (hcaptcha !== undefined) {
+      const originalGetResponse = hcaptcha.getResponse?.bind(hcaptcha);
+      const originalGetRespKey = hcaptcha.getRespKey?.bind(hcaptcha);
+      hcaptcha.getResponse = (id?: string) => {
+        if (id === undefined || widgetIds.size === 0 || widgetIds.has(String(id))) return tok;
+        return originalGetResponse?.(id) ?? tok;
+      };
+      hcaptcha.getRespKey = (id?: string) => {
+        if (id === undefined || widgetIds.size === 0 || widgetIds.has(String(id))) return key ?? "";
+        return originalGetRespKey?.(id) ?? key ?? "";
+      };
+    }
+
+    let callbackFired = false;
+    const fire = (fn: unknown): void => {
+      if (typeof fn !== "function") return;
+      callbackFired = true;
+      try {
+        (fn as (t: string, k?: string) => void)(tok, key ?? undefined);
+      } catch {
+        // A page callback can be stale after React remounts a widget.
+      }
+    };
+
+    // Fire callbacks registered by markup, e.g. data-callback="onSubmit".
+    // Not scoped to .h-captcha hosts: some integrations (e.g. Bluesky's
+    // signup gate) put data-callback on the plain div the SDK renders
+    // into, and that div never gains the h-captcha class.
+    try {
+      for (const host of Array.from(deepAll("[data-callback]"))) {
+        const name = (host as HTMLElement).getAttribute("data-callback");
+        if (name) fire(win[name]);
+      }
+    } catch {
+      // no named callback, continue to runtime config scan.
+    }
+    // Last resort: a page that wires its completion through a well-named
+    // global (e.g. onCaptchaComplete) but registers it programmatically.
+    // Deliberately NOT matching /captcha/ - that also catches
+    // onCaptchaError / onCaptchaExpired, which must never fire.
+    if (!callbackFired) {
+      try {
+        for (const name of Object.getOwnPropertyNames(win)) {
+          if (typeof win[name] === "function" && /complete|success|verify/i.test(name)) {
+            fire(win[name]);
+          }
+        }
+      } catch {
+        // heuristic only
+      }
+    }
+    // Programmatic hCaptcha integrations pass function callbacks to
+    // hcaptcha.render(). The SDK keeps them in ___hcaptcha_cfg; crawl it
+    // generically so React/Vue wrappers are handled like plain forms.
+    // This must run BEFORE the form-submit fallback below: a programmatic
+    // integration whose response textarea sits inside a form has no
+    // data-callback attribute and no well-named global, so an earlier
+    // submit would bypass the app's own completion handler and then double
+    // up when the real callback fired here.
+    const seen = new Set<unknown>();
+    const scan = (value: unknown, depth: number): void => {
+      if (value === null || value === undefined || depth > 7 || seen.has(value)) return;
+      seen.add(value);
+      if (typeof value === "function") return;
+      if (typeof value !== "object") return;
+      for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+        const normalized = key.toLowerCase();
+        if (
+          typeof child === "function" &&
+          (normalized === "callback" ||
+            normalized === "success-callback" ||
+            normalized === "verify-callback" ||
+            normalized === "onverify" ||
+            normalized === "onsuccess")
+        ) {
+          fire(child);
+          continue;
+        }
+        if (typeof child === "object" && child !== null) scan(child, depth + 1);
+      }
+    };
+    scan(win.___hcaptcha_cfg, 0);
+    scan(win.hcaptcha, 0);
+
+    // Final fallback for classic form-post integrations: no callback was
+    // reachable, but the token now sits in a response textarea INSIDE a
+    // form - the standard hCaptcha contract reads exactly that field at
+    // submit time, so submitting is the completion a solved human would
+    // trigger. Only forms that actually contain the filled field qualify.
+    let formSubmitted = false;
+    if (!callbackFired && inputs.length > 0) {
+      try {
         for (const input of inputs) {
-          // g-recaptcha-response is hCaptcha's DROP-IN compat field: filling it
-          // is right when hCaptcha replaced reCAPTCHA, and wrong when the two
-          // are co-resident — there it holds a live reCAPTCHA score token an
-          // hCaptcha token would invalidate. Fill it only when it is empty.
-          if (input.name === "g-recaptcha-response" && input.value.trim().length > 0) continue;
-          input.value = tok;
-          input.dispatchEvent(new Event("input", { bubbles: true }));
-          input.dispatchEvent(new Event("change", { bubbles: true }));
-        }
-        for (const host of Array.from(
-          deepAll(".h-captcha, [data-hcaptcha-widget-id], [data-hcaptcha-response]"),
-        )) {
-          host.setAttribute("data-hcaptcha-response", tok);
-          const id =
-            host.getAttribute("data-hcaptcha-widget-id") ??
-            host.getAttribute("data-hcaptcha-widget-id".toLowerCase());
-          if (id !== null && id.length > 0) widgetIds.add(id);
-          host.dispatchEvent(new Event("input", { bubbles: true }));
-          host.dispatchEvent(new Event("change", { bubbles: true }));
-        }
-        for (const iframe of Array.from(
-          document.querySelectorAll<HTMLIFrameElement>('iframe[src*="hcaptcha.com"]'),
-        )) {
-          try {
-            const url = new URL(iframe.src);
-            const params = new URLSearchParams(
-              url.hash.startsWith("#") ? url.hash.slice(1) : url.hash,
-            );
-            const id = params.get("id");
-            if (id !== null && id.length > 0) widgetIds.add(id);
-          } catch {
-            // ignore malformed extension/proxy iframe URLs
-          }
-        }
-
-        const win = window as unknown as Record<string, unknown>;
-        const hcaptcha = win.hcaptcha as
-          | {
-              getResponse?: (id?: string) => string;
-              getRespKey?: (id?: string) => string;
+          const form = input.form ?? input.closest("form");
+          if (form !== null) {
+            // POST into a hidden frame instead of navigating this one: the
+            // gate answers with a redirect that carries the completion code,
+            // and the driver reads it off that frame's URL to hand it to the
+            // embedding page. Navigating the form frame directly destroys
+            // the widget before the handoff can be observed.
+            if (submitMode === "top") {
+              // Standalone gate page: navigate the page itself so the
+              // gate's redirect (the completion code) becomes the page URL.
+              form.submit();
+            } else {
+              const postFrame = document.createElement("iframe");
+              postFrame.name = "hcaptcha-gate-post";
+              postFrame.style.display = "none";
+              document.body.appendChild(postFrame);
+              form.target = "hcaptcha-gate-post";
+              form.submit();
             }
-          | undefined;
-        if (hcaptcha !== undefined) {
-          const originalGetResponse = hcaptcha.getResponse?.bind(hcaptcha);
-          const originalGetRespKey = hcaptcha.getRespKey?.bind(hcaptcha);
-          hcaptcha.getResponse = (id?: string) => {
-            if (id === undefined || widgetIds.size === 0 || widgetIds.has(String(id))) return tok;
-            return originalGetResponse?.(id) ?? tok;
-          };
-          hcaptcha.getRespKey = (id?: string) => {
-            if (id === undefined || widgetIds.size === 0 || widgetIds.has(String(id)))
-              return key ?? "";
-            return originalGetRespKey?.(id) ?? key ?? "";
-          };
-        }
-
-        let callbackFired = false;
-        const fire = (fn: unknown): void => {
-          if (typeof fn !== "function") return;
-          callbackFired = true;
-          try {
-            (fn as (t: string, k?: string) => void)(tok, key ?? undefined);
-          } catch {
-            // A page callback can be stale after React remounts a widget.
+            formSubmitted = true;
+            break;
           }
-        };
+        }
+      } catch {
+        // submit is best-effort
+      }
+    }
 
-        // Fire callbacks registered by markup, e.g. data-callback="onSubmit".
-        // Not scoped to .h-captcha hosts: some integrations (e.g. Bluesky's
-        // signup gate) put data-callback on the plain div the SDK renders
-        // into, and that div never gains the h-captcha class.
+    const result = {
+      ok: inputs.length > 0 || widgetIds.size > 0 || callbackFired,
+      textareas: inputs.length,
+      widgets: widgetIds.size,
+      callbackFired,
+      formSubmitted,
+      dataCallbackHosts: (() => {
         try {
-          for (const host of Array.from(deepAll("[data-callback]"))) {
-            const name = (host as HTMLElement).getAttribute("data-callback");
-            if (name) fire(win[name]);
-          }
+          return deepAll("[data-callback]").length;
         } catch {
-          // no named callback, continue to runtime config scan.
+          return -1;
         }
-        // Last resort: a page that wires its completion through a well-named
-        // global (e.g. onCaptchaComplete) but registers it programmatically.
-        // Deliberately NOT matching /captcha/ - that also catches
-        // onCaptchaError / onCaptchaExpired, which must never fire.
-        if (!callbackFired) {
-          try {
-            for (const name of Object.getOwnPropertyNames(win)) {
-              if (
-                typeof win[name] === "function" &&
-                /complete|success|verify/i.test(name)
-              ) {
-                fire(win[name]);
-              }
-            }
-          } catch {
-            // heuristic only
-          }
+      })(),
+      globalFnMatches: (() => {
+        try {
+          return Object.getOwnPropertyNames(win).filter(
+            (n) => typeof win[n] === "function" && /complete|success|verify/i.test(n),
+          ).length;
+        } catch {
+          return -1;
         }
-        // Programmatic hCaptcha integrations pass function callbacks to
-        // hcaptcha.render(). The SDK keeps them in ___hcaptcha_cfg; crawl it
-        // generically so React/Vue wrappers are handled like plain forms.
-        // This must run BEFORE the form-submit fallback below: a programmatic
-        // integration whose response textarea sits inside a form has no
-        // data-callback attribute and no well-named global, so an earlier
-        // submit would bypass the app's own completion handler and then double
-        // up when the real callback fired here.
-        const seen = new Set<unknown>();
-        const scan = (value: unknown, depth: number): void => {
-          if (value === null || value === undefined || depth > 7 || seen.has(value)) return;
-          seen.add(value);
-          if (typeof value === "function") return;
-          if (typeof value !== "object") return;
-          for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-            const normalized = key.toLowerCase();
-            if (
-              typeof child === "function" &&
-              (normalized === "callback" ||
-                normalized === "success-callback" ||
-                normalized === "verify-callback" ||
-                normalized === "onverify" ||
-                normalized === "onsuccess")
-            ) {
-              fire(child);
-              continue;
-            }
-            if (typeof child === "object" && child !== null) scan(child, depth + 1);
-          }
-        };
-        scan(win.___hcaptcha_cfg, 0);
-        scan(win.hcaptcha, 0);
-
-        // Final fallback for classic form-post integrations: no callback was
-        // reachable, but the token now sits in a response textarea INSIDE a
-        // form - the standard hCaptcha contract reads exactly that field at
-        // submit time, so submitting is the completion a solved human would
-        // trigger. Only forms that actually contain the filled field qualify.
-        let formSubmitted = false;
-        if (!callbackFired && inputs.length > 0) {
-          try {
-            for (const input of inputs) {
-              const form = input.form ?? input.closest("form");
-              if (form !== null) {
-                // POST into a hidden frame instead of navigating this one: the
-                // gate answers with a redirect that carries the completion code,
-                // and the driver reads it off that frame's URL to hand it to the
-                // embedding page. Navigating the form frame directly destroys
-                // the widget before the handoff can be observed.
-                if (submitMode === "top") {
-                  // Standalone gate page: navigate the page itself so the
-                  // gate's redirect (the completion code) becomes the page URL.
-                  form.submit();
-                } else {
-                  const postFrame = document.createElement("iframe");
-                  postFrame.name = "hcaptcha-gate-post";
-                  postFrame.style.display = "none";
-                  document.body.appendChild(postFrame);
-                  form.target = "hcaptcha-gate-post";
-                  form.submit();
-                }
-                formSubmitted = true;
-                break;
-              }
-            }
-          } catch {
-            // submit is best-effort
-          }
-        }
-
-        const result = {
-          ok: inputs.length > 0 || widgetIds.size > 0 || callbackFired,
-          textareas: inputs.length,
-          widgets: widgetIds.size,
-          callbackFired,
-          formSubmitted,
-          dataCallbackHosts: (() => {
-            try {
-              return deepAll("[data-callback]").length;
-            } catch {
-              return -1;
-            }
-          })(),
-          globalFnMatches: (() => {
-            try {
-              return Object.getOwnPropertyNames(win).filter(
-                (n) =>
-                  typeof win[n] === "function" && /complete|success|verify/i.test(n),
-              ).length;
-            } catch {
-              return -1;
-            }
-          })(),
-          hasHcaptchaGlobal: win.hcaptcha !== undefined,
-        };
-        return result;
+      })(),
+      hasHcaptchaGlobal: win.hcaptcha !== undefined,
+    };
+    return result;
   }
 }
 
