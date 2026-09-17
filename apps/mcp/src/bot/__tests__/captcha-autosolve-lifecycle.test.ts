@@ -26,7 +26,8 @@ const h = vi.hoisted(() => ({
   solveResult: { kind: "ok" as const, token: "P0_eyJhbGciOiJIUzI1NiJ9.MINTED" },
   variantTokenPresent: false,
   challengeRendered: true,
-  gateFrames: [] as Array<{ url: string; evaluate: ReturnType<typeof vi.fn> }>,
+  gateFrames: [] as Array<{ url: () => string; evaluate: ReturnType<typeof vi.fn> }>,
+
 }));
 
 vi.mock("../captcha.js", async (importOriginal) => ({
