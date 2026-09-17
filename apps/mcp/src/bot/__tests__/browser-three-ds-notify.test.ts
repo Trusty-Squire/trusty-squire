@@ -156,10 +156,10 @@ describe("3-D Secure detection and notification", () => {
   // interval makes the synthetic evidence reach the stream reliably; the
   // assertions about the retryable outcome are unchanged.
   const sdkErrorTelemetryScript = (payload: string): string =>
-    '<script>' +
+    "<script>" +
     `const emit = () => fetch("/log", { method: "POST", body: JSON.stringify(${payload}) });` +
-    'emit(); setInterval(emit, 250);' +
-    '</script>';
+    "emit(); setInterval(emit, 250);" +
+    "</script>";
 
   it.skipIf(!available)(
     "reports a Cardinal SDK challenge-launch failure as retryable, without notifying",
@@ -199,33 +199,34 @@ describe("3-D Secure detection and notification", () => {
     "prefers a rendered challenge over stale SDK-error evidence",
     { timeout: evidencePollTimeoutMs },
     async () => {
-    const isolated = await page();
-    let sessionId: string | undefined;
-    try {
-      const released = await releasedCardSession(
-        isolated,
-        sdkErrorTelemetryScript('{ "code": "THREEDS_CARDINAL_SDK_ERROR" }') +
-          '<div>Verify your identity to continue</div><form action="/acs/challenge"><button>Approve</button></form>',
-      );
-      sessionId = released.sessionId;
+      const isolated = await page();
+      let sessionId: string | undefined;
+      try {
+        const released = await releasedCardSession(
+          isolated,
+          sdkErrorTelemetryScript('{ "code": "THREEDS_CARDINAL_SDK_ERROR" }') +
+            '<div>Verify your identity to continue</div><form action="/acs/challenge"><button>Approve</button></form>',
+        );
+        sessionId = released.sessionId;
 
-      // The precedence decision is only exercised once the SDK-error
-      // evidence has actually landed, so wait for it before observing.
-      const session = paymentSession(sessionId);
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        if (session.browser.hasThreeDsSdkErrorEvidence()) break;
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        // The precedence decision is only exercised once the SDK-error
+        // evidence has actually landed, so wait for it before observing.
+        const session = paymentSession(sessionId);
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          if (session.browser.hasThreeDsSdkErrorEvidence()) break;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        expect(session.browser.hasThreeDsSdkErrorEvidence()).toBe(true);
+
+        const observed = await observe(sessionId);
+        expect(observed.three_ds).toMatchObject({ state: "challenge_detected" });
+        expect(released.notifyThreeDs).toHaveBeenCalledTimes(1);
+      } finally {
+        if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
+        await isolated.context.close();
       }
-      expect(session.browser.hasThreeDsSdkErrorEvidence()).toBe(true);
-
-      const observed = await observe(sessionId);
-      expect(observed.three_ds).toMatchObject({ state: "challenge_detected" });
-      expect(released.notifyThreeDs).toHaveBeenCalledTimes(1);
-    } finally {
-      if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
-      await isolated.context.close();
-    }
-  });
+    },
+  );
 
   // Once a challenge has rendered in this session, a LATER absence of one means
   // it resolved and the checkout is settling — often on the order-confirmation
