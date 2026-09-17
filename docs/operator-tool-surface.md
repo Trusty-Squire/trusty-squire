@@ -21,13 +21,16 @@ surfaces.
 | Payments and vault lists | `inject_card`, `list_credentials`, `list_payment_cards`, `edit_payment_card` |
 
 `operate_read_inbox` reads the session's signed-in Gmail inbox for a
-verification email in a dedicated utility tab that is closed when the read
-finishes, so the page waiting for the code never navigates away. When the
-opened message renders, its text and links are read from the message's own
-cards rather than the whole page, and Gmail's own chrome (account-menu,
-mailbox, and support links) is dropped before scoring; the remaining mail
-links are read verbatim from the DOM, not from the size-capped interactive
-inventory.
+verification email in dedicated utility tabs that are closed when the read
+finishes, so the page waiting for the code never navigates away. Because
+Gmail's search index is eventually consistent (it can lack freshly delivered
+mail for minutes), the read cross-checks the search listing AND the real-time
+All Mail listing and opens the genuinely newest matching row on the page it
+was extracted from. When the opened message renders, its text and links are
+read from the message's own cards rather than the whole page, and Gmail's own
+chrome (account-menu, mailbox, and support links) is dropped before scoring;
+the remaining mail links are read verbatim from the DOM, not from the
+size-capped interactive inventory.
 
 Use an action `ref` from the current observation. `operate_start` and
 `operate_observe` default to `format: "compact"`, a paged control map;

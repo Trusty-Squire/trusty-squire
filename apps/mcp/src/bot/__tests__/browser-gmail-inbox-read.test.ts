@@ -148,8 +148,18 @@ const gRow = (
 // fixture dates would silently age out of the pool as the wall clock moves.
 const gmailDateTitle = (d: Date): string => {
   const months = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
   ];
   let h = d.getHours();
   const ampm = h >= 12 ? "PM" : "AM";
@@ -545,14 +555,10 @@ const OPEN_ROW_SCRIPT = `<script>
   }
 </script>`;
 
-function staleSearchIndexHandler(
-  opts: { craigslistDate?: Date } = {},
-): (url: string) => string {
+function staleSearchIndexHandler(opts: { craigslistDate?: Date } = {}): (url: string) => string {
   // Default: the fresh craigslist mail delivered minutes ago; the search
   // rows keep their relative order (proton < calcom < craigslist).
-  const craigslistTitle = gmailDateTitle(
-    opts.craigslistDate ?? new Date(Date.now() - 7 * 60_000),
-  );
+  const craigslistTitle = gmailDateTitle(opts.craigslistDate ?? new Date(Date.now() - 7 * 60_000));
   const calcomTitle = gmailDateTitle(new Date(Date.now() - 14 * 60_000));
   const protonTitle = gmailDateTitle(new Date(Date.now() - 21 * 60_000));
   return (_url) => {

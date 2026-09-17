@@ -72,7 +72,7 @@ silent failures.
 - **Email verification — the user's own inbox.** Signups are user-owned:
   the operator reads the verification code/link from the user's own Gmail
   through their signed-in browser session via the consent-gated
-  `operate_read_inbox` tool in a dedicated utility tab. The
+  `operate_read_inbox` tool in dedicated utility tabs. The
   Squire-alias inbound-mail subsystem (`packages/inbox`, the resend-inbound
   webhook) was retired in 1.0.1 —
   no aliases are minted and nothing receives inbound mail server-side.
@@ -119,7 +119,7 @@ silent failures.
   - Verification-link click and post-verify navigation primitives the host agent
     drives through the flat `operate_*` tools; the only mailbox access is
     `operate_read_inbox`, the consent-gated Gmail verification read that runs in
-    a dedicated utility tab and never navigates the waiting page.
+    dedicated utility tabs and never navigates the waiting page.
   - DOM/screenshot observation + vault-backed credential extraction the host
     agent composes per step.
   - **`operate_screenshot` — a dedicated debugging capture,**

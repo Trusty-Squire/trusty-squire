@@ -382,15 +382,11 @@ describe("mailRowIsRecent (All Mail supplement's newer_than:1d pool bound)", () 
   it("accepts a row within 24h of now", () => {
     const now = Date.now();
     expect(mailRowIsRecent(row(new Date(now - 60_000).toString()), now)).toBe(true);
-    expect(mailRowIsRecent(row(new Date(now - 23.5 * 60 * 60 * 1000).toString()), now)).toBe(
-      true,
-    );
+    expect(mailRowIsRecent(row(new Date(now - 23.5 * 60 * 60 * 1000).toString()), now)).toBe(true);
   });
   it("rejects a row older than 24h", () => {
     const now = Date.now();
-    expect(mailRowIsRecent(row(new Date(now - 25 * 60 * 60 * 1000).toString()), now)).toBe(
-      false,
-    );
+    expect(mailRowIsRecent(row(new Date(now - 25 * 60 * 60 * 1000).toString()), now)).toBe(false);
   });
   it("rejects rows without a parseable date", () => {
     const now = Date.now();
