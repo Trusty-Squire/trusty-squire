@@ -5734,15 +5734,39 @@ describe("operate session — captcha auto-solve on the general drive", () => {
 
     // The agent spent the next few minutes filling fields with detail:"none",
     // so nothing observed until well past the token's ~120s life.
-    await advanceClock(150_000, async () => {
-      await observe(started.session_id);
-      await drainDetached();
-    });
+    const diagnostics: string[] = [];
+    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await advanceClock(150_000, async () => {
+        await observe(started.session_id);
+        await drainDetached();
+      });
+    } finally {
+      for (const call of stderrWrite.mock.calls) diagnostics.push(String(call[0]));
+      for (const call of consoleError.mock.calls) diagnostics.push(call.map(String).join(" "));
+      stderrWrite.mockRestore();
+      consoleError.mockRestore();
+    }
+    const captured = diagnostics.join("");
 
     // A dead token must not be written: it would fill the response field, read
     // back as solved, and leave nothing to retry.
     expect(h.injectCaptchaCalls).toEqual([]);
-    // Nothing failed on the still-rendered challenge, so a fresh token is bought.
+    // Re-buying on the very next observation buys another token that dies the
+    // same way: the unconsumed expiry starts a geometric backoff instead.
+    expect(h.twoCaptchaCalls).toEqual(["hcaptcha"]);
+    expect(captured).toContain("outcome=token_expired");
+    expect(captured).toContain("outcome=fetch_skipped reason=expiry_backoff");
+    // ...and the audit trail records the skip with a reason (outcome and
+    // reason are sealed vocabulary in the audit line).
+    expect(captured).toContain('"event":"captcha_autosolve","outcome":"<sealed>","reason":"<sealed>"');
+
+    // Past the 30s backoff window the next observation re-arms and buys again.
+    await advanceClock(181_000, async () => {
+      await observe(started.session_id);
+      await drainDetached();
+    });
     expect(h.twoCaptchaCalls).toEqual(["hcaptcha", "hcaptcha"]);
     await finishProvisionSession(started.session_id);
   });
