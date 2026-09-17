@@ -143,7 +143,7 @@ export function buildVerificationResult(
       "No verification email found in the inbox YET. Most often it just hasn't " +
       "arrived (they commonly take 10–30s) — call operate_read_inbox AGAIN " +
       "in a few seconds. If it still fails, the code may have gone by SMS/" +
-      "authenticator: ask the user for it and type it with operate_type. The " + +
+      "authenticator: ask the user for it and type it with operate_type. The " +
       "session stays live either way.",
     resume: "code",
   };
