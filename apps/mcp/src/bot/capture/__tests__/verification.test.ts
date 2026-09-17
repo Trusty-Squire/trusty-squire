@@ -14,6 +14,8 @@ import {
   mailRowMatchesSender,
   parseMailRowDate,
   pickNewestMailRow,
+  chooseMailRow,
+  GMAIL_ALL_MAIL_URL,
   type MailResultRow,
 } from "../verification.js";
 
@@ -328,5 +330,45 @@ describe("pickNewestMailRow (relevance order must not decide recency)", () => {
     expect(parseMailRowDate("Wed, Sep 16, 2026, 11:39 PM")).not.toBeNull();
     expect(parseMailRowDate(null)).toBeNull();
     expect(parseMailRowDate("Not starred")).toBeNull();
+  });
+});
+
+describe("chooseMailRow (real-time All Mail supplement vs eventually-consistent search)", () => {
+  const row = (over: Partial<MailResultRow> & { dateTitle: string | null }) => ({
+    selector: '[data-ts-mail-row="0"]',
+    fromEmail: null,
+    fromName: null,
+    subject: null,
+    visibleText: "",
+    ...over,
+  });
+  it("keeps the search pick when the All Mail listing has no match", () => {
+    const search = row({ dateTitle: "Sep 17, 2026, 5:10 AM", visibleText: "search" });
+    expect(chooseMailRow(search, null)).toBe(search);
+  });
+  it("takes the All Mail row when the search listing matched nothing (the #828 stale-index window)", () => {
+    const allMail = row({ dateTitle: "Sep 17, 2026, 5:10 AM", visibleText: "all-mail" });
+    expect(chooseMailRow(null, allMail)).toBe(allMail);
+    expect(chooseMailRow(null, null)).toBeNull();
+  });
+  it("prefers the newer All Mail row when search matched an older indexed mail (the #831 staleness variant)", () => {
+    const search = row({ dateTitle: "Sep 17, 2026, 5:03 AM", visibleText: "stale-search" });
+    const allMail = row({ dateTitle: "Sep 17, 2026, 5:10 AM", visibleText: "fresh-all-mail" });
+    expect(chooseMailRow(search, allMail)).toBe(allMail);
+  });
+  it("keeps the search row on date ties and when the All Mail row is undated", () => {
+    const search = row({ dateTitle: "Sep 17, 2026, 5:10 AM", visibleText: "search" });
+    const tie = row({ dateTitle: "Sep 17, 2026, 5:10 AM", visibleText: "tie" });
+    expect(chooseMailRow(search, tie)).toBe(search);
+    const undated = row({ dateTitle: null, visibleText: "undated" });
+    expect(chooseMailRow(search, undated)).toBe(search);
+  });
+  it("defers to the All Mail row when the search row's date is unparseable", () => {
+    const search = row({ dateTitle: null, visibleText: "undated-search" });
+    const allMail = row({ dateTitle: "Sep 17, 2026, 5:10 AM", visibleText: "all-mail" });
+    expect(chooseMailRow(search, allMail)).toBe(allMail);
+  });
+  it("GMAIL_ALL_MAIL_URL is the non-category-limited whole-mailbox listing", () => {
+    expect(GMAIL_ALL_MAIL_URL).toBe("https://mail.google.com/mail/u/0/#all");
   });
 });

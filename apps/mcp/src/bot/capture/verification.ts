@@ -227,6 +227,22 @@ export function buildVerificationSearchQuery(): string {
   ].join(" ");
 }
 
+// The All Mail listing URL. Gmail's SEARCH results are eventually consistent:
+// a freshly delivered message can be absent from search results for seconds to
+// 15+ minutes. MEASURED 2026-09-17 (rc.35 craigslist gauntlet, #828): the
+// craigslist sign-up mail sat unread in the mailbox while the exact tool query
+// returned 38 keyword-matching rows WITHOUT it — and once indexed it ranked
+// FIRST — while the same mail appeared in the real-time mailbox listings
+// (inbox / All Mail) within ~26s of delivery, on every one of three measured
+// sends (index latency: ~26s, ~5.5min, >15min). During the window a
+// sender-scoped read found no matching row (found:false) and an unfiltered
+// read picked an older indexed mail's code (#831). The All Mail listing is a
+// real-time, non-category-limited listing of the whole mailbox (newest first,
+// includes archived mail, excludes Spam/Trash), so the read supplements EVERY
+// search listing with it and picks the genuinely newest matching row across
+// BOTH. Exported for unit tests.
+export const GMAIL_ALL_MAIL_URL = "https://mail.google.com/mail/u/0/#all";
+
 // One Gmail search-results row as read by BrowserController.extractMailResultRows.
 export interface MailResultRow {
   // Selector of the tagged row element, valid on the same page until Gmail
@@ -293,6 +309,46 @@ export function pickNewestMailRow(rows: readonly MailResultRow[]): MailResultRow
     }
   }
   return best;
+}
+
+// Pure: choose between the search listing's newest matching row and the All
+// Mail listing's newest matching row. The search index is eventually
+// consistent while the All Mail listing is real-time (see GMAIL_ALL_MAIL_URL),
+// so the newer row wins; an unparseable search-row date defers to the All Mail
+// row, ties and unparseable All Mail dates keep the search row (it was
+// relevance-ranked for exactly this query). Returns the row by reference so
+// the caller knows which page to open it on. Exported for unit tests.
+export function chooseMailRow(
+  searchPick: MailResultRow | null,
+  allMailPick: MailResultRow | null,
+): MailResultRow | null {
+  if (allMailPick === null) return searchPick;
+  if (searchPick === null) return allMailPick;
+  const searchTs = parseMailRowDate(searchPick.dateTitle);
+  const allTs = parseMailRowDate(allMailPick.dateTitle);
+  if (searchTs === null || (allTs !== null && allTs > searchTs)) return allMailPick;
+  return searchPick;
+}
+
+// Reads the All Mail listing's sender-matching rows with bounded settle
+// retries — a transient render can yield zero rows before Gmail finishes
+// drawing the list. Bounded: a genuinely empty mailbox must still resolve in
+// finite time. Any extraction failure resolves to zero rows; the search
+// listing's own result then stands.
+async function readAllMailMatchingRows(
+  browser: BrowserController,
+  page: Page,
+  rowsOf: (page: Page | null) => Promise<MailResultRow[]>,
+  sender: string | undefined,
+): Promise<MailResultRow[]> {
+  await browser.goto(GMAIL_ALL_MAIL_URL, page);
+  let rows: MailResultRow[] = [];
+  for (let i = 0; i < 3; i++) {
+    rows = await rowsOf(page).catch(() => []);
+    if (rows.length > 0) break;
+    await waitForCaptchaChallengeToSettle(browser, 1200, 0, page).catch(() => false);
+  }
+  return rows.filter((r) => mailRowMatchesSender(r, sender));
 }
 
 // Gmail's own search backend intermittently throws a transient error —
@@ -393,6 +449,10 @@ export async function awaitVerification(
     // href attributes (extractRawMailLinks) — the size-capped interactive
     // inventory truncated a long Cal.com token into a dead URL.
     const inboxTab = await browser.openUtilityTab();
+    // Second utility tab for the real-time All Mail listing (see
+    // GMAIL_ALL_MAIL_URL). Lazily created on the first supplemented attempt so
+    // controllers without row extraction (older mock surface) never open it.
+    let allMailTab: Page | null = null;
     try {
       const rawLinksOf = async (page: Page): Promise<VerificationLinkCandidate[]> => {
         const raw = await browser.extractRawMailLinks(page);
@@ -429,16 +489,45 @@ export async function awaitVerification(
           }
         ).openMailResultRow?.bind(browser);
         const rows = (await mailRowsOf?.(inboxTab).catch(() => [])) ?? [];
-        let chosen: MailResultRow | null = null;
-        if (rows.length > 0) {
-          const matches = rows.filter((r) => mailRowMatchesSender(r, opts.sender));
-          if (opts.sender !== undefined && opts.sender.length > 0 && matches.length === 0) {
-            // The hint matched no row's From address, display name, or
-            // subject: do NOT open some other row's mail and read its code.
-            // Bounded retries, then an honest not-found.
-            continue;
+        let chosen: MailResultRow | null =
+          rows.length > 0
+            ? pickNewestMailRow(rows.filter((r) => mailRowMatchesSender(r, opts.sender)))
+            : null;
+        // Supplement the search listing with the real-time All Mail listing
+        // (GMAIL_ALL_MAIL_URL): the search index is eventually consistent and
+        // can lack a freshly delivered mail for minutes, so search alone makes
+        // found:false mean "not there YET" rather than "not there". The newest
+        // matching row across BOTH listings wins; the row is opened on the
+        // page it was extracted from, so its selector stays valid.
+        let chosenPage: Page = inboxTab;
+        if (mailRowsOf !== undefined) {
+          if (allMailTab === null || allMailTab.isClosed()) {
+            allMailTab = await browser.openUtilityTab();
           }
-          chosen = pickNewestMailRow(matches);
+          const allRows = await readAllMailMatchingRows(
+            browser,
+            allMailTab,
+            mailRowsOf,
+            opts.sender,
+          );
+          const allPick = allRows.length > 0 ? pickNewestMailRow(allRows) : null;
+          const merged = chooseMailRow(chosen, allPick);
+          if (merged !== null && merged !== chosen) chosenPage = allMailTab;
+          chosen = merged;
+        }
+        if (
+          chosen === null &&
+          mailRowsOf !== undefined &&
+          opts.sender !== undefined &&
+          opts.sender.length > 0
+        ) {
+          // NEITHER the search listing nor the real-time All Mail listing has
+          // a row matching the hint's From address, display name, or subject:
+          // do NOT open some other row's mail and read its code. Bounded
+          // retries, then an honest not-found. A controller WITHOUT row
+          // extraction cannot know that — it keeps the legacy first-row open
+          // path below.
+          continue;
         }
         // The legacy first-row open fires ONLY on capability detection — the
         // controller lacks the row extraction (older mock surface) — never
@@ -448,7 +537,7 @@ export async function awaitVerification(
         // whatever row Gmail ranked first (the #831 stale-row harm).
         let opened = false;
         if (chosen !== null && openMailRowOf !== undefined) {
-          opened = await openMailRowOf(inboxTab, chosen.selector).catch(() => false);
+          opened = await openMailRowOf(chosenPage, chosen.selector).catch(() => false);
         } else if (mailRowsOf === undefined) {
           opened = await browser.openFirstMailResult(inboxTab).catch(() => false);
         }
@@ -466,9 +555,9 @@ export async function awaitVerification(
               } | null>;
             }
           ).extractOpenedMailBody?.bind(browser);
-          const body = (await openedBodyOf?.(inboxTab).catch(() => null)) ?? null;
-          const openedText = body?.text ?? (await browser.extractVisibleText(inboxTab));
-          const openedLinks = body?.links ?? (await rawLinksOf(inboxTab));
+          const body = (await openedBodyOf?.(chosenPage).catch(() => null)) ?? null;
+          const openedText = body?.text ?? (await browser.extractVisibleText(chosenPage));
+          const openedLinks = body?.links ?? (await rawLinksOf(chosenPage));
           sourceFrom = extractSenderEmail(openedText);
           const expectedDomains = expectedVerificationDomains(opts.sender, sourceFrom);
           ({ code, link } = parseVerification(
@@ -504,6 +593,7 @@ export async function awaitVerification(
       return { code, link, sourceFrom };
     } finally {
       await inboxTab.close().catch(() => undefined);
+      await allMailTab?.close().catch(() => undefined);
     }
   });
   const { code, link, sourceFrom } = verification;

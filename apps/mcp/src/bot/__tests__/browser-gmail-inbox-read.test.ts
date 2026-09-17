@@ -498,3 +498,144 @@ describe("operate_read_inbox picks the NEWEST matching mail out of a real result
     }
   }, 90_000);
 });
+
+// ── Search-index staleness supplement (real Chromium) ──
+//
+// MEASURED 2026-09-17 (live mailbox, three separate craigslist sends): Gmail's
+// SEARCH results are eventually consistent — the exact tool query returned 38
+// keyword-matching rows WITHOUT the fresh craigslist mail for seconds to 15+
+// minutes after delivery, while the real-time mailbox listings (inbox / All
+// Mail) showed it within ~26s. During that window the sender-scoped read
+// reported found:false (#828) and the unfiltered read picked an older indexed
+// mail (#831). The fixture models that window: the SEARCH view lacks the
+// craigslist row; the All Mail view has it. The page itself branches on
+// location.hash (route interception does not carry the fragment).
+const OPEN_ROW_SCRIPT = `<script>
+  for (const [id, conv, hash] of [
+    ["row-proton", "conv-proton", "inbox/11aa22bb33cc44dd55e6"],
+    ["row-calcom", "conv-calcom", "inbox/22bb33cc44dd55e6ff17"],
+    ["row-craigslist", "conv-craigslist", "inbox/33cc44dd55e6ff170a28"],
+  ]) {
+    const el = document.getElementById(id);
+    if (el === null) continue;
+    el.addEventListener("click", () => {
+      document.getElementById("list").hidden = true;
+      for (const c of document.querySelectorAll("[id^=conv-]")) {
+        if (c.id !== conv) c.remove();
+      }
+      document.getElementById(conv).hidden = false;
+      location.hash = hash;
+    });
+  }
+</script>`;
+
+function staleSearchIndexHandler(): (url: string) => string {
+  return (_url) => {
+    const searchRows =
+      gRow(
+        "row-proton",
+        "no-reply@proton.me",
+        "Proton",
+        "Proton Verification Code",
+        "Enter this code to finish the process: 934870. Stay secure, the Proton Team.",
+        "Sep 16, 2026, 11:39 PM",
+        "11:39 PM",
+      ) +
+      gRow(
+        "row-calcom",
+        "no-reply@cal.com",
+        "Cal.com",
+        "Cal.com: Verify your account",
+        "Please verify your email address by clicking the button below.",
+        "Sep 17, 2026, 5:03 AM",
+        "5:03 AM",
+      );
+    const craigslistRow = gRow(
+      "row-craigslist",
+      "automail@craigslist.org",
+      "craigslist",
+      "craigslist account sign-up",
+      "to complete your craigslist account. complete account sign-up",
+      "Sep 17, 2026, 5:10 AM",
+      "5:10 AM",
+    );
+    return (
+      `<!doctype html><html><head><title>Gmail</title></head><body>` +
+      GMAIL_CHROME_HTML +
+      `<div id="list" role="main">${LIST_FILLER}</div>` +
+      `<div id="conv-proton" hidden>${STALE_PROTON_CARD}</div>` +
+      `<div id="conv-calcom" hidden><div class="adn"><div class="gD">Cal.com &lt;no-reply@cal.com&gt;</div><div class="ii">Please verify your email address by clicking the button below.</div></div></div>` +
+      `<div id="conv-craigslist" hidden>${CRAIGSLIST_CARD}</div>` +
+      `<script>
+        var list = document.getElementById("list");
+        var search = ${JSON.stringify(searchRows)};
+        var allMail = ${JSON.stringify(searchRows + craigslistRow)};
+        // The search index is stale: the fresh craigslist mail is missing
+        // from the #search view but present in the real-time #all listing.
+        // Rows are <tr> elements — the parser drops them outside a table.
+        list.innerHTML =
+          '<table><tbody>' +
+          (location.hash.indexOf("#search/") !== -1 ? search : allMail) +
+          '</tbody></table>';
+      </script>` +
+      OPEN_ROW_SCRIPT +
+      `</body></html>`
+    );
+  };
+}
+
+async function staleIndexHarness(): Promise<{ context: BrowserContext }> {
+  if (browser === undefined) throw new Error("Chromium unavailable");
+  const context = await browser.newContext();
+  const handler = staleSearchIndexHandler();
+  await context.route("https://mail.google.com/**", (route) =>
+    route.fulfill({ contentType: "text/html", body: handler(route.request().url()) }),
+  );
+  return { context };
+}
+
+describe("operate_read_inbox supplements the search listing with the real-time All Mail listing (real Chromium)", () => {
+  it("sender 'craigslist' finds the fresh mail the stale search listing lacks (#828 staleness window)", async () => {
+    if (!available) return;
+    const { context } = await staleIndexHarness();
+    try {
+      // The search view's rows (Proton, Cal.com) match no 'craigslist' hint;
+      // only the real-time All Mail listing has the craigslist row.
+      const res = await readInbox(context, { sender: "craigslist" });
+      expect(res.found).toBe(true);
+      expect(res.link).toBe("https://accounts.craigslist.org/signup?tok=NEWACTIVATION7788");
+      expect(res.source_from).toBe("automail@craigslist.org");
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+
+  it("unfiltered read returns the All Mail row when the search index is stale (#831 staleness variant)", async () => {
+    if (!available) return;
+    const { context } = await staleIndexHarness();
+    try {
+      // The stale search view's newest row is Cal.com (5:03 AM); the All Mail
+      // listing's craigslist row (5:10 AM) is genuinely newer and must win.
+      const res = await readInbox(context);
+      expect(res.found).toBe(true);
+      expect(res.link).toBe("https://accounts.craigslist.org/signup?tok=NEWACTIVATION7788");
+      expect(res.source_from).toBe("automail@craigslist.org");
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+
+  it("a hint matching no row in EITHER listing still reports honest not-found", async () => {
+    if (!available) return;
+    const { context } = await staleIndexHarness();
+    try {
+      const res = await readInbox(context, { sender: "github.com" });
+      expect(res.found).toBe(false);
+      expect(res.code).toBeNull();
+      expect(res.link).toBeNull();
+      expect(res.needs_user?.resume).toBe("code");
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+});
