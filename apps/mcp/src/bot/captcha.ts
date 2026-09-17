@@ -554,9 +554,37 @@ export async function detectCaptchaVariant(
       }
       return { variant, challengeRendered };
     });
+    // hCaptcha's checkbox and challenge iframes are CHILDREN of the
+    // cross-origin hcaptcha.html frame host, and Bluesky renders that host
+    // inside a shadow root — so a main-document querySelector can never see
+    // them (step-3 gate: checkbox toggled, image grid rendered, `variant`
+    // still "unknown" and `challengeRendered` still false). Classify and
+    // check the rendered challenge against the LIVE frame tree instead. The
+    // checkbox frame's URL (`frame=checkbox`) never matches the challenge
+    // pattern, so a mere checkbox still reads as no rendered challenge —
+    // the solver only escalates once the image grid exists.
+    let variant = isCaptchaVariant(raw.variant) ? raw.variant : "unknown";
+    let hcaptchaChallengeFrameRendered = false;
+    if (variant === "unknown" || !raw.challengeRendered) {
+      for (const frame of page.frames()) {
+        const url = frame.url();
+        if (
+          url.includes("hcaptcha.com") &&
+          /(?:hcaptcha-challenge\.html|frame=challenge)/i.test(url)
+        ) {
+          hcaptchaChallengeFrameRendered = true;
+        }
+        if (variant === "unknown" && url.includes("hcaptcha.com")) {
+          variant = "hcaptcha";
+        }
+        if (variant === "unknown" && url.includes("challenges.cloudflare.com")) {
+          variant = "turnstile";
+        }
+      }
+    }
     return {
-      variant: isCaptchaVariant(raw.variant) ? raw.variant : "unknown",
-      challengeRendered: raw.challengeRendered,
+      variant,
+      challengeRendered: raw.challengeRendered || hcaptchaChallengeFrameRendered,
     };
   } catch {
     return { variant: "unknown", challengeRendered: false };
