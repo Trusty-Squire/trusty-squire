@@ -117,8 +117,9 @@ silent failures.
     to 30s timeout. Returns `captcha_blocked` on timeout so the MCP
     tool can surface a clear status to the user.
   - Verification-link click and post-verify navigation primitives the host agent
-    drives through the flat `operate_*` tools; there is no public inbox-polling
-    operator verb.
+    drives through the flat `operate_*` tools; the only mailbox access is
+    `operate_read_inbox`, the consent-gated Gmail verification read that runs in
+    a dedicated utility tab and never navigates the waiting page.
   - DOM/screenshot observation + vault-backed credential extraction the host
     agent composes per step.
   - **`operate_screenshot` — a dedicated debugging capture,**

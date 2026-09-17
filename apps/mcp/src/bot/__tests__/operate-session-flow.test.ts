@@ -156,6 +156,8 @@ const h = vi.hoisted(() => ({
   captureOverride: null as BrowserUseCapture | null,
   observationSemantics: { title: "", headings: [] as string[] },
   openFirstMailResult: false,
+  utilityTabsOpened: 0,
+  utilityTabsClosed: 0,
   focusedLabels: [] as string[],
   pressedKeys: [] as string[],
   scrolls: [] as string[],
@@ -443,8 +445,11 @@ vi.mock("../browser.js", async (importOriginal) => ({
       }
       return this.oauthSimPage.page;
     }
-    async goto(url: string): Promise<void> {
+    async goto(url: string, page?: unknown): Promise<void> {
       h.gotos.push(url);
+      // A second argument is the utility tab the verification read navigates —
+      // never the operation page, which must stay on its own URL.
+      if (page !== undefined) return;
       if (this.detached) this.detachedUrl = url;
       else {
         h.currentUrl = url;
@@ -530,6 +535,29 @@ vi.mock("../browser.js", async (importOriginal) => ({
     }
     async openFirstMailResult(): Promise<boolean> {
       return h.openFirstMailResult;
+    }
+    async openUtilityTab(): Promise<unknown> {
+      h.utilityTabsOpened += 1;
+      return {
+        close: async () => {
+          h.utilityTabsClosed += 1;
+        },
+      };
+    }
+    async extractRawMailLinks(): Promise<unknown[]> {
+      // Mirror production's faithful read: href-bearing anchors, untruncated,
+      // with the anchor's visible text. Derives from the same h.elements
+      // fixtures the interactive-inventory path uses.
+      return (h.elements as Array<Record<string, unknown>>)
+        .filter((e) => typeof e.href === "string" && (e.href as string).length > 0)
+        .map((e) => ({
+          href: e.href as string,
+          visibleText:
+            (e.visibleText as string | undefined) ??
+            (e.labelText as string | undefined) ??
+            (e.ariaLabel as string | undefined) ??
+            null,
+        }));
     }
     async waitForInteractiveDom(minElements = 5, timeoutMs = 20_000): Promise<void> {
       h.waitForInteractiveDomCalls.push({ minElements, timeoutMs });
@@ -1399,6 +1427,8 @@ beforeEach(() => {
   h.captureOverride = null;
   h.observationSemantics = { title: "", headings: [] };
   h.openFirstMailResult = false;
+  h.utilityTabsOpened = 0;
+  h.utilityTabsClosed = 0;
   h.focusedLabels = [];
   h.pressedKeys = [];
   h.scrolls = [];
@@ -4875,9 +4905,52 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     expect(res.sealed).toBeUndefined();
     expect(h.seededStorageStates).toEqual([undefined]);
     expect(h.connections[0]).toBe(true);
-    expect(h.currentUrl).toContain("mail.google.com");
+    // The mailbox read runs in a dedicated utility tab; the operation page is
+    // never navigated to Gmail (navigating away and back resets the form that
+    // is waiting for the code).
+    expect(h.currentUrl).toBe("https://app.example.com/verify-email");
+    expect(h.gotos.filter((u) => u.includes("mail.google.com")).length).toBeGreaterThan(0);
+    expect(h.utilityTabsOpened).toBe(1);
+    expect(h.utilityTabsClosed).toBe(1);
     expect(h.storageStateWrites).toEqual([]);
     expect(h.storageStates.get(canonical)).toEqual(googleState);
+  });
+
+  it("reads the mailbox in a dedicated utility tab and leaves the waiting page untouched", async () => {
+    const obs = await startProvisionSession({
+      serviceUrl: "https://account.proton.me/",
+      consentInboxRead: true,
+    });
+    // The operation page is mid-signup, dialog open, waiting for the code.
+    h.currentUrl = "https://account.proton.me/signup";
+    h.visibleText = "Your verification code is 481920.";
+    const res = await awaitVerification(obs.session_id, { sender: "proton.me" });
+    expect(res.found).toBe(true);
+    expect(res.code).toBe("481920");
+    expect(h.gotos.some((u) => u.includes("mail.google.com"))).toBe(true);
+    // The signup page kept its URL — and therefore its dialog state — for the
+    // whole read; navigating it to Gmail would reset the form (Proton gap).
+    expect(h.currentUrl).toBe("https://account.proton.me/signup");
+    // The utility tab is short-lived: opened for the read, closed on return.
+    expect(h.utilityTabsOpened).toBe(1);
+    expect(h.utilityTabsClosed).toBe(1);
+  });
+
+  it("returns long verification links verbatim, not truncated", async () => {
+    const obs = await startProvisionSession({
+      serviceUrl: "https://cal.com/",
+      consentInboxRead: true,
+    });
+    const longToken = "t".repeat(400) + "end";
+    const longHref = `https://cal.com/api/auth/verify-email?token=${longToken}&callbackUrl=%2Fsignup`;
+    h.visibleText = "Verify your email address to finish creating your account.";
+    h.elements = [elem({ tag: "a", role: "link", href: longHref, visibleText: "Verify email" })];
+    h.openFirstMailResult = true;
+    const res = await awaitVerification(obs.session_id, { sender: "cal.com" });
+    expect(res.found).toBe(true);
+    // The full href survives — the 300-char inventory cap must not truncate it
+    // into a URL whose token no longer works (Cal.com gap).
+    expect(res.link).toBe(longHref);
   });
 
   it("returns delegated verification results verbatim in both formats", async () => {

@@ -194,12 +194,12 @@ for the system and data flows.
 ## MCP tools
 
 The default MCP registry exposes 29 tools (31 when maintainer diagnostics are
-enabled). The 18-tool operator driving surface uses flat, single-purpose verbs:
+enabled). The 20-tool operator driving surface uses flat, single-purpose verbs:
 `operate_start`, `operate_finish`, `operate_observe`, `operate_screenshot`,
 `operate_network`, `operate_navigate`, `operate_click`, `operate_type`, `operate_select`,
-`operate_press`, `operate_scroll`, `operate_wait`, `operate_login`,
+`operate_press`, `operate_scroll`, `operate_wait`, `operate_read_inbox`, `operate_login`,
 `operate_fill_credential`, `operate_extract`, `inject_card`, `list_credentials`,
-and `list_payment_cards`.
+`list_payment_cards`, and `edit_payment_card`.
 Recipe and vault/account tools remain separate surfaces. The complete migration
 table and input contracts are in [operator-tool-surface.md](docs/operator-tool-surface.md).
 The evidence required to qualify an operator build is in
@@ -251,10 +251,11 @@ in [browser-use-serializer-port.md](docs/browser-use-serializer-port.md).
   pickers, follow the [picker and popup guidance](docs/operator-tool-surface.md#pickers-and-popup-return).
   Use `operate_login` for atomic OAuth and the username/password lifecycle,
   `operate_extract` to [capture credentials](docs/operator-tool-surface.md#credential-capture-and-retrieval),
-  and `operate_fill_credential` to load protected slots. CAPTCHA
-  solving, inbox polling, local upload, and specialized cart mutation are not
-  operator verbs; inspect and drive the page's ordinary UI or hand the task back
-  to the user.
+  and `operate_fill_credential` to load protected slots. The only mailbox
+  access is `operate_read_inbox`, the consent-gated Gmail verification read;
+  CAPTCHA solving, general inbox polling, local upload, and specialized cart
+  mutation are not operator verbs; inspect and drive the page's ordinary UI or
+  hand the task back to the user.
   Browser requests need no host declarations. See the
   [egress contract](docs/operator-tool-surface.md#browser-egress-is-unrestricted)
   for legacy parameter compatibility and the unchanged payment/vault boundaries.

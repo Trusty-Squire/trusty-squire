@@ -762,6 +762,32 @@ export class BrowserController implements BrowserDriver {
     await this.installPageNormalization(page, this.processOwner.launchMode === "remote");
   }
 
+  /**
+   * Opens a short-lived UTILITY tab in the SAME browser context — same cookie
+   * jar, same identity runtime, same Google session — for reads that must not
+   * disturb the session's live operation page. The canonical case is the
+   * await_verification mailbox read: navigating the operation page to Gmail
+   * RESETS the very signup form / verification dialog that is waiting for the
+   * emailed value (Proton signup, gauntlet 2026-09-16 — the code arrived but
+   * could never be entered because the dialog was gone on return). Reads that
+   * use this tab keep the waiting page live with its state intact.
+   *
+   * The caller closes the returned page when its read finishes. The tab is
+   * tracked like every other owned page (-OwnedPages + evidence attach +
+   * normalization), but it is never the session's active page and the
+   * observation pipeline never adopts it as one.
+   */
+  async openUtilityTab(): Promise<Page> {
+    const ctx = this.processOwner.context;
+    if (ctx === null) {
+      throw new Error("BrowserController.openUtilityTab: browser has no live context");
+    }
+    const page = await ctx.newPage();
+    this.trackOpenedTabs(page);
+    await this.installPageNormalization(page, this.processOwner.launchMode === "remote");
+    return page;
+  }
+
   // Closes ONLY this controller's own page(s) — never the shared Chrome
   // process/context. Used for every session sharing an experimental
   // multisession identity except whichever one's finish empties the group
@@ -3990,6 +4016,42 @@ export class BrowserController implements BrowserDriver {
   async extractVisibleText(page: Page | null = this.page): Promise<string> {
     if (page === null) throw new Error("Browser not started");
     return this.cardValueOutputMask.maskText(await page.evaluate(extractObservationVisibleText));
+  }
+
+  /**
+   * RAW link candidates for mailbox reads: every anchor's href attribute read
+   * VERBATIM — full length, no truncation — together with its visible text.
+   * The interactive-element inventory caps hrefs at 300 characters and drops
+   * invisible anchors, which silently mangles long verification links
+   * (Cal.com gauntlet 2026-09-16: the signed token exceeded the cap, the
+   * reconstructed URL failed with "No token found"). The mailbox read must
+   * score links from this faithful read, not from the size-capped inventory.
+   */
+  async extractRawMailLinks(
+    page: Page | null = this.page,
+  ): Promise<Array<{ href: string; visibleText: string | null }>> {
+    if (page === null) throw new Error("Browser not started");
+    const raw = await page.evaluate(() => {
+      const anchors: HTMLAnchorElement[] = [];
+      // Main document plus open shadow roots; the mailbox read only needs
+      // href-carrying anchors, and getAttribute returns the DECODED attribute
+      // value (no &amp;/soft-wrap artifacts) — the actual URL the DOM holds.
+      const collect = (root: Document | ShadowRoot): void => {
+        root.querySelectorAll("a[href]").forEach((a) => anchors.push(a as HTMLAnchorElement));
+        root.querySelectorAll("*").forEach((el) => {
+          const sr = Object.getOwnPropertyDescriptor(Element.prototype, "shadowRoot")?.get?.call(
+            el,
+          );
+          if (sr instanceof ShadowRoot) collect(sr);
+        });
+      };
+      collect(document);
+      return anchors.map((a) => ({
+        href: a.getAttribute("href") ?? "",
+        visibleText: (a.textContent ?? "").replace(/\s+/g, " ").trim() || null,
+      }));
+    });
+    return raw.filter((l) => l.href.length > 0).map((l) => this.cardValueOutputMask.maskValue(l));
   }
 
   /** Canonical tree capture, with the existing whole-document action bindings. */

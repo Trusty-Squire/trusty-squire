@@ -4,19 +4,27 @@ Trusty Squire’s operator surface is a set of flat, single-purpose MCP tools.
 Discover the installed server’s exact input and output schemas with `tools/list`;
 that registered schema is authoritative for a particular server version.
 
-The named operator surface contains 18 tools: the 15 driving verbs in
+The named operator surface contains 20 tools: the 16 driving verbs in
 `OPERATE_TOOLS`, excluding the separately exposed recipe tools, plus
-`inject_card`, `list_credentials`, and `list_payment_cards`. Recipe tools and
-vault/account tools are separate surfaces.
+`inject_card`, `list_credentials`, `list_payment_cards`, and
+`edit_payment_card`. Recipe tools and vault/account tools are separate
+surfaces.
 
 | Purpose | Tool |
 | --- | --- |
 | Start and finish | `operate_start`, `operate_finish` |
 | Read the page | `operate_observe`, `operate_screenshot`, `operate_network` |
 | Drive ordinary UI | `operate_navigate`, `operate_click`, `operate_type`, `operate_select`, `operate_press`, `operate_scroll`, `operate_wait` |
+| Email verification read | `operate_read_inbox` |
 | Login | `operate_login` |
 | Vault-aware browser work | `operate_fill_credential`, `operate_extract` |
-| Payments and vault lists | `inject_card`, `list_credentials`, `list_payment_cards` |
+| Payments and vault lists | `inject_card`, `list_credentials`, `list_payment_cards`, `edit_payment_card` |
+
+`operate_read_inbox` reads the session's signed-in Gmail inbox for a
+verification email in a dedicated utility tab that is closed when the read
+finishes, so the page waiting for the code never navigates away; the raw
+mail links it scores are read verbatim from the DOM, not from the
+size-capped interactive inventory.
 
 Use an action `ref` from the current observation. `operate_start` and
 `operate_observe` default to `format: "compact"`, a paged control map;
