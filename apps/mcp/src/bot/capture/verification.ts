@@ -235,7 +235,6 @@ export interface MailResultRow {
   fromEmail: string | null;
   fromName: string | null;
   subject: string | null;
-  snippet: string | null;
   // The date cell's full timestamp from its `title` attribute ("Sep 17, 2026,
   // 5:10 AM") — the visible text collapses it to "5:10 AM"/"Sep 16".
   dateTitle: string | null;
@@ -489,7 +488,12 @@ export async function awaitVerification(
             [],
             expectedVerificationDomains(opts.sender, null),
           ));
-        } else {
+        } else if (opts.sender === undefined || opts.sender.length === 0) {
+          // No row was ever chosen: only the hint-less read may fall back to
+          // the page-wide list parse — the legacy first-row behavior for old
+          // controllers. The query is deliberately unfiltered now, so with a
+          // sender hint set this list carries other senders' content and must
+          // not be parsed: bounded retries end in the honest not-found.
           ({ code, link } = parseVerification(
             listText,
             listLinks.filter((l) => !isGmailChromeLink(l.url)),

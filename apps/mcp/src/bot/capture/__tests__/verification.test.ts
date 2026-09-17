@@ -293,7 +293,6 @@ describe("pickNewestMailRow (relevance order must not decide recency)", () => {
     fromEmail: null,
     fromName: null,
     subject: null,
-    snippet: null,
     visibleText: "",
     ...over,
   });

@@ -1190,8 +1190,8 @@ export class BrowserController implements BrowserDriver {
 
   // READ the Gmail search-results LIST as rows with the metadata needed to
   // choose which conversation to open: the From address and display name
-  // (`span.zF[email][name]` in the sender cell), the subject (`.y6`), the
-  // snippet (`.y2`), and the full date each row keeps in its date cell's
+  // (`span.zF[email][name]` in the sender cell), the subject (`.y6`), and
+  // the full date each row keeps in its date cell's
   // `title` attribute ("Wed, Sep 16, 2026, 11:39 PM" — the visible text
   // collapses it to "11:39 PM"). Rows are tagged with a data attribute so
   // openMailResultRow can open THE chosen row. The real Gmail row is
@@ -1242,7 +1242,6 @@ export class BrowserController implements BrowserDriver {
           el.querySelector<HTMLElement>(".yP, .zF")?.textContent ??
           "";
         const subjectRaw = el.querySelector<HTMLElement>(".y6")?.textContent ?? "";
-        const snippetRaw = el.querySelector<HTMLElement>(".y2")?.textContent ?? "";
         let dateTitle: string | null = null;
         for (const span of Array.from(
           el.querySelectorAll<HTMLElement>("td.xW span[title], span[title]"),
@@ -1260,7 +1259,6 @@ export class BrowserController implements BrowserDriver {
           fromEmail: fromEmailRaw.replace(/\s+/g, " ").trim() || null,
           fromName: fromNameRaw.replace(/\s+/g, " ").trim() || null,
           subject: subjectRaw.replace(/\s+/g, " ").trim() || null,
-          snippet: snippetRaw.replace(/\s+/g, " ").trim() || null,
           dateTitle,
           visibleText: text,
         };
@@ -1270,7 +1268,6 @@ export class BrowserController implements BrowserDriver {
       ...r,
       fromName: r.fromName === null ? null : this.cardValueOutputMask.maskText(r.fromName),
       subject: r.subject === null ? null : this.cardValueOutputMask.maskText(r.subject),
-      snippet: r.snippet === null ? null : this.cardValueOutputMask.maskText(r.snippet),
       visibleText: this.cardValueOutputMask.maskText(r.visibleText),
     }));
   }
