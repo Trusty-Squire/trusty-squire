@@ -25,7 +25,6 @@ export function clickDispatchStatusForError(error: unknown): ClickDispatchStatus
 // exported from the public `playwright` entry, so match the stable message.
 export function isTargetClosedDispatchError(error: unknown): boolean {
   return (
-    error instanceof Error &&
-    /target page, context or browser has been closed/i.test(error.message)
+    error instanceof Error && /target page, context or browser has been closed/i.test(error.message)
   );
 }
