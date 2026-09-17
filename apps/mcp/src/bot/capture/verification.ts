@@ -16,7 +16,7 @@ import { findOtpCredential } from "../credential-shape.js";
 import type { Session } from "../session/model.js";
 import { audit, sessionForCall } from "../session/lifecycle.js";
 import { stashSecretSlot, type SlotHandle } from "../session/slots.js";
-import { invalidateCompactV2Snapshot, operationPageForSession } from "../observe/observe.js";
+import { invalidateCompactV2Snapshot } from "../observe/observe.js";
 import { runSerializedGoogleIdentityOperation } from "../act/act.js";
 
 async function runDetachedGoogleIdentityOperation<T>(
@@ -141,9 +141,9 @@ export function buildVerificationResult(
     wall: "verification_code",
     message:
       "No verification email found in the inbox YET. Most often it just hasn't " +
-      'arrived (they commonly take 10–30s) — call operate_act { kind: "await_verification" } AGAIN ' +
+      "arrived (they commonly take 10–30s) — call operate_read_inbox AGAIN " +
       "in a few seconds. If it still fails, the code may have gone by SMS/" +
-      "authenticator: ask the user for it and type it with operate_act. The " +
+      "authenticator: ask the user for it and type it with operate_type. The " + +
       "session stays live either way.",
     resume: "code",
   };
@@ -160,8 +160,8 @@ export function buildConsentRefusal(sessionId: string): VerificationResult {
     wall: "verification_code",
     message:
       "Inbox reading is disabled, so the operator did not read any mail. Ask " +
-      "the user for the code and type it with operate_act, or retry " +
-      'operate_act { kind: "await_verification" } with grant_inbox_consent:true ' +
+      "the user for the code and type it with operate_type, or retry " +
+      "operate_read_inbox with grant_inbox_consent:true " +
       "to restore inbox reading for this session. The session stays live either way. " +
       "To change the default permanently, re-run `connect` and update advanced settings.",
     resume: "code",
@@ -221,14 +221,7 @@ async function readGmailSearchResultsResilient(
   browser: BrowserController,
   searchUrl: string,
   page: Page,
-  linkCandidatesOf: (
-    els: readonly {
-      href?: string | null;
-      visibleText?: string | null;
-      labelText?: string | null;
-      ariaLabel?: string | null;
-    }[],
-  ) => VerificationLinkCandidate[],
+  linksOf: (page: Page) => Promise<VerificationLinkCandidate[]>,
 ): Promise<{ text: string; links: VerificationLinkCandidate[] }> {
   let text = "";
   let links: VerificationLinkCandidate[] = [];
@@ -247,7 +240,7 @@ async function readGmailSearchResultsResilient(
       if (text.length > 200) break;
       await waitForCaptchaChallengeToSettle(browser, 1200, 0, page).catch(() => false);
     }
-    links = linkCandidatesOf(await browser.extractInteractiveElements(page));
+    links = await linksOf(page);
     const transientOrEmpty =
       isGmailTransientErrorText(text) || (isEmptyGmailResultText(text) && links.length === 0);
     if (!transientOrEmpty || retry === GMAIL_TRANSIENT_MAX_RETRIES) break;
@@ -278,61 +271,61 @@ export async function awaitVerification(
   }
 
   invalidateCompactV2Snapshot(session);
-  const inboxPage = operationPageForSession(session);
-  if (inboxPage === undefined || inboxPage.isClosed()) {
-    throw new Error("inbox page is unavailable");
-  }
 
   const verification = await runDetachedGoogleIdentityOperation(session, async (browser) => {
     const query = buildVerificationSearchQuery(opts.sender);
     const searchUrl = `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
-    const linkCandidatesOf = (
-      els: readonly {
-        href?: string | null;
-        visibleText?: string | null;
-        labelText?: string | null;
-        ariaLabel?: string | null;
-      }[],
-    ): VerificationLinkCandidate[] =>
-      els
-        .filter(
-          (e): e is typeof e & { href: string } => typeof e.href === "string" && e.href.length > 0,
-        )
-        .map((e) => ({ url: e.href, text: e.visibleText ?? e.labelText ?? e.ariaLabel ?? null }));
-    let code: string | null = null;
-    let link: string | null = null;
-    let sourceFrom: string | null = null;
-    for (let attempt = 0; attempt < 3 && code === null && link === null; attempt++) {
-      sourceFrom = null;
-      if (attempt > 0)
-        await waitForCaptchaChallengeToSettle(browser, 4000, 0, inboxPage).catch(() => false);
-      await browser.goto(searchUrl, inboxPage);
-      const { text: listText, links: listLinks } = await readGmailSearchResultsResilient(
-        browser,
-        searchUrl,
-        inboxPage,
-        linkCandidatesOf,
-      );
-      const opened = await browser.openFirstMailResult(inboxPage).catch(() => false);
-      if (opened) {
-        const openedText = await browser.extractVisibleText(inboxPage);
-        const openedLinks = linkCandidatesOf(await browser.extractInteractiveElements(inboxPage));
-        sourceFrom = extractSenderEmail(openedText);
-        const expectedDomains = expectedVerificationDomains(opts.sender, sourceFrom);
-        ({ code, link } = parseVerification(
-          openedText,
-          [...openedLinks, ...listLinks],
-          expectedDomains,
-        ));
-      } else {
-        ({ code, link } = parseVerification(
-          listText,
-          listLinks,
-          expectedVerificationDomains(opts.sender, null),
-        ));
+    // DEDICATED utility tab, closed before this call returns. Navigating the
+    // session's operation page to the mailbox RESETS the form/dialog that is
+    // waiting for the code (Proton signup, gauntlet 2026-09-16: the signup
+    // page reloads, the verification dialog closes, and the code can never be
+    // entered). The tab shares the context's cookies, so Gmail's session
+    // applies; the waiting page is never touched. Links are read from the raw
+    // href attributes (extractRawMailLinks) — the size-capped interactive
+    // inventory truncated a long Cal.com token into a dead URL.
+    const inboxTab = await browser.openUtilityTab();
+    try {
+      const rawLinksOf = async (page: Page): Promise<VerificationLinkCandidate[]> => {
+        const raw = await browser.extractRawMailLinks(page);
+        return raw.map((l) => ({ url: l.href, text: l.visibleText }));
+      };
+      let code: string | null = null;
+      let link: string | null = null;
+      let sourceFrom: string | null = null;
+      for (let attempt = 0; attempt < 3 && code === null && link === null; attempt++) {
+        sourceFrom = null;
+        if (attempt > 0)
+          await waitForCaptchaChallengeToSettle(browser, 4000, 0, inboxTab).catch(() => false);
+        await browser.goto(searchUrl, inboxTab);
+        const { text: listText, links: listLinks } = await readGmailSearchResultsResilient(
+          browser,
+          searchUrl,
+          inboxTab,
+          rawLinksOf,
+        );
+        const opened = await browser.openFirstMailResult(inboxTab).catch(() => false);
+        if (opened) {
+          const openedText = await browser.extractVisibleText(inboxTab);
+          const openedLinks = await rawLinksOf(inboxTab);
+          sourceFrom = extractSenderEmail(openedText);
+          const expectedDomains = expectedVerificationDomains(opts.sender, sourceFrom);
+          ({ code, link } = parseVerification(
+            openedText,
+            [...openedLinks, ...listLinks],
+            expectedDomains,
+          ));
+        } else {
+          ({ code, link } = parseVerification(
+            listText,
+            listLinks,
+            expectedVerificationDomains(opts.sender, null),
+          ));
+        }
       }
+      return { code, link, sourceFrom };
+    } finally {
+      await inboxTab.close().catch(() => undefined);
     }
-    return { code, link, sourceFrom };
   });
   const { code, link, sourceFrom } = verification;
   const found = code !== null || link !== null;

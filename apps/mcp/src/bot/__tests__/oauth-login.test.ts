@@ -2640,7 +2640,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     20_000,
   );
 
-  it("keeps concurrent inbox verification on its captured page after source-tab adoption", async () => {
+  it("reads the verification inbox in a dedicated tab and leaves the source page live", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();
     const productUrl = "https://mail.google.com/product";
@@ -2719,19 +2719,13 @@ describe("BrowserController OAuth popup lifecycle", () => {
 
       const verification = awaitVerification(sessionId);
       await inboxEntered;
-      // await_verification invalidates the compact index by contract (it owns
-      // the source page next). The page has not navigated yet (goto paused in
-      // the spy), so re-observe to authorize the concurrent source-page actions.
+      // await_verification invalidates the compact index by contract. The
+      // source page has not navigated and never will (the read runs in a
+      // dedicated utility tab), so re-observe to authorize the concurrent
+      // source-page actions.
       const concurrent = await observe(sessionId, "compact");
       const openRef = refByLabel(concurrent, "Open tab");
-      const queuedOauthRef = refByLabel(concurrent, "Continue with Google");
       expect(openRef).toBeDefined();
-      expect(queuedOauthRef).toBeDefined();
-      const queuedOauth = act(sessionId, {
-        kind: "oauth_login",
-        target: queuedOauthRef!,
-        provider: "google",
-      });
       const openedPagePromise = source.waitForEvent("popup");
       const opened = await act(sessionId, { kind: "click", target: openRef! });
       const openedPage = await openedPagePromise;
@@ -2741,12 +2735,18 @@ describe("BrowserController OAuth popup lifecycle", () => {
       inboxGotoSpy.mockRestore();
 
       expect(result).toMatchObject({ found: true, code: "481920" });
-      await expect(queuedOauth).rejects.toBeInstanceOf(ProvenPreDispatchMutationError);
-      expect(source.url()).toContain("mail.google.com/mail/u/0/#search/");
+      // The mailbox read never touched the source page: it stays on the OAuth
+      // return URL with its controls live (navigating it to Gmail resets the
+      // waiting signup form — the Proton gauntlet failure).
+      expect(source.url()).toBe(returnUrl);
       expect(product.url()).toBe(productUrl);
       expect(openedPage.url()).toBe(openedUrl);
       expect(await openedPage.locator("main").innerText()).toBe("Opened operator tab");
       expect(await openedPage.locator("body").getAttribute("data-oauth-clicked")).toBeNull();
+      // The utility tab was closed when the read finished.
+      expect(
+        context.pages().some((p) => p.url().startsWith("https://mail.google.com/mail/u/0")),
+      ).toBe(false);
     } finally {
       if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
       else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;

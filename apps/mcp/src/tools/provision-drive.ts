@@ -40,6 +40,7 @@ import {
   stashSecretSlot,
   readSecretSlotValue,
   getSessionUserEmail,
+  awaitVerification,
   generatePassword,
   type ProvisionAction,
   type ExtractResult,
@@ -1463,6 +1464,52 @@ export const operateWaitTool: Tool<z.infer<typeof waitSchema>> = {
   },
 };
 
+// Mailbox verification reads are a session-facing thick call, not a page
+// action: the read runs in a dedicated utility tab and the page waiting for
+// the emailed value is never navigated.
+const readInboxSchema = z.object({
+  session_id: z.string().min(1),
+  sender: z.string().min(1).max(200).optional(),
+  into_slot: z.string().min(1).max(120).optional(),
+  grant_inbox_consent: z.boolean().optional(),
+});
+
+export const operateReadInboxTool: Tool<z.infer<typeof readInboxSchema>> = {
+  name: "operate_read_inbox",
+  description:
+    "Read the session's signed-in Gmail inbox for a verification email and return " +
+    "{code, link, source_from} WITHOUT touching the live page: the read runs in a " +
+    "dedicated tab that is closed when done, so a signup form or dialog waiting for " +
+    "the code stays exactly as it is. NEVER navigate the session to the mailbox for " +
+    "a code or link — navigating away and back resets the form and closes the " +
+    "waiting dialog. `sender` narrows the search (e.g. \"proton.me\"); `into_slot` " +
+    "seals a found OTP into a session slot so it is typed with operate_type slot and " +
+    "never crosses the MCP boundary; `grant_inbox_consent` overrides the session's " +
+    "inbox-read consent for this call. Returns needs_user when nothing is found yet " +
+    "— retry after a few seconds or ask the user (the session stays live).",
+  inputSchema: readInboxSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id"],
+    properties: {
+      session_id: { type: "string" },
+      sender: { type: "string" },
+      into_slot: { type: "string" },
+      grant_inbox_consent: { type: "boolean" },
+    },
+  },
+  annotations: { readOnlyHint: true },
+  async handler(args) {
+    return await awaitVerification(args.session_id, {
+      ...(args.sender !== undefined ? { sender: args.sender } : {}),
+      ...(args.into_slot !== undefined ? { intoSlot: args.into_slot } : {}),
+      ...(args.grant_inbox_consent !== undefined
+        ? { grantConsent: args.grant_inbox_consent }
+        : {}),
+    });
+  },
+};
+
 // A flat completion schema retains terminal preparation and teardown.
 const publicFinishSchema = z
   .object({
@@ -1545,6 +1592,7 @@ export const OPERATE_TOOLS: Tool[] = [
   operatePressTool,
   operateScrollTool,
   operateWaitTool,
+  operateReadInboxTool,
   operateLoginTool,
   operateFillCredentialTool,
   provisionExtractTool,
