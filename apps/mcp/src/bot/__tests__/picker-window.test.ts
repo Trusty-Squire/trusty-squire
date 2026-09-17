@@ -184,6 +184,105 @@ it.each([
   30_000,
 );
 
+it("reports a picker window closed during the click as dispatched and returns to the opener", async () => {
+  // The production pattern: clicking a picker option runs the picker's own
+  // handler (record the selection, window.close()) and the picker window is
+  // torn down while the click dispatch is still completing — then the click
+  // tool reported `action_failed: page.click: Target page, context or browser
+  // has been closed` instead of success, and the documented close-picker
+  // recovery never ran (~1/40 locally, 12/60 on a slower runner).
+  //
+  // The natural race cannot be forced deterministically: a renderer-side
+  // window.close() handshake waits for the renderer, so it can never beat the
+  // input ack that the same DOM task queues (measured: every renderer-side
+  // close variant — mousedown/onclick close, busy-wait stalls, an exposed
+  // binding calling page.close() mid-click — resolved the click, and the
+  // teardown that does beat the ack needs a renderer-killing crash, whose
+  // target is not "closed"). The fixture therefore reproduces the exact
+  // failure signature deterministically by tearing the picker window down
+  // from the browser side the moment the tracked click has installed its
+  // dispatch listener (the __trustySquireClickDispatch marker), while
+  // Playwright's click is still inside its multi-frame actionability phase.
+  // page.click then rejects with the same TargetClosedError the production
+  // race produces, for a click whose dispatch listener was installed on a
+  // now-closed picker window. The picker's own handler still records the
+  // selection before any close, so the branch where the input does win the
+  // timing behaves like the real self-close too. Without the fix the click
+  // surfaces as action_failed with no close-picker recovery; with it the
+  // dispatch is reported and the post-click observation returns to the
+  // opener.
+  const context = await browser.newContext();
+  let sessionId: string | undefined;
+  try {
+    await context.route("https://picker.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body:
+          new URL(route.request().url()).pathname === "/picker"
+            ? `<!doctype html><title>Choose country</title>
+               <button id="country" onclick="pick()">Canada</button>
+               <script>function pick() { window.opener.document.querySelector('#select_country_name_pc').value = 'Canada'; window.close(); }</script>`
+            : form("popup"),
+      }),
+    );
+    const sibling = await context.newPage();
+    const owner = BrowserController.fromHarnessPage(sibling);
+    const controller = await BrowserController.attachSessionPage(owner, { humanize: false });
+    const page = controller.activePage();
+    if (page === null) throw new Error("No session page");
+    const started = await startHarnessProvisionSession({
+      browser: controller,
+      serviceUrl: "https://picker.test/form",
+      format: "compact",
+    });
+    sessionId = started.session_id;
+    await operateClickTool.handler({ session_id: sessionId, ref: ref(started, "@select") }, null);
+    expect(controller.currentUrl()).toBe("https://picker.test/picker");
+    const pickerPage = controller.activePage();
+    if (pickerPage === null) throw new Error("No picker page");
+    const opened = await observe(sessionId, "compact");
+    const clickAttempt = operateClickTool
+      .handler({ session_id: sessionId, ref: ref(opened, "@canada"), format: "full" }, null)
+      .then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+    // Tear the picker window down as soon as the dispatch listener is in.
+    let tornDown = false;
+    const deadline = Date.now() + 15_000;
+    while (!tornDown && Date.now() < deadline) {
+      const installed = await pickerPage
+        .evaluate(
+          () =>
+            (window as { __trustySquireClickDispatch?: { token: string } })
+              .__trustySquireClickDispatch !== undefined,
+        )
+        .catch(() => null);
+      if (installed === null) break; // picker page went away on its own
+      if (installed) {
+        await pickerPage.close().catch(() => {});
+        tornDown = true;
+        break;
+      }
+    }
+    const selected = await clickAttempt;
+    expect(tornDown).toBe(true);
+    if (!selected.ok) throw selected.error;
+    // The closed picker window must not surface as action_failed: the
+    // observation follows the documented close-picker recovery to the opener.
+    expect(selected.value).toMatchObject({ url: "https://picker.test/form" });
+    expect(controller.activePage()).toBe(page);
+    expect((await captureScreenshot(sessionId)).url).toBe("https://picker.test/form");
+    await finishProvisionSession(sessionId);
+    sessionId = undefined;
+    expect(sibling.isClosed()).toBe(false);
+    await owner.close();
+  } finally {
+    if (sessionId) await finishProvisionSession(sessionId);
+    await context.close();
+  }
+}, 30_000);
+
 it("returns to creation-time ancestors without adopting a sibling or foreign page", async () => {
   const context = await browser.newContext();
   try {

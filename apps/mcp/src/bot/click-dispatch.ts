@@ -18,3 +18,13 @@ export class BrowserClickDispatchError extends Error {
 export function clickDispatchStatusForError(error: unknown): ClickDispatchStatus {
   return error instanceof BrowserClickDispatchError ? error.dispatchStatus : "unknown";
 }
+
+// Playwright reports a page that tore down while a call was in flight as
+// TargetClosedError ("Target page, context or browser has been closed"), with
+// the API name ("page.click: ") prefixed to the message. The class is not
+// exported from the public `playwright` entry, so match the stable message.
+export function isTargetClosedDispatchError(error: unknown): boolean {
+  return (
+    error instanceof Error && /target page, context or browser has been closed/i.test(error.message)
+  );
+}

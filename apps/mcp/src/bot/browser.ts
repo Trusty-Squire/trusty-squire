@@ -156,7 +156,11 @@ export interface BrowserState {
 // browser-side CheckoutCard importers are unchanged in this PR.
 export type { CheckoutCard, CheckoutSummary } from "./checkout.js";
 
-import { BrowserClickDispatchError, type ClickDispatchStatus } from "./click-dispatch.js";
+import {
+  BrowserClickDispatchError,
+  isTargetClosedDispatchError,
+  type ClickDispatchStatus,
+} from "./click-dispatch.js";
 
 export { BrowserClickDispatchError, clickDispatchStatusForError } from "./click-dispatch.js";
 export type { ClickDispatchStatus } from "./click-dispatch.js";
@@ -2193,6 +2197,7 @@ export class BrowserController implements BrowserDriver {
   private async runTrackedClick(
     handle: ElementHandle<Element>,
     click: () => Promise<void>,
+    page: Page | null = null,
   ): Promise<ClickDispatchStatus> {
     const token = `ts-click-${this.clickDispatchSequence++}`;
     const installed = await handle
@@ -2239,6 +2244,25 @@ export class BrowserController implements BrowserDriver {
       if (error instanceof BrowserClickDispatchError) {
         await readState();
         throw error;
+      }
+      // A self-closing click target (a picker whose own click handler calls
+      // window.close()) tears the page down while the input dispatch is still
+      // completing, so the click call itself rejects with TargetClosedError
+      // even though the dispatch reached the live element — actionability had
+      // passed and the dispatch listener was installed when the input went in.
+      // That outcome is a landed click whose window closed as the handler
+      // intended, not an action failure: report the dispatch as landed so the
+      // documented close-picker recovery (returnFromClosedPicker) runs
+      // upstream instead of surfacing action_failed with no recovery.
+      // Residual: a page that independently closed itself inside the same
+      // milliseconds (listener installed, dispatch not yet delivered) is
+      // classified the same way; the post-click observation still shows the
+      // true opener state, and the operator re-observes and retries. A page
+      // already closed before dispatch still fails loudly above — handle
+      // resolution and the label probe reject with not_dispatched, and a
+      // whole-context teardown fails loudly in the subsequent observation.
+      if (installed && page !== null && page.isClosed() && isTargetClosedDispatchError(error)) {
+        return "dispatched";
       }
       throw new BrowserClickDispatchError(await readState(), error);
     }
@@ -2328,7 +2352,7 @@ export class BrowserController implements BrowserDriver {
         await click();
         return "dispatched";
       }
-      return await this.runTrackedClick(handle, click);
+      return await this.runTrackedClick(handle, click, page);
     } finally {
       if (dispose) await handle.dispose().catch(() => undefined);
     }
