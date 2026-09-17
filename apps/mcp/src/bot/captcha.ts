@@ -1358,6 +1358,39 @@ export function hcaptchaInjectScript({
             // heuristic only
           }
         }
+        // Programmatic hCaptcha integrations pass function callbacks to
+        // hcaptcha.render(). The SDK keeps them in ___hcaptcha_cfg; crawl it
+        // generically so React/Vue wrappers are handled like plain forms.
+        // This must run BEFORE the form-submit fallback below: a programmatic
+        // integration whose response textarea sits inside a form has no
+        // data-callback attribute and no well-named global, so an earlier
+        // submit would bypass the app's own completion handler and then double
+        // up when the real callback fired here.
+        const seen = new Set<unknown>();
+        const scan = (value: unknown, depth: number): void => {
+          if (value === null || value === undefined || depth > 7 || seen.has(value)) return;
+          seen.add(value);
+          if (typeof value === "function") return;
+          if (typeof value !== "object") return;
+          for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+            const normalized = key.toLowerCase();
+            if (
+              typeof child === "function" &&
+              (normalized === "callback" ||
+                normalized === "success-callback" ||
+                normalized === "verify-callback" ||
+                normalized === "onverify" ||
+                normalized === "onsuccess")
+            ) {
+              fire(child);
+              continue;
+            }
+            if (typeof child === "object" && child !== null) scan(child, depth + 1);
+          }
+        };
+        scan(win.___hcaptcha_cfg, 0);
+        scan(win.hcaptcha, 0);
+
         // Final fallback for classic form-post integrations: no callback was
         // reachable, but the token now sits in a response textarea INSIDE a
         // form - the standard hCaptcha contract reads exactly that field at
@@ -1394,34 +1427,6 @@ export function hcaptchaInjectScript({
             // submit is best-effort
           }
         }
-
-        // Programmatic hCaptcha integrations pass function callbacks to
-        // hcaptcha.render(). The SDK keeps them in ___hcaptcha_cfg; crawl it
-        // generically so React/Vue wrappers are handled like plain forms.
-        const seen = new Set<unknown>();
-        const scan = (value: unknown, depth: number): void => {
-          if (value === null || value === undefined || depth > 7 || seen.has(value)) return;
-          seen.add(value);
-          if (typeof value === "function") return;
-          if (typeof value !== "object") return;
-          for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-            const normalized = key.toLowerCase();
-            if (
-              typeof child === "function" &&
-              (normalized === "callback" ||
-                normalized === "success-callback" ||
-                normalized === "verify-callback" ||
-                normalized === "onverify" ||
-                normalized === "onsuccess")
-            ) {
-              fire(child);
-              continue;
-            }
-            if (typeof child === "object" && child !== null) scan(child, depth + 1);
-          }
-        };
-        scan(win.___hcaptcha_cfg, 0);
-        scan(win.hcaptcha, 0);
 
         const result = {
           ok: inputs.length > 0 || widgetIds.size > 0 || callbackFired,

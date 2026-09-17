@@ -378,16 +378,20 @@ async function injectPendingCaptchaToken(session: Session, page?: Page): Promise
       );
       return;
     }
-    const handoff = await tryGateHandoffSolve(session, page, pending.token, pending.variant);
-    if (handoff === "delivered") {
-      audit(session.id, "captcha_autosolve", {
-        variant: pending.variant,
-        outcome: "gate_handoff_delivered",
-      });
-      console.error(
-        `[captcha-autosolve-diag] session=${session.id} variant=${pending.variant} outcome=gate_handoff_delivered age_ms=${Date.now() - pending.fetchedAt}`,
-      );
-      return;
+    if (page !== undefined && !gateHandoffAttempted.has(page)) {
+      const gateUrl = findGateFrameUrl(page);
+      if (gateUrl !== null) {
+        gateHandoffAttempted.add(page);
+        audit(session.id, "captcha_autosolve", {
+          variant: pending.variant,
+          outcome: "gate_handoff_started",
+        });
+        console.error(
+          `[captcha-autosolve-diag] session=${session.id} variant=${pending.variant} outcome=gate_handoff_started`,
+        );
+        void runGateHandoffSolve(session, page, gateUrl, pending.token, pending.variant);
+        return;
+      }
     }
     const res = await injectCaptchaToken(session.browser, pending.variant, pending.token, page);
     // injectCaptchaToken's own settle check answers "does ANY provider hold a
@@ -429,6 +433,16 @@ const gateHandoffAttempted = new WeakSet<object>();
 /** How long to wait for the standalone gate page to land on its redirect. */
 const GATE_HANDOFF_REDIRECT_TIMEOUT_MS = 20_000;
 
+function findGateFrameUrl(page: Page | undefined): string | null {
+  if (!page) return null;
+  for (const frame of page.frames()) {
+    if (frame === page.mainFrame()) continue;
+    const url = frame.url();
+    if (url.includes("/gate/")) return url;
+  }
+  return null;
+}
+
 /**
  * Detached gate-page handoff for hCaptcha gates like Bluesky's signup: the
  * live page embeds a cross-origin gate iframe (path contains '/gate/') that owns the response
@@ -441,25 +455,17 @@ const GATE_HANDOFF_REDIRECT_TIMEOUT_MS = 20_000;
  * the completion code; pointing the live page's gate iframe at it replays the
  * handoff the embedding page's own onLoad handler expects.
  */
-async function tryGateHandoffSolve(
+async function runGateHandoffSolve(
   session: Session,
-  page: Page | undefined,
+  page: Page,
+  gateUrl: string,
   token: string,
   variant: string,
-): Promise<"delivered" | "no_gate" | "no_code" | "failed"> {
-  if (variant !== "hcaptcha" || !page || gateHandoffAttempted.has(page)) return "no_gate";
-  let gateUrl: string | null = null;
-  for (const frame of page.frames()) {
-    if (frame === page.mainFrame()) continue;
-    const url = frame.url();
-    if (url.includes("/gate/")) {
-      gateUrl = url;
-      break;
-    }
-  }
-  if (!gateUrl) return "no_gate";
-  gateHandoffAttempted.add(page);
+): Promise<void> {
   let scratch: Page | null = null;
+  const auditHandoff = (outcome: string): void => {
+    audit(session.id, "captcha_autosolve", { variant, outcome });
+  };
   try {
     const context = page.context();
     scratch = await context.newPage();
@@ -475,7 +481,6 @@ async function tryGateHandoffSolve(
     console.error(
       `[captcha-gate-handoff-diag] filled=${filled.ok} textareas=${filled.textareas} formSubmitted=${filled.formSubmitted}`,
     );
-    if (!filled.formSubmitted) return "failed";
     const deadline = Date.now() + GATE_HANDOFF_REDIRECT_TIMEOUT_MS;
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 1_000));
@@ -499,21 +504,21 @@ async function tryGateHandoffSolve(
           }, url)
           .catch(() => false);
         console.error(`[captcha-gate-handoff-diag] code=1 delivered=${delivered}`);
-        return delivered ? "delivered" : "failed";
+        auditHandoff(delivered ? "gate_handoff_delivered" : "gate_handoff_undelivered");
+        return;
       }
     }
     const finalUrl = new URL(scratch.url());
     const names = Array.from(finalUrl.searchParams.keys());
-    const error = finalUrl.searchParams.get("error");
     console.error(
-      `[captcha-gate-handoff-diag] code=0 final=${finalUrl.host}${finalUrl.pathname}?[${names.join(",")}]${error ? ` error=${error}` : ""}`,
+      `[captcha-gate-handoff-diag] code=0 final=${finalUrl.host}${finalUrl.pathname}?[${names.join(",")}]`,
     );
-    return "no_code";
+    auditHandoff("gate_handoff_no_code");
   } catch (error) {
     console.error(
       `[captcha-gate-handoff-diag] failed=${error instanceof Error ? error.message : String(error)}`,
     );
-    return "failed";
+    auditHandoff("gate_handoff_error");
   } finally {
     await scratch?.close().catch(() => {});
   }
