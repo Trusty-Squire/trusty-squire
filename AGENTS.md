@@ -677,7 +677,13 @@ failures on the Oura/Ring purchase (session `6dcd7859`):
   per-character loop).** `handle.fill()` emits no keydown/keypress, and a
   hosted-field client can leave the field `invalid=true` even though the DOM
   value looks right. The released value goes vault → page only; never through
-  `operate_type`, a tool result, or a log.
+  `operate_type`, a tool result, or a log. The card writer bounds its
+  clear-fill and `pressSequentially` waits to `CARD_FIELD_WRITE_TIMEOUT_MS`
+  (3s): a frame remounted mid-write leaves the old frame's locator
+  permanently unactionable, and Playwright's 30s default burns one refill per
+  doomed attempt — starving the bounded retry budget (shipped as three
+  consecutive real-browser release-gate failures on `pan=native_error`).
+  Ordinary typing callers keep the default; do not widen the bound to them.
 - **Verify by normalising both sides for formatting separators, then requiring
   equality.** `actual === expected || digits(actual) === digits(expected)`
   accepts a superset/truncation; a field that is not genuinely equal must
@@ -685,8 +691,12 @@ failures on the Oura/Ring purchase (session `6dcd7859`):
 
 Regression: `apps/mcp/src/bot/__tests__/browser-hosted-field-remount.test.ts`
 (three site-isolated OOPIFs on different registrable domains, open shadow
-roots, child-driven sibling remounts; 20 consecutive single-call runs). Evidence
-ledger: `data/ts-hosted-field-fill-nondeterministic/findings.md`.
+roots, child-driven sibling remounts; 20 consecutive single-call runs — the
+loop classifies honestly reported `detached`/`not_found`/`native_error`
+misses under the synthetic storm as bounded transients (`≤2` of 20) and fails
+absolutely on wrong/partial values, silent misses (`filled`-but-absent),
+unknown statuses, or a value not correct after the masked-token re-arm).
+Evidence ledger: `data/ts-hosted-field-fill-nondeterministic/findings.md`.
 
 ## Final note
 
