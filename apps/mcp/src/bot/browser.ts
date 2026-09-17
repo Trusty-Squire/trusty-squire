@@ -2124,8 +2124,7 @@ export class BrowserController implements BrowserDriver {
           }
           const affordable = all.filter(
             (el) =>
-              isVisible(el) &&
-              (intent !== "type" ? hasClickAffordance(el) : hasTypeAffordance(el)),
+              isVisible(el) && (intent !== "type" ? hasClickAffordance(el) : hasTypeAffordance(el)),
           );
           const matchText = (el: Element): string =>
             intent !== "type" ? rendered(el) : norm(typeLabel(el));

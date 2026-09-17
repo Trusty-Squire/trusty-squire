@@ -25,7 +25,7 @@
  */
 /* eslint-disable no-console -- manual diagnostics printer */
 import { chromium } from "playwright";
-import type { ElementHandle, Page } from "playwright";
+import type { Page } from "playwright";
 import { BrowserController } from "../src/bot/browser.js";
 import { isCaptchaFrameUrl } from "../src/bot/captcha.js";
 
@@ -72,20 +72,23 @@ async function anchorState(page: Page, label: string): Promise<void> {
   const state = await page
     .frames()
     .filter((f) => f.url().includes("/recaptcha/api2/anchor"))
-    .reduce(async (acc, f) => {
-      const s = await f
-        .evaluate(() => {
-          const anchor = document.getElementById("recaptcha-anchor");
-          if (anchor === null) return { anchor: false };
-          return {
-            anchor: true,
-            checked: anchor.getAttribute("aria-checked"),
-            label: anchor.getAttribute("aria-label")?.slice(0, 60) ?? null,
-          };
-        })
-        .catch((e) => ({ error: String(e).slice(0, 80) }));
-      return [...(await acc), { frame: f.url().slice(0, 60), ...s }];
-    }, [] as Promise<Array<Record<string, unknown>>>);
+    .reduce(
+      async (acc, f) => {
+        const s = await f
+          .evaluate(() => {
+            const anchor = document.getElementById("recaptcha-anchor");
+            if (anchor === null) return { anchor: false };
+            return {
+              anchor: true,
+              checked: anchor.getAttribute("aria-checked"),
+              label: anchor.getAttribute("aria-label")?.slice(0, 60) ?? null,
+            };
+          })
+          .catch((e) => ({ error: String(e).slice(0, 80) }));
+        return Promise.resolve([...(await acc), { frame: f.url().slice(0, 60), ...s }]);
+      },
+      Promise.resolve([] as Array<Record<string, unknown>>),
+    );
   console.log(`=== anchor state (${label}) ===`);
   for (const row of state) console.log("  ", JSON.stringify(row));
 }
@@ -121,7 +124,8 @@ async function main(): Promise<void> {
   console.log("=== 3. operator observation inventory (widget-adjacent rows) ===");
   const capture = await controller.extractBrowserUseObservation(page, true);
   for (const el of capture.elements) {
-    const hay = `${el.tag} ${el.ariaLabel ?? ""} ${el.labelText ?? ""} ${el.visibleText ?? ""} ${el.selector} ${el.frameOrigin ?? ""}`.toLowerCase();
+    const hay =
+      `${el.tag} ${el.ariaLabel ?? ""} ${el.labelText ?? ""} ${el.visibleText ?? ""} ${el.selector} ${el.frameOrigin ?? ""}`.toLowerCase();
     if (
       hay.includes("recaptcha") ||
       hay.includes("robot") ||
@@ -140,7 +144,6 @@ async function main(): Promise<void> {
           frameOrigin: el.frameOrigin ?? null,
           framePath: el.framePath ?? null,
           visible: el.visible,
-          bounds: el.bounds,
         }),
       );
     }
@@ -148,7 +151,8 @@ async function main(): Promise<void> {
 
   // Pick the observation row for the checkbox (or the anchor iframe row).
   const candidates = capture.elements.filter((el) => {
-    const hay = `${el.ariaLabel ?? ""} ${el.labelText ?? ""} ${el.visibleText ?? ""} ${el.selector}`.toLowerCase();
+    const hay =
+      `${el.ariaLabel ?? ""} ${el.labelText ?? ""} ${el.visibleText ?? ""} ${el.selector}`.toLowerCase();
     return hay.includes("recaptcha") || hay.includes("robot");
   });
   console.log(
@@ -171,7 +175,9 @@ async function main(): Promise<void> {
   const markerSurvived = await page
     .evaluate((m) => document.querySelector(`iframe[${m}]`) !== null, marker)
     .catch(() => "eval-failed");
-  console.log(`    marker after fresh observe: ${markerSurvived} (rows2=${capture2.elements.length})`);
+  console.log(
+    `    marker after fresh observe: ${markerSurvived} (rows2=${capture2.elements.length})`,
+  );
 
   await anchorState(page, "before click");
 
@@ -181,16 +187,33 @@ async function main(): Promise<void> {
   for (const el of candidates) {
     const framePart =
       el.framePath !== undefined
-        ? { kind: "frame" as const, frame: { framePath: el.framePath, frameOrigin: el.frameOrigin ?? "", frameUrl: el.frameUrl ?? "" } }
+        ? {
+            kind: "frame" as const,
+            frame: {
+              framePath: el.framePath,
+              frameOrigin: el.frameOrigin ?? "",
+              frameUrl: el.frameUrl ?? "",
+            },
+          }
         : {};
-    const target = el.framePath !== undefined
-      ? { kind: "frame" as const, frame: { framePath: el.framePath, frameOrigin: el.frameOrigin ?? "", frameUrl: el.frameUrl ?? "" }, selector: el.selector }
-      : { kind: "selector" as const, selector: el.selector };
+    const target =
+      el.framePath !== undefined
+        ? {
+            kind: "frame" as const,
+            frame: {
+              framePath: el.framePath,
+              frameOrigin: el.frameOrigin ?? "",
+              frameUrl: el.frameUrl ?? "",
+            },
+            selector: el.selector,
+          }
+        : { kind: "selector" as const, selector: el.selector };
     console.log(`--- operate-shaped click on row ${el.index} sel=${el.selector.slice(0, 90)}`);
     try {
-      await controller.click({ ...target, method: "click" } as Parameters<
-        BrowserController["click"]
-      >[0], page);
+      await controller.click(
+        { ...target, method: "click" } as Parameters<BrowserController["click"]>[0],
+        page,
+      );
       console.log(`    click returned OK on row ${el.index}`);
     } catch (error) {
       console.log(

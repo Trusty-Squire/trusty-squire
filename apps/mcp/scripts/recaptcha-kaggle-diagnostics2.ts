@@ -48,7 +48,9 @@ async function anchorState(page: Page, label: string): Promise<void> {
     const f = document.querySelector('iframe[src*="recaptcha/api2/bframe"]');
     if (f === null) return { bframe: "absent" };
     const r = f.getBoundingClientRect();
-    return { bframe: { x: r.x, y: r.y, w: r.width, h: r.height, title: f.title } };
+    return {
+      bframe: { x: r.x, y: r.y, w: r.width, h: r.height, title: (f as HTMLIFrameElement).title },
+    };
   });
   console.log(`[${label}]`, JSON.stringify({ anchors: states, ...bframe }));
 }
@@ -117,7 +119,10 @@ async function main(): Promise<void> {
     if (anchorFrame !== undefined) {
       try {
         await anchorFrame.locator("#recaptcha-anchor").focus();
-        await anchorFrame.keyboard.press("Space");
+        // Manual diagnostics record: on the live page this dispatch attempt
+        // failed (Frame exposes no keyboard; preserved via the assertion so
+        // the run still reports the keyboard FAILED outcome it observed).
+        await (anchorFrame as unknown as Page).keyboard.press("Space");
         await sleep(4_000);
         await anchorState(page, "after Space");
       } catch (e) {

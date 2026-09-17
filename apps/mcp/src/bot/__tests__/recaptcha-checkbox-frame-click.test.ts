@@ -36,14 +36,16 @@ import { detectCaptchaVariant } from "../captcha.js";
 import { actInternally } from "../act/act.js";
 import { installBrokerBrowserCustody } from "../broker/custody.js";
 import { finishProvisionSession, startProvisionSession } from "../session/lifecycle.js";
-import { BrowserController, BrowserClickDispatchError } from "../browser.js";
+import { BrowserController } from "../browser.js";
 
 // startProvisionSession's admission reads see a signed-in fixture profile.
 vi.mock("../oauth-login.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../oauth-login.js")>()),
+  ...(await importOriginal<typeof OauthLoginModule>()),
   detectSessionProviders: async () => ["google"],
   detectGoogleAccountEmail: async () => "fixture@example.test",
 }));
+
+import type * as OauthLoginModule from "../oauth-login.js";
 
 const GOOGLE_ANCHOR_URL =
   "https://www.google.com/recaptcha/api2/anchor?ar=1&k=6Ltestsitekey0000000000000000&co=aHR0cHM&hl=en";
@@ -230,7 +232,11 @@ describe.skipIf(!available)("recaptcha v2 checkbox frame click (Kaggle shape)", 
     await expect(
       controller.click({
         kind: "frame",
-        frame: { framePath: "0:1", frameOrigin: "https://www.google.com", frameUrl: GOOGLE_BFRAME_URL },
+        frame: {
+          framePath: "0:1",
+          frameOrigin: "https://www.google.com",
+          frameUrl: GOOGLE_BFRAME_URL,
+        },
         selector: "#challenge-grid",
         method: "click",
       }),
@@ -242,7 +248,11 @@ describe.skipIf(!available)("recaptcha v2 checkbox frame click (Kaggle shape)", 
     await expect(
       controller.click({
         kind: "frame",
-        frame: { framePath: "0:0", frameOrigin: "https://www.google.com", frameUrl: GOOGLE_ANCHOR_URL },
+        frame: {
+          framePath: "0:0",
+          frameOrigin: "https://www.google.com",
+          frameUrl: GOOGLE_ANCHOR_URL,
+        },
         selector: "#recaptcha-anchor",
         method: "js_click",
       }),

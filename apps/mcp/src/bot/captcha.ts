@@ -543,10 +543,7 @@ export async function detectCaptchaVariant(
         // challenge here — the auto-solver only escalates (and only spends
         // the funded key) once the grid actually overlaps the viewport.
         return (
-          r.bottom > 0 &&
-          r.right > 0 &&
-          r.top < window.innerHeight &&
-          r.left < window.innerWidth
+          r.bottom > 0 && r.right > 0 && r.top < window.innerHeight && r.left < window.innerWidth
         );
       };
       // The image-grid challenge frame: reCAPTCHA's `bframe`, or

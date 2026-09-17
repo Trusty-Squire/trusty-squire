@@ -50,7 +50,7 @@ async function main(): Promise<void> {
   console.log("=== 2. observation rows in the anchor frame ===");
   const capture = await controller.extractBrowserUseObservation(page, true);
   const rows = capture.elements.filter(
-    (el) => el.frameOrigin !== null && el.frameOrigin.includes("google"),
+    (el) => el.frameOrigin != null && el.frameOrigin.includes("google"),
   );
   console.log(JSON.stringify(rows.map((el) => ({ ...el, ariaLabel: el.ariaLabel }))));
 

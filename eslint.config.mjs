@@ -37,6 +37,9 @@ export default [
     files: [
       "apps/mcp/vitest.tiers.ts",
       "apps/mcp/scripts/oopif-live-diagnostics.ts",
+      "apps/mcp/scripts/recaptcha-kaggle-diagnostics.ts",
+      "apps/mcp/scripts/recaptcha-kaggle-diagnostics2.ts",
+      "apps/mcp/scripts/recaptcha-kaggle-verify.ts",
     ],
     languageOptions: {
       parserOptions: {

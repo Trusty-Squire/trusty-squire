@@ -4,5 +4,11 @@
     "rootDir": ".",
     "noEmit": true
   },
-  "include": ["vitest.tiers.ts", "scripts/oopif-live-diagnostics.ts"]
+  "include": [
+    "vitest.tiers.ts",
+    "scripts/oopif-live-diagnostics.ts",
+    "scripts/recaptcha-kaggle-diagnostics.ts",
+    "scripts/recaptcha-kaggle-diagnostics2.ts",
+    "scripts/recaptcha-kaggle-verify.ts"
+  ]
 }

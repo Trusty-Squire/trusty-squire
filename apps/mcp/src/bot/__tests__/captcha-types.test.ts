@@ -4,10 +4,7 @@
 // here.
 
 import { describe, expect, it } from "vitest";
-import type {
-  CaptchaSolveResult,
-  CaptchaKind,
-} from "../captcha.js";
+import type { CaptchaSolveResult, CaptchaKind } from "../captcha.js";
 import { isRecaptchaCheckboxFrameUrl } from "../captcha.js";
 
 describe("isRecaptchaCheckboxFrameUrl", () => {
@@ -28,9 +25,9 @@ describe("isRecaptchaCheckboxFrameUrl", () => {
   });
 
   it("accepts the recaptcha.net mirror and the enterprise anchor", () => {
-    expect(isRecaptchaCheckboxFrameUrl("https://api.recaptcha.net/recaptcha/api2/anchor?k=6Lk")).toBe(
-      true,
-    );
+    expect(
+      isRecaptchaCheckboxFrameUrl("https://api.recaptcha.net/recaptcha/api2/anchor?k=6Lk"),
+    ).toBe(true);
     expect(
       isRecaptchaCheckboxFrameUrl("https://www.google.com/recaptcha/enterprise/anchor?k=6Lk"),
     ).toBe(true);
