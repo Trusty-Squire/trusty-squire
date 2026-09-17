@@ -256,11 +256,22 @@ async function multiRowHarness(): Promise<{ context: BrowserContext }> {
 
 async function readInbox(
   context: BrowserContext,
-  opts: { sender?: string } = {},
+  opts: { sender?: string; breakRowExtraction?: boolean } = {},
 ): Promise<Awaited<ReturnType<typeof awaitVerification>>> {
   const harnessPage = await context.newPage();
   await harnessPage.goto(`http://127.0.0.1:${port}/signup`);
   const controller = BrowserController.fromHarnessPage(harnessPage);
+  if (opts.breakRowExtraction) {
+    // Model a transient page.evaluate failure (Gmail rerender destroying the
+    // execution context): every row extraction throws and the production
+    // `.catch(() => [])` swallows it, so the read sees ZERO rows while the
+    // page-wide list text still carries a foreign sender's code.
+    (
+      controller as unknown as { extractMailResultRows: () => Promise<never> }
+    ).extractMailResultRows = async () => {
+      throw new Error("Execution context was destroyed, most likely because of a navigation");
+    };
+  }
   const obs = await startHarnessProvisionSession({
     browser: controller,
     serviceUrl: `http://127.0.0.1:${port}/signup`,
@@ -458,6 +469,26 @@ describe("operate_read_inbox picks the NEWEST matching mail out of a real result
     const { context } = await multiRowHarness();
     try {
       const res = await readInbox(context, { sender: "github.com" });
+      expect(res.found).toBe(false);
+      expect(res.code).toBeNull();
+      expect(res.link).toBeNull();
+      expect(res.needs_user?.resume).toBe("code");
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+
+  it("a transient extraction failure with a sender hint never parses the page-wide list's foreign code", async () => {
+    // The unfiltered query means the page-wide list text can carry another
+    // sender's code (here Proton's 934870, ranked first by relevance). If the
+    // row extraction throws once and the read falls back to parsing that list
+    // text, the craigslist read returns the PROTON code as found — the exact
+    // harm the sender filter exists to prevent. The attempt must instead end
+    // in the honest not-found path.
+    if (!available) return;
+    const { context } = await multiRowHarness();
+    try {
+      const res = await readInbox(context, { sender: "craigslist", breakRowExtraction: true });
       expect(res.found).toBe(false);
       expect(res.code).toBeNull();
       expect(res.link).toBeNull();
