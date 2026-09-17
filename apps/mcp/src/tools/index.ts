@@ -56,13 +56,8 @@ export { ALWAYS_LOAD_META } from "./always-load.js";
 // server.ts only invokes a handler after confirming a non-null api, but
 // the registry contract still types it as nullable. assertApi() is the
 // one-liner that asserts the non-nullability for handlers that DO need the API.
-export function assertApi(api: ApiClient | null): asserts api is ApiClient {
-  if (api === null) {
-    throw new Error(
-      "This tool requires an active Trusty Squire session. Run `npx @trusty-squire/mcp connect`.",
-    );
-  }
-}
+// It lives in ./assert-api.js (a leaf module) and is re-exported above.
+export { assertApi } from "./assert-api.js";
 
 const diagnosticsTools = [listExtractFailuresTool, getExtractFailureTool] as const;
 

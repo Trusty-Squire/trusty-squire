@@ -20,6 +20,7 @@ import { mockBrowserUseCapture } from "./browser-use-test-capture.js";
 // decision, not in a refactor.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type * as GoogleLoginModule from "../google-login.js";
+import type * as OAuthLoginModule from "../oauth-login.js";
 import type * as BrowserModule from "../browser.js";
 import type { InteractiveElement } from "../browser.js";
 
@@ -68,7 +69,7 @@ vi.mock("../broker/custody.js", async () => {
 // Provider-session detection is a module function now; the fake controller
 // below carries no context, so stub the module lifecycle.ts imports from.
 vi.mock("../oauth-login.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../oauth-login.js")>()),
+  ...(await importOriginal<typeof OAuthLoginModule>()),
   detectSessionProviders: async (): Promise<string[]> => h.providers ?? [],
   detectGoogleAccountEmail: async (): Promise<string | null> => h.workerEmail,
 }));
@@ -253,6 +254,7 @@ describe("characterization: registered operator tool surface", () => {
       "operate_login",
       "operate_fill_credential",
       "operate_extract",
+      "operate_decide",
     ]);
   });
 

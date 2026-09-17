@@ -60,6 +60,7 @@ export const REAL_BROWSER_FILES = [
   "src/bot/__tests__/observation-dom-correctness.test.ts",
   "src/bot/__tests__/observation-prose.test.ts",
   "src/bot/__tests__/observe-jp-mojibake.test.ts",
+  "src/bot/__tests__/operate-decide-browser.test.ts",
   "src/bot/__tests__/operate-session-flow.test.ts",
   "src/bot/__tests__/operator-click-fallback.test.ts",
   "src/bot/__tests__/operator-login-read-browser.test.ts",
