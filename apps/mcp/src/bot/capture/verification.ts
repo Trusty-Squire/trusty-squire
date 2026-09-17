@@ -340,8 +340,16 @@ export async function awaitVerification(
           // Read the opened message's OWN container (card + body) when Gmail
           // renders one, so page chrome never enters the code parse, the link
           // scoring, or the sender read. Falls back to the page-wide read,
-          // where chrome anchors are still filtered out below.
-          const body = await browser.extractOpenedMailBody(inboxTab).catch(() => null);
+          // where chrome anchors are still filtered out below. A controller
+          // without this newer method (older mock surface) falls back too.
+          const openedBodyOf = (
+            browser as BrowserController & {
+              extractOpenedMailBody?: (
+                page: Page | null,
+              ) => Promise<{ text: string; links: Array<{ url: string; text: string | null }> } | null>;
+            }
+          ).extractOpenedMailBody?.bind(browser);
+          const body = (await openedBodyOf?.(inboxTab).catch(() => null)) ?? null;
           const openedText = body?.text ?? (await browser.extractVisibleText(inboxTab));
           const openedLinks = body?.links ?? (await rawLinksOf(inboxTab));
           sourceFrom = extractSenderEmail(openedText);
