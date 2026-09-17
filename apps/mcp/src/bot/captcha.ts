@@ -970,20 +970,42 @@ export async function hasHcaptchaResponseTokenWithCompat(
   page: Page | null = browser.page,
 ): Promise<boolean> {
   if (!page) throw new Error("Browser not started");
-  return page
-    .evaluate(
-      ({ own, compat }: { own: string; compat: string }) => {
-        const value = (selector: string): string | null => {
-          const el = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector);
-          return el === null ? null : el.value.trim();
-        };
-        const ownValue = value(own);
-        if (ownValue !== null) return ownValue.length > 0;
-        return (value(compat) ?? "").length > 0;
-      },
-      { own: VARIANT_RESPONSE_SELECTOR.hcaptcha, compat: VARIANT_RESPONSE_SELECTOR.recaptcha_v2 },
-    )
-    .catch(() => false);
+  // The widget can live in a dedicated gate frame (e.g. Bluesky embeds a
+  // cross-origin bsky.social/gate/signup frame that owns the response
+  // textareas), so the check must run in EVERY frame — a main-frame-only
+  // evaluate never sees the token that landed there.
+  for (const frame of page.frames()) {
+    const present = await frame
+      .evaluate(
+        ({ own, compat }: { own: string; compat: string }) => {
+          // Shadow-DOM-aware: the widget host (and its response textarea) can
+          // sit inside an open shadow root, invisible to document.querySelector.
+          const deepAll = (selector: string): Element[] => {
+            const out: Element[] = [];
+            const walk = (root: Document | ShadowRoot): void => {
+              for (const el of Array.from(root.querySelectorAll(selector))) out.push(el);
+              for (const el of Array.from(root.querySelectorAll("*"))) {
+                const sr = (el as HTMLElement).shadowRoot;
+                if (sr) walk(sr);
+              }
+            };
+            walk(document);
+            return out;
+          };
+          const value = (selector: string): string | null => {
+            const el = deepAll(selector)[0] as HTMLInputElement | HTMLTextAreaElement | undefined;
+            return el === undefined ? null : el.value.trim();
+          };
+          const ownValue = value(own);
+          if (ownValue !== null) return ownValue.length > 0;
+          return (value(compat) ?? "").length > 0;
+        },
+        { own: VARIANT_RESPONSE_SELECTOR.hcaptcha, compat: VARIANT_RESPONSE_SELECTOR.recaptcha_v2 },
+      )
+      .catch(() => false);
+    if (present) return true;
+  }
+  return false;
 }
 
 // Tier 3 hCaptcha support — extract the hCaptcha sitekey so 2Captcha
@@ -1019,6 +1041,25 @@ export async function extractHcaptchaSitekey(
       return null;
     });
     if (fromDom !== null) return fromDom;
+    // SHADOW-ROOT embeds (Bluesky): the hCaptcha host is rendered inside a
+    // shadow root, so a main-document querySelector never sees the widget
+    // div or its iframes — but Playwright tracks the live frame tree
+    // regardless of DOM nesting. The widget's own frame URL carries the
+    // sitekey in its query or hash params; a plain hcaptcha.com asset frame
+    // without a sitekey param contributes nothing.
+    for (const frame of page.frames()) {
+      const url = frame.url();
+      if (!url.includes("hcaptcha.com")) continue;
+      try {
+        const parsed = new URL(url);
+        const hash = parsed.hash.startsWith("#") ? parsed.hash.slice(1) : parsed.hash;
+        const k =
+          parsed.searchParams.get("sitekey") ?? new URLSearchParams(hash).get("sitekey");
+        if (k !== null && k.length > 10) return k;
+      } catch {
+        // not a parseable URL — skip this frame
+      }
+    }
     // INVISIBLE hCaptcha (Hugging Face, Stripe): no .h-captcha div, no
     // iframe `?sitekey=` param — the sitekey lives in the page's JS/JSON
     // config (`captchaApiKey`, `express_hcaptcha_site_key`,
@@ -1030,6 +1071,40 @@ export async function extractHcaptchaSitekey(
   } catch {
     return null;
   }
+}
+
+// The page URL the widget is rendered on. Ordinary integrations render the
+// container in the top document; some sites (Bluesky's signup gate) embed it
+// in a cross-origin iframe, and the hCaptcha token's siteverify `hostname`
+// derives from the page the solve is attributed to — so the widget-hosting
+// frame's URL, not the top page, is the faithful attribution. Returns null
+// when no distinct widget-hosting frame is found (solve attributes to the
+// top page).
+export async function findHcaptchaWidgetPageUrl(
+  browser: BrowserController,
+  page: Page | null = browser.page,
+): Promise<string | null> {
+  if (!page) throw new Error("Browser not started");
+  const topUrl = page.url();
+  for (const frame of page.frames()) {
+    const url = frame.url();
+    if (url === topUrl || url === "about:blank") continue;
+    if (/hcaptcha\.com|newassets\.hcaptcha\.com/.test(url)) continue;
+    try {
+      const hosts = await frame.evaluate(() => ({
+        container:
+          document.querySelector<HTMLElement>("[data-sitekey], .h-captcha") !== null,
+        textarea:
+          document.querySelector<HTMLTextAreaElement>(
+            'textarea[name="h-captcha-response"], textarea[name="g-recaptcha-response"]',
+          ) !== null,
+      }));
+      if (hosts.container || hosts.textarea) return url;
+    } catch {
+      // detached or inaccessible frame — skip
+    }
+  }
+  return null;
 }
 
 async function getBrowserUserAgent(page: Page | null): Promise<string | null> {
@@ -1119,14 +1194,72 @@ export async function injectHcaptchaToken(
   if (!page) throw new Error("Browser not started");
   try {
     const responseKey = extractHcaptchaResponseKeyFromToken(token);
-    const diag = await page.evaluate(
-      ({ tok, key }: { tok: string; key: string | null }) => {
-        const widgetIds = new Set<string>();
-        const inputs = Array.from(
-          document.querySelectorAll<HTMLTextAreaElement>(
-            'textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"], textarea[name="g-recaptcha-response"]',
-          ),
+    // The widget and its SDK can live in a dedicated gate frame (e.g. Bluesky
+    // embeds a cross-origin bsky.social/gate/signup frame that owns the
+    // response textareas), so the fill must run in EVERY frame — a
+    // main-frame-only evaluate lands nothing.
+    let ok = false;
+    for (const frame of page.frames()) {
+      try {
+        const diag = await frame.evaluate(hcaptchaInjectScript, {
+          tok: token,
+          key: responseKey,
+        });
+        console.error(
+          `[captcha-inject-diag] frame=${frame.url().slice(0, 60)} ok=${diag.ok} textareas=${diag.textareas} widgets=${diag.widgets} callbackFired=${diag.callbackFired} formSubmitted=${diag.formSubmitted} dataCbHosts=${diag.dataCallbackHosts} globalFns=${diag.globalFnMatches} hasGlobal=${diag.hasHcaptchaGlobal}`,
         );
+        if (diag.ok) ok = true;
+      } catch {
+        // A frame can detach mid-injection; the others still get the token.
+      }
+    }
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+// Page-side fill body, run in every frame. Self-contained: Playwright
+// serializes only this function's source, closure variables do not travel.
+// Exported for the detached gate-page handoff (captcha-solve.ts), which runs
+// the same fill on a standalone copy of a gate URL with `submitMode: "top"`.
+export function hcaptchaInjectScript({
+  tok,
+  key,
+  submitMode = "hidden-frame",
+}: {
+  tok: string;
+  key: string | null;
+  submitMode?: "hidden-frame" | "top";
+}): {
+  ok: boolean;
+  textareas: number;
+  widgets: number;
+  callbackFired: boolean;
+  formSubmitted: boolean;
+  dataCallbackHosts: number;
+  globalFnMatches: number;
+  hasHcaptchaGlobal: boolean;
+} {
+  {
+        // Shadow-DOM-aware: the widget host and its response textarea can sit
+        // inside an open shadow root, invisible to document.querySelector.
+        const deepAll = (selector: string): Element[] => {
+          const out: Element[] = [];
+          const walk = (root: Document | ShadowRoot): void => {
+            for (const el of Array.from(root.querySelectorAll(selector))) out.push(el);
+            for (const el of Array.from(root.querySelectorAll("*"))) {
+              const sr = (el as HTMLElement).shadowRoot;
+              if (sr) walk(sr);
+            }
+          };
+          walk(document);
+          return out;
+        };
+        const widgetIds = new Set<string>();
+        const inputs = deepAll(
+          'textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"], textarea[name="g-recaptcha-response"]',
+        ) as HTMLTextAreaElement[];
         for (const input of inputs) {
           // g-recaptcha-response is hCaptcha's DROP-IN compat field: filling it
           // is right when hCaptcha replaced reCAPTCHA, and wrong when the two
@@ -1138,9 +1271,7 @@ export async function injectHcaptchaToken(
           input.dispatchEvent(new Event("change", { bubbles: true }));
         }
         for (const host of Array.from(
-          document.querySelectorAll<HTMLElement>(
-            ".h-captcha, [data-hcaptcha-widget-id], [data-hcaptcha-response]",
-          ),
+          deepAll(".h-captcha, [data-hcaptcha-widget-id], [data-hcaptcha-response]"),
         )) {
           host.setAttribute("data-hcaptcha-response", tok);
           const id =
@@ -1198,15 +1329,70 @@ export async function injectHcaptchaToken(
         };
 
         // Fire callbacks registered by markup, e.g. data-callback="onSubmit".
+        // Not scoped to .h-captcha hosts: some integrations (e.g. Bluesky's
+        // signup gate) put data-callback on the plain div the SDK renders
+        // into, and that div never gains the h-captcha class.
         try {
-          for (const host of Array.from(
-            document.querySelectorAll<HTMLElement>(".h-captcha[data-callback]"),
-          )) {
-            const name = host.getAttribute("data-callback");
-            if (name !== null && name !== undefined) fire(win[name]);
+          for (const host of Array.from(deepAll("[data-callback]"))) {
+            const name = (host as HTMLElement).getAttribute("data-callback");
+            if (name) fire(win[name]);
           }
         } catch {
           // no named callback, continue to runtime config scan.
+        }
+        // Last resort: a page that wires its completion through a well-named
+        // global (e.g. onCaptchaComplete) but registers it programmatically.
+        // Deliberately NOT matching /captcha/ - that also catches
+        // onCaptchaError / onCaptchaExpired, which must never fire.
+        if (!callbackFired) {
+          try {
+            for (const name of Object.getOwnPropertyNames(win)) {
+              if (
+                typeof win[name] === "function" &&
+                /complete|success|verify/i.test(name)
+              ) {
+                fire(win[name]);
+              }
+            }
+          } catch {
+            // heuristic only
+          }
+        }
+        // Final fallback for classic form-post integrations: no callback was
+        // reachable, but the token now sits in a response textarea INSIDE a
+        // form - the standard hCaptcha contract reads exactly that field at
+        // submit time, so submitting is the completion a solved human would
+        // trigger. Only forms that actually contain the filled field qualify.
+        let formSubmitted = false;
+        if (!callbackFired && inputs.length > 0) {
+          try {
+            for (const input of inputs) {
+              const form = input.form ?? input.closest("form");
+              if (form !== null) {
+                // POST into a hidden frame instead of navigating this one: the
+                // gate answers with a redirect that carries the completion code,
+                // and the driver reads it off that frame's URL to hand it to the
+                // embedding page. Navigating the form frame directly destroys
+                // the widget before the handoff can be observed.
+                if (submitMode === "top") {
+                  // Standalone gate page: navigate the page itself so the
+                  // gate's redirect (the completion code) becomes the page URL.
+                  form.submit();
+                } else {
+                  const postFrame = document.createElement("iframe");
+                  postFrame.name = "hcaptcha-gate-post";
+                  postFrame.style.display = "none";
+                  document.body.appendChild(postFrame);
+                  form.target = "hcaptcha-gate-post";
+                  form.submit();
+                }
+                formSubmitted = true;
+                break;
+              }
+            }
+          } catch {
+            // submit is best-effort
+          }
         }
 
         // Programmatic hCaptcha integrations pass function callbacks to
@@ -1237,19 +1423,32 @@ export async function injectHcaptchaToken(
         scan(win.___hcaptcha_cfg, 0);
         scan(win.hcaptcha, 0);
 
-        return {
+        const result = {
           ok: inputs.length > 0 || widgetIds.size > 0 || callbackFired,
           textareas: inputs.length,
           widgets: widgetIds.size,
           callbackFired,
+          formSubmitted,
+          dataCallbackHosts: (() => {
+            try {
+              return deepAll("[data-callback]").length;
+            } catch {
+              return -1;
+            }
+          })(),
+          globalFnMatches: (() => {
+            try {
+              return Object.getOwnPropertyNames(win).filter(
+                (n) =>
+                  typeof win[n] === "function" && /complete|success|verify/i.test(n),
+              ).length;
+            } catch {
+              return -1;
+            }
+          })(),
           hasHcaptchaGlobal: win.hcaptcha !== undefined,
         };
-      },
-      { tok: token, key: responseKey },
-    );
-    return diag.ok;
-  } catch {
-    return false;
+        return result;
   }
 }
 
