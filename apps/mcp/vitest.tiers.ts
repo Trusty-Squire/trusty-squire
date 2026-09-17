@@ -51,6 +51,7 @@ export const REAL_BROWSER_FILES = [
   "src/bot/__tests__/captcha-solve-token-signal.test.ts",
   "src/bot/capture/__tests__/credential-capture-browser.test.ts",
   "src/bot/__tests__/hcaptcha-inject-coresident.test.ts",
+  "src/bot/__tests__/recaptcha-checkbox-frame-click.test.ts",
   "src/bot/__tests__/locator-fallback.test.ts",
   "src/bot/__tests__/modal-overlay-inert.test.ts",
   "src/bot/__tests__/mutation-checkpoint-boundaries.test.ts",
