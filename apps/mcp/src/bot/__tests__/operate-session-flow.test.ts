@@ -423,6 +423,9 @@ vi.mock("../browser.js", async (importOriginal) => ({
           isClosed: () => false,
           url: () => this.currentUrl(),
           mainFrame: () => frame,
+          // The captcha auto-solve walks child frames for gate handoff; this
+          // simulated page embeds none.
+          frames: () => [],
           on: (event: string, handler: (payload: unknown) => void) =>
             subscribe(event, handler, false),
           once: (event: string, handler: (payload: unknown) => void) =>
@@ -477,6 +480,8 @@ vi.mock("../browser.js", async (importOriginal) => ({
       return {
         isClosed: () => false,
         url: () => this.currentUrl(),
+        // See activeOAuthPage: no child frames for the gate-handoff walk.
+        frames: () => [],
       };
     }
     mainDocumentIdentity(): string {
@@ -1121,9 +1126,16 @@ vi.mock("../browser.js", async (importOriginal) => ({
 // methods. The h.* flags and call counters are the same observations the
 // fake's methods used to make.
 vi.mock("../captcha.js", async (importOriginal) => ({
+  // Pure helpers and the injection script are the real ones: they parse or
+  // build values, they never touch the page.
+  ...(await importOriginal<typeof CaptchaModule>()),
   // withTimeout is the real one: the credential-listing bound is the behaviour
   // under test, not something to re-implement here.
   withTimeout: (await importOriginal<typeof CaptchaModule>()).withTimeout,
+  // The fake harness page hosts no cross-origin widget frame to attribute the
+  // solve to, so the widget-page lookup finds nothing (the real implementation
+  // walks real Playwright frames).
+  findHcaptchaWidgetPageUrl: async () => null,
   TwoCaptchaSolver: class {
     constructor(opts?: unknown) {
       h.twoCaptchaCtorArgs.push(opts);

@@ -18,19 +18,22 @@ import {
   TwoCaptchaSolver,
   type TwoCaptchaVaultProxy,
   detectCaptchaVariant,
+  extractHcaptchaResponseKeyFromToken,
   extractHcaptchaSitekey,
   extractRecaptchaSitekey,
   extractTurnstileSitekey,
   getHcaptchaSolveContext,
+  findHcaptchaWidgetPageUrl,
   hasCaptchaResponseTokenForVariant,
   hasHcaptchaResponseTokenWithCompat,
+  hcaptchaInjectScript,
   injectHcaptchaToken,
   injectRecaptchaToken,
   injectTurnstileToken,
   waitForCaptchaResponseToken,
   withTimeout,
 } from "./captcha.js";
-import type { CaptchaVariant } from "./captcha.js";
+import type { CaptchaVariant, TwoCaptchaResult } from "./captcha.js";
 import type { ApiClient } from "../api-client.js";
 import type { BrowserController } from "./browser.js";
 import type { Session } from "./session/model.js";
@@ -109,7 +112,7 @@ export async function fetchCaptchaToken(
   browser: BrowserController,
   variant: string,
   page?: Page,
-): Promise<{ token: string | null; outcome: string }> {
+): Promise<{ token: string | null; outcome: string; reason?: string | undefined }> {
   if (!solver.isAvailable()) return { token: null, outcome: "no_key" };
   const pageUrl = page?.url() ?? browser.currentUrl();
 
@@ -123,23 +126,33 @@ export async function fetchCaptchaToken(
     });
     return res.kind === "ok"
       ? { token: res.token, outcome: "ok" }
-      : { token: null, outcome: res.kind };
+      : { token: null, outcome: res.kind, reason: nonOkReason(res) };
   }
 
   if (variant === "hcaptcha") {
     const sitekey = await extractHcaptchaSitekey(browser, page);
     if (sitekey === null) return { token: null, outcome: "missing_sitekey" };
     const ctx = await getHcaptchaSolveContext(browser, page);
+    // Attribute the solve to the page that actually hosts the widget: when the
+    // render container lives in a cross-origin frame (Bluesky's signup gate),
+    // the token's siteverify hostname must be that frame's origin, not the
+    // top page's — a hostname mismatch is exactly the shape a server-side
+    // verify rejects with a generic "invalid" error.
+    const widgetPageUrl = await findHcaptchaWidgetPageUrl(browser, page);
+    const solvePageUrl = widgetPageUrl ?? pageUrl;
+    console.error(
+      `[captcha-autosolve-diag] session=hcaptcha-solve pageUrl_origin=${new URL(solvePageUrl).origin}${new URL(solvePageUrl).pathname} top_origin=${new URL(pageUrl).origin}`,
+    );
     const res = await solver.solveHcaptcha({
       sitekey,
-      pageUrl,
+      pageUrl: solvePageUrl,
       invisible: ctx.invisible,
       ...(ctx.userAgent !== null ? { userAgent: ctx.userAgent } : {}),
       ...(ctx.rqdata !== null ? { data: ctx.rqdata } : {}),
     });
     return res.kind === "ok"
       ? { token: res.token, outcome: "ok" }
-      : { token: null, outcome: res.kind };
+      : { token: null, outcome: res.kind, reason: nonOkReason(res) };
   }
 
   if (variant === "turnstile") {
@@ -148,10 +161,14 @@ export async function fetchCaptchaToken(
     const res = await solver.solveTurnstile({ sitekey, pageUrl });
     return res.kind === "ok"
       ? { token: res.token, outcome: "ok" }
-      : { token: null, outcome: res.kind };
+      : { token: null, outcome: res.kind, reason: nonOkReason(res) };
   }
 
   return { token: null, outcome: "unsupported_variant" };
+}
+
+function nonOkReason(res: Exclude<TwoCaptchaResult, { kind: "ok" }>): string | undefined {
+  return res.kind === "submission_failed" || res.kind === "solver_error" ? res.reason : undefined;
 }
 
 // The page half: write the token into the variant's widget and settle. This is
@@ -222,6 +239,12 @@ const AUTOSOLVE_VARIANTS = new Set<CaptchaVariant>(["hcaptcha", "recaptcha_v2", 
 // on a later observation instead of on every poll. A token that landed does not
 // arm it — the next challenge after a navigation is a different challenge.
 const CAPTCHA_AUTOSOLVE_RETRY_COOLDOWN_MS = 30_000;
+
+/** How long to wait after the challenge-form POST before reading frame URLs. */
+const GATE_POST_SETTLE_MS = 4_000;
+
+// One surface dump per page: the SDK shape does not change under us.
+const hcaptchaSurfaceDumped = new WeakSet<object>();
 
 // Hard bound on a single API/2Captcha request on the operate path. Neither the
 // vault proxy nor the credential listing carries a deadline of its own, so
@@ -294,6 +317,10 @@ export async function attemptOperateCaptchaAutoSolve(session: Session, page?: Pa
   // advances only through the operator's explicit actions, after the
   // re-observation the payment contract expects. The challenge surfaces
   // unchanged here.
+  audit(session.id, "captcha_autosolve", {
+    outcome: "autosolve_entry",
+    card_released: session.releasedPaymentCard !== null,
+  });
   if (session.releasedPaymentCard !== null) return;
   await injectPendingCaptchaToken(session, page);
   startDetachedTokenFetch(session, page);
@@ -315,6 +342,9 @@ async function injectPendingCaptchaToken(session: Session, page?: Page): Promise
         variant: pending.variant,
         outcome: "token_expired",
       });
+      console.error(
+        `[captcha-autosolve-diag] session=${session.id} variant=${pending.variant} outcome=token_expired age_ms=${Date.now() - pending.fetchedAt}`,
+      );
       return;
     }
     // A token is bound to the document it was bought for. The agent kept
@@ -323,6 +353,9 @@ async function injectPendingCaptchaToken(session: Session, page?: Page): Promise
     // the response field with a value the site will reject.
     if (!sameDocument(pending.solvedUrl, page?.url() ?? session.browser.currentUrl())) {
       audit(session.id, "captcha_autosolve", { variant: pending.variant, outcome: "stale_page" });
+      console.error(
+        `[captcha-autosolve-diag] session=${session.id} variant=${pending.variant} outcome=stale_page`,
+      );
       return;
     }
     // The same question the fetch side asks before spending: a widget that
@@ -335,7 +368,25 @@ async function injectPendingCaptchaToken(session: Session, page?: Page): Promise
         variant: pending.variant,
         outcome: "already_settled",
       });
+      console.error(
+        `[captcha-autosolve-diag] session=${session.id} variant=${pending.variant} outcome=already_settled`,
+      );
       return;
+    }
+    if (page !== undefined && !gateHandoffAttempted.has(page)) {
+      const gateUrl = findGateFrameUrl(page);
+      if (gateUrl !== null) {
+        gateHandoffAttempted.add(page);
+        audit(session.id, "captcha_autosolve", {
+          variant: pending.variant,
+          outcome: "gate_handoff_started",
+        });
+        console.error(
+          `[captcha-autosolve-diag] session=${session.id} variant=${pending.variant} outcome=gate_handoff_started`,
+        );
+        void runGateHandoffSolve(session, page, gateUrl, pending.token, pending.variant);
+        return;
+      }
     }
     const res = await injectCaptchaToken(session.browser, pending.variant, pending.token, page);
     // injectCaptchaToken's own settle check answers "does ANY provider hold a
@@ -348,7 +399,19 @@ async function injectPendingCaptchaToken(session: Session, page?: Page): Promise
       outcome: res.solved && !confirmed ? "token_not_confirmed" : res.outcome,
       solved: confirmed,
     });
+    console.error(
+      `[captcha-autosolve-diag] session=${session.id} variant=${pending.variant} outcome=${res.solved && !confirmed ? "token_not_confirmed" : res.outcome} confirmed=${confirmed} age_ms=${Date.now() - pending.fetchedAt}`,
+    );
     if (!confirmed) state.lastFinishedAt = Date.now();
+    // Gate handoff: the fill POSTs the challenge form into a hidden frame and
+    // the gate answers with a redirect carrying the completion code. Give the
+    // POST a moment, then find that code on a frame URL and point the original
+    // challenge frame at it - the embedding page's own iframe onLoad handler
+    // reads the code from there and finishes the flow. Diagnostic output uses
+    // param NAMES and presence only; values are never printed.
+    if (page) {
+      void deliverGateHandoff(page, pending.variant);
+    }
   } catch (error) {
     audit(session.id, "captcha_autosolve", {
       variant: pending.variant,
@@ -359,13 +422,155 @@ async function injectPendingCaptchaToken(session: Session, page?: Page): Promise
   }
 }
 
+/** One-shot per page: the handoff attempt is only meaningful once. */
+const gateHandoffAttempted = new WeakSet<object>();
+
+/** How long to wait for the standalone gate page to land on its redirect. */
+const GATE_HANDOFF_REDIRECT_TIMEOUT_MS = 20_000;
+
+function findGateFrameUrl(page: Page | undefined): string | null {
+  if (!page) return null;
+  for (const frame of page.frames()) {
+    if (frame === page.mainFrame()) continue;
+    const url = frame.url();
+    if (url.includes("/gate/")) return url;
+  }
+  return null;
+}
+
+/**
+ * Detached gate-page handoff for hCaptcha gates like Bluesky's signup: the
+ * live page embeds a cross-origin gate iframe (path contains '/gate/') that owns the response
+ * textareas, and its widget SDK fires an error callback when the token is
+ * filled under it, reloading the frame and destroying the token (measured
+ * live: the gate frame URL gains an `error` param within seconds of a fill).
+ * So instead of touching the live widget, load the gate URL as a STANDALONE
+ * page in the same context (same cookies, same egress), fill and submit it
+ * there, and read the gate's redirect off the page URL. The redirect carries
+ * the completion code; pointing the live page's gate iframe at it replays the
+ * handoff the embedding page's own onLoad handler expects.
+ */
+async function runGateHandoffSolve(
+  session: Session,
+  page: Page,
+  gateUrl: string,
+  token: string,
+  variant: string,
+): Promise<void> {
+  let scratch: Page | null = null;
+  const auditHandoff = (outcome: string): void => {
+    audit(session.id, "captcha_autosolve", { variant, outcome });
+  };
+  try {
+    const context = page.context();
+    scratch = await context.newPage();
+    await scratch.goto(gateUrl, { waitUntil: "domcontentloaded", timeout: 15_000 });
+    await scratch
+      .waitForSelector('textarea[name="h-captcha-response"]', { timeout: 10_000 })
+      .catch(() => null);
+    const filled = await scratch.evaluate(hcaptchaInjectScript, {
+      tok: token,
+      key: extractHcaptchaResponseKeyFromToken(token),
+      submitMode: "top" as const,
+    });
+    console.error(
+      `[captcha-gate-handoff-diag] filled=${filled.ok} textareas=${filled.textareas} formSubmitted=${filled.formSubmitted}`,
+    );
+    const deadline = Date.now() + GATE_HANDOFF_REDIRECT_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      const url = scratch.url();
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        continue;
+      }
+      if (parsed.searchParams.has("code")) {
+        const mainFrame = page.mainFrame();
+        const delivered = await mainFrame
+          .evaluate((src) => {
+            const el = document.querySelector<HTMLIFrameElement>(
+              `iframe#captcha-iframe, iframe[src*="gate/signup"]`,
+            );
+            if (!el) return false;
+            el.src = src;
+            return true;
+          }, url)
+          .catch(() => false);
+        console.error(`[captcha-gate-handoff-diag] code=1 delivered=${delivered}`);
+        auditHandoff(delivered ? "gate_handoff_delivered" : "gate_handoff_undelivered");
+        return;
+      }
+    }
+    const finalUrl = new URL(scratch.url());
+    const names = Array.from(finalUrl.searchParams.keys());
+    console.error(
+      `[captcha-gate-handoff-diag] code=0 final=${finalUrl.host}${finalUrl.pathname}?[${names.join(",")}]`,
+    );
+    auditHandoff("gate_handoff_no_code");
+  } catch (error) {
+    console.error(
+      `[captcha-gate-handoff-diag] failed=${error instanceof Error ? error.message : String(error)}`,
+    );
+    auditHandoff("gate_handoff_error");
+  } finally {
+    await scratch?.close().catch(() => {});
+  }
+}
+
+async function deliverGateHandoff(page: Page, variant: string): Promise<void> {
+  if (variant !== "hcaptcha" || gateHandoffAttempted.has(page)) return;
+  gateHandoffAttempted.add(page);
+  await new Promise((resolve) => setTimeout(resolve, GATE_POST_SETTLE_MS));
+  try {
+    let handoffUrl: string | null = null;
+    const frameDesc: string[] = [];
+    for (const frame of page.frames()) {
+      let url: URL;
+      try {
+        url = new URL(frame.url());
+      } catch {
+        frameDesc.push("unreadable");
+        continue;
+      }
+      const paramNames = Array.from(url.searchParams.keys());
+      const code = url.searchParams.get("code");
+      frameDesc.push(`${url.host}${url.pathname}?[${paramNames.join(",")}]${code ? "+CODE" : ""}`);
+      if (code && url.searchParams.has("state") && !handoffUrl) {
+        handoffUrl = frame.url();
+      }
+    }
+    console.error(`[captcha-postinject-diag] frames=${JSON.stringify(frameDesc)}`);
+    if (!handoffUrl) return;
+    const mainFrame = page.mainFrame();
+    const delivered = await mainFrame
+      .evaluate((src) => {
+        const el = document.querySelector<HTMLIFrameElement>(
+          `iframe#captcha-iframe, iframe[src*="gate/signup"]`,
+        );
+        if (!el) return false;
+        el.src = src;
+        return true;
+      }, handoffUrl)
+      .catch(() => false);
+    console.error(`[captcha-postinject-diag] delivered=${delivered}`);
+  } catch {
+    // diagnostic/handoff is best-effort
+  }
+}
+
 function startDetachedTokenFetch(session: Session, page?: Page): void {
   const state = autoSolveState(session);
-  if (state.inFlight) return;
+  if (state.inFlight) {
+    audit(session.id, "captcha_autosolve", { outcome: "fetch_skipped", reason: "in_flight" });
+    return;
+  }
   if (
     state.lastFinishedAt > 0 &&
     Date.now() - state.lastFinishedAt < CAPTCHA_AUTOSOLVE_RETRY_COOLDOWN_MS
   ) {
+    audit(session.id, "captcha_autosolve", { outcome: "fetch_skipped", reason: "cooldown" });
     return;
   }
   // Claim the slot SYNCHRONOUSLY. Observations are serialized by the session
@@ -379,12 +584,72 @@ async function runDetachedTokenFetch(session: Session, page?: Page): Promise<voi
   const state = autoSolveState(session);
   let failedAt = 0;
   let variant: CaptchaVariant | null = null;
+  audit(session.id, "captcha_autosolve", { outcome: "fetch_start" });
   try {
     const det = await detectCaptchaVariant(session.browser, page);
+    // Detection visibility: without this line a silent early return is
+    // indistinguishable from the fetch never having run at all (the gap this
+    // module exists to close).
+    audit(session.id, "captcha_autosolve", {
+      variant: det.variant,
+      outcome: "detect",
+      challenge_rendered: det.challengeRendered,
+    });
     // Only a RENDERED challenge escalates to the solver. A mere checkbox
     // (or a settled widget) with a response token needs nothing, and a
     // no-challenge page must never spend the funded key.
     if (!det.challengeRendered || !AUTOSOLVE_VARIANTS.has(det.variant)) return;
+    // One-shot SDK-surface dump (no credential values, shape only): tells us
+    // where the site's hcaptcha SDK keeps its callbacks before we rely on the
+    // injection path firing them.
+    if (page && !hcaptchaSurfaceDumped.has(page)) {
+      hcaptchaSurfaceDumped.add(page);
+      try {
+        const frames: Array<Record<string, unknown>> = [];
+        for (const frame of page.frames()) {
+          try {
+            const info = await frame.evaluate(() => {
+              const win = window as unknown as Record<string, unknown>;
+              const deepCount = (sel: string): number => {
+                let n = 0;
+                const walk = (root: Document | ShadowRoot): void => {
+                  n += root.querySelectorAll(sel).length;
+                  for (const el of Array.from(root.querySelectorAll("*"))) {
+                    const sr = (el as HTMLElement).shadowRoot;
+                    if (sr) walk(sr);
+                  }
+                };
+                walk(document);
+                return n;
+              };
+              const cfg = win.___hcaptcha_cfg as Record<string, unknown> | undefined;
+              const cfgFns = cfg
+                ? Object.entries(cfg)
+                    .filter(([, v]) => typeof v === "function")
+                    .map(([k]) => k)
+                    .join(",")
+                : "none";
+              const hc = win.hcaptcha as Record<string, unknown> | undefined;
+              return {
+                hcKeys: hc ? Object.keys(hc).join(",").slice(0, 120) : "absent",
+                cfgFns,
+                textareas: deepCount(
+                  'textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"], textarea[name="g-recaptcha-response"]',
+                ),
+                hosts: deepCount(".h-captcha, [data-hcaptcha-widget-id], [data-hcaptcha-response]"),
+                iframes: deepCount('iframe[src*="hcaptcha.com"], iframe[id^="captcha"]'),
+              };
+            });
+            frames.push({ url: frame.url().slice(0, 90), ...info });
+          } catch {
+            frames.push({ url: frame.url().slice(0, 90), error: true });
+          }
+        }
+        console.error(`[captcha-surface-diag] ${JSON.stringify(frames)}`);
+      } catch {
+        // diagnostic only
+      }
+    }
     // Scoped to the DETECTED provider: a co-resident reCAPTCHA v3 badge token
     // must not read as "the rendered hCaptcha is already solved".
     if (await variantTokenPresent(session, det.variant, page)) return;
@@ -400,25 +665,41 @@ async function runDetachedTokenFetch(session: Session, page?: Page): Promise<voi
         variant,
         outcome: fetched.outcome,
         solved: false,
+        // Audit values seal strings, so the outcome itself is unreadable in
+        // the trail; expose the two discriminating booleans beside it.
+        solver_ready: solver.isAvailable(),
+        sitekey_missing: fetched.outcome === "missing_sitekey",
+        reason: fetched.reason,
       });
+      // The audit trail seals every string, including the 2captcha error code
+      // this branch exists to surface; emit it unsealed to stderr so the
+      // operator's own diagnostics can read it. Contains no credential value.
+      console.error(
+        `[captcha-autosolve-diag] session=${session.id} variant=${variant} outcome=${fetched.outcome} reason=${fetched.reason ?? "n/a"}`,
+      );
       failedAt = Date.now();
       return;
     }
     state.pending = { variant, token: fetched.token, solvedUrl, fetchedAt: Date.now() };
+    audit(session.id, "captcha_autosolve", { variant, outcome: "token_purchased" });
+    console.error(
+      `[captcha-autosolve-diag] session=${session.id} variant=${variant} outcome=token_purchased`,
+    );
   } catch (error) {
     // Best-effort: any solver or transport error — including the page or the
     // whole session going away mid-fetch — leaves the challenge on the page for
-    // the agent to see, exactly as if no solver existed. A throw before a
-    // variant was settled on is detection racing a navigation: nothing was
-    // attempted, so there is nothing to audit and nothing to back off from.
-    if (variant !== null) {
-      audit(session.id, "captcha_autosolve", {
-        variant,
-        outcome: "error",
-        error: error instanceof Error ? error.message : String(error),
-      });
-      failedAt = Date.now();
-    }
+    // the agent to see, exactly as if no solver existed. Detection racing a
+    // navigation is still audited: a silent swallow is indistinguishable from
+    // the fetch never running (the gap this module exists to close).
+    audit(session.id, "captcha_autosolve", {
+      ...(variant !== null ? { variant } : {}),
+      outcome: "error",
+      error: error instanceof Error ? error.message : String(error),
+    });
+    console.error(
+      `[captcha-autosolve-diag] session=${session.id} variant=${variant} outcome=error error=${error instanceof Error ? error.message : String(error)}`,
+    );
+    failedAt = Date.now();
   } finally {
     state.inFlight = false;
     state.lastFinishedAt = failedAt;

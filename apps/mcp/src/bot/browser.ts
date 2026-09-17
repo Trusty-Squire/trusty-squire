@@ -940,6 +940,18 @@ export class BrowserController implements BrowserDriver {
     if (process.env.UNIVERSAL_BOT_CAPTCHA_TRACE === "1") {
       page.on("response", async (resp) => {
         const url = resp.url();
+        if (/com\.atproto\.server\.createAccount/.test(url)) {
+          let errPreview = "";
+          try {
+            const body = await resp.text();
+            const parsed = JSON.parse(body) as { error?: string; message?: string };
+            errPreview = `error=${parsed.error ?? "-"} message=${parsed.message ?? "-"}`;
+          } catch {
+            errPreview = `status=${resp.status()}`;
+          }
+          this.logOperatorDiagnostic(`[captcha-trace] createAccount ${errPreview}`);
+          return;
+        }
         if (
           !/challenges\.cloudflare\.com|google\.com\/recaptcha|hcaptcha\.com|newassets\.hcaptcha\.com/.test(
             url,
