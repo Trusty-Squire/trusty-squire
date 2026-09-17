@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, lstatSync, readFileSync } from "node:fs";
+import { closeSync, mkdirSync, lstatSync, openSync, readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { hostname } from "node:os";
@@ -267,9 +267,9 @@ export async function connectOrLaunchBroker(path: string, token: string): Promis
 
   const profileDir = profilePathIdentity(CHROME_PROFILE_DIR);
   if (await brokerElectionIsHeld(profileDir)) return await waitForBroker(path, token);
+  const launchRoot = brokerLaunchRoot(profileDir);
   let launchLease: ProfileOperationLease;
   try {
-    const launchRoot = brokerLaunchRoot(profileDir);
     await mkdir(launchRoot, { recursive: true, mode: 0o700 });
     launchLease = acquireProfileOperationGuard(profileDir, launchRoot);
   } catch (error) {
@@ -283,15 +283,30 @@ export async function connectOrLaunchBroker(path: string, token: string): Promis
       if (!isUnavailable(error)) throw error;
     }
     if (await brokerElectionIsHeld(profileDir)) return await waitForBroker(path, token);
+    // The broker's stderr carries its diagnostic channel (audit unseal lines,
+    // captcha/handoff diag). "ignore" made every standard deployment mute —
+    // measured while debugging the Bluesky signup gate (2026-09): the broker
+    // printed nothing anywhere. The daemon outlives this parent (detached,
+    // unref'd), so the log must be a real file fd, not a pipe: a pipe dies
+    // with the parent and the first write afterwards EPIPEs the broker. Best
+    // effort — a log that cannot be opened must not block the launch.
+    let brokerLogFd: number | undefined;
+    try {
+      brokerLogFd = openSync(join(launchRoot, "broker.log"), "a", 0o600);
+    } catch {
+      brokerLogFd = undefined;
+    }
     const child = spawn(
       process.execPath,
       [fileURLToPath(new URL("../../bin.js", import.meta.url)), "broker"],
       {
         detached: true,
-        stdio: "ignore",
+        stdio: brokerLogFd === undefined ? "ignore" : ["ignore", brokerLogFd, brokerLogFd],
         env: brokerEnvironment(process.env, path),
       },
     );
+    // The child dups its own copies of the fd at spawn; release ours.
+    if (brokerLogFd !== undefined) closeSync(brokerLogFd);
     let failure: Error | undefined;
     child.once("error", (error) => {
       failure = error;
