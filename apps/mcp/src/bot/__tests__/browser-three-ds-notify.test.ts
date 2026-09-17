@@ -142,8 +142,15 @@ describe("3-D Secure detection and notification", () => {
   // rendered page shows only a generic checkout error. The observation must
   // report the transient, retryable failure — never notify (no challenge is
   // up yet) and never take over the retry.
+  // These tests poll for page telemetry evidence at 250ms cadence for up to
+  // 5s before observing, on top of real Chromium context/session work — the
+  // poll alone can consume vitest's default 5000ms budget under runner load.
+  // An explicit budget keeps the assertions intact without the lottery.
+  const evidencePollTimeoutMs = 30_000;
+
   it.skipIf(!available)(
     "reports a Cardinal SDK challenge-launch failure as retryable, without notifying",
+    { timeout: evidencePollTimeoutMs },
     async () => {
       const isolated = await page();
       let sessionId: string | undefined;
@@ -173,7 +180,10 @@ describe("3-D Secure detection and notification", () => {
 
   // A detected challenge always wins over the stale SDK-error evidence: after
   // a resubmit the challenge is live and the cardholder nudge is what matters.
-  it.skipIf(!available)("prefers a rendered challenge over stale SDK-error evidence", async () => {
+  it.skipIf(!available)(
+    "prefers a rendered challenge over stale SDK-error evidence",
+    { timeout: evidencePollTimeoutMs },
+    async () => {
     const isolated = await page();
     let sessionId: string | undefined;
     try {
@@ -209,6 +219,7 @@ describe("3-D Secure detection and notification", () => {
   // hazard. `threeDsNotified` is the existing record that a challenge launched.
   it.skipIf(!available)(
     "suppresses the SDK-error advisory once a challenge already rendered this session",
+    { timeout: evidencePollTimeoutMs },
     async () => {
       const isolated = await page();
       let sessionId: string | undefined;

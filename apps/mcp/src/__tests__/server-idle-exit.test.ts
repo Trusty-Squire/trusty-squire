@@ -120,6 +120,9 @@ describe("server shutdown call admission", () => {
       },
       disconnect: async () => undefined,
     });
+    // Generous enough that observation latency on a loaded runner cannot
+    // outlive the drain window before the mid-drain check below.
+    const shutdownDeadlineMs = 2_000;
     const child = spawn(
       process.execPath,
       [
@@ -140,7 +143,7 @@ describe("server shutdown call admission", () => {
           TRUSTY_SQUIRE_BROKER_SOCKET: socket,
           TRUSTY_SQUIRE_FORWARDER_CREDENTIAL: credential,
           TRUSTY_SQUIRE_SERVER_INSTANCE_DIR: records,
-          TRUSTY_SQUIRE_SERVER_SHUTDOWN_DEADLINE_MS: "400",
+          TRUSTY_SQUIRE_SERVER_SHUTDOWN_DEADLINE_MS: String(shutdownDeadlineMs),
           TRUSTY_SQUIRE_SERVER_HEARTBEAT_INTERVAL_MS: "50",
         },
         stdio: ["pipe", "pipe", "pipe"],
@@ -173,6 +176,7 @@ describe("server shutdown call admission", () => {
       );
       await enteredCall;
       child.kill("SIGTERM");
+      const sigtermAt = Date.now();
       let recordPath = "";
       await waitFor(async () => {
         const entries = await readdir(records).catch(() => [] as string[]);
@@ -187,7 +191,12 @@ describe("server shutdown call admission", () => {
       }, 5_000);
       const first = readServerInstanceRecord(recordPath);
       expect(first).toMatchObject({ state: "draining", in_flight_calls: 1 });
-      await sleep(100);
+      // Assert the record keeps draining mid-window, anchored to the deadline
+      // itself rather than a fixed offset after observation: a fixed sleep
+      // could land past the shutdown deadline on a loaded runner, after the
+      // server has already (correctly) released the record. The midpoint of
+      // the drain window is always strictly before the deadline.
+      await sleep(Math.max(0, sigtermAt + shutdownDeadlineMs / 2 - Date.now()));
       expect(readServerInstanceRecord(recordPath)).toMatchObject({ state: "draining" });
       await expect(exited).resolves.toEqual({ code: 0, signal: null });
       await waitFor(

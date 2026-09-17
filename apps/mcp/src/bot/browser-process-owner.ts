@@ -20,13 +20,13 @@ import {
   startGlobalOperatorBrowserProcessWatchdog,
 } from "./operator-browser-watchdog.js";
 import {
-  bindOwnerBrowserLaunch,
   markOwnerBrowserLaunchTerminal,
   terminateOwnerBrowserLaunch,
   untrackOwnerBrowserLaunch,
 } from "./owner-process-reaper.js";
 import {
   activeStealthProfileValue,
+  bindOwnerBrowserLaunchBounded,
   canSelfLaunchWithProxy,
   captureOwnedChromeProcessTreeProof,
   closeBrowserContextWithin,
@@ -197,7 +197,7 @@ export class BrowserProcessOwner {
         ? tracked.proof
         : trackOwnedChromeProcessTree(identity, processGroup);
     if (proof !== null && this.ownerLaunchTracked) {
-      if (!bindOwnerBrowserLaunch(this.operatorBrowserMarker(), proof.identity)) {
+      if (!bindOwnerBrowserLaunchBounded(this.operatorBrowserMarker(), proof)) {
         releaseOwnedChromeProcessTree(proof);
         throw new Error("local browser launch identity could not be bound to owner custody");
       }
