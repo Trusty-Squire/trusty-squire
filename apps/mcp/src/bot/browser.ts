@@ -59,6 +59,7 @@ import {
 import { type ChildProcess } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import type { BrowserContext, ElementHandle, FileChooser, Frame, Locator, Page } from "playwright";
+import type { MailResultRow } from "./capture/verification.js";
 import {
   currentOperatorRequestSignal,
   markOperatorMutationDispatchAttempted,
@@ -1168,6 +1169,107 @@ export class BrowserController implements BrowserDriver {
       await page.waitForTimeout(300).catch(() => {});
     }
     return false;
+  }
+
+  // Open a SPECIFIC Gmail search-results row (the one extractMailResultRows
+  // tagged and the newest-match selection chose) so the email BODY renders —
+  // the same positional click + hash-gain wait as openFirstMailResult, but
+  // pointed at the chosen row instead of "whatever sorts first".
+  async openMailResultRow(page: Page | null, selector: string): Promise<boolean> {
+    if (page === null) return false;
+    const before = page.url();
+    await this.clickOnPage(page, selector).catch(() => {});
+    for (let i = 0; i < 10; i++) {
+      const now = page.url();
+      // An opened conversation appends a message id to the #search/#inbox hash.
+      if (now !== before && /\/[A-Za-z0-9_-]{12,}$/.test(now)) return true;
+      await page.waitForTimeout(300).catch(() => {});
+    }
+    return false;
+  }
+
+  // READ the Gmail search-results LIST as rows with the metadata needed to
+  // choose which conversation to open: the From address and display name
+  // (`span.zF[email][name]` in the sender cell), the subject (`.y6`), and
+  // the full date each row keeps in its date cell's
+  // `title` attribute ("Wed, Sep 16, 2026, 11:39 PM" — the visible text
+  // collapses it to "11:39 PM"). Rows are tagged with a data attribute so
+  // openMailResultRow can open THE chosen row. The real Gmail row is
+  // tr.zA[role=row]: the clickable link role lives on the inner div.xS, and
+  // BOTH the sender cell and the date cell sit OUTSIDE that div — so the
+  // metadata must be read from the tr, not from the role=link element.
+  // Legacy/exotic surfaces surface as div[role=link] with a substantial
+  // subject label (the same heuristic openFirstMailResult uses). Layout
+  // decides capturability: a row must be rendered to count; hidden rows
+  // never surface.
+  async extractMailResultRows(page: Page | null = this.page): Promise<MailResultRow[]> {
+    if (page === null) return [];
+    const raw = await page.evaluate(() => {
+      const MARK = "data-ts-mail-row";
+      const seen = new Set<Element>();
+      const candidates: Array<{ el: HTMLElement; text: string }> = [];
+      // Primary: the real Gmail row tr.zA (role=row) — sender and date cells
+      // are its direct tds. Fallback: div[role=link] legacy shapes, where the
+      // role=link element itself is the row.
+      const trRows = Array.from(document.querySelectorAll<HTMLElement>("tr.zA"));
+      if (trRows.length > 0) {
+        for (const el of trRows) {
+          if (seen.has(el)) continue;
+          seen.add(el);
+          // Not laid out (display:none / never rendered) — not capturable.
+          if (el.offsetParent === null && el.getClientRects().length === 0) continue;
+          candidates.push({ el, text: (el.innerText ?? "").replace(/\s+/g, " ").trim() });
+        }
+      } else {
+        for (const el of Array.from(document.querySelectorAll<HTMLElement>('div[role="link"]'))) {
+          if (seen.has(el)) continue;
+          seen.add(el);
+          const text = (el.innerText ?? "").replace(/\s+/g, " ").trim();
+          if (text.length <= 25) continue;
+          if (el.offsetParent === null && el.getClientRects().length === 0) continue;
+          candidates.push({ el, text });
+        }
+      }
+      return candidates.slice(0, 100).map(({ el, text }, i) => {
+        el.setAttribute(MARK, String(i));
+        // NOTE: no local helper functions in this callback — esbuild's
+        // keepNames annotates named function expressions with a __name call
+        // that does not exist inside the page and throws on evaluate.
+        const emailEl = el.querySelector<HTMLElement>("span.zF[email], span[email]");
+        const fromEmailRaw = emailEl?.getAttribute("email") ?? "";
+        const fromNameRaw =
+          emailEl?.getAttribute("name") ??
+          el.querySelector<HTMLElement>(".yP, .zF")?.textContent ??
+          "";
+        const subjectRaw = el.querySelector<HTMLElement>(".y6")?.textContent ?? "";
+        let dateTitle: string | null = null;
+        for (const span of Array.from(
+          el.querySelectorAll<HTMLElement>("td.xW span[title], span[title]"),
+        )) {
+          const t = (span.getAttribute("title") ?? "").trim();
+          // The date cell's title ("Wed, Sep 16, 2026, 11:39 PM") — has a
+          // time or a year, unlike other titled spans ("Not starred").
+          if (/\d{1,2}:\d{2}/.test(t) || /\b(?:19|20)\d{2}\b/.test(t)) {
+            dateTitle = t;
+            break;
+          }
+        }
+        return {
+          selector: `[${MARK}="${i}"]`,
+          fromEmail: fromEmailRaw.replace(/\s+/g, " ").trim() || null,
+          fromName: fromNameRaw.replace(/\s+/g, " ").trim() || null,
+          subject: subjectRaw.replace(/\s+/g, " ").trim() || null,
+          dateTitle,
+          visibleText: text,
+        };
+      });
+    });
+    return raw.map((r) => ({
+      ...r,
+      fromName: r.fromName === null ? null : this.cardValueOutputMask.maskText(r.fromName),
+      subject: r.subject === null ? null : this.cardValueOutputMask.maskText(r.subject),
+      visibleText: this.cardValueOutputMask.maskText(r.visibleText),
+    }));
   }
 
   /**

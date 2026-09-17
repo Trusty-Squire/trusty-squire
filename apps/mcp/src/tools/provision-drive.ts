@@ -1482,7 +1482,9 @@ export const operateReadInboxTool: Tool<z.infer<typeof readInboxSchema>> = {
     "dedicated tab that is closed when done, so a signup form or dialog waiting for " +
     "the code stays exactly as it is. NEVER navigate the session to the mailbox for " +
     "a code or link — navigating away and back resets the form and closes the " +
-    'waiting dialog. `sender` narrows the search (e.g. "proton.me"); `into_slot` ' +
+    "waiting dialog. `sender` narrows the search — matched against the From " +
+    'address, its display name, AND the subject (e.g. "proton.me"); the newest ' +
+    "matching mail is the one read. `into_slot` " +
     "seals a found OTP into a session slot so it is typed with operate_type slot and " +
     "never crosses the MCP boundary; `grant_inbox_consent` overrides the session's " +
     "inbox-read consent for this call. Returns needs_user when nothing is found yet " +

@@ -96,6 +96,83 @@ const MESSAGE_CARD = `
 </div>
 `;
 
+// Multi-row search results in Gmail's real list shape: tr[role=link] rows
+// whose sender cell carries span.zF[email][name] (address + display name),
+// the subject is .y6, the snippet .y2, and the date cell keeps its FULL
+// timestamp in a span[title] while the visible text collapses it to
+// "5:10 AM"/"11:39 PM". Row order models the live rc.35 read (MEASURED
+// 2026-09-17): Gmail orders by RELEVANCE, so the stale 11:39 PM Proton code
+// ranked FIRST while the fresh 5:10 AM craigslist sign-up mail sat below it.
+const STALE_PROTON_CARD = `
+<div class="adn">
+  <div class="gD">Proton &lt;no-reply@proton.me&gt;</div>
+  <div class="ii">Enter this code to finish the process: 934870. Stay secure,
+  the Proton Team.</div>
+</div>
+`;
+
+const CRAIGSLIST_CARD = `
+<div class="adn">
+  <div class="gD">craigslist &lt;automail@craigslist.org&gt;</div>
+  <div class="ii">To complete your craigslist account, complete account
+  sign-up: <a href="https://accounts.craigslist.org/signup?tok=NEWACTIVATION7788">Complete
+  sign-up</a>. Didn't request this link? Thanks for using craigslist.</div>
+</div>
+`;
+
+const gRow = (
+  id: string,
+  email: string,
+  name: string,
+  subject: string,
+  snippet: string,
+  dateTitle: string,
+  visibleDate: string,
+): string =>
+  // Real Gmail row shape (MEASURED 2026-09-17): tr.zA[role=row]; the link
+  // role lives on the inner div.xS and BOTH the sender cell (td.yX) and the
+  // date cell (td.xW) sit OUTSIDE it — metadata must be read from the tr.
+  `<tr class="zA" role="row" id="${id}" tabindex="-1">` +
+  `<td class="yX xY" role="gridcell"><div class="yW"><span class="bA4">` +
+  `<span translate="no" class="zF" email="${email}" name="${name}">${name}</span></span></div></td>` +
+  `<td class="xY a4W" role="gridcell"><div class="xS" role="link"><div class="xT">` +
+  `<div class="y6"><span class="bog">${subject}</span></div>` +
+  `<span class="y2">${snippet}</span></div></div></td>` +
+  `<td class="xW xY" role="gridcell"><span title="${dateTitle}">` +
+  `<span class="bq3">${visibleDate}</span></span></td>` +
+  `</tr>`;
+
+const MULTI_ROW_LIST =
+  `<table><tbody>` +
+  gRow(
+    "row-proton",
+    "no-reply@proton.me",
+    "Proton",
+    "Proton Verification Code",
+    "Enter this code to finish the process: 934870. Stay secure, the Proton Team.",
+    "Sep 16, 2026, 11:39 PM",
+    "11:39 PM",
+  ) +
+  gRow(
+    "row-calcom",
+    "no-reply@cal.com",
+    "Cal.com",
+    "Cal.com: Verify your account",
+    "Please verify your email address by clicking the button below.",
+    "Sep 17, 2026, 5:03 AM",
+    "5:03 AM",
+  ) +
+  gRow(
+    "row-craigslist",
+    "automail@craigslist.org",
+    "craigslist",
+    "craigslist account sign-up",
+    "to complete your craigslist account. complete account sign-up",
+    "Sep 17, 2026, 5:10 AM",
+    "5:10 AM",
+  ) +
+  `</tbody></table>`;
+
 type Fixture = { rowOpensConversation: boolean; convHtml?: string };
 
 function fixtureHandler(fixture: Fixture): (url: string) => string {
@@ -131,13 +208,70 @@ async function harness(fixture: Fixture): Promise<{ context: BrowserContext }> {
   return { context };
 }
 
+// Multi-row fixture: every row opens ITS OWN conversation card.
+function multiRowHandler(): (url: string) => string {
+  return (_url) => {
+    const openScript = `<script>
+      for (const [id, conv, hash] of [
+        ["row-proton", "conv-proton", "inbox/11aa22bb33cc44dd55e6"],
+        ["row-calcom", "conv-calcom", "inbox/22bb33cc44dd55e6ff17"],
+        ["row-craigslist", "conv-craigslist", "inbox/33cc44dd55e6ff170a28"],
+      ]) {
+        document.getElementById(id).addEventListener("click", () => {
+          document.getElementById("list").hidden = true;
+          // Gmail renders only the OPENED conversation's cards — the other
+          // conversations are gone from the DOM, not merely hidden. Without
+          // this removal the body extraction would read every card in the
+          // document and the stale Proton card would leak into the parse.
+          for (const c of document.querySelectorAll("[id^=conv-]")) {
+            if (c.id !== conv) c.remove();
+          }
+          document.getElementById(conv).hidden = false;
+          location.hash = hash;
+        });
+      }
+    </script>`;
+    return (
+      `<!doctype html><html><head><title>Gmail</title></head><body>` +
+      GMAIL_CHROME_HTML +
+      `<div id="list" role="main">${LIST_FILLER}${MULTI_ROW_LIST}</div>` +
+      `<div id="conv-proton" hidden>${STALE_PROTON_CARD}</div>` +
+      `<div id="conv-calcom" hidden><div class="adn"><div class="gD">Cal.com &lt;no-reply@cal.com&gt;</div><div class="ii">Please verify your email address by clicking the button below.</div></div></div>` +
+      `<div id="conv-craigslist" hidden>${CRAIGSLIST_CARD}</div>` +
+      openScript +
+      `</body></html>`
+    );
+  };
+}
+
+async function multiRowHarness(): Promise<{ context: BrowserContext }> {
+  if (browser === undefined) throw new Error("Chromium unavailable");
+  const context = await browser.newContext();
+  const handler = multiRowHandler();
+  await context.route("https://mail.google.com/**", (route) =>
+    route.fulfill({ contentType: "text/html", body: handler(route.request().url()) }),
+  );
+  return { context };
+}
+
 async function readInbox(
   context: BrowserContext,
-  opts: { sender?: string } = {},
+  opts: { sender?: string; breakRowExtraction?: boolean } = {},
 ): Promise<Awaited<ReturnType<typeof awaitVerification>>> {
   const harnessPage = await context.newPage();
   await harnessPage.goto(`http://127.0.0.1:${port}/signup`);
   const controller = BrowserController.fromHarnessPage(harnessPage);
+  if (opts.breakRowExtraction) {
+    // Model a transient page.evaluate failure (Gmail rerender destroying the
+    // execution context): every row extraction throws and the production
+    // `.catch(() => [])` swallows it, so the read sees ZERO rows while the
+    // page-wide list text still carries a foreign sender's code.
+    (
+      controller as unknown as { extractMailResultRows: () => Promise<never> }
+    ).extractMailResultRows = async () => {
+      throw new Error("Execution context was destroyed, most likely because of a navigation");
+    };
+  }
   const obs = await startHarnessProvisionSession({
     browser: controller,
     serviceUrl: `http://127.0.0.1:${port}/signup`,
@@ -273,6 +407,91 @@ describe("operate_read_inbox extraction binds to the verification email (real Ch
       const res = await readInbox(context, { sender: "proton.me" });
       expect(res.link).toBeNull();
       expect(res.found).toBe(false);
+      expect(res.needs_user?.resume).toBe("code");
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+});
+
+describe("operate_read_inbox picks the NEWEST matching mail out of a real results list (real Chromium)", () => {
+  // The live rc.35 read (MEASURED 2026-09-17): Gmail ordered results by
+  // RELEVANCE — the stale 11:39 PM Proton code was row 1 — and the craigslist
+  // "account sign-up" mail matched none of the old keywords at all, so a
+  // sender-scoped call returned {found:false} and an unfiltered call returned
+  // yesterday's Proton code (934870) with the fresh craigslist mail unread.
+  it("sender 'craigslist' finds the craigslist sign-up mail, never another row's code (#828)", async () => {
+    if (!available) return;
+    const { context } = await multiRowHarness();
+    try {
+      const res = await readInbox(context, { sender: "craigslist" });
+      expect(res.found).toBe(true);
+      expect(res.code).toBeNull();
+      expect(res.link).toBe("https://accounts.craigslist.org/signup?tok=NEWACTIVATION7788");
+      expect(res.source_from).toBe("automail@craigslist.org");
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+
+  it("sender matching covers the subject when the From address lacks the hint", async () => {
+    if (!available) return;
+    const { context } = await multiRowHarness();
+    try {
+      // "sign-up" appears in no From address or display name — only the
+      // craigslist row's subject.
+      const res = await readInbox(context, { sender: "sign-up" });
+      expect(res.found).toBe(true);
+      expect(res.link).toBe("https://accounts.craigslist.org/signup?tok=NEWACTIVATION7788");
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+
+  it("unfiltered read returns the newest mail, not the row Gmail ranked first (#831)", async () => {
+    if (!available) return;
+    const { context } = await multiRowHarness();
+    try {
+      // The Proton code (11:39 PM, ranked first by relevance) must NOT win;
+      // the craigslist mail (5:10 AM, newest) must.
+      const res = await readInbox(context);
+      expect(res.found).toBe(true);
+      expect(res.code).toBeNull();
+      expect(res.link).toBe("https://accounts.craigslist.org/signup?tok=NEWACTIVATION7788");
+      expect(res.source_from).toBe("automail@craigslist.org");
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+
+  it("a hint matching no row's From/display/subject reports honest not-found", async () => {
+    if (!available) return;
+    const { context } = await multiRowHarness();
+    try {
+      const res = await readInbox(context, { sender: "github.com" });
+      expect(res.found).toBe(false);
+      expect(res.code).toBeNull();
+      expect(res.link).toBeNull();
+      expect(res.needs_user?.resume).toBe("code");
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+
+  it("a transient extraction failure with a sender hint never parses the page-wide list's foreign code", async () => {
+    // The unfiltered query means the page-wide list text can carry another
+    // sender's code (here Proton's 934870, ranked first by relevance). If the
+    // row extraction throws once and the read falls back to parsing that list
+    // text, the craigslist read returns the PROTON code as found — the exact
+    // harm the sender filter exists to prevent. The attempt must instead end
+    // in the honest not-found path.
+    if (!available) return;
+    const { context } = await multiRowHarness();
+    try {
+      const res = await readInbox(context, { sender: "craigslist", breakRowExtraction: true });
+      expect(res.found).toBe(false);
+      expect(res.code).toBeNull();
+      expect(res.link).toBeNull();
       expect(res.needs_user?.resume).toBe("code");
     } finally {
       await context.close();
