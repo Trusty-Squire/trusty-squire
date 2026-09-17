@@ -207,15 +207,93 @@ export function buildConsentRefusal(sessionId: string): VerificationResult {
 // excluded the very email we needed and await returned found:false. MEASURED
 // 2026-07-01 (Loops login magic link: body has "login", link is
 // /api/auth/callback/email?token=…, which pickVerificationLink now extracts).
-// Exported for unit tests.
-export function buildVerificationSearchQuery(sender?: string): string {
+//
+// "sign up"/signup joined the same way: MEASURED 2026-09-17 (rc.35 craigslist
+// false found:false, #828): craigslist's activation email ("craigslist account
+// sign-up", body "complete account sign-up") matched NONE of the previous 24
+// keywords, so the sender-scoped query returned "No matches" in Gmail while
+// the mail sat unread in the inbox — `from:craigslist newer_than:1d` alone
+// found it fine, the keyword clause was the veto.
+//
+// There is deliberately NO `from:${sender}` here anymore. The sender filter is
+// applied client-side to the returned rows (mailRowMatchesSender matches the
+// From address, its display name, AND the subject), so one brittle Gmail
+// operator can never veto the search; a broad keyword query over the last day
+// stays within one results page. Exported for unit tests.
+export function buildVerificationSearchQuery(): string {
   return [
-    sender !== undefined && sender.length > 0 ? `from:${sender}` : "",
     "newer_than:1d",
-    '(verify OR verification OR confirm OR confirmation OR code OR otp OR passcode OR password OR login OR "log in" OR "sign in" OR "sign-in" OR signin OR "magic link" OR activate OR activation OR welcome OR "link account" OR "link your" OR continue)',
-  ]
-    .filter((s) => s.length > 0)
-    .join(" ");
+    '(verify OR verification OR confirm OR confirmation OR code OR otp OR passcode OR password OR login OR "log in" OR "sign in" OR "sign-in" OR signin OR "sign up" OR signup OR "magic link" OR activate OR activation OR welcome OR "link account" OR "link your" OR continue)',
+  ].join(" ");
+}
+
+// One Gmail search-results row as read by BrowserController.extractMailResultRows.
+export interface MailResultRow {
+  // Selector of the tagged row element, valid on the same page until Gmail
+  // rerenders the list; openMailResultRow opens exactly this row.
+  selector: string;
+  fromEmail: string | null;
+  fromName: string | null;
+  subject: string | null;
+  snippet: string | null;
+  // The date cell's full timestamp from its `title` attribute ("Sep 17, 2026,
+  // 5:10 AM") — the visible text collapses it to "5:10 AM"/"Sep 16".
+  dateTitle: string | null;
+  visibleText: string;
+}
+
+// The sender hint matches what a real sender looks like — the From address,
+// its display name, and the subject — never one brittle field. MEASURED
+// 2026-09-17 (rc.35 #828): relying on a single operator/field is exactly the
+// shape that missed. Rows without any From/subject metadata (legacy or exotic
+// list shapes) cannot be filtered honestly and stay candidates; the keyword
+// query and the newest-first pick still bound what gets opened. Multi-token
+// hints ("craigslist activation") require EVERY token somewhere across the
+// three fields. Exported for unit tests.
+export function mailRowMatchesSender(
+  row: Pick<MailResultRow, "fromEmail" | "fromName" | "subject">,
+  sender?: string,
+): boolean {
+  if (sender === undefined || sender.trim().length === 0) return true;
+  const fields = [row.fromEmail, row.fromName, row.subject]
+    .filter((v): v is string => typeof v === "string" && v.length > 0)
+    .join("\n")
+    .toLowerCase();
+  if (fields.length === 0) return true;
+  const hint = sender.trim().toLowerCase();
+  if (fields.includes(hint)) return true;
+  const tokens = hint.split(/\s+/).filter((t) => t.length >= 3);
+  return tokens.length > 0 && tokens.every((t) => fields.includes(t));
+}
+
+// Pure: the full row date to an epoch ms, or null when absent/unparseable.
+// Exported for unit tests.
+export function parseMailRowDate(dateTitle: string | null): number | null {
+  if (dateTitle === null) return null;
+  const ts = Date.parse(dateTitle.trim());
+  return Number.isFinite(ts) ? ts : null;
+}
+
+// Gmail search results are ordered by RELEVANCE, not date ("Showing most
+// relevant"), so the first row is not the newest mail. MEASURED 2026-09-17
+// (rc.35 stale-code defect, #831): the unfiltered query ranked an 11:39 PM
+// Proton code FIRST while the fresh 5:10 AM craigslist mail sat below it (and,
+// without the keyword fix, was absent entirely) — openFirstMailResult's
+// first-row click returned yesterday's code. Pick the row with the newest
+// parsed date instead; rows without a parseable date keep their list order
+// after all dated rows. Ties keep the earlier row. Exported for unit tests.
+export function pickNewestMailRow(rows: readonly MailResultRow[]): MailResultRow | null {
+  if (rows.length === 0) return null;
+  let best = rows[0]!;
+  let bestTs = parseMailRowDate(best.dateTitle);
+  for (let i = 1; i < rows.length; i++) {
+    const ts = parseMailRowDate(rows[i]!.dateTitle);
+    if (ts !== null && (bestTs === null || ts > bestTs)) {
+      best = rows[i]!;
+      bestTs = ts;
+    }
+  }
+  return best;
 }
 
 // Gmail's own search backend intermittently throws a transient error —
@@ -305,7 +383,7 @@ export async function awaitVerification(
   invalidateCompactV2Snapshot(session);
 
   const verification = await runDetachedGoogleIdentityOperation(session, async (browser) => {
-    const query = buildVerificationSearchQuery(opts.sender);
+    const query = buildVerificationSearchQuery();
     const searchUrl = `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
     // DEDICATED utility tab, closed before this call returns. Navigating the
     // session's operation page to the mailbox RESETS the form/dialog that is
@@ -335,7 +413,38 @@ export async function awaitVerification(
           inboxTab,
           rawLinksOf,
         );
-        const opened = await browser.openFirstMailResult(inboxTab).catch(() => false);
+        // Read the result ROWS with their From/display/subject/date metadata so
+        // BOTH the sender filter and the newest-first pick are decisions made on
+        // what the rows actually say — never on Gmail's search operators or on
+        // trust in list order (Gmail orders by relevance). A controller without
+        // these newer methods (older mock surface) falls back to the legacy
+        // first-row open below.
+        const mailRowsOf = (
+          browser as BrowserController & {
+            extractMailResultRows?: (page: Page | null) => Promise<MailResultRow[]>;
+          }
+        ).extractMailResultRows?.bind(browser);
+        const openMailRowOf = (
+          browser as BrowserController & {
+            openMailResultRow?: (page: Page | null, selector: string) => Promise<boolean>;
+          }
+        ).openMailResultRow?.bind(browser);
+        const rows = (await mailRowsOf?.(inboxTab).catch(() => [])) ?? [];
+        let chosen: MailResultRow | null = null;
+        if (rows.length > 0) {
+          const matches = rows.filter((r) => mailRowMatchesSender(r, opts.sender));
+          if (opts.sender !== undefined && opts.sender.length > 0 && matches.length === 0) {
+            // The hint matched no row's From address, display name, or
+            // subject: do NOT open some other row's mail and read its code.
+            // Bounded retries, then an honest not-found.
+            continue;
+          }
+          chosen = pickNewestMailRow(matches);
+        }
+        const opened =
+          chosen !== null && openMailRowOf !== undefined
+            ? await openMailRowOf(inboxTab, chosen.selector).catch(() => false)
+            : await browser.openFirstMailResult(inboxTab).catch(() => false);
         if (opened) {
           // Read the opened message's OWN container (card + body) when Gmail
           // renders one, so page chrome never enters the code parse, the link
@@ -359,6 +468,18 @@ export async function awaitVerification(
             openedText,
             [...openedLinks, ...listLinks].filter((l) => !isGmailChromeLink(l.url)),
             expectedDomains,
+          ));
+        } else if (chosen !== null) {
+          // The identified row never opened: parse ONLY that row's own list
+          // text (subject + snippet), never the page-wide list — another row's
+          // snippet must not leak a foreign code, and this row's code still
+          // parses when Gmail shows it in the list. No links: the list does
+          // not carry the mail's action links (that is why the row is opened
+          // at all), and page chrome must never be scored.
+          ({ code, link } = parseVerification(
+            chosen.visibleText,
+            [],
+            expectedVerificationDomains(opts.sender, null),
           ));
         } else {
           ({ code, link } = parseVerification(

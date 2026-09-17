@@ -11,6 +11,10 @@ import {
   buildConsentRefusal,
   buildVerificationSearchQuery,
   isGmailChromeLink,
+  mailRowMatchesSender,
+  parseMailRowDate,
+  pickNewestMailRow,
+  type MailResultRow,
 } from "../verification.js";
 
 describe("parseVerification (email OTP + link extraction)", () => {
@@ -181,8 +185,20 @@ describe("buildVerificationSearchQuery (finds passwordless mail)", () => {
     expect(q).toContain("newer_than:1d");
     expect(q).not.toContain("from:");
   });
-  it("prepends the sender filter when given", () => {
-    expect(buildVerificationSearchQuery("mail.loops.so")).toContain("from:mail.loops.so");
+  it("covers sign-up vocabulary — the craigslist activation miss (rc.35 #828)", () => {
+    // MEASURED live 2026-09-17: craigslist's activation email (subject
+    // "craigslist account sign-up", body "complete account sign-up") matched
+    // NONE of the old keywords, so `from:craigslist newer_than:1d (verify OR
+    // …)` rendered "No matches" in Gmail and the tool returned found:false
+    // while the mail sat unread in the inbox — `from:craigslist
+    // newer_than:1d` alone found it fine; the keyword clause was the veto.
+    const q = buildVerificationSearchQuery();
+    expect(q).toContain('"sign up"');
+    expect(q).toContain("signup");
+    // Sender narrowing is client-side now (the From address, display name,
+    // and subject of the returned rows are all matched), so one brittle
+    // Gmail operator must not gate the query.
+    expect(q).not.toContain("from:");
   });
   it("end-to-end: the real Loops login email now yields its magic link", () => {
     // The actual email body + the actual /api/auth/callback link (token redacted).
@@ -230,5 +246,88 @@ describe("isGmailChromeLink (mailbox chrome never scores as a verification link)
         "https://click.esp-service.com/redirect?u=https%3A%2F%2Fexample.com%2Fverify%3Ftoken%3Dabc",
       ),
     ).toBe(false);
+  });
+});
+
+describe("mailRowMatchesSender (From address + display name + subject, not one field)", () => {
+  const craigslistRow = {
+    fromEmail: "automail@craigslist.org",
+    fromName: "craigslist",
+    subject: "craigslist account sign-up",
+  };
+  it("matches the From address, the display name, and the subject", () => {
+    expect(mailRowMatchesSender(craigslistRow, "craigslist.org")).toBe(true);
+    expect(mailRowMatchesSender(craigslistRow, "craigslist")).toBe(true);
+    expect(mailRowMatchesSender(craigslistRow, "sign-up")).toBe(true);
+  });
+  it("requires every token of a multi-token hint across the fields", () => {
+    expect(mailRowMatchesSender(craigslistRow, "craigslist activation")).toBe(false);
+    expect(mailRowMatchesSender(craigslistRow, "craigslist sign-up")).toBe(true);
+  });
+  it("rejects rows that plainly do not match", () => {
+    expect(mailRowMatchesSender(craigslistRow, "proton.me")).toBe(false);
+    expect(
+      mailRowMatchesSender(
+        { fromEmail: "no-reply@proton.me", fromName: "Proton", subject: "Verification code" },
+        "craigslist",
+      ),
+    ).toBe(false);
+  });
+  it("keeps rows without From/subject metadata as candidates", () => {
+    // Legacy surfaces carry no metadata; the query and newest-first pick
+    // still bound what gets opened. Filtering them out would turn every
+    // legacy row into a false not-found.
+    expect(
+      mailRowMatchesSender({ fromEmail: null, fromName: null, subject: null }, "proton.me"),
+    ).toBe(true);
+  });
+  it("matches everything when no hint is given", () => {
+    expect(mailRowMatchesSender(craigslistRow, undefined)).toBe(true);
+    expect(mailRowMatchesSender(craigslistRow, "   ")).toBe(true);
+  });
+});
+
+describe("pickNewestMailRow (relevance order must not decide recency)", () => {
+  const row = (over: Partial<MailResultRow> & { dateTitle: string | null }) => ({
+    selector: '[data-ts-mail-row="0"]',
+    fromEmail: null,
+    fromName: null,
+    subject: null,
+    snippet: null,
+    visibleText: "",
+    ...over,
+  });
+  it("picks the newest dated row, not the first in list order", () => {
+    // The live rc.35 order: the OLD Proton code ranked FIRST by relevance.
+    const newest = pickNewestMailRow([
+      row({ dateTitle: "Sep 16, 2026, 11:39 PM", visibleText: "proton 934870" }),
+      row({ dateTitle: "Sep 17, 2026, 5:03 AM", visibleText: "cal.com" }),
+      row({ dateTitle: "Sep 17, 2026, 5:10 AM", visibleText: "craigslist" }),
+    ]);
+    expect(newest?.visibleText).toBe("craigslist");
+  });
+  it("keeps undated rows after all dated ones in list order", () => {
+    const best = pickNewestMailRow([
+      row({ dateTitle: null, visibleText: "undated-first" }),
+      row({ dateTitle: "Sep 17, 2026, 5:10 AM", visibleText: "dated" }),
+      row({ dateTitle: null, visibleText: "undated-second" }),
+    ]);
+    expect(best?.visibleText).toBe("dated");
+  });
+  it("falls back to the first row when nothing is dated", () => {
+    const best = pickNewestMailRow([
+      row({ dateTitle: null, visibleText: "first" }),
+      row({ dateTitle: null, visibleText: "second" }),
+    ]);
+    expect(best?.visibleText).toBe("first");
+  });
+  it("returns null for an empty list", () => {
+    expect(pickNewestMailRow([])).toBeNull();
+  });
+  it("parseMailRowDate accepts Gmail's title shapes and rejects junk", () => {
+    expect(parseMailRowDate("Sep 17, 2026, 5:10 AM")).not.toBeNull();
+    expect(parseMailRowDate("Wed, Sep 16, 2026, 11:39 PM")).not.toBeNull();
+    expect(parseMailRowDate(null)).toBeNull();
+    expect(parseMailRowDate("Not starred")).toBeNull();
   });
 });
