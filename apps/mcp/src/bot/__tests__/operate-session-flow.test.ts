@@ -5760,7 +5760,9 @@ describe("operate session — captcha auto-solve on the general drive", () => {
     expect(captured).toContain("outcome=fetch_skipped reason=expiry_backoff");
     // ...and the audit trail records the skip with a reason (outcome and
     // reason are sealed vocabulary in the audit line).
-    expect(captured).toContain('"event":"captcha_autosolve","outcome":"<sealed>","reason":"<sealed>"');
+    expect(captured).toContain(
+      '"event":"captcha_autosolve","outcome":"<sealed>","reason":"<sealed>"',
+    );
 
     // Past the 30s backoff window the next observation re-arms and buys again.
     await advanceClock(181_000, async () => {

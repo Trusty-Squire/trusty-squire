@@ -552,10 +552,7 @@ async function runGateHandoffSolve(
           .catch(() => false);
         console.error(`[captcha-gate-handoff-diag] code=1 delivered=${delivered}`);
         if (delivered) {
-          gateHandoffDeliveredCount.set(
-            page,
-            (gateHandoffDeliveredCount.get(page) ?? 0) + 1,
-          );
+          gateHandoffDeliveredCount.set(page, (gateHandoffDeliveredCount.get(page) ?? 0) + 1);
         }
         auditHandoff(delivered ? "gate_handoff_delivered" : "gate_handoff_undelivered");
         return;
@@ -724,11 +721,7 @@ async function runDetachedTokenFetch(session: Session, page?: Page): Promise<voi
     // rejected by the site or the handoff never produced one, further
     // purchases are guaranteed waste — skip them and leave the challenge
     // visible for the operator.
-    if (
-      page !== undefined &&
-      findGateFrameUrl(page) !== null &&
-      gateHandoffAttempted.has(page)
-    ) {
+    if (page !== undefined && findGateFrameUrl(page) !== null && gateHandoffAttempted.has(page)) {
       const delivered = gateHandoffDeliveredCount.get(page) ?? 0;
       audit(session.id, "captcha_autosolve", {
         variant: det.variant,

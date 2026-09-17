@@ -83,7 +83,13 @@ function fakePage(withGateFrame: boolean): Page {
     ? [
         {
           url: () => "https://bsky.social/gate/signup?handle=x.bsky.social&state=abc",
-          evaluate: vi.fn(async () => ({ hcKeys: "absent", cfgFns: "none", textareas: 2, hosts: 1, iframes: 1 })),
+          evaluate: vi.fn(async () => ({
+            hcKeys: "absent",
+            cfgFns: "none",
+            textareas: 2,
+            hosts: 1,
+            iframes: 1,
+          })),
         },
       ]
     : [];
