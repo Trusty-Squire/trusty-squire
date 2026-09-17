@@ -1177,13 +1177,20 @@ export class BrowserController implements BrowserDriver {
   }
 
   /**
-   * READ the OPENED Gmail message's own container, not the whole page:
-   * text and raw links scoped to the `.adn` message card (which carries the
-   * `.gD` sender header) around the newest non-empty `.ii`/`.a3s` body div —
-   * the shapes Gmail has used for rendered messages for years. Scoping is the
-   * extraction fix behind the 1.1.14 Proton defect: a page-wide read let the
-   * mailbox chrome (account-menu SignOutOptions URL, support links) enter the
-   * code parse and link scoring, while the code-bearing body could be missed.
+   * READ the OPENED Gmail conversation's own containers, not the whole page:
+   * text and raw links scoped to the `.adn` message cards (each carries its
+   * `.gD` sender header and `.ii`/`.a3s` body — the shapes Gmail has used for
+   * rendered messages for years). Gmail expands every message of an opened
+   * thread, so a search can open a multi-message conversation where the newest
+   * card carries no code but an older rendered card does: the extraction
+   * gathers text and links across ALL cards with a non-empty body, newest
+   * card's text FIRST (the sender read takes the first `<addr>` match) and
+   * links in DOM order (pickVerificationLink breaks score ties to the later
+   * link, so a re-sent verification link's freshest token still wins).
+   * Scoping is the extraction fix behind the 1.1.14 Proton defect: a page-wide
+   * read let the mailbox chrome (account-menu SignOutOptions URL, support
+   * links) enter the code parse and link scoring, while the code-bearing body
+   * could be missed.
    *
    * Returns null when no message body is rendered (caller falls back to the
    * page-wide read, with chrome links filtered at the call site).
@@ -1200,18 +1207,21 @@ export class BrowserController implements BrowserDriver {
     await page.waitForSelector(".ii, .a3s", { timeout: 2000 }).catch(() => undefined);
     const raw = await page.evaluate(() => {
       const bodies = Array.from(document.querySelectorAll<HTMLElement>(".ii, .a3s"));
-      let body: HTMLElement | null = null;
+      const cards: HTMLElement[] = [];
       for (const b of bodies) {
-        if ((b.innerText ?? "").trim().length > 0) body = b;
+        if ((b.innerText ?? "").trim().length === 0) continue;
+        const card = b.closest<HTMLElement>(".adn") ?? b;
+        if (!cards.includes(card)) cards.push(card);
       }
-      if (body === null) return null;
-      const card = body.closest<HTMLElement>(".adn") ?? body;
+      if (cards.length === 0) return null;
       return {
-        text: card.innerText ?? "",
-        links: Array.from(card.querySelectorAll("a[href]")).map((a) => ({
-          url: a.getAttribute("href") ?? "",
-          text: (a.textContent ?? "").replace(/\s+/g, " ").trim() || null,
-        })),
+        text: [...cards].reverse().map((c) => c.innerText ?? "").join("\n\n"),
+        links: cards.flatMap((c) =>
+          Array.from(c.querySelectorAll("a[href]")).map((a) => ({
+            url: a.getAttribute("href") ?? "",
+            text: (a.textContent ?? "").replace(/\s+/g, " ").trim() || null,
+          })),
+        ),
       };
     });
     if (raw === null) return null;

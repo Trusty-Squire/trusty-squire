@@ -99,7 +99,7 @@ const MESSAGE_CARD = `
 </div>
 `;
 
-type Fixture = { rowOpensConversation: boolean };
+type Fixture = { rowOpensConversation: boolean; convHtml?: string };
 
 function fixtureHandler(fixture: Fixture): (url: string) => string {
   return (_url) => {
@@ -112,7 +112,7 @@ function fixtureHandler(fixture: Fixture): (url: string) => string {
           });
         </script>`
       : "";
-    const convBody = fixture.rowOpensConversation ? MESSAGE_CARD : "";
+    const convBody = fixture.convHtml ?? (fixture.rowOpensConversation ? MESSAGE_CARD : "");
     return (
       `<!doctype html><html><head><title>Gmail</title></head><body>` +
       GMAIL_CHROME_HTML +
@@ -156,7 +156,65 @@ async function readInbox(
   }
 }
 
+const THREAD_CARD_WITHOUT_CODE = `
+<div class="adn">
+  <div class="gD">Proton Mail &lt;no-reply@proton.me&gt;</div>
+  <div class="ii">Still did not receive it? Wait a few minutes and try again.
+  Contact Proton support if the problem persists. 8:05 PM</div>
+</div>
+`;
+
 describe("operate_read_inbox extraction binds to the verification email (real Chromium)", () => {
+  it.skipIf(!available)(
+    "reads the code from an older message card when the newest card in the thread has none",
+    async () => {
+      // Gmail renders every message of an opened conversation; the code can
+      // sit in an older card while the newest card carries only a reminder.
+      const { context } = await harness({
+        rowOpensConversation: true,
+        convHtml: MESSAGE_CARD + THREAD_CARD_WITHOUT_CODE,
+      });
+      try {
+        const res = await readInbox(context, { sender: "proton.me" });
+        expect(res.found).toBe(true);
+        expect(res.code).toBe("610228");
+        expect(res.link).toBeNull();
+        // The sender read prefers the NEWEST card's header.
+        expect(res.source_from).toBe("no-reply@proton.me");
+      } finally {
+        await context.close();
+      }
+    },
+    90_000,
+  );
+
+  it.skipIf(!available)(
+    "breaks link score ties toward the newest card's token in a thread",
+    async () => {
+      // A re-sent verification mail: both cards carry the same shaped link
+      // with different tokens. pickVerificationLink breaks ties to the LATER
+      // link, so the NEWEST card's freshest token must win.
+      const linkCard = (token: string) =>
+        `<div class="adn">` +
+        `<div class="gD">Proton Mail &lt;no-reply@proton.me&gt;</div>` +
+        `<div class="ii">Confirm your address to finish signing up.` +
+        `<a href="https://mail.proton.me/click-tracking?u=${token}">Verify address</a>` +
+        `</div></div>`;
+      const { context } = await harness({
+        rowOpensConversation: true,
+        convHtml: linkCard("old111222333") + linkCard("new444555666"),
+      });
+      try {
+        const res = await readInbox(context, { sender: "proton.me" });
+        expect(res.link).toBe("https://mail.proton.me/click-tracking?u=new444555666");
+        expect(res.source_from).toBe("no-reply@proton.me");
+      } finally {
+        await context.close();
+      }
+    },
+    90_000,
+  );
+
   it.skipIf(!available)(
     "reads the code from the opened message body and returns NO link when the mail has none",
     async () => {
