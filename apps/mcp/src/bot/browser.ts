@@ -1,5 +1,5 @@
 import type { CheckoutCard } from "./checkout.js";
-import { isCaptchaFrameUrl } from "./captcha.js";
+import { isCaptchaFrameUrl, isRecaptchaCheckboxFrameUrl } from "./captcha.js";
 import { captureBoundScreenshot, type ScreenshotBinding } from "./screenshot-click.js";
 import {
   captureBrowserUseDOM,
@@ -2239,7 +2239,17 @@ export class BrowserController implements BrowserDriver {
     for (const frame of page.frames()) {
       if (frame.isDetached()) continue;
       const rawUrl = frame.url();
-      if (frame !== page.mainFrame() && this.frameWithinCaptcha(frame)) continue;
+      // Captcha frames stay unresolvable except for the reCAPTCHA v2 checkbox
+      // frame on a click intent: the anchor document IS the "I'm not a robot"
+      // checkbox, so a text/css click into it is the ordinary human action.
+      // Challenge frames keep refusing on every intent.
+      if (
+        frame !== page.mainFrame() &&
+        this.frameWithinCaptcha(frame) &&
+        !(intent === "click" && isRecaptchaCheckboxFrameUrl(rawUrl))
+      ) {
+        continue;
+      }
       const resolved = await this.resolveTargetInContext(frame, mode, value, intent).catch(
         () => null,
       );
@@ -2423,7 +2433,9 @@ export class BrowserController implements BrowserDriver {
       if (target.kind === "handle") {
         handle = target.handle;
       } else if (target.kind === "frame") {
-        handle = await this.resolveFrameElement(target.frame, target.selector, 0, page);
+        handle = await this.resolveFrameElement(target.frame, target.selector, 0, page, {
+          allowCaptchaCheckboxFrame: true,
+        });
         dispose = true;
       } else {
         handle = await page.$(target.selector);
@@ -6386,6 +6398,7 @@ export class BrowserController implements BrowserDriver {
     selector: string,
     index = 0,
     page: Page | null = this.page,
+    opts: { allowCaptchaCheckboxFrame?: boolean } = {},
   ): Promise<ElementHandle<Element> | null> {
     const handle = await this.resolveFrameElementInFrame(
       this.resolveFrame(target, page),
@@ -6393,6 +6406,7 @@ export class BrowserController implements BrowserDriver {
       selector,
       index,
       page,
+      opts.allowCaptchaCheckboxFrame === true,
     );
     if (handle !== null) return handle;
     // Hosted-field providers (Braintree, PayPal, Stripe Elements) remount
@@ -6406,23 +6420,42 @@ export class BrowserController implements BrowserDriver {
     for (const frame of page.frames()) {
       if (frame === page.mainFrame() || frame.isDetached()) continue;
       if (frame.url() !== target.frameUrl) continue;
-      const byUrl = await this.resolveFrameElementInFrame(frame, target, selector, index, page);
+      const byUrl = await this.resolveFrameElementInFrame(
+        frame,
+        target,
+        selector,
+        index,
+        page,
+        opts.allowCaptchaCheckboxFrame === true,
+      );
       if (byUrl !== null) return byUrl;
     }
     return null;
   }
 
   // Resolve a selector inside ONE candidate frame; null when the frame is
-  // gone, captcha-scoped, or no longer holds the expected origin.
+  // gone, captcha-scoped, or no longer holds the expected origin. The one
+  // exception is the reCAPTCHA v2 checkbox frame (`api2/anchor`) when the
+  // caller is a real-mouse click: its whole document is the "I'm not a robot"
+  // checkbox, so clicking inside it is the ordinary human action on the
+  // widget (challenge frames stay resolved-as-null — the auto-solver owns
+  // them, and synthetic js clicks are trusted-refused by reCAPTCHA anyway).
   private async resolveFrameElementInFrame(
     frame: Frame | null,
     target: FrameTarget,
     selector: string,
     index: number,
     page: Page | null,
+    allowCaptchaCheckboxFrame = false,
   ): Promise<ElementHandle<Element> | null> {
     if (page === null) return null;
-    if (frame === null || this.frameWithinCaptcha(frame)) return null;
+    if (frame === null) return null;
+    if (
+      this.frameWithinCaptcha(frame) &&
+      !(allowCaptchaCheckboxFrame && isRecaptchaCheckboxFrameUrl(frame.url()))
+    ) {
+      return null;
+    }
     const handle = await frame
       .locator(selector)
       .nth(Math.max(0, Math.floor(index)))
@@ -6465,7 +6498,9 @@ export class BrowserController implements BrowserDriver {
     selector: string,
     page: Page | null = this.page,
   ): Promise<void> {
-    const handle = await this.resolveFrameElement(target, selector, 0, page);
+    const handle = await this.resolveFrameElement(target, selector, 0, page, {
+      allowCaptchaCheckboxFrame: true,
+    });
     if (handle === null) {
       throw new Error(
         `click: the target's frame is no longer present (${this.frameLabel(target)})`,

@@ -102,6 +102,24 @@ export function isCaptchaFrameUrl(rawUrl: string): boolean {
   }
 }
 
+// The reCAPTCHA v2 CHECKBOX frame (`api2/anchor`, normal size). Its whole
+// document IS the "I'm not a robot" checkbox, so clicking inside it is the
+// ordinary human action on the widget — unlike the challenge frame (`bframe`),
+// which stays operator-off-limits. `size=invisible` anchors have no checkbox
+// (score-mode reCAPTCHA passes on submit; nothing to click).
+export function isRecaptchaCheckboxFrameUrl(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    return (
+      isCaptchaFrameUrl(rawUrl) &&
+      /^\/recaptcha\/(?:api2|enterprise)\/anchor\/?$/.test(url.pathname) &&
+      url.searchParams.get("size") !== "invisible"
+    );
+  } catch {
+    return false;
+  }
+}
+
 export type CaptchaKind = "turnstile" | "recaptcha" | "hcaptcha";
 
 // Finer-grained captcha classification for spike telemetry (T3.2).
@@ -518,7 +536,18 @@ export async function detectCaptchaVariant(
         const el = document.querySelector(sel);
         if (el === null) return false;
         const r = el.getBoundingClientRect();
-        return r.width > 30 && r.height > 30;
+        if (r.width <= 30 || r.height <= 30) return false;
+        // A challenge frame parked off-screen still has size: reCAPTCHA
+        // pre-positions its hidden bframe at top:-9999px on embeds like
+        // Kaggle's signup, so a bare checkbox must not read as a rendered
+        // challenge here — the auto-solver only escalates (and only spends
+        // the funded key) once the grid actually overlaps the viewport.
+        return (
+          r.bottom > 0 &&
+          r.right > 0 &&
+          r.top < window.innerHeight &&
+          r.left < window.innerWidth
+        );
       };
       // The image-grid challenge frame: reCAPTCHA's `bframe`, or
       // hCaptcha's challenge frame. Turnstile and score-mode
