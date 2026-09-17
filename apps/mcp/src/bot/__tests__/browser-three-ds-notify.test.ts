@@ -148,6 +148,19 @@ describe("3-D Secure detection and notification", () => {
   // An explicit budget keeps the assertions intact without the lottery.
   const evidencePollTimeoutMs = 30_000;
 
+  // The injected telemetry must survive a race with the evidence collector's
+  // own attachment: the harness controller attaches its CDP Network capture
+  // asynchronously around the navigation, so a SINGLE document-parse POST can
+  // fire before capture is live and be missed permanently — the latch would
+  // never arm and every poll would observe undefined. Re-emitting on an
+  // interval makes the synthetic evidence reach the stream reliably; the
+  // assertions about the retryable outcome are unchanged.
+  const sdkErrorTelemetryScript = (payload: string): string =>
+    "<script>" +
+    `const emit = () => fetch("/log", { method: "POST", body: JSON.stringify(${payload}) });` +
+    "emit(); setInterval(emit, 250);" +
+    "</script>";
+
   it.skipIf(!available)(
     "reports a Cardinal SDK challenge-launch failure as retryable, without notifying",
     { timeout: evidencePollTimeoutMs },
@@ -158,7 +171,9 @@ describe("3-D Secure detection and notification", () => {
         const released = await releasedCardSession(
           isolated,
           "<div>Verification details were not entered correctly.</div>" +
-            '<script>fetch("/log", { method: "POST", body: JSON.stringify({ "event": "3ds_verification.error", "code": "THREEDS_CARDINAL_SDK_ERROR" }) });</script>',
+            sdkErrorTelemetryScript(
+              '{ "event": "3ds_verification.error", "code": "THREEDS_CARDINAL_SDK_ERROR" }',
+            ),
         );
         sessionId = released.sessionId;
 
@@ -184,33 +199,34 @@ describe("3-D Secure detection and notification", () => {
     "prefers a rendered challenge over stale SDK-error evidence",
     { timeout: evidencePollTimeoutMs },
     async () => {
-    const isolated = await page();
-    let sessionId: string | undefined;
-    try {
-      const released = await releasedCardSession(
-        isolated,
-        '<script>fetch("/log", { method: "POST", body: JSON.stringify({ "code": "THREEDS_CARDINAL_SDK_ERROR" }) });</script>' +
-          '<div>Verify your identity to continue</div><form action="/acs/challenge"><button>Approve</button></form>',
-      );
-      sessionId = released.sessionId;
+      const isolated = await page();
+      let sessionId: string | undefined;
+      try {
+        const released = await releasedCardSession(
+          isolated,
+          sdkErrorTelemetryScript('{ "code": "THREEDS_CARDINAL_SDK_ERROR" }') +
+            '<div>Verify your identity to continue</div><form action="/acs/challenge"><button>Approve</button></form>',
+        );
+        sessionId = released.sessionId;
 
-      // The precedence decision is only exercised once the SDK-error
-      // evidence has actually landed, so wait for it before observing.
-      const session = paymentSession(sessionId);
-      for (let attempt = 0; attempt < 20; attempt += 1) {
-        if (session.browser.hasThreeDsSdkErrorEvidence()) break;
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        // The precedence decision is only exercised once the SDK-error
+        // evidence has actually landed, so wait for it before observing.
+        const session = paymentSession(sessionId);
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          if (session.browser.hasThreeDsSdkErrorEvidence()) break;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        expect(session.browser.hasThreeDsSdkErrorEvidence()).toBe(true);
+
+        const observed = await observe(sessionId);
+        expect(observed.three_ds).toMatchObject({ state: "challenge_detected" });
+        expect(released.notifyThreeDs).toHaveBeenCalledTimes(1);
+      } finally {
+        if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
+        await isolated.context.close();
       }
-      expect(session.browser.hasThreeDsSdkErrorEvidence()).toBe(true);
-
-      const observed = await observe(sessionId);
-      expect(observed.three_ds).toMatchObject({ state: "challenge_detected" });
-      expect(released.notifyThreeDs).toHaveBeenCalledTimes(1);
-    } finally {
-      if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
-      await isolated.context.close();
-    }
-  });
+    },
+  );
 
   // Once a challenge has rendered in this session, a LATER absence of one means
   // it resolved and the checkout is settling — often on the order-confirmation
@@ -227,7 +243,7 @@ describe("3-D Secure detection and notification", () => {
         const released = await releasedCardSession(
           isolated,
           "<div>Thank you — your order is confirmed.</div>" +
-            '<script>fetch("/log", { method: "POST", body: JSON.stringify({ "code": "THREEDS_CARDINAL_SDK_ERROR" }) });</script>',
+            sdkErrorTelemetryScript('{ "code": "THREEDS_CARDINAL_SDK_ERROR" }'),
         );
         sessionId = released.sessionId;
 
