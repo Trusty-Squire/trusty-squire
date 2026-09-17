@@ -30,10 +30,7 @@ import { chromium, type Browser, type BrowserContext } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BrowserController } from "../browser.js";
 import { awaitVerification } from "../capture/verification.js";
-import {
-  finishProvisionSession,
-  startHarnessProvisionSession,
-} from "../provision-session.js";
+import { finishProvisionSession, startHarnessProvisionSession } from "../provision-session.js";
 
 let available = false;
 try {

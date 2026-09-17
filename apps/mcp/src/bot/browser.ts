@@ -57,34 +57,16 @@ import {
 } from "./browser-process-runtime.js";
 
 import { type ChildProcess } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
-import type {
-  BrowserContext,
-  CDPSession,
-  ElementHandle,
-  FileChooser,
-  Frame,
-  Locator,
-  Page,
-  Request,
-} from "playwright";
+import type { BrowserContext, ElementHandle, FileChooser, Frame, Locator, Page } from "playwright";
 import {
   currentOperatorRequestSignal,
   markOperatorMutationDispatchAttempted,
-  throwIfOperatorRequestCancelled,
 } from "./request-cancellation.js";
 import { BrowserProcessOwner } from "./browser-process-owner.js";
-import {
-  classifyGoogleAuthState,
-  extractGoogleHumanChallenge,
-  extractGoogleNumberMatch,
-  type GoogleHumanChallenge,
-} from "./google-auth-state.js";
-import type { HeightenedAuthNotificationResult } from "../api-client.js";
 import { bindOwnerBrowserLaunch, untrackOwnerBrowserLaunch } from "./owner-process-reaper.js";
 import { PageDriver } from "./page-driver.js";
-import type { ActiveOAuthAttempt, OAuthChallengeReporter } from "./oauth-login.js";
+import type { ActiveOAuthAttempt } from "./oauth-login.js";
 import {
   clearStaleSingletonLock,
   profileProcessIdentity,
@@ -174,11 +156,7 @@ export interface BrowserState {
 // browser-side CheckoutCard importers are unchanged in this PR.
 export type { CheckoutCard, CheckoutSummary } from "./checkout.js";
 
-import {
-  BrowserClickDispatchError,
-  clickDispatchStatusForError,
-  type ClickDispatchStatus,
-} from "./click-dispatch.js";
+import { BrowserClickDispatchError, type ClickDispatchStatus } from "./click-dispatch.js";
 
 export { BrowserClickDispatchError, clickDispatchStatusForError } from "./click-dispatch.js";
 export type { ClickDispatchStatus } from "./click-dispatch.js";
@@ -1195,9 +1173,7 @@ export class BrowserController implements BrowserDriver {
    * Returns null when no message body is rendered (caller falls back to the
    * page-wide read, with chrome links filtered at the call site).
    */
-  async extractOpenedMailBody(
-    page: Page | null = this.page,
-  ): Promise<{
+  async extractOpenedMailBody(page: Page | null = this.page): Promise<{
     text: string;
     links: Array<{ url: string; text: string | null }>;
   } | null> {
@@ -1215,7 +1191,10 @@ export class BrowserController implements BrowserDriver {
       }
       if (cards.length === 0) return null;
       return {
-        text: [...cards].reverse().map((c) => c.innerText ?? "").join("\n\n"),
+        text: [...cards]
+          .reverse()
+          .map((c) => c.innerText ?? "")
+          .join("\n\n"),
         links: cards.flatMap((c) =>
           Array.from(c.querySelectorAll("a[href]")).map((a) => ({
             url: a.getAttribute("href") ?? "",

@@ -22,9 +22,12 @@ surfaces.
 
 `operate_read_inbox` reads the session's signed-in Gmail inbox for a
 verification email in a dedicated utility tab that is closed when the read
-finishes, so the page waiting for the code never navigates away; the raw
-mail links it scores are read verbatim from the DOM, not from the
-size-capped interactive inventory.
+finishes, so the page waiting for the code never navigates away. When the
+opened message renders, its text and links are read from the message's own
+cards rather than the whole page, and Gmail's own chrome (account-menu,
+mailbox, and support links) is dropped before scoring; the remaining mail
+links are read verbatim from the DOM, not from the size-capped interactive
+inventory.
 
 Use an action `ref` from the current observation. `operate_start` and
 `operate_observe` default to `format: "compact"`, a paged control map;

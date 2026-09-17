@@ -344,9 +344,10 @@ export async function awaitVerification(
           // without this newer method (older mock surface) falls back too.
           const openedBodyOf = (
             browser as BrowserController & {
-              extractOpenedMailBody?: (
-                page: Page | null,
-              ) => Promise<{ text: string; links: Array<{ url: string; text: string | null }> } | null>;
+              extractOpenedMailBody?: (page: Page | null) => Promise<{
+                text: string;
+                links: Array<{ url: string; text: string | null }>;
+              } | null>;
             }
           ).extractOpenedMailBody?.bind(browser);
           const body = (await openedBodyOf?.(inboxTab).catch(() => null)) ?? null;

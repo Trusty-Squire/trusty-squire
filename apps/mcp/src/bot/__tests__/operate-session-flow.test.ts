@@ -1225,11 +1225,10 @@ vi.mock("../profile.js", async (importOriginal) => {
   };
 });
 
-import { chmodSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ApiClient } from "../../api-client.js";
-import { dispatchOperatorBrowserProcessTermination } from "../operator-browser-watchdog.js";
 import { BrowserController } from "../browser.js";
 import { OAuthAwaitingHumanError } from "../oauth-login.js";
 import {} from "../profile.js";
@@ -1240,7 +1239,6 @@ import {
   startHarnessProvisionSession,
   act,
   observe,
-  observedHostsForSession,
   extractCredentials,
   stashSecretSlot,
   awaitVerification,
