@@ -158,6 +158,11 @@ describe("operate_decide request mapping", () => {
     ]);
     expect(JSON.stringify(body)).not.toContain('"options":[');
     expect(body.questions.stuck!.type).toBe("noul");
+    // The stuck question is self-contained: it carries the goal text and the
+    // number of offered criteria, so it scores correctly even when read
+    // independently of the pick question in the same batch.
+    expect(body.questions.stuck!.instructions).toContain("Reveal the API key");
+    expect(body.questions.stuck!.instructions).toContain("exactly 2 page");
   });
 
   it("excludes payment elements, offscreen controls, and notFillable containers", async () => {
@@ -173,17 +178,20 @@ describe("operate_decide request mapping", () => {
     expect(Object.keys(body.questions.pick!.criteria)).not.toContain("@e:container");
   });
 
-  it("caps the page criteria at 40 options", async () => {
+  it("caps the page criteria at 40 options and reports offered vs eligible counts", async () => {
     const many = Array.from({ length: 60 }, (_, i) =>
       row({ ref: `@e:c${i}`, role: "button", label: `c${i}` }),
     );
     observe.mockResolvedValue(observation(many));
     const api = mockApi(() => Promise.resolve(jevOk({ answers: { pick: { choice: "@e:c0" } } })));
-    await operateDecideTool.handler({ session_id: "s1", goal: "g" }, api);
+    const out = (await operateDecideTool.handler({ session_id: "s1", goal: "g" }, api)) as {
+      candidates: { offered: number; eligible: number };
+    };
     const body = JSON.parse(vi.mocked(api.useCredential).mock.calls[0]![0]!.http.body!) as {
       questions: { pick: { criteria: Record<string, string> } };
     };
     expect(Object.keys(body.questions.pick!.criteria)).toHaveLength(40);
+    expect(out.candidates).toEqual({ offered: 40, eligible: 60 });
   });
 
   it("passes caller-provided options through as the choice criteria", async () => {
@@ -257,6 +265,9 @@ describe("operate_decide answer mapping", () => {
       model: JEV_MODEL,
       usage: { input_tokens: 420, output_tokens: 73 },
     });
+    // The untruncated sweep is visible to the caller: all eligible rows were
+    // offered (payment/offscreen/notFillable rows never reach the pool).
+    expect(out).toMatchObject({ candidates: { offered: 2, eligible: 2 } });
     expect(out).toHaveProperty("elapsed_ms");
   });
 
@@ -266,6 +277,26 @@ describe("operate_decide answer mapping", () => {
     await expect(
       operateDecideTool.handler({ session_id: "s1", goal: "g" }, api),
     ).rejects.toThrow(/jev_invalid_response.*@e:pay/);
+  });
+
+  it("rejects prototype names as an unoffered option", async () => {
+    observe.mockResolvedValue(observation(PAGE_ROWS));
+    const api = mockApi(() =>
+      Promise.resolve(jevOk({ answers: { pick: { choice: "constructor" } } })),
+    );
+    await expect(
+      operateDecideTool.handler({ session_id: "s1", goal: "g" }, api),
+    ).rejects.toThrow(/jev_invalid_response.*"constructor"/);
+    await expect(
+      operateDecideTool.handler(
+        {
+          session_id: "s1",
+          goal: "g",
+          decision: { type: "choice", options: { a: "A", toString: "T" } },
+        },
+        mockApi(() => Promise.resolve(jevOk({ answers: { pick: { choice: "valueOf" } } }))),
+      ),
+    ).rejects.toThrow(/jev_invalid_response.*"valueOf"/);
   });
 
   it("throws when no actionable controls are visible", async () => {

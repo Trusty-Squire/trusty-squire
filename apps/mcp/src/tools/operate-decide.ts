@@ -189,7 +189,7 @@ function requireChoice(
 ): string {
   const answer = requireAnswer(result, name);
   const choice = answer.choice;
-  if (typeof choice !== "string" || !(choice in criteria)) {
+  if (typeof choice !== "string" || !Object.hasOwn(criteria, choice)) {
     throw new Error(
       `jev_invalid_response: answer for ${JSON.stringify(name)} picked ${JSON.stringify(choice)}` +
         `, which is not one of the offered options (model ${result.model ?? JEV_MODEL})`,
@@ -214,6 +214,7 @@ async function decide(
 
   let questions: Record<string, JevQuestion>;
   let criteria: Record<string, string>;
+  let candidates: { offered: number; eligible: number } | undefined;
   const decision = args.decision;
   if (decision === undefined || decision.type !== "choice") {
     if (decision !== undefined) {
@@ -222,19 +223,23 @@ async function decide(
       questions = { check: { type: "noul", instructions: args.goal } };
     } else {
       const pageOptions = collectPageOptions(obs);
-      if (Object.keys(pageOptions.criteria).length === 0) {
+      const offered = Object.keys(pageOptions.criteria).length;
+      if (offered === 0) {
         throw new Error(
           `operate_decide has nothing to decide: no actionable controls are visible on ${obs.url}.` +
             " Scroll, navigate, or decide from a full observation yourself.",
         );
       }
       criteria = pageOptions.criteria;
+      candidates = { offered, eligible: pageOptions.rows.length };
       questions = {
         pick: { type: "choice", instructions: args.goal, criteria },
         stuck: {
           type: "noul",
           instructions:
-            "None of the listed elements would advance this goal; the page looks stuck for it.",
+            `Goal: ${args.goal}. The pick question in this batch offers exactly ${offered} page ` +
+            `elements as its criteria. Answer yes if none of those ${offered} elements would ` +
+            "advance the goal and the page looks stuck for it.",
         },
       };
     }
@@ -279,6 +284,7 @@ async function decide(
       ...(picked?.label !== undefined ? { label: picked.label } : {}),
       confidence: answer.confidence ?? null,
       probabilities: answer.probabilities ?? null,
+      candidates: candidates!,
       stuck: { noul: stuck?.noul ?? null },
     };
   }
