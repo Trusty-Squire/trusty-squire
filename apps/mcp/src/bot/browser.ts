@@ -4051,9 +4051,7 @@ export class BrowserController implements BrowserDriver {
         visibleText: (a.textContent ?? "").replace(/\s+/g, " ").trim() || null,
       }));
     });
-    return raw
-      .filter((l) => l.href.length > 0)
-      .map((l) => this.cardValueOutputMask.maskValue(l));
+    return raw.filter((l) => l.href.length > 0).map((l) => this.cardValueOutputMask.maskValue(l));
   }
 
   /** Canonical tree capture, with the existing whole-document action bindings. */
