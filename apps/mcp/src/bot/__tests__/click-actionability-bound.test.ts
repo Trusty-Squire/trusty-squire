@@ -1,14 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chromium, type Browser } from "playwright";
 import { BrowserController } from "../browser.js";
-import {
-  finishProvisionSession,
-  startHarnessProvisionSession,
-} from "../provision-session.js";
-import {
-  operateClickTool,
-  provisionObserveTool,
-} from "../../tools/provision-drive.js";
+import { finishProvisionSession, startHarnessProvisionSession } from "../provision-session.js";
+import { operateClickTool, provisionObserveTool } from "../../tools/provision-drive.js";
 
 let browser: Browser;
 beforeAll(async () => {
