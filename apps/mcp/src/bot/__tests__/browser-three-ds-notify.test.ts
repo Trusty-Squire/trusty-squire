@@ -148,6 +148,19 @@ describe("3-D Secure detection and notification", () => {
   // An explicit budget keeps the assertions intact without the lottery.
   const evidencePollTimeoutMs = 30_000;
 
+  // The injected telemetry must survive a race with the evidence collector's
+  // own attachment: the harness controller attaches its CDP Network capture
+  // asynchronously around the navigation, so a SINGLE document-parse POST can
+  // fire before capture is live and be missed permanently — the latch would
+  // never arm and every poll would observe undefined. Re-emitting on an
+  // interval makes the synthetic evidence reach the stream reliably; the
+  // assertions about the retryable outcome are unchanged.
+  const sdkErrorTelemetryScript = (payload: string): string =>
+    '<script>' +
+    `const emit = () => fetch("/log", { method: "POST", body: JSON.stringify(${payload}) });` +
+    'emit(); setInterval(emit, 250);' +
+    '</script>';
+
   it.skipIf(!available)(
     "reports a Cardinal SDK challenge-launch failure as retryable, without notifying",
     { timeout: evidencePollTimeoutMs },
@@ -158,7 +171,9 @@ describe("3-D Secure detection and notification", () => {
         const released = await releasedCardSession(
           isolated,
           "<div>Verification details were not entered correctly.</div>" +
-            '<script>fetch("/log", { method: "POST", body: JSON.stringify({ "event": "3ds_verification.error", "code": "THREEDS_CARDINAL_SDK_ERROR" }) });</script>',
+            sdkErrorTelemetryScript(
+              '{ "event": "3ds_verification.error", "code": "THREEDS_CARDINAL_SDK_ERROR" }',
+            ),
         );
         sessionId = released.sessionId;
 
@@ -189,7 +204,7 @@ describe("3-D Secure detection and notification", () => {
     try {
       const released = await releasedCardSession(
         isolated,
-        '<script>fetch("/log", { method: "POST", body: JSON.stringify({ "code": "THREEDS_CARDINAL_SDK_ERROR" }) });</script>' +
+        sdkErrorTelemetryScript('{ "code": "THREEDS_CARDINAL_SDK_ERROR" }') +
           '<div>Verify your identity to continue</div><form action="/acs/challenge"><button>Approve</button></form>',
       );
       sessionId = released.sessionId;
@@ -227,7 +242,7 @@ describe("3-D Secure detection and notification", () => {
         const released = await releasedCardSession(
           isolated,
           "<div>Thank you — your order is confirmed.</div>" +
-            '<script>fetch("/log", { method: "POST", body: JSON.stringify({ "code": "THREEDS_CARDINAL_SDK_ERROR" }) });</script>',
+            sdkErrorTelemetryScript('{ "code": "THREEDS_CARDINAL_SDK_ERROR" }'),
         );
         sessionId = released.sessionId;
 
