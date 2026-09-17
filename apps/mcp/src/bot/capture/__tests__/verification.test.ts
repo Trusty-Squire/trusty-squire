@@ -13,7 +13,9 @@ import {
   isGmailChromeLink,
   mailRowMatchesSender,
   parseMailRowDate,
+  mailRowIsRecent,
   pickNewestMailRow,
+  chooseMailRow,
   type MailResultRow,
 } from "../verification.js";
 
@@ -328,5 +330,67 @@ describe("pickNewestMailRow (relevance order must not decide recency)", () => {
     expect(parseMailRowDate("Wed, Sep 16, 2026, 11:39 PM")).not.toBeNull();
     expect(parseMailRowDate(null)).toBeNull();
     expect(parseMailRowDate("Not starred")).toBeNull();
+  });
+});
+
+describe("chooseMailRow (real-time All Mail supplement vs eventually-consistent search)", () => {
+  const row = (over: Partial<MailResultRow> & { dateTitle: string | null }) => ({
+    selector: '[data-ts-mail-row="0"]',
+    fromEmail: null,
+    fromName: null,
+    subject: null,
+    visibleText: "",
+    ...over,
+  });
+  it("keeps the search pick when the All Mail listing has no match", () => {
+    const search = row({ dateTitle: "Sep 17, 2026, 5:10 AM", visibleText: "search" });
+    expect(chooseMailRow(search, null)).toBe(search);
+  });
+  it("takes the All Mail row when the search listing matched nothing (the #828 stale-index window)", () => {
+    const allMail = row({ dateTitle: "Sep 17, 2026, 5:10 AM", visibleText: "all-mail" });
+    expect(chooseMailRow(null, allMail)).toBe(allMail);
+    expect(chooseMailRow(null, null)).toBeNull();
+  });
+  it("prefers the newer All Mail row when search matched an older indexed mail (the #831 staleness variant)", () => {
+    const search = row({ dateTitle: "Sep 17, 2026, 5:03 AM", visibleText: "stale-search" });
+    const allMail = row({ dateTitle: "Sep 17, 2026, 5:10 AM", visibleText: "fresh-all-mail" });
+    expect(chooseMailRow(search, allMail)).toBe(allMail);
+  });
+  it("keeps the search row on date ties and when the All Mail row is undated", () => {
+    const search = row({ dateTitle: "Sep 17, 2026, 5:10 AM", visibleText: "search" });
+    const tie = row({ dateTitle: "Sep 17, 2026, 5:10 AM", visibleText: "tie" });
+    expect(chooseMailRow(search, tie)).toBe(search);
+    const undated = row({ dateTitle: null, visibleText: "undated" });
+    expect(chooseMailRow(search, undated)).toBe(search);
+  });
+  it("defers to the All Mail row when the search row's date is unparseable", () => {
+    const search = row({ dateTitle: null, visibleText: "undated-search" });
+    const allMail = row({ dateTitle: "Sep 17, 2026, 5:10 AM", visibleText: "all-mail" });
+    expect(chooseMailRow(search, allMail)).toBe(allMail);
+  });
+});
+
+describe("mailRowIsRecent (All Mail supplement's newer_than:1d pool bound)", () => {
+  const row = (dateTitle: string | null): MailResultRow => ({
+    selector: '[data-ts-mail-row="0"]',
+    fromEmail: null,
+    fromName: null,
+    subject: null,
+    dateTitle,
+    visibleText: "",
+  });
+  it("accepts a row within 24h of now", () => {
+    const now = Date.now();
+    expect(mailRowIsRecent(row(new Date(now - 60_000).toString()), now)).toBe(true);
+    expect(mailRowIsRecent(row(new Date(now - 23.5 * 60 * 60 * 1000).toString()), now)).toBe(true);
+  });
+  it("rejects a row older than 24h", () => {
+    const now = Date.now();
+    expect(mailRowIsRecent(row(new Date(now - 25 * 60 * 60 * 1000).toString()), now)).toBe(false);
+  });
+  it("rejects rows without a parseable date", () => {
+    const now = Date.now();
+    expect(mailRowIsRecent(row(null), now)).toBe(false);
+    expect(mailRowIsRecent(row("Not starred"), now)).toBe(false);
   });
 });

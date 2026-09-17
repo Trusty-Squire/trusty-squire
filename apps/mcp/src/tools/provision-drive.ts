@@ -1484,7 +1484,10 @@ export const operateReadInboxTool: Tool<z.infer<typeof readInboxSchema>> = {
     "a code or link — navigating away and back resets the form and closes the " +
     "waiting dialog. `sender` narrows the search — matched against the From " +
     'address, its display name, AND the subject (e.g. "proton.me"); the newest ' +
-    "matching mail is the one read. `into_slot` " +
+    "matching mail is the one read, cross-checked across the search listing AND " +
+    "the real-time All Mail listing (Gmail's search index can lag fresh mail by " +
+    "minutes — found:false means the mail is not in the mailbox, not that the " +
+    "search was stale). `into_slot` " +
     "seals a found OTP into a session slot so it is typed with operate_type slot and " +
     "never crosses the MCP boundary; `grant_inbox_consent` overrides the session's " +
     "inbox-read consent for this call. Returns needs_user when nothing is found yet " +
