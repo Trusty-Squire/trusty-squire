@@ -1973,7 +1973,7 @@ export class BrowserController implements BrowserDriver {
     ctx: Page | Frame,
     mode: "text" | "css",
     value: string,
-    intent: "click" | "type",
+    intent: "click" | "js_click" | "type",
   ): Promise<
     | {
         ok: true;
@@ -2109,7 +2109,7 @@ export class BrowserController implements BrowserDriver {
 
         let pool: Element[];
         if (mode === "css") {
-          pool = all.filter((el) => isVisible(el) && (intent === "click" || hasTypeAffordance(el)));
+          pool = all.filter((el) => isVisible(el) && (intent !== "type" || hasTypeAffordance(el)));
         } else {
           const want = norm(value);
           if (want.length === 0) {
@@ -2125,10 +2125,10 @@ export class BrowserController implements BrowserDriver {
           const affordable = all.filter(
             (el) =>
               isVisible(el) &&
-              (intent === "click" ? hasClickAffordance(el) : hasTypeAffordance(el)),
+              (intent !== "type" ? hasClickAffordance(el) : hasTypeAffordance(el)),
           );
           const matchText = (el: Element): string =>
-            intent === "click" ? rendered(el) : norm(typeLabel(el));
+            intent !== "type" ? rendered(el) : norm(typeLabel(el));
           const exact = affordable.filter((el) => matchText(el) === want);
           // Prefer exact-text matches; only fall back to "contains" (with a
           // length guard so a big wrapper doesn't swallow the query) when no
@@ -2225,7 +2225,7 @@ export class BrowserController implements BrowserDriver {
   async resolvePageTarget(
     mode: "text" | "css",
     value: string,
-    intent: "click" | "type" = "click",
+    intent: "click" | "js_click" | "type" = "click",
     page: Page | null = this.page,
   ): Promise<ResolvedPageTarget> {
     if (page === null) throw new Error("Browser not started");
@@ -2434,7 +2434,7 @@ export class BrowserController implements BrowserDriver {
         handle = target.handle;
       } else if (target.kind === "frame") {
         handle = await this.resolveFrameElement(target.frame, target.selector, 0, page, {
-          allowCaptchaCheckboxFrame: true,
+          allowCaptchaCheckboxFrame: target.method === "click",
         });
         dispose = true;
       } else {

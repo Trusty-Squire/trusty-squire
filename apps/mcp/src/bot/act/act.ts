@@ -818,7 +818,7 @@ async function executeAct(
           const resolved = await browser.resolvePageTarget(
             locator.mode,
             locator.value,
-            action.kind === "type" ? "type" : "click",
+            action.kind,
             compactV2ActionPage,
           );
           if (!resolved.ok) {

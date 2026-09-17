@@ -31,9 +31,19 @@ import { existsSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { detectCaptchaVariant } from "../captcha.js";
+import { actInternally } from "../act/act.js";
+import { installBrokerBrowserCustody } from "../broker/custody.js";
+import { finishProvisionSession, startProvisionSession } from "../session/lifecycle.js";
 import { BrowserController, BrowserClickDispatchError } from "../browser.js";
+
+// startProvisionSession's admission reads see a signed-in fixture profile.
+vi.mock("../oauth-login.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../oauth-login.js")>()),
+  detectSessionProviders: async () => ["google"],
+  detectGoogleAccountEmail: async () => "fixture@example.test",
+}));
 
 const GOOGLE_ANCHOR_URL =
   "https://www.google.com/recaptcha/api2/anchor?ar=1&k=6Ltestsitekey0000000000000000&co=aHR0cHM&hl=en";
@@ -122,7 +132,7 @@ describe.skipIf(!available)("recaptcha v2 checkbox frame click (Kaggle shape)", 
             if (f === undefined) return false;
             return (await f.locator("#recaptcha-anchor").count()) > 0;
           },
-          { timeout: 15_000, intervals: [250, 500] },
+          { timeout: 15_000, interval: 250 },
         )
         .toBe(true);
     };
@@ -174,28 +184,30 @@ describe.skipIf(!available)("recaptcha v2 checkbox frame click (Kaggle shape)", 
           if (f === undefined) return null;
           return f.getAttribute("#recaptcha-anchor", "aria-checked").catch(() => null);
         },
-        { timeout: 10_000, intervals: [250, 500] },
+        { timeout: 10_000, interval: 250 },
       )
       .toBe("true");
     // The parent moves the challenge frame on-screen only after the queued
     // postMessage lands — poll rather than read once.
     await expect
       .poll(
-        () =>
-          page.evaluate(() => {
+        async () => {
+          const box = await page.evaluate(() => {
             const r = document
               .querySelector<HTMLIFrameElement>("#rc-bframe")!
               .getBoundingClientRect();
             return { top: r.top, height: r.height };
-          }),
-        { timeout: 10_000, intervals: [100, 250] },
+          });
+          return box.top > 0 && box.height > 30;
+        },
+        { timeout: 10_000, interval: 100 },
       )
-      .toSatisfy((b: { top: number; height: number }) => b.top > 0 && b.height > 30);
+      .toBe(true);
 
     const after = await detectCaptchaVariant(controller, page);
     expect(after.challengeRendered).toBe(true);
     await page.close();
-  });
+  }, 120_000);
 
   it("still refuses challenge-frame clicks and synthetic js clicks into the checkbox frame", async () => {
     const page: Page = await context.newPage();
@@ -209,7 +221,7 @@ describe.skipIf(!available)("recaptcha v2 checkbox frame click (Kaggle shape)", 
           if (f === undefined) return false;
           return (await f.locator("#recaptcha-anchor").count()) > 0;
         },
-        { timeout: 15_000, intervals: [250, 500] },
+        { timeout: 15_000, interval: 250 },
       )
       .toBe(true);
     const controller = BrowserController.fromHarnessPage(page);
@@ -235,6 +247,104 @@ describe.skipIf(!available)("recaptcha v2 checkbox frame click (Kaggle shape)", 
         method: "js_click",
       }),
     ).rejects.toThrow(/no longer present|detached/i);
+
+    // The locator escape hatch (text=/css= → resolvePageTarget) honors the
+    // same rule: a js_click locator must NOT resolve inside the anchor frame
+    // (otherwise the resolved handle would be dispatched as an untrusted
+    // synthetic click that reCAPTCHA ignores while the action reports
+    // success), while a real-mouse click locator still resolves there.
+    const jsLocator = await controller.resolvePageTarget(
+      "css",
+      "#recaptcha-anchor",
+      "js_click",
+      page,
+    );
+    expect(jsLocator.ok).toBe(false);
+    const jsLocatorText = await controller.resolvePageTarget(
+      "text",
+      "I'm not a robot",
+      "js_click",
+      page,
+    );
+    expect(jsLocatorText.ok).toBe(false);
+    const clickLocator = await controller.resolvePageTarget(
+      "css",
+      "#recaptcha-anchor",
+      "click",
+      page,
+    );
+    expect(clickLocator.ok).toBe(true);
+    if (clickLocator.ok) await clickLocator.handle.dispose().catch(() => undefined);
     await page.close();
-  });
+  }, 120_000);
+
+  it("operate_act locator dispatch honors the trust rule: js_click refuses, real click toggles", async () => {
+    // This drives the FULL operate_act locator path (act.ts →
+    // resolvePageTarget → dispatch), not just the BrowserController
+    // primitives: the original leak was act.ts mapping a js_click locator to
+    // the trusted "click" resolution intent, so the anchor frame admitted
+    // resolution and the synthetic click reported a success reCAPTCHA then
+    // contradicted (checkbox untoggled, challenge never rendered).
+    const sessionContext = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    await sessionContext.route("**://www.google.com/recaptcha/api2/anchor**", (route) =>
+      route.fulfill({ contentType: "text/html; charset=utf-8", body: ANCHOR_HTML }),
+    );
+    await sessionContext.route("**://www.google.com/recaptcha/api2/bframe**", (route) =>
+      route.fulfill({ contentType: "text/html; charset=utf-8", body: BFRAME_HTML }),
+    );
+    const sessionController = BrowserController.fromHarnessPage(await sessionContext.newPage());
+    installBrokerBrowserCustody({
+      acquire: async () => ({ browser: sessionController, profileDir: "fixture-only" }),
+      cleanupAdmission: async () => true,
+      orphanAdmission: async () => {},
+      orphan: async () => {},
+      release: async (controller, beforeRelease) => {
+        await beforeRelease?.();
+        await controller.closeOwnPagesOnly();
+      },
+    });
+    let sessionId: string | undefined;
+    try {
+      const started = await startProvisionSession(
+        { serviceUrl: baseUrl },
+        {
+          observeSession: async (session) => ({
+            session_id: session.id,
+            url: session.browser.currentUrl(),
+            text: "",
+            elements: [],
+          }),
+          compactV2StartMetadata: () => ({}),
+        },
+      );
+      sessionId = started.session_id;
+
+      // A js_click locator into the anchor frame must refuse ("no element
+      // matched" — the anchor frame stays unresolvable for untrusted intents).
+      await expect(
+        actInternally(sessionId, { kind: "js_click", target: "css=#recaptcha-anchor" }, "compact"),
+      ).rejects.toThrow(/no element matched/);
+
+      // The real-mouse click locator remains the trusted activation path and
+      // actually toggles the widget (the pre-fix lie was a dispatched no-op).
+      await actInternally(sessionId, { kind: "click", target: "css=#recaptcha-anchor" }, "compact");
+      const anchorFrame = sessionContext
+        .pages()[0]!
+        .frames()
+        .find((fr) => fr.url().startsWith("https://www.google.com/recaptcha/api2/anchor"));
+      expect(anchorFrame).toBeDefined();
+      await expect
+        .poll(
+          async () =>
+            await anchorFrame!.getAttribute("#recaptcha-anchor", "aria-checked").catch(() => null),
+          { timeout: 10_000, interval: 250 },
+        )
+        .toBe("true");
+    } finally {
+      if (sessionId !== undefined) {
+        await finishProvisionSession(sessionId).catch(() => undefined);
+      }
+      await sessionContext.close();
+    }
+  }, 60_000);
 });
