@@ -675,6 +675,32 @@ function installSelfManagedChromeCleanup(): void {
   }
 }
 
+// A custody bind is verified against /proc state Chrome itself mutates during
+// startup: it rewrites argv into a single process title and erases its own
+// environ marker (see bindLaunch's marker note in owner-process-reaper.ts).
+// A snapshot taken mid-rewrite can read "stale"/"unknown" for a healthy, live
+// Chrome, so one failed bind proves nothing. Retry within a short bounded
+// window; a definitively exited tree fails fast, and a persistent mismatch
+// still refuses custody at the call sites. The bind's proof requirements
+// (birth identity + per-launch profile + marker non-contradiction) are
+// unchanged.
+const LAUNCH_CUSTODY_BIND_WINDOW_MS = 2_000;
+const LAUNCH_CUSTODY_BIND_RETRY_MS = 10;
+const launchCustodyBindWait = new Int32Array(new SharedArrayBuffer(4));
+
+export function bindOwnerBrowserLaunchBounded(
+  marker: string,
+  proof: OwnedChromeProcessTreeProof,
+): boolean {
+  const deadline = Date.now() + LAUNCH_CUSTODY_BIND_WINDOW_MS;
+  for (;;) {
+    if (bindOwnerBrowserLaunch(marker, proof.identity)) return true;
+    if (ownedChromeProcessTreeState(proof) === "stale") return false;
+    if (Date.now() >= deadline) return false;
+    Atomics.wait(launchCustodyBindWait, 0, 0, LAUNCH_CUSTODY_BIND_RETRY_MS);
+  }
+}
+
 export function registerSelfManagedChrome(
   child: ChildProcess,
   profileDir: string,
@@ -686,7 +712,7 @@ export function registerSelfManagedChrome(
     const proof = trackOwnedChromeProcessTree(identity, processGroup);
     if (proof !== null) {
       const marker = proof.identity.process_marker;
-      if (marker !== undefined && !bindOwnerBrowserLaunch(marker, proof.identity)) {
+      if (marker !== undefined && !bindOwnerBrowserLaunchBounded(marker, proof)) {
         releaseOwnedChromeProcessTree(proof);
         throw new Error("local browser launch identity could not be bound to owner custody");
       }
