@@ -258,9 +258,42 @@ const CAPTCHA_AUTOSOLVE_REQUEST_TIMEOUT_MS = 20_000;
 // dead: injecting it would report a solve the site rejects.
 const CAPTCHA_TOKEN_LIFETIME_MS = 120_000;
 
+// When a bought token dies unconsumed, the agent's observe cadence is slower
+// than the token's shelf life — so re-purchasing on the very next observation
+// buys another token that dies the same way. Back off geometrically per
+// consecutive expiry; the cap keeps a slow agent still re-arming eventually.
+const CAPTCHA_AUTOSOLVE_EXPIRY_BACKOFF_MAX_MS = 480_000;
+
+function expiryBackoffMs(consecutiveExpiries: number): number {
+  const raw = CAPTCHA_AUTOSOLVE_RETRY_COOLDOWN_MS * 2 ** (consecutiveExpiries - 1);
+  return Math.min(raw, CAPTCHA_AUTOSOLVE_EXPIRY_BACKOFF_MAX_MS);
+}
+
+// A gate-style handoff mints the site's completion code and delivers it into
+// the live page's gate frame; from there the site itself decides whether the
+// code is acceptable. Measured live on Bluesky signup (release 1.1.15-rc.1,
+// sessions b7582464/64ee93d9): the handoff completes byte-identically to the
+// site's own widget path, yet the server rejects every code minted from an
+// out-of-band-solved token ("Invalid verification code" at first use, seconds
+// after minting, while the same code minutes later reports a distinct
+// expired-token error). The delivery succeeding is therefore not evidence the
+// flow can pass.
+//
+// The handoff itself is one-shot per page (gateHandoffAttempted): once it has
+// run, every later purchase on the same page can only reach the live-widget
+// injection — which on a gate page measurably fires the site's error callback,
+// reloads the frame, and destroys the token — so each cycle burns the funded
+// key on a result the page structurally refuses. Once a handoff has been
+// attempted on a page and the gate challenge renders again, stop buying for
+// that page and leave the challenge to the operator.
+const GATE_HANDOFF_MAX_DELIVERED_PER_PAGE = 1;
+
 interface AutoSolveState {
   inFlight: boolean;
   lastFinishedAt: number;
+  // Geometric backoff after a token died unconsumed (see expiryBackoffMs).
+  consecutiveExpiries: number;
+  expiryBackoffUntil: number;
   // A bought token waiting for a lease-holding caller to inject it, with the
   // document it was bought for and when it was minted.
   pending: {
@@ -292,7 +325,13 @@ const attemptState = new WeakMap<Session, AutoSolveState>();
 function autoSolveState(session: Session): AutoSolveState {
   const existing = attemptState.get(session);
   if (existing !== undefined) return existing;
-  const fresh: AutoSolveState = { inFlight: false, lastFinishedAt: 0, pending: null };
+  const fresh: AutoSolveState = {
+    inFlight: false,
+    lastFinishedAt: 0,
+    consecutiveExpiries: 0,
+    expiryBackoffUntil: 0,
+    pending: null,
+  };
   attemptState.set(session, fresh);
   return fresh;
 }
@@ -338,6 +377,8 @@ async function injectPendingCaptchaToken(session: Session, page?: Page): Promise
     // would fill the response field, read back as solved, and leave the agent
     // submitting a value the site rejects with nothing left to retry.
     if (Date.now() - pending.fetchedAt > CAPTCHA_TOKEN_LIFETIME_MS) {
+      state.consecutiveExpiries += 1;
+      state.expiryBackoffUntil = Date.now() + expiryBackoffMs(state.consecutiveExpiries);
       audit(session.id, "captcha_autosolve", {
         variant: pending.variant,
         outcome: "token_expired",
@@ -371,8 +412,14 @@ async function injectPendingCaptchaToken(session: Session, page?: Page): Promise
       console.error(
         `[captcha-autosolve-diag] session=${session.id} variant=${pending.variant} outcome=already_settled`,
       );
+      state.consecutiveExpiries = 0;
+      state.expiryBackoffUntil = 0;
       return;
     }
+    // The token is being consumed — the purchase→consume pipeline worked this
+    // time, so a later expiry would be a fresh observation, not a streak.
+    state.consecutiveExpiries = 0;
+    state.expiryBackoffUntil = 0;
     if (page !== undefined && !gateHandoffAttempted.has(page)) {
       const gateUrl = findGateFrameUrl(page);
       if (gateUrl !== null) {
@@ -424,6 +471,11 @@ async function injectPendingCaptchaToken(session: Session, page?: Page): Promise
 
 /** One-shot per page: the handoff attempt is only meaningful once. */
 const gateHandoffAttempted = new WeakSet<object>();
+
+/** Delivered handoffs per page — bounds the spend once the site shows it will
+ * not accept codes minted this way (see the GATE_HANDOFF_MAX_DELIVERED_PER_PAGE
+ * comment). */
+const gateHandoffDeliveredCount = new WeakMap<object, number>();
 
 /** How long to wait for the standalone gate page to land on its redirect. */
 const GATE_HANDOFF_REDIRECT_TIMEOUT_MS = 20_000;
@@ -499,6 +551,9 @@ async function runGateHandoffSolve(
           }, url)
           .catch(() => false);
         console.error(`[captcha-gate-handoff-diag] code=1 delivered=${delivered}`);
+        if (delivered) {
+          gateHandoffDeliveredCount.set(page, (gateHandoffDeliveredCount.get(page) ?? 0) + 1);
+        }
         auditHandoff(delivered ? "gate_handoff_delivered" : "gate_handoff_undelivered");
         return;
       }
@@ -571,6 +626,13 @@ function startDetachedTokenFetch(session: Session, page?: Page): void {
     Date.now() - state.lastFinishedAt < CAPTCHA_AUTOSOLVE_RETRY_COOLDOWN_MS
   ) {
     audit(session.id, "captcha_autosolve", { outcome: "fetch_skipped", reason: "cooldown" });
+    return;
+  }
+  if (Date.now() < state.expiryBackoffUntil) {
+    audit(session.id, "captcha_autosolve", { outcome: "fetch_skipped", reason: "expiry_backoff" });
+    console.error(
+      `[captcha-autosolve-diag] session=${session.id} outcome=fetch_skipped reason=expiry_backoff expiries=${state.consecutiveExpiries} remaining_ms=${state.expiryBackoffUntil - Date.now()}`,
+    );
     return;
   }
   // Claim the slot SYNCHRONOUSLY. Observations are serialized by the session
@@ -653,6 +715,27 @@ async function runDetachedTokenFetch(session: Session, page?: Page): Promise<voi
     // Scoped to the DETECTED provider: a co-resident reCAPTCHA v3 badge token
     // must not read as "the rendered hCaptcha is already solved".
     if (await variantTokenPresent(session, det.variant, page)) return;
+    // A gate challenge that renders again after this page's one-shot handoff
+    // can only be re-attempted through the destructive live-widget injection
+    // (the handoff is one-shot per page). Whether the delivered code was then
+    // rejected by the site or the handoff never produced one, further
+    // purchases are guaranteed waste — skip them and leave the challenge
+    // visible for the operator.
+    if (page !== undefined && findGateFrameUrl(page) !== null && gateHandoffAttempted.has(page)) {
+      const delivered = gateHandoffDeliveredCount.get(page) ?? 0;
+      audit(session.id, "captcha_autosolve", {
+        variant: det.variant,
+        outcome: "autosolve_disabled",
+        reason:
+          delivered >= GATE_HANDOFF_MAX_DELIVERED_PER_PAGE
+            ? "gate_handoff_delivered_but_rejected"
+            : "gate_handoff_already_attempted",
+      });
+      console.error(
+        `[captcha-autosolve-diag] session=${session.id} variant=${det.variant} outcome=autosolve_disabled reason=${delivered >= GATE_HANDOFF_MAX_DELIVERED_PER_PAGE ? "gate_handoff_delivered_but_rejected" : "gate_handoff_already_attempted"} delivered=${delivered}`,
+      );
+      return;
+    }
     variant = det.variant;
 
     const solvedUrl = page?.url() ?? session.browser.currentUrl();
