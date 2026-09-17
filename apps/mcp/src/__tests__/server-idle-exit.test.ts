@@ -182,6 +182,15 @@ describe("server shutdown call admission", () => {
         const entries = await readdir(records).catch(() => [] as string[]);
         recordPath =
           entries
+            // The registry publishes every write (including markDraining) via
+            // write-tmp-then-rename, so a readdir snapshot can catch a
+            // `.tmp-<uuid>` entry that already holds the new draining content
+            // while the real record still holds the previous state. Binding
+            // recordPath to that transient name fails the mid-drain read below
+            // with null once the rename completes, even though the real record
+            // was draining the whole time (release-gate run 35169298161).
+            // Wait for the stable record file only.
+            .filter((entry) => !entry.includes(".tmp-"))
             .map((entry) => join(records, entry))
             .find((path) => {
               const record = readServerInstanceRecord(path);
