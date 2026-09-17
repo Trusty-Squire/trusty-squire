@@ -99,6 +99,38 @@ export function parseVerification(
   return { code, link };
 }
 
+// Gmail's own page chrome leaks into any page-wide anchor read of a mailbox
+// page: the account-menu, settings, and support links are ordinary <a> anchors
+// sitting beside the mail content. Chrome anchors can score POSITIVE — the
+// account menu's SignOutOptions URL carries a `continue=` parameter (+3), and
+// support-article URLs often do too — so without this filter a mailbox page
+// whose message body was never reached scored a UI URL as the verification
+// link and returned {found:true, code:null, link:"https://accounts.google.com/
+// SignOutOptions?...&continue=..."} — a claimed hit naming Gmail's own account
+// menu instead of anything from the verification email (Proton gauntlet,
+// operate_read_inbox on 1.1.14; the code WAS in the mailbox). A verification
+// email's action link is never the mail app's own chrome, so these are
+// unconditionally dropped before scoring — a chrome-only page then yields
+// {code:null, link:null}, which keeps the retry loop running and stays honest
+// (needs_user) instead of claiming a hit. Exported for unit tests.
+export function isGmailChromeLink(rawUrl: string): boolean {
+  const url = rawUrl.trim();
+  if (url.startsWith("#")) return true;
+  try {
+    const u = new URL(url.replace(/&amp;/gi, "&"));
+    const host = u.hostname.toLowerCase();
+    // The mailbox app itself (its hash-UI paths and internal navigation) and
+    // Google's account-menu/help chrome never carry a third-party signup's
+    // verification link. Google's own account-security mail is exactly the
+    // noise a third-party signup must not grab.
+    if (host === "mail.google.com" || host === "support.google.com") return true;
+    if (host === "accounts.google.com") return /^\/signoutoptions(?:$|[/?#])/i.test(u.pathname);
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 // Best-effort sender address from an OPENED Gmail message: Gmail renders the
 // header as "Name <addr@domain>". Returned as source_from so a caller can verify
 // the code came from the expected service — a no-sender search can otherwise
@@ -305,19 +337,24 @@ export async function awaitVerification(
         );
         const opened = await browser.openFirstMailResult(inboxTab).catch(() => false);
         if (opened) {
-          const openedText = await browser.extractVisibleText(inboxTab);
-          const openedLinks = await rawLinksOf(inboxTab);
+          // Read the opened message's OWN container (card + body) when Gmail
+          // renders one, so page chrome never enters the code parse, the link
+          // scoring, or the sender read. Falls back to the page-wide read,
+          // where chrome anchors are still filtered out below.
+          const body = await browser.extractOpenedMailBody(inboxTab).catch(() => null);
+          const openedText = body?.text ?? (await browser.extractVisibleText(inboxTab));
+          const openedLinks = body?.links ?? (await rawLinksOf(inboxTab));
           sourceFrom = extractSenderEmail(openedText);
           const expectedDomains = expectedVerificationDomains(opts.sender, sourceFrom);
           ({ code, link } = parseVerification(
             openedText,
-            [...openedLinks, ...listLinks],
+            [...openedLinks, ...listLinks].filter((l) => !isGmailChromeLink(l.url)),
             expectedDomains,
           ));
         } else {
           ({ code, link } = parseVerification(
             listText,
-            listLinks,
+            listLinks.filter((l) => !isGmailChromeLink(l.url)),
             expectedVerificationDomains(opts.sender, null),
           ));
         }

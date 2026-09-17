@@ -1175,6 +1175,52 @@ export class BrowserController implements BrowserDriver {
     }
     return false;
   }
+
+  /**
+   * READ the OPENED Gmail message's own container, not the whole page:
+   * text and raw links scoped to the `.adn` message card (which carries the
+   * `.gD` sender header) around the newest non-empty `.ii`/`.a3s` body div —
+   * the shapes Gmail has used for rendered messages for years. Scoping is the
+   * extraction fix behind the 1.1.14 Proton defect: a page-wide read let the
+   * mailbox chrome (account-menu SignOutOptions URL, support links) enter the
+   * code parse and link scoring, while the code-bearing body could be missed.
+   *
+   * Returns null when no message body is rendered (caller falls back to the
+   * page-wide read, with chrome links filtered at the call site).
+   */
+  async extractOpenedMailBody(
+    page: Page | null = this.page,
+  ): Promise<{
+    text: string;
+    links: Array<{ url: string; text: string | null }>;
+  } | null> {
+    if (page === null) throw new Error("Browser not started");
+    // Conversation render follows the URL change openFirstMailResult waited
+    // for; give the body a short bounded window to appear.
+    await page.waitForSelector(".ii, .a3s", { timeout: 2000 }).catch(() => undefined);
+    const raw = await page.evaluate(() => {
+      const bodies = Array.from(document.querySelectorAll<HTMLElement>(".ii, .a3s"));
+      let body: HTMLElement | null = null;
+      for (const b of bodies) {
+        if ((b.innerText ?? "").trim().length > 0) body = b;
+      }
+      if (body === null) return null;
+      const card = body.closest<HTMLElement>(".adn") ?? body;
+      return {
+        text: card.innerText ?? "",
+        links: Array.from(card.querySelectorAll("a[href]")).map((a) => ({
+          url: a.getAttribute("href") ?? "",
+          text: (a.textContent ?? "").replace(/\s+/g, " ").trim() || null,
+        })),
+      };
+    });
+    if (raw === null) return null;
+    const links = raw.links
+      .filter((l) => l.url.length > 0)
+      .map((l) => this.cardValueOutputMask.maskValue(l));
+    return { text: this.cardValueOutputMask.maskText(raw.text), links };
+  }
+
   async goto(url: string, page?: Page): Promise<void> {
     await markOperatorMutationDispatchAttempted();
     return await this.pageDriver.goto(url, page);
