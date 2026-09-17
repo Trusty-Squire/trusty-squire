@@ -57,34 +57,16 @@ import {
 } from "./browser-process-runtime.js";
 
 import { type ChildProcess } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
-import type {
-  BrowserContext,
-  CDPSession,
-  ElementHandle,
-  FileChooser,
-  Frame,
-  Locator,
-  Page,
-  Request,
-} from "playwright";
+import type { BrowserContext, ElementHandle, FileChooser, Frame, Locator, Page } from "playwright";
 import {
   currentOperatorRequestSignal,
   markOperatorMutationDispatchAttempted,
-  throwIfOperatorRequestCancelled,
 } from "./request-cancellation.js";
 import { BrowserProcessOwner } from "./browser-process-owner.js";
-import {
-  classifyGoogleAuthState,
-  extractGoogleHumanChallenge,
-  extractGoogleNumberMatch,
-  type GoogleHumanChallenge,
-} from "./google-auth-state.js";
-import type { HeightenedAuthNotificationResult } from "../api-client.js";
 import { bindOwnerBrowserLaunch, untrackOwnerBrowserLaunch } from "./owner-process-reaper.js";
 import { PageDriver } from "./page-driver.js";
-import type { ActiveOAuthAttempt, OAuthChallengeReporter } from "./oauth-login.js";
+import type { ActiveOAuthAttempt } from "./oauth-login.js";
 import {
   clearStaleSingletonLock,
   profileProcessIdentity,
@@ -174,11 +156,7 @@ export interface BrowserState {
 // browser-side CheckoutCard importers are unchanged in this PR.
 export type { CheckoutCard, CheckoutSummary } from "./checkout.js";
 
-import {
-  BrowserClickDispatchError,
-  clickDispatchStatusForError,
-  type ClickDispatchStatus,
-} from "./click-dispatch.js";
+import { BrowserClickDispatchError, type ClickDispatchStatus } from "./click-dispatch.js";
 
 export { BrowserClickDispatchError, clickDispatchStatusForError } from "./click-dispatch.js";
 export type { ClickDispatchStatus } from "./click-dispatch.js";
@@ -1175,6 +1153,63 @@ export class BrowserController implements BrowserDriver {
     }
     return false;
   }
+
+  /**
+   * READ the OPENED Gmail conversation's own containers, not the whole page:
+   * text and raw links scoped to the `.adn` message cards (each carries its
+   * `.gD` sender header and `.ii`/`.a3s` body — the shapes Gmail has used for
+   * rendered messages for years). Gmail expands every message of an opened
+   * thread, so a search can open a multi-message conversation where the newest
+   * card carries no code but an older rendered card does: the extraction
+   * gathers text and links across ALL cards with a non-empty body, newest
+   * card's text FIRST (the sender read takes the first `<addr>` match) and
+   * links in DOM order (pickVerificationLink breaks score ties to the later
+   * link, so a re-sent verification link's freshest token still wins).
+   * Scoping is the extraction fix behind the 1.1.14 Proton defect: a page-wide
+   * read let the mailbox chrome (account-menu SignOutOptions URL, support
+   * links) enter the code parse and link scoring, while the code-bearing body
+   * could be missed.
+   *
+   * Returns null when no message body is rendered (caller falls back to the
+   * page-wide read, with chrome links filtered at the call site).
+   */
+  async extractOpenedMailBody(page: Page | null = this.page): Promise<{
+    text: string;
+    links: Array<{ url: string; text: string | null }>;
+  } | null> {
+    if (page === null) throw new Error("Browser not started");
+    // Conversation render follows the URL change openFirstMailResult waited
+    // for; give the body a short bounded window to appear.
+    await page.waitForSelector(".ii, .a3s", { timeout: 2000 }).catch(() => undefined);
+    const raw = await page.evaluate(() => {
+      const bodies = Array.from(document.querySelectorAll<HTMLElement>(".ii, .a3s"));
+      const cards: HTMLElement[] = [];
+      for (const b of bodies) {
+        if ((b.innerText ?? "").trim().length === 0) continue;
+        const card = b.closest<HTMLElement>(".adn") ?? b;
+        if (!cards.includes(card)) cards.push(card);
+      }
+      if (cards.length === 0) return null;
+      return {
+        text: [...cards]
+          .reverse()
+          .map((c) => c.innerText ?? "")
+          .join("\n\n"),
+        links: cards.flatMap((c) =>
+          Array.from(c.querySelectorAll("a[href]")).map((a) => ({
+            url: a.getAttribute("href") ?? "",
+            text: (a.textContent ?? "").replace(/\s+/g, " ").trim() || null,
+          })),
+        ),
+      };
+    });
+    if (raw === null) return null;
+    const links = raw.links
+      .filter((l) => l.url.length > 0)
+      .map((l) => this.cardValueOutputMask.maskValue(l));
+    return { text: this.cardValueOutputMask.maskText(raw.text), links };
+  }
+
   async goto(url: string, page?: Page): Promise<void> {
     await markOperatorMutationDispatchAttempted();
     return await this.pageDriver.goto(url, page);

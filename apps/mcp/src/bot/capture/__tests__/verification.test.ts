@@ -10,6 +10,7 @@ import {
   buildVerificationResult,
   buildConsentRefusal,
   buildVerificationSearchQuery,
+  isGmailChromeLink,
 } from "../verification.js";
 
 describe("parseVerification (email OTP + link extraction)", () => {
@@ -196,5 +197,38 @@ describe("buildVerificationSearchQuery (finds passwordless mail)", () => {
     expect(link).toBe(
       "https://app.loops.so/api/auth/callback/email?callbackUrl=https%3A%2F%2Fapp.loops.so%2Fadd-domain&token=REDACTED&email=x%40y.com",
     );
+  });
+});
+
+describe("isGmailChromeLink (mailbox chrome never scores as a verification link)", () => {
+  it("drops the account-menu URL the 1.1.14 Proton defect returned", () => {
+    expect(
+      isGmailChromeLink(
+        "https://accounts.google.com/SignOutOptions?hl=en&continue=https://mail.google.com/mail/u/0/",
+      ),
+    ).toBe(true);
+  });
+
+  it("drops the mailbox app itself, its hash UI, and Google support chrome", () => {
+    expect(isGmailChromeLink("https://mail.google.com/mail/u/0/#inbox")).toBe(true);
+    expect(isGmailChromeLink("#compose")).toBe(true);
+    expect(
+      isGmailChromeLink(
+        "https://support.google.com/mail/answer/91324?hl=en&continue=https://mail.google.com/mail/u/0/",
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps ordinary accounts.google.com surfaces other than the account menu", () => {
+    expect(isGmailChromeLink("https://accounts.google.com/o/oauth2/auth?client_id=x")).toBe(false);
+  });
+
+  it("keeps everything that is not Google mailbox chrome, including trackers", () => {
+    expect(isGmailChromeLink("https://mail.proton.me/click-tracking?u=abc123def456")).toBe(false);
+    expect(
+      isGmailChromeLink(
+        "https://click.esp-service.com/redirect?u=https%3A%2F%2Fexample.com%2Fverify%3Ftoken%3Dabc",
+      ),
+    ).toBe(false);
   });
 });

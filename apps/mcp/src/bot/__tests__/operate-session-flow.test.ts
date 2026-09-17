@@ -156,6 +156,12 @@ const h = vi.hoisted(() => ({
   captureOverride: null as BrowserUseCapture | null,
   observationSemantics: { title: "", headings: [] as string[] },
   openFirstMailResult: false,
+  // When non-null, extractOpenedMailBody() returns this body instead of null
+  // (null = page-wide fallback, matching the pre-method behavior).
+  openedMailBody: null as {
+    text: string;
+    links: Array<{ url: string; text: string | null }>;
+  } | null,
   utilityTabsOpened: 0,
   utilityTabsClosed: 0,
   focusedLabels: [] as string[],
@@ -535,6 +541,12 @@ vi.mock("../browser.js", async (importOriginal) => ({
     }
     async openFirstMailResult(): Promise<boolean> {
       return h.openFirstMailResult;
+    }
+    async extractOpenedMailBody(): Promise<{
+      text: string;
+      links: Array<{ url: string; text: string | null }>;
+    } | null> {
+      return h.openedMailBody;
     }
     async openUtilityTab(): Promise<unknown> {
       h.utilityTabsOpened += 1;
@@ -1213,11 +1225,10 @@ vi.mock("../profile.js", async (importOriginal) => {
   };
 });
 
-import { chmodSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ApiClient } from "../../api-client.js";
-import { dispatchOperatorBrowserProcessTermination } from "../operator-browser-watchdog.js";
 import { BrowserController } from "../browser.js";
 import { OAuthAwaitingHumanError } from "../oauth-login.js";
 import {} from "../profile.js";
@@ -1228,7 +1239,6 @@ import {
   startHarnessProvisionSession,
   act,
   observe,
-  observedHostsForSession,
   extractCredentials,
   stashSecretSlot,
   awaitVerification,
@@ -1427,6 +1437,7 @@ beforeEach(() => {
   h.captureOverride = null;
   h.observationSemantics = { title: "", headings: [] };
   h.openFirstMailResult = false;
+  h.openedMailBody = null;
   h.utilityTabsOpened = 0;
   h.utilityTabsClosed = 0;
   h.focusedLabels = [];

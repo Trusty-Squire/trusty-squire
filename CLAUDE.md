@@ -71,8 +71,8 @@ silent failures.
   v16+ shipped.
 - **Email verification — the user's own inbox.** Signups are user-owned:
   the operator reads the verification code/link from the user's own Gmail
-  through their signed-in browser session, as ordinary page state rather than a
-  dedicated operator tool. The
+  through their signed-in browser session via the consent-gated
+  `operate_read_inbox` tool in a dedicated utility tab. The
   Squire-alias inbound-mail subsystem (`packages/inbox`, the resend-inbound
   webhook) was retired in 1.0.1 —
   no aliases are minted and nothing receives inbound mail server-side.
