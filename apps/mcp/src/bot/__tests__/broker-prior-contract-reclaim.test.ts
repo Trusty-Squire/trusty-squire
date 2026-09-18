@@ -44,11 +44,9 @@ const ACCOUNT_ID = "account";
  * its first acquire (apps/mcp/src/bot/broker/runtime.ts). */
 async function bindProfileToAccount(profileDir: string, accountId: string): Promise<void> {
   const { brokerAccountBindingPath } = await import("../broker/account-binding.js");
-  await writeFile(
-    brokerAccountBindingPath(profileDir),
-    JSON.stringify({ version: 1, accountId }),
-    { mode: 0o600 },
-  );
+  await writeFile(brokerAccountBindingPath(profileDir), JSON.stringify({ version: 1, accountId }), {
+    mode: 0o600,
+  });
 }
 
 const sleep = async (ms: number) => await new Promise((resolve) => setTimeout(resolve, ms));
@@ -461,9 +459,9 @@ describe("prior-contract broker reclaim on upgrade", () => {
         disconnect: async () => undefined,
       });
 
-      await expect(discovery.connectOrLaunchBroker(socket, "stale-token", ACCOUNT_ID)).rejects.toThrow(
-        "Invalid broker credential",
-      );
+      await expect(
+        discovery.connectOrLaunchBroker(socket, "stale-token", ACCOUNT_ID),
+      ).rejects.toThrow("Invalid broker credential");
       expect(state.spawn).not.toHaveBeenCalled();
     },
   );
@@ -596,7 +594,9 @@ describe("same-contract stale-credential broker reclaim", () => {
       const holderPid = fixture.pid!;
       const attached = await transport.BrokerClient.connect(socket, "old-token");
       try {
-        await expect(discovery.connectOrLaunchBroker(socket, "new-token", ACCOUNT_ID)).rejects.toMatchObject({
+        await expect(
+          discovery.connectOrLaunchBroker(socket, "new-token", ACCOUNT_ID),
+        ).rejects.toMatchObject({
           code: "broker_unavailable",
         });
         const message = String(

@@ -114,6 +114,13 @@ and its other sessions intact.
   only capability: a connection presenting another connection's session id is
   refused with `stale_lease`, and a dropped connection's sessions close after a
   five-second grace. A reconnecting client starts fresh and does not adopt them.
+- A start refused by a wall (`needs_user`, such as `google_session`) still reports
+  a `session_id`, but that id was never owned by any connection. The client
+  remembers it and answers locally without dispatching: a follow-up operate call
+  replays the same wall, and `operate_finish` returns the closed,
+  `mutation: "not_dispatched"` receipt and forgets the id. So `stale_lease` keeps
+  one meaning — another connection owns a live session — and never stands in for
+  a session that was never created. `broker-forwarder.test.ts` pins the replay.
 - Browser egress is unrestricted for all targets. Session cleanup closes only that owned
   family. A close that cannot be proven leaves the broker alive holding physical
   custody; it never refuses a later command or start. The existing exact
