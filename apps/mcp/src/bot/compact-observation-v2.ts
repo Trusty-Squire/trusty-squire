@@ -1190,6 +1190,8 @@ const VALIDATION_SIGNAL_RE =
   /\b(?:error|failed|invalid|required|incorrect|missing|must|cannot|can't|couldn't|not valid|not found|please (?:complete|enter|select|choose|provide)|try again)\b/i;
 const TURNSTILE_RESPONSE_NAME_RE = /^(?:cf-turnstile-response|cf-chl-widget-\S+_response)$/;
 const TURNSTILE_WIDGET_ID_RE = /^cf-chl-widget-\S+_response$/;
+const RESPONSE_FIELD_NAME_RE =
+  /^(?:(?:g-recaptcha-response|h-captcha-response|cf-turnstile-response)(?:-\d+)?|cf-chl-widget-\S+_response)$/;
 
 function nodeTagV2(node: BrowserUseNode): string {
   return node.nodeType === 1 ? node.nodeName.toLowerCase() : "";
@@ -1484,7 +1486,17 @@ export function safeBlockersV2(
     ]
       .filter((value): value is string => typeof value === "string")
       .join(" ");
-    if (CHALLENGE_MARKER_RE.test(identity)) return true;
+    // A response field is a SOLVED-signal carrier, not a challenge: its own
+    // name/id contains the provider name ("g-recaptcha-response"), so the
+    // marker below would otherwise make it a challenge root on every page with
+    // a recaptcha/hcaptcha/turnstile widget — reporting the injected token's
+    // own textarea as an unsolved challenge even after the frames clear.
+    const responseField =
+      ["input", "textarea"].includes(tag) &&
+      [node.attributes.name, node.attributes.id].some(
+        (value) => typeof value === "string" && RESPONSE_FIELD_NAME_RE.test(value.trim().toLowerCase()),
+      );
+    if (CHALLENGE_MARKER_RE.test(identity) && !responseField) return true;
     if (node.nodeType === 3) {
       const text = blockerTextV2(node) ?? "";
       return (
@@ -1516,8 +1528,18 @@ export function safeBlockersV2(
     const name = (node.attributes.name ?? "").trim().toLowerCase();
     const id = (node.attributes.id ?? "").trim().toLowerCase();
     const isResponseInput =
-      nodeTagV2(node) === "input" &&
-      (TURNSTILE_RESPONSE_NAME_RE.test(name) || TURNSTILE_WIDGET_ID_RE.test(id));
+      (nodeTagV2(node) === "input" &&
+        (TURNSTILE_RESPONSE_NAME_RE.test(name) || TURNSTILE_WIDGET_ID_RE.test(id))) ||
+      // reCAPTCHA keeps its response in a textarea, not an input, and the
+      // widget writes the token as the DOM value (no value attribute), which
+      // the serializer surfaces through the AX value property. Measured live on
+      // Kaggle email-register (2026-09-17): a bought 2Captcha token injected
+      // here is accepted by the site's own submit path, but without this
+      // signal the observation kept reporting the anchor checkbox as an
+      // unsolved challenge, so the agent read a successful solve as a failure
+      // and re-clicked the re-armed widget.
+      (nodeTagV2(node) === "textarea" &&
+        (name === "g-recaptcha-response" || id.startsWith("g-recaptcha-response")));
     if (isResponseInput && (node.attributes.value ?? "").trim() !== "") {
       solvedChallengeSignals.add(node);
     }
@@ -1554,8 +1576,21 @@ export function safeBlockersV2(
         !challengeFrames.some((frame) => withinSubtree(frame, node)),
     ),
   ];
+  // reCAPTCHA's response textarea sits OUTSIDE the widget frames — a sibling
+  // of the anchor/bframe iframes inside the widget container in the embedding
+  // document — so the per-frame boundary walk below pins `boundary` to the
+  // frame itself (the container also holds the challenge frame, breaking the
+  // walk). A filled g-recaptcha-response in the same document scope as a
+  // widget frame is that frame's solved signal; without it a solved reCAPTCHA
+  // keeps blocking the observation forever.
+  const recaptchaSolvedScopes = new Set(
+    [...solvedChallengeSignals]
+      .filter((signal) => nodeTagV2(signal) === "textarea")
+      .map((signal) => scopeFor.get(signal)),
+  );
   const solvedWidgets = new Set(
     widgets.filter((widget) => {
+      if (recaptchaSolvedScopes.has(scopeFor.get(widget))) return true;
       const isFrame = challengeFrames.includes(widget);
       if (isFrame && widget.rendered === false) return true;
       let boundary = widget;
@@ -1578,9 +1613,25 @@ export function safeBlockersV2(
       return [...solvedChallengeSignals].some((signal) => withinSubtree(signal, boundary));
     }),
   );
+  const solvedWidgetFrames = [...solvedWidgets].filter((widget) =>
+    ["iframe", "frame"].includes(nodeTagV2(widget)),
+  );
   const blockers: SafeBlockerV2[] = [];
   for (const challengeRoot of challengeRoots) {
     if (blockers.length >= BLOCKER_MAX_ITEMS) break;
+    // Decorative widget chrome (Google's g-recaptcha-bubble-arrow divs) hangs
+    // at body level OUTSIDE the widget container, so the frame-root
+    // suppression above never reaches it. While a challenge is open these
+    // visible marker-named divs become challenge roots of their own; once the
+    // widget's response field is filled they are inert decoration, not a
+    // challenge. A root that still hosts a widget (or is one) keeps blocking.
+    if (
+      recaptchaSolvedScopes.has(scopeFor.get(challengeRoot)) &&
+      !["iframe", "frame"].includes(nodeTagV2(challengeRoot)) &&
+      !widgets.some((widget) => withinSubtree(widget, challengeRoot))
+    ) {
+      continue;
+    }
     const boundaryNodes: BrowserUseNode[] = [];
     const controls = new Set<BrowserUseNode>();
     const collectControls = (node: BrowserUseNode): void => {
@@ -1699,6 +1750,10 @@ export function safeBlockersV2(
   for (const node of nodes) {
     if (blockers.length >= BLOCKER_MAX_ITEMS) break;
     if (visibleFor.get(node) !== true || !modalDialogV2(node)) continue;
+    // A challenge rendered INSIDE a solved provider's own frame (reCAPTCHA's
+    // image grid carries role=dialog) is the widget's chrome, not an
+    // independent modal; the frame-root loop already accounts for the frame.
+    if (solvedWidgetFrames.some((frame) => withinSubtree(node, frame))) continue;
     const name = dialogNameV2(node);
     if (name === undefined || blockers.some((blocker) => blocker.text === name.text)) continue;
     const controls = dialogControlsV2(node, nodes, visibleFor, enclosingDialogV2, refForNode);
