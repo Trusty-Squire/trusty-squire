@@ -9,6 +9,7 @@ const start = z
     service: z.string().min(1).max(120).optional(),
     name: z.string().min(1).max(60).optional(),
     field: z.string().min(1).max(120).optional(),
+    reason: z.string().max(200).optional(),
   })
   .strict()
   .refine(
@@ -44,7 +45,9 @@ the value. Delivery is single-use: the same approval_id will not return the
 value twice, so store it where it needs to go on first receipt. A denied or
 expired approval returns a refusal and no value. Pass \`field\` to name one
 field of a multi-field credential (required when the credential has more than
-one — call list_credentials for its field names).`;
+one — call list_credentials for its field names). Pass optional \`reason\`
+(short, in your own words) saying what you will do with the value so the
+owner can see who is asking and why.`;
 
 function refusal(reason: string, approval: CredentialFetchApproval): Record<string, unknown> {
   return {
@@ -115,6 +118,7 @@ export const fetchCredentialTool: Tool<z.infer<typeof inputSchema>> = {
           service: { type: "string" },
           name: { type: "string" },
           field: { type: "string" },
+          reason: { type: "string" },
         },
         additionalProperties: false,
       },
@@ -140,6 +144,7 @@ export const fetchCredentialTool: Tool<z.infer<typeof inputSchema>> = {
               ...(args.service !== undefined ? { service: args.service } : {}),
               ...(args.name !== undefined ? { name: args.name } : {}),
               ...(args.field !== undefined ? { field: args.field } : {}),
+              ...(args.reason !== undefined ? { reason: args.reason } : {}),
             });
       return toolResult(approval);
     } catch (error) {

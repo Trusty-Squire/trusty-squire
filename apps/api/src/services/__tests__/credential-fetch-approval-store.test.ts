@@ -25,6 +25,7 @@ function input(over: Partial<CredentialFetchApprovalInput> = {}): CredentialFetc
     nonce: "nonce_1",
     agent: "codex",
     requesterKind: "agent",
+    reason: null,
     intentHash: "intent_1",
     expiresAt: new Date(T0 + 10 * 60 * 1000),
     ...over,
@@ -38,11 +39,20 @@ describe("InMemoryCredentialFetchApprovalStore", () => {
     const id = await store.create("acct_1", input());
     expect(await store.approve(id, "mandate_1")).toBe("approved");
 
-    const outcomes = await Promise.all(
-      Array.from({ length: 8 }, () => store.claim(id, "acct_1")),
-    );
+    const outcomes = await Promise.all(Array.from({ length: 8 }, () => store.claim(id, "acct_1")));
     expect(outcomes.filter((outcome) => outcome.kind === "claimed")).toHaveLength(1);
     expect(outcomes.filter((outcome) => outcome.kind === "already_consumed")).toHaveLength(7);
+  });
+
+  it("restates the reason only while the approval is still pending", async () => {
+    const store = new InMemoryCredentialFetchApprovalStore(() => new Date(T0));
+    const id = await store.create("acct_1", input({ reason: "first reason" }));
+    expect((await store.restateReason(id, "second reason"))?.reason).toBe("second reason");
+    expect((await store.getById(id))?.reason).toBe("second reason");
+
+    await store.approve(id, "mandate_1");
+    expect(await store.restateReason(id, "after the human answered")).toBeNull();
+    expect((await store.getById(id))?.reason).toBe("second reason");
   });
 
   it("will not claim for a different account", async () => {
@@ -137,10 +147,7 @@ describe("PrismaCredentialFetchApprovalStore", () => {
         async findFirst() {
           return row;
         },
-        async updateMany(args: {
-          where: Record<string, unknown>;
-          data: Record<string, unknown>;
-        }) {
+        async updateMany(args: { where: Record<string, unknown>; data: Record<string, unknown> }) {
           updates.push(args);
           // Understands the two Prisma operators the store actually sends:
           // `{ gt | lte }` on expires_at and `{ in }` on status.
@@ -173,6 +180,7 @@ describe("PrismaCredentialFetchApprovalStore", () => {
     nonce: "nonce_1",
     agent: "codex",
     requester_kind: "agent",
+    reason: null,
     intent_hash: "intent_1",
     status: "approved",
     failure_code: null,

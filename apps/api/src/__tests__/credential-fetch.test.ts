@@ -229,6 +229,94 @@ describe("passkey-gated fetch_credential", () => {
     expect(await revealAudit()).toEqual([]);
   });
 
+  it("names the authenticated requester and the stated reason on the ceremony the page reads", async () => {
+    const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
+    const created = await createFetch({
+      reference,
+      reason: "write the key into a GitHub Actions secret",
+    });
+    expect(created.statusCode).toBe(201);
+    const approval = created.json() as {
+      approval_id: string;
+      agent: string;
+      reason: string | null;
+    };
+    // createFetch sends `x-squire-agent-identity: Codex`; the session's identity
+    // is `codex`. The page reads the authenticated one, never the header.
+    expect(approval.agent).toBe("codex");
+    expect(approval.reason).toBe("write the key into a GitHub Actions secret");
+
+    const page = await server.inject({
+      method: "GET",
+      url: `/v1/vault/fetch-approvals/${approval.approval_id}/ceremony`,
+    });
+    expect(page.statusCode).toBe(200);
+    expect(page.json()).toMatchObject({
+      agent: "codex",
+      reason: "write the key into a GitHub Actions secret",
+    });
+    // The stated reason is display-only: it must not enter the signed payload.
+    expect((page.json() as { payload: Record<string, unknown> }).payload).not.toHaveProperty(
+      "reason",
+    );
+  });
+
+  it("stores a null reason when the agent omits one", async () => {
+    const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
+    const created = await createFetch({ reference });
+    expect(created.statusCode).toBe(201);
+    expect((created.json() as { reason: string | null }).reason).toBeNull();
+
+    const page = await server.inject({
+      method: "GET",
+      url: `/v1/vault/fetch-approvals/${(created.json() as { approval_id: string }).approval_id}/ceremony`,
+    });
+    expect(page.statusCode).toBe(200);
+    expect((page.json() as { reason: string | null }).reason).toBeNull();
+    expect((page.json() as { agent: string }).agent).toBe("codex");
+  });
+
+  // The human judges WHY from the page. A repeat call rides the same pending
+  // approval, so the page must state the purpose THIS call gave — not the one
+  // the first call talked its way in with.
+  it("restates the reason on a reused pending approval", async () => {
+    const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
+    const first = await createFetch({ reference, reason: "put the key in the operator config" });
+    expect(first.statusCode).toBe(201);
+    const approvalId = (first.json() as { approval_id: string }).approval_id;
+
+    const second = await createFetch({
+      reference,
+      reason: "upload the key to a third-party debug service",
+    });
+    expect(second.statusCode).toBe(200);
+    expect(second.json()).toMatchObject({
+      approval_id: approvalId,
+      reason: "upload the key to a third-party debug service",
+    });
+
+    const page = await server.inject({
+      method: "GET",
+      url: `/v1/vault/fetch-approvals/${approvalId}/ceremony`,
+    });
+    expect((page.json() as { reason: string | null }).reason).toBe(
+      "upload the key to a third-party debug service",
+    );
+  });
+
+  it("keeps the standing reason when a reusing call states none", async () => {
+    const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
+    const first = await createFetch({ reference, reason: "put the key in the operator config" });
+    const approvalId = (first.json() as { approval_id: string }).approval_id;
+
+    const second = await createFetch({ reference });
+    expect(second.statusCode).toBe(200);
+    expect(second.json()).toMatchObject({
+      approval_id: approvalId,
+      reason: "put the key in the operator config",
+    });
+  });
+
   it("returns the raw value once a valid fetch mandate is signed, and audits purpose=reveal", async () => {
     const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
     const approval = (await createFetch({ reference })).json() as { approval_id: string };
@@ -440,10 +528,7 @@ describe("passkey-gated fetch_credential", () => {
   it("cannot mint an approval against another account's credential", async () => {
     const other = await deps.accountStore.createAccount("victim@example.test", "Victim");
     const otherToken = await issueAgentToken(other.id, "claude");
-    const victimRef = await storeCredential(
-      { service: "OpenAI", value: SECRET_VALUE },
-      otherToken,
-    );
+    const victimRef = await storeCredential({ service: "OpenAI", value: SECRET_VALUE }, otherToken);
 
     const created = await createFetch({ reference: victimRef });
     expect(created.statusCode).toBe(404);

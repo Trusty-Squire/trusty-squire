@@ -418,6 +418,7 @@ export class ApiClient {
     service?: string;
     name?: string;
     field?: string;
+    reason?: string;
   }): Promise<CredentialFetchApproval> {
     return this.post("/v1/vault/fetch-approvals", input);
   }

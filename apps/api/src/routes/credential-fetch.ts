@@ -74,6 +74,7 @@ import {
 } from "../services/vouch-mandate.js";
 
 const APPROVAL_TTL_MS = 10 * 60 * 1000;
+const REASON_MAX_CHARS = 200;
 
 const createBody = z
   .object({
@@ -81,6 +82,7 @@ const createBody = z
     service: z.string().min(1).max(120).optional(),
     name: z.string().min(1).max(60).optional(),
     field: z.string().min(1).max(120).optional(),
+    reason: z.string().max(REASON_MAX_CHARS).optional(),
   })
   .strict()
   .refine(
@@ -93,6 +95,11 @@ const approveBody = z.object({ jws: z.string().min(1).max(8192) }).strict();
 
 function approvalUrl(id: string): string {
   return approvalPageUrl("fetch", id);
+}
+
+function statedReason(value: string | undefined): string | null {
+  const trimmed = value?.trim() ?? "";
+  return trimmed.length === 0 ? null : trimmed;
 }
 
 // An opaque, purpose-specific digest of the owning account. Putting it inside
@@ -157,6 +164,8 @@ function approvalResponse(record: CredentialFetchApprovalRecord, now: Date) {
     },
     field: record.field,
     field_names: record.fieldNames,
+    agent: record.agent,
+    reason: record.reason,
     expires_at: record.expiresAt.toISOString(),
     ...(record.failureCode !== null ? { error: record.failureCode } : {}),
   };
@@ -266,9 +275,18 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
       intentHash,
       now,
     );
+    // A repeat call inside the TTL rides the SAME approval, so the human must
+    // read the purpose THIS call stated, not the first one's. A call that
+    // states none leaves the existing reason standing rather than erasing it.
+    const reason = statedReason(parsed.data.reason);
     if (reusable !== null) {
-      await sendFetchTelegram(opts.deps, reusable);
-      return reply.code(200).send(approvalResponse(reusable, now));
+      const restated =
+        reason === null
+          ? null
+          : await opts.deps.credentialFetchApprovalStore.restateReason(reusable.id, reason);
+      const current = restated ?? reusable;
+      await sendFetchTelegram(opts.deps, current);
+      return reply.code(200).send(approvalResponse(current, now));
     }
 
     const id = await opts.deps.credentialFetchApprovalStore.create(auth.account_id, {
@@ -281,6 +299,7 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
       nonce: randomBytes(16).toString("base64url"),
       agent,
       requesterKind,
+      reason,
       intentHash,
       expiresAt: new Date(now.getTime() + APPROVAL_TTL_MS),
     });

@@ -454,6 +454,7 @@ model CredentialFetchApproval {
   nonce                String
   agent                String
   requester_kind       String    @default("agent")
+  reason               String?
   intent_hash          String
   status               String
   failure_code         String?

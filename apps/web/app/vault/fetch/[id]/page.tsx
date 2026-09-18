@@ -13,6 +13,7 @@ import {
   WRONG_ACCOUNT_DEVICE_MESSAGE,
 } from "../../../lib/pairing";
 import { getVouchflow } from "../../../lib/vouchflow";
+import { consequenceLine, revealQuestion } from "./copy";
 
 interface FetchCeremony {
   approval_id: string;
@@ -20,6 +21,8 @@ interface FetchCeremony {
   credential: { reference: string; service: string | null; name: string };
   field: string | null;
   field_names: string[];
+  agent: string;
+  reason: string | null;
   expires_at: string;
   error?: string;
   payload: unknown;
@@ -158,78 +161,76 @@ export default function CredentialFetchApprovalPage() {
             : ceremony?.status === "failed"
               ? `The vault refused this fetch${ceremony.error ? `: ${ceremony.error}` : "."}`
               : null;
+  const pending = ceremony?.status === "pending";
+  const question =
+    ceremony === null
+      ? null
+      : revealQuestion(ceremony.credential, ceremony.field, ceremony.field_names);
 
   return (
     <AppShell anonymous>
-      <div className="app-head">
-        <div>
-          <h1 className="app-title">Approve revealing a secret</h1>
-          <p className="app-sub">
-            Approving hands the raw value to the agent that asked for it. Do this only if the agent
-            needs to write the key somewhere itself.
-          </p>
+      {pending && question !== null && (
+        <div className="app-head">
+          <div>
+            <h1 className="app-title" id="credential-target">
+              {question}
+            </h1>
+          </div>
         </div>
-      </div>
+      )}
 
       {error !== null && <div className="app-banner err">{error}</div>}
       {ceremony === null && error === null && <p className="app-sub">Loading…</p>}
       {terminal !== null && (
-        <div className={`app-banner ${ceremony?.status === "approved" ? "ok" : ""}`}>
-          {terminal}
-        </div>
+        <h1 className={`app-banner ${ceremony?.status === "approved" ? "ok" : ""}`}>{terminal}</h1>
       )}
 
-      {ceremony !== null && (
+      {pending && ceremony !== null && (
         <section className="app-card" aria-labelledby="credential-target">
-          <h2 className="app-title" id="credential-target" style={{ fontSize: "var(--t-lg)" }}>
-            {ceremony.credential.service ?? "Credential"} · {ceremony.credential.name}
-          </h2>
-          <p className="mono app-sub" style={{ overflowWrap: "anywhere", marginTop: "var(--s-3)" }}>
-            {ceremony.credential.reference}
+          <p className="app-sub" style={{ marginTop: 0, overflowWrap: "anywhere" }}>
+            Requested by {ceremony.agent}
+          </p>
+          {ceremony.reason !== null && (
+            <dl className="app-sub" style={{ margin: "var(--s-3) 0 0" }}>
+              <dt>Reason given</dt>
+              <dd className="mono" style={{ margin: "var(--s-2) 0 0", overflowWrap: "anywhere" }}>
+                “{ceremony.reason}”
+              </dd>
+            </dl>
+          )}
+          <p className="app-sub" style={{ marginTop: "var(--s-3)" }}>
+            {consequenceLine(ceremony.expires_at)}
           </p>
 
-          <div style={{ marginTop: "var(--s-6)" }}>
-            <p className="sect-label">Field to reveal</p>
-            <p className="mono app-sub" style={{ margin: 0, overflowWrap: "anywhere" }}>
-              {ceremony.field ?? ceremony.field_names.join(", ") ?? "—"}
-            </p>
-          </div>
-
-          <div className="app-banner err" style={{ marginTop: "var(--s-6)" }}>
-            The agent will see this value in clear, and it will stay in that conversation&apos;s
-            transcript. It can be read once — this approval is spent on first delivery.
-          </div>
-
-          {ceremony.status === "pending" &&
-            (needsPasskeySetup ? (
+          {needsPasskeySetup ? (
+            <button
+              className="btn-primary"
+              type="button"
+              onClick={() => void setUpPasskey()}
+              disabled={busy}
+            >
+              {busy ? "Setting up…" : "Sign in and set up passkey"}
+            </button>
+          ) : (
+            <div style={{ display: "flex", gap: "var(--s-3)", flexWrap: "wrap" }}>
               <button
                 className="btn-primary"
                 type="button"
-                onClick={() => void setUpPasskey()}
+                onClick={() => void approve()}
                 disabled={busy}
               >
-                {busy ? "Setting up…" : "Sign in and set up passkey"}
+                {busy ? "Approving…" : "Approve reveal"}
               </button>
-            ) : (
-              <div style={{ display: "flex", gap: "var(--s-3)", flexWrap: "wrap" }}>
-                <button
-                  className="btn-primary"
-                  type="button"
-                  onClick={() => void approve()}
-                  disabled={busy}
-                >
-                  {busy ? "Approving…" : "Approve reveal"}
-                </button>
-                <button
-                  className="btn-deny"
-                  type="button"
-                  onClick={() => void deny()}
-                  disabled={busy}
-                >
-                  Deny
-                </button>
-              </div>
-            ))}
+              <button
+                className="btn-deny"
+                type="button"
+                onClick={() => void deny()}
+                disabled={busy}
+              >
+                Deny
+              </button>
+            </div>
+          )}
         </section>
       )}
     </AppShell>
