@@ -50,6 +50,21 @@ function cloneCard(card: CheckoutCard): CheckoutCard {
   };
 }
 
+/** Non-secret vault fields the agent types after approval. PAN/CVV stay out. */
+export function releasedCardPublicFields(card: CheckoutCard): {
+  exp_month: string;
+  exp_year: string;
+  name: string;
+  billing: CheckoutCard["billing"];
+} {
+  return {
+    exp_month: card.exp_month,
+    exp_year: card.exp_year,
+    name: card.name,
+    billing: { ...card.billing },
+  };
+}
+
 function fieldSummary(
   results: Record<InjectCardField, InjectCardFieldResult>,
   targets: InjectCardInput["fields"],
@@ -65,6 +80,31 @@ function fieldSummary(
   };
 }
 
+function cardInjectedResult(
+  session: Session,
+  args: InjectCardInput,
+  released: {
+    approvalId: string;
+    approvalUrl: string;
+    checkout: ReleasedCardApproval["checkout"];
+    last4: string;
+    card: CheckoutCard;
+  },
+  results: Record<InjectCardField, InjectCardFieldResult>,
+) {
+  return {
+    status: "card_injected",
+    session_id: session.id,
+    approval_id: released.approvalId,
+    approval_url: released.approvalUrl,
+    approved_terms: released.checkout,
+    last4: released.last4,
+    ...releasedCardPublicFields(released.card),
+    card_tokens: cardTokenVocabulary(released.card),
+    ...fieldSummary(results, args.fields),
+  };
+}
+
 async function injectReleasedCard(session: Session, args: InjectCardInput) {
   const released = session.releasedPaymentCard;
   if (released === null) throw new Error("approved card release is unavailable");
@@ -76,16 +116,7 @@ async function injectReleasedCard(session: Session, args: InjectCardInput) {
   }
   if (Date.now() >= released.deadline) throw new Error("payment_approval_expired");
   const results = await injectCardIntoSessionTargets(session.id, released.card, args.fields);
-  return {
-    status: "card_injected",
-    session_id: session.id,
-    approval_id: released.approvalId,
-    approval_url: released.approvalUrl,
-    approved_terms: released.checkout,
-    last4: released.last4,
-    card_tokens: cardTokenVocabulary(released.card),
-    ...fieldSummary(results, args.fields),
-  };
+  return cardInjectedResult(session, args, released, results);
 }
 
 function pendingResult(session: Session, result: Record<string, unknown>): Record<string, unknown> {
@@ -102,7 +133,7 @@ function pendingResult(session: Session, result: Record<string, unknown>): Recor
 export const injectCardTool: Tool<InjectCardInput> = {
   name: "inject_card",
   description:
-    "Release one saved card under the existing single human purchase approval and fill only the supplied observation refs. Supply session_id and refs for pan/cvv from operate_observe; each may target the main document or any reachable frame. Expiry, cardholder name, and billing are NOT part of this tool and are not secret: fill them yourself with operate_type/operate_select. After approval the session also exposes the card as opaque per-digit masked tokens you can place into ANY field ref yourself with operate_type: {{pan}} and {{cvv}} type the whole value, {{pan:N}} and {{cvv:N}} type one digit (1-based, N up to the returned pan_length/cvv_length); the broker substitutes the real digit at the keystroke boundary and the digits are never shown to you or masked out of every observation, screenshot, and error. Use the refs for the ordinary path and the tokens for arbitrary layouts, single-digit boxes, remounts, re-validation, or post-error re-arm. Avoid provider helper/autofill/focus inputs and choose the actual card control. This tool never searches for payment providers, chooses a card UI, reads or validates the total, clicks submit, clears fields, or diagnoses the checkout. Partial results are ordinary browser outcomes; retry changed refs with the same approval_id. Before placing the order, re-observe and confirm no competing saved-card control is selected. The operator detects a rendered 3-D Secure challenge on observation or action results and notifies the cardholder once; do not solve or wait on the challenge yourself — keep observing until the checkout resolves. The released PAN/CVV are masked from all normal operator output before the first write.",
+    "Release one saved card under the existing single human purchase approval and fill only the supplied observation refs. Supply session_id and refs for pan/cvv from operate_observe; each may target the main document or any reachable frame. Expiry, cardholder name, and billing are NOT inject targets and are not secret: after approval the result carries exp_month, exp_year, name, and any stored billing alongside last4, and you type those with operate_type/operate_select like any other field. After approval the session also exposes the card as opaque per-digit masked tokens you can place into ANY field ref yourself with operate_type: {{pan}} and {{cvv}} type the whole value, {{pan:N}} and {{cvv:N}} type one digit (1-based, N up to the returned pan_length/cvv_length); the broker substitutes the real digit at the keystroke boundary and the digits are never shown to you or masked out of every observation, screenshot, and error. Use the refs for the ordinary path and the tokens for arbitrary layouts, single-digit boxes, remounts, re-validation, or post-error re-arm. Avoid provider helper/autofill/focus inputs and choose the actual card control. This tool never searches for payment providers, chooses a card UI, reads or validates the total, clicks submit, clears fields, or diagnoses the checkout. Partial results are ordinary browser outcomes; retry changed refs with the same approval_id. Before placing the order, re-observe and confirm no competing saved-card control is selected. The operator detects a rendered 3-D Secure challenge on observation or action results and notifies the cardholder once; do not solve or wait on the challenge yourself — keep observing until the checkout resolves. The released PAN/CVV are masked from all normal operator output before the first write.",
   inputSchema,
   jsonInputSchema: {
     type: "object",
@@ -214,16 +245,18 @@ export const injectCardTool: Tool<InjectCardInput> = {
         card: releasedCard,
       };
       session.activePayment = null;
-      return {
-        status: "card_injected",
-        session_id: session.id,
-        approval_id: approved.approval_id,
-        approval_url: approved.approval_url,
-        approved_terms: approved.checkout,
-        last4: approved.last4,
-        card_tokens: cardTokenVocabulary(releasedCard),
-        ...fieldSummary(fieldResults, args.fields),
-      };
+      return cardInjectedResult(
+        session,
+        args,
+        {
+          approvalId: approved.approval_id,
+          approvalUrl: approved.approval_url,
+          checkout: approved.checkout,
+          last4: approved.last4,
+          card: releasedCard,
+        },
+        fieldResults,
+      );
     });
   },
 };

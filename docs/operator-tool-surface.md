@@ -369,9 +369,11 @@ job without exposing plaintext to the agent.
   above.
 - `inject_card` retains the existing single purchase approval and fills only
   caller-named `pan`/`cvv` refs. Expiry, cardholder name, and billing are NOT
-  inject targets and are not secret: fill them with ordinary `operate_type`/
-  `operate_select`, or place the masked per-digit tokens returned in the
-  inject_card result (`card_tokens`) into any ref yourself. It does not submit
+  inject targets and are not secret: after approval the result carries
+  `exp_month`, `exp_year`, `name`, and any stored `billing` alongside `last4`;
+  type those with ordinary `operate_type`/`operate_select`, or place the masked
+  per-digit tokens returned in the inject_card result (`card_tokens`) into any
+  ref yourself. It does not submit
   or interpret the checkout. Use
   `operate_observe`, `operate_network`, and masked screenshots as evidence, then
   drive the page with ordinary actions. A rendered 3-D Secure challenge is

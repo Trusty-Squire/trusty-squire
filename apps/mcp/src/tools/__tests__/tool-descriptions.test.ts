@@ -158,6 +158,8 @@ describe("still-true contracts survive the cleanup", () => {
       }).success,
     ).toBe(true);
     expect(injectCardTool.description).toContain("operate_type/operate_select");
+    expect(injectCardTool.description).toContain("exp_month");
+    expect(injectCardTool.description).toContain("alongside last4");
     expect(injectCardTool.description).toContain("{{pan}}");
     expect(injectCardTool.description).toContain("{{cvv:N}}");
     expect(injectCardTool.description).toContain("masked from all normal operator output");

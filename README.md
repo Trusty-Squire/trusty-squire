@@ -37,7 +37,10 @@ existing single human approval for that purchase, verifies the signed release,
 and opens the card only inside the operator. A pending approval is resumed with
 the returned `approval_id`; retries may supply changed field refs under that same
 still-valid approval. The primitive fills only the named fields and returns a
-per-field `filled`, `not_found`, `detached`, or `native_error` result. It never
+per-field `filled`, `not_found`, `detached`, or `native_error` result. Expiry,
+cardholder name, and billing are not inject targets and are not secret: the
+result carries `exp_month`, `exp_year`, `name`, and any stored billing alongside
+`last4`, and you type those with `operate_type`/`operate_select`. It never
 searches for a provider, chooses a saved-card UI, rereads the total, submits,
 clears fields, or diagnoses the checkout.
 
@@ -349,8 +352,8 @@ in [browser-use-serializer-port.md](docs/browser-use-serializer-port.md).
 - `list_payment_cards` returns saved-card labels and opaque references.
   `inject_card` takes one explicit `card_ref`, purchase terms, and per-field
   refs plus the addressed `session_id`. It creates or resumes the single approval
-  and returns per-field browser outcomes plus approval metadata and last4; it
-  never returns PAN/CVV or submits.
+  and returns per-field browser outcomes plus approval metadata, last4, expiry,
+  cardholder name, and stored billing; it never returns PAN/CVV or submits.
 - `list_credentials` and `use_credential` find saved credentials and make authenticated API calls without returning raw values.
   Before provisioning, call `list_credentials` with
   `{"service":["exa","groq","cartesia"],"fields":"summary"}` to check for
