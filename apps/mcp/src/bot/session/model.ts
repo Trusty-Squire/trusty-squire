@@ -125,6 +125,36 @@ export interface Session {
   // begin between complete action leases.
   watchdog: OperatorBrowserWatchdog | null;
   terminalTeardownOwner: SessionTerminalTeardownOwner | null;
+  // Jev-driven operate_drive loop. Null until the first drive call; finish
+  // clears it. `running` is the busy lock so a second in-flight drive refuses
+  // instead of interleaving.
+  drive: SessionDriveState | null;
+}
+
+export interface DriveTrajectoryStep {
+  action: string;
+  target: string;
+  confidence: number;
+  url: string;
+  stage?: string;
+  jev_ms?: number;
+}
+
+export interface DriveHandoffQuestion {
+  question: string;
+  options: Record<string, string>;
+  probabilities?: Record<string, number>;
+}
+
+export interface SessionDriveState {
+  running: boolean;
+  goal: string;
+  facts: Record<string, string>;
+  trajectory: DriveTrajectoryStep[];
+  lastQuestion: DriveHandoffQuestion | null;
+  lastActionKey: string | null;
+  lastFingerprint: string | null;
+  jevCalls: number;
 }
 
 // The last extracted elements are resealed on every retain so each retained
@@ -213,6 +243,7 @@ export function createSession(input: CreateSessionInput): Session {
     startedAt: Date.now(),
     watchdog: null,
     terminalTeardownOwner: null,
+    drive: null,
     startUrl: input.startUrl,
     consentInboxRead: input.consentInboxRead,
     userEmail: input.userEmail,

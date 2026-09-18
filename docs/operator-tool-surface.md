@@ -4,7 +4,7 @@ Trusty Squire’s operator surface is a set of flat, single-purpose MCP tools.
 Discover the installed server’s exact input and output schemas with `tools/list`;
 that registered schema is authoritative for a particular server version.
 
-The named operator surface contains 20 tools: the 16 driving verbs in
+The named operator surface contains 21 tools: the 17 driving verbs in
 `OPERATE_TOOLS`, excluding the separately exposed recipe tools, plus
 `inject_card`, `list_credentials`, `list_payment_cards`, and
 `edit_payment_card`. Recipe tools and vault/account tools are separate
@@ -17,6 +17,7 @@ still require another observation or an explicit wait.
 
 | Purpose | Tool |
 | --- | --- |
+| Goal-shaped drive | `operate_drive` |
 | Start and finish | `operate_start`, `operate_finish` |
 | Read the page | `operate_observe`, `operate_screenshot`, `operate_network` |
 | Drive ordinary UI | `operate_navigate`, `operate_click`, `operate_type`, `operate_select`, `operate_press`, `operate_scroll`, `operate_wait` |
@@ -24,6 +25,16 @@ still require another observation or an explicit wait.
 | Login | `operate_login` |
 | Vault-aware browser work | `operate_fill_credential`, `operate_extract` |
 | Payments and vault lists | `inject_card`, `list_credentials`, `list_payment_cards`, `edit_payment_card` |
+
+For a signup, checkout, or other goal-shaped website task, call `operate_drive`
+with the goal and a `facts` bag (email, name, address, `card_ref`, …). Pass
+`session_id` of an open session, or `url` to open the page and drive in one
+call. The loop observes, lets Jev pick the next control, gates on confidence,
+and acts through the same click/type/select/login/inbox/card primitives.
+It returns a handoff (never a bare page): status, the current compact
+observation with the same stable refs, trajectory, and done/remaining. Resume
+the same session with `answer` and/or added `facts`. Use the single-step
+primitives only for a handoff you are answering or a task that is not a goal.
 
 `operate_read_inbox` reads the session's signed-in Gmail inbox for a
 verification email in dedicated utility tabs that are closed when the read
