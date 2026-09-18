@@ -891,7 +891,8 @@ footer {
   max-width: 520px;
 }
 .app-card .btn-primary,
-.app-card .btn-secondary {
+.app-card .btn-secondary,
+.app-card .btn-deny {
   margin-top: 18px;
   width: auto;
   display: inline-flex;

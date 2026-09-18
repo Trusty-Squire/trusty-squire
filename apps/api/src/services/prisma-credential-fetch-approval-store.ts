@@ -31,6 +31,8 @@ export class PrismaCredentialFetchApprovalStore implements CredentialFetchApprov
         nonce: input.nonce,
         agent: input.agent,
         requester_kind: input.requesterKind,
+        requested_by: input.requestedBy,
+        reason: input.reason,
         intent_hash: input.intentHash,
         status: "pending",
         expires_at: input.expiresAt,
@@ -139,6 +141,8 @@ export interface CredentialFetchApprovalRow {
   nonce: string;
   agent: string;
   requester_kind: string;
+  requested_by: string | null;
+  reason: string | null;
   intent_hash: string;
   status: string;
   failure_code: string | null;
@@ -161,6 +165,8 @@ function toRecord(row: CredentialFetchApprovalRow): CredentialFetchApprovalRecor
     nonce: row.nonce,
     agent: row.agent,
     requesterKind: row.requester_kind === "web" ? "web" : ("agent" as CredentialFetchRequesterKind),
+    requestedBy: row.requested_by ?? null,
+    reason: row.reason ?? null,
     intentHash: row.intent_hash,
     status: row.status as CredentialFetchApprovalStatus,
     failureCode: row.failure_code,

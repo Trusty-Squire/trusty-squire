@@ -229,6 +229,54 @@ describe("passkey-gated fetch_credential", () => {
     expect(await revealAudit()).toEqual([]);
   });
 
+  it("stores requested_by and reason on the ceremony the page reads", async () => {
+    const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
+    const created = await createFetch({
+      reference,
+      reason: "write the key into a GitHub Actions secret",
+    });
+    expect(created.statusCode).toBe(201);
+    const approval = created.json() as {
+      approval_id: string;
+      requested_by: string | null;
+      reason: string | null;
+    };
+    expect(approval.requested_by).toBe("Codex");
+    expect(approval.reason).toBe("write the key into a GitHub Actions secret");
+
+    const page = await server.inject({
+      method: "GET",
+      url: `/v1/vault/fetch-approvals/${approval.approval_id}/ceremony`,
+    });
+    expect(page.statusCode).toBe(200);
+    expect(page.json()).toMatchObject({
+      requested_by: "Codex",
+      reason: "write the key into a GitHub Actions secret",
+    });
+    // Who/why are display-only: they must not enter the signed payload.
+    expect((page.json() as { payload: Record<string, unknown> }).payload).not.toHaveProperty(
+      "requested_by",
+    );
+    expect((page.json() as { payload: Record<string, unknown> }).payload).not.toHaveProperty(
+      "reason",
+    );
+  });
+
+  it("stores a null reason when the agent omits one", async () => {
+    const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
+    const created = await createFetch({ reference });
+    expect(created.statusCode).toBe(201);
+    expect((created.json() as { reason: string | null }).reason).toBeNull();
+
+    const page = await server.inject({
+      method: "GET",
+      url: `/v1/vault/fetch-approvals/${(created.json() as { approval_id: string }).approval_id}/ceremony`,
+    });
+    expect(page.statusCode).toBe(200);
+    expect((page.json() as { reason: string | null }).reason).toBeNull();
+    expect((page.json() as { requested_by: string | null }).requested_by).toBe("Codex");
+  });
+
   it("returns the raw value once a valid fetch mandate is signed, and audits purpose=reveal", async () => {
     const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
     const approval = (await createFetch({ reference })).json() as { approval_id: string };
@@ -440,10 +488,7 @@ describe("passkey-gated fetch_credential", () => {
   it("cannot mint an approval against another account's credential", async () => {
     const other = await deps.accountStore.createAccount("victim@example.test", "Victim");
     const otherToken = await issueAgentToken(other.id, "claude");
-    const victimRef = await storeCredential(
-      { service: "OpenAI", value: SECRET_VALUE },
-      otherToken,
-    );
+    const victimRef = await storeCredential({ service: "OpenAI", value: SECRET_VALUE }, otherToken);
 
     const created = await createFetch({ reference: victimRef });
     expect(created.statusCode).toBe(404);

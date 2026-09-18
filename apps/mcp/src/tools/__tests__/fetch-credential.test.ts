@@ -142,6 +142,36 @@ describe("fetch_credential", () => {
     expect(seen).toEqual({ service: "AWS", field: "secret_access_key" });
   });
 
+  it("forwards a stated reason on the first call", async () => {
+    let seen: unknown;
+    const api = mockApi({
+      createCredentialFetchApproval: async (input) => {
+        seen = input;
+        return pending;
+      },
+    });
+    await fetchCredentialTool.handler(
+      { service: "Twilio", field: "account_sid", reason: "put the SID in the operator config" },
+      api,
+    );
+    expect(seen).toEqual({
+      service: "Twilio",
+      field: "account_sid",
+      reason: "put the SID in the operator config",
+    });
+  });
+
+  it("rejects a reason longer than 200 characters", () => {
+    expect(
+      fetchCredentialTool.inputSchema.safeParse({ service: "Twilio", reason: "x".repeat(201) })
+        .success,
+    ).toBe(false);
+    expect(
+      fetchCredentialTool.inputSchema.safeParse({ service: "Twilio", reason: "x".repeat(200) })
+        .success,
+    ).toBe(true);
+  });
+
   it("lets an unrelated API failure through rather than faking a refusal", async () => {
     const api = mockApi({
       createCredentialFetchApproval: async () => {

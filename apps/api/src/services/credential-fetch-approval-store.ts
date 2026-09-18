@@ -35,6 +35,10 @@ export interface CredentialFetchApprovalInput {
   nonce: string;
   agent: string;
   requesterKind: CredentialFetchRequesterKind;
+  /** Live agent identity from `X-Squire-Agent-Identity`, when the caller sent one. */
+  requestedBy: string | null;
+  /** Optional short reason the agent stated for needing the raw value. */
+  reason: string | null;
   intentHash: string;
   expiresAt: Date;
 }

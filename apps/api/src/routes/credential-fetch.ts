@@ -74,6 +74,7 @@ import {
 } from "../services/vouch-mandate.js";
 
 const APPROVAL_TTL_MS = 10 * 60 * 1000;
+const REASON_MAX_CHARS = 200;
 
 const createBody = z
   .object({
@@ -81,6 +82,7 @@ const createBody = z
     service: z.string().min(1).max(120).optional(),
     name: z.string().min(1).max(60).optional(),
     field: z.string().min(1).max(120).optional(),
+    reason: z.string().max(REASON_MAX_CHARS).optional(),
   })
   .strict()
   .refine(
@@ -93,6 +95,27 @@ const approveBody = z.object({ jws: z.string().min(1).max(8192) }).strict();
 
 function approvalUrl(id: string): string {
   return approvalPageUrl("fetch", id);
+}
+
+function headerString(value: string | string[] | undefined): string | null {
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  return trimmed.length === 0 ? null : trimmed;
+}
+
+function requestedByFromRequest(req: FastifyRequest): string | null {
+  const fromHeader = headerString(req.headers["x-squire-agent-identity"]);
+  if (fromHeader !== null) return fromHeader;
+  const auth = req.auth;
+  if (auth?.kind !== "agent") return null;
+  const identity = auth.agent_identity?.trim() ?? "";
+  return identity.length === 0 ? null : identity;
+}
+
+function statedReason(value: string | undefined): string | null {
+  const trimmed = value?.trim() ?? "";
+  return trimmed.length === 0 ? null : trimmed;
 }
 
 // An opaque, purpose-specific digest of the owning account. Putting it inside
@@ -157,6 +180,8 @@ function approvalResponse(record: CredentialFetchApprovalRecord, now: Date) {
     },
     field: record.field,
     field_names: record.fieldNames,
+    requested_by: record.requestedBy,
+    reason: record.reason,
     expires_at: record.expiresAt.toISOString(),
     ...(record.failureCode !== null ? { error: record.failureCode } : {}),
   };
@@ -281,6 +306,8 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
       nonce: randomBytes(16).toString("base64url"),
       agent,
       requesterKind,
+      requestedBy: requestedByFromRequest(req),
+      reason: statedReason(parsed.data.reason),
       intentHash,
       expiresAt: new Date(now.getTime() + APPROVAL_TTL_MS),
     });

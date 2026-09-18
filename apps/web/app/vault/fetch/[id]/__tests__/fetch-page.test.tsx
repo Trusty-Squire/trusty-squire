@@ -56,6 +56,8 @@ const ceremony = {
   },
   field: "secret_access_key",
   field_names: ["access_key_id", "secret_access_key"],
+  requested_by: "Grok" as string | null,
+  reason: "write it into GitHub Actions" as string | null,
   expires_at: "2026-09-05T12:10:00.000Z",
   payload: { fetch: { purpose: "credential.reveal" } },
   payload_sha256: "payload-hash",
@@ -65,7 +67,10 @@ let status: string;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-09-05T12:00:00.000Z"));
   status = "pending";
+  ceremony.requested_by = "Grok";
+  ceremony.reason = "write it into GitHub Actions";
   pairing.getPairingState.mockResolvedValue({ enrolled: true });
   pairing.pairDevice.mockResolvedValue(undefined);
   pairing.registerEnrolledDevice.mockResolvedValue(false);
@@ -91,7 +96,10 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe("credential fetch approval page", () => {
   it("styles the approval and denial controls with the shared button classes", async () => {
@@ -102,17 +110,53 @@ describe("credential fetch approval page", () => {
     expect(approve.classList.contains("btn-primary")).toBe(true);
   });
 
-  it("names the exact credential and field, and warns what approving costs", async () => {
+  it("asks the reveal as a question with a humanized field, who/why, and expiry", async () => {
     render(<CredentialFetchApprovalPage />);
-    expect(await screen.findByText("AWS · prod")).toBeTruthy();
-    expect(screen.getByText("vault://account/subscription/credential")).toBeTruthy();
-    expect(screen.getByText("secret_access_key")).toBeTruthy();
-    expect(screen.getByText(/see this value in clear/i)).toBeTruthy();
+    expect(
+      await screen.findByRole("heading", {
+        name: "Reveal AWS Secret access key to your agent?",
+      }),
+    ).toBeTruthy();
+    expect(screen.getByText("Requested by Grok · write it into GitHub Actions")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Your agent sees this value once, in clear, and it stays in that conversation. Expires in 10 minutes.",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText("vault://account/subscription/credential")).toBeNull();
+    expect(screen.queryByText("secret_access_key")).toBeNull();
+    expect(screen.queryByText("AWS · prod")).toBeNull();
+  });
+
+  it("omits the requested-by line when neither who nor why is present", async () => {
+    ceremony.requested_by = null;
+    ceremony.reason = null;
+    render(<CredentialFetchApprovalPage />);
+    await screen.findByRole("heading", {
+      name: "Reveal AWS Secret access key to your agent?",
+    });
+    expect(screen.queryByText(/Requested by/)).toBeNull();
+  });
+
+  it("shows only the agent when there is no reason", async () => {
+    ceremony.reason = null;
+    render(<CredentialFetchApprovalPage />);
+    expect(await screen.findByText("Requested by Grok")).toBeTruthy();
+    expect(screen.queryByText(/Requested by Grok ·/)).toBeNull();
+  });
+
+  it("shows only the reason when there is no agent, with no placeholder", async () => {
+    ceremony.requested_by = null;
+    render(<CredentialFetchApprovalPage />);
+    expect(await screen.findByText("write it into GitHub Actions")).toBeTruthy();
+    expect(screen.queryByText(/Requested by/)).toBeNull();
   });
 
   it("never renders a secret value — the ceremony carries none", async () => {
     render(<CredentialFetchApprovalPage />);
-    await screen.findByText("AWS · prod");
+    await screen.findByRole("heading", {
+      name: "Reveal AWS Secret access key to your agent?",
+    });
     // The ceremony response has no value field at all; this pins that the page
     // has no place it could render one from.
     expect(Object.keys(ceremony)).not.toContain("fields");
@@ -135,6 +179,13 @@ describe("credential fetch approval page", () => {
       jws: "signed-fetch-jws",
     });
     expect(await screen.findByText(/agent can now read this secret once/i)).toBeTruthy();
+    expect(screen.getByText("AWS · prod")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Approve reveal" })).toBeNull();
+    expect(screen.queryByText(/Expires in/)).toBeNull();
+    expect(
+      screen.queryByRole("heading", { name: "Reveal AWS Secret access key to your agent?" }),
+    ).toBeNull();
   });
 
   it("denies without signing anything", async () => {
@@ -145,6 +196,9 @@ describe("credential fetch approval page", () => {
     await waitFor(() => expect(screen.getByText(/no value was released/i)).toBeTruthy());
     expect(vouchflow.signPayload).not.toHaveBeenCalled();
     expect(api.apiPost).toHaveBeenCalledWith("/v1/vault/fetch-approvals/fetch_1/deny", {});
+    expect(screen.getByText("AWS · prod")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
+    expect(screen.queryByText(/Expires in/)).toBeNull();
   });
 
   // A signed-in browser opening the link claims its own passkey, so an owner

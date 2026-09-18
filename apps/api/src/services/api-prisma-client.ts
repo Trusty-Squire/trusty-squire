@@ -224,6 +224,8 @@ interface CredentialFetchApprovalRow {
   nonce: string;
   agent: string;
   requester_kind: string;
+  requested_by: string | null;
+  reason: string | null;
   intent_hash: string;
   status: string;
   failure_code: string | null;
