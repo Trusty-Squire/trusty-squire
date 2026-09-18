@@ -31,6 +31,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BrowserController } from "../browser.js";
 import { awaitVerification } from "../capture/verification.js";
 import { finishProvisionSession, startHarnessProvisionSession } from "../provision-session.js";
+import { sessionForCall } from "../session/lifecycle.js";
 
 let available = false;
 try {
@@ -282,7 +283,14 @@ async function multiRowHarness(): Promise<{ context: BrowserContext }> {
 
 async function readInbox(
   context: BrowserContext,
-  opts: { sender?: string; breakRowExtraction?: boolean } = {},
+  opts: {
+    sender?: string;
+    breakRowExtraction?: boolean;
+    // Backdate the session's start so the fixture mails (minutes old) POSTdate
+    // the session floor. Models a task that began N minutes ago — the normal
+    // shape: the session starts, THEN the signup triggers the fresh mail.
+    sessionStartsMinutesAgo?: number;
+  } = {},
 ): Promise<Awaited<ReturnType<typeof awaitVerification>>> {
   const harnessPage = await context.newPage();
   await harnessPage.goto(`http://127.0.0.1:${port}/signup`);
@@ -303,6 +311,11 @@ async function readInbox(
     serviceUrl: `http://127.0.0.1:${port}/signup`,
     consentInboxRead: true,
   });
+  if (opts.sessionStartsMinutesAgo !== undefined) {
+    const session = sessionForCall(obs.session_id);
+    if (session !== undefined)
+      session.startedAt = Date.now() - opts.sessionStartsMinutesAgo * 60_000;
+  }
   try {
     const result = await awaitVerification(obs.session_id, opts);
     // The signup page the dialog lives on must be untouched by the read.
@@ -450,7 +463,7 @@ describe("operate_read_inbox picks the NEWEST matching mail out of a real result
     if (!available) return;
     const { context } = await multiRowHarness();
     try {
-      const res = await readInbox(context, { sender: "craigslist" });
+      const res = await readInbox(context, { sender: "craigslist", sessionStartsMinutesAgo: 30 });
       expect(res.found).toBe(true);
       expect(res.code).toBeNull();
       expect(res.link).toBe("https://accounts.craigslist.org/signup?tok=NEWACTIVATION7788");
@@ -466,7 +479,10 @@ describe("operate_read_inbox picks the NEWEST matching mail out of a real result
     try {
       // "sign-up" appears in no From address or display name — only the
       // craigslist row's subject.
-      const res = await readInbox(context, { sender: "sign-up" });
+      const res = await readInbox(context, {
+        sender: "sign-up",
+        sessionStartsMinutesAgo: 30,
+      });
       expect(res.found).toBe(true);
       expect(res.link).toBe("https://accounts.craigslist.org/signup?tok=NEWACTIVATION7788");
     } finally {
@@ -480,7 +496,7 @@ describe("operate_read_inbox picks the NEWEST matching mail out of a real result
     try {
       // The Proton code (11:39 PM, ranked first by relevance) must NOT win;
       // the craigslist mail (5:10 AM, newest) must.
-      const res = await readInbox(context);
+      const res = await readInbox(context, { sessionStartsMinutesAgo: 30 });
       expect(res.found).toBe(true);
       expect(res.code).toBeNull();
       expect(res.link).toBe("https://accounts.craigslist.org/signup?tok=NEWACTIVATION7788");
@@ -499,6 +515,29 @@ describe("operate_read_inbox picks the NEWEST matching mail out of a real result
       expect(res.code).toBeNull();
       expect(res.link).toBeNull();
       expect(res.needs_user?.resume).toBe("code");
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+
+  it("a matching mail that predates the session start is reported stale, never returned", async () => {
+    // The 1.1.16-rc.1 craigslist defect: the session read a mailbox holding
+    // only mails OLDER than the task (the fresh mail had not arrived / the
+    // task triggered no send at all) and returned the newest stale row's
+    // already-consumed activation link as found:true. The session floor must
+    // drop every predating row and report the stale-match honest result.
+    if (!available) return;
+    const { context } = await multiRowHarness();
+    try {
+      // No backdating: the session starts NOW, so every fixture mail (7–21
+      // minutes old) predates it — the exact live control shape.
+      const res = await readInbox(context, { sender: "craigslist" });
+      expect(res.found).toBe(false);
+      expect(res.code).toBeNull();
+      expect(res.link).toBeNull();
+      expect(res.needs_user?.resume).toBe("code");
+      expect(res.needs_user?.message).toContain("BEFORE this task started");
+      expect(res.needs_user?.message).toContain("operate_read_inbox AGAIN");
     } finally {
       await context.close();
     }
@@ -634,7 +673,10 @@ describe("operate_read_inbox supplements the search listing with the real-time A
     try {
       // The search view's rows (Proton, Cal.com) match no 'craigslist' hint;
       // only the real-time All Mail listing has the craigslist row.
-      const res = await readInbox(context, { sender: "craigslist" });
+      const res = await readInbox(context, {
+        sender: "craigslist",
+        sessionStartsMinutesAgo: 30,
+      });
       expect(res.found).toBe(true);
       expect(res.link).toBe("https://accounts.craigslist.org/signup?tok=NEWACTIVATION7788");
       expect(res.source_from).toBe("automail@craigslist.org");
@@ -649,7 +691,7 @@ describe("operate_read_inbox supplements the search listing with the real-time A
     try {
       // The stale search view's newest row is Cal.com (5:03 AM); the All Mail
       // listing's craigslist row (5:10 AM) is genuinely newer and must win.
-      const res = await readInbox(context);
+      const res = await readInbox(context, { sessionStartsMinutesAgo: 30 });
       expect(res.found).toBe(true);
       expect(res.link).toBe("https://accounts.craigslist.org/signup?tok=NEWACTIVATION7788");
       expect(res.source_from).toBe("automail@craigslist.org");

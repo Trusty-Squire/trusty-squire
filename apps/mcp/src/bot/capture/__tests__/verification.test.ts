@@ -14,6 +14,7 @@ import {
   mailRowMatchesSender,
   parseMailRowDate,
   mailRowIsRecent,
+  mailRowPredatesSession,
   pickNewestMailRow,
   chooseMailRow,
   type MailResultRow,
@@ -142,6 +143,23 @@ describe("buildVerificationResult (Flow A — code-wall hand-back)", () => {
       resume: "code",
     });
     expect(r.needs_user?.message.toLowerCase()).toContain("ask the user");
+  });
+
+  it("names the stale older mail in the hand-back when only pre-session matches were seen", () => {
+    const r = buildVerificationResult("sk_1", null, null, null, true);
+    expect(r.found).toBe(false);
+    expect(r.needs_user?.wall).toBe("verification_code");
+    expect(r.needs_user?.resume).toBe("code");
+    expect(r.needs_user?.message).toContain("BEFORE this task started");
+    // Still steers to the retry, and does NOT leak any old link as found.
+    expect(r.link).toBeNull();
+    expect(r.needs_user?.message).toContain("operate_read_inbox AGAIN");
+  });
+
+  it("never marks a found result with the stale-match hand-back", () => {
+    const r = buildVerificationResult("sk_1", null, "https://x.example/confirm", null, true);
+    expect(r.found).toBe(true);
+    expect(r.needs_user).toBeUndefined();
   });
 });
 
@@ -392,5 +410,36 @@ describe("mailRowIsRecent (All Mail supplement's newer_than:1d pool bound)", () 
     const now = Date.now();
     expect(mailRowIsRecent(row(null), now)).toBe(false);
     expect(mailRowIsRecent(row("Not starred"), now)).toBe(false);
+  });
+});
+
+describe("mailRowPredatesSession (a previous task's mail never becomes this task's hit)", () => {
+  const row = (dateTitle: string | null): MailResultRow => ({
+    selector: '[data-ts-mail-row="0"]',
+    fromEmail: null,
+    fromName: null,
+    subject: null,
+    dateTitle,
+    visibleText: "",
+  });
+  const sessionStart = new Date("2026-09-17T05:00:00").getTime();
+  it("marks a row dated before the session start as predating", () => {
+    // The 2026-09-17 rc.1 craigslist stale-link defect: a fresh signup's
+    // read returned the older account's already-consumed activation link.
+    expect(
+      mailRowPredatesSession(row("Sep 16, 2026, 11:39 PM"), sessionStart),
+    ).toBe(true);
+  });
+  it("keeps a row dated after the session start", () => {
+    expect(
+      mailRowPredatesSession(row("Sep 17, 2026, 5:10 AM"), sessionStart),
+    ).toBe(false);
+    expect(
+      mailRowPredatesSession(row("Sep 17, 2026, 5:00 AM"), sessionStart),
+    ).toBe(false);
+  });
+  it("never marks rows without a parseable date (cannot be proven old)", () => {
+    expect(mailRowPredatesSession(row(null), sessionStart)).toBe(false);
+    expect(mailRowPredatesSession(row("Not starred"), sessionStart)).toBe(false);
   });
 });
