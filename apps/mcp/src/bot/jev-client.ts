@@ -3,11 +3,13 @@
 // Default transport is the platform route (`api.decide` → POST /v1/decide):
 // the API holds the TypeSafe key. A user who has stored their own `typesafe`
 // vault credential keeps the existing `useCredential` path (BYOK). Detection
-// is one `listCredentials` call per ApiClient, cached, the same listing
-// captcha-solve.ts uses for a vaulted 2captcha key. Retry and error classes
-// are unchanged. See docs/DESIGN-jev-platform-route.md.
+// is one `listCredentials` call per ApiClient, cached for JEV_BYOK_CACHE_TTL_MS
+// — an ApiClient outlives a session (one per server process, one per broker
+// client), so the cache has to expire or a credential vaulted mid-run is never
+// seen. The same listing captcha-solve.ts uses for a vaulted 2captcha key.
+// Retry and error classes are unchanged. See docs/DESIGN-jev-platform-route.md.
 
-import type { ApiClient } from "../api-client.js";
+import { ApiCallError, type ApiClient } from "../api-client.js";
 
 export const JEV_SERVICE = "typesafe";
 export const JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
@@ -109,15 +111,17 @@ export function isTransientJevStatus(status: number): boolean {
   return status === 503 || status === 529;
 }
 
-const typesafeByokCache = new WeakMap<ApiClient, boolean>();
+export const JEV_BYOK_CACHE_TTL_MS = 60_000;
+
+const typesafeByokCache = new WeakMap<ApiClient, { has: boolean; expiresAt: number }>();
 
 async function accountHasTypesafeCredential(api: ApiClient): Promise<boolean> {
   const cached = typesafeByokCache.get(api);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined && Date.now() < cached.expiresAt) return cached.has;
   try {
     const { credentials } = await api.listCredentials();
     const has = credentials.some((c) => (c.service ?? "").toLowerCase() === JEV_SERVICE);
-    typesafeByokCache.set(api, has);
+    typesafeByokCache.set(api, { has, expiresAt: Date.now() + JEV_BYOK_CACHE_TTL_MS });
     return has;
   } catch {
     return false;
@@ -131,19 +135,27 @@ async function callJev(
   questions: Record<string, JevQuestion>,
 ): Promise<{ status: number; body: string }> {
   if (byok) {
-    const res = await api.useCredential({
-      service: JEV_SERVICE,
-      http: {
-        method: "POST",
-        url: JEV_ENDPOINT,
-        headers: {
-          authorization: "Bearer ${SECRET}",
-          "content-type": "application/json",
+    try {
+      const res = await api.useCredential({
+        service: JEV_SERVICE,
+        http: {
+          method: "POST",
+          url: JEV_ENDPOINT,
+          headers: {
+            authorization: "Bearer ${SECRET}",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ state, model: JEV_MODEL, questions }),
         },
-        body: JSON.stringify({ state, model: JEV_MODEL, questions }),
-      },
-    });
-    return { status: res.response.status, body: res.response.body };
+      });
+      return { status: res.response.status, body: res.response.body };
+    } catch (err) {
+      // The credential was deleted since detection. That is "no BYOK", not a
+      // failed decision — drop the stale cache and serve this same call
+      // through the platform route.
+      if (!(err instanceof ApiCallError) || err.status !== 404) throw err;
+      typesafeByokCache.delete(api);
+    }
   }
   return api.decide(state, questions);
 }

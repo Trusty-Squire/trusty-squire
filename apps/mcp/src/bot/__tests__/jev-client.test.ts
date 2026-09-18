@@ -5,8 +5,9 @@
 // budget-exhausted failure, and strict response parsing.
 
 import { describe, expect, it, vi } from "vitest";
-import type { ApiClient } from "../../api-client.js";
+import { ApiCallError, type ApiClient } from "../../api-client.js";
 import {
+  JEV_BYOK_CACHE_TTL_MS,
   JEV_ENDPOINT,
   JEV_MODEL,
   JEV_RETRY_BACKOFF_BASE_MS,
@@ -30,6 +31,25 @@ function vaultOk(body: unknown): {
   return { response: { status: 200, headers: {}, body: JSON.stringify(body), truncated: false } };
 }
 
+function credentialSummary(service: string | null) {
+  return {
+    id: "id",
+    reference: "ref",
+    service,
+    label: "default",
+    field_names: ["value"],
+    key_name: null,
+    type: "api_key",
+    allowed_hosts: [],
+    auth_strategy: "api_key",
+    signin_url: null,
+    login_hosts: [],
+    created_at: "2026-01-01T00:00:00Z",
+    last_retrieved_at: null,
+    retrieval_count: 0,
+  };
+}
+
 function mockApi(opts: {
   credentials?: Array<{ service: string | null }>;
   decide?: (...args: DecideArgs) => ReturnType<ApiClient["decide"]>;
@@ -37,28 +57,13 @@ function mockApi(opts: {
   listCredentials?: () => ReturnType<ApiClient["listCredentials"]>;
 }): ApiClient {
   return {
-    listCredentials:
+    listCredentials: vi.fn(
       opts.listCredentials ??
-      vi.fn(() =>
-        Promise.resolve({
-          credentials: (opts.credentials ?? []).map((c) => ({
-            id: "id",
-            reference: "ref",
-            service: c.service,
-            label: "default",
-            field_names: ["value"],
-            key_name: null,
-            type: "api_key",
-            allowed_hosts: [],
-            auth_strategy: "api_key",
-            signin_url: null,
-            login_hosts: [],
-            created_at: "2026-01-01T00:00:00Z",
-            last_retrieved_at: null,
-            retrieval_count: 0,
+        (() =>
+          Promise.resolve({
+            credentials: (opts.credentials ?? []).map((c) => credentialSummary(c.service)),
           })),
-        }),
-      ),
+    ),
     decide: vi.fn(opts.decide ?? (() => Promise.resolve(jevOk({ answers: { pick: { choice: "@e:reveal" } } })))),
     useCredential: vi.fn(
       opts.useCredential ??
@@ -126,6 +131,68 @@ describe("askJev request mapping", () => {
     await askJev(api, "state", QUESTIONS);
     expect(api.listCredentials).toHaveBeenCalledTimes(1);
     expect(api.decide).toHaveBeenCalledTimes(2);
+  });
+
+  it("picks up a credential vaulted after a cached miss once the TTL lapses", async () => {
+    let vaulted = false;
+    const api = mockApi({
+      listCredentials: () =>
+        Promise.resolve({
+          credentials: vaulted ? [credentialSummary("typesafe")] : [],
+        }),
+    });
+    await askJev(api, "state", QUESTIONS);
+    expect(api.decide).toHaveBeenCalledTimes(1);
+
+    vaulted = true;
+    await askJev(api, "state", QUESTIONS);
+    expect(api.decide).toHaveBeenCalledTimes(2);
+    expect(api.useCredential).not.toHaveBeenCalled();
+
+    const realNow = Date.now;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + JEV_BYOK_CACHE_TTL_MS + 1);
+    try {
+      await askJev(api, "state", QUESTIONS);
+    } finally {
+      vi.mocked(Date.now).mockRestore();
+    }
+    expect(api.listCredentials).toHaveBeenCalledTimes(2);
+    expect(api.useCredential).toHaveBeenCalledTimes(1);
+    expect(api.decide).toHaveBeenCalledTimes(2);
+  });
+
+  it("falls back to the platform route when the vaulted credential is gone", async () => {
+    const api = mockApi({
+      credentials: [{ service: "typesafe" }],
+      useCredential: () =>
+        Promise.reject(
+          new ApiCallError(404, "credential_not_found", "POST /v1/vault/use → 404", {
+            error: "credential_not_found",
+          }),
+        ),
+      decide: () =>
+        Promise.resolve(jevOk({ model: JEV_MODEL, answers: { pick: { choice: "@e:reveal" } } })),
+    });
+
+    const outcome = await askJev(api, "state", QUESTIONS);
+    expect(outcome.result.answers.pick).toEqual({ choice: "@e:reveal" });
+    expect(api.useCredential).toHaveBeenCalledTimes(1);
+    expect(api.decide).toHaveBeenCalledTimes(1);
+
+    // The stale BYOK cache entry is dropped, so the next call re-detects
+    // instead of retrying the deleted credential.
+    await askJev(api, "state", QUESTIONS);
+    expect(api.listCredentials).toHaveBeenCalledTimes(2);
+  });
+
+  it("propagates a non-404 vault failure instead of masking it as no-BYOK", async () => {
+    const api = mockApi({
+      credentials: [{ service: "typesafe" }],
+      useCredential: () =>
+        Promise.reject(new ApiCallError(403, "host_not_allowed", "POST /v1/vault/use → 403")),
+    });
+    await expect(askJev(api, "state", QUESTIONS)).rejects.toBeInstanceOf(ApiCallError);
+    expect(api.decide).not.toHaveBeenCalled();
   });
 
   it("returns the parsed answers with attempts and elapsed time", async () => {
