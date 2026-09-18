@@ -159,9 +159,10 @@ export interface DirectoryEntry {
 }
 
 export interface UsageResponse {
-  monthly: { spent_cents: number; budget_cents: number; remaining_cents: number };
-  daily: { spent_cents: number; silent_max_cents: number };
-  mandate_id: string;
+  monthly?: { spent_cents: number; budget_cents: number; remaining_cents: number };
+  daily?: { spent_cents: number; silent_max_cents: number };
+  mandate_id?: string;
+  decisions: { month_calls: number; month_input_tokens: number; month_output_tokens: number };
 }
 
 export interface PaymentApproval {
@@ -443,6 +444,21 @@ export class ApiClient {
     response: { status: number; headers: Record<string, string>; body: string; truncated: boolean };
   }> {
     return this.post("/v1/vault/use", input);
+  }
+
+  // Platform Jev — POST /v1/decide. Returns the upstream HTTP status and body
+  // verbatim (including 503/529/422) so askJev's retry path can read them the
+  // same way it reads a vault-proxied TypeSafe response.
+  async decide(
+    state: string,
+    questions: Record<string, unknown>,
+  ): Promise<{ status: number; body: string }> {
+    const res = await this.fetchImpl(`${this.config.apiBaseUrl}/v1/decide`, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({ state, questions }),
+    });
+    return { status: res.status, body: await res.text() };
   }
 
   async browserFillCredential(input: {

@@ -281,6 +281,13 @@ export interface ApiPrismaClient {
     // Metrics exporter: total captcha encounters.
     count(args?: { where?: Record<string, unknown> }): Promise<number>;
   };
+  decisionEvent: {
+    create(args: { data: Record<string, unknown> }): Promise<unknown>;
+    findMany(args: {
+      where: Record<string, unknown>;
+      select: { input_tokens: true; output_tokens: true };
+    }): Promise<Array<{ input_tokens: number; output_tokens: number }>>;
+  };
   pairingToken: {
     create(args: { data: Record<string, unknown> }): Promise<unknown>;
     findUnique(args: { where: { token: string } }): Promise<{

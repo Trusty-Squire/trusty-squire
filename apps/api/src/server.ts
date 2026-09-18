@@ -24,6 +24,7 @@ import { registerVaultE2ERoute } from "./routes/vault-e2e.js";
 import { registerPayApprovalsRoute } from "./routes/pay-approvals.js";
 import { registerTelegramRoute } from "./routes/telegram.js";
 import { registerVaultAccessRoute } from "./routes/vault-access.js";
+import { registerDecideRoute } from "./routes/decide.js";
 import { registerCredentialMutationRoutes } from "./routes/credential-mutations.js";
 import { registerCardMutationRoutes } from "./routes/card-mutations.js";
 import { registerCredentialFetchRoutes } from "./routes/credential-fetch.js";
@@ -328,6 +329,11 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     requireAny: auth.requireAny,
   });
   await fastify.register(registerVaultAccessRoute, {
+    deps,
+    requireAgent: auth.requireAgent,
+    ...(opts.proxyExecutor !== undefined ? { proxyExecutor: opts.proxyExecutor } : {}),
+  });
+  await fastify.register(registerDecideRoute, {
     deps,
     requireAgent: auth.requireAgent,
     ...(opts.proxyExecutor !== undefined ? { proxyExecutor: opts.proxyExecutor } : {}),

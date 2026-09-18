@@ -118,6 +118,10 @@ export function makeAuthMiddleware(deps: AuthDeps) {
         reply.code(401).send({ error: "agent_session_required" });
         return reply;
       }
+      // Drive steps each call /v1/decide; counting them would throttle a
+      // legitimate drive (and the account's other calls). Size checks on
+      // the route are the only bound. Captain, 2026-09-18.
+      if (req.routeOptions.url === "/v1/decide") return;
       if (overAccountRate(req.auth.account_id)) return rateLimited(reply);
     },
 

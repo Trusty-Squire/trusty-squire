@@ -49,6 +49,11 @@ import {
   PrismaCaptchaEventStore,
   type CaptchaEventStore,
 } from "./captcha-events.js";
+import {
+  InMemoryDecisionEventStore,
+  PrismaDecisionEventStore,
+  type DecisionEventStore,
+} from "./decision-events.js";
 import { RetentionCron } from "./retention-cron.js";
 import { InMemorySessionStore, type SessionStore } from "../auth/session.js";
 import { InMemoryAccountStore, type AccountStore } from "./in-memory-account-store.js";
@@ -129,6 +134,7 @@ export interface ApiDeps {
   egressGrantStore: EgressGrantStore;
   machineTokenStore: MachineTokenStore;
   captchaEventStore: CaptchaEventStore;
+  decisionEventStore: DecisionEventStore;
   retentionCron: RetentionCron | null;
 
   // Config
@@ -398,6 +404,11 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
   const captchaEventStore: CaptchaEventStore =
     authPrisma !== null ? new PrismaCaptchaEventStore(authPrisma) : new InMemoryCaptchaEventStore();
 
+  const decisionEventStore: DecisionEventStore =
+    authPrisma !== null
+      ? new PrismaDecisionEventStore(authPrisma)
+      : new InMemoryDecisionEventStore();
+
   const retentionCron: RetentionCron | null =
     authPrisma !== null
       ? new RetentionCron({
@@ -459,6 +470,7 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     egressGrantStore,
     machineTokenStore,
     captchaEventStore,
+    decisionEventStore,
     retentionCron,
     sessionSecret: opts.sessionSecret,
     pingDb,

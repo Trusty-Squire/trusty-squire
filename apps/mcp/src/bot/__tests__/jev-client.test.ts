@@ -1,10 +1,8 @@
-// askJev unit tests — the vaulted Jev request path kept for the forthcoming
-// Jev-driven operate loop. Covers the measured request shape (choice criteria
-// object, NEVER an `options` array; noul questions pass through verbatim),
-// bounded retry/backoff on 503/529, the honest budget-exhausted failure, and
-// strict response parsing. The tool that used to sit on top of this client
-// (operate_decide) was reverted from the surface; these tests exercise the
-// client directly with a mocked ApiClient so they stay fast and non-browser.
+// askJev unit tests — platform /v1/decide by default, vaulted typesafe
+// credential as BYOK override. Covers the measured request shape (choice
+// criteria object, NEVER an `options` array; noul questions pass through
+// verbatim), bounded retry/backoff on 503/529 through the route, the honest
+// budget-exhausted failure, and strict response parsing.
 
 import { describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "../../api-client.js";
@@ -20,17 +18,53 @@ import {
 } from "../jev-client.js";
 
 type UseCredentialInput = Parameters<ApiClient["useCredential"]>[0];
+type DecideArgs = Parameters<ApiClient["decide"]>;
 
-function jevOk(body: unknown): {
+function jevOk(body: unknown): { status: number; body: string } {
+  return { status: 200, body: JSON.stringify(body) };
+}
+
+function vaultOk(body: unknown): {
   response: { status: number; headers: Record<string, string>; body: string; truncated: boolean };
 } {
   return { response: { status: 200, headers: {}, body: JSON.stringify(body), truncated: false } };
 }
 
-function mockApi(
-  impl: (input: UseCredentialInput) => ReturnType<ApiClient["useCredential"]>,
-): ApiClient {
-  return { useCredential: vi.fn(impl) } as unknown as ApiClient;
+function mockApi(opts: {
+  credentials?: Array<{ service: string | null }>;
+  decide?: (...args: DecideArgs) => ReturnType<ApiClient["decide"]>;
+  useCredential?: (input: UseCredentialInput) => ReturnType<ApiClient["useCredential"]>;
+  listCredentials?: () => ReturnType<ApiClient["listCredentials"]>;
+}): ApiClient {
+  return {
+    listCredentials:
+      opts.listCredentials ??
+      vi.fn(() =>
+        Promise.resolve({
+          credentials: (opts.credentials ?? []).map((c) => ({
+            id: "id",
+            reference: "ref",
+            service: c.service,
+            label: "default",
+            field_names: ["value"],
+            key_name: null,
+            type: "api_key",
+            allowed_hosts: [],
+            auth_strategy: "api_key",
+            signin_url: null,
+            login_hosts: [],
+            created_at: "2026-01-01T00:00:00Z",
+            last_retrieved_at: null,
+            retrieval_count: 0,
+          })),
+        }),
+      ),
+    decide: vi.fn(opts.decide ?? (() => Promise.resolve(jevOk({ answers: { pick: { choice: "@e:reveal" } } })))),
+    useCredential: vi.fn(
+      opts.useCredential ??
+        (() => Promise.resolve(vaultOk({ answers: { pick: { choice: "@e:reveal" } } }))),
+    ),
+  } as unknown as ApiClient;
 }
 
 const QUESTIONS = {
@@ -43,12 +77,31 @@ const QUESTIONS = {
 };
 
 describe("askJev request mapping", () => {
-  it("sends the measured request shape through the vaulted credential", async () => {
-    const api = mockApi(() =>
-      Promise.resolve(jevOk({ model: JEV_MODEL, answers: { pick: { choice: "@e:reveal" } } })),
-    );
+  it("sends the measured request shape through POST /v1/decide by default", async () => {
+    const api = mockApi({
+      decide: () =>
+        Promise.resolve(jevOk({ model: JEV_MODEL, answers: { pick: { choice: "@e:reveal" } } })),
+    });
     await askJev(api, "https://fixture.test/page — page state", QUESTIONS);
 
+    expect(api.decide).toHaveBeenCalledTimes(1);
+    expect(api.useCredential).not.toHaveBeenCalled();
+    const [state, questions] = vi.mocked(api.decide).mock.calls[0]!;
+    expect(state).toBe("https://fixture.test/page — page state");
+    expect(questions).toEqual(QUESTIONS);
+    expect(JSON.stringify(questions)).not.toContain('"options":[');
+  });
+
+  it("uses the vault path when a typesafe credential exists", async () => {
+    const api = mockApi({
+      credentials: [{ service: "typesafe" }],
+      useCredential: () =>
+        Promise.resolve(vaultOk({ model: JEV_MODEL, answers: { pick: { choice: "@e:reveal" } } })),
+    });
+    await askJev(api, "https://fixture.test/page — page state", QUESTIONS);
+
+    expect(api.useCredential).toHaveBeenCalledTimes(1);
+    expect(api.decide).not.toHaveBeenCalled();
     const input = vi.mocked(api.useCredential).mock.calls[0]![0]!;
     expect(input.service).toBe(JEV_SERVICE);
     expect(input.http.url).toBe(JEV_ENDPOINT);
@@ -64,23 +117,31 @@ describe("askJev request mapping", () => {
     expect(body.model).toBe(JEV_MODEL);
     expect(body.state).toBe("https://fixture.test/page — page state");
     expect(body.questions).toEqual(QUESTIONS);
-    // Criteria object keyed by option, with an `options` array never sent.
     expect(JSON.stringify(body)).not.toContain('"options":[');
   });
 
+  it("lists credentials once per client and caches the BYOK decision", async () => {
+    const api = mockApi({});
+    await askJev(api, "state", QUESTIONS);
+    await askJev(api, "state", QUESTIONS);
+    expect(api.listCredentials).toHaveBeenCalledTimes(1);
+    expect(api.decide).toHaveBeenCalledTimes(2);
+  });
+
   it("returns the parsed answers with attempts and elapsed time", async () => {
-    const api = mockApi(() =>
-      Promise.resolve(
-        jevOk({
-          model: JEV_MODEL,
-          usage: { input_tokens: 420, output_tokens: 73 },
-          answers: {
-            pick: { choice: "@e:reveal", confidence: 0.97, probabilities: { "@e:reveal": 0.97 } },
-            stuck: { noul: 0.02 },
-          },
-        }),
-      ),
-    );
+    const api = mockApi({
+      decide: () =>
+        Promise.resolve(
+          jevOk({
+            model: JEV_MODEL,
+            usage: { input_tokens: 420, output_tokens: 73 },
+            answers: {
+              pick: { choice: "@e:reveal", confidence: 0.97, probabilities: { "@e:reveal": 0.97 } },
+              stuck: { noul: 0.02 },
+            },
+          }),
+        ),
+    });
     const outcome = await askJev(api, "state", QUESTIONS);
     expect(outcome.attempts).toBe(1);
     expect(outcome.elapsedMs).toBeGreaterThanOrEqual(0);
@@ -97,28 +158,28 @@ describe("askJev request mapping", () => {
 
 describe("askJev response parsing", () => {
   it("rejects a non-JSON body honestly", async () => {
-    const api = mockApi(() =>
-      Promise.resolve({
-        response: { status: 200, headers: {}, body: "<html>oops</html>", truncated: false },
-      }),
-    );
+    const api = mockApi({
+      decide: () => Promise.resolve({ status: 200, body: "<html>oops</html>" }),
+    });
     await expect(askJev(api, "state", QUESTIONS)).rejects.toThrow(/jev_invalid_response/);
   });
 
   it("rejects a response with no answers object", async () => {
-    const api = mockApi(() => Promise.resolve(jevOk({ model: JEV_MODEL })));
+    const api = mockApi({
+      decide: () => Promise.resolve(jevOk({ model: JEV_MODEL })),
+    });
     await expect(askJev(api, "state", QUESTIONS)).rejects.toThrow(/jev_invalid_response.*answers/);
   });
 
   it("rejects a non-object answer entry", async () => {
-    const api = mockApi(() => Promise.resolve(jevOk({ answers: { pick: "reveal" } })));
+    const api = mockApi({
+      decide: () => Promise.resolve(jevOk({ answers: { pick: "reveal" } })),
+    });
     await expect(askJev(api, "state", QUESTIONS)).rejects.toThrow(/jev_invalid_response.*"pick"/);
   });
 });
 
 describe("askJev retry on transient unavailability", () => {
-  // Drives fake timers until the in-flight call settles, so the test can't
-  // deadlock on a backoff wait that lands past the last advance.
   async function advanceUntilSettled<T>(
     pending: Promise<T>,
     stepMs = 500,
@@ -141,38 +202,33 @@ describe("askJev retry on transient unavailability", () => {
     return await tracked;
   }
 
-  function transient(status: number): {
-    response: { status: number; headers: Record<string, string>; body: string; truncated: boolean };
-  } {
+  function transient(status: number): { status: number; body: string } {
     return {
-      response: {
-        status,
-        headers: {},
-        body: JSON.stringify({
-          detail: {
-            error_type: status === 503 ? "model_unavailable" : "system_overloaded",
-            message: "try again",
-          },
-        }),
-        truncated: false,
-      },
+      status,
+      body: JSON.stringify({
+        detail: {
+          error_type: status === 503 ? "model_unavailable" : "system_overloaded",
+          message: "try again",
+        },
+      }),
     };
   }
 
-  it.each([503, 529])("retries HTTP %d with exponential backoff and succeeds", async (status) => {
+  it.each([503, 529])("retries HTTP %d through the route with exponential backoff and succeeds", async (status) => {
     vi.useFakeTimers();
     try {
       let calls = 0;
-      const api = mockApi(() => {
-        calls++;
-        if (calls <= 2) return Promise.resolve(transient(status));
-        return Promise.resolve(
-          jevOk({ answers: { pick: { choice: "@e:reveal", confidence: 0.9 } } }),
-        );
+      const api = mockApi({
+        decide: () => {
+          calls++;
+          if (calls <= 2) return Promise.resolve(transient(status));
+          return Promise.resolve(jevOk({ answers: { pick: { choice: "@e:reveal", confidence: 0.9 } } }));
+        },
       });
       const outcome = await advanceUntilSettled(askJev(api, "state", QUESTIONS));
       expect(calls).toBe(3);
       expect(outcome).toMatchObject({ ok: true, value: { attempts: 3 } });
+      expect(api.useCredential).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
@@ -182,9 +238,11 @@ describe("askJev retry on transient unavailability", () => {
     vi.useFakeTimers();
     try {
       let calls = 0;
-      const api = mockApi(() => {
-        calls++;
-        return Promise.resolve(transient(503));
+      const api = mockApi({
+        decide: () => {
+          calls++;
+          return Promise.resolve(transient(503));
+        },
       });
       const outcome = await advanceUntilSettled(askJev(api, "state", QUESTIONS));
       expect(calls).toBe(JEV_RETRY_MAX_ATTEMPTS);
@@ -196,8 +254,6 @@ describe("askJev retry on transient unavailability", () => {
       expect(message).toContain("NO decision was made");
       expect(message).toContain("Do not guess");
       expect((failure as JevUnavailableError).attempts).toBe(JEV_RETRY_MAX_ATTEMPTS);
-      // The total budget is stated and honored: 400+800+1600+3200 = 6000ms of
-      // backoff stays inside JEV_RETRY_BUDGET_MS.
       expect(JEV_RETRY_BACKOFF_BASE_MS * (2 ** JEV_RETRY_MAX_ATTEMPTS - 1)).toBeLessThan(
         JEV_RETRY_BUDGET_MS,
       );
@@ -207,12 +263,18 @@ describe("askJev retry on transient unavailability", () => {
   });
 
   it("fails immediately (no retry) on a non-transient upstream status", async () => {
-    const api = mockApi(() =>
-      Promise.resolve({
-        response: { status: 401, headers: {}, body: '{"detail":"unauthorized"}', truncated: false },
-      }),
-    );
+    const api = mockApi({
+      decide: () => Promise.resolve({ status: 401, body: '{"detail":"unauthorized"}' }),
+    });
     await expect(askJev(api, "state", QUESTIONS)).rejects.toThrow(/jev_request_failed.*401/);
-    expect(api.useCredential).toHaveBeenCalledTimes(1);
+    expect(api.decide).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats platform 504 jev_timeout as unavailable", async () => {
+    const api = mockApi({
+      decide: () => Promise.resolve({ status: 504, body: '{"error":"jev_timeout"}' }),
+    });
+    await expect(askJev(api, "state", QUESTIONS)).rejects.toBeInstanceOf(JevUnavailableError);
+    expect(api.decide).toHaveBeenCalledTimes(1);
   });
 });
