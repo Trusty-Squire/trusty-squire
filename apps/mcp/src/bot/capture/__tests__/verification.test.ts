@@ -426,17 +426,11 @@ describe("mailRowPredatesSession (a previous task's mail never becomes this task
   it("marks a row dated before the session start as predating", () => {
     // The 2026-09-17 rc.1 craigslist stale-link defect: a fresh signup's
     // read returned the older account's already-consumed activation link.
-    expect(
-      mailRowPredatesSession(row("Sep 16, 2026, 11:39 PM"), sessionStart),
-    ).toBe(true);
+    expect(mailRowPredatesSession(row("Sep 16, 2026, 11:39 PM"), sessionStart)).toBe(true);
   });
   it("keeps a row dated after the session start", () => {
-    expect(
-      mailRowPredatesSession(row("Sep 17, 2026, 5:10 AM"), sessionStart),
-    ).toBe(false);
-    expect(
-      mailRowPredatesSession(row("Sep 17, 2026, 5:00 AM"), sessionStart),
-    ).toBe(false);
+    expect(mailRowPredatesSession(row("Sep 17, 2026, 5:10 AM"), sessionStart)).toBe(false);
+    expect(mailRowPredatesSession(row("Sep 17, 2026, 5:00 AM"), sessionStart)).toBe(false);
   });
   it("never marks rows without a parseable date (cannot be proven old)", () => {
     expect(mailRowPredatesSession(row(null), sessionStart)).toBe(false);
