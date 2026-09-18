@@ -10,14 +10,17 @@ import {
   DRIVE_FIXED_DONE,
   DRIVE_FIXED_STUCK,
   actionCriteria,
+  actionDescription,
   buildDriveQuestions,
   buildHandoff,
   buildJevState,
   decideAfterJev,
+  driveCandidates,
   gated,
   matchingFactKeys,
   mergeCompactTable,
   mergeFacts,
+  nextActionInstructions,
   noProgressDecision,
   observationFingerprint,
   valueCriteria,
@@ -28,7 +31,18 @@ import { operateDriveTool } from "../../tools/provision-drive.js";
 const EMAIL: WireRow = ["@e:email", "t", "@email|f=email|s=r"];
 const NAME: WireRow = ["@e:name", "t", "@first-name|f=first_name"];
 const SUBMIT: WireRow = ["@e:go", "b", "@continue"];
+const OFFSCREEN: WireRow = ["@e:signup", "b", "@sign-up|v=offscreen|a=signup|f=email"];
+const DISABLED: WireRow = ["@e:dec", "b", "@decrease-quantity|s=d|f=quantity"];
+const PAYMENT: WireRow = ["@e:pan", "t", "@card-number|f=payment"];
 const ROWS: WireRow[] = [EMAIL, NAME, SUBMIT];
+
+function slugFor(row: WireRow, includePayment = false): string {
+  const hit = driveCandidates([row, ...ROWS.filter((r) => r[0] !== row[0])], includePayment).find(
+    (c) => c.ref === row[0],
+  );
+  if (hit === undefined) throw new Error(`no slug for ${row[0]}`);
+  return hit.slug;
+}
 
 describe("operate_drive constants", () => {
   it("keeps the coverage-matrix gate and call budgets as code constants", () => {
@@ -39,24 +53,38 @@ describe("operate_drive constants", () => {
 });
 
 describe("request building", () => {
-  it("asks next_action as a Choice over observed refs plus done and stuck", () => {
-    const questions = buildDriveQuestions(ROWS, { email: "a@b.test" });
+  it("asks next_action as a Choice over readable slugs plus done and stuck", () => {
+    const questions = buildDriveQuestions(ROWS, { email: "a@b.test" }, "sign up");
     const next = questions.next_action;
     expect(next?.type).toBe("choice");
     if (next?.type !== "choice") return;
-    expect(Object.keys(next.criteria)).toEqual([
-      "@e:email",
-      "@e:name",
-      "@e:go",
-      DRIVE_FIXED_DONE,
-      DRIVE_FIXED_STUCK,
-    ]);
+    const keys = Object.keys(next.criteria);
+    expect(keys).toContain(DRIVE_FIXED_DONE);
+    expect(keys).toContain(DRIVE_FIXED_STUCK);
+    expect(keys.some((key) => key.startsWith("@e:"))).toBe(false);
+    expect(JSON.stringify(next.criteria)).not.toMatch(/\bb @/);
+    expect(next.instructions).toBe(nextActionInstructions("sign up"));
+    expect(next.instructions).toContain("You are driving a browser to: sign up");
     expect(JSON.stringify(next)).not.toContain('"options":[');
+  });
+
+  it("describes actions in words and maps slugs back to refs", () => {
+    expect(actionDescription(SUBMIT)).toBe('click the button labeled "continue"');
+    expect(actionDescription(EMAIL)).toBe("type into the email field");
+    const candidates = driveCandidates(ROWS, false);
+    expect(candidates.map((c) => c.ref).sort()).toEqual(["@e:email", "@e:go", "@e:name"].sort());
+    expect(candidates.every((c) => c.slug.startsWith("k"))).toBe(true);
+  });
+
+  it("excludes offscreen, disabled, and payment rows except at the card step", () => {
+    const mixed = [...ROWS, OFFSCREEN, DISABLED, PAYMENT];
+    expect(driveCandidates(mixed, false).map((c) => c.ref)).toEqual(["@e:email", "@e:name", "@e:go"]);
+    expect(driveCandidates(mixed, true).map((c) => c.ref)).toContain("@e:pan");
   });
 
   it("asks value as a Choice over fact keys, never authored text", () => {
     const facts = { email: "a@b.test", first_name: "Ada" };
-    const questions = buildDriveQuestions(ROWS, facts);
+    const questions = buildDriveQuestions(ROWS, facts, "sign up");
     const value = questions.value;
     expect(value?.type).toBe("choice");
     if (value?.type !== "choice") return;
@@ -68,11 +96,11 @@ describe("request building", () => {
   });
 
   it("omits the value question when there are no facts", () => {
-    expect(buildDriveQuestions(ROWS, {}).value).toBeUndefined();
+    expect(buildDriveQuestions(ROWS, {}, "sign up").value).toBeUndefined();
   });
 
   it("asks goal_complete as a Noul", () => {
-    const questions = buildDriveQuestions(ROWS, {});
+    const questions = buildDriveQuestions(ROWS, {}, "sign up");
     expect(questions.goal_complete).toEqual({
       type: "noul",
       instructions: "Is the stated goal already complete on this page?",
@@ -81,22 +109,26 @@ describe("request building", () => {
 });
 
 describe("history threading", () => {
-  it("puts the goal, fact keys, last 20 history lines, and compact rows in state", () => {
-    const history = Array.from({ length: 22 }, (_, i) => `click @e:${i} conf=0.90 -> https://x.test/${i}`);
+  it("puts goal, facts, readable history, and candidate lines in prose state", () => {
+    const history = Array.from({ length: 22 }, (_, i) => `click step ${i}`);
     const state = buildJevState(
       "sign up",
       ["email", "first_name"],
       history,
       "https://x.test/form",
-      "form",
-      ROWS,
+      "Create account",
+      driveCandidates(ROWS, false),
     );
-    expect(state.startsWith("goal: sign up\nfacts: email, first_name\nhistory:\n")).toBe(true);
-    expect(state).not.toContain("click @e:0 ");
-    expect(state).toContain("click @e:2 ");
-    expect(state).toContain("click @e:21 ");
-    expect(state).toContain('["@e:email","t","@email|f=email|s=r"]');
-    expect(state).toContain("https://x.test/form stage=form");
+    expect(state).toContain("Page: https://x.test/form (title: Create account). Goal: sign up.");
+    expect(state).toContain("Facts available: email, first_name.");
+    expect(state).toContain("Actions already taken, in order:");
+    expect(state).toContain("click step 2 -> ");
+    expect(state).toContain("click step 21");
+    expect(state).not.toContain("click step 0");
+    expect(state).not.toContain("@e:");
+    expect(state).not.toContain('["@e:email"');
+    expect(state).toContain("type into the email field");
+    expect(state).toContain('click the button labeled "continue"');
   });
 });
 
@@ -117,6 +149,7 @@ describe("decideAfterJev stop reasons", () => {
     lastFingerprint: null as string | null,
     lastActionKey: null as string | null,
     fingerprint: "fp1",
+    goal: "sign up",
   };
 
   it("completes when goal_complete noul clears the gate", () => {
@@ -131,7 +164,7 @@ describe("decideAfterJev stop reasons", () => {
     ).toMatchObject({ kind: "complete" });
   });
 
-  it("returns needs_value when Jev picks stuck", () => {
+  it("returns stuck when Jev picks stuck, not needs_value", () => {
     expect(
       decideAfterJev({
         ...base,
@@ -140,10 +173,10 @@ describe("decideAfterJev stop reasons", () => {
           next_action: { choice: DRIVE_FIXED_STUCK, confidence: 0.7 },
         },
       }),
-    ).toEqual({ kind: "stuck", field: "email", confidence: 0.7 });
+    ).toEqual({ kind: "stuck", confidence: 0.7 });
   });
 
-  it("returns needs_value when a fillable field has no matching fact", () => {
+  it("returns needs_value naming the field label when a fillable has no matching fact", () => {
     expect(
       decideAfterJev({
         ...base,
@@ -157,22 +190,26 @@ describe("decideAfterJev stop reasons", () => {
     ).toEqual({ kind: "needs_value", field: "email" });
   });
 
-  it("returns low_confidence with the question, options, and probabilities", () => {
+  it("returns low_confidence with slug options and probabilities", () => {
+    const go = slugFor(SUBMIT);
     const decision = decideAfterJev({
       ...base,
       answers: {
         goal_complete: { noul: 0.1 },
         next_action: {
-          choice: "@e:go",
+          choice: go,
           confidence: 0.41,
-          probabilities: { "@e:go": 0.41, stuck: 0.3 },
+          probabilities: { [go]: 0.41, stuck: 0.3 },
         },
       },
     });
     expect(decision.kind).toBe("low_confidence");
     if (decision.kind !== "low_confidence") return;
     expect(decision.question.options).toEqual(actionCriteria(ROWS));
-    expect(decision.question.probabilities).toEqual({ "@e:go": 0.41, stuck: 0.3 });
+    expect(Object.keys(decision.question.options ?? {}).some((key) => key.startsWith("@e:"))).toBe(
+      false,
+    );
+    expect(decision.question.probabilities).toEqual({ [go]: 0.41, stuck: 0.3 });
   });
 
   it("returns no_progress when the same fingerprint and action are chosen twice", () => {
@@ -262,6 +299,7 @@ describe("resume answer", () => {
       lastFingerprint: null,
       lastActionKey: null,
       fingerprint: "resume",
+      goal: "sign up",
       answers: {
         next_action: { choice: "@e:go", confidence: 1 },
         goal_complete: { noul: 0 },
