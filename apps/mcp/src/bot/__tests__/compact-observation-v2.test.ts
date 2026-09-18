@@ -832,6 +832,168 @@ describe("compact observation v2", () => {
     });
   });
 
+  describe("solved reCAPTCHA challenge", () => {
+    // Live Kaggle email-register shape (2026-09-17): the anchor and challenge
+    // (bframe) iframes are siblings in the MAIN document, and the response
+    // textarea (display:none, token written as the DOM value by the widget)
+    // is their sibling too — no .cf-turnstile-style wrapper node between them
+    // and the frames. The anchor's aria-checked stays false after an
+    // out-of-band token injection, so only the textarea token can say
+    // "solved".
+    const el = (id: string, overrides: Partial<BrowserUseNode>): BrowserUseNode => ({
+      id,
+      nodeType: 1,
+      nodeName: "DIV",
+      value: "",
+      attributes: {},
+      visible: true,
+      snapshot: true,
+      bounds: null,
+      cursor: null,
+      scrollable: false,
+      showScroll: false,
+      scrollText: "",
+      clickListener: false,
+      axRole: null,
+      axProperties: [],
+      axChildIds: null,
+      shadowType: null,
+      hiddenElements: [],
+      hiddenContent: false,
+      children: [],
+      contentDocument: null,
+      ...overrides,
+    });
+    const anchorIframe = (): BrowserUseNode =>
+      el("anchor", {
+        nodeName: "IFRAME",
+        attributes: {
+          title: "reCAPTCHA",
+          src: "https://www.google.com/recaptcha/api2/anchor?ar=1&k=SITEKEY",
+        },
+      });
+    const bframeIframe = (open: boolean): BrowserUseNode =>
+      el("bframe", {
+        nodeName: "IFRAME",
+        attributes: {
+          title: "recaptcha challenge expires in two minutes",
+          src: "https://www.google.com/recaptcha/api2/bframe?ar=1&k=SITEKEY",
+        },
+        ...(open
+          ? { contentDocument: el("bframe-doc", { nodeType: 9, nodeName: "#document", children: [] }) }
+          : {}),
+      });
+    const responseTextarea = (token: string): BrowserUseNode =>
+      el("g-recaptcha-response", {
+        nodeName: "TEXTAREA",
+        attributes: { name: "g-recaptcha-response", id: "g-recaptcha-response", value: token },
+      });
+    const recaptchaPage = (token: string): BrowserUseNode =>
+      el("root", {
+        nodeType: 9,
+        nodeName: "#document",
+        children: [anchorIframe(), bframeIframe(true), responseTextarea(token)],
+      });
+
+    it("keeps reporting the challenge while the response textarea is empty", () => {
+      const blockers = safeBlockersV2(recaptchaPage(""));
+      expect(blockers.length).toBeGreaterThanOrEqual(1);
+      expect(blockers.every((b) => b.kind === "challenge")).toBe(true);
+    });
+
+    it("stops reporting anchor and bframe once the response textarea holds a token", () => {
+      expect(safeBlockersV2(recaptchaPage("0.token123"))).toEqual([]);
+    });
+
+    it("reports the challenge again after the widget resets and clears the textarea", () => {
+      const root = recaptchaPage("0.token123");
+      expect(safeBlockersV2(root)).toEqual([]);
+      const textarea = root.children[2];
+      textarea.attributes.value = "";
+      const blockers = safeBlockersV2(root);
+      expect(blockers.length).toBeGreaterThanOrEqual(1);
+      expect(blockers.every((b) => b.kind === "challenge")).toBe(true);
+    });
+
+    // While the challenge overlay is open Google appends decorative bubble
+    // arrows to the page BODY, outside the widget container — visible divs
+    // whose class carries the captcha marker, so each becomes its own
+    // challenge root. Once the response field is filled they are inert
+    // chrome; a root that still hosts a widget keeps blocking.
+    const recaptchaPageWithArrowChrome = (token: string): BrowserUseNode =>
+      el("root", {
+        nodeType: 9,
+        nodeName: "#document",
+        children: [
+          anchorIframe(),
+          bframeIframe(true),
+          responseTextarea(token),
+          el("chrome-host", {
+            children: [
+              el("arrow-1", { attributes: { class: "g-recaptcha-bubble-arrow" } }),
+              el("arrow-2", { attributes: { class: "g-recaptcha-bubble-arrow" } }),
+            ],
+          }),
+        ],
+      });
+
+    it("keeps reporting body-level bubble-arrow chrome while the token is missing", () => {
+      const blockers = safeBlockersV2(recaptchaPageWithArrowChrome("")).filter(
+        (b) => b.kind === "challenge",
+      );
+      expect(blockers.length).toBeGreaterThanOrEqual(3);
+    });
+
+    it("stops reporting bubble-arrow chrome once the response textarea holds a token", () => {
+      expect(safeBlockersV2(recaptchaPageWithArrowChrome("0.token123"))).toEqual([]);
+    });
+
+    // reCAPTCHA's image grid inside the bframe carries role=dialog, so while
+    // the challenge is open the observation reports it as a modal. After the
+    // token lands the grid is the solved widget's own chrome, not an
+    // independent modal, and must not block.
+    const bframeWithDialog = (): BrowserUseNode =>
+      el("bframe", {
+        nodeName: "IFRAME",
+        attributes: {
+          title: "recaptcha challenge expires in two minutes",
+          src: "https://www.google.com/recaptcha/api2/bframe?ar=1&k=SITEKEY",
+        },
+        contentDocument: el("bframe-doc", {
+          nodeType: 9,
+          nodeName: "#document",
+          children: [
+            el("challenge-dialog", {
+              attributes: { role: "dialog", "aria-label": "Select all images with bicycles" },
+              children: [
+                el("verify-button", {
+                  nodeName: "BUTTON",
+                  children: [el("verify-text", { nodeType: 3, nodeName: "#text", value: "Verify" })],
+                }),
+              ],
+            }),
+          ],
+        }),
+      });
+
+    const recaptchaPageWithChallengeDialog = (token: string): BrowserUseNode =>
+      el("root", {
+        nodeType: 9,
+        nodeName: "#document",
+        children: [anchorIframe(), bframeWithDialog(), responseTextarea(token)],
+      });
+
+    it("reports the bframe image-grid dialog as a modal while the token is missing", () => {
+      const blockers = safeBlockersV2(recaptchaPageWithChallengeDialog(""));
+      expect(blockers.some((b) => b.kind === "dialog")).toBe(true);
+    });
+
+    it("stops reporting the bframe image-grid dialog once the response textarea holds a token", () => {
+      const blockers = safeBlockersV2(recaptchaPageWithChallengeDialog("0.token123"));
+      expect(blockers.some((b) => b.kind === "dialog")).toBe(false);
+    });
+  });
+
   it("shrinks a URL that exceeds the wire budget before packing so the first page keeps multiple rows", () => {
     const dense = Array.from({ length: 40 }, (_, index) =>
       element({
