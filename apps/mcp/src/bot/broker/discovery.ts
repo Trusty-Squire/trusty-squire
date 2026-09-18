@@ -24,9 +24,10 @@ import { BrokerRefusal } from "./refusal.js";
 const BROKER_CONNECT_TIMEOUT_MS = 10_000;
 const BROKER_CONNECT_POLL_MS = 100;
 
-/** Bounded reclaim windows for a resident prior-contract broker: SIGTERM
- * first, then SIGKILL only if the graceful window does not clear the
- * profile election lease and socket. Internal timing only — never a tool
+/** Bounded reclaim windows for a resident broker: SIGTERM first, then
+ * SIGKILL only if the graceful window does not clear the profile election
+ * lease and socket. Shared by prior-contract (#823) and same-contract
+ * stale-credential (#849) reclaim. Internal timing only — never a tool
  * parameter or config knob. */
 interface ReclaimTimings {
   termGraceMs: number;
@@ -99,6 +100,17 @@ function isUnauthorizedRefusal(error: unknown): boolean {
   return error instanceof BrokerRefusal && error.code === "unauthorized";
 }
 
+/** Contract B processed `connect` and rejected the token digest. A
+ * prior-contract daemon never produces this: it refuses `connect` with
+ * "Authenticate before issuing commands" and only authenticates `hello`. */
+function isInvalidBrokerCredential(error: unknown): boolean {
+  return (
+    error instanceof BrokerRefusal &&
+    error.code === "unauthorized" &&
+    error.message === "Invalid broker credential"
+  );
+}
+
 const sleep = async (ms: number): Promise<void> =>
   await new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -128,11 +140,34 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-/** The profile election lease plus a live prior-contract handshake identify
- * the resident positively: the daemon holds the election lease for its whole
- * life, so the lease owner is the daemon the probe proved resident. Returns
- * null when any link of that identification is missing. */
-function priorContractBrokerPid(profileDir: string): number | null {
+/** Connected SOCK_STREAM peers on a pathname Unix socket (Linux
+ * `/proc/net/unix` state 03). Null when the count cannot be observed.
+ * Reclaim uses this to refuse killing a stale-credential broker that still
+ * has attached clients. */
+function brokerSocketConnectedPeerCount(path: string): number | null {
+  if (process.platform !== "linux") return null;
+  try {
+    let n = 0;
+    for (const line of readFileSync("/proc/net/unix", "utf8").split("\n")) {
+      if (!line.includes(path)) continue;
+      const fields = line.trim().split(/\s+/);
+      // Num: RefCount Protocol Flags Type St Inode Path…
+      if (fields.length < 8) continue;
+      if (fields.slice(7).join(" ") !== path) continue;
+      if (fields[5] === "03") n += 1;
+    }
+    return n;
+  } catch {
+    return null;
+  }
+}
+
+/** The profile election lease plus a live broker-argv process on this host
+ * identify the resident: the daemon holds the election lease for its whole
+ * life, so the lease owner is the daemon the wire probe proved resident.
+ * Returns null when any link of that identification is missing. Shared by
+ * prior-contract and same-contract stale-credential reclaim. */
+function residentBrokerPid(profileDir: string): number | null {
   const owner = profileOperationLockOwner(profileDir, brokerElectionRoot(profileDir));
   if (owner === null || owner.host !== hostname()) return null;
   const { pid, start_time } = owner;
@@ -172,16 +207,16 @@ async function waitForReclaimClear(
   return false;
 }
 
-/** Reclaim the profile from the positively identified prior-contract broker:
+/** Reclaim the profile from a positively identified resident broker:
  * SIGTERM, then a bounded wait for its lease and socket to clear, escalating
  * to SIGKILL only if the graceful path does not clear it. Throws a refusal
- * that names the resident older-contract broker when reclaim cannot
- * complete. */
-async function terminatePriorContractBroker(
+ * that names the pid when reclaim cannot complete. */
+async function terminateResidentBroker(
   profileDir: string,
   path: string,
   pid: number,
   timings: ReclaimTimings,
+  unavailableMessage: (pid: number) => string,
 ): Promise<void> {
   for (const [signal, graceMs] of [
     ["SIGTERM", timings.termGraceMs],
@@ -196,20 +231,33 @@ async function terminatePriorContractBroker(
       return;
     }
   }
-  throw new BrokerRefusal(
-    "broker_unavailable",
-    `A resident broker from an older release (pid ${pid}) still owns this profile's browser and could not be reclaimed; no operator command was dispatched`,
+  throw new BrokerRefusal("broker_unavailable", unavailableMessage(pid));
+}
+
+function staleCredentialLiveClientMessage(pid: number): string {
+  return (
+    `A resident broker (pid ${pid}) still owns this profile with a stale credential ` +
+    `and an attached client; finish those sessions, or confirm no other client is ` +
+    `attached and terminate pid ${pid} (TERM), then retry. No operator command was dispatched`
+  );
+}
+
+function staleCredentialUnreclaimedMessage(pid: number): string {
+  return (
+    `A resident broker (pid ${pid}) still owns this profile's browser with a stale ` +
+    `credential and could not be reclaimed; confirm no other client is attached, ` +
+    `terminate pid ${pid} (TERM), then retry. No operator command was dispatched`
   );
 }
 
 /** Reclaims a resident prior-contract broker for this profile, if one is
  * positively identified: a live daemon that refuses Contract B's `connect`
  * but still authenticates the pre-Contract-B `hello` handshake, while
- * holding this profile's election lease. A same-contract daemon — including
- * one that holds the lease before its socket appears — never authenticates
- * `hello` (or is reached only through the ENOENT/unavailable path), so it is
- * never a reclaim target. Returns whether a reclaim happened; throws only
- * when a reclaim was proven possible but could not complete. */
+ * holding this profile's election lease. A same-contract daemon never
+ * authenticates `hello` (or is reached only through the ENOENT/unavailable
+ * path), so it is never a prior-contract reclaim target — stale-credential
+ * reclaim owns that case separately. Returns whether a reclaim happened;
+ * throws only when a reclaim was proven possible but could not complete. */
 export async function reclaimPriorContractBrokerIfPresent(
   path: string,
   token: string,
@@ -219,10 +267,69 @@ export async function reclaimPriorContractBrokerIfPresent(
   if (!isUnauthorizedRefusal(connectError)) return false;
   if (!(await brokerSpeaksLegacyWire(path, token))) return false;
   const profileDir = profilePathIdentity(CHROME_PROFILE_DIR);
-  const pid = priorContractBrokerPid(profileDir);
+  const pid = residentBrokerPid(profileDir);
   if (pid === null) return false;
-  await terminatePriorContractBroker(profileDir, path, pid, timings);
+  await terminateResidentBroker(
+    profileDir,
+    path,
+    pid,
+    timings,
+    (owner) =>
+      `A resident broker from an older release (pid ${owner}) still owns this profile's browser and could not be reclaimed; no operator command was dispatched`,
+  );
   return true;
+}
+
+/** Reclaims a same-contract broker whose credential digest no longer matches
+ * the current agent session token: Contract B's `connect` handshake is
+ * accepted (the current-contract successor of `hello`) and the credential is
+ * rejected, the process holds this profile's election lease with a live
+ * broker-argv owner on this host, and the resident has no attached clients.
+ * A broker with attached clients is never killed; the refusal names the pid
+ * and the manual TERM reclaim step. SIGKILL is skipped if a client appears
+ * after SIGTERM. Returns whether a reclaim happened; throws when the
+ * resident is identified but must not be (or could not be) reclaimed. */
+export async function reclaimStaleCredentialBrokerIfPresent(
+  path: string,
+  token: string,
+  connectError: unknown,
+  timings: ReclaimTimings = RECLAIM_TIMINGS,
+): Promise<boolean> {
+  if (!isInvalidBrokerCredential(connectError)) return false;
+  // Prior-contract reclaim owns the legacy-hello case; do not double-signal.
+  if (await brokerSpeaksLegacyWire(path, token)) return false;
+  const profileDir = profilePathIdentity(CHROME_PROFILE_DIR);
+  const pid = residentBrokerPid(profileDir);
+  if (pid === null) return false;
+  // The connect that just rejected us may still appear as a peer for a
+  // tick after socket.destroy(). Wait it out so an empty stale broker is
+  // reclaimed instead of being mistaken for an attached client.
+  const peerDeadline = Date.now() + 250;
+  let peers = brokerSocketConnectedPeerCount(path) ?? 0;
+  while (peers > 0 && Date.now() < peerDeadline) {
+    await sleep(25);
+    peers = brokerSocketConnectedPeerCount(path) ?? 0;
+  }
+  if (peers > 0) {
+    throw new BrokerRefusal("broker_unavailable", staleCredentialLiveClientMessage(pid));
+  }
+  for (const [signal, graceMs] of [
+    ["SIGTERM", timings.termGraceMs],
+    ["SIGKILL", timings.killGraceMs],
+  ] as const) {
+    if (signal === "SIGKILL" && (brokerSocketConnectedPeerCount(path) ?? 0) > 0) {
+      throw new BrokerRefusal("broker_unavailable", staleCredentialLiveClientMessage(pid));
+    }
+    try {
+      process.kill(pid, signal);
+    } catch {
+      // Already gone: fall through and let the clear-wait decide.
+    }
+    if (await waitForReclaimClear(profileDir, path, Date.now() + graceMs, timings.pollMs)) {
+      return true;
+    }
+  }
+  throw new BrokerRefusal("broker_unavailable", staleCredentialUnreclaimedMessage(pid));
 }
 
 async function waitForBroker(
@@ -258,11 +365,16 @@ export async function connectOrLaunchBroker(path: string, token: string): Promis
     if (isUnavailable(error)) {
       // A socket with no live listener is a dead predecessor's orphan; the new
       // broker's own bind reclaims it (probe -> unlink -> bind).
-    } else if (!(await reclaimPriorContractBrokerIfPresent(path, token, error))) {
+    } else if (await reclaimPriorContractBrokerIfPresent(path, token, error)) {
+      // A reclaimed prior-contract broker freed the profile: fall through to
+      // the ordinary launch of a current-contract daemon.
+    } else if (await reclaimStaleCredentialBrokerIfPresent(path, token, error)) {
+      // A reclaimed same-contract broker whose digest lagged a re-enrollment
+      // or skipped maintenance refresh: fall through to a fresh daemon that
+      // reads the current agent session token.
+    } else {
       throw error;
     }
-    // A reclaimed prior-contract broker freed the profile: fall through to
-    // the ordinary launch of a new-contract daemon.
   }
 
   const profileDir = profilePathIdentity(CHROME_PROFILE_DIR);

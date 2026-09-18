@@ -21,6 +21,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+/** A refused start never minted an owned session. Follow-up operate_* calls
+ * on that id must replay the wall, not `stale_lease`. Finish matches the
+ * broker-side refused-start receipt (closed, nothing dispatched). */
+function refusedStartFinishReceipt(sessionId: string): Record<string, unknown> {
+  return {
+    session_id: sessionId,
+    operation_id: randomUUID(),
+    execution: "completed",
+    mutation: "not_dispatched",
+    cleanup: "closed",
+    closed: true,
+    url: "",
+  };
+}
+
 /** The MCP process holds only plain session ids. Never reconnect/replay a
  * dispatched request after transport loss: its side effect may have happened.
  * The wire is Contract B: connect / open / command / close. */
@@ -29,6 +44,7 @@ export class OperatorForwarder {
   private client: BrokerClient | undefined;
   private connecting = false;
   private readonly sessions = new Set<string>();
+  private readonly refusedStarts = new Map<string, Record<string, unknown>>();
   constructor(
     private readonly path: string,
     private readonly guard: SessionGuard,
@@ -61,6 +77,18 @@ export class OperatorForwarder {
         throw signal.reason ?? new BrokerRefusal("cancelled", "Request cancelled before dispatch");
     };
     checkCancelled();
+    const requestedEarly =
+      typeof originalArgs.session_id === "string" ? originalArgs.session_id : undefined;
+    if (name !== "operate_start" && requestedEarly !== undefined) {
+      const refused = this.refusedStarts.get(requestedEarly);
+      if (refused !== undefined) {
+        if (name === "operate_finish") {
+          this.refusedStarts.delete(requestedEarly);
+          return refusedStartFinishReceipt(requestedEarly);
+        }
+        return refused;
+      }
+    }
     let reconnecting = false;
     if (this.connection !== undefined) {
       const existing = await awaitOperatorPreparation(
@@ -131,7 +159,9 @@ export class OperatorForwarder {
             cleanup: owned ? "open" : "unknown",
             closed: false,
           });
-        if (owned) this.sessions.add(raw.sessionId as string);
+        if (owned && typeof raw.sessionId === "string") this.sessions.add(raw.sessionId);
+        else if (refusedStart && typeof returnedSessionId === "string")
+          this.refusedStarts.set(returnedSessionId, observation);
         return observation;
       }
 
@@ -193,5 +223,6 @@ export class OperatorForwarder {
     this.client = undefined;
     await client?.close();
     this.sessions.clear();
+    this.refusedStarts.clear();
   }
 }

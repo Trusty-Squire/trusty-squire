@@ -83,13 +83,25 @@ and its other sessions intact.
   broker-argv-corroborated owner pid on this host. Reclaim is SIGTERM, then a
   bounded wait for both the election lease and the socket endpoint to clear,
   then SIGKILL; if reclaim cannot complete, the client fails with a
-  `broker_unavailable` refusal naming the pid. A same-contract daemon — including
-  a just-started lease holder and a credential-rejected one — is never a reclaim
-  target, and a provably-reborn lease pid is left to the ordinary stale-owner
-  scavenge. The same reclaim runs on the maintenance path before the
-  bare-operation fallback. Reclaim timings are internal, never a tool parameter
-  or config knob. `broker-prior-contract-reclaim.test.ts` pins the mechanism
-  with real child processes, signals, lease files, and sockets.
+  `broker_unavailable` refusal naming the pid. A just-started same-contract
+  lease holder that has not yet bound its socket is never a reclaim target, and
+  a provably-reborn lease pid is left to the ordinary stale-owner scavenge.
+  The same reclaim runs on the maintenance path before the bare-operation
+  fallback.
+- A same-contract resident whose credential digest no longer matches the current
+  agent session token (re-enrollment, a driver/server restart, or a maintenance
+  release that could not refresh) is a separate reclaim. Positive identification
+  is the current-contract `connect` handshake succeeding as a protocol exchange
+  and rejecting the credential (`unauthorized: Invalid broker credential`), plus
+  the same election-lease and broker-argv owner pid on this host. Reclaim uses
+  the same SIGTERM → bounded wait → SIGKILL mechanics, but only when the
+  resident has no attached clients. A broker with an attached client is never
+  killed; the client fails with one `broker_unavailable` refusal naming the pid
+  and the manual TERM reclaim step. After maintenance, a credential refresh that
+  cannot complete terminates the drained broker rather than leaving it on the
+  old digest. Reclaim timings are internal, never a tool parameter or config
+  knob. `broker-prior-contract-reclaim.test.ts` pins both reclaim paths with
+  real child processes, signals, lease files, and sockets.
 - Each session owns a target family and a serialized command queue. A service
   URL does not reserve a site; one authenticated client drives the shared profile.
   Several connections to the same profile attach at once, one per client process,
