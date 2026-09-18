@@ -19,6 +19,7 @@ import {
   brokerEndpointHasLiveListener,
   brokerSpeaksLegacyWire,
 } from "./transport.js";
+import { readBrokerAccountBinding } from "./account-binding.js";
 import { BrokerRefusal } from "./refusal.js";
 
 const BROKER_CONNECT_TIMEOUT_MS = 10_000;
@@ -284,21 +285,32 @@ export async function reclaimPriorContractBrokerIfPresent(
  * the current agent session token: Contract B's `connect` handshake is
  * accepted (the current-contract successor of `hello`) and the credential is
  * rejected, the process holds this profile's election lease with a live
- * broker-argv owner on this host, and the resident has no attached clients.
+ * broker-argv owner on this host, the profile is enrolled to the caller's own
+ * account, and the resident has no attached clients.
+ *
+ * The credential rejection alone cannot tell a rotated token from another
+ * account's broker — one profile and one socket serve every account on the
+ * box — so the profile's account binding is what proves the resident is ours.
+ * A broker bound to another account (or carrying no readable binding) is left
+ * alone and the original refusal propagates.
+ *
  * A broker with attached clients is never killed; the refusal names the pid
  * and the manual TERM reclaim step. SIGKILL is skipped if a client appears
  * after SIGTERM. Returns whether a reclaim happened; throws when the
  * resident is identified but must not be (or could not be) reclaimed. */
 export async function reclaimStaleCredentialBrokerIfPresent(
   path: string,
-  token: string,
+  accountId: string | undefined,
   connectError: unknown,
   timings: ReclaimTimings = RECLAIM_TIMINGS,
 ): Promise<boolean> {
+  // A prior-contract daemon never produces this exact refusal (it refuses
+  // `connect` with "Authenticate before issuing commands"), so the legacy
+  // reclaim path owns that case and cannot double-signal here.
   if (!isInvalidBrokerCredential(connectError)) return false;
-  // Prior-contract reclaim owns the legacy-hello case; do not double-signal.
-  if (await brokerSpeaksLegacyWire(path, token)) return false;
+  if (accountId === undefined) return false;
   const profileDir = profilePathIdentity(CHROME_PROFILE_DIR);
+  if ((await readBrokerAccountBinding(profileDir)) !== accountId) return false;
   const pid = residentBrokerPid(profileDir);
   if (pid === null) return false;
   // The connect that just rejected us may still appear as a peer for a
@@ -358,7 +370,11 @@ export function brokerEnvironment(env: NodeJS.ProcessEnv, path: string): NodeJS.
   return { ...env, TRUSTY_SQUIRE_BROKER_SOCKET: path };
 }
 
-export async function connectOrLaunchBroker(path: string, token: string): Promise<BrokerClient> {
+export async function connectOrLaunchBroker(
+  path: string,
+  token: string,
+  accountId: string | undefined,
+): Promise<BrokerClient> {
   try {
     return await BrokerClient.connect(path, token);
   } catch (error) {
@@ -368,7 +384,7 @@ export async function connectOrLaunchBroker(path: string, token: string): Promis
     } else if (await reclaimPriorContractBrokerIfPresent(path, token, error)) {
       // A reclaimed prior-contract broker freed the profile: fall through to
       // the ordinary launch of a current-contract daemon.
-    } else if (await reclaimStaleCredentialBrokerIfPresent(path, token, error)) {
+    } else if (await reclaimStaleCredentialBrokerIfPresent(path, accountId, error)) {
       // A reclaimed same-contract broker whose digest lagged a re-enrollment
       // or skipped maintenance refresh: fall through to a fresh daemon that
       // reads the current agent session token.

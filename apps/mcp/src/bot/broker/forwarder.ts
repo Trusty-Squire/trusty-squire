@@ -56,7 +56,11 @@ export class OperatorForwarder {
         const session = await this.guard.bind();
         if (session?.agent_session_token === undefined)
           throw new BrokerRefusal("unauthorized", "Connect before using the broker");
-        const client = await connectOrLaunchBroker(this.path, session.agent_session_token);
+        const client = await connectOrLaunchBroker(
+          this.path,
+          session.agent_session_token,
+          session.account_id,
+        );
         this.client = client;
         return client;
       })().finally(() => {

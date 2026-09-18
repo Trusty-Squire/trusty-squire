@@ -91,7 +91,7 @@ describe("broker discovery election", () => {
       void sleep(10).then(async () => await listen(transport));
       return { once: vi.fn(), unref: vi.fn() };
     });
-    const client = await discovery.connectOrLaunchBroker(socket, "token");
+    const client = await discovery.connectOrLaunchBroker(socket, "token", "account");
     expect(state.spawn).toHaveBeenCalledOnce();
     await client.close();
     await listener?.close();
@@ -104,7 +104,7 @@ describe("broker discovery election", () => {
     const electionRoot = discovery.brokerElectionRoot(profile);
     await mkdir(electionRoot, { recursive: true, mode: 0o700 });
     election = profileModule.acquireProfileOperationGuard(profile, electionRoot);
-    const connecting = discovery.connectOrLaunchBroker(socket, "token");
+    const connecting = discovery.connectOrLaunchBroker(socket, "token", "account");
     await sleep(10);
     await listen(transport);
     const client = await connecting;
@@ -124,8 +124,8 @@ describe("broker discovery election", () => {
     });
 
     const [first, second] = await Promise.all([
-      discovery.connectOrLaunchBroker(socket, "token"),
-      discovery.connectOrLaunchBroker(socket, "token"),
+      discovery.connectOrLaunchBroker(socket, "token", "account"),
+      discovery.connectOrLaunchBroker(socket, "token", "account"),
     ]);
 
     expect(state.spawn).toHaveBeenCalledTimes(1);

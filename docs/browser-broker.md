@@ -93,7 +93,12 @@ and its other sessions intact.
   release that could not refresh) is a separate reclaim. Positive identification
   is the current-contract `connect` handshake succeeding as a protocol exchange
   and rejecting the credential (`unauthorized: Invalid broker credential`), plus
-  the same election-lease and broker-argv owner pid on this host. Reclaim uses
+  the same election-lease and broker-argv owner pid on this host. A rejected
+  credential alone cannot tell a rotated token from another account's broker —
+  one profile and one socket serve every account on the box — so the profile's
+  account binding must name the caller's own enrolled account; a resident on a
+  profile bound elsewhere, or carrying no readable binding, is never signalled
+  and the `unauthorized` refusal propagates unchanged. Reclaim uses
   the same SIGTERM → bounded wait → SIGKILL mechanics, but only when the
   resident has no attached clients. A broker with an attached client is never
   killed; the client fails with one `broker_unavailable` refusal naming the pid

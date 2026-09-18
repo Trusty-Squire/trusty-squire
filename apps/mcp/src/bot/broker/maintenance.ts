@@ -50,14 +50,15 @@ export async function withBrokerMaintenance<T>(operation: () => Promise<T>): Pro
     // prior-contract broker still holding the profile, or a same-contract
     // broker whose digest lagged a re-enrollment: reclaim (terminate) it so
     // plain login drains the old broker instead of racing it, then run the
-    // operation bare exactly like the no-socket path. A stale-credential
-    // broker with attached clients throws rather than being killed.
+    // operation bare exactly like the no-socket path. Stale-credential reclaim
+    // only ever signals a broker on a profile bound to this same account, and
+    // one with attached clients throws rather than being killed.
     // Unidentifiable residents are left alone and the original error
     // propagates.
     if (await reclaimPriorContractBrokerIfPresent(path, session.agent_session_token, error)) {
       return await operation();
     }
-    if (await reclaimStaleCredentialBrokerIfPresent(path, session.agent_session_token, error)) {
+    if (await reclaimStaleCredentialBrokerIfPresent(path, session.account_id, error)) {
       return await operation();
     }
     throw error;
