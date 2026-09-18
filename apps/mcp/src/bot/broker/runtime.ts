@@ -1,6 +1,6 @@
+import { brokerAccountBindingPath } from "./account-binding.js";
 import { brokerAdmissionId } from "./admission-context.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { BrowserController } from "../browser.js";
 import { IdentityRuntime } from "../identity-runtime.js";
 import {
@@ -96,7 +96,7 @@ export class BrokerRuntime implements BrokerBrowserCustody {
           if (!(await waitForProfileFree(settings.profileDir, { deadlineMs: 0 })))
             throw new BrokerRefusal("profile_busy", "Profile is already open");
           await mkdir(settings.profileDir, { recursive: true, mode: 0o700 });
-          const bindingPath = join(settings.profileDir, "trusty-squire-broker-account.json");
+          const bindingPath = brokerAccountBindingPath(settings.profileDir);
           try {
             await writeFile(
               bindingPath,

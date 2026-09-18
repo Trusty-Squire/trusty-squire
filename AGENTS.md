@@ -464,7 +464,12 @@ Raw live runtime evaluation remains internal rather than a public read API.
 The broker exclusively owns the physical operator browser; sessions own independent
 families of tabs. Preserve the election, physical-profile lease, and process-marker
 watchdog/reaper contracts in [`docs/browser-broker.md`](docs/browser-broker.md).
-The underlying bounded teardown and accepted reparented-idle-renderer residual are
+A resident broker whose credential no longer matches the enrolled agent session
+token is reclaimed or refused by that guide's stale-credential contract; do not
+diagnose it as a missing CLI kill-switch. `stale_lease` means another connection
+owns a live session, never a session that was never created — a wall-refused
+start's `session_id` replays its wall. The underlying bounded teardown and
+accepted reparented-idle-renderer residual are
 in [`docs/DESIGN-warm-browser-reuse.md`](docs/DESIGN-warm-browser-reuse.md#5-ownership-crash-recovery-and-containment).
 Never replace identity-proven Chrome containment with root-PID-only signaling or
 broad `pkill`. The strict containment follow-up remains

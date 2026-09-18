@@ -158,12 +158,21 @@ it("settles a start with no live page instead of retaining the session", async (
     })),
   ]);
   try {
-    await expect(
-      run.forwarder.invoke("operate_start", { service_url: "https://service.test" }, "start"),
-    ).resolves.toMatchObject({
+    const started = (await run.forwarder.invoke(
+      "operate_start",
+      { service_url: "https://service.test" },
+      "start",
+    )) as { session_id: string };
+    expect(started).toMatchObject({
       needs_user: { provider: "google" },
     });
     expect(run.broker.authority.inventory().sessions).toBe(0);
+    await expect(
+      run.forwarder.invoke("operate_observe", { session_id: started.session_id }, "observe-wall"),
+    ).resolves.toMatchObject({
+      session_id: started.session_id,
+      needs_user: { provider: "google" },
+    });
   } finally {
     await run.close();
   }

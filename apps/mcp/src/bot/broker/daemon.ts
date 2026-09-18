@@ -27,6 +27,23 @@ export function brokerIdleTimeoutMs(env: NodeJS.ProcessEnv = process.env): numbe
   return Math.max(MIN_BROKER_IDLE_TIMEOUT_MS, configured);
 }
 
+/** After a connect maintenance window, refresh the resident broker's
+ * credential from the enrolled session. The skip path that used to leave a
+ * stale digest (profile still busy, or restore/refresh throwing) now
+ * terminates the drained broker instead. */
+export async function completeMaintenanceCredentialRefresh(args: {
+  profileIsFree: boolean;
+  restore: () => Promise<void>;
+}): Promise<"restored" | "terminate"> {
+  if (!args.profileIsFree) return "terminate";
+  try {
+    await args.restore();
+    return "restored";
+  } catch {
+    return "terminate";
+  }
+}
+
 /** On-demand broker entrypoint; retains custody while clients own sessions. */
 export async function runBrokerDaemon(): Promise<void> {
   const path = resolveBrokerSocket();
@@ -62,6 +79,7 @@ export async function runBrokerDaemon(): Promise<void> {
   let closing = false;
   let listenerClosed = false;
   let maintenanceOwner: string | undefined;
+  let exitAfterMaintenance = false;
   let idleTimer: NodeJS.Timeout | undefined;
   const idleTimeout = brokerIdleTimeoutMs();
   const drained = (): boolean => {
@@ -78,8 +96,16 @@ export async function runBrokerDaemon(): Promise<void> {
   };
   const releaseMaintenanceLease = async (clientId: string): Promise<void> => {
     if (maintenanceOwner !== clientId) return;
-    if (await waitForProfileFree(CHROME_PROFILE_DIR, { deadlineMs: 0 })) await restoreMaintenance();
-    else maintenanceOwner = undefined;
+    const outcome = await completeMaintenanceCredentialRefresh({
+      profileIsFree: await waitForProfileFree(CHROME_PROFILE_DIR, { deadlineMs: 0 }),
+      restore: restoreMaintenance,
+    });
+    if (outcome === "restored") return;
+    // Profile still busy, or restore/refresh failed: exit the drained broker
+    // rather than keep authenticating the pre-maintenance digest. The next
+    // operator attach launches a daemon that reads the current token.
+    maintenanceOwner = undefined;
+    exitAfterMaintenance = true;
   };
   const listener = await listenBroker(path, {
     authenticate: async (token, agentId) => await operator.authenticate(token, agentId),
@@ -132,6 +158,10 @@ export async function runBrokerDaemon(): Promise<void> {
       await operator.disconnect(principal, explicit);
       connected.delete(principal.clientId);
       await releaseMaintenanceLease(principal.clientId);
+      if (exitAfterMaintenance) {
+        void shutdown();
+        return;
+      }
       scheduleShutdownIfIdle();
     },
   });

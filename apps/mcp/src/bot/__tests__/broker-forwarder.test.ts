@@ -220,4 +220,73 @@ describe("MCP broker forwarding over the Contract B wire", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("replays the google_session wall on a refused-start id instead of stale_lease", async () => {
+    const wall = {
+      wall: "google_session",
+      message:
+        "No live Google session in your Chrome profile, so the operator cannot act as you yet. " +
+        "Reconnect with `npx @trusty-squire/mcp connect --force-relogin=google` and retry " +
+        "— the task has NOT started and nothing was changed.",
+      resume: "connect" as const,
+    };
+    let calls = 0;
+    await withBroker(
+      "ts-forward-refused-start-",
+      async (method, params) => {
+        calls += 1;
+        if (method === "open")
+          return {
+            observation: {
+              session_id: "refused-one",
+              format: "browser-use-dom",
+              stage: "auth",
+              url: "",
+              needs_user: wall,
+            },
+          };
+        return { result: params };
+      },
+      async (path) => {
+        const forwarder = new OperatorForwarder(path, guard);
+        try {
+          const started = (await forwarder.invoke(
+            "operate_start",
+            { service_url: "https://service.test" },
+            "start",
+          )) as { session_id: string; needs_user: typeof wall };
+          expect(started).toMatchObject({
+            session_id: "refused-one",
+            needs_user: { wall: "google_session", resume: "connect" },
+          });
+          expect(forwarder.sessionCount()).toBe(0);
+          const observeCalls = calls;
+          await expect(
+            forwarder.invoke("operate_observe", { session_id: started.session_id }, "observe"),
+          ).resolves.toMatchObject({
+            session_id: "refused-one",
+            needs_user: { wall: "google_session", resume: "connect", message: wall.message },
+          });
+          expect(calls).toBe(observeCalls);
+          const finished = await forwarder.invoke(
+            "operate_finish",
+            { session_id: started.session_id },
+            "finish",
+          );
+          expect(finished).toMatchObject({
+            session_id: "refused-one",
+            closed: true,
+            mutation: "not_dispatched",
+            cleanup: "closed",
+            execution: "completed",
+          });
+          await expect(
+            forwarder.invoke("operate_observe", { session_id: started.session_id }, "observe"),
+          ).rejects.toMatchObject({ code: "stale_lease" });
+        } finally {
+          await forwarder.close();
+        }
+      },
+    );
+  });
 });
