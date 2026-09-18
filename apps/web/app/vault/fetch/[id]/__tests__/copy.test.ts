@@ -4,7 +4,6 @@ import {
   fieldLabel,
   formatExpiryRemaining,
   humanizeFieldKey,
-  requestedByLine,
   revealQuestion,
 } from "../copy";
 
@@ -73,19 +72,6 @@ describe("revealQuestion", () => {
     expect(revealQuestion({ service: "OpenAI", name: "staging" }, null, ["value"])).toBe(
       "Reveal your OpenAI (staging) secret to your agent?",
     );
-  });
-});
-
-describe("requestedByLine", () => {
-  it("joins the agent and its reason with a middle dot", () => {
-    expect(requestedByLine("Grok", "write it into GitHub Actions")).toBe(
-      "Requested by Grok · write it into GitHub Actions",
-    );
-  });
-
-  it("names the agent alone when it stated no reason", () => {
-    expect(requestedByLine("Grok", null)).toBe("Requested by Grok");
-    expect(requestedByLine("Grok", "   ")).toBe("Requested by Grok");
   });
 });
 

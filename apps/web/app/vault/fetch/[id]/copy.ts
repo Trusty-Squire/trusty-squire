@@ -46,13 +46,6 @@ export function revealQuestion(
   return `Reveal ${subject.join(" ")} to your agent?`;
 }
 
-// The agent is the authenticated requester the approval was minted under, so
-// there is always one to name; only the stated reason is optional.
-export function requestedByLine(agent: string, reason: string | null): string {
-  const why = reason?.trim() ?? "";
-  return why.length > 0 ? `Requested by ${agent} · ${why}` : `Requested by ${agent}`;
-}
-
 export function formatExpiryRemaining(expiresAt: string, nowMs = Date.now()): string {
   const remainingMs = new Date(expiresAt).getTime() - nowMs;
   const seconds = Math.max(0, Math.floor(remainingMs / 1000));

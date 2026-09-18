@@ -13,7 +13,7 @@ import {
   WRONG_ACCOUNT_DEVICE_MESSAGE,
 } from "../../../lib/pairing";
 import { getVouchflow } from "../../../lib/vouchflow";
-import { consequenceLine, requestedByLine, revealQuestion } from "./copy";
+import { consequenceLine, revealQuestion } from "./copy";
 
 interface FetchCeremony {
   approval_id: string;
@@ -166,7 +166,6 @@ export default function CredentialFetchApprovalPage() {
     ceremony === null
       ? null
       : revealQuestion(ceremony.credential, ceremony.field, ceremony.field_names);
-  const whoWhy = ceremony === null ? null : requestedByLine(ceremony.agent, ceremony.reason);
 
   return (
     <AppShell anonymous>
@@ -189,8 +188,16 @@ export default function CredentialFetchApprovalPage() {
       {pending && ceremony !== null && (
         <section className="app-card" aria-labelledby="credential-target">
           <p className="app-sub" style={{ marginTop: 0, overflowWrap: "anywhere" }}>
-            {whoWhy}
+            Requested by {ceremony.agent}
           </p>
+          {ceremony.reason !== null && (
+            <dl className="app-sub" style={{ margin: "var(--s-3) 0 0" }}>
+              <dt>Reason given</dt>
+              <dd className="mono" style={{ margin: "var(--s-2) 0 0", overflowWrap: "anywhere" }}>
+                “{ceremony.reason}”
+              </dd>
+            </dl>
+          )}
           <p className="app-sub" style={{ marginTop: "var(--s-3)" }}>
             {consequenceLine(ceremony.expires_at)}
           </p>

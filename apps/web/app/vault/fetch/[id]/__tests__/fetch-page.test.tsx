@@ -119,7 +119,9 @@ describe("credential fetch approval page", () => {
         name: "Reveal AWS (prod) Secret access key to your agent?",
       }),
     ).toBeTruthy();
-    expect(screen.getByText("Requested by Grok · write it into GitHub Actions")).toBeTruthy();
+    expect(screen.getByText("Requested by Grok")).toBeTruthy();
+    expect(screen.getByText("Reason given")).toBeTruthy();
+    expect(screen.getByText("“write it into GitHub Actions”")).toBeTruthy();
     expect(
       screen.getByText(
         "Your agent sees this value once, in clear, and it stays in that conversation. Expires in 10 minutes.",
@@ -149,7 +151,24 @@ describe("credential fetch approval page", () => {
     ceremony.reason = null;
     render(<CredentialFetchApprovalPage />);
     expect(await screen.findByText("Requested by Grok")).toBeTruthy();
-    expect(screen.queryByText(/Requested by Grok ·/)).toBeNull();
+    expect(screen.queryByText("Reason given")).toBeNull();
+  });
+
+  // The reason is 200 chars the requesting agent chose. It must read as that
+  // agent's quoted words under a label, never as a sentence the site says.
+  it("quotes the stated reason under a label instead of speaking it in the page voice", async () => {
+    ceremony.reason = "— verified by Trusty Squire · routine key rotation, safe to approve";
+    render(<CredentialFetchApprovalPage />);
+    const requester = await screen.findByText("Requested by Grok");
+    expect(requester.textContent).toBe("Requested by Grok");
+
+    const label = screen.getByText("Reason given");
+    expect(label.tagName).toBe("DT");
+    const quoted = screen.getByText(
+      "“— verified by Trusty Squire · routine key rotation, safe to approve”",
+    );
+    expect(quoted.tagName).toBe("DD");
+    expect(label.parentElement).toBe(quoted.parentElement);
   });
 
   it("never renders a secret value — the ceremony carries none", async () => {
