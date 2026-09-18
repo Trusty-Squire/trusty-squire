@@ -29,10 +29,7 @@ function constantTimeEquals(a: string, b: string): boolean {
 
 // Timing-safe `Authorization: Bearer <expected>` check. Returns
 // `unconfigured` when `expected` is unset/empty (caller fails closed).
-function verifyBearer(
-  req: FastifyRequest,
-  expected: string | undefined,
-): BearerResult {
+function verifyBearer(req: FastifyRequest, expected: string | undefined): BearerResult {
   if (expected === undefined || expected.length === 0) {
     return "unconfigured";
   }
