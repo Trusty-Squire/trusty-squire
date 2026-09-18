@@ -26,10 +26,14 @@ finishes, so the page waiting for the code never navigates away. Because
 Gmail's search index is eventually consistent (it can lack freshly delivered
 mail for minutes), the read cross-checks the search listing AND the real-time
 All Mail listing and opens the genuinely newest matching row on the page it
-was extracted from. When the opened message renders, its text and links are
-read from the message's own cards rather than the whole page, and Gmail's own
-chrome (account-menu, mailbox, and support links) is dropped before scoring;
-the remaining mail links are read verbatim from the DOM, not from the
+was extracted from. A matching row dated before the session started is a
+previous task's mail — its single-use link is already consumed or expired —
+so it is never returned; when only such pre-session matches are seen, the
+read reports an honest `found: false` with retry guidance instead of a dead
+link. When the opened message renders, its text and links are read from the
+message's own cards rather than the whole page, and Gmail's own chrome
+(account-menu, mailbox, and support links) is dropped before scoring; the
+remaining mail links are read verbatim from the DOM, not from the
 size-capped interactive inventory.
 
 Use an action `ref` from the current observation. `operate_start` and

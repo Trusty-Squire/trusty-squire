@@ -159,26 +159,42 @@ export function expectedVerificationDomains(
 // Pure: assemble the verification result. When neither a code nor a link was
 // found, the thick session is still live, so this is a RESUMABLE hand-back
 // (Flow A) — the host asks the user for the code and types it — not a give-up.
+// `staleMatchSeen` (optional) marks that the read DID see matching mail — but
+// only from before this session started: the fresh mail for this task has not
+// arrived/indexed yet, and the older match's single-use link is stale, so the
+// honest answer is still found:false with retry guidance naming that fact.
 // Exported for unit tests.
 export function buildVerificationResult(
   sessionId: string,
   code: string | null,
   link: string | null,
   sourceFrom: string | null = null,
+  staleMatchSeen = false,
 ): VerificationResult {
   const found = code !== null || link !== null;
   const src = sourceFrom !== null ? { source_from: sourceFrom } : {};
   if (found) return { session_id: sessionId, found, code, link, ...src };
-  const needs_user: NeedsUserCode = {
-    wall: "verification_code",
-    message:
-      "No verification email found in the inbox YET. Most often it just hasn't " +
-      "arrived (they commonly take 10–30s) — call operate_read_inbox AGAIN " +
-      "in a few seconds. If it still fails, the code may have gone by SMS/" +
-      "authenticator: ask the user for it and type it with operate_type. The " +
-      "session stays live either way.",
-    resume: "code",
-  };
+  const needs_user: NeedsUserCode = staleMatchSeen
+    ? {
+        wall: "verification_code",
+        message:
+          "Matching mail from BEFORE this task started was found, but the fresh " +
+          "mail for this task has not arrived yet — the older mail's link/code is " +
+          "stale (its single-use link is already consumed or expired) and was NOT " +
+          "returned. Call operate_read_inbox AGAIN in a few seconds; the fresh " +
+          "mail commonly lands within 10–30s. The session stays live either way.",
+        resume: "code",
+      }
+    : {
+        wall: "verification_code",
+        message:
+          "No verification email found in the inbox YET. Most often it just hasn't " +
+          "arrived (they commonly take 10–30s) — call operate_read_inbox AGAIN " +
+          "in a few seconds. If it still fails, the code may have gone by SMS/" +
+          "authenticator: ask the user for it and type it with operate_type. The " +
+          "session stays live either way.",
+        resume: "code",
+      };
   return { session_id: sessionId, found, code, link, needs_user, ...src };
 }
 
@@ -298,6 +314,26 @@ export function mailRowIsRecent(row: Pick<MailResultRow, "dateTitle">, now: numb
   return ts !== null && now - ts <= 24 * 60 * 60 * 1000;
 }
 
+// Pure: whether the row's parsed date PREDATES `sessionStartMs` — the
+// session's own start (Session.startedAt). A verification mail for a task
+// THIS session triggered can only have been sent after the session began, so
+// a matching row older than the session start is by construction a PREVIOUS
+// task's mail — its single-use link is already consumed or expired, and
+// returning it as this session's hit is exactly the stale-link defect
+// (2026-09-17 rc.1 craigslist: a fresh signup's sender-scoped read returned
+// the older account's dead activation link "Page Not Found" while the new
+// mail sat below it / unindexed). Such rows are dropped from both listings
+// before the newest pick; if nothing newer exists the read keeps its bounded
+// retries and ends in the honest not-found instead. Rows without a parseable
+// date cannot be proven old and stay candidates. Exported for unit tests.
+export function mailRowPredatesSession(
+  row: Pick<MailResultRow, "dateTitle">,
+  sessionStartMs: number,
+): boolean {
+  const ts = parseMailRowDate(row.dateTitle);
+  return ts !== null && ts < sessionStartMs;
+}
+
 // Gmail search results are ordered by RELEVANCE, not date ("Showing most
 // relevant"), so the first row is not the newest mail. MEASURED 2026-09-17
 // (rc.35 stale-code defect, #831): the unfiltered query ranked an 11:39 PM
@@ -354,7 +390,8 @@ async function readAllMailMatchingRows(
   page: Page,
   rowsOf: (page: Page | null) => Promise<MailResultRow[]>,
   sender: string | undefined,
-): Promise<MailResultRow[]> {
+  sessionStartMs: number,
+): Promise<{ rows: MailResultRow[]; staleMatchSeen: boolean }> {
   await browser.goto(GMAIL_ALL_MAIL_URL, page);
   let rows: MailResultRow[] = [];
   for (let i = 0; i < 3; i++) {
@@ -363,7 +400,14 @@ async function readAllMailMatchingRows(
     await waitForCaptchaChallengeToSettle(browser, 1200, 0, page).catch(() => false);
   }
   const now = Date.now();
-  return rows.filter((r) => mailRowMatchesSender(r, sender) && mailRowIsRecent(r, now));
+  const matching = rows.filter((r) => mailRowMatchesSender(r, sender) && mailRowIsRecent(r, now));
+  // A matching row older than the session start is a PREVIOUS task's mail:
+  // drop it from the candidates, but report that it was seen so the caller
+  // can end in the distinct stale-match not-found instead of the generic one.
+  return {
+    rows: matching.filter((r) => !mailRowPredatesSession(r, sessionStartMs)),
+    staleMatchSeen: matching.some((r) => mailRowPredatesSession(r, sessionStartMs)),
+  };
 }
 
 // Gmail's own search backend intermittently throws a transient error —
@@ -476,6 +520,11 @@ export async function awaitVerification(
       let code: string | null = null;
       let link: string | null = null;
       let sourceFrom: string | null = null;
+      // A matching row whose own date predates the session start is a
+      // PREVIOUS task's mail (see mailRowPredatesSession): it never becomes
+      // the hit, but if that is all the read ever sees, the final result is
+      // the distinct stale-match not-found instead of the generic one.
+      let staleMatchSeen = false;
       for (let attempt = 0; attempt < 3 && code === null && link === null; attempt++) {
         sourceFrom = null;
         if (attempt > 0)
@@ -504,9 +553,14 @@ export async function awaitVerification(
           }
         ).openMailResultRow?.bind(browser);
         const rows = (await mailRowsOf?.(inboxTab).catch(() => [])) ?? [];
+        const searchRows = rows.filter((r) => mailRowMatchesSender(r, opts.sender));
+        if (searchRows.some((r) => mailRowPredatesSession(r, session.startedAt)))
+          staleMatchSeen = true;
         let chosen: MailResultRow | null =
-          rows.length > 0
-            ? pickNewestMailRow(rows.filter((r) => mailRowMatchesSender(r, opts.sender)))
+          searchRows.length > 0
+            ? pickNewestMailRow(
+                searchRows.filter((r) => !mailRowPredatesSession(r, session.startedAt)),
+              )
             : null;
         // Supplement the search listing with the real-time All Mail listing
         // (GMAIL_ALL_MAIL_URL): the search index is eventually consistent and
@@ -519,12 +573,14 @@ export async function awaitVerification(
           if (allMailTab === null || allMailTab.isClosed()) {
             allMailTab = await browser.openUtilityTab();
           }
-          const allRows = await readAllMailMatchingRows(
+          const { rows: allRows, staleMatchSeen: allStale } = await readAllMailMatchingRows(
             browser,
             allMailTab,
             mailRowsOf,
             opts.sender,
+            session.startedAt,
           );
+          if (allStale) staleMatchSeen = true;
           const allPick = allRows.length > 0 ? pickNewestMailRow(allRows) : null;
           const merged = chooseMailRow(chosen, allPick);
           if (merged !== null && merged !== chosen) chosenPage = allMailTab;
@@ -595,9 +651,10 @@ export async function awaitVerification(
         } else if (opts.sender === undefined || opts.sender.length === 0) {
           // No row was ever chosen: only the hint-less read may fall back to
           // the page-wide list parse — the legacy first-row behavior for old
-          // controllers. The query is deliberately unfiltered now, so with a
-          // sender hint set this list carries other senders' content and must
-          // not be parsed: bounded retries end in the honest not-found.
+          // controllers (and ONLY old ones: when row extraction exists this
+          // whole list is unfiltered other-sender content and must not be
+          // parsed — bounded retries end in the honest not-found).
+          if (mailRowsOf !== undefined) continue;
           ({ code, link } = parseVerification(
             listText,
             listLinks.filter((l) => !isGmailChromeLink(l.url)),
@@ -605,13 +662,13 @@ export async function awaitVerification(
           ));
         }
       }
-      return { code, link, sourceFrom };
+      return { code, link, sourceFrom, staleMatchSeen };
     } finally {
       await inboxTab.close().catch(() => undefined);
       await allMailTab?.close().catch(() => undefined);
     }
   });
-  const { code, link, sourceFrom } = verification;
+  const { code, link, sourceFrom, staleMatchSeen } = verification;
   const found = code !== null || link !== null;
   audit(sessionId, "await_verification", {
     sender: opts.sender ?? null,
@@ -635,5 +692,5 @@ export async function awaitVerification(
       ...(sourceFrom !== null ? { source_from: sourceFrom } : {}),
     };
   }
-  return buildVerificationResult(sessionId, code, link, sourceFrom);
+  return buildVerificationResult(sessionId, code, link, sourceFrom, staleMatchSeen);
 }
