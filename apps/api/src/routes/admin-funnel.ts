@@ -1,20 +1,48 @@
 // GET /v1/admin/funnel — Panel 1 acquisition-funnel API-side data.
 //
-// Auth: a DEDICATED read-only bearer (FUNNEL_METRICS_TOKEN), NOT the
-// broad UNIVERSAL_BOT_API_KEY — least-privilege for the registry→API
-// cross-service read. Returns counts ONLY (no account_ids/emails), so
-// no PII crosses the trust boundary.
+// Auth: a dedicated read-only bearer (FUNNEL_METRICS_TOKEN) — least-privilege
+// for the registry→API cross-service read. Returns counts ONLY (no
+// account_ids/emails), so no PII crosses the trust boundary.
 //
 // The caller (registry dashboard) passes explicit window bounds so both
 // services aggregate over identical boundaries.
 
-import type { FastifyInstance } from "fastify";
-import { verifyBearer } from "../auth/authorize-machine-or-admin.js";
+import { timingSafeEqual } from "node:crypto";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { FunnelStatsStore } from "../services/funnel-stats.js";
 import { fetchNpmDownloads } from "../services/npm-downloads.js";
 
 const DEFAULT_NPM_PACKAGE = "@trusty-squire/mcp";
 const DEFAULT_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+type BearerResult = "ok" | "unauthorized" | "unconfigured";
+
+// Constant-time string compare. Returns false on any length mismatch
+// (timingSafeEqual throws on differing lengths) — the early length
+// branch is itself non-secret, since token length isn't a secret.
+function constantTimeEquals(a: string, b: string): boolean {
+  const aBuf = Buffer.from(a, "utf8");
+  const bBuf = Buffer.from(b, "utf8");
+  if (aBuf.length !== bBuf.length) return false;
+  return timingSafeEqual(aBuf, bBuf);
+}
+
+// Timing-safe `Authorization: Bearer <expected>` check. Returns
+// `unconfigured` when `expected` is unset/empty (caller fails closed).
+function verifyBearer(
+  req: FastifyRequest,
+  expected: string | undefined,
+): BearerResult {
+  if (expected === undefined || expected.length === 0) {
+    return "unconfigured";
+  }
+  const auth = req.headers["authorization"];
+  if (typeof auth !== "string" || !auth.startsWith("Bearer ")) {
+    return "unauthorized";
+  }
+  const presented = auth.slice("Bearer ".length).trim();
+  return constantTimeEquals(presented, expected) ? "ok" : "unauthorized";
+}
 
 export interface AdminFunnelRouteDeps {
   funnelStatsStore: FunnelStatsStore;
