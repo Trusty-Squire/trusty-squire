@@ -34,14 +34,45 @@ describe("fieldLabel", () => {
 });
 
 describe("revealQuestion", () => {
+  const twilio = { service: "Twilio", name: "default" };
+
   it("asks about the service and humanized field", () => {
-    expect(revealQuestion("Twilio", "account_sid", ["account_sid"])).toBe(
+    expect(revealQuestion(twilio, "account_sid", ["account_sid"])).toBe(
       "Reveal Twilio Account SID to your agent?",
     );
   });
 
   it("omits a missing service rather than substituting a placeholder", () => {
-    expect(revealQuestion(null, "password", ["password"])).toBe("Reveal Password to your agent?");
+    expect(revealQuestion({ service: null, name: "default" }, "password", ["password"])).toBe(
+      "Reveal Password to your agent?",
+    );
+  });
+
+  it("names the credential rather than the pseudo-field a lone secret is stored under", () => {
+    expect(revealQuestion({ service: "OpenAI", name: "default" }, null, ["value"])).toBe(
+      "Reveal your OpenAI secret to your agent?",
+    );
+    expect(revealQuestion({ service: "OpenAI", name: "default" }, "value", ["value"])).toBe(
+      "Reveal your OpenAI secret to your agent?",
+    );
+    expect(revealQuestion({ service: null, name: "default" }, null, ["value"])).toBe(
+      "Reveal your secret to your agent?",
+    );
+  });
+
+  it("still labels a field a human named `value` alongside others", () => {
+    expect(revealQuestion(twilio, "value", ["value", "checksum"])).toBe(
+      "Reveal Twilio Value to your agent?",
+    );
+  });
+
+  it("names the label that tells two credentials of one service apart", () => {
+    expect(
+      revealQuestion({ service: "AWS", name: "prod" }, "secret_access_key", ["secret_access_key"]),
+    ).toBe("Reveal AWS (prod) Secret access key to your agent?");
+    expect(revealQuestion({ service: "OpenAI", name: "staging" }, null, ["value"])).toBe(
+      "Reveal your OpenAI (staging) secret to your agent?",
+    );
   });
 });
 

@@ -54,7 +54,7 @@ const ceremony = {
     service: "AWS",
     name: "prod",
   },
-  field: "secret_access_key",
+  field: "secret_access_key" as string | null,
   field_names: ["access_key_id", "secret_access_key"],
   agent: "Grok",
   reason: "write it into GitHub Actions" as string | null,
@@ -70,6 +70,9 @@ beforeEach(() => {
   vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-09-05T12:00:00.000Z"));
   status = "pending";
   ceremony.reason = "write it into GitHub Actions";
+  ceremony.credential.name = "prod";
+  ceremony.field = "secret_access_key";
+  ceremony.field_names = ["access_key_id", "secret_access_key"];
   pairing.getPairingState.mockResolvedValue({ enrolled: true });
   pairing.pairDevice.mockResolvedValue(undefined);
   pairing.registerEnrolledDevice.mockResolvedValue(false);
@@ -113,7 +116,7 @@ describe("credential fetch approval page", () => {
     render(<CredentialFetchApprovalPage />);
     expect(
       await screen.findByRole("heading", {
-        name: "Reveal AWS Secret access key to your agent?",
+        name: "Reveal AWS (prod) Secret access key to your agent?",
       }),
     ).toBeTruthy();
     expect(screen.getByText("Requested by Grok · write it into GitHub Actions")).toBeTruthy();
@@ -127,6 +130,21 @@ describe("credential fetch approval page", () => {
     expect(screen.queryByText("AWS · prod")).toBeNull();
   });
 
+  // The common shape: one pasted API key, stored under the pseudo-field
+  // `value` with the label nobody renamed. Neither name is a human's, so the
+  // question names the credential instead of asking to reveal "AWS Value".
+  it("asks for a lone unnamed secret by its service, never by the pseudo-field", async () => {
+    ceremony.credential.name = "default";
+    ceremony.field = null;
+    ceremony.field_names = ["value"];
+    render(<CredentialFetchApprovalPage />);
+    expect(
+      await screen.findByRole("heading", { name: "Reveal your AWS secret to your agent?" }),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Value/)).toBeNull();
+    expect(screen.queryByText(/default/)).toBeNull();
+  });
+
   it("names the requesting agent alone when it stated no reason", async () => {
     ceremony.reason = null;
     render(<CredentialFetchApprovalPage />);
@@ -137,7 +155,7 @@ describe("credential fetch approval page", () => {
   it("never renders a secret value — the ceremony carries none", async () => {
     render(<CredentialFetchApprovalPage />);
     await screen.findByRole("heading", {
-      name: "Reveal AWS Secret access key to your agent?",
+      name: "Reveal AWS (prod) Secret access key to your agent?",
     });
     // The ceremony response has no value field at all; this pins that the page
     // has no place it could render one from.
@@ -166,7 +184,7 @@ describe("credential fetch approval page", () => {
     expect(screen.queryByRole("button", { name: "Approve reveal" })).toBeNull();
     expect(screen.queryByText(/Expires in/)).toBeNull();
     expect(
-      screen.queryByRole("heading", { name: "Reveal AWS Secret access key to your agent?" }),
+      screen.queryByRole("heading", { name: "Reveal AWS (prod) Secret access key to your agent?" }),
     ).toBeNull();
   });
 

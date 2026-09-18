@@ -165,7 +165,7 @@ export default function CredentialFetchApprovalPage() {
   const question =
     ceremony === null
       ? null
-      : revealQuestion(ceremony.credential.service, ceremony.field, ceremony.field_names);
+      : revealQuestion(ceremony.credential, ceremony.field, ceremony.field_names);
   const whoWhy = ceremony === null ? null : requestedByLine(ceremony.agent, ceremony.reason);
 
   return (

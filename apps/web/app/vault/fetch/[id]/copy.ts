@@ -4,6 +4,12 @@
 
 const ACRONYMS = new Set(["api", "id", "sid", "aws", "url", "http", "https", "otp", "jwt"]);
 
+// A credential pasted as one lone secret is stored under the pseudo-field
+// `value`, and a credential nobody renamed carries the label `default`.
+// Neither is a name a human chose, so neither is a name to show one.
+const ANONYMOUS_FIELD = "value";
+const ANONYMOUS_LABEL = "default";
+
 export function humanizeFieldKey(key: string): string {
   return key
     .split(/[_-\s]+/)
@@ -25,12 +31,19 @@ export function fieldLabel(field: string | null, fieldNames: string[]): string {
 }
 
 export function revealQuestion(
-  service: string | null,
+  credential: { service: string | null; name: string },
   field: string | null,
   fieldNames: string[],
 ): string {
-  const label = fieldLabel(field, fieldNames);
-  return `Reveal ${service === null ? label : `${service} ${label}`} to your agent?`;
+  const qualifiers = [
+    credential.service,
+    credential.name === ANONYMOUS_LABEL ? null : `(${credential.name})`,
+  ];
+  const anonymous = fieldNames.length === 1 && (field ?? fieldNames[0]) === ANONYMOUS_FIELD;
+  const subject = (
+    anonymous ? ["your", ...qualifiers, "secret"] : [...qualifiers, fieldLabel(field, fieldNames)]
+  ).filter((part) => part !== null);
+  return `Reveal ${subject.join(" ")} to your agent?`;
 }
 
 // The agent is the authenticated requester the approval was minted under, so
