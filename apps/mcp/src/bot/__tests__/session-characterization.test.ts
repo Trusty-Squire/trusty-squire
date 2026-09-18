@@ -239,6 +239,7 @@ describe("characterization: registered operator tool surface", () => {
   it("registers exactly these operate_* tools, in this order", () => {
     expect(TOOLS.map((tool) => tool.name).filter((name) => name.startsWith("operate_"))).toEqual([
       "operate_start",
+      "operate_drive",
       "operate_finish",
       "operate_observe",
       "operate_screenshot",
@@ -327,6 +328,7 @@ describe("characterization: Session construction", () => {
       compactV2Refs: { kind: "Map", size: 0 },
       compactV2Secret: { kind: "Buffer", length: 32 },
       consentInboxRead: true,
+      drive: null,
       generation: 0,
       id: expect.any(String),
       initializing: true,
@@ -394,6 +396,7 @@ describe("characterization: Session construction", () => {
       compactV2Refs: { kind: "Map", size: 0 },
       compactV2Secret: { kind: "Buffer", length: 32 },
       consentInboxRead: true,
+      drive: null,
       generation: 0,
       id: expect.any(String),
       initializing: true,

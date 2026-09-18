@@ -220,4 +220,43 @@ describe("MCP broker forwarding over the Contract B wire", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("opens then commands when operate_drive is given a url instead of a session", async () => {
+    const seen: { method: string; params: Record<string, unknown> }[] = [];
+    await withBroker(
+      "ts-forward-drive-",
+      async (method, params) => {
+        seen.push({ method, params });
+        if (method === "open")
+          return { sessionId: "session-drive", observation: { session_id: "session-drive" } };
+        return { result: { status: "budget", session_id: "session-drive" } };
+      },
+      async (path) => {
+        const forwarder = new OperatorForwarder(path, guard);
+        try {
+          expect(
+            await forwarder.invoke(
+              "operate_drive",
+              { url: "https://signup.test/", goal: "create an account" },
+              "drive",
+            ),
+          ).toEqual({ status: "budget", session_id: "session-drive" });
+          expect(seen[0]).toMatchObject({
+            method: "open",
+            params: { serviceUrl: "https://signup.test/" },
+          });
+          expect(seen[1]).toMatchObject({
+            method: "command",
+            params: {
+              sessionId: "session-drive",
+              name: "operate_drive",
+              args: { session_id: "session-drive", goal: "create an account" },
+            },
+          });
+        } finally {
+          await forwarder.close();
+        }
+      },
+    );
+  });
 });

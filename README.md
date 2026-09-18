@@ -193,9 +193,9 @@ for the system and data flows.
 
 ## MCP tools
 
-The default MCP registry exposes 29 tools (31 when maintainer diagnostics are
-enabled). The 20-tool operator driving surface uses flat, single-purpose verbs:
-`operate_start`, `operate_finish`, `operate_observe`, `operate_screenshot`,
+The default MCP registry exposes 30 tools (32 when maintainer diagnostics are
+enabled). The 21-tool operator driving surface uses flat, single-purpose verbs:
+`operate_start`, `operate_drive`, `operate_finish`, `operate_observe`, `operate_screenshot`,
 `operate_network`, `operate_navigate`, `operate_click`, `operate_type`, `operate_select`,
 `operate_press`, `operate_scroll`, `operate_wait`, `operate_read_inbox`, `operate_login`,
 `operate_fill_credential`, `operate_extract`, `inject_card`, `list_credentials`,
@@ -241,7 +241,11 @@ in [browser-use-serializer-port.md](docs/browser-use-serializer-port.md).
   `server_unavailable` includes `retry.max_attempts: 1`: retry once, and never
   kill or restart the shared operator process.
 - `operate_start` opens a scoped website session and `operate_observe` reads its
-  current state. Drive ordinary controls with `operate_click`, `operate_type`,
+  current state. For a signup, checkout, or other goal-shaped task, call
+  `operate_drive` with the goal and facts (or pass `url` to open and drive in
+  one call) instead of planning each click and type yourself; resume that
+  session with `answer` and/or added facts if it hands back. Drive ordinary
+  controls with `operate_click`, `operate_type`,
   `operate_select`, `operate_press`, and `operate_scroll`; use
   `operate_navigate` for scoped navigation. Acting tools target a current `ref`.
   `operate_type` accepts either literal `text` or a protected session `slot`,
