@@ -137,20 +137,6 @@ export const registerDecideRoute: FastifyPluginAsync<{
       return reply.code(response.status).send(payload);
     } catch (err) {
       if (err instanceof ProxyError && err.code === "timeout") {
-        try {
-          await opts.deps.decisionEventStore.record({
-            account_id: auth.account_id,
-            occurred_at: opts.deps.now?.() ?? new Date(),
-            model: JEV_MODEL,
-            input_tokens: 0,
-            output_tokens: 0,
-            upstream_status: 504,
-            latency_ms: Date.now() - started,
-            questions: questionNames.length,
-          });
-        } catch (ledgerErr) {
-          req.log.warn({ err: ledgerErr }, "decision ledger write failed");
-        }
         reply.code(504).send({ error: "jev_timeout" });
         return;
       }

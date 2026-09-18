@@ -230,6 +230,7 @@ describe("POST /v1/decide", () => {
     });
     expect(res.statusCode).toBe(504);
     expect(res.json()).toEqual({ error: "jev_timeout" });
+    expect(ledger.events).toHaveLength(0);
   });
 
   it("returns 503 jev_unconfigured when the platform secret is absent", async () => {
