@@ -27,7 +27,6 @@ const h = vi.hoisted(() => ({
   variantTokenPresent: false,
   challengeRendered: true,
   gateFrames: [] as Array<{ url: () => string; evaluate: ReturnType<typeof vi.fn> }>,
-
 }));
 
 vi.mock("../captcha.js", async (importOriginal) => ({
@@ -231,5 +230,38 @@ describe("attemptOperateCaptchaAutoSolve — bounded spend", () => {
     await attemptOperateCaptchaAutoSolve(session, page);
     await flushDetached();
     expect(h.solveCalls).toHaveLength(0);
+  });
+
+  // The detect state's audit outcome is a sealed value, so its unsealed
+  // `[captcha-autosolve-diag]` line is the only readable record of whether
+  // detection saw a rendered challenge. Both halves must reach the diag
+  // stream, and the challenge flag must match what detection observed.
+  it("emits an unsealed detect diag line reporting the observed challenge state", async () => {
+    const diag: string[] = [];
+    const errorSpy = vi.spyOn(console, "error").mockImplementation((msg: string) => {
+      diag.push(String(msg));
+    });
+    try {
+      h.challengeRendered = true;
+      await attemptOperateCaptchaAutoSolve(fakeSession(), fakePage(false));
+      await flushDetached();
+      const detect = diag.filter(
+        (l) => l.includes("[captcha-autosolve-diag]") && l.includes("outcome=detect"),
+      );
+      expect(detect).toHaveLength(1);
+      expect(detect[0]).toContain("challenge_rendered=true");
+
+      diag.length = 0;
+      h.challengeRendered = false;
+      await attemptOperateCaptchaAutoSolve(fakeSession(), fakePage(false));
+      await flushDetached();
+      const detectNoChallenge = diag.filter(
+        (l) => l.includes("[captcha-autosolve-diag]") && l.includes("outcome=detect"),
+      );
+      expect(detectNoChallenge).toHaveLength(1);
+      expect(detectNoChallenge[0]).toContain("challenge_rendered=false");
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });

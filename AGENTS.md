@@ -698,6 +698,30 @@ absolutely on wrong/partial values, silent misses (`filled`-but-absent),
 unknown statuses, or a value not correct after the masked-token re-arm).
 Evidence ledger: `data/ts-hosted-field-fill-nondeterministic/findings.md`.
 
+### 21. Captcha auto-solve diagnostics live in the broker daemon's stderr, and token lifetime outpaces sparse observers
+
+`[captcha-autosolve-diag]` lines and `provision-audit` entries go to the
+broker daemon's stderr (`~/.trusty-squire/.trusty-squire-broker-leases/launch/broker.log`),
+NEVER the MCP server's or operator's log — the operator log shows no solver
+output by design. Audit outcome values are sealed; only diag lines and the
+`challenge_rendered`/`card_released` booleans are readable. The broker also
+rekeys session ids (`broker/operator.ts` `remapSession`), so daemon-side lines
+carry an internal id, not the wire session id.
+
+The auto-solve DOES engage on a plain drive (proven live on Kaggle,
+`data/ts-recaptcha-autosolve-not-engaging/findings.md`): detect
+`challenge_rendered:true` → detached 2Captcha fetch (25s–5min observed) →
+inject on the observe after purchase → `ok confirmed=true` → blockers clear.
+The reported "never engages, no diag" was a stale shared daemon (npx-cached
+old release, stderr → /dev/null) blinding every lane sharing the profile.
+Check `ps -o args=` on the daemon pid before concluding "no diagnostics".
+
+**The rule:** before claiming the auto-solve didn't run, read `broker.log`
+under the daemon's internal session id; remember `CAPTCHA_TOKEN_LIFETIME_MS`
+is 120s — a `token_expired` diag means the observer's cadence, not the
+solver, missed the window. A risk engine (Kaggle) can also stop issuing
+challenges entirely after repeated cycles; no challenge, no solve.
+
 ## Final note
 
 You are reading this file because a prior agent burned four version numbers, confused users, and forced a human to intervene. The agent was not malicious. It was not lazy. It was pattern-matching on its own prose instead of on tool output.
