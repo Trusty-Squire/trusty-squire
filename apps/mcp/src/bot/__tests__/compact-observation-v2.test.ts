@@ -908,7 +908,7 @@ describe("compact observation v2", () => {
     it("reports the challenge again after the widget resets and clears the textarea", () => {
       const root = recaptchaPage("0.token123");
       expect(safeBlockersV2(root)).toEqual([]);
-      const textarea = root.children[2];
+      const textarea = root.children[2]!;
       textarea.attributes.value = "";
       const blockers = safeBlockersV2(root);
       expect(blockers.length).toBeGreaterThanOrEqual(1);
