@@ -8,6 +8,7 @@ import {
   persistOperatorCaptureEvidence,
   throwIfOperatorRequestCancelled,
 } from "../bot/request-cancellation.js";
+import { runOperateDrive } from "../bot/operate-drive.js";
 import { createHash, randomUUID } from "node:crypto";
 // Phase 1 — the interactive provisioning tool surface a frontier HOST agent
 // drives. The host is the planner; these tools are the browser + the moat.
@@ -186,10 +187,14 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
     CONTROL_QUERY_CONTRACT +
     'Use `format:"full"` only when the page DOM and text are needed. A released card\'s PAN (complete ordinary spellings and prefixes of at least eight digits) and security code are masked; all other emitted content stays verbatim. ' +
     DOM_OBSERVATION_CONTRACT +
-    "YOU are the planner — read the observation, then drive the signup, setup, or " +
-    "checkout with operate_click, operate_type, operate_select, operate_navigate, operate_scroll, and operate_login (inject_card releases a saved card into pan/cvv refs and exposes masked {{pan}}/{{cvv}} per-digit tokens for operate_type placement), re-read with " +
-    "operate_observe, and call operate_extract " +
-    "when you reach the credentials. Always operate_finish when done. The " +
+    "For a signup, checkout, or other goal-shaped task, call operate_drive " +
+    "with the goal and facts (or pass url to operate_drive to open and drive in one call) " +
+    "instead of planning each click and type yourself; resume the same session with " +
+    "answer and/or added facts if it hands back. The primitives " +
+    "(operate_click, operate_type, operate_select, operate_navigate, operate_scroll, operate_login) " +
+    "remain for a single step the drive handed back or a task that is not a goal. " +
+    "inject_card releases a saved card into pan/cvv refs and exposes masked {{pan}}/{{cvv}} per-digit tokens for operate_type placement. " +
+    "Call operate_extract when you reach the credentials. Always operate_finish when done. The " +
     "browser has unrestricted egress.",
   inputSchema: startSchema,
   jsonInputSchema: {
@@ -1580,10 +1585,88 @@ export const operateFinishTool: Tool<z.infer<typeof publicFinishSchema>> = {
   },
 };
 
+const driveSchema = z
+  .object({
+    session_id: z.string().min(1).optional(),
+    url: z.string().url().optional(),
+    goal: z.string().min(1).max(4000),
+    facts: z.record(z.string(), z.string()).optional(),
+    max_steps: z.number().int().min(1).max(50).optional(),
+    max_seconds: z.number().int().min(1).max(120).optional(),
+    answer: z.string().min(1).max(200).optional(),
+  })
+  .superRefine((value, ctx) => {
+    const hasSession = value.session_id !== undefined;
+    const hasUrl = value.url !== undefined;
+    if (hasSession === hasUrl) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Provide exactly one of session_id or url",
+      });
+    }
+  });
+
+export const operateDriveTool: Tool<z.infer<typeof driveSchema>> = {
+  name: "operate_drive",
+  description:
+    "Drive a signup, checkout, or other website goal to completion. This is the tool to reach for " +
+    "when the user asked to create an account, complete a purchase, or provision a service — " +
+    "prefer it over calling operate_click / operate_type / operate_observe yourself. " +
+    "Pass session_id of an open operate_start session, or url to open the page (same start path as " +
+    "operate_start, sign-in wall and hint included) and drive in one call. goal is the task in words. " +
+    "facts is the key/value bag of values the loop may type (email, first_name, last_name, company, " +
+    "address, city, state, zip, password, card_ref, merchant, amount_cents, currency, …); it never " +
+    "invents a value. Optional max_steps (default 15) and max_seconds (default 45) bound this call; " +
+    "a budget handoff is partial progress — call again on the same session to continue. " +
+    "Resume with answer (one option key from a previous handoff: a ref, done, or stuck) and/or added " +
+    "facts; the loop continues from the current page. Returns a handoff, never a bare page: status, " +
+    "the current compact observation with the same stable refs, trajectory, done/remaining, and " +
+    "step/time counters. Status complete means the goal is done; needs_value names a missing fact; " +
+    "low_confidence includes the question, options, and probabilities to answer; no_progress, budget, " +
+    "jev_unavailable, and pending_approval (card approval URL) are resumable. Google sign-in, " +
+    "verification-email read, captcha, and card release run inside the loop. Always operate_finish when done.",
+  inputSchema: driveSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["goal"],
+    oneOf: [{ required: ["session_id"] }, { required: ["url"] }],
+    properties: {
+      session_id: { type: "string" },
+      url: { type: "string", format: "uri" },
+      goal: { type: "string" },
+      facts: { type: "object", additionalProperties: { type: "string" } },
+      max_steps: { type: "integer", minimum: 1, maximum: 50 },
+      max_seconds: { type: "integer", minimum: 1, maximum: 120 },
+      answer: { type: "string" },
+    },
+  },
+  async handler(args, api, context) {
+    const consentInboxRead = args.url === undefined ? undefined : await readInboxConsent();
+    return await runOperateDrive(
+      {
+        goal: args.goal,
+        ...(args.session_id === undefined ? {} : { session_id: args.session_id }),
+        ...(args.url === undefined ? {} : { url: args.url }),
+        ...(args.facts === undefined ? {} : { facts: args.facts }),
+        ...(args.max_steps === undefined ? {} : { max_steps: args.max_steps }),
+        ...(args.max_seconds === undefined ? {} : { max_seconds: args.max_seconds }),
+        ...(args.answer === undefined ? {} : { answer: args.answer }),
+      },
+      api,
+      {
+        ...(context?.signal === undefined ? {} : { signal: context.signal }),
+        ...(context?.notifyUser === undefined ? {} : { notifyUser: context.notifyUser }),
+        ...(consentInboxRead === undefined ? {} : { consentInboxRead }),
+      },
+    );
+  },
+};
+
 // The rest of the vault surface is unchanged and is outside
 // the direct observation/action target set.
 export const OPERATE_TOOLS: Tool[] = [
   provisionStartTool,
+  operateDriveTool,
   operateFinishTool,
   provisionObserveTool,
   provisionScreenshotTool,

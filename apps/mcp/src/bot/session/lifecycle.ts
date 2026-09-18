@@ -760,6 +760,7 @@ export interface PreparedFinishResult<T> {
 
 function clearSessionArtifacts(session: Session): void {
   session.secretSlots.clear();
+  session.drive = null;
 }
 
 function deregisterProvisionSession(session: Session): void {
