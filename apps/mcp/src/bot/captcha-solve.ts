@@ -657,6 +657,13 @@ async function runDetachedTokenFetch(session: Session, page?: Page): Promise<voi
       outcome: "detect",
       challenge_rendered: det.challengeRendered,
     });
+    // Unsealed diag line for the detect state: the audit outcome here is a
+    // sealed value, so without this there is NO readable record of whether
+    // detection saw a rendered challenge — making a silent early return
+    // indistinguishable from the auto-solve never running at all.
+    console.error(
+      `[captcha-autosolve-diag] session=${session.id} variant=${det.variant} outcome=detect challenge_rendered=${det.challengeRendered}`,
+    );
     // Only a RENDERED challenge escalates to the solver. A mere checkbox
     // (or a settled widget) with a response token needs nothing, and a
     // no-challenge page must never spend the funded key.
