@@ -898,6 +898,12 @@ footer {
   display: inline-flex;
   padding: 9px 18px;
 }
+/* .btn-primary is borderless; its neighbours carry a 1px one. Side by side at
+   width:auto that 1px lands on the outer box, so match it invisibly and the
+   pair measures identically. */
+.app-card .btn-primary {
+  border: 1px solid transparent;
+}
 .app-banner {
   margin-top: 16px;
   padding: 11px 15px;

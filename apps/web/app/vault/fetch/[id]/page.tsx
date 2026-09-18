@@ -21,7 +21,7 @@ interface FetchCeremony {
   credential: { reference: string; service: string | null; name: string };
   field: string | null;
   field_names: string[];
-  requested_by: string | null;
+  agent: string;
   reason: string | null;
   expires_at: string;
   error?: string;
@@ -166,11 +166,7 @@ export default function CredentialFetchApprovalPage() {
     ceremony === null
       ? null
       : revealQuestion(ceremony.credential.service, ceremony.field, ceremony.field_names);
-  const whoWhy = ceremony === null ? null : requestedByLine(ceremony.requested_by, ceremony.reason);
-  const credentialTitle =
-    ceremony === null
-      ? null
-      : `${ceremony.credential.service ?? "Credential"} · ${ceremony.credential.name}`;
+  const whoWhy = ceremony === null ? null : requestedByLine(ceremony.agent, ceremony.reason);
 
   return (
     <AppShell anonymous>
@@ -187,26 +183,15 @@ export default function CredentialFetchApprovalPage() {
       {error !== null && <div className="app-banner err">{error}</div>}
       {ceremony === null && error === null && <p className="app-sub">Loading…</p>}
       {terminal !== null && (
-        <>
-          <div className={`app-banner ${ceremony?.status === "approved" ? "ok" : ""}`}>
-            {terminal}
-          </div>
-          {credentialTitle !== null && (
-            <h2 className="app-title" style={{ fontSize: "var(--t-lg)" }}>
-              {credentialTitle}
-            </h2>
-          )}
-        </>
+        <h1 className={`app-banner ${ceremony?.status === "approved" ? "ok" : ""}`}>{terminal}</h1>
       )}
 
       {pending && ceremony !== null && (
         <section className="app-card" aria-labelledby="credential-target">
-          {whoWhy !== null && (
-            <p className="app-sub" style={{ marginTop: 0, overflowWrap: "anywhere" }}>
-              {whoWhy}
-            </p>
-          )}
-          <p className="app-sub" style={{ marginTop: whoWhy === null ? 0 : "var(--s-3)" }}>
+          <p className="app-sub" style={{ marginTop: 0, overflowWrap: "anywhere" }}>
+            {whoWhy}
+          </p>
+          <p className="app-sub" style={{ marginTop: "var(--s-3)" }}>
             {consequenceLine(ceremony.expires_at)}
           </p>
 

@@ -17,11 +17,11 @@ export function humanizeFieldKey(key: string): string {
     .join(" ");
 }
 
+// The route settles field selection before minting, refusing a multi-field
+// credential with no field named — so the ceremony always describes exactly
+// one field: the one the agent named, or the credential's only one.
 export function fieldLabel(field: string | null, fieldNames: string[]): string {
-  if (field !== null && field.length > 0) return humanizeFieldKey(field);
-  if (fieldNames.length === 1) return humanizeFieldKey(fieldNames[0]!);
-  if (fieldNames.length > 1) return fieldNames.map(humanizeFieldKey).join(", ");
-  return "";
+  return humanizeFieldKey(field ?? fieldNames[0]!);
 }
 
 export function revealQuestion(
@@ -30,20 +30,14 @@ export function revealQuestion(
   fieldNames: string[],
 ): string {
   const label = fieldLabel(field, fieldNames);
-  const subject = [service, label].filter((part) => part !== null && part !== "").join(" ");
-  return `Reveal ${subject.length > 0 ? subject : "this secret"} to your agent?`;
+  return `Reveal ${service === null ? label : `${service} ${label}`} to your agent?`;
 }
 
-export function requestedByLine(
-  requestedBy: string | null | undefined,
-  reason: string | null | undefined,
-): string | null {
-  const who = requestedBy?.trim() ?? "";
+// The agent is the authenticated requester the approval was minted under, so
+// there is always one to name; only the stated reason is optional.
+export function requestedByLine(agent: string, reason: string | null): string {
   const why = reason?.trim() ?? "";
-  if (who.length > 0 && why.length > 0) return `Requested by ${who} · ${why}`;
-  if (who.length > 0) return `Requested by ${who}`;
-  if (why.length > 0) return why;
-  return null;
+  return why.length > 0 ? `Requested by ${agent} · ${why}` : `Requested by ${agent}`;
 }
 
 export function formatExpiryRemaining(expiresAt: string, nowMs = Date.now()): string {
@@ -51,9 +45,7 @@ export function formatExpiryRemaining(expiresAt: string, nowMs = Date.now()): st
   const seconds = Math.max(0, Math.floor(remainingMs / 1000));
   if (seconds < 60) return seconds === 1 ? "1 second" : `${seconds} seconds`;
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return minutes === 1 ? "1 minute" : `${minutes} minutes`;
-  const hours = Math.floor(minutes / 60);
-  return hours === 1 ? "1 hour" : `${hours} hours`;
+  return minutes === 1 ? "1 minute" : `${minutes} minutes`;
 }
 
 export function consequenceLine(expiresAt: string, nowMs = Date.now()): string {

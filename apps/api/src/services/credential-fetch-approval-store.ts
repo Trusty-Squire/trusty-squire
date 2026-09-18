@@ -35,8 +35,6 @@ export interface CredentialFetchApprovalInput {
   nonce: string;
   agent: string;
   requesterKind: CredentialFetchRequesterKind;
-  /** Live agent identity from `X-Squire-Agent-Identity`, when the caller sent one. */
-  requestedBy: string | null;
   /** Optional short reason the agent stated for needing the raw value. */
   reason: string | null;
   intentHash: string;
@@ -81,6 +79,13 @@ export interface CredentialFetchApprovalStore {
     intentHash: string,
     now: Date,
   ): Promise<CredentialFetchApprovalRecord | null>;
+  /**
+   * Restate WHY on a still-pending approval a repeat call is reusing, so the
+   * human reads the purpose the CURRENT call gave rather than the first one's.
+   * Returns the refreshed record, or null when the approval is no longer
+   * pending and the reason was therefore not changed.
+   */
+  restateReason(id: string, reason: string): Promise<CredentialFetchApprovalRecord | null>;
   getById(id: string): Promise<CredentialFetchApprovalRecord | null>;
   getByIdForAccount(id: string, accountId: string): Promise<CredentialFetchApprovalRecord | null>;
   approve(id: string, mandateId: string | null): Promise<CredentialFetchApproveResult>;
@@ -130,6 +135,13 @@ export class InMemoryCredentialFetchApprovalStore implements CredentialFetchAppr
         candidate.expiresAt > now,
     );
     return record === undefined ? null : cloneRecord(record);
+  }
+
+  async restateReason(id: string, reason: string): Promise<CredentialFetchApprovalRecord | null> {
+    const record = this.records.get(id);
+    if (record === undefined || record.status !== "pending") return null;
+    record.reason = reason;
+    return cloneRecord(record);
   }
 
   async getById(id: string): Promise<CredentialFetchApprovalRecord | null> {

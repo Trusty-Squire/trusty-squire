@@ -56,7 +56,7 @@ const ceremony = {
   },
   field: "secret_access_key",
   field_names: ["access_key_id", "secret_access_key"],
-  requested_by: "Grok" as string | null,
+  agent: "Grok",
   reason: "write it into GitHub Actions" as string | null,
   expires_at: "2026-09-05T12:10:00.000Z",
   payload: { fetch: { purpose: "credential.reveal" } },
@@ -69,7 +69,6 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-09-05T12:00:00.000Z"));
   status = "pending";
-  ceremony.requested_by = "Grok";
   ceremony.reason = "write it into GitHub Actions";
   pairing.getPairingState.mockResolvedValue({ enrolled: true });
   pairing.pairDevice.mockResolvedValue(undefined);
@@ -128,28 +127,11 @@ describe("credential fetch approval page", () => {
     expect(screen.queryByText("AWS · prod")).toBeNull();
   });
 
-  it("omits the requested-by line when neither who nor why is present", async () => {
-    ceremony.requested_by = null;
-    ceremony.reason = null;
-    render(<CredentialFetchApprovalPage />);
-    await screen.findByRole("heading", {
-      name: "Reveal AWS Secret access key to your agent?",
-    });
-    expect(screen.queryByText(/Requested by/)).toBeNull();
-  });
-
-  it("shows only the agent when there is no reason", async () => {
+  it("names the requesting agent alone when it stated no reason", async () => {
     ceremony.reason = null;
     render(<CredentialFetchApprovalPage />);
     expect(await screen.findByText("Requested by Grok")).toBeTruthy();
     expect(screen.queryByText(/Requested by Grok ·/)).toBeNull();
-  });
-
-  it("shows only the reason when there is no agent, with no placeholder", async () => {
-    ceremony.requested_by = null;
-    render(<CredentialFetchApprovalPage />);
-    expect(await screen.findByText("write it into GitHub Actions")).toBeTruthy();
-    expect(screen.queryByText(/Requested by/)).toBeNull();
   });
 
   it("never renders a secret value — the ceremony carries none", async () => {
@@ -179,7 +161,7 @@ describe("credential fetch approval page", () => {
       jws: "signed-fetch-jws",
     });
     expect(await screen.findByText(/agent can now read this secret once/i)).toBeTruthy();
-    expect(screen.getByText("AWS · prod")).toBeTruthy();
+    expect(screen.queryByText("AWS · prod")).toBeNull();
     expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Approve reveal" })).toBeNull();
     expect(screen.queryByText(/Expires in/)).toBeNull();
@@ -196,7 +178,7 @@ describe("credential fetch approval page", () => {
     await waitFor(() => expect(screen.getByText(/no value was released/i)).toBeTruthy());
     expect(vouchflow.signPayload).not.toHaveBeenCalled();
     expect(api.apiPost).toHaveBeenCalledWith("/v1/vault/fetch-approvals/fetch_1/deny", {});
-    expect(screen.getByText("AWS · prod")).toBeTruthy();
+    expect(screen.queryByText("AWS · prod")).toBeNull();
     expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
     expect(screen.queryByText(/Expires in/)).toBeNull();
   });

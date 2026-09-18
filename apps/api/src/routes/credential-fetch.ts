@@ -97,22 +97,6 @@ function approvalUrl(id: string): string {
   return approvalPageUrl("fetch", id);
 }
 
-function headerString(value: string | string[] | undefined): string | null {
-  const raw = Array.isArray(value) ? value[0] : value;
-  if (typeof raw !== "string") return null;
-  const trimmed = raw.trim();
-  return trimmed.length === 0 ? null : trimmed;
-}
-
-function requestedByFromRequest(req: FastifyRequest): string | null {
-  const fromHeader = headerString(req.headers["x-squire-agent-identity"]);
-  if (fromHeader !== null) return fromHeader;
-  const auth = req.auth;
-  if (auth?.kind !== "agent") return null;
-  const identity = auth.agent_identity?.trim() ?? "";
-  return identity.length === 0 ? null : identity;
-}
-
 function statedReason(value: string | undefined): string | null {
   const trimmed = value?.trim() ?? "";
   return trimmed.length === 0 ? null : trimmed;
@@ -180,7 +164,7 @@ function approvalResponse(record: CredentialFetchApprovalRecord, now: Date) {
     },
     field: record.field,
     field_names: record.fieldNames,
-    requested_by: record.requestedBy,
+    agent: record.agent,
     reason: record.reason,
     expires_at: record.expiresAt.toISOString(),
     ...(record.failureCode !== null ? { error: record.failureCode } : {}),
@@ -291,9 +275,18 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
       intentHash,
       now,
     );
+    // A repeat call inside the TTL rides the SAME approval, so the human must
+    // read the purpose THIS call stated, not the first one's. A call that
+    // states none leaves the existing reason standing rather than erasing it.
+    const reason = statedReason(parsed.data.reason);
     if (reusable !== null) {
-      await sendFetchTelegram(opts.deps, reusable);
-      return reply.code(200).send(approvalResponse(reusable, now));
+      const restated =
+        reason === null
+          ? null
+          : await opts.deps.credentialFetchApprovalStore.restateReason(reusable.id, reason);
+      const current = restated ?? reusable;
+      await sendFetchTelegram(opts.deps, current);
+      return reply.code(200).send(approvalResponse(current, now));
     }
 
     const id = await opts.deps.credentialFetchApprovalStore.create(auth.account_id, {
@@ -306,8 +299,7 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
       nonce: randomBytes(16).toString("base64url"),
       agent,
       requesterKind,
-      requestedBy: requestedByFromRequest(req),
-      reason: statedReason(parsed.data.reason),
+      reason,
       intentHash,
       expiresAt: new Date(now.getTime() + APPROVAL_TTL_MS),
     });

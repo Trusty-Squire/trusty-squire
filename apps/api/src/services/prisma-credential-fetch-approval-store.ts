@@ -31,7 +31,6 @@ export class PrismaCredentialFetchApprovalStore implements CredentialFetchApprov
         nonce: input.nonce,
         agent: input.agent,
         requester_kind: input.requesterKind,
-        requested_by: input.requestedBy,
         reason: input.reason,
         intent_hash: input.intentHash,
         status: "pending",
@@ -57,6 +56,14 @@ export class PrismaCredentialFetchApprovalStore implements CredentialFetchApprov
       orderBy: { created_at: "desc" },
     });
     return row === null ? null : toRecord(row);
+  }
+
+  async restateReason(id: string, reason: string): Promise<CredentialFetchApprovalRecord | null> {
+    const updated = await this.prisma.credentialFetchApproval.updateMany({
+      where: { id, status: "pending" },
+      data: { reason },
+    });
+    return updated.count === 1 ? await this.getById(id) : null;
   }
 
   async getById(id: string): Promise<CredentialFetchApprovalRecord | null> {
@@ -141,7 +148,6 @@ export interface CredentialFetchApprovalRow {
   nonce: string;
   agent: string;
   requester_kind: string;
-  requested_by: string | null;
   reason: string | null;
   intent_hash: string;
   status: string;
@@ -165,7 +171,6 @@ function toRecord(row: CredentialFetchApprovalRow): CredentialFetchApprovalRecor
     nonce: row.nonce,
     agent: row.agent,
     requesterKind: row.requester_kind === "web" ? "web" : ("agent" as CredentialFetchRequesterKind),
-    requestedBy: row.requested_by ?? null,
     reason: row.reason ?? null,
     intentHash: row.intent_hash,
     status: row.status as CredentialFetchApprovalStatus,

@@ -28,7 +28,7 @@ describe("fieldLabel", () => {
     expect(fieldLabel("account_sid", ["account_sid", "auth_token"])).toBe("Account SID");
   });
 
-  it("humanizes a single unnamed field", () => {
+  it("humanizes the credential's only field when none was named", () => {
     expect(fieldLabel(null, ["api_key"])).toBe("API key");
   });
 });
@@ -46,23 +46,15 @@ describe("revealQuestion", () => {
 });
 
 describe("requestedByLine", () => {
-  it("joins both values with a middle dot", () => {
+  it("joins the agent and its reason with a middle dot", () => {
     expect(requestedByLine("Grok", "write it into GitHub Actions")).toBe(
       "Requested by Grok · write it into GitHub Actions",
     );
   });
 
-  it("shows only the agent when there is no reason", () => {
+  it("names the agent alone when it stated no reason", () => {
     expect(requestedByLine("Grok", null)).toBe("Requested by Grok");
-  });
-
-  it("shows only the reason when there is no agent, with no placeholder", () => {
-    expect(requestedByLine(null, "write it into a .env file")).toBe("write it into a .env file");
-  });
-
-  it("returns null when neither value is present", () => {
-    expect(requestedByLine(null, null)).toBeNull();
-    expect(requestedByLine("  ", "")).toBeNull();
+    expect(requestedByLine("Grok", "   ")).toBe("Requested by Grok");
   });
 });
 
