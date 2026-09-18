@@ -363,7 +363,7 @@ in [browser-use-serializer-port.md](docs/browser-use-serializer-port.md).
   calling with `{}` preserves the full metadata inventory. Discover the exact
   projection and inputs through the installed server's `tools/list` description
   and schema.
-- `fetch_credential` returns a credential's raw value to the agent — the one path that does. It first returns an approval link and no value; you open it and sign with your passkey; the agent resumes with the returned `approval_id` and receives the value once. Denial or expiry releases nothing, and a mutation or payment approval cannot be used here. Reach for it only when the key must land somewhere the agent controls (a GitHub Actions secret, a `.env`) with no server-side injection path — `use_credential` is the right tool for calling an API.
+- `fetch_credential` returns a credential's raw value to the agent — the one path that does. It first returns an approval link and no value; you open it and sign with your passkey; the agent resumes with the returned `approval_id` and receives the value once. The agent may pass a short `reason`; the page asks the reveal as a question naming the credential, shows which agent is asking, quotes that stated reason, and says when the approval expires. Denial or expiry releases nothing, and a mutation or payment approval cannot be used here. Reach for it only when the key must land somewhere the agent controls (a GitHub Actions secret, a `.env`) with no server-side injection path — `use_credential` is the right tool for calling an API.
 - `edit_credential` changes only an existing credential's non-secret name,
   `allowed_hosts`, or `login_hosts`; `delete_credential` soft-deletes one. Each
   first returns a Telegram/passkey approval link bound to the operation, exact

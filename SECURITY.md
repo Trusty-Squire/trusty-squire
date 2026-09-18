@@ -54,6 +54,11 @@ reaching anybody else — starting with the agent that requested it — is not
 authority to release the value, and neither is a stranger's own entirely
 genuine passkey.
 
+The page the human reads names the requesting agent from the authenticated
+caller the API recorded, never from a caller-supplied header. The short reason
+quoted beside it is the agent's own words and stays outside the signed payload
+— weigh it as a claim, not as something the passkey attests to.
+
 Denial is deliberately open: `deny` takes no assertion, so anyone holding the
 approval id can refuse it. Refusing moves no value — it only closes the
 approval — so the conservative answer is the one any link-holder may give, and
