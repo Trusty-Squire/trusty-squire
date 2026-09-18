@@ -326,7 +326,6 @@ describe("TOOLS registry", () => {
       "operate_login",
       "operate_fill_credential",
       "operate_extract",
-      "operate_decide",
       "inject_card",
       "list_credentials",
       "list_payment_cards",
@@ -343,7 +342,7 @@ describe("TOOLS registry", () => {
       "store_credential",
       "use_credential",
     ];
-    expect(target).toHaveLength(21);
+    expect(target).toHaveLength(20);
     expect(TOOLS.map((tool) => tool.name).sort()).toEqual([...target, ...unchanged].sort());
     const assertNoKind = (schema: unknown): void => {
       if (typeof schema !== "object" || schema === null) return;
@@ -365,14 +364,14 @@ describe("TOOLS registry", () => {
       const tools = buildToolRegistry(
         disabled === undefined ? {} : { TRUSTY_SQUIRE_DIAGNOSTICS: disabled },
       );
-      expect(tools).toHaveLength(30);
+      expect(tools).toHaveLength(29);
       expect(tools.map((tool) => tool.name)).not.toEqual(
         expect.arrayContaining(["list_extract_failures", "get_extract_failure"]),
       );
     }
 
     const tools = buildToolRegistry({ TRUSTY_SQUIRE_DIAGNOSTICS: "1" });
-    expect(tools).toHaveLength(32);
+    expect(tools).toHaveLength(31);
     expect(tools.map((tool) => tool.name)).toEqual(
       expect.arrayContaining(["list_extract_failures", "get_extract_failure"]),
     );
@@ -442,7 +441,6 @@ describe("TOOLS registry", () => {
         "operate_login",
         "operate_fill_credential",
         "operate_extract",
-        "operate_decide",
       ].sort(),
     );
     expect(OperatorSurface.OPERATE_TOOLS.map((tool) => tool.name).sort()).toEqual(names);

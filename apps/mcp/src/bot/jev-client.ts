@@ -172,7 +172,7 @@ export async function askJev(
         `jev_unavailable: TypeSafe System One (Jev) returned HTTP ${statuses.join("/")}` +
           ` on ${statuses.length} attempt${statuses.length === 1 ? "" : "s"} over ${Date.now() - started}ms` +
           ` (${exhausted}, budget ${JEV_RETRY_BUDGET_MS}ms). NO decision was made.` +
-          ` Do not guess: retry operate_decide shortly, or decide from the observation yourself.`,
+          ` Do not guess: retry shortly, or decide from the observation yourself.`,
         statuses,
         attempt,
         Date.now() - started,
@@ -187,7 +187,7 @@ export async function askJev(
         `jev_unavailable: TypeSafe System One (Jev) returned HTTP ${statuses.join("/")}` +
           ` on ${statuses.length} attempt${statuses.length === 1 ? "" : "s"} over ${Date.now() - started}ms` +
           ` (retry budget exhausted, budget ${JEV_RETRY_BUDGET_MS}ms). NO decision was made.` +
-          ` Do not guess: retry operate_decide shortly, or decide from the observation yourself.`,
+          ` Do not guess: retry shortly, or decide from the observation yourself.`,
         statuses,
         attempt,
         Date.now() - started,
