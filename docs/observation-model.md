@@ -218,7 +218,9 @@ rerenders, navigation, partial fills, or cleared controls.
   general secret scanner and does not apply Luhn-wide masking.
 - **Agent-directed placement.** `inject_card` targets only `pan` and `cvv` refs;
   expiry, cardholder name, and billing are ordinary `operate_type`/
-  `operate_select` fills. After release the agent references the secrets as
+  `operate_select` fills using the values the inject_card result returns after
+  approval (`exp_month`, `exp_year`, `name`, and stored `billing` alongside
+  `last4`). After release the agent references the secrets as
   opaque per-digit tokens (`{{pan}}`, `{{cvv}}`, `{{pan:N}}`, `{{cvv:N}}`, see
   `card-secret-tokens.ts`) that it may place into ANY ref with any timing; the
   broker substitutes the real digits only at the keystroke boundary inside the

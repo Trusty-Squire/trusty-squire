@@ -14,7 +14,8 @@
  * tokens even exist for the agent.
  *
  * Expiry, cardholder name, and billing are NOT secret and are not tokenized;
- * the agent fills them with ordinary operate_type/operate_select values.
+ * after approval the inject_card result returns them so the agent can type
+ * them with ordinary operate_type/operate_select.
  */
 
 export const CARD_TOKEN_PAN = "{{pan}}";

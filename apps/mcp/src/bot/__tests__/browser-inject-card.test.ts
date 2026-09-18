@@ -124,6 +124,11 @@ describe("direct card injection and masked observation", () => {
         ).resolves.toMatchObject({
           status: "card_injected",
           approval_id: "approval_same_purchase",
+          last4: "1111",
+          exp_month: CARD.exp_month,
+          exp_year: CARD.exp_year,
+          name: CARD.name,
+          billing: CARD.billing,
           fields: { pan: { status: "filled" } },
         });
         expect(await isolated.page.locator('[name="number"]').inputValue()).toBe(CARD.pan);
@@ -382,9 +387,22 @@ describe("direct card injection and masked observation", () => {
             },
           }),
           {} as ApiClient,
-        )) as { fields: Record<string, { status: string }>; card_tokens: Record<string, unknown> };
+        )) as {
+          last4: string;
+          exp_month: string;
+          exp_year: string;
+          name: string;
+          billing: unknown;
+          fields: Record<string, { status: string }>;
+          card_tokens: Record<string, unknown>;
+        };
         expect(result).toMatchObject({
           status: "card_injected",
+          last4: "1111",
+          exp_month: CARD.exp_month,
+          exp_year: CARD.exp_year,
+          name: CARD.name,
+          billing: CARD.billing,
           fields: {
             pan: { status: "filled" },
             cvv: { status: "filled" },
@@ -401,6 +419,11 @@ describe("direct card injection and masked observation", () => {
         // The checkout total (123 JPY) legitimately contains the CVV digits,
         // so the no-leak check covers the secret-bearing parts of the result.
         const secretBearing = JSON.stringify({
+          last4: result.last4,
+          exp_month: result.exp_month,
+          exp_year: result.exp_year,
+          name: result.name,
+          billing: result.billing,
           fields: result.fields,
           card_tokens: result.card_tokens,
         });

@@ -186,7 +186,8 @@ agent calls inject_card with purchase terms, card_ref, and exact field refs
   -> operator verifies the signed release
   -> released PAN/CVV output mask is installed before the first write
   -> only the named same-origin or reachable cross-origin fields are filled
-  -> per-field browser outcomes and approval metadata return; PAN/CVV do not
+  -> per-field browser outcomes, approval metadata, last4, expiry, name, and
+     billing return; PAN/CVV do not
 agent re-observes and drives the checkout with generic browser actions
   -> partial fills can be retried under the same still-valid approval
   -> agent chooses currency, clicks place order, and waits
