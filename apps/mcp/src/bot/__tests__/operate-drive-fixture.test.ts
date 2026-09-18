@@ -231,6 +231,7 @@ describe("operate_drive real-browser fixture", () => {
         goal: "already running",
         facts: {},
         trajectory: [],
+        history: [],
         lastQuestion: null,
         lastActionKey: null,
         lastFingerprint: null,

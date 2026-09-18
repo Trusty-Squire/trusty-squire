@@ -1618,10 +1618,11 @@ export const operateDriveTool: Tool<z.infer<typeof driveSchema>> = {
     "address, city, state, zip, password, card_ref, merchant, amount_cents, currency, …); it never " +
     "invents a value. Optional max_steps (default 15) and max_seconds (default 45) bound this call; " +
     "a budget handoff is partial progress — call again on the same session to continue. " +
-    "Resume with answer (one option key from a previous handoff: a ref, done, or stuck) and/or added " +
+    "Resume with answer (one option key from a previous handoff: a readable action slug, done, or stuck) and/or added " +
     "facts; the loop continues from the current page. Returns a handoff, never a bare page: status, " +
     "the current compact observation with the same stable refs, trajectory, done/remaining, and " +
-    "step/time counters. Status complete means the goal is done; needs_value names a missing fact; " +
+    "step/time counters. Status complete means the goal is done; needs_value names the missing field's label; " +
+    "stuck means no listed element advances the goal; " +
     "low_confidence includes the question, options, and probabilities to answer; no_progress, budget, " +
     "jev_unavailable, and pending_approval (card approval URL) are resumable. Google sign-in, " +
     "verification-email read, captcha, and card release run inside the loop. Always operate_finish when done.",

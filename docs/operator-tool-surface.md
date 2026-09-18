@@ -32,9 +32,12 @@ with the goal and a `facts` bag (email, name, address, `card_ref`, …). Pass
 call. The loop observes, lets Jev pick the next control, gates on confidence,
 and acts through the same click/type/select/login/inbox/card primitives.
 It returns a handoff (never a bare page): status, the current compact
-observation with the same stable refs, trajectory, and done/remaining. Resume
-the same session with `answer` and/or added `facts`. Use the single-step
-primitives only for a handoff you are answering or a task that is not a goal.
+observation with the same stable refs, trajectory, and done/remaining.
+`needs_value` names the missing field's label; `stuck` means no listed
+element advances the goal. Resume the same session with `answer` (a
+readable action slug from the handoff options, `done`, or `stuck`) and/or
+added `facts`. Use the single-step primitives only for a handoff you are
+answering or a task that is not a goal.
 
 `operate_read_inbox` reads the session's signed-in Gmail inbox for a
 verification email in dedicated utility tabs that are closed when the read

@@ -14,6 +14,7 @@ import {
   actionCriteria,
   buildDriveQuestions,
   buildJevState,
+  driveCandidates,
   wireRowsFromObservation,
 } from "../operate-drive.js";
 import { finishProvisionSession, startHarnessProvisionSession } from "../provision-session.js";
@@ -78,14 +79,14 @@ describe.skipIf(!live)("operate_drive coverage-matrix replay", () => {
           ? {}
           : { accountId: process.env.TRUSTY_SQUIRE_ACCOUNT_ID }),
       });
-      const questions = buildDriveQuestions(rows, FACTS);
+      const questions = buildDriveQuestions(rows, FACTS, "fill the checkout contact and shipping fields");
       const state = buildJevState(
         "fill the checkout contact and shipping fields",
         Object.keys(FACTS),
         [],
         started.url,
-        started.stage,
-        rows,
+        started.semantic?.title,
+        driveCandidates(rows, false),
       );
       const outcome = await askJev(api, state, questions);
       const next = outcome.result.answers.next_action;
@@ -95,6 +96,7 @@ describe.skipIf(!live)("operate_drive coverage-matrix replay", () => {
       if ((next?.confidence ?? 0) >= DRIVE_CONFIDENCE_THRESHOLD) {
         expect(next?.choice).toBeDefined();
         expect(Object.keys(actionCriteria(rows))).toContain(next?.choice);
+        expect(String(next?.choice ?? "")).not.toMatch(/^@e:/);
         gatedCorrect.push(`next_action:${next?.choice}`);
       }
       if ((value?.confidence ?? 0) >= DRIVE_CONFIDENCE_THRESHOLD) {

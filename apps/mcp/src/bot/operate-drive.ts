@@ -80,9 +80,39 @@ const ROLE_LETTERS: Record<string, string> = {
   file: "f",
 };
 
+const ROLE_WORDS: Record<string, string> = {
+  b: "button",
+  button: "button",
+  l: "link",
+  link: "link",
+  t: "textbox",
+  textbox: "textbox",
+  s: "select",
+  select: "select",
+  c: "checkbox",
+  checkbox: "checkbox",
+  r: "radio",
+  radio: "radio",
+  tb: "tab",
+  tab: "tab",
+  m: "menuitem",
+  menuitem: "menuitem",
+  f: "file",
+  file: "file",
+};
+
+export interface DriveCandidate {
+  ref: string;
+  role: string;
+  slug: string;
+  description: string;
+  row: WireRow;
+}
+
 export type DriveStatus =
   | "complete"
   | "needs_value"
+  | "stuck"
   | "low_confidence"
   | "no_progress"
   | "budget"
@@ -151,6 +181,7 @@ export function emptyDriveState(goal: string, facts: Record<string, string>): Se
     goal,
     facts: { ...facts },
     trajectory: [],
+    history: [],
     lastQuestion: null,
     lastActionKey: null,
     lastFingerprint: null,
@@ -241,7 +272,18 @@ export function rowLabel(row: WireRow): string {
   const facts = row[2];
   if (facts === undefined || facts.length === 0) return row[0];
   const first = facts.split("|")[0] ?? row[0];
-  return first.startsWith("@") ? first : row[0];
+  if (first.includes("=")) return row[0];
+  return first.startsWith("@") ? first : first;
+}
+
+export function readableLabel(row: WireRow): string {
+  const labeled = rowLabel(row).replace(/^@/, "");
+  if (labeled.length === 0 || labeled.startsWith("@e:")) {
+    const field = rowField(row);
+    if (field !== undefined && field.length > 0 && field !== "payment") return field;
+    return "control";
+  }
+  return labeled;
 }
 
 export function rowField(row: WireRow): string | undefined {
@@ -258,12 +300,27 @@ export function isFillableRow(row: WireRow): boolean {
 
 export function isPaymentRow(row: WireRow): boolean {
   const facts = row[2] ?? "";
-  const label = rowLabel(row).toLowerCase();
+  const label = readableLabel(row).toLowerCase();
   return (
     facts.includes("f=payment") ||
+    facts.includes("a=payment") ||
     /card[- ]?number|\bpan\b|credit[- ]?card/.test(label) ||
     /cvv|cvc|cid|security[- ]?code/.test(label)
   );
+}
+
+export function isOffscreenRow(row: WireRow): boolean {
+  return (row[2] ?? "").includes("v=offscreen");
+}
+
+export function isDisabledRow(row: WireRow): boolean {
+  return /(?:^|\|)s=d(?:\||$)/.test(row[2] ?? "");
+}
+
+export function isCandidateRow(row: WireRow, includePayment: boolean): boolean {
+  if (isOffscreenRow(row) || isDisabledRow(row)) return false;
+  if (!includePayment && (isPaymentRow(row) || isCvvRow(row))) return false;
+  return true;
 }
 
 export function isCvvRow(row: WireRow): boolean {
@@ -306,8 +363,11 @@ function normalizeKey(value: string): string {
 export function fieldNameForRow(row: WireRow): string {
   const field = rowField(row);
   if (field !== undefined && field.length > 0 && field !== "payment") return field;
-  const label = rowLabel(row).replace(/^@/, "");
-  return label.length > 0 ? label : row[0];
+  return readableLabel(row);
+}
+
+export function fieldLabelForRow(row: WireRow): string {
+  return readableLabel(row);
 }
 
 export function matchingFactKeys(facts: Record<string, string>, row: WireRow): string[] {
@@ -322,9 +382,66 @@ export function matchingFactKeys(facts: Record<string, string>, row: WireRow): s
   return matched.length > 0 ? matched : [];
 }
 
+export function slugifyCriteriaKey(seed: string): string {
+  return (
+    "k" +
+    seed
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 40)
+  );
+}
+
+export function actionDescription(row: WireRow): string {
+  const label = readableLabel(row);
+  const role = ROLE_WORDS[row[1]] ?? "control";
+  if (isFillableRow(row)) {
+    if (row[1] === "s" || row[1] === "select") return `choose an option in the ${label} field`;
+    return `type into the ${label} field`;
+  }
+  if (row[1] === "c" || row[1] === "checkbox") return `toggle the checkbox labeled "${label}"`;
+  return `click the ${role} labeled "${label}"`;
+}
+
+export function driveCandidates(
+  rows: readonly WireRow[],
+  includePayment: boolean,
+): DriveCandidate[] {
+  const used = new Set<string>();
+  const candidates: DriveCandidate[] = [];
+  for (const row of rows) {
+    if (!isCandidateRow(row, includePayment)) continue;
+    const role = ROLE_LETTERS[row[1]] ?? row[1];
+    const seed = `${row[2] ?? readableLabel(row)}_${role}`;
+    let slug = slugifyCriteriaKey(seed);
+    let n = 2;
+    while (used.has(slug)) {
+      slug = slugifyCriteriaKey(`${seed}_${n}`);
+      n += 1;
+    }
+    used.add(slug);
+    candidates.push({
+      ref: row[0],
+      role,
+      slug,
+      description: actionDescription(row),
+      row,
+    });
+  }
+  return candidates;
+}
+
 export function compactRowsText(url: string, stage: string | undefined, rows: readonly WireRow[]): string {
   const header = stage === undefined ? url : `${url} stage=${stage}`;
   return `${header}\n${JSON.stringify(rows)}`;
+}
+
+export function nextActionInstructions(goal: string): string {
+  return (
+    `You are driving a browser to: ${goal}. Pick the single next action that advances it. ` +
+    "Pick done if it is already complete; pick stuck if no listed element advances it."
+  );
 }
 
 export function buildJevState(
@@ -332,31 +449,35 @@ export function buildJevState(
   factKeys: readonly string[],
   history: readonly string[],
   url: string,
-  stage: string | undefined,
-  rows: readonly WireRow[],
+  title: string | undefined,
+  candidates: readonly DriveCandidate[],
 ): string {
   const recent = history.slice(-DRIVE_HISTORY_CAP);
-  return [
-    `goal: ${goal}`,
-    `facts: ${factKeys.length === 0 ? "(none)" : factKeys.join(", ")}`,
-    "history:",
-    recent.length === 0 ? "(none)" : recent.join("\n"),
-    "observation:",
-    compactRowsText(url, stage, rows),
-  ].join("\n");
+  const titlePart = title === undefined || title.length === 0 ? "" : ` (title: ${title})`;
+  const facts = factKeys.length === 0 ? "(none)" : factKeys.join(", ");
+  const taken = recent.length === 0 ? "(none)" : recent.join(" -> ");
+  const elements =
+    candidates.length === 0
+      ? "(none)"
+      : candidates.map((candidate) => `- ${candidate.description}`).join("\n");
+  return (
+    `Page: ${url}${titlePart}. Goal: ${goal}. Facts available: ${facts}. ` +
+    `Actions already taken, in order: ${taken}. ` +
+    "If the last action did not change the page, do NOT repeat it. " +
+    `Visible interactive elements:\n${elements}`
+  );
 }
 
-export function actionCriteria(rows: readonly WireRow[]): Record<string, string> {
+export function actionCriteria(
+  rows: readonly WireRow[],
+  includePayment: boolean = false,
+): Record<string, string> {
   const criteria: Record<string, string> = {};
-  for (const row of rows) {
-    const label = rowLabel(row);
-    const field = rowField(row);
-    const fillable = isFillableRow(row) ? "fillable" : "clickable";
-    criteria[row[0]] = `${row[1]} ${label}${field !== undefined ? ` f=${field}` : ""} (${fillable})`;
+  for (const candidate of driveCandidates(rows, includePayment)) {
+    criteria[candidate.slug] = candidate.description;
   }
   criteria[DRIVE_FIXED_DONE] = "the goal is already complete; stop";
-  criteria[DRIVE_FIXED_STUCK] =
-    "cannot proceed: a required value is missing from facts, or the next step is unclear";
+  criteria[DRIVE_FIXED_STUCK] = "no listed element advances the goal; stop";
   return criteria;
 }
 
@@ -373,20 +494,22 @@ export function valueCriteria(facts: Record<string, string>, row?: WireRow): Rec
 export function buildDriveQuestions(
   rows: readonly WireRow[],
   facts: Record<string, string>,
+  goal: string,
+  includePayment: boolean = Boolean(facts.card_ref),
 ): Record<string, JevQuestion> {
   const questions: Record<string, JevQuestion> = {
     next_action: {
       type: "choice",
-      instructions:
-        "Which observed control advances the goal? Pick done if the goal is already complete. Pick stuck if a required value is not in facts or the page cannot be driven.",
-      criteria: actionCriteria(rows),
+      instructions: nextActionInstructions(goal),
+      criteria: actionCriteria(rows, includePayment),
     },
     goal_complete: {
       type: "noul",
       instructions: "Is the stated goal already complete on this page?",
     },
   };
-  if (Object.keys(facts).length > 0 && rows.some(isFillableRow)) {
+  const fillable = driveCandidates(rows, includePayment).some((candidate) => isFillableRow(candidate.row));
+  if (Object.keys(facts).length > 0 && fillable) {
     questions.value = {
       type: "choice",
       instructions:
@@ -413,7 +536,7 @@ export function gated(
 
 export type DriveDecision =
   | { kind: "complete"; confidence: number }
-  | { kind: "stuck"; field: string; confidence: number }
+  | { kind: "stuck"; confidence: number }
   | { kind: "no_progress" }
   | {
       kind: "low_confidence";
@@ -427,6 +550,13 @@ export type DriveDecision =
       confidence: number;
       special?: "oauth" | "inbox" | "card";
     };
+
+export function resolveActionChoice(
+  choice: string,
+  candidates: readonly DriveCandidate[],
+): DriveCandidate | undefined {
+  return candidates.find((candidate) => candidate.slug === choice || candidate.ref === choice);
+}
 
 function lowConfidenceQuestion(
   instructions: string,
@@ -450,42 +580,48 @@ export function decideAfterJev(input: {
   lastFingerprint: string | null;
   lastActionKey: string | null;
   fingerprint: string;
+  goal: string;
   cardRef?: string;
   threshold?: number;
 }): DriveDecision {
   const threshold = input.threshold ?? DRIVE_CONFIDENCE_THRESHOLD;
+  const includePayment = input.cardRef !== undefined;
+  const candidates = driveCandidates(input.rows, includePayment);
+  const criteria = actionCriteria(input.rows, includePayment);
+  const instructions = nextActionInstructions(input.goal);
   const complete = input.answers.goal_complete;
   if (gated(complete, threshold)) {
     return { kind: "complete", confidence: complete?.noul ?? 1 };
   }
   const next = input.answers.next_action;
-  const criteria = actionCriteria(input.rows);
-  if (!gated(next, threshold) || next?.choice === undefined || criteria[next.choice] === undefined) {
-    return lowConfidenceQuestion("Which observed control advances the goal?", criteria, next);
+  const resolved =
+    next?.choice === undefined ? undefined : resolveActionChoice(next.choice, candidates);
+  const knownChoice =
+    next?.choice !== undefined &&
+    (criteria[next.choice] !== undefined || resolved !== undefined);
+  if (!gated(next, threshold) || next?.choice === undefined || !knownChoice) {
+    return lowConfidenceQuestion(instructions, criteria, next);
   }
   const choice = next.choice;
   const confidence = confidenceOf(next);
   if (choice === DRIVE_FIXED_DONE) return { kind: "complete", confidence };
   if (choice === DRIVE_FIXED_STUCK) {
-    const fillable = input.rows.find(isFillableRow);
-    return {
-      kind: "stuck",
-      field: fillable === undefined ? "unknown" : fieldNameForRow(fillable),
-      confidence,
-    };
+    return { kind: "stuck", confidence };
   }
-  if (input.lastFingerprint === input.fingerprint && input.lastActionKey === choice) {
+  const candidate = resolved ?? resolveActionChoice(choice, candidates);
+  if (candidate === undefined) {
+    return lowConfidenceQuestion(instructions, criteria, next);
+  }
+  if (input.lastFingerprint === input.fingerprint && input.lastActionKey === candidate.ref) {
     return { kind: "no_progress" };
   }
-  const row = input.rows.find((candidate) => candidate[0] === choice);
-  if (row === undefined) {
-    return lowConfidenceQuestion("Which observed control advances the goal?", criteria, next);
-  }
+  const row = candidate.row;
+  const ref = candidate.ref;
   if (isFillableRow(row) && isOtpRow(row)) {
     return {
       kind: "act",
-      action: { kind: "type", target: choice, text: "" },
-      actionKey: choice,
+      action: { kind: "type", target: ref, text: "" },
+      actionKey: ref,
       confidence,
       special: "inbox",
     };
@@ -494,7 +630,7 @@ export function decideAfterJev(input: {
     const matched = matchingFactKeys(input.facts, row);
     const valueAnswer = input.answers.value;
     if (matched.length === 0) {
-      return { kind: "needs_value", field: fieldNameForRow(row) };
+      return { kind: "needs_value", field: fieldLabelForRow(row) };
     }
     if (valueAnswer !== undefined && !gated(valueAnswer, threshold)) {
       return lowConfidenceQuestion(
@@ -505,21 +641,21 @@ export function decideAfterJev(input: {
     }
     const valueKey = valueAnswer?.choice;
     if (valueKey === undefined || input.facts[valueKey] === undefined || !matched.includes(valueKey)) {
-      return { kind: "needs_value", field: fieldNameForRow(row) };
+      return { kind: "needs_value", field: fieldLabelForRow(row) };
     }
     const text = input.facts[valueKey]!;
     const action: ProvisionAction =
       row[1] === "s" || row[1] === "select"
-        ? { kind: "select", target: choice, text }
-        : { kind: "type", target: choice, text };
+        ? { kind: "select", target: ref, text }
+        : { kind: "type", target: ref, text };
     const special = isPaymentRow(row) && input.cardRef !== undefined ? "card" : undefined;
-    return { kind: "act", action, actionKey: choice, confidence, ...(special === undefined ? {} : { special }) };
+    return { kind: "act", action, actionKey: ref, confidence, ...(special === undefined ? {} : { special }) };
   }
   if (isPaymentRow(row) && input.cardRef !== undefined) {
     return {
       kind: "act",
-      action: { kind: "click", target: choice },
-      actionKey: choice,
+      action: { kind: "click", target: ref },
+      actionKey: ref,
       confidence,
       special: "card",
     };
@@ -527,16 +663,16 @@ export function decideAfterJev(input: {
   if (isGoogleAuthRow(row)) {
     return {
       kind: "act",
-      action: { kind: "oauth_login", target: choice, provider: "google" },
-      actionKey: choice,
+      action: { kind: "oauth_login", target: ref, provider: "google" },
+      actionKey: ref,
       confidence,
       special: "oauth",
     };
   }
   return {
     kind: "act",
-    action: { kind: "click", target: choice },
-    actionKey: choice,
+    action: { kind: "click", target: ref },
+    actionKey: ref,
     confidence,
   };
 }
@@ -618,8 +754,14 @@ function handoffObservation(observation: Observation, rows: WireRow[]): Observat
   };
 }
 
-function findRow(rows: readonly WireRow[], ref: string): WireRow | undefined {
-  return rows.find((row) => row[0] === ref || rowLabel(row) === ref);
+function findRow(rows: readonly WireRow[], refOrSlug: string): WireRow | undefined {
+  const byRef = rows.find((row) => row[0] === refOrSlug || rowLabel(row) === refOrSlug);
+  if (byRef !== undefined) return byRef;
+  for (const includePayment of [false, true]) {
+    const hit = driveCandidates(rows, includePayment).find((candidate) => candidate.slug === refOrSlug);
+    if (hit !== undefined) return hit.row;
+  }
+  return undefined;
 }
 
 function paymentFields(rows: readonly WireRow[]): { pan?: string; cvv?: string } {
@@ -692,16 +834,12 @@ function resumeAction(
   answer: string,
   rows: readonly WireRow[],
   facts: Record<string, string>,
+  goal: string,
   cardRef: string | undefined,
 ): DriveDecision {
   if (answer === DRIVE_FIXED_DONE) return { kind: "complete", confidence: 1 };
   if (answer === DRIVE_FIXED_STUCK) {
-    const fillable = rows.find(isFillableRow);
-    return {
-      kind: "stuck",
-      field: fillable === undefined ? "unknown" : fieldNameForRow(fillable),
-      confidence: 1,
-    };
+    return { kind: "stuck", confidence: 1 };
   }
   const row = findRow(rows, answer);
   if (row === undefined) {
@@ -709,7 +847,7 @@ function resumeAction(
       kind: "low_confidence",
       question: {
         question: "Resume answer is not a current option",
-        options: actionCriteria(rows),
+        options: actionCriteria(rows, cardRef !== undefined),
       },
     };
   }
@@ -727,6 +865,7 @@ function resumeAction(
     lastFingerprint: null,
     lastActionKey: null,
     fingerprint: "resume",
+    goal,
     ...(cardRef === undefined ? {} : { cardRef }),
   });
 }
@@ -871,13 +1010,21 @@ async function driveLoop(input: {
     if (decision.kind === "complete") {
       return finish("complete");
     }
-    if (decision.kind === "stuck" || decision.kind === "needs_value") {
-      const field = decision.kind === "stuck" ? decision.field : decision.field;
+    if (decision.kind === "stuck") {
       drive.lastQuestion = {
-        question: `Missing value for ${field}`,
-        options: Object.fromEntries(Object.keys(drive.facts).map((key) => [key, key])),
+        question: nextActionInstructions(drive.goal),
+        options: actionCriteria(rows, drive.facts.card_ref !== undefined),
       };
-      return finish("needs_value", { field, question: drive.lastQuestion });
+      return finish("stuck", { question: drive.lastQuestion });
+    }
+    if (decision.kind === "needs_value") {
+      drive.lastQuestion = {
+        question: `Missing value for ${decision.field}`,
+        options: Object.fromEntries(
+          Object.keys(drive.facts).map((key) => [key, `the provided ${key} value`]),
+        ),
+      };
+      return finish("needs_value", { field: decision.field, question: drive.lastQuestion });
     }
     if (decision.kind === "no_progress") {
       return finish("no_progress");
@@ -921,6 +1068,7 @@ async function driveLoop(input: {
         ...(observation?.stage === undefined ? {} : { stage: observation.stage }),
         ...(jevMs === undefined ? {} : { jev_ms: jevMs }),
       });
+      drive.history.push("inject card");
       if (!cardInjected(payment)) {
         const approvalUrl =
           typeof payment.approval_url === "string" ? payment.approval_url : undefined;
@@ -961,12 +1109,17 @@ async function driveLoop(input: {
         ...(observation.stage === undefined ? {} : { stage: observation.stage }),
         ...(jevMs === undefined ? {} : { jev_ms: jevMs }),
       });
+      drive.history.push(verification.code !== null ? "type verification code" : "open verification link");
       drive.lastFingerprint = observationFingerprint(observation.url, rows);
       drive.lastActionKey = decision.actionKey;
       return "continue";
     }
 
     observation = await actSafely(dependencies, sessionId, decision.action);
+    const historyLine = (() => {
+      const acted = findRow(rows, decision.actionKey);
+      return acted === undefined ? decision.action.kind : actionDescription(acted);
+    })();
     rows = mergeCompactTable(rows, observation);
     drive.trajectory.push({
       action: decision.action.kind,
@@ -976,6 +1129,7 @@ async function driveLoop(input: {
       ...(observation.stage === undefined ? {} : { stage: observation.stage }),
       ...(jevMs === undefined ? {} : { jev_ms: jevMs }),
     });
+    drive.history.push(historyLine);
     drive.lastFingerprint = observationFingerprint(observation.url, rows);
     drive.lastActionKey = decision.actionKey;
     return "continue";
@@ -983,7 +1137,7 @@ async function driveLoop(input: {
 
   if (args.answer !== undefined) {
     const resumed = await applyDecision(
-      resumeAction(args.answer, rows, drive.facts, drive.facts.card_ref),
+      resumeAction(args.answer, rows, drive.facts, drive.goal, drive.facts.card_ref),
     );
     if (resumed !== "continue") return resumed;
     steps += 1;
@@ -999,19 +1153,16 @@ async function driveLoop(input: {
         jevRetried: "askJev requires an active Trusty Squire session (vaulted typesafe credential)",
       });
     }
-    const questions = buildDriveQuestions(rows, drive.facts);
+    const includePayment = drive.facts.card_ref !== undefined;
+    const questions = buildDriveQuestions(rows, drive.facts, drive.goal, includePayment);
+    const candidates = driveCandidates(rows, includePayment);
     const state = buildJevState(
       drive.goal,
       Object.keys(drive.facts),
-      drive.trajectory.map(
-        (step) =>
-          `${step.action} ${step.target} conf=${step.confidence.toFixed(2)} -> ${step.url}${
-            step.stage === undefined ? "" : ` ${step.stage}`
-          }`,
-      ),
+      drive.history,
       observation.url,
-      observation.stage,
-      rows,
+      observation.semantic?.title,
+      candidates,
     );
     let jev: JevCallOutcome;
     try {
@@ -1030,6 +1181,7 @@ async function driveLoop(input: {
       lastFingerprint: drive.lastFingerprint,
       lastActionKey: drive.lastActionKey,
       fingerprint: observationFingerprint(observation.url, rows),
+      goal: drive.goal,
       ...(drive.facts.card_ref === undefined ? {} : { cardRef: drive.facts.card_ref }),
     });
     const applied = await applyDecision(decision, jev.elapsedMs);

@@ -151,6 +151,7 @@ export interface SessionDriveState {
   goal: string;
   facts: Record<string, string>;
   trajectory: DriveTrajectoryStep[];
+  history: string[];
   lastQuestion: DriveHandoffQuestion | null;
   lastActionKey: string | null;
   lastFingerprint: string | null;
