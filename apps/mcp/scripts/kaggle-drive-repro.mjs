@@ -12,7 +12,6 @@
  *   node scripts/kaggle-drive-repro.mjs > .kaggle-drive-out.log 2> .kaggle-drive-server.log &
  *   echo '{"name":"operate_start","args":{...}}' > .kaggle-drive-queue/001-start.json
  */
-/* eslint-disable no-console -- manual diagnostics printer */
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { existsSync, readFileSync, mkdirSync, readdirSync, rmSync } from "node:fs";
