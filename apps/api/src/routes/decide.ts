@@ -40,7 +40,11 @@ function tokenCount(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
 }
 
-function usageFromBody(payload: unknown): { model: string; input_tokens: number; output_tokens: number } {
+function usageFromBody(payload: unknown): {
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+} {
   if (typeof payload !== "object" || payload === null) {
     return { model: JEV_MODEL, input_tokens: 0, output_tokens: 0 };
   }
@@ -50,7 +54,9 @@ function usageFromBody(payload: unknown): { model: string; input_tokens: number;
   return {
     model: typeof model === "string" && model.length > 0 ? model : JEV_MODEL,
     input_tokens: tokenCount(usageObj === null ? undefined : Reflect.get(usageObj, "input_tokens")),
-    output_tokens: tokenCount(usageObj === null ? undefined : Reflect.get(usageObj, "output_tokens")),
+    output_tokens: tokenCount(
+      usageObj === null ? undefined : Reflect.get(usageObj, "output_tokens"),
+    ),
   };
 }
 
@@ -69,8 +75,7 @@ export const registerDecideRoute: FastifyPluginAsync<{
 }> = async (fastify, opts) => {
   const envMax = Number(process.env.VAULT_USE_MAX_RESPONSE_BYTES);
   const maxResponseBytes = Number.isFinite(envMax) && envMax > 0 ? envMax : 2 * 1024 * 1024;
-  const executor =
-    opts.proxyExecutor ?? new HttpProxyExecutor({ maxResponseBytes });
+  const executor = opts.proxyExecutor ?? new HttpProxyExecutor({ maxResponseBytes });
 
   fastify.post("/v1/decide", { preHandler: opts.requireAgent }, async (req, reply) => {
     const auth = req.auth!;

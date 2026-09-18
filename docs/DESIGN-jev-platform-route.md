@@ -1,6 +1,6 @@
 # DESIGN: Jev decisions as a platform call (no per-user TypeSafe key)
 
-**Status:** proposed 2026-09-18. Reviewed by /plan-eng-review the same day (report at the end).
+**Status:** implemented 2026-09-18, proposed and reviewed by /plan-eng-review the same day (report at the end).
 
 ## Problem
 
@@ -23,13 +23,14 @@ Jev becomes a platform call. The API holds one TypeSafe key as a Fly secret and 
 ### MCP: `jev-client.ts`
 
 - `askJev` calls `api.decide(state, questions)` (a new ApiClient method next to `useCredential`) instead of the vault path.
-- If the account has a `typesafe` credential in its vault, the client uses the existing `useCredential` path instead. Detection is one `listCredentials` call per session, cached on the session, the same way `captcha-solve.ts` detects the user's 2captcha key today.
+- If the account has a `typesafe` credential in its vault, the client uses the existing `useCredential` path instead. Detection is one `listCredentials` call, the same listing `captcha-solve.ts` uses to find the user's 2captcha key, cached per `ApiClient` for `JEV_BYOK_CACHE_TTL_MS` (60s). The cache is keyed on the `ApiClient` rather than the session because an `ApiClient` outlives a session (one per server process, one per broker client), so it expires on a TTL — otherwise a credential vaulted mid-run would never be seen, and one deleted mid-run would keep being called.
+- If the vault path answers 404 the credential is gone since detection: that is "no BYOK", not a failed decision, so the client drops the cached answer and serves the same call through the platform route.
 - Retry, backoff, budget, and error classes are unchanged.
 - The firstmate dispatch resolver is not part of this; it stays on its own key.
 
 ### Usage visibility
 
-`GET /v1/usage` (existing `getUsage`) gains a `decisions` block: `{ month_calls, month_input_tokens, month_output_tokens }` computed from the ledger. Nothing is billed; the number exists so pricing can be decided from real use.
+`GET /v1/usage` — the route behind the ApiClient's existing `getUsage`, which until now had none — answers a `decisions` block: `{ month_calls, month_input_tokens, month_output_tokens }` computed from the ledger. The mandate-era `monthly` / `daily` / `mandate_id` blocks are optional on the client type and are not served. Nothing is billed; the number exists so pricing can be decided from real use.
 
 ## Cost
 
@@ -52,11 +53,12 @@ TypeSafe's published price is $0.042 per million input tokens. The scout measure
 | Upstream hangs | the shared outbound fetch's timeout returns 504 `jev_timeout`; client treats as unavailable |
 | Ledger write fails | logged, response unaffected |
 | User has their own key | vault path, platform route never called |
+| Their key is deleted mid-run | the 404 drops the cached detection; that same call falls through to the platform route |
 
 ## Test plan
 
 - API: route requires agent auth and is not counted by the hourly limit; forwards body and returns upstream status/body verbatim (mocked upstream); size limits reject; upstream timeout returns 504; absent secret returns 503; ledger row written with token counts; usage block sums the month.
-- MCP: `askJev` calls `/v1/decide` by default, uses the vault path when a `typesafe` credential exists (detected once per session and cached), retries 503/529 through the route the same as before; existing jev-client tests keep passing with the transport swapped.
+- MCP: `askJev` calls `/v1/decide` by default, uses the vault path when a `typesafe` credential exists (detected once and cached for the TTL, re-detected after it), falls back to the platform route when that credential is deleted, retries 503/529 through the route the same as before; existing jev-client tests keep passing with the transport swapped.
 - Live: one real drive on the branch with no `typesafe` credential in the test account's vault completes decisions through the route; the ledger shows the rows.
 
 ## GSTACK REVIEW REPORT

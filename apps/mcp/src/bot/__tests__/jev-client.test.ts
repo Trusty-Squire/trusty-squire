@@ -64,7 +64,9 @@ function mockApi(opts: {
             credentials: (opts.credentials ?? []).map((c) => credentialSummary(c.service)),
           })),
     ),
-    decide: vi.fn(opts.decide ?? (() => Promise.resolve(jevOk({ answers: { pick: { choice: "@e:reveal" } } })))),
+    decide: vi.fn(
+      opts.decide ?? (() => Promise.resolve(jevOk({ answers: { pick: { choice: "@e:reveal" } } }))),
+    ),
     useCredential: vi.fn(
       opts.useCredential ??
         (() => Promise.resolve(vaultOk({ answers: { pick: { choice: "@e:reveal" } } }))),
@@ -281,25 +283,30 @@ describe("askJev retry on transient unavailability", () => {
     };
   }
 
-  it.each([503, 529])("retries HTTP %d through the route with exponential backoff and succeeds", async (status) => {
-    vi.useFakeTimers();
-    try {
-      let calls = 0;
-      const api = mockApi({
-        decide: () => {
-          calls++;
-          if (calls <= 2) return Promise.resolve(transient(status));
-          return Promise.resolve(jevOk({ answers: { pick: { choice: "@e:reveal", confidence: 0.9 } } }));
-        },
-      });
-      const outcome = await advanceUntilSettled(askJev(api, "state", QUESTIONS));
-      expect(calls).toBe(3);
-      expect(outcome).toMatchObject({ ok: true, value: { attempts: 3 } });
-      expect(api.useCredential).not.toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+  it.each([503, 529])(
+    "retries HTTP %d through the route with exponential backoff and succeeds",
+    async (status) => {
+      vi.useFakeTimers();
+      try {
+        let calls = 0;
+        const api = mockApi({
+          decide: () => {
+            calls++;
+            if (calls <= 2) return Promise.resolve(transient(status));
+            return Promise.resolve(
+              jevOk({ answers: { pick: { choice: "@e:reveal", confidence: 0.9 } } }),
+            );
+          },
+        });
+        const outcome = await advanceUntilSettled(askJev(api, "state", QUESTIONS));
+        expect(calls).toBe(3);
+        expect(outcome).toMatchObject({ ok: true, value: { attempts: 3 } });
+        expect(api.useCredential).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("fails honestly with NO decision when the retry budget is exhausted", async () => {
     vi.useFakeTimers();

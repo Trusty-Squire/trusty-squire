@@ -8,7 +8,13 @@ import { buildInMemoryDeps, type ApiDeps } from "../services/deps.js";
 import { InMemoryDecisionEventStore } from "../services/decision-events.js";
 import { buildServer } from "../server.js";
 import { HttpProxyExecutor, ProxyError } from "../services/http-proxy.js";
-import { CRITERIA_LIMIT, JEV_ENDPOINT, JEV_MODEL, QUESTION_LIMIT, STATE_LIMIT_BYTES } from "../routes/decide.js";
+import {
+  CRITERIA_LIMIT,
+  JEV_ENDPOINT,
+  JEV_MODEL,
+  QUESTION_LIMIT,
+  STATE_LIMIT_BYTES,
+} from "../routes/decide.js";
 
 const SESSION_SECRET = "dev-test-secret-do-not-use-anywhere-else";
 
