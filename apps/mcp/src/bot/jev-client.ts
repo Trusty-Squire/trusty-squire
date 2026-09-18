@@ -1,22 +1,15 @@
-// Jev — TypeSafe's System One decision model (api.typesafe.ai), called through
-// the vaulted `typesafe` credential. The raw key NEVER crosses to the agent:
-// the request goes out via `api.useCredential` and the vault substitutes
-// ${SECRET} server-side, exactly like every other proxied credential call.
+// Jev — TypeSafe's System One decision model (api.typesafe.ai).
 //
-// Measured request shapes (scout drive1-3, report ts-jev-navigation-latency):
-//   - Choice questions are {"type":"choice","instructions",criteria} where
-//     criteria maps option-key -> description. An `options` ARRAY 422s.
-//   - Noul (yes/no validation) questions are {"type":"noul","instructions"}.
-//   - Answers arrive as answers.<name>.choice / .confidence / .probabilities
-//     (choice) and answers.<name>.noul (noul).
-// Upstream 503 `model_unavailable` / 529 `system_overloaded` are transient
-// (measured 503 storms inside the launch window). They are retried with
-// bounded backoff under a stated budget; when the budget is exhausted the
-// caller gets an honest error naming what was retried — never a fallback
-// guess, because the whole value of the primitive is that its confidence
-// numbers are the model's, not ours.
+// Default transport is the platform route (`api.decide` → POST /v1/decide):
+// the API holds the TypeSafe key. A user who has stored their own `typesafe`
+// vault credential keeps the existing `useCredential` path (BYOK). Detection
+// is one `listCredentials` call per ApiClient, cached for JEV_BYOK_CACHE_TTL_MS
+// — an ApiClient outlives a session (one per server process, one per broker
+// client), so the cache has to expire or a credential vaulted mid-run is never
+// seen. The same listing captcha-solve.ts uses for a vaulted 2captcha key.
+// Retry and error classes are unchanged. See docs/DESIGN-jev-platform-route.md.
 
-import type { ApiClient } from "../api-client.js";
+import { ApiCallError, type ApiClient } from "../api-client.js";
 
 export const JEV_SERVICE = "typesafe";
 export const JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
@@ -112,8 +105,59 @@ function bodySnippet(body: string): string {
 
 export function isTransientJevStatus(status: number): boolean {
   // 503 model_unavailable, 529 system_overloaded (measured bodies:
-  // {"detail":{"error_type":..., "message":...}}).
+  // {"detail":{"error_type":..., "message":...}}). Platform 503
+  // jev_unconfigured takes the same path — an outage as far as the caller
+  // is concerned.
   return status === 503 || status === 529;
+}
+
+export const JEV_BYOK_CACHE_TTL_MS = 60_000;
+
+const typesafeByokCache = new WeakMap<ApiClient, { has: boolean; expiresAt: number }>();
+
+async function accountHasTypesafeCredential(api: ApiClient): Promise<boolean> {
+  const cached = typesafeByokCache.get(api);
+  if (cached !== undefined && Date.now() < cached.expiresAt) return cached.has;
+  try {
+    const { credentials } = await api.listCredentials();
+    const has = credentials.some((c) => (c.service ?? "").toLowerCase() === JEV_SERVICE);
+    typesafeByokCache.set(api, { has, expiresAt: Date.now() + JEV_BYOK_CACHE_TTL_MS });
+    return has;
+  } catch {
+    return false;
+  }
+}
+
+async function callJev(
+  api: ApiClient,
+  byok: boolean,
+  state: string,
+  questions: Record<string, JevQuestion>,
+): Promise<{ status: number; body: string }> {
+  if (byok) {
+    try {
+      const res = await api.useCredential({
+        service: JEV_SERVICE,
+        http: {
+          method: "POST",
+          url: JEV_ENDPOINT,
+          headers: {
+            authorization: "Bearer ${SECRET}",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ state, model: JEV_MODEL, questions }),
+        },
+      });
+      return { status: res.response.status, body: res.response.body };
+    } catch (err) {
+      // The credential was deleted since detection. That is "no BYOK", not a
+      // failed decision — drop the stale cache and serve this same call
+      // through the platform route.
+      if (!(err instanceof ApiCallError) || err.status !== 404) throw err;
+      typesafeByokCache.delete(api);
+    }
+  }
+  return api.decide(state, questions);
 }
 
 /**
@@ -127,36 +171,35 @@ export async function askJev(
   questions: Record<string, JevQuestion>,
   signal?: AbortSignal,
 ): Promise<JevCallOutcome> {
-  const body = JSON.stringify({ state, model: JEV_MODEL, questions });
+  const byok = await accountHasTypesafeCredential(api);
   const started = Date.now();
   const deadline = started + JEV_RETRY_BUDGET_MS;
   const statuses: number[] = [];
 
   for (let attempt = 1; ; attempt++) {
     if (signal?.aborted) throw signal.reason ?? new Error("operator_request_cancelled");
-    const res = await api.useCredential({
-      service: JEV_SERVICE,
-      http: {
-        method: "POST",
-        url: JEV_ENDPOINT,
-        headers: {
-          authorization: "Bearer ${SECRET}",
-          "content-type": "application/json",
-        },
-        body,
-      },
-    });
-    const { status } = res.response;
+    const { status, body } = await callJev(api, byok, state, questions);
     if (status === 200) {
       return {
-        result: parseJevResult(res.response.body),
+        result: parseJevResult(body),
         attempts: attempt,
         elapsedMs: Date.now() - started,
       };
     }
+    if (status === 504) {
+      throw new JevUnavailableError(
+        `jev_unavailable: TypeSafe System One (Jev) returned HTTP 504` +
+          ` on 1 attempt over ${Date.now() - started}ms` +
+          ` (jev_timeout). NO decision was made.` +
+          ` Do not guess: retry shortly, or decide from the observation yourself.`,
+        [504],
+        attempt,
+        Date.now() - started,
+      );
+    }
     if (!isTransientJevStatus(status)) {
       throw new JevRequestError(
-        `jev_request_failed: TypeSafe System One returned HTTP ${status}: ${bodySnippet(res.response.body)}`,
+        `jev_request_failed: TypeSafe System One returned HTTP ${status}: ${bodySnippet(body)}`,
         status,
       );
     }

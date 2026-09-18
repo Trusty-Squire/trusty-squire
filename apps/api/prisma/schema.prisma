@@ -511,6 +511,23 @@ model TelegramLinkToken {
   @@index([account_id])
 }
 
+// Platform Jev decisions. One row per POST /v1/decide forward to TypeSafe,
+// so per-account usage is visible before pricing exists. Shape mirrors
+// CaptchaEvent (append-only ledger, no FK). See docs/DESIGN-jev-platform-route.md.
+model DecisionEvent {
+  id              String   @id @default(cuid())
+  account_id      String   @db.VarChar(26)
+  occurred_at     DateTime @default(now())
+  model           String
+  input_tokens    Int
+  output_tokens   Int
+  upstream_status Int
+  latency_ms      Int
+  questions       Int
+
+  @@index([account_id, occurred_at])
+}
+
 // Egress grant — a standing, revocable token a deployed workload holds to
 // call a provider through the injecting proxy, so the raw vault credential
 // never leaves the server (v1a of Egress Grants; see docs/ARCHITECTURE.md).
