@@ -254,7 +254,6 @@ describe("characterization: registered operator tool surface", () => {
       "operate_login",
       "operate_fill_credential",
       "operate_extract",
-      "operate_decide",
     ]);
   });
 

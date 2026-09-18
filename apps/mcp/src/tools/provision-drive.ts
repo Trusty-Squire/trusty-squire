@@ -46,10 +46,6 @@ import {
   type ExtractResult,
 } from "../bot/provision-session.js";
 import { isMaskedDisplay } from "../bot/credential-shape.js";
-import { operateDecideTool } from "./operate-decide.js";
-// Re-exported so the operator tool surface module exposes every operate_*
-// definition (the tools.test.ts surface contract reads the module's exports).
-export { operateDecideTool };
 import { openSessionStorage } from "../session.js";
 import { servingAccountId } from "../session-guard.js";
 import { sessionForCall } from "../bot/session/lifecycle.js";
@@ -1603,8 +1599,6 @@ export const OPERATE_TOOLS: Tool[] = [
   operateLoginTool,
   operateFillCredentialTool,
   provisionExtractTool,
-  // Decision aid (read-only, never acts); appended after the action surface.
-  operateDecideTool,
 ] as Tool[];
 
 const captureOutputSchema = {

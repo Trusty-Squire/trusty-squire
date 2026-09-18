@@ -4,9 +4,8 @@ Trusty Squire’s operator surface is a set of flat, single-purpose MCP tools.
 Discover the installed server’s exact input and output schemas with `tools/list`;
 that registered schema is authoritative for a particular server version.
 
-The named operator surface contains 21 tools: the 17 tools in
-`OPERATE_TOOLS` (16 driving verbs plus the read-only `operate_decide`
-decision aid), excluding the separately exposed recipe tools, plus
+The named operator surface contains 20 tools: the 16 driving verbs in
+`OPERATE_TOOLS`, excluding the separately exposed recipe tools, plus
 `inject_card`, `list_credentials`, `list_payment_cards`, and
 `edit_payment_card`. Recipe tools and vault/account tools are separate
 surfaces.
@@ -19,7 +18,6 @@ surfaces.
 | Email verification read | `operate_read_inbox` |
 | Login | `operate_login` |
 | Vault-aware browser work | `operate_fill_credential`, `operate_extract` |
-| Fast typed decision (read-only) | `operate_decide` |
 | Payments and vault lists | `inject_card`, `list_credentials`, `list_payment_cards`, `edit_payment_card` |
 
 `operate_read_inbox` reads the session's signed-in Gmail inbox for a
@@ -43,16 +41,6 @@ per-digit tokens (`{{pan}}`, `{{cvv}}`, `{{pan:N}}`, `{{cvv:N}}`) into any
 textbox ref. `operate_screenshot` composites covers over only the
 injected controls and identified ordinary displayed copies that contain those
 two values. Payment approval and vault write-only boundaries remain separate.
-
-Use `operate_decide` when a decision would otherwise cost a full model turn:
-it asks the vaulted TypeSafe Jev (System One) model (~0.3s) which observed ref
-best advances a stated goal, to assign a value from caller-supplied options,
-or for a yes/no validation of the goal against the current page. It never acts
-— drive the returned ref with the ordinary verbs — and gates on the confidence
-value the model returns verbatim (no hidden threshold). Payment elements never
-enter the decision's candidate set, so a decision cannot route a payment, and
-transient upstream 503/529 unavailability is retried inside a stated budget,
-failing honestly with no decision on exhaustion.
 
 ## Pickers and popup return
 
