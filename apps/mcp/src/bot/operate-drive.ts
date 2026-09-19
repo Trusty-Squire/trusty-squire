@@ -527,8 +527,24 @@ export function isActedRow(row: WireRow): boolean {
   return (row[2] ?? "").includes("w=acted");
 }
 
+export function isPickerRow(row: WireRow): boolean {
+  if (!isFillableRow(row) || row[1] === "s" || row[1] === "select") return false;
+  if (/(?:^|\|)a=picker(?:\||$)/.test(row[2] ?? "")) return true;
+  const field = rowField(row);
+  if (field === "origin" || field === "destination" || field === "date" || field === "country") {
+    return true;
+  }
+  const label = normalizeKey(readableLabel(row));
+  if (label.includes("where_from") || label.includes("where_to")) return true;
+  return label.split("_").some((token) =>
+    ["date", "departure", "depart", "expiry", "expiration", "calendar", "origin", "destination"].includes(
+      token,
+    ),
+  );
+}
+
 export function isClickableRow(row: WireRow): boolean {
-  return CLICKABLE_ROLES.has(row[1]);
+  return CLICKABLE_ROLES.has(row[1]) || isPickerRow(row);
 }
 
 export function isSubmitLikeRow(row: WireRow): boolean {
@@ -621,9 +637,9 @@ const FIELD_ALIASES: Record<string, readonly string[]> = {
   password: ["password", "password_label"],
   otp: ["otp", "code", "verification_code", "pin"],
   query: ["query", "q", "search", "search_query", "keywords"],
-  origin: ["origin", "from", "departure", "where_from"],
+  origin: ["origin", "from", "where_from"],
   destination: ["destination", "to", "arrival", "where_to"],
-  date: ["date", "departure_date", "depart_date"],
+  date: ["date", "departure_date", "depart_date", "departure", "expiry", "expiration", "exp_date"],
 };
 
 function normalizeKey(value: string): string {
@@ -686,6 +702,13 @@ export function matchingFactKeys(facts: Record<string, string>, row: WireRow): s
   }
   if (label.includes("where_to") || label.includes("destination") || label.includes("going_to")) {
     for (const alias of aliasKeysFor("destination")) wanted.add(alias);
+  }
+  if (
+    label.split("_").some((token) =>
+      ["date", "departure", "depart", "expiry", "expiration", "calendar"].includes(token),
+    )
+  ) {
+    for (const alias of aliasKeysFor("date")) wanted.add(alias);
   }
   return keys.filter((key) => wanted.has(normalizeKey(key)));
 }
@@ -771,9 +794,14 @@ export function isSuggestionRow(row: WireRow, rows: readonly WireRow[] = []): bo
   return searchFieldLabel(rows) !== undefined;
 }
 
-export function actionDescription(row: WireRow, rows: readonly WireRow[] = []): string {
+export function actionDescription(
+  row: WireRow,
+  rows: readonly WireRow[] = [],
+  operation?: DriveOperation,
+): string {
   const label = readableLabel(row);
   const role = ROLE_WORDS[row[1]] ?? "control";
+  if (operation === "CLICK" && isPickerRow(row)) return `Open ${label}`;
   if (isFillableRow(row)) {
     if (row[1] === "s" || row[1] === "select") return `choose an option in the ${label} field`;
     return `type into the ${label} field`;
@@ -933,7 +961,12 @@ export function clickableCandidates(
   rows: readonly WireRow[],
   includePayment: boolean,
 ): DriveCandidate[] {
-  return driveCandidates(rows, includePayment).filter((candidate) => isClickableRow(candidate.row));
+  return driveCandidates(rows, includePayment)
+    .filter((candidate) => isClickableRow(candidate.row))
+    .map((candidate) => ({
+      ...candidate,
+      description: actionDescription(candidate.row, rows, "CLICK"),
+    }));
 }
 
 export function fillableCandidates(
@@ -1346,13 +1379,20 @@ export function driveTargetSets(
   return { operations, TYPE_TEXT: typeText, SELECT: select, CLICK: click, SCROLL: scroll };
 }
 
-function criteriaFromCandidates(candidates: readonly DriveCandidate[]): Record<string, string> {
+function criteriaFromCandidates(
+  candidates: readonly DriveCandidate[],
+  operation?: DriveOperation,
+): Record<string, string> {
   const criteria: Record<string, string> = {};
   for (const candidate of candidates) {
+    if (candidate.option !== undefined) {
+      criteria[candidate.slug] =
+        `${readableLabel(candidate.row)} → ${candidate.optionLabel ?? candidate.option}`;
+      continue;
+    }
+    const label = readableLabel(candidate.row);
     criteria[candidate.slug] =
-      candidate.option === undefined
-        ? readableLabel(candidate.row)
-        : `${readableLabel(candidate.row)} → ${candidate.optionLabel ?? candidate.option}`;
+      operation === "CLICK" && isPickerRow(candidate.row) ? `Open ${label}` : label;
   }
   return criteria;
 }
@@ -1380,7 +1420,7 @@ export function buildDriveQuestions(
     questions.CLICK_target = {
       type: "choice",
       instructions: "Which control should be clicked?",
-      criteria: criteriaFromCandidates(sets.CLICK),
+      criteria: criteriaFromCandidates(sets.CLICK, "CLICK"),
     };
   }
   if (sets.TYPE_TEXT.length > 0) {
@@ -2903,7 +2943,16 @@ async function driveLoop(input: {
 
     const historyLine = (() => {
       const acted = findRow(rows, decision.actionKey);
-      return acted === undefined ? decision.action.kind : actionDescription(acted);
+      if (acted === undefined) return decision.action.kind;
+      const operation =
+        decision.action.kind === "click"
+          ? "CLICK"
+          : decision.action.kind === "type"
+            ? "TYPE_TEXT"
+            : decision.action.kind === "select"
+              ? "SELECT"
+              : undefined;
+      return actionDescription(acted, rows, operation);
     })();
     const beforeEpoch =
       drive.lastDocumentEpoch ??
@@ -3125,15 +3174,19 @@ async function driveLoop(input: {
       pageOptions,
       sets,
     );
+    const stateSeenRefs = new Set<string>();
     const state = buildJevState(
       drive.goal,
       Object.keys(drive.facts),
       drive.history,
       observation.url,
       observation.semantic?.title,
-      [...sets.TYPE_TEXT, ...sets.SELECT, ...sets.CLICK].filter(
-        (candidate) => !isOffscreenRow(candidate.row),
-      ),
+      [...sets.TYPE_TEXT, ...sets.SELECT, ...sets.CLICK].filter((candidate) => {
+        if (isOffscreenRow(candidate.row)) return false;
+        if (stateSeenRefs.has(candidate.ref)) return false;
+        stateSeenRefs.add(candidate.ref);
+        return true;
+      }),
       pageTextFromObservation(observation),
     );
     const prepareMs = Date.now() - prepareStarted;

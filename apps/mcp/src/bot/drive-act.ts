@@ -100,8 +100,14 @@ function inPageGuard(input: {
   const combobox =
     element.getAttribute("role") === "combobox" ||
     element.getAttribute("role") === "searchbox" ||
+    element.getAttribute("aria-haspopup") !== null ||
     (element instanceof HTMLInputElement &&
-      (element.type === "search" || element.getAttribute("aria-autocomplete") !== null));
+      (element.type === "search" ||
+        element.type === "date" ||
+        element.type === "datetime-local" ||
+        element.type === "month" ||
+        element.readOnly ||
+        element.getAttribute("aria-autocomplete") !== null));
   const ariaLabel = element.getAttribute("aria-label") ?? "";
   const placeholder = element instanceof HTMLInputElement ? element.placeholder : "";
   const searchSubmit =
@@ -376,7 +382,7 @@ export async function settleDriveStep(page: Page, combobox: boolean): Promise<nu
           while (performance.now() - start < cap) {
             const options = Array.from(
               document.querySelectorAll(
-                '[role="option"],[role="listbox"] a,.suggestions a,.suggestion-link,.suggestions-dropdown a,[aria-selected]',
+                '[role="option"],[role="listbox"] a,[role="listbox"] [role="option"],.suggestions a,.suggestion-link,.suggestions-dropdown a,[aria-selected],[role="grid"] button,[role="grid"] [role="gridcell"],[role="gridcell"],[role="dialog"] [role="gridcell"],[role="dialog"] [role="grid"] button',
               ),
             ).filter(visibleSuggestion);
             if (options.length > 0) return;

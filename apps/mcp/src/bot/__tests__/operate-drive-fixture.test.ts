@@ -398,6 +398,73 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
+  it("keeps offscreen fields and drops ordinary offscreen buttons", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Picker viewport</title>
+<main style="min-height:4000px">
+  <label>Departure <input id="dep" aria-haspopup="dialog"></label>
+  <label>Company <input id="company" style="position:absolute;top:5000px"></label>
+  <button type="button" id="done">Done</button>
+  <div id="days">${Array.from(
+    { length: 40 },
+    (_, i) =>
+      `<button type="button" style="position:absolute;top:${3000 + i * 40}px">Day ${i + 1}</button>`,
+  ).join("")}</div>
+</main>`;
+    const { context, page, started } = await openFixture(html, "picker-viewport.test");
+    try {
+      const snap = await captureFrameSnapshot(page, [], 0);
+      expect(snap).not.toBeNull();
+      if (snap === null) return;
+      const labels = snap.elements.map((element) => element.label);
+      expect(labels.some((label) => label.includes("Departure"))).toBe(true);
+      expect(labels.some((label) => label.includes("Company"))).toBe(true);
+      expect(labels).toContain("Done");
+      expect(labels.filter((label) => /^Day \d+$/.test(label))).toEqual([]);
+      const company = snap.elements.find((element) => element.label.includes("Company"));
+      expect(company?.offscreen).toBe(true);
+      expect(company?.role).toBe("textbox");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("waits for date-grid cells after a click-open", async () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Date picker</title>
+<label>Departure <input id="dep" aria-haspopup="dialog" readonly></label>
+<div id="cal"></div>
+<script>
+  document.getElementById("dep").addEventListener("click", () => {
+    setTimeout(() => {
+      const grid = document.createElement("div");
+      grid.setAttribute("role", "grid");
+      const cell = document.createElement("button");
+      cell.setAttribute("role", "gridcell");
+      cell.textContent = "Sunday, September 20, 2026";
+      grid.appendChild(cell);
+      document.getElementById("cal").appendChild(grid);
+    }, 80);
+  });
+</script>`;
+    const { context, page, started } = await openFixture(html, "date-settle.test");
+    try {
+      const snap = await captureFrameSnapshot(page, [], 0);
+      const departure = snap?.elements.find((element) => element.label.includes("Departure"));
+      expect(departure).toBeDefined();
+      if (departure === undefined) return;
+      const acted = await driveActOnPage(page, { kind: "click", target: departure.ref });
+      expect(acted.kind).toBe("ok");
+      if (acted.kind !== "ok") return;
+      expect(acted.combobox).toBe(true);
+      const waited = await settleDriveStep(page, acted.combobox);
+      expect(waited).toBeGreaterThan(0);
+      expect(await page.locator('[role="gridcell"]').count()).toBe(1);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("returns a snapshot on a lazily-growing DOM instead of walking forever", async () => {
     // Exercise drive capture without first walking the growing DOM through
     // general observation during fixture setup.
