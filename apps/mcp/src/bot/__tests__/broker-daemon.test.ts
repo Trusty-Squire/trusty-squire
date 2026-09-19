@@ -110,3 +110,27 @@ it("a close that cannot drain leaves the identity cell serving", async () => {
   }
 
 });
+
+it("a close whose force-close cannot prove the tree died leaves the cell serving", async () => {
+  // The other exit that returns false. `closing` is the flag every later
+  // `acquire` reads as "identity cell is draining", and `resume()` — the only
+  // thing that clears it — refuses while an owner remains, so leaving it set
+  // here wedged the broker permanently: every session refused, the idle
+  // shutdown looping on the same failed close, and connect reporting a busy
+  // browser no session actually owned.
+  vi.stubEnv("BOT_CDP_ENDPOINT", "http://127.0.0.1:1");
+  try {
+    const runtime = new BrokerRuntime("fixture-account");
+    const internals = runtime as unknown as {
+      owner: { close: () => Promise<string>; forceCloseOwnedProcessTree: () => Promise<string> };
+    };
+    internals.owner = {
+      close: async () => "unknown",
+      forceCloseOwnedProcessTree: async () => "unknown",
+    };
+    await expect(runtime.close()).resolves.toBe(false);
+    await expect(runtime.acquire({})).rejects.toThrow("Broker requires a locally owned browser");
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});

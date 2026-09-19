@@ -478,7 +478,22 @@ async function connect(args: Argv): Promise<void> {
         ...(context.accountId !== undefined ? { accountId: context.accountId } : {}),
         agentIdentity: context.agentIdentity,
       },
-      async () =>
+      async () => {
+        // An install that is already connected needs no browser at all. Decide
+        // that BEFORE the broker drain and the exclusive profile guard, or a
+        // machine whose browser is busy with other work fails an install it
+        // never had to perform.
+        if (
+          await settleAlreadyConnected(
+            args,
+            target,
+            agent,
+            canonicalProfileDir,
+            context.accountId,
+            context.agentIdentity,
+          )
+        )
+          return;
         await withBrokerMaintenance(
           async () =>
             await withConnectProfileGuard(canonicalProfileDir, (profileDir) =>
@@ -492,11 +507,8 @@ async function connect(args: Argv): Promise<void> {
                 wantInteractive,
               ),
             ),
-          // The broker endpoint is derived from the profile path: maintenance
-          // must address the profile we are about to guard, not the launch-time
-          // default (they differ whenever the target records its own profile).
-          { profileDir: canonicalProfileDir },
-        ),
+        );
+      },
     );
   } catch (err) {
     if (err instanceof ProfileBusyError) {
@@ -618,6 +630,82 @@ export async function withConnectProfileGuard<T>(
   return await withProfileOperationGuard(canonicalProfileDir, () => operation(canonicalProfileDir));
 }
 
+/**
+ * Settle a connect that needs no login ceremony, using only reads: the stored
+ * session, the account-bound plumbing, and a cookie probe of the profile on
+ * disk. Returns true when the connect is finished.
+ *
+ * An existing install is "connected" only when BOTH the account-bound plumbing
+ * still works and the bot profile has a confirmed Google session. A bare
+ * machine/agent token can talk to Trusty Squire, but it cannot act as the user
+ * at third-party sites, so it must not skip the browser confirm. Pass
+ * --force-relogin to bypass (e.g. to switch Google).
+ *
+ * This runs OUTSIDE the broker maintenance window and the exclusive profile
+ * guard: only a connect that genuinely needs the ceremony may approach the
+ * browser exclusively.
+ */
+async function settleAlreadyConnected(
+  args: Argv,
+  target: AgentTarget,
+  agent: AgentDefinition,
+  profileDir: string,
+  accountId: string | undefined,
+  agentIdentity: string,
+): Promise<boolean> {
+  if (args.forceRelogin) return false;
+  const preflight = await checkAlreadyProvisioned(profileDir, accountId);
+  if (preflight.kind === "ceremony") return false;
+  ui.divider();
+  await hydrateArgsFromStoredPreferences(args, accountId);
+  await ensureConsentRecorded(consentFromArgs(args), args.advancedConfigured === true, accountId);
+  if (preflight.kind === "unverified") {
+    await writeAgentConfig(target, agent, args, preflight.session, {
+      profileDir,
+      agentIdentity,
+    });
+    await maybeStoreTwoCaptchaKey(args, preflight.session);
+    ui.warn(preflightUnverifiedMessage(preflight.detail));
+    ui.hint(
+      `Close any other Trusty Squire session and re-run ` +
+        `${ui.code("npx @trusty-squire/mcp connect --force-relogin")} to verify it.`,
+    );
+    return true;
+  }
+  // Backfill connected_providers from the bot-side marker on
+  // pre-rc.5 sessions, so the preflight cache is current.
+  for (const p of preflight.providers) await recordConnectedProvider(p, accountId);
+  // Connect session validation: we short-circuited because Google is
+  // valid + bound, but if the bot's GitHub session validated DEAD, proactively
+  // offer to reconnect it — a dead GitHub session is exactly why people re-run
+  // connect (GitHub-OAuth signups fail). Skippable; non-interactive notices.
+  // Saying yes falls THROUGH into the same ceremony rather than branching into
+  // a second sign-in command.
+  const reconnectGithub =
+    !preflight.providers.includes("github") && (await offerGithubReloginIfDead(args));
+  if (!reconnectGithub) {
+    await writeAgentConfig(target, agent, args, preflight.session, {
+      profileDir,
+      agentIdentity,
+    });
+    await maybeStoreTwoCaptchaKey(args, preflight.session);
+    ui.success(
+      `Already connected (${preflight.providers.join(" + ")}). ` +
+        `${agent.display_name} config refreshed.`,
+    );
+    printProviderState(preflight.providers);
+    ui.hint(
+      `Pass ${ui.code("--force-relogin")} to switch accounts or to refresh a ` +
+        `stale/expired session (this "connected" check reads cached cookies, ` +
+        `which can outlive the real session).`,
+    );
+    return true;
+  }
+  args.forceRelogin = true;
+  args.forceReloginProvider = "github";
+  return false;
+}
+
 async function connectWithProfileGuard(
   args: Argv,
   target: AgentTarget,
@@ -627,69 +715,6 @@ async function connectWithProfileGuard(
   agentIdentity: string,
   wantInteractive: boolean,
 ): Promise<void> {
-
-  // Preflight: an existing install is "connected" only when BOTH the
-  // account-bound plumbing still works and the bot profile has a confirmed
-  // Google session. A bare machine/agent token can talk to Trusty Squire, but
-  // it cannot act as the user at third-party sites, so it must not skip the
-  // browser confirm. Pass --force-relogin to bypass (e.g. to switch Google).
-  if (!args.forceRelogin) {
-    const preflight = await checkAlreadyProvisioned(profileDir, accountId);
-    if (preflight.kind !== "ceremony") {
-      ui.divider();
-      await hydrateArgsFromStoredPreferences(args, accountId);
-      await ensureConsentRecorded(
-        consentFromArgs(args),
-        args.advancedConfigured === true,
-        accountId,
-      );
-      if (preflight.kind === "unverified") {
-        await writeAgentConfig(target, agent, args, preflight.session, {
-          profileDir,
-          agentIdentity,
-        });
-        await maybeStoreTwoCaptchaKey(args, preflight.session);
-        ui.warn(preflightUnverifiedMessage(preflight.detail));
-        ui.hint(
-          `Close any other Trusty Squire session and re-run ` +
-            `${ui.code("npx @trusty-squire/mcp connect --force-relogin")} to verify it.`,
-        );
-        return;
-      }
-      // Backfill connected_providers from the bot-side marker on
-      // pre-rc.5 sessions, so the preflight cache is current.
-      for (const p of preflight.providers) await recordConnectedProvider(p, accountId);
-      // Connect session validation: we short-circuited because Google is
-      // valid + bound, but if the bot's GitHub session validated DEAD, proactively
-      // offer to reconnect it — a dead GitHub session is exactly why people re-run
-      // connect (GitHub-OAuth signups fail). Skippable; non-interactive notices.
-      // Saying yes falls THROUGH into the same ceremony below rather than
-      // branching into a second sign-in command.
-      const reconnectGithub =
-        !preflight.providers.includes("github") && (await offerGithubReloginIfDead(args));
-      if (!reconnectGithub) {
-        await writeAgentConfig(target, agent, args, preflight.session, {
-          profileDir,
-          agentIdentity,
-        });
-        await maybeStoreTwoCaptchaKey(args, preflight.session);
-        ui.success(
-          `Already connected (${preflight.providers.join(" + ")}). ` +
-            `${agent.display_name} config refreshed.`,
-        );
-        printProviderState(preflight.providers);
-        ui.hint(
-          `Pass ${ui.code("--force-relogin")} to switch accounts or to refresh a ` +
-            `stale/expired session (this "connected" check reads cached cookies, ` +
-            `which can outlive the real session).`,
-        );
-        return;
-      }
-      args.forceRelogin = true;
-      args.forceReloginProvider = "github";
-    }
-  }
-
   console.warn("");
   console.warn(
     "Opening the Trusty Squire install page in a browser. " +

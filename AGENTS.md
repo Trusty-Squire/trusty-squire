@@ -893,7 +893,15 @@ so no pairing code was ever minted and the sign-in page rendered `not_found`.
 One shared browser per profile is the design: `connect` attaches to the broker
 (`withBrokerMaintenance`), drains it, does the plain login, and releases on the
 lease boundary. It never starts a second instance and never takes the profile
-exclusively while a broker owns it. A `draining` answer is retried, not fatal.
+exclusively while a broker owns it.
+
+It also only goes there when it has to. The already-provisioned preflight runs
+BEFORE the maintenance handshake and the exclusive profile guard, so an
+already-connected install completes from reads alone — no drain, no login
+browser, no profile lease. Only a connect that genuinely needs the login
+ceremony (no session, expired/absent token, `--force-relogin`) may approach the
+browser exclusively, and for that one a `draining` answer is reported at once
+rather than waited on.
 
 Corollaries: a close that cannot drain must not leave
 `BrokerRuntime.closing` set (that refuses every later session while the blocking

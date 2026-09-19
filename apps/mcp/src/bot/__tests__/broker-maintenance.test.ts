@@ -7,6 +7,7 @@ vi.mock("../../session-guard.js", () => ({
   createSessionGuard: () => ({ bind: async () => ({ agent_session_token: "test" }) }),
 }));
 import { withBrokerMaintenance } from "../broker/maintenance.js";
+import { profilePathIdentity } from "../profile.js";
 import { BrokerClient, listenBroker } from "../broker/transport.js";
 
 describe("plain-login broker maintenance over the connect path", () => {
@@ -48,104 +49,53 @@ describe("plain-login broker maintenance over the connect path", () => {
     expect(events).toEqual(["connect:maintain", "plain-login", "close", "disconnect"]);
   });
 
-  it("waits out live sessions and opens the window once they end", async () => {
-    const root = await mkdtemp(join(tmpdir(), "ts-maint-busy-"));
-    const path = join(root, "b.sock");
-    const events: string[] = [];
-    let connects = 0;
-    const broker = await listenBroker(path, {
-      authenticate: async () => ({ accountId: "account", agentId: "connect" }),
-      connected: async () => {
-        // A browser another session still owns is never closed underneath it;
-        // the plain-login owner retries until those sessions end.
-        connects += 1;
-        return connects === 1 ? { maintenance: "draining" } : { maintenance: "ready" };
-      },
-      call: async (_principal, method) => {
-        events.push(method);
-        return { closed: true };
-      },
-      disconnect: async () => {
-        events.push("disconnect");
-      },
-    });
-    vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", path);
-    vi.stubEnv("TRUSTY_SQUIRE_MAINTENANCE_DRAIN_WAIT_MS", "5000");
-    try {
-      await expect(
-        withBrokerMaintenance(async () => {
-          events.push("plain-login");
-          return "plain-login";
-        }),
-      ).resolves.toBe("plain-login");
-    } finally {
-      vi.unstubAllEnvs();
-      await broker.close();
-      await rm(root, { recursive: true, force: true });
-    }
-    expect(connects).toBe(2);
-    // The draining connection is dropped without claiming the window; the
-    // retry is what opens it, and the lease boundary closes it.
-    expect(events).toContain("plain-login");
-    expect(events).toContain("close");
-  });
-
-  it("still waits out live sessions when the drain-wait variable is blank", async () => {
-    // Blanking an env var is how a shell profile or an MCP config env block
-    // neutralizes it. That must mean "unset" — coercing it to a zero deadline
-    // would make the first `draining` answer fatal again.
-    const root = await mkdtemp(join(tmpdir(), "ts-maint-blank-"));
-    const path = join(root, "b.sock");
-    let connects = 0;
-    const broker = await listenBroker(path, {
-      authenticate: async () => ({ accountId: "account", agentId: "connect" }),
-      connected: async () => {
-        connects += 1;
-        return connects === 1 ? { maintenance: "draining" } : { maintenance: "ready" };
-      },
-      call: async () => ({ closed: true }),
-      disconnect: async () => undefined,
-    });
-    vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", path);
-    vi.stubEnv("TRUSTY_SQUIRE_MAINTENANCE_DRAIN_WAIT_MS", "");
-    try {
-      await expect(withBrokerMaintenance(async () => "plain-login")).resolves.toBe("plain-login");
-    } finally {
-      vi.unstubAllEnvs();
-      await broker.close();
-      await rm(root, { recursive: true, force: true });
-    }
-    expect(connects).toBe(2);
-  });
-
-  it("reports the profile when live sessions never release the browser", async () => {
+  it("fails fast and names the profile whose browser is still owned", async () => {
+    // Only a connect that genuinely needs the login ceremony reaches here, so a
+    // busy browser is reported at once. The message must name the profile the
+    // caller actually addressed — naming the process default instead is the
+    // wrong-profile defect this whole path exists to fix, so the assertion is
+    // the exact interpolated path, not any path that happens to say "profile".
     const root = await mkdtemp(join(tmpdir(), "ts-maint-stuck-"));
     const path = join(root, "b.sock");
     const profile = join(root, "profile");
     await mkdir(profile, { recursive: true });
     let connects = 0;
+    let released = false;
     const broker = await listenBroker(path, {
       authenticate: async () => ({ accountId: "account", agentId: "connect" }),
       connected: async () => {
         connects += 1;
         return { maintenance: "draining" };
       },
-      call: async () => ({ closed: true }),
+      call: async () => {
+        released = true;
+        return { closed: true };
+      },
       disconnect: async () => undefined,
     });
     vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", path);
-    // The deadline is the retry bound; zero makes the first `draining` final.
-    vi.stubEnv("TRUSTY_SQUIRE_MAINTENANCE_DRAIN_WAIT_MS", "0");
+    vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profile);
+    let ran = false;
     try {
-      await expect(withBrokerMaintenance(async () => "plain-login")).rejects.toThrow(
-        /still using the shared browser for .*profile; finish it and retry/,
+      await expect(
+        withBrokerMaintenance(async () => {
+          ran = true;
+          return "plain-login";
+        }),
+      ).rejects.toThrow(
+        `A Trusty Squire session is still using the shared browser for ` +
+          `${profilePathIdentity(profile)}; finish it and retry. ` +
+          `No operator command was dispatched`,
       );
     } finally {
       vi.unstubAllEnvs();
       await broker.close();
       await rm(root, { recursive: true, force: true });
     }
+    // One attempt, no login, and the window was never claimed.
     expect(connects).toBe(1);
+    expect(ran).toBe(false);
+    expect(released).toBe(false);
   });
 });
 

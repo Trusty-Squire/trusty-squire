@@ -328,18 +328,22 @@ export class BrokerRuntime implements BrokerBrowserCustody {
   }
 
   async close(): Promise<boolean> {
-    // A close that cannot drain must not enter the closing state: `closing` is
-    // what every later `acquire` reads as "identity cell is draining", so
-    // leaving it set would wedge the broker for good — it would refuse every
-    // session while still holding the live ones that blocked the drain.
+    // `closing` is set only while a drain is actually in progress. It is what
+    // every later `acquire` reads as "identity cell is draining", so a close
+    // that returns false must leave it clear on EVERY such exit — live sessions
+    // below, and the force-close that could not prove the tree died. Otherwise
+    // the cell refuses every session forever: `resume()` is the only reset and
+    // it refuses while an owner remains, so nothing would ever clear it.
     if (this.pending > 0 || this.sessions.size > 0) return false;
     this.closing = true;
     if (
       this.owner !== undefined &&
       (await this.owner.close().catch(() => "unknown")) !== "closed"
     ) {
-      if ((await this.owner.forceCloseOwnedProcessTree().catch(() => "unknown")) !== "closed")
+      if ((await this.owner.forceCloseOwnedProcessTree().catch(() => "unknown")) !== "closed") {
+        this.closing = false;
         return false;
+      }
     }
     this.lease?.release();
     this.lease = undefined;

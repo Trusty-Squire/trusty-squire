@@ -11,6 +11,10 @@
 // is already using the browser", which is the exact symptom this whole path
 // exists to remove.
 //
+// Connect no longer waits on a busy browser, so the second connect below is
+// refused outright while the first owner's teardown runs; before the window was
+// held it was instead answered `ready` and raced that teardown for the profile.
+//
 // This drives the REAL daemon over a REAL unix socket. The only substitutions
 // are the enrolled-session source (whose disk read is what makes the teardown
 // await in production — here it is a gate the test opens deliberately) and the
@@ -78,7 +82,6 @@ it("keeps the maintenance window owned until the post-window teardown finishes",
   dirs.push(root);
   const socket = join(root, "b.sock");
   vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", socket);
-  vi.stubEnv("TRUSTY_SQUIRE_MAINTENANCE_DRAIN_WAIT_MS", "15000");
 
   const { runBrokerDaemon } = await import("../broker/daemon.js");
   const { withBrokerMaintenance } = await import("../broker/maintenance.js");
@@ -93,19 +96,26 @@ it("keeps the maintenance window owned until the post-window teardown finishes",
 
   harness.holdTeardown();
   const released = first.release();
+  await sleep(100);
 
   let secondRan = false;
-  const second = withBrokerMaintenance(async () => {
-    secondRan = true;
-    return "connected";
-  });
-
-  // Long enough for several of the client's 500 ms drain retries to be answered.
-  await sleep(1_600);
+  await expect(
+    withBrokerMaintenance(async () => {
+      secondRan = true;
+      return "connected";
+    }),
+  ).rejects.toThrow("Identity maintenance is already owned");
   expect(secondRan).toBe(false);
 
   harness.releaseTeardown();
   await released;
-  await expect(second).resolves.toBe("connected");
+
+  // Once the browser is actually back, the window is free again.
+  await expect(
+    withBrokerMaintenance(async () => {
+      secondRan = true;
+      return "connected";
+    }),
+  ).resolves.toBe("connected");
   expect(secondRan).toBe(true);
 }, 30_000);

@@ -21,6 +21,11 @@
 // in the exact on-disk format the lease machinery reads, and it speaks the
 // connect/close maintenance contract over a real unix socket. Nothing here
 // launches Chrome.
+//
+// A broker whose browser is still owned answers `draining` and connect reports
+// that at once: an already-connected install never gets here (it is settled
+// from reads before any broker work), so the only caller left is one that
+// genuinely needs the login ceremony, and it must not wait.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -175,7 +180,8 @@ async function profileLockPath(
  * `CHROME_PROFILE_DIR` still names the process default.
  */
 async function connectFixture(drainingReplies: number): Promise<{
-  result: string;
+  result: unknown;
+  profileIdentity: string;
   guardObservedFree: boolean;
   lockRestored: boolean;
 }> {
@@ -224,9 +230,14 @@ async function connectFixture(drainingReplies: number): Promise<{
     // ProfileBusyError the captain saw.
     guardObservedFree = !existsSync(lockPath);
     return await withProfileOperationGuard(targetProfile, async () => "connected");
-  });
+  }).catch((error: unknown) => error);
   await waitFor(() => existsSync(lockPath), 5_000).catch(() => undefined);
-  return { result, guardObservedFree, lockRestored: existsSync(lockPath) };
+  return {
+    result,
+    profileIdentity: profileModule.profilePathIdentity(targetProfile),
+    guardObservedFree,
+    lockRestored: existsSync(lockPath),
+  };
 }
 
 describe("connect attaches to the live broker for the profile it is connecting", () => {
@@ -239,10 +250,15 @@ describe("connect attaches to the live broker for the profile it is connecting",
     expect(outcome.lockRestored).toBe(true);
   });
 
-  it("waits out a broker whose browser is still owned, then connects", async () => {
-    const outcome = await connectFixture(2);
-    expect(outcome.result).toBe("connected");
-    expect(outcome.guardObservedFree).toBe(true);
+  it("reports the TARGET profile when that broker's browser is still owned", async () => {
+    // The refusal is the other half of the same seam: it proves the endpoint
+    // that answered belongs to the target profile, not the process default,
+    // because the fixture listening on it is the target's.
+    const outcome = await connectFixture(1);
+    expect(outcome.result).toBeInstanceOf(Error);
+    expect((outcome.result as Error).message).toContain(outcome.profileIdentity);
+    // Nothing ran and the broker kept custody: no drain, no guard, no relaunch.
+    expect(outcome.guardObservedFree).toBe(false);
     expect(outcome.lockRestored).toBe(true);
   });
 });

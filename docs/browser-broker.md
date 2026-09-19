@@ -57,11 +57,19 @@ its post-maintenance credential refresh only once a drain actually happened. The
 client then runs the existing separate plain Google login lifecycle with no CDP,
 and `close{}` (the lease boundary, formerly
 `client_close`) resumes the broker on the same account when the connection ends.
-A `draining` answer is not a failure: the plain-login owner drops that connection
-without claiming the window and retries (500 ms, bounded by
-`MAINTENANCE_DRAIN_WAIT_MS`, 120 s) until the live sessions end, then proceeds.
-Only a deadline that passes with sessions still running is an error, and it
-names the profile and the retry step.
+`draining` drops that connection without claiming the window and is reported at
+once, naming the profile and the retry step. Connect never waits on it: an
+install that is already connected is settled before any broker work (see below),
+so the only caller that reaches the handshake is one that genuinely needs the
+login ceremony, and telling that caller immediately beats stalling it.
+
+Connect approaches the browser only when it needs it. The already-provisioned
+preflight — stored session, account-bound plumbing, and a cookie read of the
+profile on disk — runs BEFORE the maintenance handshake and before the exclusive
+profile guard, so an install that is already connected completes with no drain,
+no login browser, and no profile lease. Ordering this the other way round is
+what failed an install on a machine whose browser was merely busy with other
+work.
 
 Attaching is the point, and the claim is what attaching buys. The plain login
 is deliberately a second, non-CDP Chrome on the SAME profile: Google's OAuth
