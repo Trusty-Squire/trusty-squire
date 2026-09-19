@@ -19,7 +19,6 @@ import {
   admitsChoice,
   isSuggestionRow,
   buildDriveQuestions,
-  buildFillQuestions,
   buildHandoff,
   buildJevState,
   clickableCandidates,
@@ -90,7 +89,11 @@ describe("operate_drive constants", () => {
 
 describe("request building", () => {
   it("asks operation plus scoped target heads, never a flat mix of fillables and clickables", () => {
-    const questions = buildDriveQuestions(ROWS, { email: "a@b.test", first_name: "Ada" }, "sign up");
+    const questions = buildDriveQuestions(
+      ROWS,
+      { email: "a@b.test", first_name: "Ada" },
+      "sign up",
+    );
     const operation = questions.operation;
     expect(operation?.type).toBe("choice");
     if (operation?.type !== "choice") return;
@@ -101,10 +104,17 @@ describe("request building", () => {
     expect(questions.goal_complete).toBeUndefined();
     expect(questions.next_action).toBeUndefined();
     expect(questions.SCROLL_target).toBeUndefined();
-    expect(Object.keys(questions).sort()).toEqual(["CLICK_target", "TYPE_TEXT_target", "operation"]);
+    expect(Object.keys(questions).sort()).toEqual([
+      "CLICK_target",
+      "TYPE_TEXT_target",
+      "operation",
+    ]);
     expect(questions.TYPE_TEXT_target?.type).toBe("choice");
     expect(questions.CLICK_target?.type).toBe("choice");
-    if (questions.TYPE_TEXT_target?.type !== "choice" || questions.CLICK_target?.type !== "choice") {
+    if (
+      questions.TYPE_TEXT_target?.type !== "choice" ||
+      questions.CLICK_target?.type !== "choice"
+    ) {
       return;
     }
     expect(Object.keys(questions.TYPE_TEXT_target.criteria)).toContain(slugFor(EMAIL));
@@ -148,7 +158,11 @@ describe("request building", () => {
 
   it("excludes offscreen, disabled, and payment rows except at the card step", () => {
     const mixed = [...ROWS, OFFSCREEN, DISABLED, PAYMENT];
-    expect(driveCandidates(mixed, false).map((c) => c.ref)).toEqual(["@e:email", "@e:name", "@e:go"]);
+    expect(driveCandidates(mixed, false).map((c) => c.ref)).toEqual([
+      "@e:email",
+      "@e:name",
+      "@e:go",
+    ]);
     expect(driveCandidates(mixed, true).map((c) => c.ref)).toContain("@e:pan");
   });
 
@@ -171,7 +185,9 @@ describe("request building", () => {
     );
     expect(withPage.SELECT_target?.type).toBe("choice");
     if (withPage.SELECT_target?.type !== "choice") return;
-    expect(Object.keys(withPage.SELECT_target.criteria).some((key) => key.includes("oregon"))).toBe(true);
+    expect(Object.keys(withPage.SELECT_target.criteria).some((key) => key.includes("oregon"))).toBe(
+      true,
+    );
   });
 
   it("omits empty target heads", () => {
@@ -194,10 +210,7 @@ describe("page text from observation", () => {
       }),
     ).toBe("Create account\nSign up\nConfirm you are human");
     expect(
-      pageTextFromObservation(
-        { semantic: { title: "HN" } },
-        ["first story", "control", ""],
-      ),
+      pageTextFromObservation({ semantic: { title: "HN" } }, ["first story", "control", ""]),
     ).toBe("HN\nfirst story");
     expect(
       pageTextFromObservation({
@@ -248,9 +261,9 @@ describe("confidence gate and validate_choice", () => {
   it("rejects a choice that is not offered, not argmax, or badly normalized", () => {
     const criteria = { CLICK: "click", DONE: "done" };
     expect(validateChoice(criteria, valid("CLICK", criteria))).toBe(true);
-    expect(validateChoice(criteria, { choice: "SCROLL", confidence: 0.9, probabilities: { CLICK: 1 } })).toBe(
-      false,
-    );
+    expect(
+      validateChoice(criteria, { choice: "SCROLL", confidence: 0.9, probabilities: { CLICK: 1 } }),
+    ).toBe(false);
     expect(
       validateChoice(criteria, {
         choice: "CLICK",
@@ -265,23 +278,35 @@ describe("confidence gate and validate_choice", () => {
         probabilities: { CLICK: 0.5, DONE: 0.4 },
       }),
     ).toBe(false);
-    expect(validateChoiceReason(criteria, { choice: "SCROLL", confidence: 0.9, probabilities: { CLICK: 1 } })).toBe(
-      "choice_not_offered",
-    );
+    expect(
+      validateChoiceReason(criteria, {
+        choice: "SCROLL",
+        confidence: 0.9,
+        probabilities: { CLICK: 1 },
+      }),
+    ).toBe("choice_not_offered");
     expect(
       admitsChoice(criteria, { choice: "SCROLL", confidence: 0.9, probabilities: { CLICK: 1 } }),
     ).toEqual({ kind: "invalid_answer", reason: "choice_not_offered", confidence: 0.9 });
     expect(
       admitsChoice(
         criteria,
-        { choice: "CLICK", confidence: 0.26, probabilities: peakedProbabilities(Object.keys(criteria), "CLICK", 0.91) },
+        {
+          choice: "CLICK",
+          confidence: 0.26,
+          probabilities: peakedProbabilities(Object.keys(criteria), "CLICK", 0.91),
+        },
         { reversible: true },
       ),
     ).toEqual({ ok: true });
     expect(
       admitsChoice(
         criteria,
-        { choice: "DONE", confidence: 0.2, probabilities: peakedProbabilities(Object.keys(criteria), "DONE", 0.91) },
+        {
+          choice: "DONE",
+          confidence: 0.2,
+          probabilities: peakedProbabilities(Object.keys(criteria), "DONE", 0.91),
+        },
         { hard: true },
       ),
     ).toEqual({ ok: true });
@@ -416,8 +441,12 @@ describe("decideAfterJev stop reasons", () => {
     const pay: WireRow = ["@e:pay", "b", "@pay-now|f=payment"];
     const paymentRows: WireRow[] = [pay];
     const paymentQuestions = buildDriveQuestions(paymentRows, { card_ref: "card-1" }, "pay", true);
-    const ops = paymentQuestions.operation?.type === "choice" ? paymentQuestions.operation.criteria : {};
-    const clicks = paymentQuestions.CLICK_target?.type === "choice" ? paymentQuestions.CLICK_target.criteria : {};
+    const ops =
+      paymentQuestions.operation?.type === "choice" ? paymentQuestions.operation.criteria : {};
+    const clicks =
+      paymentQuestions.CLICK_target?.type === "choice"
+        ? paymentQuestions.CLICK_target.criteria
+        : {};
     const paySlug = Object.keys(clicks)[0];
     expect(paySlug).toBeDefined();
     if (paySlug === undefined) return;
@@ -484,11 +513,14 @@ describe("decideAfterJev stop reasons", () => {
     const otp: WireRow = ["@e:code", "t", "@verification-code|f=otp"];
     const withOtp = [...ROWS, otp];
     const otpQuestions = buildDriveQuestions(withOtp, facts, "sign up");
-    const otpOp =
-      otpQuestions.operation?.type === "choice" ? otpQuestions.operation.criteria : {};
+    const otpOp = otpQuestions.operation?.type === "choice" ? otpQuestions.operation.criteria : {};
     const otpTargets =
-      otpQuestions.TYPE_TEXT_target?.type === "choice" ? otpQuestions.TYPE_TEXT_target.criteria : {};
-    const otpSlug = Object.keys(otpTargets).find((key) => otpTargets[key]?.includes("verification"));
+      otpQuestions.TYPE_TEXT_target?.type === "choice"
+        ? otpQuestions.TYPE_TEXT_target.criteria
+        : {};
+    const otpSlug = Object.keys(otpTargets).find((key) =>
+      otpTargets[key]?.includes("verification"),
+    );
     expect(otpSlug).toBeDefined();
     expect(
       decideAfterJev({
@@ -524,9 +556,12 @@ describe("decideAfterJev stop reasons", () => {
   it("emits a select action for a long option label, not a type", () => {
     const factsWithState = { ...facts, state: "California" };
     const questionsWithState = buildDriveQuestions([STATE, SUBMIT], factsWithState, "pick a state");
-    const operation = questionsWithState.operation?.type === "choice" ? questionsWithState.operation.criteria : {};
+    const operation =
+      questionsWithState.operation?.type === "choice" ? questionsWithState.operation.criteria : {};
     const selectCriteria =
-      questionsWithState.SELECT_target?.type === "choice" ? questionsWithState.SELECT_target.criteria : {};
+      questionsWithState.SELECT_target?.type === "choice"
+        ? questionsWithState.SELECT_target.criteria
+        : {};
     const optionKey = Object.keys(selectCriteria).find((key) => key.includes(":"));
     expect(optionKey).toBeDefined();
     const decision = decideAfterJev({
@@ -586,9 +621,11 @@ describe("form-fill assignment helpers", () => {
       description: "choose an option in the country field",
       row: ["@e:co", "s", "@country-region|s=r|f=region"],
     };
-    expect(fillActionForCandidate(address, { address: "1 Market St" }, "address", 1)).toMatchObject({
-      action: { kind: "select", target: "@e:addr", text: "1 Market St" },
-    });
+    expect(fillActionForCandidate(address, { address: "1 Market St" }, "address", 1)).toMatchObject(
+      {
+        action: { kind: "select", target: "@e:addr", text: "1 Market St" },
+      },
+    );
     expect(fillActionForCandidate(country, { country: "US" }, "country", 1)).toMatchObject({
       action: { kind: "select", target: "@e:co", text: "US" },
     });
@@ -611,12 +648,16 @@ describe("form-fill assignment helpers", () => {
   });
 
   it("treats a click as the last action for the email-check fallback", () => {
-    expect(lastActionWasClick([{ action: "click", target: "@e:go", confidence: 0.9, url: "https://x.test" }])).toBe(
-      true,
-    );
-    expect(lastActionWasClick([{ action: "type", target: "@e:email", confidence: 0.9, url: "https://x.test" }])).toBe(
-      false,
-    );
+    expect(
+      lastActionWasClick([
+        { action: "click", target: "@e:go", confidence: 0.9, url: "https://x.test" },
+      ]),
+    ).toBe(true);
+    expect(
+      lastActionWasClick([
+        { action: "type", target: "@e:email", confidence: 0.9, url: "https://x.test" },
+      ]),
+    ).toBe(false);
   });
 });
 
@@ -625,9 +666,7 @@ describe("handoff shape", () => {
     const handoff = buildHandoff({
       status: "budget",
       sessionId: "sess-1",
-      trajectory: [
-        { action: "click", target: "@e:go", confidence: 0.9, url: "https://x.test/a" },
-      ],
+      trajectory: [{ action: "click", target: "@e:go", confidence: 0.9, url: "https://x.test/a" }],
       goal: "sign up",
       steps: 15,
       seconds: 45,
@@ -710,7 +749,9 @@ describe("facts, fingerprint, compact merge", () => {
 
   it("matches last_name onto a last-name label even when f=name", () => {
     const last: WireRow = ["@e:ln", "t", "@last-name|f=name|s=r"];
-    expect(matchingFactKeys({ last_name: "Lovelace", first_name: "Ada" }, last)).toEqual(["last_name"]);
+    expect(matchingFactKeys({ last_name: "Lovelace", first_name: "Ada" }, last)).toEqual([
+      "last_name",
+    ]);
   });
 
   it("matches a query fact onto a search field", () => {
@@ -765,7 +806,11 @@ describe("facts, fingerprint, compact merge", () => {
   it("keeps acted markers and committed field state in the progress fingerprint", () => {
     const acted: WireRow = ["@e:state", "s", "@state|w=acted"];
     const before = observationFingerprint("https://x.test", [acted]);
-    const afterFill = observationFingerprint("https://x.test", [acted], ["filled:@e:state", "sel:state=California"]);
+    const afterFill = observationFingerprint(
+      "https://x.test",
+      [acted],
+      ["filled:@e:state", "sel:state=California"],
+    );
     expect(before).toContain("w=acted");
     expect(afterFill).not.toBe(before);
     expect(
@@ -786,8 +831,12 @@ describe("facts, fingerprint, compact merge", () => {
     expect(questions[DRIVE_VALUE_QUESTION]?.type).toBe("choice");
     expect(typeableCandidates([search], {}, false).map((c) => c.ref)).toEqual(["@e:q"]);
     const ops = questions.operation?.type === "choice" ? questions.operation.criteria : {};
-    const types = questions.TYPE_TEXT_target?.type === "choice" ? questions.TYPE_TEXT_target.criteria : {};
-    const values = questions[DRIVE_VALUE_QUESTION]?.type === "choice" ? questions[DRIVE_VALUE_QUESTION].criteria : {};
+    const types =
+      questions.TYPE_TEXT_target?.type === "choice" ? questions.TYPE_TEXT_target.criteria : {};
+    const values =
+      questions[DRIVE_VALUE_QUESTION]?.type === "choice"
+        ? questions[DRIVE_VALUE_QUESTION].criteria
+        : {};
     const searchSlug = Object.keys(types)[0];
     expect(searchSlug).toBeDefined();
     if (searchSlug === undefined) return;
@@ -834,11 +883,15 @@ describe("facts, fingerprint, compact merge", () => {
   it("offers a fillable search combobox for TYPE_TEXT and a click-only combobox for CLICK", () => {
     const search: WireRow = ["@e:q", "t", "@search-with-duck|f=search"];
     const trip: WireRow = ["@e:trip", "combobox", "@round-trip"];
-    expect(typeableCandidates([search], { query: "Zurich weather" }, false).map((c) => c.ref)).toEqual([
-      "@e:q",
-    ]);
+    expect(
+      typeableCandidates([search], { query: "Zurich weather" }, false).map((c) => c.ref),
+    ).toEqual(["@e:q"]);
     expect(clickableCandidates([trip], false).map((c) => c.ref)).toEqual(["@e:trip"]);
-    const questions = buildDriveQuestions([search, trip], { query: "Zurich weather" }, "Search DuckDuckGo");
+    const questions = buildDriveQuestions(
+      [search, trip],
+      { query: "Zurich weather" },
+      "Search DuckDuckGo",
+    );
     expect(questions.TYPE_TEXT_target?.type).toBe("choice");
     expect(questions.CLICK_target?.type).toBe("choice");
   });
@@ -849,12 +902,17 @@ describe("facts, fingerprint, compact merge", () => {
     const facts = { origin: "Zurich", destination: "London" };
     expect(matchingFactKeys(facts, from)).toEqual(["origin"]);
     expect(matchingFactKeys(facts, to)).toEqual(["destination"]);
-    expect(typeableCandidates([from, to], facts, false).map((c) => c.ref)).toEqual(["@e:from", "@e:to"]);
+    expect(typeableCandidates([from, to], facts, false).map((c) => c.ref)).toEqual([
+      "@e:from",
+      "@e:to",
+    ]);
   });
 
   it("assigns a page-supplied select option from a goal phrase without a matching fact", () => {
     const trip: WireRow = ["@e:trip", "s", "@trip-type"];
-    const pageOptions = new Map<string, readonly string[]>([["@e:trip", ["Round trip", "One way", "Multi-city"]]]);
+    const pageOptions = new Map<string, readonly string[]>([
+      ["@e:trip", ["Round trip", "One way", "Multi-city"]],
+    ]);
     const questions = buildDriveQuestions(
       [trip],
       {},
@@ -865,7 +923,8 @@ describe("facts, fingerprint, compact merge", () => {
       pageOptions,
     );
     const ops = questions.operation?.type === "choice" ? questions.operation.criteria : {};
-    const selects = questions.SELECT_target?.type === "choice" ? questions.SELECT_target.criteria : {};
+    const selects =
+      questions.SELECT_target?.type === "choice" ? questions.SELECT_target.criteria : {};
     const tripSlug = Object.keys(selects).find((key) => selects[key] === "trip-type");
     expect(tripSlug).toBeDefined();
     if (tripSlug === undefined) return;
@@ -896,7 +955,9 @@ describe("facts, fingerprint, compact merge", () => {
     const goal = "Sign up as Ada Lovelace using ada@example.test";
     const questions = buildDriveQuestions([email, SUBMIT], {}, goal);
     expect(questions[DRIVE_VALUE_QUESTION]).toBeUndefined();
-    expect(Object.values(goalValueCriteria(goal, {}))).toEqual(expect.arrayContaining(["Ada", "Lovelace"]));
+    expect(Object.values(goalValueCriteria(goal, {}))).toEqual(
+      expect.arrayContaining(["Ada", "Lovelace"]),
+    );
     expect(requiredFillableMissingFact([email, SUBMIT], {}, false)?.ref).toBe("@e:email");
   });
 
@@ -914,7 +975,9 @@ describe("facts, fingerprint, compact merge", () => {
 describe("operate_drive tool schema", () => {
   it("requires a goal and exactly one of session_id or url", () => {
     expect(operateDriveTool.name).toBe("operate_drive");
-    expect(operateDriveTool.inputSchema.parse({ url: "https://x.test/signup", goal: "sign up" })).toMatchObject({
+    expect(
+      operateDriveTool.inputSchema.parse({ url: "https://x.test/signup", goal: "sign up" }),
+    ).toMatchObject({
       url: "https://x.test/signup",
       goal: "sign up",
     });

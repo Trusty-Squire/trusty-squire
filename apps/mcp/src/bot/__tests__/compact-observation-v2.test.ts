@@ -881,7 +881,13 @@ describe("compact observation v2", () => {
           src: "https://www.google.com/recaptcha/api2/bframe?ar=1&k=SITEKEY",
         },
         ...(open
-          ? { contentDocument: el("bframe-doc", { nodeType: 9, nodeName: "#document", children: [] }) }
+          ? {
+              contentDocument: el("bframe-doc", {
+                nodeType: 9,
+                nodeName: "#document",
+                children: [],
+              }),
+            }
           : {}),
       });
     const responseTextarea = (token: string): BrowserUseNode =>
@@ -969,7 +975,9 @@ describe("compact observation v2", () => {
               children: [
                 el("verify-button", {
                   nodeName: "BUTTON",
-                  children: [el("verify-text", { nodeType: 3, nodeName: "#text", value: "Verify" })],
+                  children: [
+                    el("verify-text", { nodeType: 3, nodeName: "#text", value: "Verify" }),
+                  ],
                 }),
               ],
             }),
@@ -1544,11 +1552,7 @@ describe("compact observation v2", () => {
       }),
     ).toEqual({
       title: "Example storefront",
-      headings: [
-        "Create your account",
-        "4111111111111111",
-        "API key: abcdefghijklmnopqrstuvwxyz",
-      ],
+      headings: ["Create your account", "4111111111111111", "API key: abcdefghijklmnopqrstuvwxyz"],
     });
     expect(
       safePageSemanticsV2({ title: "4111111111111111", headings: ["API key: abcdef"] }),

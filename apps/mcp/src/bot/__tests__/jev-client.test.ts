@@ -85,7 +85,11 @@ const QUESTIONS = {
 
 describe("askJev request mapping", () => {
   it("serializes structured drive state once for platform while preserving BYOK objects", async () => {
-    const state = { goal: "fill form", history: [], elements: [{ ref: "@e:one", description: "Email", required: true }] };
+    const state = {
+      goal: "fill form",
+      history: [],
+      elements: [{ ref: "@e:one", description: "Email", required: true }],
+    };
     const platform = mockApi({});
     await askJev(platform, state, QUESTIONS);
     expect(vi.mocked(platform.decide).mock.calls[0]![0]).toBe(JSON.stringify(state));

@@ -291,22 +291,48 @@ describe("MCP broker forwarding over the Contract B wire", () => {
   });
 
   it("replays and finishes a refused drive-open without dispatching commands", async () => {
-    const observation = { session_id: "drive-refused", needs_user: { wall: "google_session", message: "Connect first", resume: "connect" } };
+    const observation = {
+      session_id: "drive-refused",
+      needs_user: { wall: "google_session", message: "Connect first", resume: "connect" },
+    };
     const seen: string[] = [];
-    await withBroker("ts-drive-wall-", async (method) => {
-      seen.push(method);
-      return { observation };
-    }, async (path) => {
-      const forwarder = new OperatorForwarder(path, guard);
-      try {
-        await expect(forwarder.invoke("operate_drive", { url: "https://signup.test", goal: "sign up" }, "drive-wall")).resolves.toMatchObject({ status: "needs_value", field: "google_session", observation, steps: 0 });
-        expect(forwarder.sessionCount()).toBe(0);
-        await expect(forwarder.invoke("operate_observe", { session_id: "drive-refused" }, "wall-observe")).resolves.toEqual(observation);
-        await expect(forwarder.invoke("operate_finish", { session_id: "drive-refused" }, "wall-finish")).resolves.toMatchObject({ closed: true, mutation: "not_dispatched", cleanup: "closed" });
-        expect(seen).toEqual(["open"]);
-        await expect(forwarder.invoke("operate_observe", { session_id: "drive-refused" }, "after-finish")).rejects.toMatchObject({ code: "stale_lease" });
-      } finally { await forwarder.close(); }
-    });
+    await withBroker(
+      "ts-drive-wall-",
+      async (method) => {
+        seen.push(method);
+        return { observation };
+      },
+      async (path) => {
+        const forwarder = new OperatorForwarder(path, guard);
+        try {
+          await expect(
+            forwarder.invoke(
+              "operate_drive",
+              { url: "https://signup.test", goal: "sign up" },
+              "drive-wall",
+            ),
+          ).resolves.toMatchObject({
+            status: "needs_value",
+            field: "google_session",
+            observation,
+            steps: 0,
+          });
+          expect(forwarder.sessionCount()).toBe(0);
+          await expect(
+            forwarder.invoke("operate_observe", { session_id: "drive-refused" }, "wall-observe"),
+          ).resolves.toEqual(observation);
+          await expect(
+            forwarder.invoke("operate_finish", { session_id: "drive-refused" }, "wall-finish"),
+          ).resolves.toMatchObject({ closed: true, mutation: "not_dispatched", cleanup: "closed" });
+          expect(seen).toEqual(["open"]);
+          await expect(
+            forwarder.invoke("operate_observe", { session_id: "drive-refused" }, "after-finish"),
+          ).rejects.toMatchObject({ code: "stale_lease" });
+        } finally {
+          await forwarder.close();
+        }
+      },
+    );
   });
 
   it("opens then commands when operate_drive is given a url instead of a session", async () => {

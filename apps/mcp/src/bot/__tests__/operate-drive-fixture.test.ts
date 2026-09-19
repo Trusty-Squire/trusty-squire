@@ -133,9 +133,7 @@ async function openFixture(html: string, host: string) {
   const context = await browser.newContext();
   const page = await context.newPage();
   const url = `https://${host}/`;
-  await page.route("**/*", (route) =>
-    route.fulfill({ contentType: "text/html", body: html }),
-  );
+  await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
   await page.goto(url);
   const started = await startHarnessProvisionSession({
     browser: BrowserController.fromHarnessPage(page),
@@ -199,7 +197,11 @@ describe("operate_drive real-browser fixture", () => {
       const email = snap.elements.find((element) => element.label.includes("Email"));
       expect(email).toBeDefined();
       if (email === undefined) return;
-      const typed = await driveActOnPage(page, { kind: "type", target: email.ref, text: "ada@fixture.test" });
+      const typed = await driveActOnPage(page, {
+        kind: "type",
+        target: email.ref,
+        text: "ada@fixture.test",
+      });
       expect(typed.kind).toBe("ok");
       await settleDriveStep(page, typed.kind === "ok" && typed.combobox);
       expect(await page.locator("#email").inputValue()).toBe("ada@fixture.test");

@@ -5,10 +5,7 @@ import {
   DriveEvaluateTimeout,
   evaluateBound,
 } from "../drive-evaluate.js";
-import {
-  attachOperatorRequestAbort,
-  withOperatorRequestContext,
-} from "../request-cancellation.js";
+import { attachOperatorRequestAbort, withOperatorRequestContext } from "../request-cancellation.js";
 
 function hungPage(evaluate: Page["evaluate"], send = vi.fn(async () => undefined)): Page {
   return {
