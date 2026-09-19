@@ -167,62 +167,23 @@ function selectAllInPage(input: { ref: string }): boolean {
   const root = window as Window & { __tsDriveRegistry?: DriveCache };
   const element = root.__tsDriveRegistry?.nodes.get(input.ref);
   if (element === undefined || !element.isConnected) return false;
-  // A picker click remounts the editable into an overlay (Flights
-  // "Where else?") while the snapshot ref stays connected as the chip.
-  // Refocusing that chip steals the overlay's focus and insertText never
-  // updates the query. Prefer the focused editable; fail closed if the
-  // original ref is gone so a detached target cannot type into a neighbor.
-  const active = element.ownerDocument.activeElement;
-  const target =
-    active instanceof HTMLInputElement ||
-    active instanceof HTMLTextAreaElement ||
-    (active instanceof HTMLElement && active.isContentEditable)
-      ? active
-      : element;
-  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
-    target.focus();
-    target.select();
+  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+    element.focus();
+    element.select();
     return true;
   }
-  if (target instanceof HTMLElement) {
-    target.focus();
-    const doc = target.ownerDocument;
+  if (element instanceof HTMLElement) {
+    element.focus();
+    const doc = element.ownerDocument;
     const selection = doc.getSelection();
     if (selection === null) return false;
     const range = doc.createRange();
-    range.selectNodeContents(target);
+    range.selectNodeContents(element);
     selection.removeAllRanges();
     selection.addRange(range);
     return true;
   }
   return false;
-}
-
-async function waitForOpenedOverlay(page: Page): Promise<void> {
-  await evaluateBound(
-    page,
-    async (cap) => {
-      const start = performance.now();
-      const visibleSuggestion = (node: Element): boolean => {
-        if (node.closest('[aria-hidden="true"],[inert]') !== null) return false;
-        if (typeof node.checkVisibility === "function") {
-          return node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
-        }
-        const style = getComputedStyle(node);
-        return style.display !== "none" && style.visibility !== "hidden";
-      };
-      while (performance.now() - start < cap) {
-        const options = Array.from(
-          document.querySelectorAll(
-            '[role="option"],[role="listbox"] a,[role="listbox"] [role="option"],.suggestions a,.suggestion-link,.suggestions-dropdown a,[aria-selected],[role="grid"] button,[role="grid"] [role="gridcell"],[role="gridcell"],[role="dialog"] [role="gridcell"],[role="dialog"] [role="grid"] button',
-          ),
-        ).filter(visibleSuggestion);
-        if (options.length > 0) return;
-        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      }
-    },
-    DRIVE_COMBOBOX_WAIT_MS,
-  );
 }
 
 export async function driveActOnPage(page: Page, action: ProvisionAction): Promise<DriveActResult> {
@@ -346,9 +307,6 @@ export async function driveActOnPage(page: Page, action: ProvisionAction): Promi
       button: "left",
       clickCount: 1,
     });
-    if (guard.combobox) {
-      await waitForOpenedOverlay(page).catch(() => undefined);
-    }
     const selected = await evaluateBound(frame, selectAllInPage, { ref: action.target }).catch(
       () => false,
     );
@@ -426,7 +384,32 @@ export async function settleDriveStep(page: Page, combobox: boolean): Promise<nu
       },
       DRIVE_SETTLE_MS,
     );
-    if (combobox) await waitForOpenedOverlay(page);
+    if (combobox) {
+      await evaluateBound(
+        page,
+        async (cap) => {
+          const start = performance.now();
+          const visibleSuggestion = (element: Element): boolean => {
+            if (element.closest('[aria-hidden="true"],[inert]') !== null) return false;
+            if (typeof element.checkVisibility === "function") {
+              return element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+            }
+            const style = getComputedStyle(element);
+            return style.display !== "none" && style.visibility !== "hidden";
+          };
+          while (performance.now() - start < cap) {
+            const options = Array.from(
+              document.querySelectorAll(
+                '[role="option"],[role="listbox"] a,[role="listbox"] [role="option"],.suggestions a,.suggestion-link,.suggestions-dropdown a,[aria-selected],[role="grid"] button,[role="grid"] [role="gridcell"],[role="gridcell"],[role="dialog"] [role="gridcell"],[role="dialog"] [role="grid"] button',
+              ),
+            ).filter(visibleSuggestion);
+            if (options.length > 0) return;
+            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+          }
+        },
+        DRIVE_COMBOBOX_WAIT_MS,
+      );
+    }
   } catch {
     return Date.now() - started;
   }

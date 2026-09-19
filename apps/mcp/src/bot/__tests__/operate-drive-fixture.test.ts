@@ -429,49 +429,6 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
-  it("types into the remounted overlay input a picker click focused", async () => {
-    const html = `<!doctype html><meta charset="utf-8"><title>Origin picker</title>
-<label>Where from? <input id="from" role="combobox" aria-haspopup="listbox" value="Philadelphia"></label>
-<div id="overlay"></div>
-<script>
-  document.getElementById("from").addEventListener("click", () => {
-    setTimeout(() => {
-      const input = document.createElement("input");
-      input.id = "else";
-      input.setAttribute("role", "combobox");
-      input.setAttribute("aria-label", "Where else?");
-      input.value = "Philadelphia";
-      const list = document.createElement("div");
-      list.setAttribute("role", "listbox");
-      const option = document.createElement("div");
-      option.setAttribute("role", "option");
-      option.textContent = "Philadelphia, Pennsylvania";
-      list.appendChild(option);
-      document.getElementById("overlay").replaceChildren(input, list);
-      input.focus();
-      input.select();
-    }, 80);
-  });
-</script>`;
-    const { context, page, started } = await openFixture(html, "picker-overlay-type.test");
-    try {
-      const snap = await captureFrameSnapshot(page, [], 0);
-      const from = snap?.elements.find((element) => element.label.includes("Where from?"));
-      expect(from).toBeDefined();
-      if (from === undefined) return;
-      const typed = await driveActOnPage(page, {
-        kind: "type",
-        target: from.ref,
-        text: "Zurich",
-      });
-      expect(typed.kind).toBe("ok");
-      expect(await page.locator("#else").inputValue()).toBe("Zurich");
-    } finally {
-      await finishProvisionSession(started.session_id);
-      await context.close();
-    }
-  }, 30_000);
-
   it("waits for date-grid cells after a click-open", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Date picker</title>
 <label>Departure <input id="dep" aria-haspopup="dialog" readonly></label>
