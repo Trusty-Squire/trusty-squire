@@ -41,6 +41,7 @@ import {
   pageTextFromObservation,
   peakedProbabilities,
   requiredFactComboboxAction,
+  requiredFactPickerOpen,
   requiredFillableMissingFact,
   selectTargetKey,
   selectTargets,
@@ -933,6 +934,17 @@ describe("facts, fingerprint, compact merge", () => {
     });
     expect(requiredFactComboboxAction([cabin], facts)).toBeUndefined();
     expect(requiredFactComboboxAction([trip], facts, ["@e:trip"])).toBeUndefined();
+  });
+
+  it("opens a valued fillable picker whose current value contradicts the fact", () => {
+    const from: WireRow = ["@e:from", "t", "Where from?|f=origin|a=picker|n=Philadelphia"];
+    const to: WireRow = ["@e:to", "t", "Where to?|f=destination|a=picker"];
+    const facts = { origin: "Zurich", destination: "London" };
+    expect(requiredFactPickerOpen([from, to], facts)).toBe("@e:from");
+    expect(requiredFactPickerOpen([to], facts)).toBeUndefined();
+    expect(requiredFactPickerOpen([from], facts, ["@e:from"])).toBeUndefined();
+    const filled: WireRow = ["@e:from", "t", "Where from?|f=origin|a=picker|n=Zurich"];
+    expect(requiredFactPickerOpen([filled], facts)).toBeUndefined();
   });
 
   it("assigns a page-supplied select option from a goal phrase without a matching fact", () => {

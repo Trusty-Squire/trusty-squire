@@ -1206,6 +1206,25 @@ export function requiredFactComboboxAction(
   return undefined;
 }
 
+export function requiredFactPickerOpen(
+  rows: readonly WireRow[],
+  facts: Record<string, string>,
+  filledRefs: readonly string[] = [],
+): string | undefined {
+  const filled = new Set(filledRefs);
+  for (const row of rows) {
+    if (!isPickerRow(row) || isDisabledRow(row) || isActedRow(row) || filled.has(row[0])) continue;
+    const key = matchingFactKeys(facts, row)[0];
+    if (key === undefined) continue;
+    const fact = facts[key];
+    if (fact === undefined || fact.length === 0) continue;
+    const current = rowCurrentValue(row);
+    if (current === undefined || current.length === 0 || factValuesMatch(current, fact)) continue;
+    return row[0];
+  }
+  return undefined;
+}
+
 export function requiredFillableMissingFact(
   rows: readonly WireRow[],
   facts: Record<string, string>,
@@ -3184,6 +3203,20 @@ async function driveLoop(input: {
       if (comboboxFill.fillsRef !== undefined && !drive.filledRefs.includes(comboboxFill.fillsRef)) {
         drive.filledRefs.push(comboboxFill.fillsRef);
       }
+      steps += 1;
+      continue;
+    }
+    const pickerOpen = requiredFactPickerOpen(rows, drive.facts, drive.filledRefs);
+    if (pickerOpen !== undefined) {
+      drive.boundFingerprint = progressFingerprint(observation.url, rows, drive, session);
+      drive.consumedActionKey = null;
+      const applied = await applyDecision({
+        kind: "act",
+        action: { kind: "click", target: pickerOpen },
+        actionKey: pickerOpen,
+        confidence: 1,
+      });
+      if (applied !== "continue") return applied;
       steps += 1;
       continue;
     }
