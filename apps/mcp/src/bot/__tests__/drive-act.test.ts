@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Page } from "playwright";
-import { pageFingerprintOf, waitForNavigationIdle } from "../drive-act.js";
+import { pageFingerprintOf, settleDriveStep, waitForNavigationIdle } from "../drive-act.js";
 import { attachOperatorRequestAbort, withOperatorRequestContext } from "../request-cancellation.js";
 
 describe("navigation content settle", () => {
@@ -79,5 +79,28 @@ describe("navigation content settle", () => {
       expect(controller.signal.aborted).toBe(false);
       expect(vi.getTimerCount()).toBe(0);
     });
+  });
+});
+
+describe("action settle", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("keeps the two-frame settle bounded while navigation replaces the page context", async () => {
+    vi.useFakeTimers();
+    const page = {
+      evaluate: async () => await new Promise(() => undefined),
+    } as unknown as Page;
+    let settled = false;
+    const waiting = settleDriveStep(page, false).then(() => {
+      settled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(49);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await waiting;
+    expect(settled).toBe(true);
   });
 });

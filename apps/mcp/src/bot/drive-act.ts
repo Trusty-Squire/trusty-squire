@@ -468,9 +468,8 @@ export async function driveActOnPage(page: Page, action: ProvisionAction): Promi
 export async function settleDriveStep(page: Page, combobox: boolean): Promise<number> {
   const started = Date.now();
   try {
-    await evaluateBound(
-      page,
-      async (wait) => {
+    const frames = page
+      .evaluate(async (wait) => {
         await Promise.race([
           new Promise<void>((resolve) => {
             requestAnimationFrame(() => {
@@ -481,9 +480,16 @@ export async function settleDriveStep(page: Page, combobox: boolean): Promise<nu
             setTimeout(resolve, wait);
           }),
         ]);
-      },
-      DRIVE_SETTLE_MS,
-    );
+      }, DRIVE_SETTLE_MS)
+      .catch(() => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      frames,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, DRIVE_SETTLE_MS);
+      }),
+    ]);
+    if (timer !== undefined) clearTimeout(timer);
     if (combobox) await waitForOpenedOverlay(page);
   } catch {
     return Date.now() - started;
