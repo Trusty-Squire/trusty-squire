@@ -59,6 +59,8 @@ import { createSessionGuard } from "../session-guard.js";
 import {
   connectOrLaunchBroker,
   isUnavailable,
+  isUnsupportedCeremonyOpen,
+  reclaimStaleCredentialBrokerIfPresent,
   resolveBrokerSocket,
 } from "./broker/discovery.js";
 import type { BrokerClient } from "./broker/transport.js";
@@ -989,10 +991,11 @@ export async function tryRunCeremonyInSharedBroker(
 ): Promise<LoginRunResult | null> {
   const session = await createSessionGuard().bind();
   if (session?.agent_session_token === undefined || session.account_id === undefined) return null;
+  const socket = resolveBrokerSocket(opts.profileDir);
   let client: BrokerClient;
   try {
     client = await connectOrLaunchBroker(
-      resolveBrokerSocket(opts.profileDir),
+      socket,
       session.agent_session_token,
       session.account_id,
     );
@@ -1007,7 +1010,7 @@ export async function tryRunCeremonyInSharedBroker(
   let sessionId: string | undefined;
   let stopExposure: (() => Promise<void>) | null | undefined;
   try {
-    const open = (await client.call("open", {
+    const openCeremony = async () => (await client.call("open", {
       serviceUrl: opts.url,
       adoptIdentity: true,
       // The ceremony IS what creates the live Google session: its start must
@@ -1015,6 +1018,20 @@ export async function tryRunCeremonyInSharedBroker(
       // with an empty profile deadlocks against a self-referential remedy.
       ceremony: true,
     })) as { sessionId?: string; observation?: unknown };
+    let open: Awaited<ReturnType<typeof openCeremony>>;
+    try {
+      open = await openCeremony();
+    } catch (error) {
+      if (!isUnsupportedCeremonyOpen(error)) throw error;
+      // This failed open created no tab. Drop our peer before reclaim so
+      // the existing attached-client refusal only sees other callers.
+      await client.close();
+      if (!(await reclaimStaleCredentialBrokerIfPresent(socket, session.account_id, error)))
+        throw error;
+      client = await connectOrLaunchBroker(socket, session.agent_session_token, session.account_id);
+      // Retry exactly once; another rejection propagates through cleanup.
+      open = await openCeremony();
+    }
     sessionId = open.sessionId;
     if (sessionId === undefined) {
       // The broker minted no live session AND no tab. Nothing in this run

@@ -127,6 +127,26 @@ function isInvalidBrokerCredential(error: unknown): boolean {
   );
 }
 
+/** Older Contract B brokers accept connect but reject ceremony open fields
+ * in their strict Zod schema. This is an upgrade signal, not an open retry
+ * for arbitrary execution failures. */
+export function isUnsupportedCeremonyOpen(error: unknown): boolean {
+  if (!(error instanceof BrokerRefusal) || error.code !== "broker_execution_failed") return false;
+  try {
+    const issues = JSON.parse(error.message) as {
+      code?: string;
+      keys?: string[];
+      path?: unknown[];
+    }[];
+    return Array.isArray(issues) && issues.some((issue) =>
+      issue.code === "unrecognized_keys" && issue.path?.length === 0 &&
+      issue.keys?.some((key) => key === "ceremony" || key === "adoptIdentity"),
+    );
+  } catch {
+    return false;
+  }
+}
+
 const sleep = async (ms: number): Promise<void> =>
   await new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -296,7 +316,11 @@ export async function reclaimPriorContractBrokerIfPresent(
   return true;
 }
 
-/** Reclaims a same-contract broker whose credential digest no longer matches
+/** Also serves ceremony opens rejected by an older strict schema, after the
+ * caller closes its connection. The same account/lease/attached-client reclaim
+ * contract applies to both upgrade causes.
+ *
+ * Reclaims a same-contract broker whose credential digest no longer matches
  * the current agent session token: Contract B's `connect` handshake is
  * accepted (the current-contract successor of `hello`) and the credential is
  * rejected, the process holds this profile's election lease with a live
@@ -322,7 +346,7 @@ export async function reclaimStaleCredentialBrokerIfPresent(
   // A prior-contract daemon never produces this exact refusal (it refuses
   // `connect` with "Authenticate before issuing commands"), so the legacy
   // reclaim path owns that case and cannot double-signal here.
-  if (!isInvalidBrokerCredential(connectError)) return false;
+  if (!isInvalidBrokerCredential(connectError) && !isUnsupportedCeremonyOpen(connectError)) return false;
   if (accountId === undefined) return false;
   const profileDir = profilePathIdentity(currentProfileDir());
   if ((await readBrokerAccountBinding(profileDir)) !== accountId) return false;

@@ -1,8 +1,9 @@
 import type * as ChildProcess from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
 import type * as BrokerTransport from "../broker/transport.js";
 import type * as DiscoveryModule from "../broker/discovery.js";
 import type * as ProfileModule from "../profile.js";
@@ -61,6 +62,17 @@ const sleep = async (ms: number) => await new Promise((resolve) => setTimeout(re
  *   authenticates `hello` with the token — a Contract B broker refuses
  *   `hello` instead. It dies on default SIGTERM exactly like the
  *   pre-wire-collapse daemon, unless told to ignore it. */
+// Execute the older strict open schemas to generate the actual wire error.
+const oldOpenErrors = Object.fromEntries(["ceremony", "adoptIdentity"].map((field) => {
+  const schema = z.object({
+    serviceUrl: z.string(),
+    ...(field === "ceremony" ? { adoptIdentity: z.boolean().optional() } : {}),
+  }).strict();
+  const result = schema.safeParse({ serviceUrl: "https://example.com", adoptIdentity: true, ceremony: true });
+  if (result.success) throw new Error("Old schema unexpectedly accepted ceremony");
+  return [field, result.error.message];
+}));
+
 const PRIOR_CONTRACT_DAEMON_SCRIPT = `
 const fs = require("node:fs");
 const net = require("node:net");
@@ -106,6 +118,15 @@ if (!mode.includes("no-listen")) {
         if (journalPath) fs.appendFileSync(journalPath, String(request.method) + "\\n");
         const reply = (payload) =>
           socket.write(JSON.stringify({ id: request.id, ...payload }) + "\\n");
+        if (mode.includes("schema-") && request.method === "open") {
+          const errors = ${JSON.stringify(oldOpenErrors)};
+          reply({ error: { code: "broker_execution_failed", message: errors[mode.includes("schema-ceremony") ? "ceremony" : "adoptIdentity"] } });
+          continue;
+        }
+        if (mode.includes("schema-") && request.method === "close") {
+          reply({ result: { closed: true } });
+          continue;
+        }
         const authedMethod = mode.includes("contract-b") ? "connect" : "hello";
         if (request.method !== authedMethod || typeof request.params?.token !== "string") {
           reply({
@@ -551,6 +572,89 @@ describe("same-contract stale-credential broker reclaim", () => {
       return { once: vi.fn(), unref: vi.fn() };
     });
   }
+
+  it.each([
+    { field: "ceremony", outcome: "completes" },
+    { field: "adoptIdentity", outcome: "completes" },
+    { field: "ceremony", outcome: "refuses attached clients" },
+    { field: "ceremony", outcome: "stops after one retry" },
+  ])(
+    "old broker rejecting $field: $outcome",
+    { timeout: 30_000 },
+    async ({ field, outcome }) => {
+      const { discovery, profileModule, transport } = await modules();
+      vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", socket);
+      lockPath = await electionLockPath(discovery, profileModule, profile);
+      const journal = join(root, "ceremony-wire.txt");
+      const fixture = spawnFixture(socket, lockPath, state.sessionToken, `contract-b schema-${field}`, journal);
+      await awaitFixtureReady(socket, lockPath, state.sessionToken, { listens: true, contract: "current" });
+      const freshCalls: { method: string; params: unknown }[] = [];
+      state.spawn.mockImplementation(() => {
+        election = profileModule.acquireProfileOperationGuard(profile, discovery.brokerElectionRoot(profile));
+        void sleep(10).then(async () => {
+          // Stand in for the replacement's visible browser process so the
+          // real display-discovery helper can let the ceremony complete.
+          const holder = realSpawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+            stdio: "ignore",
+            env: { ...process.env, DISPLAY: ":0", XAUTHORITY: join(root, "desktop-auth") },
+          });
+          children.push(holder);
+          await symlink(`${hostname()}-${holder.pid}`, join(profile, "SingletonLock"));
+          listener = await transport.listenBroker(socket, {
+            authenticate: async () => ({ accountId: ACCOUNT_ID, agentId: "agent" }),
+            connected: async () => undefined,
+            call: async (_identity, method, params) => {
+              freshCalls.push({ method, params });
+              if (method === "open" && outcome === "stops after one retry") {
+                const { BrokerRefusal } = await import("../broker/refusal.js");
+                throw new BrokerRefusal("broker_execution_failed", oldOpenErrors[field]!);
+              }
+              return method === "open" ? { sessionId: "fresh-tab" } : { closed: true };
+            },
+            disconnect: async () => undefined,
+          });
+        });
+        return { once: vi.fn(), unref: vi.fn() };
+      });
+      const { tryRunCeremonyInSharedBroker } = await import("../google-login.js");
+      const attached = outcome === "refuses attached clients"
+        ? await transport.BrokerClient.connect(socket, state.sessionToken)
+        : undefined;
+      const running = tryRunCeremonyInSharedBroker({
+        profileDir: profile,
+        url: "https://trustysquire.ai/install/confirm?install=fixture",
+        deadline: Date.now() + 10_000,
+        pollUntilDone: async () => true,
+        bannerLabel: "fixture",
+      });
+      if (attached !== undefined) {
+        try {
+          await expect(running).rejects.toMatchObject({ code: "broker_unavailable" });
+          await expect(running).rejects.toThrow(/attached client/);
+          expect(state.spawn).not.toHaveBeenCalled();
+          expect(fixture.signalCode).toBeNull();
+          expect(fixture.exitCode).toBeNull();
+        } finally {
+          await attached.close();
+        }
+        return;
+      }
+      if (outcome === "stops after one retry") {
+        await expect(running).rejects.toMatchObject({ code: "broker_execution_failed" });
+      } else {
+        await expect(running).resolves.toEqual({ status: "satisfied", closeState: "closed" });
+      }
+      expect(await awaitExit(fixture)).toBe("SIGTERM");
+      expect(state.spawn).toHaveBeenCalledOnce();
+      expect((await readFile(journal, "utf8")).split("\n").filter((method) => method === "open")).toHaveLength(1);
+      expect(freshCalls.filter(({ method }) => method === "open")).toEqual([{
+        method: "open",
+        params: { serviceUrl: "https://trustysquire.ai/install/confirm?install=fixture", adoptIdentity: true, ceremony: true },
+      }]);
+      if (outcome === "completes")
+        expect(freshCalls).toContainEqual({ method: "close", params: { sessionId: "fresh-tab" } });
+    },
+  );
 
   it(
     "reproduces the orphaning path: a resident same-contract broker whose digest lagged a re-enrollment is reclaimed and replaced",
