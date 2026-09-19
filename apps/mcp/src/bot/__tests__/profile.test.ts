@@ -14,6 +14,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   renameSync,
   rmSync,
@@ -32,6 +33,8 @@ import {
   closeProfileWithProof,
   currentProfileHolderPid,
   launchWithProfileGate,
+  profileBusyDetail,
+  profilePathIdentity,
   profileProcessIdentity,
   profileProcessGroupMarkerState,
   profileProcessIdentityState,
@@ -702,5 +705,56 @@ describe("owner reaper group proof", () => {
         profileState: () => "matching",
       }),
     ).toBe("matching");
+  });
+});
+
+// `profileBusyDetail` is the only diagnostic the captain sees behind "another
+// Trusty Squire session is already using the browser". Everything it prints has
+// to be something a person can act on: the owning process and the step that
+// clears it. A process start time is an internal identity token — raw
+// /proc/<pid>/stat jiffies on Linux, a platform-prefixed string elsewhere — and
+// leaking it into that message told him "started 8834521", which names nothing
+// and suggests no action.
+describe("profileBusyDetail", () => {
+  let dir: string;
+  let lockRoot: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ts-profile-busy-"));
+    lockRoot = mkdtempSync(join(tmpdir(), "ts-profile-busy-locks-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(lockRoot, { recursive: true, force: true });
+  });
+
+  it("names the owning session and the action, and nothing else", () => {
+    const profile = profilePathIdentity(dir);
+    const lease = acquireProfileOperationGuard(profile, lockRoot);
+    try {
+      expect(profileBusyDetail(profile, lockRoot)).toBe(
+        `Trusty Squire session pid ${process.pid} holds ${profile}. ` +
+          `Finish that session, or stop pid ${process.pid} if it is wedged, then retry.`,
+      );
+    } finally {
+      lease.release();
+    }
+  });
+
+  it("never renders the owner's raw start-time identity token", () => {
+    if (process.platform !== "linux") return;
+    const stat = readFileSync(`/proc/${process.pid}/stat`, "utf8");
+    const startTime = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+    expect(startTime).toMatch(/^\d+$/);
+    const profile = profilePathIdentity(dir);
+    const lease = acquireProfileOperationGuard(profile, lockRoot);
+    try {
+      expect(profileBusyDetail(profile, lockRoot)).not.toContain(startTime);
+    } finally {
+      lease.release();
+    }
+  });
+
+  it("reports nothing when no live process owns the profile", () => {
+    expect(profileBusyDetail(profilePathIdentity(dir), lockRoot)).toBeNull();
   });
 });

@@ -63,6 +63,16 @@ without claiming the window and retries (500 ms, bounded by
 Only a deadline that passes with sessions still running is an error, and it
 names the profile and the retry step.
 
+Attaching is the point, and the claim is what attaching buys. The plain login
+is deliberately a second, non-CDP Chrome on the SAME profile: Google's OAuth
+secure-browser check rejects a CDP-attached browser, so the sign-in ceremony
+cannot be driven through the broker's own browser. `connect` therefore attaches
+to the broker, takes the maintenance window for that profile, drains it, and
+runs the login under that claim — it never competes with the broker for the
+profile and never opens a second instance beside a live one. Do not convert
+`connect` into driving the broker's CDP browser; the claim, not the process
+identity, is what "reuse the browser" means here.
+
 The window stays owned for the whole of the teardown that follows it — the
 credential refresh, the runtime resume, and the re-taken profile lease — not
 just until `close{}` arrives. A concurrent maintain connect is answered

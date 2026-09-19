@@ -809,6 +809,10 @@ export function currentProfileHolderPid(profileDir: string = CHROME_PROFILE_DIR)
  * the actual gate a later launch collides with, and it names the owner even
  * when the owner has not started Chrome yet. Returns null when nothing on this
  * host provably owns the profile.
+ *
+ * Only what a person can act on goes in here. A process start time is an
+ * internal identity token (raw /proc jiffies on Linux, a platform-prefixed
+ * string elsewhere) and is never rendered at the user.
  */
 export function profileBusyDetail(
   profileDir: string = CHROME_PROFILE_DIR,
@@ -824,10 +828,8 @@ export function profileBusyDetail(
   const pid = leaseOwner ?? chromeHolder;
   if (pid === null) return null;
   const role = leaseOwner !== null ? "Trusty Squire session" : "Chrome";
-  const started = readProcessStartTime(pid);
-  const startTime = started.state === "present" ? `, started ${started.startTime}` : "";
   return (
-    `${role} pid ${pid}${startTime} holds ${profile}. ` +
+    `${role} pid ${pid} holds ${profile}. ` +
     `Finish that session, or stop pid ${pid} if it is wedged, then retry.`
   );
 }
