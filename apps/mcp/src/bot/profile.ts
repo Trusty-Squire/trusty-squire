@@ -715,7 +715,7 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
-interface LockHolder {
+export interface LockHolder {
   host: string;
   pid: number;
   // True when the holder is a dead pid on THIS host — i.e. reclaimable.
@@ -724,8 +724,9 @@ interface LockHolder {
 }
 
 // Read + parse Chrome's SingletonLock symlink ("<host>-<pid>"). null when
-// there is no lock (the profile is free) or the link is malformed.
-function readLockHolder(profileDir: string): LockHolder | null {
+// there is no lock (the profile is free) or the link is malformed. A pure
+// read: it never removes a lock, sweeps an owner, or signals a process.
+export function readLockHolder(profileDir: string): LockHolder | null {
   const lockPath = join(profileDir, "SingletonLock");
   let target: string;
   try {

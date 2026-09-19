@@ -581,10 +581,13 @@ behavior change, not a test to update.
 
 ### Browser busy façade (`@trusty-squire/mcp/browser`)
 
-`openTab` / `browserBusy` / `BrowserBusy` in [`apps/mcp/src/browser.ts`](apps/mcp/src/browser.ts)
-fold the four busy layers into one typed answer. Import from `@trusty-squire/mcp/browser`.
-The refusal-code mapping and the "do not reason about the wrong layer" contract
-live in [`docs/browser-broker.md`](docs/browser-broker.md#busy-facade).
+`openTab` / `browserBusy` / `BrowserBusy` in
+[`apps/mcp/src/browser-busy.ts`](apps/mcp/src/browser-busy.ts) fold the busy layers
+into one typed answer. Import from `@trusty-squire/mcp/browser`. `openTab` is a
+broker client (connect / open / command / close) reachable from any process;
+`browserBusy` is a strictly read-only probe. The refusal-code mapping, the
+read-only contract, and the "a running tab family is not busy" rule live in
+[`docs/browser-broker.md`](docs/browser-broker.md#busy-facade).
 
 ### Browser process vs page lifetime (`browser.ts` is a facade)
 

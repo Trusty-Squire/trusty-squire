@@ -54,10 +54,18 @@ export function defaultBrokerSocket(profileDir = CHROME_PROFILE_DIR): string {
   );
 }
 
-export function resolveBrokerSocket(): string {
+/** Where a profile's broker socket lives: the configured override, else the
+ * derived default. Pure — no directory is created and nothing is asserted, so
+ * a read-only probe can ask for a path that may not exist. */
+export function brokerSocketPath(profileDir = CHROME_PROFILE_DIR): string {
   const configured = process.env.TRUSTY_SQUIRE_BROKER_SOCKET?.trim();
   if (configured) return configured;
-  const path = defaultBrokerSocket();
+  return defaultBrokerSocket(profileDir);
+}
+
+export function resolveBrokerSocket(): string {
+  const path = brokerSocketPath();
+  if (path !== defaultBrokerSocket()) return path;
   const parent = dirname(path);
   mkdirSync(parent, { recursive: true, mode: 0o700 });
   const stat = lstatSync(parent);

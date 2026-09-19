@@ -28,8 +28,8 @@
       "import": "./dist/server.js"
     },
     "./browser": {
-      "types": "./dist/browser.d.ts",
-      "import": "./dist/browser.js"
+      "types": "./dist/browser-busy.d.ts",
+      "import": "./dist/browser-busy.js"
     }
   },
   "bin": {

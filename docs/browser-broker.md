@@ -170,29 +170,46 @@ Implementation entry points: `src/bot/broker/daemon.ts`, `discovery.ts`,
 The four layers above each answer "is the browser in use" in their own terms:
 tab families (`runtime.ts`), the profile election / SingletonLock lease
 (`profile.ts`), connect's maintenance window (`daemon.ts`), and the custody
-latch (`custody.ts`). Callers see fourteen `BrokerRefusal` codes; six of them
-mean some form of "not now". A second consumer imports one fold from
-`@trusty-squire/mcp/browser` (`apps/mcp/src/browser.ts`):
+latch (`custody.ts`). A second consumer imports one fold from
+`@trusty-squire/mcp/browser` (`apps/mcp/src/browser-busy.ts`):
 
 ```ts
 import { openTab, browserBusy, BrowserBusy } from "@trusty-squire/mcp/browser";
 ```
 
-`browserBusy()` is the read-only fold. `openTab({ profile, purpose })` records
-the holder's purpose and throws `BrowserBusy` with `.action()` when it
-genuinely cannot; it never sleeps. Wire codes stay unchanged — this is a
-mapping at the package boundary:
+`openTab({ profile, purpose })` is a broker client: it connects over the local
+socket exactly as the operator forwarder does, `open`s a session, navigates
+through `command`, and `close`s on `release()`. It reaches the browser from any
+process, holds no in-process lease of its own, and throws `BrowserBusy` with
+`.action()` when a layer genuinely refuses. Its deadline is carried by Contract
+B's reserved `abort` control frame, so a cancelled acquire settles at once
+rather than sleeping.
+
+`browserBusy()` is the read-only fold, and read-only is load-bearing: it probes
+for a live broker listener and reads the profile's SingletonLock holder. It
+never reclaims a lock, sweeps owner processes, signals anything, or sleeps. A
+live broker owns the profile lease and multiplexes tab families on one shared
+Chrome, so its own Chrome is reported free rather than as a foreign process to
+close.
+
+**Tab families are the layer that is never an answer.** A running session does
+not make the browser unavailable — that is precisely the wrong-layer conclusion
+this fold exists to prevent. `stale_lease` means "not yours, or gone": a
+permanent failure a retry can never clear, so it stays unmapped beside
+`cancelled` and `unauthorized`.
+
+Wire codes stay unchanged — this is a mapping at the package boundary:
 
 | Wire code              | Layer / reason |
 | ---------------------- | -------------- |
-| `stale_lease`          | tabs           |
 | `profile_busy`         | profile        |
 | `maintenance`          | maintenance    |
 | `broker_unavailable`   | custody        |
 | `incompatible_runtime` | custody        |
 | `launch_timeout`       | custody        |
 
-Other refusal codes are not "not now" and are not mapped.
+Other refusal codes are not "not now" and are not mapped; they propagate
+unchanged.
 
 ## Executed mechanical acceptance
 
