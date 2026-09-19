@@ -157,6 +157,45 @@ function refFor(started: { safe_table?: unknown }, label: string): string {
 }
 
 describe("operate_drive real-browser fixture", () => {
+  it("starts URL-owned drives with deferred general perception and snapshots directly", async () => {
+    const { context, started } = await openFixture(SIGNUP_HTML, "signup-direct-start.test");
+    try {
+      const startSession = vi.fn(async () => ({
+        session_id: started.session_id,
+        url: "https://signup-direct-start.test/",
+      }));
+      const observeSpy = vi.fn(async () => {
+        throw new Error("drive startup should not call the general observation");
+      });
+      const dependencies = deps(async (_api, _state, questions) =>
+        jevFromQuestions(questions, true),
+      );
+      dependencies.startSession = startSession;
+      dependencies.observe = observeSpy;
+
+      const handoff = await runOperateDrive(
+        {
+          url: "https://signup-direct-start.test/",
+          goal: "inspect this signup",
+          facts: { email: "ada@fixture.test", company: "Acme" },
+        },
+        api(),
+        undefined,
+        dependencies,
+      );
+
+      expect(handoff.status).toBe("complete");
+      expect(startSession).toHaveBeenCalledWith(
+        expect.objectContaining({ initialObservation: "drive", format: "compact" }),
+      );
+      expect(observeSpy).not.toHaveBeenCalled();
+      expect(handoff.observation?.safe_table).toBeDefined();
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("completes a multi-step signup in one call", async () => {
     const { context, page, started } = await openFixture(SIGNUP_HTML, "signup-complete.test");
     try {

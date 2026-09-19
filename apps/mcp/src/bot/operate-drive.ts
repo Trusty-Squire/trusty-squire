@@ -2196,6 +2196,7 @@ export async function runOperateDrive(
     observation = await dependencies.startSession({
       serviceUrl: url,
       format: "compact",
+      initialObservation: "drive",
       consentInboxRead: context?.consentInboxRead !== false,
       ...(api === null ? {} : { api }),
     });
