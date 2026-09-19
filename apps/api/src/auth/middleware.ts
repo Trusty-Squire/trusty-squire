@@ -23,6 +23,7 @@ export interface AuthDeps {
 }
 
 const BEARER_PREFIX = "Bearer mcp_session_";
+const ACCOUNT_RATE_LIMIT_EXEMPT_ROUTES = new Set(["/v1/decide", "/v1/vault/use"]);
 
 export function makeAuthMiddleware(deps: AuthDeps) {
   const now = (): Date => deps.now?.() ?? new Date();
@@ -72,7 +73,7 @@ export function makeAuthMiddleware(deps: AuthDeps) {
   }
 
   // Per-account rolling-hour rate limit on the authed control plane — a DoS
-  // backstop so one token can't hammer vault store/list/use, grant mint, etc.
+  // backstop so one token can't hammer vault store/list, grant mint, etc.
   // Generous (the deployed-app egress PROXY runs on a SEPARATE grant-token path
   // with an optional per-grant cap, so this won't throttle workloads). In-memory /
   // single-instance, like the grant limiter. `<= 0` disables it.
@@ -118,10 +119,12 @@ export function makeAuthMiddleware(deps: AuthDeps) {
         reply.code(401).send({ error: "agent_session_required" });
         return reply;
       }
-      // Drive steps each call /v1/decide; counting them would throttle a
-      // legitimate drive (and the account's other calls). Size checks on
-      // the route are the only bound. Captain, 2026-09-18.
-      if (req.routeOptions.url === "/v1/decide") return;
+      // Server-side-use routes spend a platform or vaulted credential only
+      // inside the API's outbound executor. Counting these workload calls
+      // would throttle legitimate drives without limiting secret disclosure.
+      // Route identity is server-owned, so clients cannot opt other calls out.
+      const routeUrl = req.routeOptions.url;
+      if (routeUrl !== undefined && ACCOUNT_RATE_LIMIT_EXEMPT_ROUTES.has(routeUrl)) return;
       if (overAccountRate(req.auth.account_id)) return rateLimited(reply);
     },
 

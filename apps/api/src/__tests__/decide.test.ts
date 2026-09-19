@@ -276,8 +276,8 @@ describe("POST /v1/decide", () => {
     expect(ledger.events[0]?.latency_ms).toBeGreaterThanOrEqual(0);
   });
 
-  it("is not counted by the per-account hourly limit", async () => {
-    process.env.API_ACCOUNT_HOURLY_LIMIT = "2";
+  it("still performs server-side decisions after 1000 account-scoped requests", async () => {
+    process.env.API_ACCOUNT_HOURLY_LIMIT = "1000";
     await server.close();
     deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET });
     ledger = new InMemoryDecisionEventStore();
@@ -292,8 +292,9 @@ describe("POST /v1/decide", () => {
         url: "/v1/vault/credentials",
         headers: { authorization: `Bearer ${token}` },
       });
-    expect((await vaultHit()).statusCode).toBe(200);
-    expect((await vaultHit()).statusCode).toBe(200);
+    for (let i = 0; i < 1000; i++) {
+      expect((await vaultHit()).statusCode).toBe(200);
+    }
     expect((await vaultHit()).statusCode).toBe(429);
 
     const decide = await server.inject({

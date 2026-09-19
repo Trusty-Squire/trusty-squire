@@ -386,6 +386,35 @@ describe("proxy (write-only sink, enforced allowlist)", () => {
     expect(JSON.stringify(audit.events)).not.toContain("sk_test_secret");
   });
 
+  it("allows audited server-side egress above the plaintext retrieval ceiling", async () => {
+    const { vault, audit } = makeVault();
+    const entry = await vault.store(storeInput());
+    for (let i = 0; i < 100; i++) {
+      await audit.record({
+        account_id: ACCOUNT,
+        type: VAULT_AUDIT_TYPES.retrieved,
+        payload: { reference: entry.reference, requester: "user", outcome: "success" },
+      });
+    }
+
+    await expect(
+      vault.proxy(
+        entry.reference,
+        ACCOUNT,
+        { method: "GET", url: "https://api.openai.com/v1/models" },
+        async () => okResponse,
+      ),
+    ).resolves.toEqual(okResponse);
+    expect(
+      audit.events.some(
+        (event) =>
+          event.type === VAULT_AUDIT_TYPES.proxyExecuted &&
+          event.payload.reference === entry.reference,
+      ),
+    ).toBe(true);
+    expect(await audit.countRecentRetrievals(ACCOUNT, NOW)).toBe(100);
+  });
+
   it("hard-rejects an off-allowlist host before decrypt/dispatch", async () => {
     const { vault } = makeVault();
     const entry = await vault.store(storeInput());

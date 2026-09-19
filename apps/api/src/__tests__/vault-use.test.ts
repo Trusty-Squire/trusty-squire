@@ -16,7 +16,7 @@ import { buildServer } from "../server.js";
 import { HttpProxyExecutor } from "../services/http-proxy.js";
 
 const SESSION_SECRET = "dev-test-secret-do-not-use-anywhere-else";
-const CUSTOMER_ID = "ts-test";
+const prevAccountHourlyLimit = process.env.API_ACCOUNT_HOURLY_LIMIT;
 
 interface Harness {
   server: FastifyInstance;
@@ -123,6 +123,8 @@ describe("POST /v1/vault/use", () => {
   });
   afterEach(async () => {
     await h.server.close();
+    if (prevAccountHourlyLimit === undefined) delete process.env.API_ACCOUNT_HOURLY_LIMIT;
+    else process.env.API_ACCOUNT_HOURLY_LIMIT = prevAccountHourlyLimit;
   });
 
   it("proxies to an allowlisted host; secret injected server-side, never returned to the agent", async () => {
@@ -151,6 +153,43 @@ describe("POST /v1/vault/use", () => {
     expect(seen[0]!.auth).toBe("Bearer sk-the-real-secret");
     // The agent's response body does NOT contain the secret.
     expect(body.response.body).not.toContain("sk-the-real-secret");
+  });
+
+  it("still performs server-side use after 1000 account-scoped requests", async () => {
+    await h.server.close();
+    process.env.API_ACCOUNT_HOURLY_LIMIT = "1000";
+    h = await setup();
+
+    const account = await h.deps.accountStore.createAccount("burst@example.test", "Burst");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    const reference = await storeCred(h, cookie, "OpenAI");
+    const controlPlaneHit = () =>
+      h.server.inject({
+        method: "GET",
+        url: "/v1/vault/credentials",
+        headers: { authorization: `Bearer ${token}` },
+      });
+    for (let i = 0; i < 999; i++) {
+      expect((await controlPlaneHit()).statusCode).toBe(200);
+    }
+    expect((await controlPlaneHit()).statusCode).toBe(429);
+
+    const use = await h.server.inject({
+      method: "POST",
+      url: "/v1/vault/use",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      payload: {
+        reference,
+        http: {
+          method: "GET",
+          url: "https://api.openai.com/v1/models",
+          headers: { authorization: "Bearer ${SECRET}" },
+        },
+      },
+    });
+    expect(use.statusCode).toBe(200);
+    expect(seen).toHaveLength(1);
   });
 
   it("HARD-REJECTS an off-allowlist host with 403 (no upstream dispatch)", async () => {
@@ -217,7 +256,6 @@ describe("POST /v1/vault/use", () => {
     const cookie = await webCookie(h.deps, account.id);
     const token = await agentToken(h.deps, account.id);
     const reference = await storeLoginCred(h, cookie, "Example", ["app.example.com"]);
-    const keys = fillKeyPair();
 
     const res = await h.server.inject({
       method: "POST",

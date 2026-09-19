@@ -726,7 +726,7 @@ export class CredentialVault implements VaultClient {
   // passkey-signed fetch approval bound to this exact (account, credential);
   // this method performs no authorization of its own beyond account scoping,
   // which is why nothing but the fetch-approval route may call it. Counted
-  // against the same retrieval ceiling as every other decrypt path.
+  // against the plaintext-retrieval ceiling enforced by retrieveInternal.
   //
   // `approvedFieldNames` is the EXACT field set the human signed for, and the
   // filtering happens here rather than in the caller so the audit row states
@@ -856,6 +856,9 @@ export class CredentialVault implements VaultClient {
   // use_credential: decrypt fields, hand them + the request to the
   // injected executor (which substitutes ${SECRET.<field>}), return only
   // the upstream response. Host hard-checked against allowed_hosts first.
+  // This code path deliberately does not call retrieveInternal: the secret
+  // stays inside the API executor, so server-side egress is not subject to
+  // the plaintext-retrieval ceiling. The proxy audit below remains required.
   async proxy(
     reference: string,
     accountId: string,
@@ -1131,11 +1134,12 @@ export class CredentialVault implements VaultClient {
     return fields;
   }
 
-  // Per-account retrieval rate limit, shared by every decrypt path
-  // (agent retrieve, runtime retrieve, web reveal). Counts `retrieved`
-  // audit rows in the trailing window; on breach it records a
-  // rate_limited event and throws. Keeping this in one place is what
-  // stops a new decrypt path from silently bypassing the ceiling.
+  // Per-account plaintext-retrieval rate limit, shared by every path that
+  // returns decrypted fields (agent retrieve, runtime retrieve, browser fill,
+  // and web/approved reveal). Counts `retrieved` audit rows in the trailing
+  // window; on breach it records a rate_limited event and throws. In-API proxy
+  // egress is intentionally separate because its executor never returns the
+  // secret to the caller.
   private async enforceRetrievalRateLimit(
     accountId: string,
     auditOnLimit: Pick<
