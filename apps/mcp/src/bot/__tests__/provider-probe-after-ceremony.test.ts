@@ -107,4 +107,60 @@ describe("probeProviderSessionsAfterCeremony", () => {
     });
     expect(result).toEqual(["google"]);
   });
+
+  it("returns null — not a definite negative — when every snapshot read throws", async () => {
+    // The review round-11 fix: `.catch(() => [])` turned a snapshot READ
+    // FAILURE into "no provider session", collapsing the absent-vs-unreadable
+    // distinction. A store that exists and cannot be read is unknown, and
+    // unknown is not a pass and not a re-pair trigger.
+    const snapshot = vi.fn(async (): Promise<OAuthProviderId[]> => {
+      throw new Error("database disk image is malformed");
+    });
+    const result = await probeProviderSessionsAfterCeremony("/unused", {
+      live: async () => {
+        throw new ProfileBusyError("busy");
+      },
+      snapshot,
+      windowMs: 30,
+      pollMs: 10,
+    });
+    expect(result).toBeNull();
+  });
+
+  it("keeps polling past a failed read and recovers when a later one succeeds", async () => {
+    let calls = 0;
+    const snapshot = vi.fn(async (): Promise<OAuthProviderId[]> => {
+      calls++;
+      if (calls === 1) throw new Error("store busy");
+      return ["google"];
+    });
+    const result = await probeProviderSessionsAfterCeremony("/unused", {
+      live: async () => {
+        throw new ProfileBusyError("busy");
+      },
+      snapshot,
+      windowMs: 10_000,
+      pollMs: 1,
+    });
+    expect(result).toEqual(["google"]);
+    expect(calls).toBe(2);
+  });
+
+  it("keeps polling through failed reads and returns the last good read at the deadline", async () => {
+    let calls = 0;
+    const snapshot = vi.fn(async (): Promise<OAuthProviderId[]> => {
+      calls++;
+      return calls <= 2 ? ["google"] : await Promise.reject(new Error("store busy"));
+    });
+    const result = await probeProviderSessionsAfterCeremony("/unused", {
+      live: async () => {
+        throw new ProfileBusyError("busy");
+      },
+      snapshot,
+      windowMs: 30,
+      pollMs: 10,
+      awaitProviders: ["github"],
+    });
+    expect(result).toEqual(["google"]);
+  });
 });

@@ -450,12 +450,32 @@ export async function probeProviderSessionsAfterCeremony(
   const deadline = Date.now() + (runtime.windowMs ?? COOKIE_COMMIT_WINDOW_MS);
   const snapshot = runtime.snapshot ?? detectProviderSessionsFromProfile;
   const awaited = runtime.awaitProviders ?? [];
+  // A snapshot READ FAILURE is unknown, not a definite negative: collapsing it
+  // to [] turned "could not read the store" into "no provider session" — the
+  // exact conflation the absent-vs-unreadable distinction exists to prevent.
+  // The probe returns null only when EVERY read in the window failed; a read
+  // that SUCCEEDED and found nothing keeps returning [] — an empty store is
+  // an answer. Reads resume every iteration: an awaited provider may still
+  // land after a successful-but-empty early read.
+  let sawSuccessfulRead = false;
   let found: OAuthProviderId[] = [];
   for (;;) {
-    found = await snapshot(profileDir).catch(() => []);
+    let read: OAuthProviderId[] | null = null;
+    try {
+      read = await snapshot(profileDir);
+    } catch {
+      read = null;
+    }
+    if (read === null) {
+      if (!sawSuccessfulRead && Date.now() >= deadline) return null;
+    } else {
+      sawSuccessfulRead = true;
+      found = read;
+    }
     const satisfied =
-      awaited.length === 0 ? found.length > 0 : awaited.every((id) => found.includes(id));
-    if (satisfied || Date.now() >= deadline) return found;
+      sawSuccessfulRead &&
+      (awaited.length === 0 ? found.length > 0 : awaited.every((id) => found.includes(id)));
+    if (satisfied || Date.now() >= deadline) return sawSuccessfulRead ? found : null;
     await new Promise((resolve) => setTimeout(resolve, runtime.pollMs ?? COOKIE_COMMIT_POLL_MS));
   }
 }
