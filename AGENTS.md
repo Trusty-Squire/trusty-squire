@@ -860,7 +860,7 @@ once, which is why `status` is a wire operation. Ask through
 `browserBusy()` / `openTab` in
 [`apps/mcp/src/browser-busy.ts`](apps/mcp/src/browser-busy.ts)
 (`@trusty-squire/mcp/browser`); the mapping table lives in
-[`docs/browser-broker.md`](docs/browser-broker.md#busy-facade).
+[`docs/browser-broker.md`](docs/browser-broker.md#busy-façade).
 
 The client wire is the frozen Contract B (`connect` / `open` / `command` /
 `close`), owned by `apps/mcp/src/bot/broker/protocol.ts`. A tool name crosses

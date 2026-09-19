@@ -154,6 +154,8 @@ and its other sessions intact.
 - Idle shutdown requires zero connected clients, zero live sessions, zero
   in-flight admissions, and zero pending graceful session closes for the
   configured minutes-scale bound. Graceful Chrome closure precedes lease release.
+  A connection that declared itself a `status` probe is not a connected client
+  for this purpose — see [Busy façade](#busy-façade).
 
 MCP server-instance records use the hash of
 `TRUSTY_SQUIRE_SERVER_LINEAGE` (or the forwarder credential when present) to

@@ -597,7 +597,7 @@ refusal-code mapping, why a façade bound below a layer's budget is worse than
 none, the permanent failures that each get their own typed error rather than a
 busy layer (`UnservableProfileError`, `BrowserNeedsUser`, `ExternalBrowserError`),
 and the "a running tab family is not busy" rule live in
-[`docs/browser-broker.md`](docs/browser-broker.md#busy-facade).
+[`docs/browser-broker.md`](docs/browser-broker.md#busy-façade).
 
 ### Browser process vs page lifetime (`browser.ts` is a facade)
 
