@@ -123,7 +123,8 @@ export function makeAuthMiddleware(deps: AuthDeps) {
       // inside the API's outbound executor. Counting these workload calls
       // would throttle legitimate drives without limiting secret disclosure.
       // Route identity is server-owned, so clients cannot opt other calls out.
-      if (ACCOUNT_RATE_LIMIT_EXEMPT_ROUTES.has(req.routeOptions.url)) return;
+      const routeUrl = req.routeOptions.url;
+      if (routeUrl !== undefined && ACCOUNT_RATE_LIMIT_EXEMPT_ROUTES.has(routeUrl)) return;
       if (overAccountRate(req.auth.account_id)) return rateLimited(reply);
     },
 
