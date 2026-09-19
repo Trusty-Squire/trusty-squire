@@ -1147,11 +1147,9 @@ async function checkAlreadyProvisioned(
       return preflight;
     }
     const preflight = decideConnectPreflight(session, stillValid, providers);
-    // Nothing here writes connected_providers: cookie presence can ADD a
-    // provider the record lacks, but it cannot prove liveness, and a repair
-    // write keyed on presence alone would promote a dead session (an empty
-    // record is the one state this branch can reach). Only the live probe
-    // that runs after a ceremony persists provider records.
+    // The profile IS the record: what its cookie store proves decides the
+    // claim, every run. Nothing persists a provider list to compare against,
+    // so a stale one can never demote a machine that is really signed in.
     return preflight.kind === "provisioned" ? { ...preflight, session } : preflight;
   } catch {
     return { kind: "ceremony" };

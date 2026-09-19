@@ -273,24 +273,6 @@ export class SessionStore {
   }
 
   /**
-   * Upsert ONE account's entry WITHOUT touching the current-account pointer.
-   * For bookkeeping writers that annotate an account's stored session rather
-   * than binding it: they do not move the
-   * machine to it — the pointer stays with the last real connect, even one
-   * that moved it concurrently mid-probe.
-   */
-  async writeAccountRecord(data: SessionData): Promise<void> {
-    const key = accountKey(data);
-    if (!isSafeAccountKey(key)) {
-      throw new Error(`Invalid session account ID: ${key}`);
-    }
-    await this.writeAtomic(this.accountFile(key), withoutLegacyProxy(data));
-    if (key !== UNBOUND_ACCOUNT_KEY) {
-      await fs.rm(this.accountFile(UNBOUND_ACCOUNT_KEY), { force: true });
-    }
-  }
-
-  /**
    * Remove ONE account's entry (the current one by default). Other accounts'
    * files are untouched; the pointer moves to a survivor, or is deleted when
    * nothing is left.
