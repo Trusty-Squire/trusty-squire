@@ -186,6 +186,33 @@ function selectAllInPage(input: { ref: string }): boolean {
   return false;
 }
 
+async function waitForOpenedOverlay(page: Page): Promise<void> {
+  await evaluateBound(
+    page,
+    async (cap) => {
+      const start = performance.now();
+      const visibleSuggestion = (node: Element): boolean => {
+        if (node.closest('[aria-hidden="true"],[inert]') !== null) return false;
+        if (typeof node.checkVisibility === "function") {
+          return node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+        }
+        const style = getComputedStyle(node);
+        return style.display !== "none" && style.visibility !== "hidden";
+      };
+      while (performance.now() - start < cap) {
+        const options = Array.from(
+          document.querySelectorAll(
+            '[role="option"],[role="listbox"] a,[role="listbox"] [role="option"],.suggestions a,.suggestion-link,.suggestions-dropdown a,[aria-selected],[role="grid"] button,[role="grid"] [role="gridcell"],[role="gridcell"],[role="dialog"] [role="gridcell"],[role="dialog"] [role="grid"] button',
+          ),
+        ).filter(visibleSuggestion);
+        if (options.length > 0) return;
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      }
+    },
+    DRIVE_COMBOBOX_WAIT_MS,
+  );
+}
+
 export async function driveActOnPage(page: Page, action: ProvisionAction): Promise<DriveActResult> {
   if (action.kind === "scroll") {
     const direction = action.direction ?? "down";
@@ -307,16 +334,25 @@ export async function driveActOnPage(page: Page, action: ProvisionAction): Promi
       button: "left",
       clickCount: 1,
     });
-    const selected = await evaluateBound(frame, selectAllInPage, { ref: action.target }).catch(
-      () => false,
-    );
-    if (!selected) {
-      return {
-        kind: "stale",
-        reason: "reselection_failed",
-        ...timings,
-        cdpMs: Date.now() - cdpStarted,
-      };
+    // A picker click focuses the overlay input (Flights "Where else?").
+    // Refocusing the snapshot ref yanks that away and insertText writes
+    // behind the dialog. Match jev-ultrafast: wait for the overlay, then
+    // selectAll+insertText with no in-page focus. Plain fields still
+    // reselect the clicked ref so a detached target cannot type into a neighbor.
+    if (guard.combobox) {
+      await waitForOpenedOverlay(page).catch(() => undefined);
+    } else {
+      const selected = await evaluateBound(frame, selectAllInPage, { ref: action.target }).catch(
+        () => false,
+      );
+      if (!selected) {
+        return {
+          kind: "stale",
+          reason: "reselection_failed",
+          ...timings,
+          cdpMs: Date.now() - cdpStarted,
+        };
+      }
     }
     // Selection API select() / selectNodeContents does not replace a committed
     // Flights city chip after another overlay has just closed. Issue the
@@ -384,32 +420,7 @@ export async function settleDriveStep(page: Page, combobox: boolean): Promise<nu
       },
       DRIVE_SETTLE_MS,
     );
-    if (combobox) {
-      await evaluateBound(
-        page,
-        async (cap) => {
-          const start = performance.now();
-          const visibleSuggestion = (element: Element): boolean => {
-            if (element.closest('[aria-hidden="true"],[inert]') !== null) return false;
-            if (typeof element.checkVisibility === "function") {
-              return element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
-            }
-            const style = getComputedStyle(element);
-            return style.display !== "none" && style.visibility !== "hidden";
-          };
-          while (performance.now() - start < cap) {
-            const options = Array.from(
-              document.querySelectorAll(
-                '[role="option"],[role="listbox"] a,[role="listbox"] [role="option"],.suggestions a,.suggestion-link,.suggestions-dropdown a,[aria-selected],[role="grid"] button,[role="grid"] [role="gridcell"],[role="gridcell"],[role="dialog"] [role="gridcell"],[role="dialog"] [role="grid"] button',
-              ),
-            ).filter(visibleSuggestion);
-            if (options.length > 0) return;
-            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-          }
-        },
-        DRIVE_COMBOBOX_WAIT_MS,
-      );
-    }
+    if (combobox) await waitForOpenedOverlay(page);
   } catch {
     return Date.now() - started;
   }
