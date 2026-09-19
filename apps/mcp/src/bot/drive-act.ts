@@ -246,6 +246,11 @@ export async function documentEpochOf(page: Page): Promise<string> {
   }
 }
 
+export function documentOriginOf(epoch: string): string {
+  const bar = epoch.indexOf("|");
+  return bar === -1 ? epoch : epoch.slice(0, bar);
+}
+
 export async function waitForNavigationIdle(page: Page): Promise<void> {
   await page.waitForLoadState("networkidle", { timeout: 3000 }).catch(() => undefined);
 }
