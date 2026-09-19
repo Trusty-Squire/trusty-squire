@@ -9,6 +9,9 @@ import {
   DRIVE_DEFAULT_MAX_SECONDS,
   DRIVE_FIXED_NONE,
   DRIVE_MAX_CANDIDATES,
+  DRIVE_MAX_CRITERIA,
+  driveTargetSets,
+  elementState,
   DRIVE_MAX_JEV_CALLS,
   DRIVE_RULES,
   DRIVE_VALUE_QUESTION,
@@ -995,5 +998,118 @@ describe("select option key collisions", () => {
         action: { kind: "select", target: STATE[0], text: target.option },
       });
     }
+  });
+});
+
+describe("drive outbound choice budgets", () => {
+  it("elides large dropdowns within the batch budget and executes an offered option", () => {
+    const options = Array.from({ length: 200 }, (_, i) => `Region ${i}`);
+    const pageOptions = new Map([["state", options]]);
+    const sets = driveTargetSets([STATE], {}, false, [], "", pageOptions);
+    const questions = buildDriveQuestions(
+      [STATE],
+      {},
+      "choose region",
+      false,
+      [],
+      "",
+      pageOptions,
+      sets,
+    );
+    const total = Object.values(questions).reduce(
+      (n, q) => n + (q.type === "choice" ? Object.keys(q.criteria).length : 0),
+      0,
+    );
+    expect(total).toBeLessThanOrEqual(DRIVE_MAX_CRITERIA);
+    expect(sets.SELECT.length).toBeLessThan(options.length);
+    expect(elementState(sets.SELECT[0]!)).toMatchObject({ options_elided: true });
+    const candidate = sets.SELECT.at(-1)!;
+    expect(candidate.option).toBeDefined();
+    const answers = Object.fromEntries(
+      Object.entries(questions).flatMap(([name, q]) =>
+        q.type === "choice"
+          ? [[name, valid(name === "operation" ? "SELECT" : candidate.slug, q.criteria)]]
+          : [],
+      ),
+    );
+    expect(
+      decideAfterJev({
+        rows: [STATE],
+        facts: {},
+        goal: "choose region",
+        fingerprint: "a",
+        lastFingerprint: null,
+        lastActionKey: null,
+        sets,
+        questions,
+        answers,
+      }),
+    ).toMatchObject({ kind: "act", action: { kind: "select", text: candidate.option } });
+  });
+
+  it("includes goal-value choices in the batch budget and validates the offered subset", () => {
+    const row: WireRow = ["@e:search", "t", "@search|f=query"];
+    const facts = Object.fromEntries(
+      Array.from({ length: 200 }, (_, i) => [`item_${i}`, `phrase ${i}`]),
+    );
+    const sets = driveTargetSets([row, STATE], facts, false);
+    const questions = buildDriveQuestions(
+      [row, STATE],
+      facts,
+      "search for widgets",
+      false,
+      [],
+      "",
+      new Map(),
+      sets,
+    );
+    expect(
+      Object.values(questions).reduce(
+        (n, q) => n + (q.type === "choice" ? Object.keys(q.criteria).length : 0),
+        0,
+      ),
+    ).toBeLessThanOrEqual(DRIVE_MAX_CRITERIA);
+    const valueQuestion = questions[DRIVE_VALUE_QUESTION];
+    expect(valueQuestion?.type).toBe("choice");
+    if (valueQuestion?.type !== "choice") throw new Error("missing value choices");
+    expect(valueQuestion.criteria).toHaveProperty(DRIVE_FIXED_NONE);
+    const valueKey = Object.keys(valueQuestion.criteria).find((key) => key !== DRIVE_FIXED_NONE)!;
+    const answers = Object.fromEntries(
+      Object.entries(questions).flatMap(([name, q]) =>
+        q.type === "choice"
+          ? [
+              [
+                name,
+                valid(
+                  name === "operation"
+                    ? "TYPE_TEXT"
+                    : name === "TYPE_TEXT_target"
+                      ? sets.TYPE_TEXT[0]!.slug
+                      : name === DRIVE_VALUE_QUESTION
+                        ? valueKey
+                        : Object.keys(q.criteria)[0]!,
+                  q.criteria,
+                ),
+              ],
+            ]
+          : [],
+      ),
+    );
+    expect(
+      decideAfterJev({
+        rows: [row, STATE],
+        facts,
+        goal: "search for widgets",
+        fingerprint: "a",
+        lastFingerprint: null,
+        lastActionKey: null,
+        sets,
+        questions,
+        answers,
+      }),
+    ).toMatchObject({
+      kind: "act",
+      action: { kind: "type", text: valueQuestion.criteria[valueKey] },
+    });
   });
 });

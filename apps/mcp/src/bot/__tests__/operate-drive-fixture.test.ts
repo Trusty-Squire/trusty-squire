@@ -5,6 +5,8 @@
 // Jev confidence.
 
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { chromium, type Browser } from "playwright";
 import type { ApiClient } from "../../api-client.js";
 import { BrowserController } from "../browser.js";
@@ -362,6 +364,58 @@ describe("coverage-matrix constant", () => {
 });
 
 describe("drive review regressions", () => {
+  it("masks dropdown choices and traces while selecting their original labels", async () => {
+    const { context, page, started } = await openFixture(
+      '<label>Saved method<select id="method"><option>Choose</option><option value="visa">Visa 41111111****1111</option></select></label>',
+      "masked-options.test",
+    );
+    const dir = mkdtempSync(join(process.cwd(), ".drive-trace-test-"));
+    const tracePath = join(dir, "trace.jsonl");
+    const previousTrace = process.env.DRIVE_TRACE_PATH;
+    process.env.DRIVE_TRACE_PATH = tracePath;
+    try {
+      sessionForCall(started.session_id)!.browser.registerCardValueOutputMask({
+        pan: "4111111111111111",
+        cvv: "739",
+      });
+      let calls = 0;
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "choose saved method", max_steps: 1 },
+        api(),
+        undefined,
+        deps(async (_api, state, questions) => {
+          calls++;
+          expect(JSON.stringify({ state, questions })).not.toContain("41111111");
+          const question = questions.SELECT_target;
+          if (question?.type !== "choice") throw new Error("missing SELECT choices");
+          const pick = Object.keys(question.criteria).find((key) =>
+            question.criteria[key]!.includes("[card number]"),
+          )!;
+          expect(pick).toBeDefined();
+          const outcome = jevFromQuestions(questions);
+          outcome.result.answers.SELECT_target = {
+            choice: pick,
+            confidence: 0.93,
+            probabilities: peaked(Object.keys(question.criteria), pick),
+          };
+          return outcome;
+        }),
+      );
+      expect(calls).toBe(1);
+      expect(result.status).toBe("budget");
+      expect(await page.locator("#method").inputValue()).toBe("visa");
+      const trace = readFileSync(tracePath, "utf8");
+      expect(trace).not.toContain("41111111");
+      expect(trace).toContain("[card number]");
+    } finally {
+      if (previousTrace === undefined) delete process.env.DRIVE_TRACE_PATH;
+      else process.env.DRIVE_TRACE_PATH = previousTrace;
+      rmSync(dir, { recursive: true, force: true });
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it.each(["type", "select"])(
     "does not retain a completed %s ref after navigation",
     async (action) => {

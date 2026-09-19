@@ -101,6 +101,7 @@ export const DRIVE_DEFAULT_MAX_SECONDS = 45;
 export const DRIVE_HISTORY_CAP = 20;
 export const DRIVE_MAX_JEV_CALLS = 120;
 export const DRIVE_MAX_CANDIDATES = 250;
+export const DRIVE_MAX_CRITERIA = 128;
 export const DRIVE_WAIT_MS = 1500;
 export const DRIVE_STALE_LIMIT = 3;
 export const DRIVE_IDENTICAL_RESNAP_MS = 200;
@@ -206,6 +207,8 @@ export interface DriveCandidate {
   description: string;
   row: WireRow;
   option?: string;
+  optionLabel?: string;
+  optionsElided?: boolean;
 }
 
 export type DriveStatus =
@@ -418,10 +421,16 @@ function driveTraceEnabled(): boolean {
   return path !== undefined && path.length > 0;
 }
 
-function appendDriveTrace(entry: Record<string, unknown>): void {
+function maskDriveOutput<T>(session: Session, value: T): T {
+  return typeof session.browser.maskOperatorOutput === "function"
+    ? session.browser.maskOperatorOutput(value)
+    : value;
+}
+
+function appendDriveTrace(session: Session, entry: Record<string, unknown>): void {
   const path = process.env.DRIVE_TRACE_PATH;
   if (path === undefined || path.length === 0) return;
-  appendFileSync(path, `${JSON.stringify(entry)}\n`);
+  appendFileSync(path, `${JSON.stringify(maskDriveOutput(session, entry))}\n`);
 }
 
 async function nativeSelectSnapshot(
@@ -455,7 +464,9 @@ function candidateDump(candidates: readonly DriveCandidate[]): Array<{
     ref: candidate.ref,
     role: candidate.role,
     description: candidate.description,
-    ...(candidate.option === undefined ? {} : { option: candidate.option }),
+    ...(candidate.option === undefined
+      ? {}
+      : { option: candidate.optionLabel ?? candidate.option }),
   }));
 }
 
@@ -1034,6 +1045,7 @@ export function selectTargets(
   candidates: readonly DriveCandidate[],
   facts: Record<string, string>,
   pageOptions: ReadonlyMap<string, readonly string[]> = new Map(),
+  maskText: (text: string) => string = (text) => text,
 ): DriveCandidate[] {
   const targets: DriveCandidate[] = [];
   for (const candidate of candidates) {
@@ -1043,13 +1055,15 @@ export function selectTargets(
     const addOption = (text: string) => {
       if (texts.has(text)) return;
       texts.add(text);
-      const optionSlug = uniqueCriteriaSlug(text, used);
+      const label = maskText(text);
+      const optionSlug = uniqueCriteriaSlug(label, used);
       used.add(optionSlug);
       targets.push({
         ...candidate,
         slug: `${candidate.slug}:${optionSlug.replace(/^k/, "")}`,
-        description: `choose "${text}" in the ${readableLabel(candidate.row)} field`,
+        description: `choose "${label}" in the ${readableLabel(candidate.row)} field`,
         option: text,
+        optionLabel: label,
       });
     };
     for (const key of matchingFactKeys(facts, candidate.row)) {
@@ -1151,6 +1165,7 @@ export interface DriveStateElement {
   disabled?: boolean;
   required?: boolean;
   acted?: boolean;
+  options_elided?: boolean;
 }
 
 export interface DriveJevState {
@@ -1190,13 +1205,17 @@ export function elementState(candidate: DriveCandidate): DriveStateElement {
   return {
     id: candidate.slug,
     role: ROLE_WORDS[candidate.row[1]] ?? candidate.role,
-    description: candidate.option === undefined ? label : `${label} → ${candidate.option}`,
+    description:
+      candidate.option === undefined
+        ? label
+        : `${label} → ${candidate.optionLabel ?? candidate.option}`,
     operations: operationsForRow(candidate.row),
     ...(checked === undefined ? {} : { checked }),
     ...(valueMatch === null ? {} : { value: valueMatch[1] }),
     ...(isDisabledRow(candidate.row) ? { disabled: true } : {}),
     ...(isRequiredRow(candidate.row) ? { required: true } : {}),
     ...(isActedRow(candidate.row) ? { acted: true } : {}),
+    ...(candidate.optionsElided ? { options_elided: true } : {}),
   };
 }
 
@@ -1300,6 +1319,7 @@ export function driveTargetSets(
   filledRefs: readonly string[] = [],
   pageUrl: string = "",
   pageOptions: ReadonlyMap<string, readonly string[]> = new Map(),
+  maskText: (text: string) => string = (text) => text,
 ): DriveTargetSets {
   const remaining = { n: DRIVE_MAX_CANDIDATES };
   const typeText = takeCapped(
@@ -1311,6 +1331,7 @@ export function driveTargetSets(
       selectCandidates(rows, facts, includePayment, filledRefs, pageUrl),
       facts,
       pageOptions,
+      maskText,
     ),
     remaining,
   );
@@ -1331,7 +1352,7 @@ function criteriaFromCandidates(candidates: readonly DriveCandidate[]): Record<s
     criteria[candidate.slug] =
       candidate.option === undefined
         ? readableLabel(candidate.row)
-        : `${readableLabel(candidate.row)} → ${candidate.option}`;
+        : `${readableLabel(candidate.row)} → ${candidate.optionLabel ?? candidate.option}`;
   }
   return criteria;
 }
@@ -1405,6 +1426,50 @@ export function buildDriveQuestions(
       instructions: "Where should the page scroll?",
       criteria: scrollCriteria,
     };
+  }
+  const choices = Object.entries(questions).filter(
+    (entry): entry is [string, Extract<JevQuestion, { type: "choice" }>] =>
+      entry[1].type === "choice",
+  );
+  let remaining = DRIVE_MAX_CRITERIA;
+  for (const [index, [name, question]] of choices.entries()) {
+    const reserved = choices
+      .slice(index + 1)
+      .reduce(
+        (total, [laterName, later]) =>
+          total +
+          Math.min(Object.keys(later.criteria).length, laterName === "SCROLL_target" ? 4 : 1),
+        0,
+      );
+    const entries = Object.entries(question.criteria);
+    const limit = remaining - reserved;
+    if (entries.length > limit) {
+      const none = entries.find(([key]) => key === DRIVE_FIXED_NONE);
+      const kept =
+        none === undefined
+          ? entries.slice(0, limit)
+          : [...entries.filter(([key]) => key !== DRIVE_FIXED_NONE).slice(0, limit - 1), none];
+      question.criteria = Object.fromEntries(kept);
+      question.instructions += " Some choices were omitted to fit the decision budget.";
+    }
+    remaining -= Object.keys(question.criteria).length;
+    if (name === "SELECT_target") {
+      const omittedRefs = new Set(
+        sets.SELECT.filter(
+          (candidate) => candidate.option !== undefined && !(candidate.slug in question.criteria),
+        ).map((candidate) => candidate.ref),
+      );
+      sets.SELECT = sets.SELECT.filter((candidate) => candidate.slug in question.criteria).map(
+        (candidate) => {
+          if (!omittedRefs.has(candidate.ref)) return candidate;
+          question.criteria[candidate.slug] += " (additional options omitted)";
+          return { ...candidate, optionsElided: true };
+        },
+      );
+    } else if (name === "CLICK_target" || name === "TYPE_TEXT_target" || name === "SCROLL_target") {
+      const operation = name.slice(0, -7) as "CLICK" | "TYPE_TEXT" | "SCROLL";
+      sets[operation] = sets[operation].filter((candidate) => candidate.slug in question.criteria);
+    }
   }
   return questions;
 }
@@ -1681,7 +1746,8 @@ export function decideAfterJev(input: {
         };
       }
       if (allowsGoalValueAssignment(row)) {
-        const valueCriteria = goalValueCriteria(input.goal, input.facts);
+        const valueQuestion = questions[DRIVE_VALUE_QUESTION];
+        const valueCriteria = valueQuestion?.type === "choice" ? valueQuestion.criteria : {};
         const valueAnswer = input.answers[DRIVE_VALUE_QUESTION];
         const valueAdmission = admitsChoice(
           valueCriteria,
@@ -2912,7 +2978,7 @@ async function driveLoop(input: {
       }
     }
     const nextFingerprint = progressFingerprint(observation.url, rows, drive, session);
-    appendDriveTrace({
+    appendDriveTrace(session, {
       at: "after_act",
       step: drive.trajectory.length,
       action: decision.action,
@@ -2945,7 +3011,12 @@ async function driveLoop(input: {
     questions: Record<string, JevQuestion>,
   ): Promise<JevCallOutcome | DriveHandoff> => {
     try {
-      const jev = await dependencies.askJev(api!, state, questions, context?.signal);
+      const jev = await dependencies.askJev(
+        api!,
+        maskDriveOutput(session, state),
+        maskDriveOutput(session, questions),
+        context?.signal,
+      );
       drive.jevCalls += 1;
       return jev;
     } catch (error) {
@@ -3039,6 +3110,7 @@ async function driveLoop(input: {
       drive.filledRefs,
       pageUrl,
       pageOptions,
+      (text) => maskDriveOutput(session, text),
     );
     const questions = buildDriveQuestions(
       rows,
@@ -3098,7 +3170,7 @@ async function driveLoop(input: {
       answers = retried.result.answers;
       decision = decide(answers);
     }
-    appendDriveTrace({
+    appendDriveTrace(session, {
       at: "step",
       step: steps,
       url_before: observation.url,
