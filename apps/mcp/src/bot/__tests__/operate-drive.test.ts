@@ -88,6 +88,13 @@ describe("operate_drive constants", () => {
     expect(DRIVE_STALE_LIMIT).toBe(3);
     expect(DRIVE_IDENTICAL_RESNAP_MS).toBe(200);
   });
+
+  it("puts the MIT filter/control rule on the two-head operation request", () => {
+    const rule =
+      "Set every requested filter/control; a matching result alone does not prove a requested filter was set.";
+    expect(DRIVE_RULES).toContain(rule);
+    expect(nextActionInstructions("find one-way flights")).toContain(rule);
+  });
 });
 
 describe("request building", () => {
