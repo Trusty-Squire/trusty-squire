@@ -923,18 +923,26 @@ export class CredentialVault implements VaultClient {
     const startedAt = this.now().getTime();
     try {
       const response = await executor({ accountId, http, fields });
-      await this.runProxyAuditSideEffect(() =>
-        this.deps.store.markRetrieved(reference, this.now()),
-      );
-      await this.recordProxyAudit(accountId, VAULT_AUDIT_TYPES.proxyExecuted, {
-        reference,
-        requester: "agent",
-        ...audit,
-        target_host: targetHost,
-        response_status: response.status,
-        response_size: Buffer.byteLength(response.body, "utf8"),
-        upstream_duration_ms: this.now().getTime() - startedAt,
-      });
+      const markRetrieved = () =>
+        this.runProxyAuditSideEffect(() =>
+          this.deps.store.markRetrieved(reference, this.now()),
+        );
+      const recordExecuted = () =>
+        this.recordProxyAudit(accountId, VAULT_AUDIT_TYPES.proxyExecuted, {
+          reference,
+          requester: "agent",
+          ...audit,
+          target_host: targetHost,
+          response_status: response.status,
+          response_size: Buffer.byteLength(response.body, "utf8"),
+          upstream_duration_ms: this.now().getTime() - startedAt,
+        });
+      if (this.deps.proxyAuditFailureMode === "best_effort") {
+        await Promise.all([markRetrieved(), recordExecuted()]);
+      } else {
+        await markRetrieved();
+        await recordExecuted();
+      }
       return response;
     } catch (err) {
       await this.recordProxyAudit(accountId, VAULT_AUDIT_TYPES.proxyExecuted, {
