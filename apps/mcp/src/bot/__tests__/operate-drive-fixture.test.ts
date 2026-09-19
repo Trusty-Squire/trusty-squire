@@ -37,6 +37,19 @@ const SIGNUP_HTML = `<!doctype html><meta charset="utf-8"><title>Signup fixture<
 const NOOP_HTML = `<!doctype html><meta charset="utf-8"><title>Noop fixture</title>
 <main><button id="noop">Do nothing</button><p id="status">idle</p></main>`;
 
+const GROWING_HTML = `<!doctype html><meta charset="utf-8"><title>Growing</title>
+<main><a href="#keep">Keep</a><div id="sink"></div></main>
+<script>
+  const sink = document.getElementById("sink");
+  setInterval(() => {
+    for (let i = 0; i < 200; i += 1) {
+      const node = document.createElement("span");
+      node.textContent = "n" + i;
+      sink.appendChild(node);
+    }
+  }, 0);
+</script>`;
+
 let browser: Browser;
 
 beforeAll(async () => {
@@ -308,6 +321,22 @@ describe("operate_drive real-browser fixture", () => {
         api(),
       );
       expect(handoff.status).toBe("busy");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("returns a snapshot on a lazily-growing DOM instead of walking forever", async () => {
+    const { context, page, started } = await openFixture(GROWING_HTML, "growing.test");
+    try {
+      await page.waitForTimeout(50);
+      const startedAt = Date.now();
+      const snapshot = await captureFrameSnapshot(page, [], 0);
+      expect(Date.now() - startedAt).toBeLessThan(3_000);
+      expect(snapshot).not.toBeNull();
+      expect(snapshot?.timedOut).not.toBe(true);
+      expect(snapshot?.elements.some((element) => element.label === "Keep")).toBe(true);
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();

@@ -3,8 +3,11 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  DRIVE_SNAPSHOT_BUDGET_MS,
   DRIVE_SNAPSHOT_CREDIT,
   DRIVE_SNAPSHOT_MAX_ELEMENTS,
+  DRIVE_SNAPSHOT_MAX_NAME_VISITS,
+  DRIVE_SNAPSHOT_MAX_WALK_NODES,
   driveRowsFromSnapshot,
   inferFieldFromLabel,
   snapshotSelectOptions,
@@ -32,6 +35,9 @@ describe("drive snapshot conversion", () => {
     expect(DRIVE_SNAPSHOT_CREDIT).toContain("jev-ultrafast");
     expect(DRIVE_SNAPSHOT_CREDIT).toContain("MIT");
     expect(DRIVE_SNAPSHOT_MAX_ELEMENTS).toBe(250);
+    expect(DRIVE_SNAPSHOT_BUDGET_MS).toBeLessThan(DRIVE_SNAPSHOT_MAX_ELEMENTS * 20);
+    expect(DRIVE_SNAPSHOT_MAX_WALK_NODES).toBeLessThan(10_000);
+    expect(DRIVE_SNAPSHOT_MAX_NAME_VISITS).toBeLessThan(DRIVE_SNAPSHOT_MAX_WALK_NODES);
   });
 
   it("keeps visible text labels and infers fields without slugging", () => {

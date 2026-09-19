@@ -20,7 +20,7 @@ import { BrokerAuthority, type BrokerPrincipal } from "./authority.js";
 import { BrokerRefusal } from "./refusal.js";
 import type { BrokerTransportPort } from "./transport.js";
 import { provenPreDispatchMutationFailure } from "../mutation-dispatch-evidence.js";
-import { withOperatorRequestContext } from "../request-cancellation.js";
+import { attachOperatorRequestAbort, withOperatorRequestContext } from "../request-cancellation.js";
 import type { CloseResult, CommandResult, OpenResult } from "./protocol.js";
 
 class DeliveredPreDispatchFailure {
@@ -144,6 +144,9 @@ export class OperatorBroker implements BrokerTransportPort {
       throw new BrokerRefusal("duplicate_pending", "Request is already registered");
     const controller = new AbortController();
     this.requestControllers.set(key, { principalId: principal.clientId, controller });
+    attachOperatorRequestAbort(controller.signal, (reason) => {
+      if (!controller.signal.aborted) controller.abort(reason);
+    });
     try {
       return await operation(controller.signal);
     } finally {
