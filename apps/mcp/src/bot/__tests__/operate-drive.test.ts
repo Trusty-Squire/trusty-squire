@@ -13,6 +13,7 @@ import {
   DRIVE_RULES,
   DRIVE_VALUE_QUESTION,
   goalValueCriteria,
+  DRIVE_IDENTICAL_RESNAP_MS,
   DRIVE_STALE_LIMIT,
   actionDescription,
   admitsChoice,
@@ -83,6 +84,7 @@ describe("operate_drive constants", () => {
     expect(DRIVE_MAX_JEV_CALLS).toBe(120);
     expect(DRIVE_MAX_CANDIDATES).toBe(250);
     expect(DRIVE_STALE_LIMIT).toBe(3);
+    expect(DRIVE_IDENTICAL_RESNAP_MS).toBe(200);
   });
 });
 
@@ -444,7 +446,7 @@ describe("decideAfterJev stop reasons", () => {
     ).toBe("act");
   });
 
-  it("returns no_progress when the same fingerprint and action are chosen twice", () => {
+  it("repeats a same-ref click so three-strike can wait for in-place widgets", () => {
     expect(
       decideAfterJev({
         ...base,
@@ -455,7 +457,11 @@ describe("decideAfterJev stop reasons", () => {
           CLICK_target: valid(slugFor(SUBMIT), clickCriteria),
         },
       }),
-    ).toEqual({ kind: "no_progress" });
+    ).toMatchObject({
+      kind: "act",
+      action: { kind: "click", target: "@e:go" },
+      actionKey: "@e:go",
+    });
   });
 
   it("types a matching fact and never authors a value", () => {
@@ -823,6 +829,66 @@ describe("facts, fingerprint, compact merge", () => {
         },
       }),
     ).toEqual({ kind: "needs_value", field: "search-wikipedia" });
+  });
+
+  it("offers a fillable search combobox for TYPE_TEXT and a click-only combobox for CLICK", () => {
+    const search: WireRow = ["@e:q", "t", "@search-with-duck|f=search"];
+    const trip: WireRow = ["@e:trip", "combobox", "@round-trip"];
+    expect(typeableCandidates([search], { query: "Zurich weather" }, false).map((c) => c.ref)).toEqual([
+      "@e:q",
+    ]);
+    expect(clickableCandidates([trip], false).map((c) => c.ref)).toEqual(["@e:trip"]);
+    const questions = buildDriveQuestions([search, trip], { query: "Zurich weather" }, "Search DuckDuckGo");
+    expect(questions.TYPE_TEXT_target?.type).toBe("choice");
+    expect(questions.CLICK_target?.type).toBe("choice");
+  });
+
+  it("matches origin and destination facts from where-from / where-to labels", () => {
+    const from: WireRow = ["@e:from", "t", "@where-from|f=origin"];
+    const to: WireRow = ["@e:to", "t", "@where-to|f=destination"];
+    const facts = { origin: "Zurich", destination: "London" };
+    expect(matchingFactKeys(facts, from)).toEqual(["origin"]);
+    expect(matchingFactKeys(facts, to)).toEqual(["destination"]);
+    expect(typeableCandidates([from, to], facts, false).map((c) => c.ref)).toEqual(["@e:from", "@e:to"]);
+  });
+
+  it("assigns a page-supplied select option from a goal phrase without a matching fact", () => {
+    const trip: WireRow = ["@e:trip", "s", "@trip-type"];
+    const pageOptions = new Map<string, readonly string[]>([["@e:trip", ["Round trip", "One way", "Multi-city"]]]);
+    const questions = buildDriveQuestions(
+      [trip],
+      {},
+      "Find one-way flights from Zurich to London",
+      false,
+      [],
+      "",
+      pageOptions,
+    );
+    const ops = questions.operation?.type === "choice" ? questions.operation.criteria : {};
+    const selects = questions.SELECT_target?.type === "choice" ? questions.SELECT_target.criteria : {};
+    const tripSlug = Object.keys(selects).find((key) => selects[key] === "trip-type");
+    expect(tripSlug).toBeDefined();
+    if (tripSlug === undefined) return;
+    expect(
+      decideAfterJev({
+        rows: [trip],
+        facts: {},
+        lastFingerprint: null,
+        lastActionKey: null,
+        fingerprint: "fp1",
+        goal: "Find one-way flights from Zurich to London",
+        pageOptions,
+        answers: {
+          operation: valid("SELECT", ops),
+          SELECT_target: valid(tripSlug, selects),
+        },
+      }),
+    ).toEqual({
+      kind: "act",
+      action: { kind: "select", target: "@e:trip", text: "One way" },
+      actionKey: "@e:trip",
+      confidence: 0.91,
+    });
   });
 
   it("never assigns a goal phrase into an identity field", () => {
