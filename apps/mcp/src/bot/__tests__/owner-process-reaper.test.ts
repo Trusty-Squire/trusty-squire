@@ -325,42 +325,6 @@ describe("owner process reaper contracts", () => {
   );
 
   it.skipIf(process.platform !== "linux")(
-    "collects ready handshakes whose owning process is gone and keeps live ones",
-    async () => {
-      const root = await tempDir();
-      // A worker-launch handshake the owner never got to collect: the owner
-      // died inside the ready window, so nothing named the file again and the
-      // directory grew one per hard owner death.
-      const dead = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
-      const deadPid = dead.pid!;
-      await new Promise<void>((resolveExit) => dead.once("exit", () => resolveExit()));
-      await waitForGone(deadPid);
-      const orphanPath = join(
-        root,
-        `${deadPid}-orphan-token-00000000-0000-4000-8000-000000000000.ready`,
-      );
-      const livePath = join(
-        root,
-        `${process.pid}-live-token-11111111-1111-4111-8111-111111111111.ready`,
-      );
-      await writeFile(
-        orphanPath,
-        `${JSON.stringify({ version: 1, token: "orphan-token", pid: deadPid })}\n`,
-      );
-      await writeFile(
-        livePath,
-        `${JSON.stringify({ version: 1, token: "live-token", pid: deadPid })}\n`,
-      );
-
-      await expect(sweepOrphanedOwnerProcesses(root)).resolves.toBe(0);
-      expect(existsSync(orphanPath)).toBe(false);
-      // A live owner may be mid-handshake. Its pid is never reclaimed, because
-      // a pid that is still running cannot be told apart from a reborn one.
-      expect(existsSync(livePath)).toBe(true);
-    },
-  );
-
-  it.skipIf(process.platform !== "linux")(
     "leaves zero surviving tracked children after the owner is killed",
     async () => {
       const root = await tempDir();

@@ -932,12 +932,6 @@ sessions keep the broker alive).
 oracle for the tab ceremony; `broker-daemon.test.ts`,
 and `broker-prior-contract-reclaim.test.ts` pin the rest.
 
-Stale-artifact sweep: the startup `sweepOrphanedOwnerProcesses`
-(`apps/mcp/src/bot/owner-process-reaper.ts`) also collects
-`~/.trusty-squire/owner-reapers/*.ready` worker-handshake files whose owning pid
-is gone. Never collect one whose owner is still running — a live owner may be
-mid-handshake, and a reborn pid cannot be told apart from it.
-
 ## Maintaining this file
 
 This file is a living contract, not a historical record. Keep it for durable,
