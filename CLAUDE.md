@@ -579,6 +579,13 @@ the facade FORWARDS each lifecycle export rather than re-implementing it, and th
 COMPLETE key set of every observation payload. Treat a failure there as a
 behavior change, not a test to update.
 
+### Browser busy façade (`@trusty-squire/mcp/browser`)
+
+`openTab` / `browserBusy` / `BrowserBusy` in [`apps/mcp/src/browser.ts`](apps/mcp/src/browser.ts)
+fold the four busy layers into one typed answer. Import from `@trusty-squire/mcp/browser`.
+The refusal-code mapping and the "do not reason about the wrong layer" contract
+live in [`docs/browser-broker.md`](docs/browser-broker.md#busy-facade).
+
 ### Browser process vs page lifetime (`browser.ts` is a facade)
 
 `BrowserController` composes one exclusive `BrowserProcessOwner`

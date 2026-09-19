@@ -165,6 +165,34 @@ Implementation entry points: `src/bot/broker/daemon.ts`, `discovery.ts`,
 `authority.ts`, `runtime.ts`, `operator.ts`, `forwarder.ts`, `protocol.ts`, and
 `transport.ts` under `apps/mcp`.
 
+## Busy façade
+
+The four layers above each answer "is the browser in use" in their own terms:
+tab families (`runtime.ts`), the profile election / SingletonLock lease
+(`profile.ts`), connect's maintenance window (`daemon.ts`), and the custody
+latch (`custody.ts`). Callers see fourteen `BrokerRefusal` codes; six of them
+mean some form of "not now". A second consumer imports one fold from
+`@trusty-squire/mcp/browser` (`apps/mcp/src/browser.ts`):
+
+```ts
+import { openTab, browserBusy, BrowserBusy } from "@trusty-squire/mcp/browser";
+```
+
+`browserBusy()` is the read-only fold. `openTab({ profile, purpose })` records
+the holder's purpose and throws `BrowserBusy` with `.action()` when it
+genuinely cannot; it never sleeps. Wire codes stay unchanged — this is a
+mapping at the package boundary:
+
+| Wire code              | Layer / reason |
+| ---------------------- | -------------- |
+| `stale_lease`          | tabs           |
+| `profile_busy`         | profile        |
+| `maintenance`          | maintenance    |
+| `broker_unavailable`   | custody        |
+| `incompatible_runtime` | custody        |
+| `launch_timeout`       | custody        |
+
+Other refusal codes are not "not now" and are not mapped.
 
 ## Executed mechanical acceptance
 
