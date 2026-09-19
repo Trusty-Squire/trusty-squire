@@ -99,6 +99,15 @@ export function panel(body: string, opts: PanelOpts = {}): void {
   const color = opts.color ?? "wine";
   const borderColor =
     color === "wine" ? WINE : color === "dim" ? "#555" : color === "yellow" ? "yellow" : "red";
+  // A pipe is also a machine-readable boundary: Beeline consumes the connect
+  // command's printed install URL. Capping a non-TTY panel at the fallback
+  // 80-column terminal width split the 43-character setup token across lines,
+  // so the consumer opened a truncated token and the API correctly returned
+  // `not_found`. Let boxen size piped output to its content; interactive
+  // terminals keep the compact visual width.
+  const width = process.stdout.isTTY
+    ? Math.min(termWidth() - 2, 78)
+    : Math.max(termWidth() - 2, ...body.split("\n").map((line) => line.length + 4));
   // Tighter padding than the design's previous round-border default:
   // hairline border + 1 column of side padding reads as a Linear-style
   // panel rather than a heavy boxed callout.
@@ -109,7 +118,7 @@ export function panel(body: string, opts: PanelOpts = {}): void {
       borderStyle: "single",
       borderColor,
       ...(opts.align !== undefined ? { textAlignment: opts.align } : {}),
-      width: Math.min(termWidth() - 2, 78),
+      width,
     }),
   );
 }
