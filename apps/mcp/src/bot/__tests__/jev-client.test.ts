@@ -84,6 +84,17 @@ const QUESTIONS = {
 };
 
 describe("askJev request mapping", () => {
+  it("serializes structured drive state once for platform while preserving BYOK objects", async () => {
+    const state = { goal: "fill form", history: [], elements: [{ ref: "@e:one", description: "Email", required: true }] };
+    const platform = mockApi({});
+    await askJev(platform, state, QUESTIONS);
+    expect(vi.mocked(platform.decide).mock.calls[0]![0]).toBe(JSON.stringify(state));
+    const byok = mockApi({ credentials: [{ service: "typesafe" }] });
+    await askJev(byok, state, QUESTIONS);
+    const input = vi.mocked(byok.useCredential).mock.calls[0]![0]!;
+    expect(JSON.parse(input.http.body!).state).toEqual(state);
+  });
+
   it("sends the measured request shape through POST /v1/decide by default", async () => {
     const api = mockApi({
       decide: () =>
