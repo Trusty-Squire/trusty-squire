@@ -2773,8 +2773,19 @@ async function driveLoop(input: {
   const applyDecision = async (
     decision: DriveDecision,
     jevMs?: number,
+    decisionPageFingerprint?: string,
   ): Promise<DriveHandoff | "continue"> => {
     if (decision.kind === "complete") {
+      const page = session.browser.page;
+      if (page !== null && decisionPageFingerprint !== undefined) {
+        const currentPageFingerprint = await pageFingerprintOf(page);
+        if (
+          decisionPageFingerprint.length > 0 &&
+          currentPageFingerprint === decisionPageFingerprint
+        ) {
+          return finish("complete");
+        }
+      }
       const completeSnap = await snapshotOrTimeout(framesIfNeeded());
       if (completeSnap !== "ok") return completeSnap;
       const fresh = progressFingerprint(observation.url, rows, drive, session);
@@ -3287,6 +3298,8 @@ async function driveLoop(input: {
     const questionCount = Object.keys(questions).length;
     const stateBytes = Buffer.byteLength(JSON.stringify(state));
     const fingerprint = progressFingerprint(observation.url, rows, drive, session);
+    const page = session.browser.page;
+    const decisionPageFingerprint = page === null ? "" : await pageFingerprintOf(page);
     if (drive.boundFingerprint !== fingerprint) drive.consumedActionKey = null;
     drive.boundFingerprint = fingerprint;
     const decide = (answers: Record<string, JevAnswer>): DriveDecision =>
@@ -3391,7 +3404,7 @@ async function driveLoop(input: {
         continue;
       }
     }
-    const applied = await applyDecision(decision, jevMs);
+    const applied = await applyDecision(decision, jevMs, decisionPageFingerprint);
     if (applied !== "continue") return applied;
     steps += 1;
   }
