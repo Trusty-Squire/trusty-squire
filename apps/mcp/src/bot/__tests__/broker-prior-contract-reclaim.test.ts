@@ -62,18 +62,13 @@ const sleep = async (ms: number) => await new Promise((resolve) => setTimeout(re
  *   authenticates `hello` with the token — a Contract B broker refuses
  *   `hello` instead. It dies on default SIGTERM exactly like the
  *   pre-wire-collapse daemon, unless told to ignore it. */
-// Execute the older strict open schemas to generate the actual wire error.
+// Execute the older strict open schema to generate the actual wire error a
+// pre-ceremony broker produces for the ceremony field.
 const oldOpenErrors = Object.fromEntries(
-  ["ceremony", "adoptIdentity"].map((field) => {
-    const schema = z
-      .object({
-        serviceUrl: z.string(),
-        ...(field === "ceremony" ? { adoptIdentity: z.boolean().optional() } : {}),
-      })
-      .strict();
+  ["ceremony"].map((field) => {
+    const schema = z.object({ serviceUrl: z.string() }).strict();
     const result = schema.safeParse({
       serviceUrl: "https://example.com",
-      adoptIdentity: true,
       ceremony: true,
     });
     if (result.success) throw new Error("Old schema unexpectedly accepted ceremony");
@@ -128,7 +123,7 @@ if (!mode.includes("no-listen")) {
           socket.write(JSON.stringify({ id: request.id, ...payload }) + "\\n");
         if (mode.includes("schema-") && request.method === "open") {
           const errors = ${JSON.stringify(oldOpenErrors)};
-          reply({ error: { code: "broker_execution_failed", message: errors[mode.includes("schema-ceremony") ? "ceremony" : "adoptIdentity"] } });
+          reply({ error: { code: "broker_execution_failed", message: errors["ceremony"] } });
           continue;
         }
         if (mode.includes("schema-") && request.method === "close") {
@@ -576,7 +571,6 @@ describe("same-contract stale-credential broker reclaim", () => {
 
   it.each([
     { field: "ceremony", outcome: "completes" },
-    { field: "adoptIdentity", outcome: "completes" },
     { field: "ceremony", outcome: "refuses attached clients" },
     { field: "ceremony", outcome: "stops after one retry" },
   ])("old broker rejecting $field: $outcome", { timeout: 30_000 }, async ({ field, outcome }) => {
@@ -665,7 +659,6 @@ describe("same-contract stale-credential broker reclaim", () => {
         method: "open",
         params: {
           serviceUrl: "https://trustysquire.ai/install/confirm?install=fixture",
-          adoptIdentity: true,
           ceremony: true,
         },
       },

@@ -144,7 +144,7 @@ export function isUnsupportedCeremonyOpen(error: unknown): boolean {
         (issue) =>
           issue.code === "unrecognized_keys" &&
           issue.path?.length === 0 &&
-          issue.keys?.some((key) => key === "ceremony" || key === "adoptIdentity"),
+          issue.keys?.some((key) => key === "ceremony"),
       )
     );
   } catch {

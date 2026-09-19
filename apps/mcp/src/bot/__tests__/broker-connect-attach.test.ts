@@ -116,7 +116,6 @@ const server = net.createServer((socket) => {
       }
       if (request.method === "open") {
         seen.openUrl = request.params?.serviceUrl ?? null;
-        seen.openAdoptIdentity = request.params?.adoptIdentity === true;
         seen.openCeremony = request.params?.ceremony === true;
         if (openNeedsUser === "needs-user") {
           // A documented needs_user hand-back (OpenResult): the broker
@@ -257,7 +256,6 @@ async function connectFixture(
   profileIdentity: string;
   lockNeverReleased: boolean;
   openUrl: string | null;
-  openAdoptIdentity: boolean;
   openCeremony: boolean;
   closedSession: string | null;
   commands: { name: string | null; args: Record<string, unknown> | null }[];
@@ -335,7 +333,6 @@ async function connectFixture(
   }, 5_000).catch(() => undefined);
   const seen = ((): {
     openUrl: string | null;
-    openAdoptIdentity: boolean;
     openCeremony: boolean;
     closedSession: string | null;
     commands: { name: string | null; args: Record<string, unknown> | null }[];
@@ -345,7 +342,6 @@ async function connectFixture(
     } catch {
       return {
         openUrl: null,
-        openAdoptIdentity: false,
         openCeremony: false,
         closedSession: null,
         commands: [],
@@ -359,7 +355,6 @@ async function connectFixture(
     // momentarily: the ceremony is a tab in the broker's browser.
     lockNeverReleased: existsSync(lockPath),
     openUrl: seen.openUrl,
-    openAdoptIdentity: seen.openAdoptIdentity,
     openCeremony: seen.openCeremony === true,
     closedSession: seen.closedSession,
     commands: seen.commands,
@@ -377,11 +372,11 @@ describe("connect attaches to the live broker for the profile it is connecting",
       // profile — the fixture is the only listener on it, and it received the
       // tab open.
       expect(outcome.openUrl).toBe(CONFIRM_URL);
-      // The open is identity-neutral: the ceremony reuses whatever identity
-      // the shared browser is live under instead of requesting a bare one.
-      expect(outcome.openAdoptIdentity).toBe(true);
-      // The open names itself as the ceremony: that marker is what scopes the
-      // google_session admission gate bypass to this open and nothing else.
+      // The open names itself as the ceremony — Contract B's ONE optional
+      // field. It scopes the google_session admission-gate bypass to this
+      // open, and it is what makes the open identity-neutral (the ceremony
+      // reuses whatever identity the shared browser is live under rather than
+      // requesting a bare one; deriveOpenToolArgs pins that rule).
       expect(outcome.openCeremony).toBe(true);
       // The session tab is closed at the lease boundary.
       expect(outcome.closedSession).toBe("tab-1");

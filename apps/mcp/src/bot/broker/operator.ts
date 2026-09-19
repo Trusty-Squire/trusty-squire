@@ -45,17 +45,15 @@ const commandSchema = z
   .strict();
 // The tool's own input schema stays the single validator (exactly as before
 // the collapse); the open request only names the three launch fields plus
-// the identity-neutral adoption flag and the connect ceremony's own marker.
-// `ceremony` is the ONE new field (round-12 captain order): it is set only
-// by the connect ceremony (google-login.ts) and only scopes the
-// google_session admission gate bypass — the agent-facing `operate_start`
-// schema has no such field, and no forwarder path can inject it.
+// the connect ceremony's own marker. `ceremony` is the ONE new field
+// (captain ruling 031): it is set only by the connect ceremony
+// (google-login.ts) — the agent-facing `operate_start` schema has no such
+// field, and no forwarder path can inject it.
 const openSchema = z
   .object({
     serviceUrl: z.string().min(1),
     format: z.enum(["compact", "full"]).optional(),
     proxy: z.string().optional(),
-    adoptIdentity: z.boolean().optional(),
     ceremony: z.boolean().optional(),
   })
   .strict();
@@ -83,21 +81,20 @@ function isOperatorCommand(name: string): boolean {
 }
 
 /** Derive the operate_start arguments an `open` request maps to. Exported for
- * tests: the identity-neutral rule lives here — an `adoptIdentity` open
- * without an explicit proxy reuses `liveProxyUrl` (whatever identity the
- * shared browser is already live under), an explicit proxy always wins, and
- * with nothing live the request stays bare. */
+ * tests: identity adoption is a behavior OF the ceremony open, not a flag of
+ * its own — a ceremony open without an explicit proxy reuses `liveProxyUrl`
+ * (whatever identity the shared browser is already live under), an explicit
+ * proxy always wins, and a plain open stays bare. */
 export function deriveOpenToolArgs(
   input: {
     serviceUrl: string;
     format?: "compact" | "full" | undefined;
     proxy?: string | undefined;
-    adoptIdentity?: boolean | undefined;
+    ceremony?: boolean | undefined;
   },
   liveProxyUrl: string | undefined,
 ): Record<string, unknown> {
-  const liveProxy =
-    input.adoptIdentity === true && input.proxy === undefined ? liveProxyUrl : undefined;
+  const liveProxy = input.ceremony === true && input.proxy === undefined ? liveProxyUrl : undefined;
   return {
     service_url: input.serviceUrl,
     ...(input.format !== undefined ? { format: input.format } : {}),
@@ -203,7 +200,7 @@ export class OperatorBroker implements BrokerTransportPort {
     const tool = findTool("operate_start", this.tools);
     if (tool === null || !isOperatorCommand(tool.name))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
-    // Identity-neutral open (adoptIdentity): when the shared browser is
+    // A ceremony open is identity-neutral: when the shared browser is
     // already live under some identity, the opener reuses it instead of
     // requesting a bare one — a bare request would be refused
     // incompatible_runtime while other sessions are live, or would recycle

@@ -11,7 +11,7 @@ import { existsSync, symlinkSync } from "node:fs";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { hostname, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { exposeSharedBrokerCeremonyDisplay } from "../google-login.js";
 import { registerLocalBrowserLaunch } from "../browser-process-runtime.js";
@@ -160,6 +160,36 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
       await expect(exposeSharedBrokerCeremonyDisplay(profile, "test")).resolves.toMatchObject({
         kind: "already_visible",
       });
+    } finally {
+      untrackOwnerBrowserLaunch(launch.marker);
+    }
+  });
+
+  // The broker daemon and connect are different processes and may run under
+  // different TMPDIRs — broker discovery supports exactly that. A rig this
+  // repo RECORDED for the holder launch is ours wherever the daemon's temp
+  // root put it; rejecting it because its parent is not the CLIENT's temp
+  // root exposed no noVNC URL and stranded a headless user until the
+  // deadline, on a display we created ourselves.
+  it("exposes the tracked rig when the broker's temp root differs from this process's", async () => {
+    const profile = await tempProfile();
+    vi.stubEnv("TRUSTY_SQUIRE_REAPER_DIR", join(profile, "reaper"));
+    const brokerTemp = join(profile, "broker-temp");
+    await mkdir(join(brokerTemp, "tsq-login-elsewhere"), { recursive: true, mode: 0o700 });
+    const authFile = join(brokerTemp, "tsq-login-elsewhere", "xauthority");
+    expect(dirname(dirname(authFile))).not.toBe(tmpdir());
+    const launch = registerLocalBrowserLaunch(profile, { DISPLAY: ":73", XAUTHORITY: authFile });
+    const child = await spawnHolder({ DISPLAY: ":0", XAUTHORITY: "/foreign/xauthority" }, profile);
+    await holderOwnsProfile(profile, child);
+    expect(
+      bindOwnerBrowserLaunch(launch.marker, profileProcessIdentity(child.pid!, profile)!),
+    ).toBe(true);
+    mockState.attachSucceeds = true;
+    try {
+      const exposure = await exposeSharedBrokerCeremonyDisplay(profile, "test");
+      expect(exposure.kind).toBe("exposed");
+      expect(mockState.rigs[0]).toMatchObject({ display: ":73", authFile });
+      if (exposure.kind === "exposed") await exposure.stop();
     } finally {
       untrackOwnerBrowserLaunch(launch.marker);
     }

@@ -749,7 +749,12 @@ export async function exposeSharedBrokerCeremonyDisplay(
       reason:
         "the browser holding the profile runs without a DISPLAY/XAUTHORITY in its launch record or process tree",
     };
-  if (!isOwnedLoginRigXauthority(authFile))
+  // A launch record IS the proof of ownership: this repo wrote it for this
+  // exact holder launch (same profile, same pid, matching birth identity), so
+  // the rig it names is ours wherever the daemon's TMPDIR put it. Only the
+  // process-tree fallback — no record to consult — has to read ownership off
+  // the private dir's name.
+  if (tracked === null && !isOwnedLoginRigXauthority(authFile))
     return {
       kind: "already_visible",
       reason:
@@ -794,12 +799,14 @@ export async function exposeSharedBrokerCeremonyDisplay(
   };
 }
 
-// Rigs this repo creates live in private dirs named `tsq-login-*` directly
-// under the temp root; an Xauthority pointing anywhere else belongs to the
-// machine's real display, which the user can already see.
+// Last-resort ownership signal, for a holder with no launch record: rigs this
+// repo creates live in private dirs named `tsq-login-*`. The dir's PARENT is
+// deliberately not compared against this process's temp root — the broker
+// daemon and connect are different processes and may run under different
+// TMPDIRs, and rejecting the broker's own rig on that difference strands a
+// headless user with no noVNC URL until the deadline.
 function isOwnedLoginRigXauthority(authFile: string): boolean {
-  const dir = dirname(authFile);
-  return basename(dir).startsWith("tsq-login-") && dirname(dir) === tmpdir();
+  return basename(dirname(authFile)).startsWith("tsq-login-");
 }
 
 // Chrome can erase the main process's launch environment while crashpad and
@@ -970,8 +977,8 @@ async function logoutProvidersThroughSession(
 /**
  * Open the confirm page as a session tab in the shared broker's browser — an
  * ordinary broker-client open of one tab family, no drain and no second
- * Chrome. The open is identity-neutral (`adoptIdentity`): when the shared
- * browser is already live under some identity (for example a proxied
+ * Chrome. A `ceremony` open is identity-neutral by construction: when the
+ * shared browser is already live under some identity (for example a proxied
  * operator session), the ceremony reuses it instead of requesting a bare
  * one — a bare request would be refused `incompatible_runtime` while other
  * sessions are live, or would recycle the shared Chrome underneath them
@@ -1013,10 +1020,10 @@ export async function tryRunCeremonyInSharedBroker(
     const openCeremony = async () =>
       (await client.call("open", {
         serviceUrl: opts.url,
-        adoptIdentity: true,
         // The ceremony IS what creates the live Google session: its start must
         // pass the google_session admission gate, or every enrolled machine
         // with an empty profile deadlocks against a self-referential remedy.
+        // The same flag adopts the browser's live identity — see OpenRequest.
         ceremony: true,
       })) as { sessionId?: string; observation?: unknown };
     let open: Awaited<ReturnType<typeof openCeremony>>;

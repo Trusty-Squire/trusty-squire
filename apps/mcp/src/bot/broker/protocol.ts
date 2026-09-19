@@ -48,24 +48,24 @@ export interface OpenRequest {
   serviceUrl: string;
   format?: "compact" | "full";
   proxy?: string;
-  /** Reuse whatever identity the shared browser is already live under
-   * instead of requesting one: when the broker's Chrome serves sessions
-   * through a proxy, an open without a proxy would otherwise be refused
-   * `incompatible_runtime` (other sessions live) or recycle the shared
-   * Chrome underneath them (none live). Only meaningful when `proxy` is
-   * omitted; an explicit `proxy` always wins. */
-  adoptIdentity?: boolean;
-  /** This open IS the connect re-auth ceremony: its start must pass the
-   * `google_session` admission gate, because the ceremony is what creates
-   * the live Google session — gating it deadlocked every enrolled machine
-   * whose profile had none (the gate's own remedy, `connect
-   * --force-relogin=google`, is the ceremony itself). Nothing else changes:
-   * the ceremony still gets a full operator session (the deferred
-   * --force-relogin logout drive rides it) and still counts in the
-   * inventory. Ceremony-only by construction: the only sender is the
-   * connect ceremony in google-login.ts, and the agent-facing
-   * `operate_start` surface has no such field and no forwarder path that
-   * could add one. */
+  /** This open IS the connect re-auth ceremony — the ONE optional field on
+   * `open`. Two things follow from it, and neither is separately selectable:
+   *
+   * 1. Its start passes the `google_session` admission gate, because the
+   *    ceremony is what creates the live Google session — gating it
+   *    deadlocked every enrolled machine whose profile had none (the gate's
+   *    own remedy, `connect --force-relogin=google`, is the ceremony itself).
+   * 2. It adopts whatever identity the shared browser is already live under
+   *    instead of requesting one. Without that, an open carrying no proxy
+   *    against a proxied Chrome is refused `incompatible_runtime` while other
+   *    sessions live, or recycles the shared Chrome underneath them when none
+   *    do. An explicit `proxy` still wins.
+   *
+   * Nothing else changes: the ceremony still gets a full operator session
+   * (the deferred --force-relogin logout drive rides it) and still counts in
+   * the inventory. Ceremony-only by construction: the only sender is the
+   * connect ceremony in google-login.ts, and the agent-facing `operate_start`
+   * surface has no such field and no forwarder path that could add one. */
   ceremony?: boolean;
 }
 export interface OpenResult {
