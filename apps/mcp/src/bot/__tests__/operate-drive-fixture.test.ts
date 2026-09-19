@@ -450,6 +450,14 @@ describe("operate_drive real-browser fixture", () => {
       document.getElementById("overlay").replaceChildren(input, list);
       input.focus();
       input.select();
+      input.addEventListener("input", () => {
+        const typed = input.value;
+        setTimeout(() => {
+          option.textContent = typed.includes("Zurich")
+            ? "Zurich Airport (ZRH)"
+            : "Philadelphia, Pennsylvania";
+        }, 80);
+      });
     }, 80);
   });
 </script>`;
@@ -466,6 +474,7 @@ describe("operate_drive real-browser fixture", () => {
       });
       expect(typed.kind).toBe("ok");
       expect(await page.locator("#else").inputValue()).toBe("Zurich");
+      expect(await page.locator('[role="option"]').textContent()).toBe("Zurich Airport (ZRH)");
     } finally {
       await finishProvisionSession(started.session_id);
       await context.close();
