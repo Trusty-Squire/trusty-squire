@@ -896,12 +896,19 @@ lease boundary. It never starts a second instance and never takes the profile
 exclusively while a broker owns it.
 
 It also only goes there when it has to. The already-provisioned preflight runs
-BEFORE the maintenance handshake and the exclusive profile guard, so an
-already-connected install completes from reads alone — no drain, no login
-browser, no profile lease. Only a connect that genuinely needs the login
-ceremony (no session, expired/absent token, `--force-relogin`) may approach the
-browser exclusively, and for that one a `draining` answer is reported at once
-rather than waited on.
+BEFORE the maintenance handshake and the exclusive profile guard, and its
+provider probe is a byte-copy read of the profile's cookie store
+(`detectProviderSessionsFromProfile`) — no profile lease, no wait, no browser.
+That is load-bearing, not an optimization: a probe that OPENS the profile
+contends with the resident broker's Chrome, so it reports "busy" on precisely
+the machines that are already connected, which is the reported failure wearing a
+different message. Anything asking "is this machine already connected?" must
+answer it without taking the thing the answer is about.
+
+Only a connect that genuinely needs the login ceremony (no session,
+expired/absent token, `--force-relogin`) may approach the browser exclusively,
+and for that one a `draining` answer is reported at once rather than waited on.
+A probe failure is `unverified`, never a forced re-pair (connect-loops-forever).
 
 Corollaries: a close that cannot drain must not leave
 `BrokerRuntime.closing` set (that refuses every later session while the blocking

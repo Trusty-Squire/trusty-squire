@@ -64,12 +64,19 @@ so the only caller that reaches the handshake is one that genuinely needs the
 login ceremony, and telling that caller immediately beats stalling it.
 
 Connect approaches the browser only when it needs it. The already-provisioned
-preflight — stored session, account-bound plumbing, and a cookie read of the
-profile on disk — runs BEFORE the maintenance handshake and before the exclusive
-profile guard, so an install that is already connected completes with no drain,
-no login browser, and no profile lease. Ordering this the other way round is
-what failed an install on a machine whose browser was merely busy with other
-work.
+preflight — stored session, account-bound plumbing, and a byte-copy read of the
+profile's cookie store (`detectProviderSessionsFromProfile`) — runs BEFORE the
+maintenance handshake and before the exclusive profile guard, and takes no
+profile lease, waits for nothing, and opens no browser. An install that is
+already connected therefore completes while the broker keeps both its lease and
+its Chrome.
+
+Ordering it the other way round, or answering it with a probe that opens the
+profile, both fail the same way: the machines that are already connected are
+exactly the machines whose browser is busy, so the question contends with the
+browser it is about and connect reports the profile as busy. Cookie presence is
+all that read proves — the live liveness probe still runs after the ceremony,
+where this process has just closed the profile itself.
 
 Attaching is the point, and the claim is what attaching buys. The plain login
 is deliberately a second, non-CDP Chrome on the SAME profile: Google's OAuth

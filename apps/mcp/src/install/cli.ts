@@ -54,6 +54,7 @@ import {
 import { detectAsn, type AsnInfo } from "../bot/index.js";
 import {
   detectActiveProviderSessions,
+  detectProviderSessionsFromProfile,
   openInstallConfirmInBotChrome,
   type InstallClaimPollResult,
 } from "../bot/google-login.js";
@@ -1092,19 +1093,20 @@ async function checkAlreadyProvisioned(
       session.api_base_url,
       session.agent_session_token,
     );
-    // Probe the profile cookies instead of trusting the marker. The marker is a
-    // cache that can lie after logout/expiry; connect is rare enough to pay this
-    // cost, and this keeps "Already connected" aligned with the bot's real
-    // ability to wear the user's Google identity. validate=true so a dead-but-
-    // present GitHub session isn't persisted into connected_providers.
+    // Read the profile's cookie store instead of trusting the marker: the
+    // marker is a cache that can lie after logout/expiry. This is a byte-copy
+    // read — it takes no profile lease, waits for nothing, and opens no
+    // browser — because the machines that are already connected are exactly the
+    // machines whose browser is busy, and asking the profile a question must
+    // never contend with the browser the question is about.
     //
     // A busy profile or any other probe failure must not force a re-pair: that
     // is the connect-loops-forever bug. It also must not become a connected
-    // claim based on cached markers, because only a live probe proves the
+    // claim based on cached markers, because only reading the profile proves the
     // provider session. Refresh config with an explicit unverified warning.
     let providers: OAuthProviderId[] | null;
     try {
-      providers = await detectActiveProviderSessions(profileDir);
+      providers = await detectProviderSessionsFromProfile(profileDir);
       await syncConnectedProviders(providers, accountId);
     } catch (err) {
       const preflight = decideConnectPreflight(session, stillValid, null);

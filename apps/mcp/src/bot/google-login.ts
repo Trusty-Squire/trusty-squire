@@ -17,6 +17,9 @@
 // this module's display stack and remain on Chrome's new-headless path.
 
 import { createRequire } from "node:module";
+import { copyFile, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import chalk from "chalk";
 import {
   CHROME_PROFILE_DIR,
@@ -267,6 +270,74 @@ async function validateProviderSession(
   } finally {
     await page.close().catch(() => undefined);
   }
+}
+
+/**
+ * Read the providers whose session cookies are present in a profile WITHOUT
+ * opening it: no profile lease, no wait for the profile to be free, no Chrome.
+ *
+ * `connect` asks this before it decides whether it needs the browser at all, and
+ * the steady state on any machine that has used the MCP server is a resident
+ * broker holding both the profile lease and a live Chrome on it. Opening the
+ * profile to answer "are you already connected?" therefore contended with the
+ * very browser the answer is about, and reported the profile as busy on exactly
+ * the machines that were already connected.
+ *
+ * Chrome keeps the live cookie DB under an exclusive SQLite lock, so this reads
+ * a byte copy: copying needs no lock, and a provider session cookie is
+ * long-lived enough that a committed snapshot is the same answer. Presence is
+ * all this proves — a cookie can outlive the session behind it, which is why
+ * connect's "Already connected" says so and points at --force-relogin. The
+ * liveness probe below still runs where it is affordable: after the ceremony,
+ * on a profile this process has just closed.
+ *
+ * Throws when the profile cannot be read; the caller must treat that as
+ * unverified rather than as proof the machine needs re-pairing.
+ */
+export async function detectProviderSessionsFromProfile(
+  profileDir: string = CHROME_PROFILE_DIR,
+): Promise<OAuthProviderId[]> {
+  const snapshotDir = await mkdtemp(join(tmpdir(), "ts-cookie-snapshot-"));
+  const snapshot = join(snapshotDir, "Cookies");
+  try {
+    await copyFile(join(profileDir, "Default", "Cookies"), snapshot);
+    const { default: Database } = await import("better-sqlite3");
+    const db = new Database(snapshot, { readonly: true, fileMustExist: true });
+    try {
+      const rows = db
+        .prepare("select host_key, name, expires_utc, is_persistent from cookies")
+        .all() as ProfileCookieRow[];
+      return (Object.keys(LOGIN_TARGETS) as OAuthProviderId[]).filter((id) =>
+        rows.some((row) => cookieProvesSession(row, LOGIN_TARGETS[id])),
+      );
+    } finally {
+      db.close();
+    }
+  } finally {
+    await rm(snapshotDir, { recursive: true, force: true });
+  }
+}
+
+interface ProfileCookieRow {
+  host_key: string;
+  name: string;
+  expires_utc: number;
+  is_persistent: number;
+}
+
+// Chrome stores expiry as microseconds since 1601-01-01 UTC.
+const WINDOWS_EPOCH_OFFSET_MS = 11_644_473_600_000;
+
+function cookieProvesSession(row: ProfileCookieRow, target: LoginTarget, now = Date.now()): boolean {
+  if (!target.cookies.includes(row.name)) return false;
+  const host = new URL(target.cookieOrigin).hostname;
+  const matchesHost = row.host_key.startsWith(".")
+    ? host === row.host_key.slice(1) || host.endsWith(row.host_key)
+    : host === row.host_key;
+  if (!matchesHost) return false;
+  // A non-persistent cookie has no meaningful expiry recorded.
+  if (row.is_persistent === 0) return true;
+  return row.expires_utc / 1000 - WINDOWS_EPOCH_OFFSET_MS > now;
 }
 
 // Inspect a live bot Chrome context and return the providers whose sessions are
