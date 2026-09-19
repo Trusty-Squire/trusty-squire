@@ -29,6 +29,7 @@ import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type * as ProfileModule from "../profile.js";
+import { controlLabelV2 } from "../compact-observation-v2.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../session-guard.js", () => ({
@@ -42,6 +43,9 @@ vi.mock("../../session-guard.js", () => ({
 
 const TOKEN = "fixture-token";
 const CONFIRM_URL = "https://trustysquire.ai/install/confirm?install=fixture";
+// Minted by the same function the real observation uses, so the fixture can
+// never encode a label shape production does not emit.
+const SIGN_OUT_LABEL = controlLabelV2("Sign out")!;
 
 /**
  * A real broker fixture: a separate process that
@@ -107,10 +111,14 @@ const server = net.createServer((socket) => {
         });
         // GitHub's logout page renders its confirm control; the observe-then-
         // click drive must find a Sign out row in the returned action map.
+        // The label is the @slug alias controlLabelV2 really mints for an
+        // accessible name of "Sign out" — a bare "sign-out" is a shape no
+        // observation emits, and matching against it passes here while the
+        // click never fires in production.
         reply({
           result:
             request.params?.name === "operate_observe"
-              ? { safe_table: [{ ref: "@e5", role: "button", label: "sign-out" }] }
+              ? { safe_table: [{ ref: "@e5", role: "button", label: ${JSON.stringify(SIGN_OUT_LABEL)} }] }
               : { ok: true },
         });
         continue;

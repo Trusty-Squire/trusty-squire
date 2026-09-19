@@ -58,6 +58,7 @@ import {
 import { createSessionGuard } from "../session-guard.js";
 import { connectOrLaunchBroker, resolveBrokerSocket } from "./broker/discovery.js";
 import type { BrokerClient } from "./broker/transport.js";
+import { controlLabelV2 } from "./compact-observation-v2.js";
 import { extractGoogleAccountEmail } from "./oauth-login.js";
 export { extractGoogleAccountEmail };
 import {
@@ -801,6 +802,9 @@ const PROVIDER_LOGOUT_URLS: Record<OAuthProviderId, string> = {
   github: "https://github.com/logout",
 };
 
+// The accessible name of the confirm control on GitHub's logout page.
+const GITHUB_SIGN_OUT_CONTROL_NAME = "Sign out";
+
 // The label printed inside the noVNC URL box for a SHARED-browser ceremony.
 // Disclosure, not softening: the URL shows the whole shared display for the
 // ceremony deadline — sibling sessions' tabs included — and is single-use.
@@ -843,16 +847,21 @@ async function logoutProvidersThroughSession(
         // operate_click only accepts a ref a prior observation minted — a
         // bare text selector never resolves (stale_ref). Observe the logout
         // page, find the Sign out control in the returned action map, and
-        // click its ref.
+        // click its ref. The wanted alias comes from the same function that
+        // MINTS the observation's labels, so this never drifts from the
+        // `@slug` shape they actually carry (a disambiguating ordinal makes
+        // it `@sign-out-2`, hence the prefix match).
         let signedOut = false;
         try {
           const observed = (await operateCommand(client, sessionId, "operate_observe", {})) as {
             safe_table?: { ref: string; role?: string; label?: string }[];
           };
+          const wanted = controlLabelV2(GITHUB_SIGN_OUT_CONTROL_NAME);
           const signOut = (observed?.safe_table ?? []).find(
             (row) =>
               (row.role === "button" || row.role === "link") &&
-              (row.label ?? "").toLowerCase().startsWith("sign-out"),
+              wanted !== undefined &&
+              (row.label ?? "").toLowerCase().startsWith(wanted),
           );
           if (signOut !== undefined) {
             await operateCommand(client, sessionId, "operate_click", { ref: signOut.ref });
