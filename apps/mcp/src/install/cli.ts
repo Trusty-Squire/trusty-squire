@@ -866,12 +866,6 @@ async function runConnectInstall(
     );
   }
 
-  // Persist the current live probe only as connect UX data, bound to the
-  // account the ceremony just established. On a bare --force-relogin account
-  // switch that is the NEW account (the caller-level accountId is the old
-  // pin), and it is the record the config pin and the next preflight read.
-  for (const p of providers ?? [])
-    await recordConnectedProvider(p, session.account_id ?? accountId);
   printProviderState(providers ?? []);
 
   // Config + key land either way: the session is real and re-running connect
@@ -1100,29 +1094,6 @@ export function preflightUnverifiedMessage(detail: string): string {
   );
 }
 
-/**
- * Cookie evidence may CONFIRM a provider the live post-ceremony probe already
- * recorded; it may never add one. A cookie name on disk outlives the session
- * behind it, so treating it as a discovery is how a server-revoked login reads
- * as connected and the GitHub repair offer stops firing. Nothing here writes
- * `connected_providers`: only the live probe that runs after a ceremony does.
- *
- * A session predating that record has nothing to confirm against, so its
- * cookies stand alone rather than forcing a needless re-pair.
- */
-function confirmRecordedProviders(
-  session: SessionData,
-  cookieProviders: OAuthProviderId[],
-): OAuthProviderId[] {
-  const recorded = session.connected_providers;
-  // An absent or EMPTY record means "unknown", not "none": shipped builds
-  // could persist [] from a transient probe failure, and intersecting cookie
-  // evidence against that lie would demote a really-signed-in machine forever.
-  // The veto only applies to providers the record positively names.
-  if (recorded === undefined || recorded.length === 0) return cookieProviders;
-  return cookieProviders.filter((provider) => recorded.includes(provider));
-}
-
 type CheckedConnectPreflight =
   | { kind: "ceremony" }
   | { kind: "provisioned"; providers: OAuthProviderId[]; session: SessionData }
@@ -1163,10 +1134,7 @@ async function checkAlreadyProvisioned(
     // provider session. Refresh config with an explicit unverified warning.
     let providers: OAuthProviderId[] | null;
     try {
-      providers = confirmRecordedProviders(
-        session,
-        await detectProviderSessionsFromProfile(profileDir),
-      );
+      providers = await detectProviderSessionsFromProfile(profileDir);
     } catch (err) {
       const preflight = decideConnectPreflight(session, stillValid, null);
       if (preflight.kind === "unverified") {
@@ -1213,33 +1181,6 @@ async function offerGithubReloginIfDead(args: Argv): Promise<boolean> {
     return false;
   }
   return true;
-}
-
-// Persist `provider` into session.connected_providers (idempotent).
-// Called after a successful live provider probe so the install preflight on the
-// next run can read both providers from the session file without loading a
-// profile-dir marker.
-async function recordConnectedProvider(provider: OAuthProviderId, accountId?: string): Promise<void> {
-  try {
-    const storage = await openSessionStorage();
-    const session = await storage.read(accountId);
-    if (session === null) return;
-    const current = new Set(session.connected_providers ?? []);
-    if (current.has(provider)) return;
-    current.add(provider);
-    // Bookkeeping, not binding: never move the current-account pointer.
-    await storage.writeAccountRecord({
-      ...session,
-      connected_providers: [...current],
-      saved_at: new Date().toISOString(),
-    });
-  } catch {
-    // Best-effort — the bot-side login-state.json marker is the
-    // primary source of truth; session.connected_providers is a
-    // convenience cache for the preflight path. A failed write here
-    // just means the next install runs the secondary prompt again,
-    // which is recoverable.
-  }
 }
 
 function consentFromArgs(args: Argv): InstallConsent {

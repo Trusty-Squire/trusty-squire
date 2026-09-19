@@ -274,8 +274,8 @@ export class SessionStore {
 
   /**
    * Upsert ONE account's entry WITHOUT touching the current-account pointer.
-   * For bookkeeping writers (e.g. the post-ceremony connected_providers
-   * record): they annotate an account's stored session, they do not bind the
+   * For bookkeeping writers that annotate an account's stored session rather
+   * than binding it: they do not move the
    * machine to it — the pointer stays with the last real connect, even one
    * that moved it concurrently mid-probe.
    */

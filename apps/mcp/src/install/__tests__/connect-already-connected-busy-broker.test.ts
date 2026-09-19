@@ -272,10 +272,16 @@ async function recordConnectedProviders(providers: string[]): Promise<string> {
   return sessionPath;
 }
 
-// Cookie evidence confirms; it never discovers. A provider the live
-// post-ceremony probe never recorded cannot be claimed from the cookie store,
-// which is what keeps the dead-GitHub repair offer reachable.
-it("confirms only the providers a live probe recorded, and records nothing itself", async () => {
+// Legacy bookkeeping: `connected_providers` is an add-only field older
+// builds wrote after a ceremony. The preflight must NEVER read it as a veto
+// over live cookie evidence — an add-only record that overrode the cookies
+// told users their working GitHub session was dead and walked them into a
+// needless re-ceremony, every run.
+
+// Cookie evidence alone decides the claim. A stale add-only record that names
+// fewer providers than the profile proves must not demote the claim or fire a
+// bogus repair offer.
+it("claims what the cookie store proves even when an old record names less", async () => {
   const sessionPath = await recordConnectedProviders(["google"]);
   await writeProfileCookies(profileDir, [
     ...GOOGLE_SESSION_COOKIES.map((name) => ({ host: ".google.com", name })),
@@ -285,10 +291,10 @@ it("confirms only the providers a live probe recorded, and records nothing itsel
 
   const output = await runConnect();
 
-  expect(output).toContain("Already connected (google)");
-  // GitHub's rows are on disk, but no live probe ever recorded it, so the
-  // repair offer still fires rather than the claim being upgraded.
-  expect(output).toContain("GitHub session is not active");
+  expect(output).toContain("Already connected (google + github)");
+  expect(output).not.toContain("GitHub session is not active");
+  expect(output).not.toContain("Opening the Trusty Squire install page");
+  // The preflight writes nothing back: the record stays as it was.
   const after = JSON.parse(await fs.readFile(sessionPath, "utf8")) as {
     connected_providers?: string[];
   };
@@ -299,7 +305,7 @@ it("confirms only the providers a live probe recorded, and records nothing itsel
 // session-scoped and never written, so probing for it reported every signed-in
 // profile as signed out — and interactively that answer walks a fully connected
 // machine into the ceremony, which is the reported failure.
-it("confirms a recorded GitHub session from the rows Chrome actually persists", async () => {
+it("claims a GitHub session from the rows Chrome actually persists", async () => {
   await recordConnectedProviders(["google", "github"]);
   await writeProfileCookies(profileDir, [
     ...GOOGLE_SESSION_COOKIES.map((name) => ({ host: ".google.com", name })),
