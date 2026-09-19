@@ -829,13 +829,6 @@ in `apps/mcp/src/session.ts`.
 The public operator contract and capability migration are owned by
 [`docs/operator-tool-surface.md`](docs/operator-tool-surface.md).
 
-Goal-shaped website work (signup, checkout, provision) is `operate_drive`
-(`apps/mcp/src/bot/operate-drive.ts`): observe → Jev → one confidence gate
-(`DRIVE_CONFIDENCE_THRESHOLD` 0.6) → the existing `act()` path. There is no
-standalone decide tool. A drive returns a handoff, never a bare page; resume
-the same session with `answer` and/or added `facts`. Do not add a second
-threshold or extra stops for payment, captcha, or sign-in walls.
-
 ## Cross-process browser broker
 
 The default broker custody and recovery

@@ -1168,10 +1168,7 @@ async function adoptTabOpenedByClick(
   return adopted;
 }
 
-export async function settleAfterDriveAction(
-  page?: Page,
-  combobox = false,
-): Promise<void> {
+export async function settleAfterDriveAction(page?: Page, combobox = false): Promise<void> {
   if (!page) return;
   const capMs = combobox ? 200 : 50;
   await page
@@ -1190,10 +1187,12 @@ export async function settleAfterDriveAction(
             if (stopped) return;
             frames += 1;
             if (waitOptions) {
-              const visible = Array.from(document.querySelectorAll('[role="option"]')).some((node) => {
-                const box = (node as HTMLElement).getBoundingClientRect();
-                return box.width > 0 && box.height > 0;
-              });
+              const visible = Array.from(document.querySelectorAll('[role="option"]')).some(
+                (node) => {
+                  const box = (node as HTMLElement).getBoundingClientRect();
+                  return box.width > 0 && box.height > 0;
+                },
+              );
               if (visible) {
                 finish();
                 return;

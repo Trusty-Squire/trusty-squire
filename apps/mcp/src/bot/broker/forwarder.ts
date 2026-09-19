@@ -151,8 +151,7 @@ export class OperatorForwarder {
     )
       args = { ...args, session_id: this.sessions.values().next().value };
     const requested = typeof args.session_id === "string" ? args.session_id : undefined;
-    let sessionId =
-      requested !== undefined && this.sessions.has(requested) ? requested : undefined;
+    let sessionId = requested !== undefined && this.sessions.has(requested) ? requested : undefined;
     checkCancelled();
 
     // Cancellation is per request, keyed on the dispatched frame id: the broker
@@ -167,8 +166,7 @@ export class OperatorForwarder {
       method: BrokerWireMethod,
       params: Record<string, unknown>,
     ): Promise<unknown> => {
-      const id =
-        method === "open" && name === "operate_drive" ? `${requestId}:open` : requestId;
+      const id = method === "open" && name === "operate_drive" ? `${requestId}:open` : requestId;
       dispatchedRequestId = id;
       return await client.call(method, params, id, notifyUser);
     };

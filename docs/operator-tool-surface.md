@@ -4,11 +4,8 @@ Trusty Squire’s operator surface is a set of flat, single-purpose MCP tools.
 Discover the installed server’s exact input and output schemas with `tools/list`;
 that registered schema is authoritative for a particular server version.
 
-The named operator surface contains 21 tools: the 17 driving verbs in
-`OPERATE_TOOLS`, excluding the separately exposed recipe tools, plus
-`inject_card`, `list_credentials`, `list_payment_cards`, and
-`edit_payment_card`. Recipe tools and vault/account tools are separate
-surfaces.
+The operator surface is listed below. Recipe and vault/account tools are
+separate surfaces.
 
 Startup navigation waits for `DOMContentLoaded`, including deferred scripts,
 but skips the humanized post-load dwell before observing the page. It does not
@@ -29,7 +26,7 @@ still require another observation or an explicit wait.
 For a signup, checkout, or other goal-shaped website task, call `operate_drive`
 with the goal and a `facts` bag (email, name, address, `card_ref`, …). Pass
 `session_id` of an open session, or `url` to open the page and drive in one
-call. Each step asks Jev for one operation (CLICK, TYPE_TEXT, SELECT,
+call; provide exactly one. Each step asks Jev for one operation (CLICK, TYPE_TEXT, SELECT,
 SCROLL, WAIT, DONE, BLOCKED) plus a matching per-operation target; unused
 target heads cannot act. Identifying values come only from the facts bag. A
 search or query field may receive a phrase Jev assigns from the goal's own
@@ -48,6 +45,15 @@ element advances the goal. Resume the same session with `answer` (a
 readable action slug from the handoff options, `done`, or `stuck`) and/or
 added `facts`. Use the single-step primitives only for a handoff you are
 answering or a task that is not a goal.
+
+Calls default to 60 steps and 45 seconds; `max_steps` and `max_seconds` set
+the per-call allowances within the registered schema's limits.
+A `budget` handoff preserves partial progress for another call on the same
+session. `jev_unavailable`, `no_progress`, and `evaluate_timeout` also return
+handoffs; the last indicates that an in-page evaluation exceeded its deadline.
+`pending_approval` supplies the card approval URL. Always call `operate_finish`
+when the task is finished. Drive-initiated opens follow the
+[broker refused-start receipt contract](browser-broker.md).
 
 browser-use/jev-ultrafast (MIT) adoptions live in `operate-drive.ts`. Mapping:
 

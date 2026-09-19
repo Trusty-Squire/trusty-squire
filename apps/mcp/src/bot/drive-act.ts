@@ -50,7 +50,11 @@ export function resolveDriveFrame(page: Page, ref: string): Frame {
   return frames[ordinal] ?? page.mainFrame();
 }
 
-function inPageGuard(input: { ref: string; kind: "click" | "type" | "select"; text?: string }): GuardResult {
+function inPageGuard(input: {
+  ref: string;
+  kind: "click" | "type" | "select";
+  text?: string;
+}): GuardResult {
   const scriptStarted = performance.now();
   const timed = <T extends Omit<GuardResult, "scriptMs">>(result: T): T & { scriptMs: number } => ({
     ...result,
@@ -111,7 +115,10 @@ function inPageGuard(input: { ref: string; kind: "click" | "type" | "select"; te
     element.dispatchEvent(new Event("change", { bubbles: true }));
     return timed({ ok: true, x, y, combobox: false, searchSubmit: false });
   }
-  if (input.kind === "type" && (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) {
+  if (
+    input.kind === "type" &&
+    (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)
+  ) {
     element.focus();
     element.select();
   } else if (input.kind === "type" && element instanceof HTMLElement) {
@@ -127,25 +134,37 @@ function inPageGuard(input: { ref: string; kind: "click" | "type" | "select"; te
   return timed({ ok: true, x, y, combobox, searchSubmit });
 }
 
-export async function driveActOnPage(
-  page: Page,
-  action: ProvisionAction,
-): Promise<DriveActResult> {
+export async function driveActOnPage(page: Page, action: ProvisionAction): Promise<DriveActResult> {
   if (action.kind === "scroll") {
     const direction = action.direction ?? "down";
     const wallStarted = Date.now();
     try {
-      await evaluateBound(page, (dir) => {
-        const height = innerHeight;
-        if (dir === "down") scrollBy(0, Math.min(560, height));
-        else if (dir === "up") scrollBy(0, -Math.min(560, height));
-        else if (dir === "bottom") scrollTo(0, document.documentElement.scrollHeight);
-        else scrollTo(0, 0);
-      }, direction);
+      await evaluateBound(
+        page,
+        (dir) => {
+          const height = innerHeight;
+          if (dir === "down") scrollBy(0, Math.min(560, height));
+          else if (dir === "up") scrollBy(0, -Math.min(560, height));
+          else if (dir === "bottom") scrollTo(0, document.documentElement.scrollHeight);
+          else scrollTo(0, 0);
+        },
+        direction,
+      );
     } catch {
-      return { kind: "stale", reason: "evaluate_timeout", ...ZERO_ACT_TIMINGS, guardWallMs: Date.now() - wallStarted };
+      return {
+        kind: "stale",
+        reason: "evaluate_timeout",
+        ...ZERO_ACT_TIMINGS,
+        guardWallMs: Date.now() - wallStarted,
+      };
     }
-    return { kind: "ok", combobox: false, searchSubmit: false, ...ZERO_ACT_TIMINGS, guardWallMs: Date.now() - wallStarted };
+    return {
+      kind: "ok",
+      combobox: false,
+      searchSubmit: false,
+      ...ZERO_ACT_TIMINGS,
+      guardWallMs: Date.now() - wallStarted,
+    };
   }
   if (action.kind !== "click" && action.kind !== "type" && action.kind !== "select") {
     return { kind: "unsupported" };
@@ -160,7 +179,12 @@ export async function driveActOnPage(
       ...(action.kind === "select" || action.kind === "type" ? { text: action.text } : {}),
     });
   } catch {
-    return { kind: "stale", reason: "evaluate_timeout", ...ZERO_ACT_TIMINGS, guardWallMs: Date.now() - guardStarted };
+    return {
+      kind: "stale",
+      reason: "evaluate_timeout",
+      ...ZERO_ACT_TIMINGS,
+      guardWallMs: Date.now() - guardStarted,
+    };
   }
   const timings: DriveActTimings = {
     guardScriptMs: guard.scriptMs,
@@ -168,7 +192,8 @@ export async function driveActOnPage(
     cdpMs: 0,
   };
   if (!guard.ok) return { kind: "stale", reason: guard.reason, ...timings };
-  if (action.kind === "select") return { kind: "ok", combobox: false, searchSubmit: false, ...timings };
+  if (action.kind === "select")
+    return { kind: "ok", combobox: false, searchSubmit: false, ...timings };
   const context = page.context();
   const cdpStarted = Date.now();
   const cdp = await context.newCDPSession(page);
@@ -239,10 +264,7 @@ export async function driveActOnPage(
   }
 }
 
-export async function settleDriveStep(
-  page: Page,
-  combobox: boolean,
-): Promise<number> {
+export async function settleDriveStep(page: Page, combobox: boolean): Promise<number> {
   const started = Date.now();
   try {
     await evaluateBound(

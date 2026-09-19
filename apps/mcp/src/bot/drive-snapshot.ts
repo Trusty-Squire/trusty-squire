@@ -146,22 +146,26 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
         ? "b"
         : element.role === "link" || element.role === "option"
           ? "l"
-          : element.role === "textbox" || element.role === "searchbox" || element.role === "spinbutton"
+          : element.role === "textbox" ||
+              element.role === "searchbox" ||
+              element.role === "spinbutton"
             ? "t"
             : element.role === "combobox" && element.operations.includes("select")
               ? "s"
               : element.role === "combobox" && element.operations.includes("fill")
                 ? "t"
-              : element.role === "checkbox"
-                ? "c"
-                : element.role === "radio"
-                  ? "r"
-                  : element.role === "tab"
-                    ? "tb"
-                    : element.role === "menuitem"
-                      ? "m"
-                      : element.role;
-    rows.push(facts.length === 0 ? [element.ref, roleLetter] : [element.ref, roleLetter, facts.join("|")]);
+                : element.role === "checkbox"
+                  ? "c"
+                  : element.role === "radio"
+                    ? "r"
+                    : element.role === "tab"
+                      ? "tb"
+                      : element.role === "menuitem"
+                        ? "m"
+                        : element.role;
+    rows.push(
+      facts.length === 0 ? [element.ref, roleLetter] : [element.ref, roleLetter, facts.join("|")],
+    );
   }
   return rows;
 }
@@ -261,7 +265,8 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
   };
   let nameVisits = 0;
   const name = (element: Element | null, seen = new Set<Element>()): string => {
-    if (element === null || seen.has(element) || nameVisits >= arg.maxNameVisits || expired()) return "";
+    if (element === null || seen.has(element) || nameVisits >= arg.maxNameVisits || expired())
+      return "";
     nameVisits += 1;
     seen.add(element);
     const labelledBy = (element.getAttribute("aria-labelledby") ?? "")
@@ -272,7 +277,12 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     if (labelledBy.length > 0) return labelledBy;
     const aria = element.getAttribute("aria-label");
     if (aria !== null && aria.trim().length > 0) return aria.trim();
-    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement || element instanceof HTMLButtonElement) {
+    if (
+      element instanceof HTMLInputElement ||
+      element instanceof HTMLTextAreaElement ||
+      element instanceof HTMLSelectElement ||
+      element instanceof HTMLButtonElement
+    ) {
       const labels = element.labels === null ? [] : Array.from(element.labels);
       const fromLabels = labels
         .map((label) => name(label, seen))
@@ -280,7 +290,11 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
         .join(" ");
       if (fromLabels.length > 0) return fromLabels;
     }
-    if (element instanceof HTMLInputElement && ["button", "submit", "reset"].includes(element.type) && element.value.length > 0) {
+    if (
+      element instanceof HTMLInputElement &&
+      ["button", "submit", "reset"].includes(element.type) &&
+      element.value.length > 0
+    ) {
       return element.value;
     }
     const alt = element.getAttribute("alt");
@@ -289,7 +303,11 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       const child = Array.from(element.childNodes)
         .map((node) => {
           if (node.nodeType === 3) return (node.textContent ?? "").trim();
-          if (node.nodeType === 1 && node instanceof Element && node.getAttribute("aria-hidden") !== "true") {
+          if (
+            node.nodeType === 1 &&
+            node instanceof Element &&
+            node.getAttribute("aria-hidden") !== "true"
+          ) {
             return name(node, seen);
           }
           return "";
@@ -330,7 +348,10 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     if (element.tagName === "BUTTON" || element.tagName === "SUMMARY") return "button";
     if (element.tagName === "A" || element.classList.contains("suggestion-link")) return "link";
     if (element.tagName === "SELECT") return "combobox";
-    if (element.tagName === "TEXTAREA" || (element instanceof HTMLElement && element.isContentEditable)) {
+    if (
+      element.tagName === "TEXTAREA" ||
+      (element instanceof HTMLElement && element.isContentEditable)
+    ) {
       return "textbox";
     }
     if (element instanceof HTMLInputElement) {
@@ -354,10 +375,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     const rect = element.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) continue;
     const inViewport =
-      rect.bottom > 0 &&
-      rect.top < innerHeight &&
-      rect.right > 0 &&
-      rect.left < innerWidth;
+      rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
     const keepOffscreen =
       role === "button" ||
       role === "textbox" ||
@@ -374,7 +392,9 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     if (!inViewport && !keepOffscreen && !pinned) continue;
     const ref = identity(element);
     const label =
-      !inViewport && !keepOffscreen ? (element.getAttribute("aria-label")?.trim() || role) : name(element) || role;
+      !inViewport && !keepOffscreen
+        ? element.getAttribute("aria-label")?.trim() || role
+        : name(element) || role;
     const disabled =
       element.matches(":disabled") ||
       element.closest('[aria-disabled="true"]') !== null ||
@@ -418,9 +438,16 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     let value: string | undefined;
     if (omit.has(ref)) {
       omittedValues += 1;
-    } else if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
+    } else if (
+      element instanceof HTMLInputElement ||
+      element instanceof HTMLTextAreaElement ||
+      element instanceof HTMLSelectElement
+    ) {
       value = element.value;
-    } else if (element instanceof HTMLElement && (element.isContentEditable || role === "combobox")) {
+    } else if (
+      element instanceof HTMLElement &&
+      (element.isContentEditable || role === "combobox")
+    ) {
       value = (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
     }
     const options =
@@ -451,11 +478,18 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     else offscreenControls.push(row);
   }
   const fieldsFirst = (list: DriveSnapshotElement[]): DriveSnapshotElement[] => {
-    const fields = list.filter((row) => row.operations.includes("fill") || row.operations.includes("select"));
-    const rest = list.filter((row) => !row.operations.includes("fill") && !row.operations.includes("select"));
+    const fields = list.filter(
+      (row) => row.operations.includes("fill") || row.operations.includes("select"),
+    );
+    const rest = list.filter(
+      (row) => !row.operations.includes("fill") && !row.operations.includes("select"),
+    );
     return [...fields, ...rest];
   };
-  const elements = [...fieldsFirst(inView), ...fieldsFirst(offscreenControls)].slice(0, arg.maxElements);
+  const elements = [...fieldsFirst(inView), ...fieldsFirst(offscreenControls)].slice(
+    0,
+    arg.maxElements,
+  );
   const headings: string[] = [];
   for (const heading of Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6"))) {
     if (!visible(heading)) continue;
@@ -575,7 +609,10 @@ export function mergeSnapshots(parts: readonly DriveSnapshot[]): DriveSnapshot {
   const main = parts[0]!;
   const elements = parts.flatMap((part) => part.elements);
   const headings = parts.flatMap((part) => part.headings);
-  const text = parts.map((part) => part.text).filter((part) => part.length > 0).join("\n");
+  const text = parts
+    .map((part) => part.text)
+    .filter((part) => part.length > 0)
+    .join("\n");
   const fingerprint = parts.map((part) => part.fingerprint).join("\n---\n");
   return {
     url: main.url,
@@ -603,7 +640,8 @@ export async function frameDynamicsSignature(frame: Frame): Promise<string> {
         inputs
           .map((element) => {
             if (element instanceof HTMLInputElement) return `${element.name}:${element.type}`;
-            if (element instanceof HTMLSelectElement) return `${element.name}:select:${element.options.length}`;
+            if (element instanceof HTMLSelectElement)
+              return `${element.name}:select:${element.options.length}`;
             return element.tagName;
           })
           .join(","),

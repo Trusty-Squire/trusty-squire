@@ -1510,7 +1510,8 @@ export function safeBlockersV2(
     const responseField =
       ["input", "textarea"].includes(tag) &&
       [node.attributes.name, node.attributes.id].some(
-        (value) => typeof value === "string" && RESPONSE_FIELD_NAME_RE.test(value.trim().toLowerCase()),
+        (value) =>
+          typeof value === "string" && RESPONSE_FIELD_NAME_RE.test(value.trim().toLowerCase()),
       );
     if (CHALLENGE_MARKER_RE.test(identity) && !responseField) return true;
     if (node.nodeType === 3) {

@@ -165,9 +165,9 @@ async function callJev(
 }
 
 /**
- * Ask Jev one batch of named questions against `state` (structured page
- * context, JSON-serialized). Retries 503/529 with exponential backoff inside
- * JEV_RETRY_BUDGET_MS; any other non-200 is an immediate honest failure.
+ * Ask Jev one batch of named questions against string or structured page
+ * context. Transport encoding is owned by callJev above. Retries 503/529
+ * with exponential backoff inside JEV_RETRY_BUDGET_MS; any other non-200 is an immediate honest failure.
  */
 export async function askJev(
   api: ApiClient,

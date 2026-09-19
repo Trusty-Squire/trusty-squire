@@ -180,11 +180,13 @@ export const injectCardTool: Tool<InjectCardInput> = {
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   async handler(args, api, context) {
     assertApi(api);
-    return await withPaymentSessionCall(args.session_id, async (session) =>
-      await injectCardOnSession(session, args, api as ApiClient, {
-        ...(context?.signal === undefined ? {} : { signal: context.signal }),
-        ...(context?.notifyUser === undefined ? {} : { notifyUser: context.notifyUser }),
-      }),
+    return await withPaymentSessionCall(
+      args.session_id,
+      async (session) =>
+        await injectCardOnSession(session, args, api as ApiClient, {
+          ...(context?.signal === undefined ? {} : { signal: context.signal }),
+          ...(context?.notifyUser === undefined ? {} : { notifyUser: context.notifyUser }),
+        }),
     );
   },
 };
@@ -199,17 +201,12 @@ export async function injectCardOnSession(
   if (session.releasedPaymentCard !== null) return await injectReleasedCard(session, args);
   if (args.approval_id !== undefined) {
     const pending = session.activePayment;
-    if (
-      pending?.status !== "awaiting_approval" ||
-      pending.state.approval_id !== args.approval_id
-    ) {
+    if (pending?.status !== "awaiting_approval" || pending.state.approval_id !== args.approval_id) {
       throw new Error("approval_id is not resumable in this session");
     }
   }
   const resumeFrom: PendingApprovalWait | undefined =
-    session.activePayment?.status === "awaiting_approval"
-      ? session.activePayment.state
-      : undefined;
+    session.activePayment?.status === "awaiting_approval" ? session.activePayment.state : undefined;
   const controller = session.browser;
   let releasedCard: CheckoutCard | null = null;
   let fieldResults: Record<InjectCardField, InjectCardFieldResult> | null = null;

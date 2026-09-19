@@ -2856,7 +2856,9 @@ export class BrowserController implements BrowserDriver {
       if ((await nestedSelect.count()) === 1) {
         const nestedId = await nestedSelect
           .first()
-          .evaluate((node) => (node instanceof HTMLSelectElement && node.id.length > 0 ? node.id : ""));
+          .evaluate((node) =>
+            node instanceof HTMLSelectElement && node.id.length > 0 ? node.id : "",
+          );
         if (nestedId.length > 0) {
           activeSelector = `#${nestedId}`;
           tagName = "select";
