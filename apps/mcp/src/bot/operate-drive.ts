@@ -1206,6 +1206,25 @@ export function requiredFactComboboxAction(
   return undefined;
 }
 
+export function requiredFactCityType(
+  rows: readonly WireRow[],
+  facts: Record<string, string>,
+  filledRefs: readonly string[] = [],
+): { target: string; text: string } | undefined {
+  const filled = new Set(filledRefs);
+  for (const row of rows) {
+    if (!isFillableRow(row) || isDisabledRow(row) || isActedRow(row) || filled.has(row[0])) continue;
+    const key = matchingFactKeys(facts, row)[0];
+    if (key !== "origin" && key !== "destination") continue;
+    const fact = facts[key];
+    if (fact === undefined || fact.length === 0) continue;
+    const current = rowCurrentValue(row);
+    if (current !== undefined && factValuesMatch(current, fact)) continue;
+    return { target: row[0], text: fact };
+  }
+  return undefined;
+}
+
 export function requiredFillableMissingFact(
   rows: readonly WireRow[],
   facts: Record<string, string>,
@@ -3184,6 +3203,21 @@ async function driveLoop(input: {
       if (comboboxFill.fillsRef !== undefined && !drive.filledRefs.includes(comboboxFill.fillsRef)) {
         drive.filledRefs.push(comboboxFill.fillsRef);
       }
+      steps += 1;
+      continue;
+    }
+    const cityFill = requiredFactCityType(rows, drive.facts, drive.filledRefs);
+    if (cityFill !== undefined) {
+      drive.boundFingerprint = progressFingerprint(observation.url, rows, drive, session);
+      drive.consumedActionKey = null;
+      const applied = await applyDecision({
+        kind: "act",
+        action: { kind: "type", target: cityFill.target, text: cityFill.text },
+        actionKey: cityFill.target,
+        confidence: 1,
+      });
+      if (applied !== "continue") return applied;
+      if (!drive.filledRefs.includes(cityFill.target)) drive.filledRefs.push(cityFill.target);
       steps += 1;
       continue;
     }
