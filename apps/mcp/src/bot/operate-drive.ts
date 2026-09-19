@@ -53,6 +53,7 @@ import {
   snapshotToObservation,
   type DriveSnapshot,
 } from "./drive-snapshot.js";
+import { evaluateBound } from "./drive-evaluate.js";
 import {
   documentEpochOf,
   documentOriginOf,
@@ -204,6 +205,7 @@ export type DriveStatus =
   | "no_progress"
   | "budget"
   | "jev_unavailable"
+  | "evaluate_timeout"
   | "pending_approval"
   | "busy";
 
@@ -395,7 +397,7 @@ async function nativeSelectSnapshot(session: Session): Promise<
   const page = session.browser.page;
   if (page === null) return null;
   try {
-    return await page.evaluate(() =>
+    return await evaluateBound(page, () =>
       Array.from(document.querySelectorAll("select")).map((el) => ({
         id: el.id,
         name: el.name,
@@ -1934,6 +1936,7 @@ async function snapshotDriveSession(
   snapshotMs: number;
   snapshotScriptMs: number;
   snapshotWallMs: number;
+  timedOut: boolean;
 }> {
   const started = Date.now();
   const timed = (
@@ -1941,12 +1944,14 @@ async function snapshotDriveSession(
     rows: WireRow[],
     scriptMs = 0,
     wallMs = Date.now() - started,
+    timedOut = false,
   ) => ({
     observation,
     rows,
     snapshotMs: Date.now() - started,
     snapshotScriptMs: scriptMs,
     snapshotWallMs: wallMs,
+    timedOut,
   });
   if (deps.snapshot !== undefined) {
     const observation = await deps.snapshot(sessionId, maskedRefsOf(drive));
@@ -1963,6 +1968,9 @@ async function snapshotDriveSession(
   if (main === null) {
     const observation = await deps.observe(sessionId, "compact");
     return timed(observation, mergeCompactTable([], observation));
+  }
+  if (main.timedOut === true) {
+    return timed(snapshotToObservation(main, sessionId, []), [], 0, main.wallMs, true);
   }
   const parts: DriveSnapshot[] = [main];
   if (needFrames) {
@@ -1995,7 +2003,7 @@ async function snapshotDriveSession(
     ...(observation.safe_table === undefined ? {} : { safe_table: observation.safe_table }),
     ...(observation.semantic === undefined ? {} : { semantic: observation.semantic }),
   };
-  return timed(observation, rows, snapshot.scriptMs, snapshot.wallMs);
+  return timed(observation, rows, snapshot.scriptMs, snapshot.wallMs, snapshot.timedOut === true);
 }
 
 function resolveResumeAnswer(
@@ -2251,6 +2259,19 @@ async function driveLoop(input: {
   );
   let observation: Observation = firstSnap.observation;
   let rows = firstSnap.rows;
+  if (firstSnap.timedOut) {
+    return buildHandoff({
+      status: "evaluate_timeout",
+      sessionId,
+      observation: handoffObservation(observation, rows),
+      trajectory: drive.trajectory,
+      goal: drive.goal,
+      steps: 0,
+      seconds: elapsed(),
+      jevCalls: drive.jevCalls,
+      reason: "in-page evaluate exceeded budget",
+    });
+  }
   drive.lastActProfile = {
     act_ms: 0,
     settle_ms: 0,
@@ -2282,13 +2303,21 @@ async function driveLoop(input: {
     rows = snap.rows;
     return snap;
   };
+  const snapshotOrTimeout = async (needFrames: boolean): Promise<DriveHandoff | "ok"> => {
+    const snap = await refreshSnapshot(needFrames);
+    if (snap.timedOut) {
+      return finish("evaluate_timeout", { reason: "in-page evaluate exceeded budget" });
+    }
+    return "ok";
+  };
   const framesIfNeeded = (): boolean =>
     drive.facts.card_ref !== undefined &&
     (paymentFields(rows).pan === undefined || isCheckoutUrl(observation.url));
 
   const applyDecision = async (decision: DriveDecision, jevMs?: number): Promise<DriveHandoff | "continue"> => {
     if (decision.kind === "complete") {
-      await refreshSnapshot(framesIfNeeded());
+      const completeSnap = await snapshotOrTimeout(framesIfNeeded());
+      if (completeSnap !== "ok") return completeSnap;
       const fresh = progressFingerprint(observation.url, rows, drive, session);
       if (drive.boundFingerprint !== null && fresh !== drive.boundFingerprint) {
         drive.consumedActionKey = null;
@@ -2315,7 +2344,8 @@ async function driveLoop(input: {
           { once: true },
         );
       });
-      await refreshSnapshot(framesIfNeeded());
+      const waitSnap = await snapshotOrTimeout(framesIfNeeded());
+      if (waitSnap !== "ok") return waitSnap;
       drive.trajectory.push({
         action: "wait",
         target: "WAIT",
@@ -2417,6 +2447,7 @@ async function driveLoop(input: {
       }
       markMaskedRefs(drive, [card.fields.pan?.ref, card.fields.cvv?.ref]);
       const cardSnap = await refreshSnapshot(true);
+      if (cardSnap.timedOut) return finish("evaluate_timeout", { reason: "in-page evaluate exceeded budget" });
       drive.lastActProfile = {
         act_ms: drive.lastActProfile?.act_ms ?? 0,
         settle_ms: drive.lastActProfile?.settle_ms ?? 0,
@@ -2469,6 +2500,7 @@ async function driveLoop(input: {
         return finish("needs_value", { field: "verification_code" });
       }
       const inboxSnap = await refreshSnapshot(framesIfNeeded());
+      if (inboxSnap.timedOut) return finish("evaluate_timeout", { reason: "in-page evaluate exceeded budget" });
       drive.lastActProfile = {
         act_ms: drive.lastActProfile?.act_ms ?? 0,
         settle_ms: drive.lastActProfile?.settle_ms ?? 0,
@@ -2505,7 +2537,8 @@ async function driveLoop(input: {
     const acted = await actDriveSafely(session, sessionId, decision.action, dependencies);
     if (acted.kind === "stale") {
       drive.consumedActionKey = null;
-      await refreshSnapshot(framesIfNeeded());
+      const staleSnap = await snapshotOrTimeout(framesIfNeeded());
+      if (staleSnap !== "ok") return staleSnap;
       return "continue";
     }
     let actMs = Date.now() - actStarted;
@@ -2528,6 +2561,7 @@ async function driveLoop(input: {
         }
       }
       const snap = await refreshSnapshot(framesIfNeeded());
+      if (snap.timedOut) return finish("evaluate_timeout", { reason: "in-page evaluate exceeded budget" });
       drive.lastActProfile = {
         ...drive.lastActProfile,
         act_ms: actMs,

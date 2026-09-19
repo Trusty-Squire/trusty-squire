@@ -15,6 +15,25 @@ interface RequestAutomationContext {
 }
 
 const contexts = new AsyncLocalStorage<RequestAutomationContext>();
+const abortBySignal = new WeakMap<AbortSignal, (reason?: unknown) => void>();
+
+/** Bind the registered request AbortController so an in-page deadline can
+ * fire the abort path that already exists, without touching other sessions. */
+export function attachOperatorRequestAbort(
+  signal: AbortSignal,
+  abort: (reason?: unknown) => void,
+): void {
+  abortBySignal.set(signal, abort);
+}
+
+export function abortCurrentOperatorRequest(reason?: unknown): boolean {
+  const signal = currentOperatorRequestSignal();
+  if (signal === undefined) return false;
+  const abort = abortBySignal.get(signal);
+  if (abort === undefined) return false;
+  abort(reason);
+  return true;
+}
 
 export async function withOperatorRequestContext<T>(
   signal: AbortSignal,

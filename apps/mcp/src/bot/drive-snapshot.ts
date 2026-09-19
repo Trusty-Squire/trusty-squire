@@ -3,6 +3,7 @@
 // node registry keyed by our refs. Used only inside operate_drive.
 
 import type { Frame, Page } from "playwright";
+import { DriveEvaluateTimeout, evaluateBound } from "./drive-evaluate.js";
 import type { Observation } from "./provision-session.js";
 
 type SnapshotRow = [string, string, string?];
@@ -11,6 +12,9 @@ export const DRIVE_SNAPSHOT_CREDIT =
   "Drive snapshot evaluate adapted from browser-use/jev-ultrafast snapshot.js (MIT).";
 
 export const DRIVE_SNAPSHOT_MAX_ELEMENTS = 250;
+export const DRIVE_SNAPSHOT_BUDGET_MS = 2500;
+export const DRIVE_SNAPSHOT_MAX_WALK_NODES = 2000;
+export const DRIVE_SNAPSHOT_MAX_NAME_VISITS = 400;
 
 export interface DriveSnapshotOption {
   value: string;
@@ -44,12 +48,16 @@ export interface DriveSnapshot {
   omittedValues: number;
   scriptMs: number;
   wallMs: number;
+  timedOut?: boolean;
 }
 
 interface DriveSnapshotArg {
   omitValueRefs: string[];
   frameOrdinal: number;
   maxElements: number;
+  budgetMs: number;
+  maxWalkNodes: number;
+  maxNameVisits: number;
 }
 
 type DriveInPageSnapshot = {
@@ -186,6 +194,8 @@ export function snapshotToObservation(
 
 function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
   const scriptStarted = performance.now();
+  const deadline = scriptStarted + arg.budgetMs;
+  const expired = (): boolean => performance.now() >= deadline;
   if (document.body === null) return null;
   type DriveCache = {
     ids: WeakMap<Element, number>;
@@ -227,8 +237,10 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     const style = getComputedStyle(element);
     return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
   };
+  let nameVisits = 0;
   const name = (element: Element | null, seen = new Set<Element>()): string => {
-    if (element === null || seen.has(element)) return "";
+    if (element === null || seen.has(element) || nameVisits >= arg.maxNameVisits || expired()) return "";
+    nameVisits += 1;
     seen.add(element);
     const labelledBy = (element.getAttribute("aria-labelledby") ?? "")
       .split(/\s+/)
@@ -312,6 +324,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
   const offscreenControls: DriveSnapshotElement[] = [];
   let omittedValues = 0;
   for (const element of Array.from(document.querySelectorAll(selector))) {
+    if (expired()) break;
     if (!safe(element) || !visible(element)) continue;
     const role = roleOf(element);
     if (role === null) continue;
@@ -338,7 +351,8 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ) !== null;
     if (!inViewport && !keepOffscreen && !pinned) continue;
     const ref = identity(element);
-    const label = name(element) || role;
+    const label =
+      !inViewport && !keepOffscreen ? (element.getAttribute("aria-label")?.trim() || role) : name(element) || role;
     const disabled =
       element.matches(":disabled") ||
       element.closest('[aria-disabled="true"]') !== null ||
@@ -385,7 +399,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     } else if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
       value = element.value;
     } else if (element instanceof HTMLElement && (element.isContentEditable || role === "combobox")) {
-      value = element.innerText.trim();
+      value = (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
     }
     const options =
       element instanceof HTMLSelectElement
@@ -425,8 +439,10 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
   const range = document.createRange();
   let length = 0;
+  let walkNodes = 0;
   let node = walker.nextNode();
-  while (node !== null && length < 6000) {
+  while (node !== null && length < 6000 && walkNodes < arg.maxWalkNodes && !expired()) {
+    walkNodes += 1;
     const value = (node.textContent ?? "").trim();
     const parent = node.parentElement;
     if (
@@ -484,14 +500,34 @@ export async function captureFrameSnapshot(
   frameOrdinal: number,
 ): Promise<DriveSnapshot | null> {
   const wallStarted = Date.now();
-  const raw = await target.evaluate(inPageSnapshot, {
-    omitValueRefs: [...omitValueRefs],
-    frameOrdinal,
-    maxElements: DRIVE_SNAPSHOT_MAX_ELEMENTS,
-  });
-  const wallMs = Date.now() - wallStarted;
-  if (raw === null) return null;
-  return { ...raw, wallMs };
+  try {
+    const raw = await evaluateBound(target, inPageSnapshot, {
+      omitValueRefs: [...omitValueRefs],
+      frameOrdinal,
+      maxElements: DRIVE_SNAPSHOT_MAX_ELEMENTS,
+      budgetMs: DRIVE_SNAPSHOT_BUDGET_MS,
+      maxWalkNodes: DRIVE_SNAPSHOT_MAX_WALK_NODES,
+      maxNameVisits: DRIVE_SNAPSHOT_MAX_NAME_VISITS,
+    });
+    const wallMs = Date.now() - wallStarted;
+    if (raw === null) return null;
+    return { ...raw, wallMs };
+  } catch (error) {
+    if (!(error instanceof DriveEvaluateTimeout)) return null;
+    return {
+      url: "",
+      title: "",
+      headings: [],
+      text: "",
+      fingerprint: "",
+      documentEpoch: "",
+      elements: [],
+      omittedValues: 0,
+      scriptMs: 0,
+      wallMs: Date.now() - wallStarted,
+      timedOut: true,
+    };
+  }
 }
 
 export function mergeSnapshots(parts: readonly DriveSnapshot[]): DriveSnapshot {
@@ -525,12 +561,13 @@ export function mergeSnapshots(parts: readonly DriveSnapshot[]): DriveSnapshot {
     omittedValues: parts.reduce((sum, part) => sum + part.omittedValues, 0),
     scriptMs: parts.reduce((sum, part) => sum + part.scriptMs, 0),
     wallMs: parts.reduce((sum, part) => sum + part.wallMs, 0),
+    ...(parts.some((part) => part.timedOut === true) ? { timedOut: true } : {}),
   };
 }
 
 export async function frameDynamicsSignature(frame: Frame): Promise<string> {
   try {
-    return await frame.evaluate(() => {
+    return await evaluateBound(frame, () => {
       const inputs = Array.from(document.querySelectorAll("input,textarea,select"));
       return [
         location.href,
