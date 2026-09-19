@@ -2422,7 +2422,10 @@ function resolveResumeAnswer(
   return hit?.[0] ?? answer;
 }
 
-const DRIVE_OPENED_TAB_ADOPTION_GRACE_MS = 300;
+// CDP click dispatch is synchronous and Playwright delivers the page event on
+// the next turn. One frame-sized polling interval catches that event without
+// charging every same-tab click the general action path's 300ms popup grace.
+const DRIVE_OPENED_TAB_ADOPTION_GRACE_MS = 50;
 
 async function actDriveSafely(
   session: Session,
