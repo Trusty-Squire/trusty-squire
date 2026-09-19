@@ -1041,7 +1041,14 @@ export async function observeSession(
     await attemptOperateCaptchaAutoSolve(session, sourcePage);
     session.generation += 1;
     const generation = session.generation;
-    const capture = await session.browser.extractBrowserUseObservation(sourcePage, true);
+    // Startup already crossed DOMContentLoaded and completed the bounded
+    // consent-hydration pass. Repeating the general observation settle here
+    // adds up to 3.5s before the first snapshot without a newer mutation to
+    // wait for; ordinary post-action observations keep the full settle.
+    const capture = await session.browser.extractBrowserUseObservation(
+      sourcePage,
+      startMetadata === undefined,
+    );
     retainSessionElements(session, capture.elements);
     let semanticSource: ObservationSemanticSourceV2 = { title: "", headings: [] };
     try {
