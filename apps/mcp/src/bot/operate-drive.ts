@@ -57,6 +57,7 @@ import {
 } from "./drive-snapshot.js";
 import { evaluateBound } from "./drive-evaluate.js";
 import type { BrowserController } from "./browser.js";
+import { frameOriginOf } from "./browser-use-capture.js";
 import {
   documentEpochOf,
   documentOriginOf,
@@ -1967,12 +1968,22 @@ async function canonicalDriveRefs(
   }
   if (!Array.isArray(fresh) || fresh.length === 0) return translated;
   const canonical = provisionElementRefs(fresh);
-  const selectors = fresh.map((element) => element.selector);
   for (const ref of driveRefs) {
     try {
       // resolveDriveFrame falls back to the main frame for detached ordinals;
       // the registry lookup then misses and the ref stays untranslated.
       const frame = resolveDriveFrame(page, ref);
+      const frameUrl = frame.url();
+      const frameOrigin = frameOriginOf(frame);
+      const candidates = fresh.flatMap((element, index) => {
+        const sameFrame =
+          element.frameUrl == null
+            ? frame === page.mainFrame()
+            : frame !== page.mainFrame() &&
+              element.frameUrl === frameUrl &&
+              element.frameOrigin === frameOrigin;
+        return sameFrame ? [{ index, selector: element.selector }] : [];
+      });
       const handle = await frame.evaluateHandle((refId) => {
         const registry = (
           window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element> } }
@@ -1984,23 +1995,23 @@ async function canonicalDriveRefs(
         await handle.dispose().catch(() => undefined);
         continue;
       }
-      // Every fresh element's selector is probed in the drive node's own
-      // document: selectors from other frames cannot match this node, and
-      // equality (`=== node`) pins the match regardless of selector reuse.
       const index = await frame
         .evaluate(
-          (input: { node: Element; candidates: string[] }): number => {
+          (input: {
+            node: Element;
+            candidates: Array<{ index: number; selector: string }>;
+          }): number => {
             const { node, candidates } = input;
-            for (let i = 0; i < candidates.length; i += 1) {
+            for (const candidate of candidates) {
               try {
-                if (document.querySelector(candidates[i] as string) === node) return i;
+                if (document.querySelector(candidate.selector) === node) return candidate.index;
               } catch {
                 // Selector invalid in this document — not the match.
               }
             }
             return -1;
           },
-          { node: element, candidates: selectors },
+          { node: element, candidates },
         )
         .catch(() => -1);
       await handle.dispose().catch(() => undefined);

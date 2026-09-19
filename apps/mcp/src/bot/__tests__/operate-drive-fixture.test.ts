@@ -361,6 +361,84 @@ describe("coverage-matrix constant", () => {
 });
 
 describe("drive review regressions", () => {
+  it.each([false, true])(
+    "keeps reused hosted-field selectors frame-scoped (cross-origin: %s)",
+    async (crossOrigin) => {
+      const context = await browser.newContext();
+      const page = await context.newPage();
+      let sessionId: string | undefined;
+      try {
+        const panUrl = "https://provider.test/pan";
+        const cvvUrl = crossOrigin ? "https://cvv-provider.test/cvv" : "https://provider.test/cvv";
+        await page.route(panUrl, (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: '<label>Card number <input id="field" autocomplete="cc-number"></label>',
+          }),
+        );
+        await page.route(cvvUrl, (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: '<label>CVV <input id="field" autocomplete="cc-csc"></label>',
+          }),
+        );
+        const url = "https://hosted-checkout.test/checkout";
+        await page.route(url, (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: `<input id="field" aria-label="Unrelated" value="unchanged"><iframe id="pan" src="${panUrl}"></iframe><iframe id="cvv" src="${cvvUrl}"></iframe>`,
+          }),
+        );
+        await page.goto(url);
+        const started = await startHarnessProvisionSession({
+          browser: BrowserController.fromHarnessPage(page),
+          serviceUrl: url,
+          format: "compact",
+        });
+        sessionId = started.session_id;
+        const card = {
+          pan: "4111111111111111",
+          cvv: "739",
+          exp_month: "12",
+          exp_year: "2030",
+          name: "Ada",
+          billing: { line1: "1 Main St", city: "Boston", postal_code: "02110", country: "US" },
+        };
+        const dependencies = deps(async () => {
+          throw new Error("card fill should not call Jev");
+        });
+        let injections = 0;
+        dependencies.injectCard = async (_session, args) => {
+          injections += 1;
+          expect(args.fields.pan?.ref).not.toBe(args.fields.cvv?.ref);
+          const fields = await injectCardIntoSessionTargets(started.session_id, card, args.fields);
+          expect(fields).toEqual({ pan: { status: "filled" }, cvv: { status: "filled" } });
+          return { status: "card_injected", complete: true, fields };
+        };
+        const result = await runOperateDrive(
+          {
+            session_id: started.session_id,
+            goal: "fill card",
+            facts: { card_ref: "card" },
+            max_steps: 1,
+          },
+          api(),
+          undefined,
+          dependencies,
+        );
+        expect(result.status).toBe("budget");
+        expect(injections).toBe(1);
+        expect(await page.frameLocator("#pan").locator("#field").inputValue()).toBe(card.pan);
+        expect(await page.frameLocator("#cvv").locator("#field").inputValue()).toBe(card.cvv);
+        expect(await page.locator("#field").inputValue()).toBe("unchanged");
+      } finally {
+        if (sessionId !== undefined) await finishProvisionSession(sessionId);
+        await context.close();
+      }
+    },
+    30_000,
+  );
+
   it("registers compact injection refs and retries after four incomplete fills", async () => {
     const { context, page, started } = await openFixture(
       '<label>Card number <input id="pan" autocomplete="cc-number"></label><label>CVV <input id="cvv" autocomplete="cc-csc"></label>',
