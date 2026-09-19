@@ -852,6 +852,16 @@ The default broker custody, maintenance, and recovery
 contracts live in [`docs/browser-broker.md`](docs/browser-broker.md). Mechanical
 fixture acceptance does not qualify real Google auth or prove the current head.
 
+"Is the browser in use" has four true answers (tab families, profile leases,
+connect's maintenance window, custody). Do not diagnose a hang from one layer
+alone, do not read a running tab family as a broker-wide wedge, and do not fold
+the layers from outside the broker — it is the only side that sees all four at
+once, which is why `status` is a wire operation. Ask through
+`browserBusy()` / `openTab` in
+[`apps/mcp/src/browser-busy.ts`](apps/mcp/src/browser-busy.ts)
+(`@trusty-squire/mcp/browser`); the mapping table lives in
+[`docs/browser-broker.md`](docs/browser-broker.md#busy-façade).
+
 The client wire is the frozen Contract B (`connect` / `open` / `command` /
 `close`), owned by `apps/mcp/src/bot/broker/protocol.ts`. A tool name crosses
 the wire only inside `command`; `close` finishes a session or ends the

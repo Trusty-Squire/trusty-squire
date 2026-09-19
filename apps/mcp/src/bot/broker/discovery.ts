@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { closeSync, mkdirSync, lstatSync, openSync, readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
-import { hostname } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -54,10 +54,18 @@ export function defaultBrokerSocket(profileDir = CHROME_PROFILE_DIR): string {
   );
 }
 
-export function resolveBrokerSocket(): string {
+/** Where a profile's broker socket lives: the configured override, else the
+ * derived default. Pure — no directory is created and nothing is asserted, so
+ * a read-only probe can ask for a path that may not exist. */
+export function brokerSocketPath(): string {
   const configured = process.env.TRUSTY_SQUIRE_BROKER_SOCKET?.trim();
   if (configured) return configured;
-  const path = defaultBrokerSocket();
+  return defaultBrokerSocket();
+}
+
+export function resolveBrokerSocket(): string {
+  const path = brokerSocketPath();
+  if (path !== defaultBrokerSocket()) return path;
   const parent = dirname(path);
   mkdirSync(parent, { recursive: true, mode: 0o700 });
   const stat = lstatSync(parent);
@@ -370,6 +378,29 @@ export function brokerEnvironment(env: NodeJS.ProcessEnv, path: string): NodeJS.
   return { ...env, TRUSTY_SQUIRE_BROKER_SOCKET: path };
 }
 
+/**
+ * A daemon claims the profile-operation lease during startup, BEFORE it
+ * listens, so a lease another process holds kills it there — most often the
+ * `connect` ceremony, which holds that lease for a whole interactive login.
+ * Reporting that as a merely unavailable broker sends the caller to restart a
+ * broker that cannot start, and the advised retry loops until connect ends.
+ */
+function daemonExitRefusal(
+  profileDir: string,
+  reason: NodeJS.Signals | number | null,
+): BrokerRefusal {
+  const owner = profileOperationLockOwner(profileDir, tmpdir());
+  if (owner !== null && owner.host === hostname() && owner.pid !== process.pid)
+    return new BrokerRefusal(
+      "profile_busy",
+      `The Chrome profile lease is held by pid ${owner.pid}; no operator command was dispatched`,
+    );
+  return new BrokerRefusal(
+    "broker_unavailable",
+    `Broker exited before attachment (${reason}); no operator command was dispatched`,
+  );
+}
+
 export async function connectOrLaunchBroker(
   path: string,
   token: string,
@@ -440,10 +471,7 @@ export async function connectOrLaunchBroker(
       failure = error;
     });
     child.once("exit", (code, signal) => {
-      failure = new BrokerRefusal(
-        "broker_unavailable",
-        `Broker exited before attachment (${signal ?? code}); no operator command was dispatched`,
-      );
+      failure = daemonExitRefusal(profileDir, signal ?? code);
     });
     child.unref();
     return await waitForBroker(path, token, () => failure);

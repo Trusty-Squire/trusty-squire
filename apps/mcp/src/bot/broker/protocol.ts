@@ -23,8 +23,8 @@
 
 import type { Observation } from "../provision-session.js";
 
-/** The four operations the wire expresses. */
-export type BrokerWireMethod = "connect" | "open" | "command" | "close";
+/** The four operations the wire expresses, plus the read that answers for them. */
+export type BrokerWireMethod = "connect" | "open" | "command" | "close" | "status";
 
 /** connect: authenticate the local MCP process and mint its connection id. */
 export interface ConnectRequest {
@@ -36,6 +36,12 @@ export interface ConnectRequest {
    * It is deliberately not a general client operation.
    */
   maintain?: boolean;
+  /**
+   * Connect-only concern: this connection will only read `status`. It is a
+   * read, so it is kept out of the broker's idle accounting — probing on any
+   * cadence must not extend how long the shared Chrome stays resident.
+   */
+  probe?: boolean;
 }
 export interface ConnectResult {
   version: 1;
@@ -86,6 +92,26 @@ export interface CloseResult {
   /** The `operate_finish` tool payload, when a session was finished. */
   result?: unknown;
   preDispatchFailure?: { error: string; dispatch: "not_dispatched" };
+}
+
+/**
+ * status: "is the browser in use", answered ONCE by the side that can see all
+ * four layers at the same instant — tab families, the profile lease and its
+ * holder, the connect maintenance window, and custody. A client cannot fold
+ * these from outside: a live socket says nothing about whose Chrome holds the
+ * lease, and the maintenance window is broker-local state. Read-only.
+ */
+export interface StatusResult {
+  busy: boolean;
+  /**
+   * The refusal code the same condition would produce on `open`. Present only
+   * when busy. The client maps code to layer; the wire does not carry a second
+   * copy of that mapping to drift from.
+   */
+  code?: string;
+  detail?: string;
+  /** The process actually holding the profile, when the profile layer answers. */
+  holder?: { pid?: number; host?: string };
 }
 
 /** Notifications travel on the originating command's stream, unchanged. */

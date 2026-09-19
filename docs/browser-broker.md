@@ -154,6 +154,8 @@ and its other sessions intact.
 - Idle shutdown requires zero connected clients, zero live sessions, zero
   in-flight admissions, and zero pending graceful session closes for the
   configured minutes-scale bound. Graceful Chrome closure precedes lease release.
+  A connection that declared itself a `status` probe is not a connected client
+  for this purpose — see [Busy façade](#busy-façade).
 
 MCP server-instance records use the hash of
 `TRUSTY_SQUIRE_SERVER_LINEAGE` (or the forwarder credential when present) to
@@ -165,6 +167,122 @@ Implementation entry points: `src/bot/broker/daemon.ts`, `discovery.ts`,
 `authority.ts`, `runtime.ts`, `operator.ts`, `forwarder.ts`, `protocol.ts`, and
 `transport.ts` under `apps/mcp`.
 
+## Busy façade
+
+The four layers above each answer "is the browser in use" in their own terms:
+tab families (`runtime.ts`), the profile election / SingletonLock lease
+(`profile.ts`), connect's maintenance window (`daemon.ts`), and the custody
+latch (`custody.ts`). A second consumer imports one fold from
+`@trusty-squire/mcp/browser` (`apps/mcp/src/browser-busy.ts`):
+
+```ts
+import { openTab, browserBusy, BrowserBusy } from "@trusty-squire/mcp/browser";
+```
+
+`openTab({ profile, purpose })` is a broker client: it connects over the local
+socket exactly as the operator forwarder does, `open`s a session, navigates
+through `command`, and `close`s on `release()`. It reaches the browser from any
+process, holds no in-process lease of its own, and throws `BrowserBusy` with
+`.action()` when a layer genuinely refuses.
+
+**The façade invents no deadline of its own — every instruction is the
+caller's to cancel.** The acquire and `tab.page.goto` each take an optional
+`signal` and dispatch under a request id that Contract B's reserved `abort`
+control frame can reach, so cancelling one cancels exactly that broker request
+and leaves the connection, its lease, and its other sessions untouched.
+Nothing here sleeps.
+
+Each layer already owns its own budget and says so in its own code, and a
+façade bound below one of those budgets is worse than none: it fails healthy
+work and then invites a retry the layer is not ready for. The acquire is
+bounded by the broker (connect, Chrome start, the first observation, up to
+`BOT_START_TIMEOUT_MS`) which raises `launch_timeout` itself. A navigate gets
+60 s per attempt over three attempts in `PageDriver.goto`; aborting it cancels
+the broker request but does **not** stop the navigate already in flight, and
+the cancelled call keeps the session lease until it returns — so a caller who
+wants a bound should pass `AbortSignal.timeout(ms)` knowing that, rather than
+receive one it never asked for.
+
+**The broker answers the busy question, because it is the only side that sees
+all four layers at the same instant.** `status` is a read-only Contract B
+operation returning `StatusResult`; `brokerBusyStatus` (`broker/status.ts`)
+computes it from the maintenance window, custody's drain state, the profile
+lock holder, and whether the Chrome holding that lock is the broker's own.
+Live tab families are not an input: the broker multiplexes them on one shared
+Chrome, so no number of them can produce a busy answer. `browserBusy()` is a
+thin client of that call. A client cannot fold this from outside — a live
+socket says nothing about whose Chrome holds the lease, and the maintenance
+window is broker-local state, so inferring "not busy" from a listener
+contradicted `openTab` at the same instant.
+
+The result carries the refusal `code` the same condition would produce on
+`open`, and the client maps code to layer; the wire deliberately carries no
+second copy of that mapping to drift from. Only when **no** broker is resident
+does the client read the profile lock itself, because then there is nothing
+brokered to hold it. A broker that is resident but cannot be asked — no
+enrolled account to authenticate with — is never answered from the lock
+either: that would report the broker's own Chrome as a foreign process to
+close, so `browserBusy` raises `BrowserNeedsUser` instead.
+
+A status connection sets `probe: true` on `connect` and is kept out of the
+broker's idle accounting (`BrokerClientRegistry` in `daemon.ts`). Probing is a
+read, and a consumer following the probe-before-act pattern on any cadence
+under the idle bound would otherwise pin the shared Chrome resident forever.
+
+The profile layer reaches the client under `profile_busy` in all of its senses.
+`BrokerRuntime.acquire` converts the `ProfileBusyError` that Chrome's
+SingletonLock and a launch collision raise, because the wire would otherwise
+flatten a plain `Error` to `broker_execution_failed`. The profile-operation
+lease — the one `connect` holds for a whole interactive login — is claimed in
+daemon startup *before* the socket listens, so a held lease kills the daemon
+rather than refusing a request; `connectOrLaunchBroker` therefore reads that
+lease's owner when a spawned daemon dies before attachment and refuses
+`profile_busy` naming the holder, instead of reporting a broker that merely
+failed to start.
+
+A start the broker hands back (no live provider session in the bot profile —
+the likeliest first run) is not a busy layer either: `openTab` throws
+`BrowserNeedsUser`, whose `.action()` names reconnect.
+
+Two permanent configuration failures are deliberately **not** busy layers,
+because no retry can clear either and a busy `.action()` would be a lie. Each
+still gets its own typed façade error carrying the action that IS true, so the
+per-layer wire vocabulary never reaches the consumer:
+
+- The broker serves exactly one physical profile. Naming another gets
+  `UnservableProfileError`, which names the profile this installation serves.
+- A broker pointed at an external Chrome (`BOT_CDP_ENDPOINT` set) refuses with
+  the wire code `external_browser`, which the façade raises as
+  `ExternalBrowserError` naming that variable. This is deliberately a separate
+  code from `incompatible_runtime` — that one means "finish the sessions
+  pinning this browser identity, then retry", which is a genuine not-now.
+
+`browserBusy()` is the read-only fold over that one served profile, and
+read-only is load-bearing: it probes for a live broker listener and reads the
+profile's SingletonLock holder. It never reclaims a lock, sweeps owner
+processes, signals anything, or sleeps. A live broker owns the profile lease
+and multiplexes tab families on one shared Chrome, so its own Chrome is
+reported free rather than as a foreign process to close.
+
+**Tab families are the layer that is never an answer.** A running session does
+not make the browser unavailable — that is precisely the wrong-layer conclusion
+this fold exists to prevent. `stale_lease` means "not yours, or gone": a
+permanent failure a retry can never clear, so it stays unmapped beside
+`cancelled` and `unauthorized`.
+
+Wire codes stay unchanged — this is a mapping at the package boundary:
+
+| Wire code              | Layer / reason |
+| ---------------------- | -------------- |
+| `profile_busy`         | profile        |
+| `maintenance`          | maintenance    |
+| `broker_unavailable`   | custody        |
+| `incompatible_runtime` | custody        |
+| `launch_timeout`       | custody        |
+
+Other refusal codes are not "not now" and are not mapped onto a busy layer.
+`external_browser` becomes `ExternalBrowserError`; the rest — `stale_lease`,
+`cancelled`, `unauthorized` — propagate unchanged.
 
 ## Executed mechanical acceptance
 

@@ -579,6 +579,26 @@ the facade FORWARDS each lifecycle export rather than re-implementing it, and th
 COMPLETE key set of every observation payload. Treat a failure there as a
 behavior change, not a test to update.
 
+### Browser busy façade (`@trusty-squire/mcp/browser`)
+
+`openTab` / `browserBusy` / `BrowserBusy` in
+[`apps/mcp/src/browser-busy.ts`](apps/mcp/src/browser-busy.ts) fold the busy layers
+into one typed answer. Import from `@trusty-squire/mcp/browser`. `openTab` is a
+broker client (connect / open / command / close) reachable from any process.
+It invents no deadline of its own — each layer owns its budget and says so in
+its own code, so the acquire and `tab.page.goto` take only an optional `signal`
+and cancel through the wire `abort` frame. **`browserBusy` does not fold the
+layers itself**: it calls the read-only `status` wire operation, which the
+broker answers from `broker/status.ts` where the maintenance window, custody
+and the profile lock holder are all visible at once. That probe connects with
+`probe: true` so it stays out of the broker's idle accounting — a read must
+never extend how long the shared Chrome stays resident. The
+refusal-code mapping, why a façade bound below a layer's budget is worse than
+none, the permanent failures that each get their own typed error rather than a
+busy layer (`UnservableProfileError`, `BrowserNeedsUser`, `ExternalBrowserError`),
+and the "a running tab family is not busy" rule live in
+[`docs/browser-broker.md`](docs/browser-broker.md#busy-façade).
+
 ### Browser process vs page lifetime (`browser.ts` is a facade)
 
 `BrowserController` composes one exclusive `BrowserProcessOwner`

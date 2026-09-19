@@ -7,6 +7,7 @@ import {
   acquireProfileOperationGuard,
   profilePathIdentity,
   CHROME_PROFILE_DIR,
+  ProfileBusyError,
   waitForProfileFree,
   type ProfileOperationLease,
 } from "../profile.js";
@@ -53,8 +54,14 @@ export class BrokerRuntime implements BrokerBrowserCustody {
     proxyUrl?: string;
   }): Promise<{ browser: BrowserController; profileDir: string }> {
     if (this.closing) throw new BrokerRefusal("maintenance", "Identity cell is draining");
+    // Distinct from incompatible_runtime: that code means "not now, finish the
+    // sessions pinning this identity". This is a standing configuration choice
+    // no retry can clear.
     if ((process.env.BOT_CDP_ENDPOINT ?? "").trim() !== "")
-      throw new BrokerRefusal("incompatible_runtime", "Broker requires a locally owned browser");
+      throw new BrokerRefusal(
+        "external_browser",
+        "Broker requires a locally owned browser; BOT_CDP_ENDPOINT names an external Chrome",
+      );
     // A dead shared Chrome takes every live session with it. Forget the dead
     // tab families and relaunch on the same persistent profile before serving
     // the next start, instead of handing out pages from a dead browser.
@@ -157,6 +164,13 @@ export class BrokerRuntime implements BrokerBrowserCustody {
       this.sessions.set(browser, acquired.releaseTabs);
       if (admissionId !== undefined) this.admissionIds.set(browser, admissionId);
       return { browser, profileDir };
+    } catch (error) {
+      // The profile-operation lease and Chrome's SingletonLock both refuse
+      // with a plain ProfileBusyError, which the wire flattens to
+      // broker_execution_failed. It is the profile layer saying "not now", so
+      // it has to reach the client under the code that says so.
+      if (error instanceof ProfileBusyError) throw new BrokerRefusal("profile_busy", error.message);
+      throw error;
     } finally {
       this.pending--;
       if (admissionId !== undefined) {
@@ -285,6 +299,14 @@ export class BrokerRuntime implements BrokerBrowserCustody {
     this.sessions.delete(browser);
     this.admissionIds.delete(browser);
     release();
+  }
+
+  /** What custody itself can see, for the wire `status` fold. */
+  custodyStatus(): { draining: boolean; ownsLiveBrowser: boolean } {
+    return {
+      draining: this.closing,
+      ownsLiveBrowser: this.owner !== undefined && this.owner.isConnected(),
+    };
   }
 
   browserLost(): boolean {
