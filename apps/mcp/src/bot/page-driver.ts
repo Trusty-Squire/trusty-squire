@@ -320,9 +320,9 @@ export class PageDriver {
     // Post-load dwell. Cloudflare/reCAPTCHA scoring runs JS that
     // collects behavior signals over a window (typically 500-2000ms);
     // landing on a page and immediately interacting reads as bot-like.
-    // The "dwell" gives the scoring window enough wall-clock to settle
-    // and also gives any deferred JS time to register event listeners
-    // we'll later fire.
+    // The "dwell" gives the scoring window enough wall-clock to settle.
+    // Startup skips this delay; deferred scripts have already finished at
+    // the DOMContentLoaded boundary above.
     if (this.humanize && readiness !== "document-ready") {
       await this.sleep(rand(800, 2000));
     }

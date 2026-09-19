@@ -13,6 +13,11 @@ reports it; otherwise it returns a clear log-in-first `needs_user` result.
 Ordinary operator admission never substitutes an on-disk cookie read for that
 live-context probe.
 
+Each start performs a fresh live account lookup to warm the profile before
+provider detection, and reuses that lookup's email for session metadata.
+Neither admission nor account metadata is cached across starts. The account
+lookup itself is not the admission signal; the provider probe remains the gate.
+
 Google OAuth stays in the same real-profile browser context. The serialized
 OAuth boundary retains the authorized target and delegates to
 `BrowserController.loginWithOAuth`; it never swaps or recreates the browser.
