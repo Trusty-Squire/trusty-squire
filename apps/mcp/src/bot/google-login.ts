@@ -58,7 +58,7 @@ import {
 import { createSessionGuard } from "../session-guard.js";
 import { connectOrLaunchBroker, resolveBrokerSocket } from "./broker/discovery.js";
 import type { BrokerClient } from "./broker/transport.js";
-import { controlLabelV2 } from "./compact-observation-v2.js";
+import { controlLabelV2, wireRoleToSafeRoleV2 } from "./compact-observation-v2.js";
 import { extractGoogleAccountEmail } from "./oauth-login.js";
 export { extractGoogleAccountEmail };
 import {
@@ -820,9 +820,17 @@ async function operateCommand(
   name: string,
   args: Record<string, unknown>,
 ): Promise<unknown> {
-  // The daemon injects session_id into the tool args itself; a caller that
-  // guesses it is refused, so only the tool's own arguments travel.
-  return await client.call("command", { sessionId, name, args });
+  // The daemon's OperatorBroker.command parses every operator schema, which
+  // REQUIRES args.session_id, and refuses a mismatched one with stale_lease —
+  // it does not inject the id for us. The reply is the CommandResult envelope
+  // `{ result: <tool payload> }`, the same wire the MCP forwarder rides: send
+  // the id inside args and unwrap the envelope.
+  const reply = (await client.call("command", {
+    sessionId,
+    name,
+    args: { ...args, session_id: sessionId },
+  })) as { result?: unknown } | undefined;
+  return reply?.result;
 }
 
 // A deferred --force-relogin clear runs through the very tab the ceremony
@@ -854,17 +862,30 @@ async function logoutProvidersThroughSession(
         let signedOut = false;
         try {
           const observed = (await operateCommand(client, sessionId, "operate_observe", {})) as {
-            safe_table?: { ref: string; role?: string; label?: string }[];
+            safe_table?: unknown[];
           };
+          // The wire's control rows are positional tuples `[ref, role, facts?]`
+          // (compact-observation-v2 wireControl): the role is a wire letter
+          // (b=button, l=link, …) and the facts are a `|`-joined list whose
+          // FIRST element is the `@label` alias the observation minted. Decode
+          // that shape here — object rows never travel this wire.
           const wanted = controlLabelV2(GITHUB_SIGN_OUT_CONTROL_NAME);
-          const signOut = (observed?.safe_table ?? []).find(
-            (row) =>
-              (row.role === "button" || row.role === "link") &&
+          const signOut = (observed?.safe_table ?? []).find((row) => {
+            if (!Array.isArray(row)) return false;
+            const [ref, roleWire, facts] = row as [unknown, unknown, unknown];
+            const role = wireRoleToSafeRoleV2(String(roleWire));
+            const label = typeof facts === "string" ? facts.split("|")[0]! : "";
+            return (
+              typeof ref === "string" &&
+              (role === "button" || role === "link") &&
               wanted !== undefined &&
-              (row.label ?? "").toLowerCase().startsWith(wanted),
-          );
+              label.toLowerCase().startsWith(wanted)
+            );
+          });
           if (signOut !== undefined) {
-            await operateCommand(client, sessionId, "operate_click", { ref: signOut.ref });
+            await operateCommand(client, sessionId, "operate_click", {
+              ref: (signOut as [string, unknown, unknown?])[0],
+            });
             signedOut = true;
           }
         } catch {
@@ -1028,6 +1049,11 @@ export async function launchCeremonyBrowserContext(
           {
             headless: false,
             viewport: null,
+            // The adopted rig's DISPLAY/XAUTHORITY (remote login on a
+            // headless box) must reach Chrome itself, not just the marker
+            // registration — a headed launch with no DISPLAY dies with
+            // "Missing X server or $DISPLAY".
+            env: params.env,
             args: [
               `--window-size=${params.window.width},${params.window.height}`,
               "--lang=en-US",

@@ -104,22 +104,41 @@ const server = net.createServer((socket) => {
         continue;
       }
       if (request.method === "command") {
+        // Mirror OperatorBroker.command: the operator schema REQUIRES
+        // args.session_id and a mismatch is a stale_lease refusal. A caller
+        // that omits the id (or guesses a different one) never gets past
+        // this point, so the recorded sequence below proves the connect
+        // shape sends the real id on every verb.
+        const args = request.params?.args ?? {};
+        if (args.session_id !== "tab-1") {
+          reply({ error: { code: "stale_lease", message: "An owned session is required" } });
+          continue;
+        }
         seen.commands = seen.commands || [];
         seen.commands.push({
           name: request.params?.name ?? null,
-          args: request.params?.args ?? null,
+          args,
         });
         // GitHub's logout page renders its confirm control; the observe-then-
         // click drive must find a Sign out row in the returned action map.
-        // The label is the @slug alias controlLabelV2 really mints for an
-        // accessible name of "Sign out" — a bare "sign-out" is a shape no
-        // observation emits, and matching against it passes here while the
-        // click never fires in production.
+        // Rows travel the REAL wire shape — positional tuples [ref, role,
+        // facts?] with a wire role letter and the @slug alias first in the
+        // |-joined facts — not the object shape no observation emits.
+        // The daemon's command dispatch returns the CommandResult envelope
+        // "{ result: <tool payload> }" and the transport sends THAT as the
+        // frame's result field -- mirror it exactly, or the caller's unwrap
+        // of .result sees nothing.
         reply({
-          result:
-            request.params?.name === "operate_observe"
-              ? { safe_table: [{ ref: "@e5", role: "button", label: ${JSON.stringify(SIGN_OUT_LABEL)} }] }
-              : { ok: true },
+          result: {
+            result:
+              request.params?.name === "operate_observe"
+                ? {
+                    safe_table: [
+                      [${JSON.stringify(SIGN_OUT_LABEL)}, "b", ${JSON.stringify(SIGN_OUT_LABEL)}],
+                    ],
+                  }
+                : { ok: true },
+          },
         });
         continue;
       }
@@ -317,11 +336,20 @@ describe("connect attaches to the live broker for the profile it is connecting",
       // ref a prior observation minted), then back to the confirm page for
       // the fresh sign-in.
       expect(outcome.commands).toEqual([
-        { name: "operate_navigate", args: { url: "https://accounts.google.com/Logout" } },
-        { name: "operate_navigate", args: { url: "https://github.com/logout" } },
-        { name: "operate_observe", args: {} },
-        { name: "operate_click", args: { ref: "@e5" } },
-        { name: "operate_navigate", args: { url: CONFIRM_URL } },
+        {
+          name: "operate_navigate",
+          args: { url: "https://accounts.google.com/Logout", session_id: "tab-1" },
+        },
+        {
+          name: "operate_navigate",
+          args: { url: "https://github.com/logout", session_id: "tab-1" },
+        },
+        { name: "operate_observe", args: { session_id: "tab-1" } },
+        {
+          name: "operate_click",
+          args: { ref: SIGN_OUT_LABEL, session_id: "tab-1" },
+        },
+        { name: "operate_navigate", args: { url: CONFIRM_URL, session_id: "tab-1" } },
       ]);
       expect(outcome.lockNeverReleased).toBe(true);
     },
