@@ -1127,6 +1127,13 @@ ceremony so a human can drive the sign-in.
 the OLD self-launch + patchright `connectOverCDP` login cell, not to every
 Playwright-driven Chrome — the broker's Chrome carries Google OAuth fine.
 
+Note the blast radius: connect no longer has a plain-spawn cell at all. The
+self-launch fallback is `launchPersistentContext`, which the 2026-07-20 note
+above already classifies as "also CDP" (it passed on two other Hetzners, so the
+detection is not deterministic across IPs). So BOTH of connect's paths ride on
+the hypothesis below — a PATH B failure does not leave a cleared path standing,
+and restoring one means restoring a plain spawn.
+
 **Falsification experiment (owned by this branch's proofs, `022`):** PATH A —
 valid existing session + broker BUSY → `connect` completes with NO noVNC
 sign-in, NO drain, NO second Chrome; PATH B — no valid session → the sign-in

@@ -641,15 +641,15 @@ function createTrackedLoginBrowserLifecycle(
 // Open the bot's visible Chrome at `url` and run `pollUntilDone` until it
 // resolves true, the deadline passes, or the browser/status check fails.
 //
-// Two launch paths (see the module header): the shared broker's tab (the
-// broker's Playwright-driven Chrome) and the self-launched persistent-context
-// Chrome, which is plain — no `--remote-debugging-port`, never
-// `connectOverCDP`ed. STATE.md 2026-07-20 confirmed a CDP attach × Google
-// OAuth failure for the OLD self-launch + connectOverCDP cell; whether the
-// broker's Chrome trips the same check is the open hypothesis the current
-// PATH A/B E2E proofs settle. Nothing drives the user's sign-in in either
-// path: completion arrives out of band, through `connect`'s nonce-scoped
-// Finish callback.
+// Two launch paths (see the module header): the shared broker's tab, and the
+// self-launched `launchPersistentContext` Chrome. NEITHER is the plain spawn
+// STATE.md's 2026-07-20 bisect cleared — it names launchPersistentContext
+// "also CDP" too, and that plain cell was replaced when the ceremony moved
+// onto the shared browser. That bisect confirmed a CDP attach × Google OAuth
+// failure for the OLD self-launch + connectOverCDP cell; whether either path
+// here trips the same check is the open hypothesis the PATH A/B E2E proofs
+// settle. Nothing drives the user's sign-in in either path: completion
+// arrives out of band, through `connect`'s nonce-scoped Finish callback.
 export interface RunInBotChromeOpts {
   profileDir: string;
   url: string;
@@ -1222,9 +1222,9 @@ export function checkLoginStatusWithin(
 export async function openInstallConfirmInBotChrome(
   opts: {
     confirmUrl: string;
-    // Returns claimed only after the install ceremony succeeds. The plain login
-    // browser intentionally has no CDP endpoint, so the per-run Finish callback
-    // is the completion signal for every install path.
+    // Returns claimed only after the install ceremony succeeds. No path reads
+    // completion off the live page, so the per-run Finish callback is the
+    // completion signal for every install path.
     pollUntilClaimed: (wizardCompleted: boolean) => Promise<InstallClaimPollResult>;
     profileDir?: string;
     timeoutMinutes?: number;
