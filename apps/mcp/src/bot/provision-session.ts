@@ -1,6 +1,5 @@
 import type { ScreenshotBinding, ScreenshotPoint } from "./screenshot-click.js";
 import type { GoogleHumanChallenge } from "./google-auth-state.js";
-import type { CaptureSource } from "./credential-capture.js";
 import type { BrowserUseCapture } from "./browser-use-capture.js";
 // Phase 1 — the session-holding "thick tools" surface a frontier host agent
 // drives. MCP tool calls are stateless, but a provision run needs ONE live
@@ -220,7 +219,6 @@ import { egressSeedHosts } from "./session/hosts.js";
 // slots and the user-email lookup stay re-exported below (the tool layer's
 // import surface), as with the lifecycle names.
 import { widenAllowedHostsFromUrl } from "./session/registry.js";
-import { stashSecretSlot, type SlotHandle } from "./session/slots.js";
 
 export { getSessionUserEmail } from "./session/registry.js";
 export { readSecretSlotValue, stashSecretSlot, type SlotHandle } from "./session/slots.js";
@@ -287,12 +285,7 @@ export type { FinishResult, PreparedFinishResult } from "./session/lifecycle.js"
 // facing entry point and the helpers this facade still calls are imported
 // back here; the tool layer's import surface stays on this module (re-exports
 // below), as with the lifecycle and observe names.
-import {
-  actInternally,
-  compactV2SelectionFailureReason,
-  runSerializedGoogleIdentityOperation,
-  settleAfterStateChange,
-} from "./act/act.js";
+import { actInternally, compactV2SelectionFailureReason } from "./act/act.js";
 import {
   compactV2AuthorizationForTarget,
   resolveTarget,

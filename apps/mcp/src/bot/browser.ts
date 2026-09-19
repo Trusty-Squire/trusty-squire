@@ -39,9 +39,7 @@ import { OperatorEvidenceCollector } from "./operator-evidence.js";
 // captchas still need the click-and-wait pattern (the Tier 2 captcha
 // gate).
 
-import {
-  type StealthProfile,
-} from "./browser-process-runtime.js";
+import { type StealthProfile } from "./browser-process-runtime.js";
 
 import { existsSync, statSync } from "node:fs";
 import type { BrowserContext, ElementHandle, FileChooser, Frame, Locator, Page } from "playwright";
@@ -53,9 +51,7 @@ import {
 import { BrowserProcessOwner } from "./browser-process-owner.js";
 import { PageDriver } from "./page-driver.js";
 import type { ActiveOAuthAttempt } from "./oauth-login.js";
-import {
-  type ProfileCloseState,
-} from "./profile.js";
+import { type ProfileCloseState } from "./profile.js";
 
 export type ContextInitScriptId = "evaluate-name-shim" | "navigator-webdriver" | "webgl-spoof";
 
@@ -274,10 +270,7 @@ export function stripCloudflareChallengeParams(rawUrl: string): string | null {
 
 // The bounded graceful-quit primitives behind the old plain-login browser
 // remain the operator owner's shared teardown path.
-export {
-  BROWSER_QUIT_SIGNAL,
-  quitBrowserGracefully,
-} from "./browser-process-runtime.js";
+export { BROWSER_QUIT_SIGNAL, quitBrowserGracefully } from "./browser-process-runtime.js";
 
 // Dev-runtime guard: when the bot is run through `tsx`, esbuild may inject
 // calls to its `__name(fn, "name")` helper into functions passed to

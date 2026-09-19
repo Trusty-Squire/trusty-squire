@@ -9,9 +9,8 @@ pool, cookie reinjection, or OAuth browser replacement. Google admission reads
 `detectSessionProviders()` from the opened live browser context and passes that
 result to `googleSessionGate`.
 
-Interactive login/forced relogin also uses the real profile. The plain browser's
-completion is the install claim and explicit Finish callback, so identity flow
-never reads Chrome's on-disk cookie database.
+Interactive login and forced relogin follow the
+[connect ceremony contract](browser-broker.md) on that real profile.
 
 The serialized OAuth boundary, compact-observation-v2 serializer, vault
 extraction and credential-egress host seeding remain. Browser egress is unrestricted.

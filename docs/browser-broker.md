@@ -50,22 +50,29 @@ label, which carries no authority.
 
 The client wire is the frozen Contract B — `connect`, `open`, `command`,
 `close` (`apps/mcp/src/bot/broker/protocol.ts`). A connection ends with
-`close{}` (the lease boundary, formerly `client_close`), which lets the broker
-resume on the same account when the connection ends.
+`close{}` (the lease boundary, formerly `client_close`), which releases that
+connection's claim without draining or restarting the shared browser.
 
 Connect approaches the browser only when it needs it. The already-provisioned
 preflight — stored session, account-bound plumbing, and a byte-copy read of the
 profile's cookie store (`detectProviderSessionsFromProfile`) — runs BEFORE any
 broker or browser work, takes no profile lease, waits for nothing, and opens no
 browser. An install that is already connected therefore completes while the
-broker keeps both its lease and its Chrome.
+broker keeps both its lease and its Chrome. An absent profile or cookie store
+requires the ceremony; a failed preflight probe is reported as `unverified`
+instead of forcing re-pairing.
 
 Ordering it the other way round, or answering it with a probe that opens the
 profile, both fail the same way: the machines that are already connected are
 exactly the machines whose browser is busy, so the question contends with the
 browser it is about and connect reports the profile as busy. Cookie presence is
-all that read proves — the live liveness probe still runs after the ceremony,
-where this process has just closed the profile itself.
+all that read proves; a cookie can outlive its server-side session. After the
+ceremony, `probeProviderSessionsAfterCeremony` first tries the live probe. If the
+profile is still busy, it polls committed-cookie snapshots for up to 45 seconds,
+awaiting Google and any explicitly requested provider before accepting early.
+Unreadable snapshots are unknown, not proof of sign-out; no provider list is
+persisted in the account session file. Ceremony completion itself remains the
+install claim plus its explicit nonce-scoped Finish callback, never a cookie read.
 
 When an install does need the login ceremony, the ceremony opens the confirm
 page as a TAB in the shared broker browser — an ordinary `open` on a
@@ -75,12 +82,29 @@ connect-or-launch path spawns the broker daemon, whose browser hosts the tab
 (and keeps the reclaim contracts below). The self-launch fallback — a headed
 persistent-context Chrome on the bot profile through the operator's own launch
 custody (`launchCeremonyBrowserContext`) — runs only where no broker can serve
-yet (a first-ever connect on an unenrolled machine); its profile gate fail-fasts
+yet (for example, a first connect on an unenrolled machine, or an unreachable
+broker socket); its profile gate fail-fasts
 with the busy-profile message rather than racing a browser that holds the
 profile. Because the broker's Chrome runs on its own private Xvfb, connect
 exposes that display over noVNC for the ceremony (same x11vnc + websockify +
 tunnel stack as the standalone remote login, reaped at the ceremony's lease
 boundary) — a tab no human can see is a tab no human can complete.
+Display discovery first reads the holder profile's tracked launch display from
+the owner-reaper manifest, then falls back to the holder's process tree: Chrome
+can erase its main process environment while children retain DISPLAY/XAUTHORITY.
+A display outside the repo-owned rig is treated as already visible. Missing
+usable display evidence or failed noVNC exposure stops the ceremony immediately.
+Cleanup removes the ceremony's helpers and tab, preserving the broker's browser
+and display even on setup failure. The self-launch path closes its own browser
+and rig, including when initial page setup fails.
+`shared-ceremony-exposure.test.ts` and `broker-connect-attach.test.ts` pin these
+contracts.
+
+The ceremony adopts the browser's current proxy identity instead of requesting
+a conflicting bare browser. Its `ceremony` open enters the scoped admission
+exception in `session/lifecycle.ts`: sign-in must be able to create the Google
+session it otherwise requires. Ordinary agent-facing `operate_start` admission
+is unchanged.
 
 Known property of that exposure, decided with the connect-browser-claim work:
 the noVNC URL shows the WHOLE shared display, not just the ceremony tab. While
@@ -95,8 +119,6 @@ oversight: do not narrow it without the maintainer's word.
 
 A deferred
 `--force-relogin` cookie clear rides the same tab as ordinary logout navigation.
-The CDP-attach × Google OAuth question is owned by the STATE.md bisect
-paragraph below — do not cite it as a reason to add a second instance.
 
 The ceremony's broker endpoint is derived from the profile the caller is about
 to use, not from the launch-time default. `connect` resolves its target's
@@ -107,13 +129,9 @@ endpoint, the election root, the profile lock — reads the environment live
 `CHROME_PROFILE_DIR` addresses a different profile's broker and then collides
 with the live broker that owns the real profile.
 
-STATE.md's 2026-07-20 bisect confirmed a CDP-attach × Google OAuth failure for
-the OLD self-launch + `connectOverCDP` login cell (2026-09-04 extended it to
-the deleted `login` subcommand). Whether the broker's Playwright-driven Chrome
-carries a Google sign-in is the open hypothesis; the connect PATH A/B E2E
-proofs (valid-session and no-session runs completing against a live broker) are
-the falsification experiment. Do not cite either the failure or its absence as
-settled without that run.
+The Google OAuth hypothesis and live-validation evidence are owned by
+[STATE.md](../STATE.md#connect-ceremony-on-the-shared-broker-browser--new-hypothesis-falsification-pending-2026-09-06-fmsquire-connect-browser-claim).
+Do not infer live sign-in success from fixture acceptance.
 
 There are no `hello`/`tool`/`cancel`/`resume` operations: a
 session command is `command{sessionId,name,args}` (the only place a tool name
@@ -147,6 +165,10 @@ and its other sessions intact.
   a provably-reborn lease pid is left to the ordinary stale-owner scavenge.
   The same reclaim runs whenever a client connects-or-launches — the connect
   ceremony included — before falling back to a self-launched browser.
+- On a rejected handshake, the daemon first re-reads its bound account entry.
+  It retries authentication once after refreshing credentials only if the account
+  and presented token exactly match that entry and refresh succeeds. A store or
+  refresh refusal leaves the original rejection intact.
 - A same-contract resident whose credential digest no longer matches the current
   agent session token (re-enrollment or a driver/server restart) is a separate
   reclaim. Positive identification
@@ -165,6 +187,12 @@ and its other sessions intact.
   parameter or config
   knob. `broker-prior-contract-reclaim.test.ts` pins both reclaim paths with
   real child processes, signals, lease files, and sockets.
+- An older resident whose strict `open` schema rejects `ceremony` or
+  `adoptIdentity` uses the same stale-credential reclaim path. Connect closes
+  its failed connection first, retains the same-account and attached-client
+  refusal contracts, then connects-or-launches and retries ceremony open once.
+  A second rejection propagates; arbitrary open failures do not trigger reclaim.
+  `broker-connect-attach.test.ts` covers this upgrade path.
 - Each session owns a target family and a serialized command queue. A service
   URL does not reserve a site; one authenticated client drives the shared profile.
   Several connections to the same profile attach at once, one per client process,
@@ -181,7 +209,8 @@ and its other sessions intact.
   a session that was never created. `broker-forwarder.test.ts` pins the replay.
 - Browser egress is unrestricted for all targets. Session cleanup closes only that owned
   family. A close that cannot be proven leaves the broker alive holding physical
-  custody; it never refuses a later command or start. The existing exact
+  custody. A failed close restores the prior closing state: it must neither latch
+  a new refusal nor clear a pre-existing custody-unproven latch. The existing exact
   owner-process identity backstop remains the only physical-process custody.
 - Per-session approval, charge dispatch fences, and post-submit outcome custody
   continue in the existing handlers. Approval notifications travel over the

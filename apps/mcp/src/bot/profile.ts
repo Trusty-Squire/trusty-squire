@@ -36,7 +36,7 @@ export const CHROME_PROFILE_DIR =
  * endpoint, an election root, a profile lock — must therefore read the
  * environment live. Reading the frozen constant instead addresses a
  * DIFFERENT profile's broker than the one about to be guarded, which skips
- * maintenance and collides with the live broker that owns the real profile.
+ * the shared browser and collides with the live broker that owns the real profile.
  */
 export function currentProfileDir(): string {
   const configured = (process.env.TRUSTY_SQUIRE_PROFILE_DIR ?? "").trim();

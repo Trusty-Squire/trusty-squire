@@ -520,9 +520,7 @@ export interface NeedsUserLogin {
  */
 const ceremonyStartAdmissionContext = new AsyncLocalStorage<true>();
 
-export async function withCeremonyStartAdmission<T>(
-  operation: () => Promise<T>,
-): Promise<T> {
+export async function withCeremonyStartAdmission<T>(operation: () => Promise<T>): Promise<T> {
   return await ceremonyStartAdmissionContext.run(true, operation);
 }
 

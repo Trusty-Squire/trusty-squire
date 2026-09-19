@@ -4,33 +4,9 @@
 // profile. `connect` (install/cli.ts) is the ONLY caller that opens a login;
 // every signup after it is fully automated.
 //
-// The install-confirm ceremony opens as a TAB in the shared browser: when a
-// resident broker holds the profile, connect is an ordinary broker client —
-// it opens one session tab at the confirm URL and watches for the Finish
-// callback; the user signs in there and completion arrives out of band
-// through the nonce-scoped Finish callback. Because the broker's Chrome runs
-// on its own private Xvfb, connect also exposes that display over noVNC for
-// the ceremony (same x11vnc + websockify + tunnel stack as the standalone
-// remote login) — a tab no human can see is a tab no human can complete.
-// The exposed URL shows the WHOLE shared display — sibling sessions' tabs
-// included — for the ceremony deadline, and is single-use (fresh VNC
-// password, one quick tunnel, torn down at the lease boundary). That pixel
-// exposure is a decided property of the ceremony, documented in
-// docs/browser-broker.md. Exposure is best-effort: any failure to attach
-// degrades to the unexposed tab with a logged cause and the ceremony
-// continues; it never blocks a connect that would otherwise succeed. A
-// deferred --force-relogin clear rides the same tab as ordinary logout
-// navigation. Only when no broker can serve (first connect on an
-// unenrolled machine, or no live broker) does connect launch its own
-// persistent-context browser on the bot profile — the same launcher class
-// the operator uses.
-// Completion never comes off a live BrowserContext in either path.
-//
-// The self-launched ceremony uses a local visible Chrome window when one
-// exists. On a headless host it starts a login-scoped Xvfb + noVNC tunnel so
-// a human can drive that same browser remotely. Automated operator sessions
-// do not use this module's display stack and remain on Chrome's new-headless
-// path.
+// Connect ceremony custody, display exposure, and provider-probe contracts are
+// owned by docs/browser-broker.md. Completion is out of band through the install
+// claim and nonce-scoped Finish callback, never inferred from a live page.
 
 import { createRequire } from "node:module";
 import { readFileSync, readdirSync } from "node:fs";
@@ -51,10 +27,7 @@ import {
   withProfileOperationGuard,
 } from "./profile.js";
 import { clearProviderCookiesFromContext } from "./login-state.js";
-import {
-  closeBrowserContextWithin,
-  registerLocalBrowserLaunch,
-} from "./browser.js";
+import { closeBrowserContextWithin, registerLocalBrowserLaunch } from "./browser.js";
 import { createSessionGuard } from "../session-guard.js";
 import {
   connectOrLaunchBroker,
@@ -366,7 +339,11 @@ interface ProfileCookieRow {
 // Chrome stores expiry as microseconds since 1601-01-01 UTC.
 const WINDOWS_EPOCH_OFFSET_MS = 11_644_473_600_000;
 
-function cookieProvesSession(row: ProfileCookieRow, target: LoginTarget, now = Date.now()): boolean {
+function cookieProvesSession(
+  row: ProfileCookieRow,
+  target: LoginTarget,
+  now = Date.now(),
+): boolean {
   if (!target.persistedCookies.includes(row.name)) return false;
   const host = new URL(target.cookieOrigin).hostname;
   const matchesHost = row.host_key.startsWith(".")
@@ -760,8 +737,7 @@ export async function exposeSharedBrokerCeremonyDisplay(
   if (holderPid === null)
     return {
       kind: "unshowable",
-      reason:
-        "no live browser process holds the profile, so its display could not be discovered",
+      reason: "no live browser process holds the profile, so its display could not be discovered",
     };
   const tracked = ownerTrackedBrowserDisplay(profileDir, holderPid);
   const env = tracked === null ? readProcessTreeDisplay(holderPid) : null;
@@ -1022,11 +998,7 @@ export async function tryRunCeremonyInSharedBroker(
   const socket = resolveBrokerSocket(opts.profileDir);
   let client: BrokerClient;
   try {
-    client = await connectOrLaunchBroker(
-      socket,
-      session.agent_session_token,
-      session.account_id,
-    );
+    client = await connectOrLaunchBroker(socket, session.agent_session_token, session.account_id);
   } catch (err) {
     // Genuinely no broker to serve (no listener, connection refused, socket
     // lost): the self-launch path's profile gate reports the truth about the
@@ -1038,14 +1010,15 @@ export async function tryRunCeremonyInSharedBroker(
   let sessionId: string | undefined;
   let stopExposure: (() => Promise<void>) | null | undefined;
   try {
-    const openCeremony = async () => (await client.call("open", {
-      serviceUrl: opts.url,
-      adoptIdentity: true,
-      // The ceremony IS what creates the live Google session: its start must
-      // pass the google_session admission gate, or every enrolled machine
-      // with an empty profile deadlocks against a self-referential remedy.
-      ceremony: true,
-    })) as { sessionId?: string; observation?: unknown };
+    const openCeremony = async () =>
+      (await client.call("open", {
+        serviceUrl: opts.url,
+        adoptIdentity: true,
+        // The ceremony IS what creates the live Google session: its start must
+        // pass the google_session admission gate, or every enrolled machine
+        // with an empty profile deadlocks against a self-referential remedy.
+        ceremony: true,
+      })) as { sessionId?: string; observation?: unknown };
     let open: Awaited<ReturnType<typeof openCeremony>>;
     try {
       open = await openCeremony();
@@ -1077,22 +1050,14 @@ export async function tryRunCeremonyInSharedBroker(
       );
     }
     if (opts.forceReloginProviders?.length) {
-      await logoutProvidersThroughSession(
-        client,
-        sessionId,
-        opts.url,
-        opts.forceReloginProviders,
-      );
+      await logoutProvidersThroughSession(client, sessionId, opts.url, opts.forceReloginProviders);
     }
     // The broker's Chrome runs on its own private Xvfb, so the tab is
     // invisible to the user until this process exposes that display over
     // noVNC. A tab no human can see is a tab no human can complete — and
     // when it provably cannot be shown, waiting out the deadline would only
     // burn it (round-12 review-3): fail now with the cause and the recovery.
-    const exposure = await exposeSharedBrokerCeremonyDisplay(
-      opts.profileDir,
-      SHARED_DISPLAY_LABEL,
-    );
+    const exposure = await exposeSharedBrokerCeremonyDisplay(opts.profileDir, SHARED_DISPLAY_LABEL);
     if (exposure.kind === "unshowable") {
       throw new Error(
         `\n[login] The install page opened as a tab in the shared browser's private ` +
@@ -1106,12 +1071,12 @@ export async function tryRunCeremonyInSharedBroker(
     console.error(
       exposure.kind === "already_visible"
         ? `\n[login] The install page opened as a tab in the shared browser's display ` +
-          `(${exposure.reason}) — complete the sign-in on that screen.\n`
+            `(${exposure.reason}) — complete the sign-in on that screen.\n`
         : `\n[login] The install page opened as a tab in the shared browser's display — ` +
-          `open the noVNC URL above on any device to see and drive it. That URL shows ` +
-          `the WHOLE shared browser display for the duration of the ceremony — every ` +
-          `tab this browser is running, not only the sign-in — and it is single-use: ` +
-          `it exists for this ceremony only and stops working when the ceremony ends.\n`,
+            `open the noVNC URL above on any device to see and drive it. That URL shows ` +
+            `the WHOLE shared browser display for the duration of the ceremony — every ` +
+            `tab this browser is running, not only the sign-in — and it is single-use: ` +
+            `it exists for this ceremony only and stops working when the ceremony ends.\n`,
     );
     stopExposure = exposure.kind === "exposed" ? exposure.stop : null;
     const ok = await pollUntil(

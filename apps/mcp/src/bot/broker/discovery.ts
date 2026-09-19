@@ -138,9 +138,14 @@ export function isUnsupportedCeremonyOpen(error: unknown): boolean {
       keys?: string[];
       path?: unknown[];
     }[];
-    return Array.isArray(issues) && issues.some((issue) =>
-      issue.code === "unrecognized_keys" && issue.path?.length === 0 &&
-      issue.keys?.some((key) => key === "ceremony" || key === "adoptIdentity"),
+    return (
+      Array.isArray(issues) &&
+      issues.some(
+        (issue) =>
+          issue.code === "unrecognized_keys" &&
+          issue.path?.length === 0 &&
+          issue.keys?.some((key) => key === "ceremony" || key === "adoptIdentity"),
+      )
     );
   } catch {
     return false;
@@ -346,7 +351,8 @@ export async function reclaimStaleCredentialBrokerIfPresent(
   // A prior-contract daemon never produces this exact refusal (it refuses
   // `connect` with "Authenticate before issuing commands"), so the legacy
   // reclaim path owns that case and cannot double-signal here.
-  if (!isInvalidBrokerCredential(connectError) && !isUnsupportedCeremonyOpen(connectError)) return false;
+  if (!isInvalidBrokerCredential(connectError) && !isUnsupportedCeremonyOpen(connectError))
+    return false;
   if (accountId === undefined) return false;
   const profileDir = profilePathIdentity(currentProfileDir());
   if ((await readBrokerAccountBinding(profileDir)) !== accountId) return false;

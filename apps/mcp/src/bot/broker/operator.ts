@@ -223,14 +223,10 @@ export class OperatorBroker implements BrokerTransportPort {
         observation = await withOperatorRequestContext(
           signal,
           async () =>
-            await withBrokerAdmission(
-              { sessionId: id },
-              async () =>
-                input.ceremony === true
-                  ? await withCeremonyStartAdmission(
-                      async () => await tool.handler(args, pinnedApi),
-                    )
-                  : await tool.handler(args, pinnedApi),
+            await withBrokerAdmission({ sessionId: id }, async () =>
+              input.ceremony === true
+                ? await withCeremonyStartAdmission(async () => await tool.handler(args, pinnedApi))
+                : await tool.handler(args, pinnedApi),
             ),
         );
         if (signal.aborted) throw signal.reason ?? new Error("operator_request_cancelled");

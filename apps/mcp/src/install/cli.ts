@@ -624,7 +624,7 @@ async function withConnectTargetEnvironment<T>(
  * disk. Returns true when the connect is finished.
  *
  * An existing install is "connected" only when BOTH the account-bound plumbing
- * still works and the bot profile has a confirmed Google session. A bare
+ * still works and the bot profile has Google session cookies. A bare
  * machine/agent token can talk to Trusty Squire, but it cannot act as the user
  * at third-party sites, so it must not skip the browser confirm. Pass
  * --force-relogin to bypass (e.g. to switch Google).
@@ -661,8 +661,8 @@ async function settleAlreadyConnected(
     return true;
   }
   // Connect session validation: we short-circuited because Google is
-  // valid + bound, but if the bot's GitHub session validated DEAD, proactively
-  // offer to reconnect it — a dead GitHub session is exactly why people re-run
+  // cookie-present + bound, but if GitHub cookies are absent, proactively
+  // offer to reconnect it — a missing GitHub session is why people re-run
   // connect (GitHub-OAuth signups fail). Skippable; non-interactive notices.
   // Saying yes falls THROUGH into the same ceremony rather than branching into
   // a second sign-in command.
@@ -803,9 +803,7 @@ async function runConnectInstall(
   const session = await runInstallClaim(args.apiBase, target, baseSession, args.skipBrowser, {
     applyServerPrefs: !wantInteractive,
     profileDir,
-    ...(deferredReloginProviders.length
-      ? { forceReloginProviders: deferredReloginProviders }
-      : {}),
+    ...(deferredReloginProviders.length ? { forceReloginProviders: deferredReloginProviders } : {}),
   });
   if (session === null) {
     ui.fail(
@@ -887,10 +885,7 @@ async function runConnectInstall(
   }
 }
 
-async function hydrateArgsFromStoredPreferences(
-  args: Argv,
-  accountId?: string,
-): Promise<void> {
+async function hydrateArgsFromStoredPreferences(args: Argv, accountId?: string): Promise<void> {
   if (args.advancedConfigured === true) return;
   try {
     const session = await (await openSessionStorage()).read(accountId);
@@ -1045,9 +1040,7 @@ export type ConnectIncompleteReason =
  * while the Google session the user just created is still inside Chrome's
  * ~30s commit window, and the gate rejects a sign-in that succeeded.
  */
-export function providersConnectMustAwait(
-  requestedProvider?: OAuthProviderId,
-): OAuthProviderId[] {
+export function providersConnectMustAwait(requestedProvider?: OAuthProviderId): OAuthProviderId[] {
   return requestedProvider === undefined || requestedProvider === "google"
     ? ["google"]
     : ["google", requestedProvider];

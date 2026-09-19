@@ -595,9 +595,7 @@ function buildVncWebDir(): string {
 export function createXvfbDisplayRig(): RemoteLoginRig {
   const xvfb = resolveLoginBinary("Xvfb");
   if (xvfb === null) {
-    throw new Error(
-      "headed Chrome needs Xvfb installed.\n" + remoteLoginInstallHint(["Xvfb"]),
-    );
+    throw new Error("headed Chrome needs Xvfb installed.\n" + remoteLoginInstallHint(["Xvfb"]));
   }
   return {
     width: LOGIN_WIDTH,
