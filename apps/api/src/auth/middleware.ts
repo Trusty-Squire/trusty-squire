@@ -23,6 +23,7 @@ export interface AuthDeps {
 }
 
 const BEARER_PREFIX = "Bearer mcp_session_";
+const ACCOUNT_RATE_LIMIT_EXEMPT_ROUTES = new Set(["/v1/decide", "/v1/vault/use"]);
 
 export function makeAuthMiddleware(deps: AuthDeps) {
   const now = (): Date => deps.now?.() ?? new Date();
@@ -118,10 +119,11 @@ export function makeAuthMiddleware(deps: AuthDeps) {
         reply.code(401).send({ error: "agent_session_required" });
         return reply;
       }
-      // Drive steps each call /v1/decide; counting them would throttle a
-      // legitimate drive (and the account's other calls). Size checks on
-      // the route are the only bound. Captain, 2026-09-18.
-      if (req.routeOptions.url === "/v1/decide") return;
+      // Server-side-use routes spend a platform or vaulted credential only
+      // inside the API's outbound executor. Counting these workload calls
+      // would throttle legitimate drives without limiting secret disclosure.
+      // Route identity is server-owned, so clients cannot opt other calls out.
+      if (ACCOUNT_RATE_LIMIT_EXEMPT_ROUTES.has(req.routeOptions.url)) return;
       if (overAccountRate(req.auth.account_id)) return rateLimited(reply);
     },
 
