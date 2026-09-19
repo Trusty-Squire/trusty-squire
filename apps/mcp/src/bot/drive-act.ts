@@ -510,7 +510,7 @@ export async function pageFingerprintOf(page: Page): Promise<string> {
       )
         .map((element) => `${element.tagName}:${element.type}:${element.value}`)
         .join("\n");
-      return [location.href, document.title, text, controls].join("\n");
+      return [text, controls].join("\n").trim();
     });
   } catch {
     return "";
@@ -533,13 +533,26 @@ export async function waitForNavigationIdle(page: Page, beforeFingerprint: strin
         )
           .map((element) => `${element.tagName}:${element.type}:${element.value}`)
           .join("\n");
-        return [location.href, document.title, text, controls].join("\n");
+        return [text, controls].join("\n").trim();
       };
-      const started = performance.now();
-      while (performance.now() - started < cap) {
-        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-        if (fingerprint() !== before) return;
-      }
+      await new Promise<void>((resolve) => {
+        let frame: number;
+        const finish = (): void => {
+          clearTimeout(timer);
+          cancelAnimationFrame(frame);
+          resolve();
+        };
+        const timer = setTimeout(finish, cap);
+        const poll = (): void => {
+          const current = fingerprint();
+          if (current.length > 0 && current !== before) {
+            finish();
+          } else {
+            frame = requestAnimationFrame(poll);
+          }
+        };
+        frame = requestAnimationFrame(poll);
+      });
     },
     { before: beforeFingerprint, cap: DRIVE_NAVIGATION_WAIT_MS },
   ).catch(() => undefined);
