@@ -483,12 +483,19 @@ authorized target and delegates to `loginWithOAuth`; never copy cookies, restore
 storage state, swap browsers, or add a parallel OAuth driver.
 
 `operate_start` admits Google only through `detectSessionProviders()` on that
-live context and feeds it to `googleSessionGate`. Do not read Chrome's on-disk
-cookie database for identity or completion.
+live context and feeds it to `googleSessionGate`. An OPERATOR session's
+identity answer still comes from that live context — do not substitute a
+cookie-database read for it.
 
-Connect's login ceremony completion is the install claim plus explicit Finish
-callback, not a disk-cookie probe. See `apps/mcp/src/bot/google-login.ts` and
-`docs/DESIGN-warm-browser-reuse.md`.
+`connect` is the documented exception, and only outside a live context. Its
+preflight answers "is this machine already connected?" from a byte copy of the
+profile's cookie store (`detectProviderSessionsFromProfile`), and its success
+gate falls back to the same snapshot when the broker's Chrome still holds the
+profile (`probeProviderSessionsAfterCeremony`). That is deliberate: opening the
+profile to ask contends with the browser the question is about, which reported
+"busy" on precisely the machines that were connected. Ceremony COMPLETION is
+still the install claim plus the explicit Finish callback, never a cookie read.
+See `apps/mcp/src/bot/google-login.ts` and `docs/DESIGN-warm-browser-reuse.md`.
 
 ### 14. MCP tests have fast, real-browser, and post-merge-slow tiers
 

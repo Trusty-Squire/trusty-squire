@@ -66,12 +66,18 @@ vi.mock("../bot/google-login.js", async (importOriginal) => {
   return {
     ...actual,
     ensureOAuthSession: vi.fn(async () => ({ status: "logged_in" as const })),
-    // install() probes live provider cookies via detectActiveProviderSessions,
-    // which launches a REAL persistent-context Chrome on the bot profile. In a
-    // test that contends with any running browser (e.g. a concurrent
-    // housekeeper harvest holding the profile lock) it blocks ~15s + retries
-    // and times the suite out. An e2e must not launch a real browser — stub it.
+    // connect's success gate probes live provider cookies through
+    // probeProviderSessionsAfterCeremony, whose own default reaches
+    // detectActiveProviderSessions and launches a REAL persistent-context
+    // Chrome on the bot profile. In a test that contends with any running
+    // browser (e.g. a concurrent housekeeper harvest holding the profile
+    // lock) it blocks ~15s + retries and times the suite out. An e2e must not
+    // launch a real browser — stub the function the gate actually calls, not
+    // only the one underneath it: a `...actual` spread hands back the REAL
+    // probe, which resolves its default against the real module binding and
+    // never sees a mocked export.
     detectActiveProviderSessions: vi.fn(async () => ["google"] as const),
+    probeProviderSessionsAfterCeremony: vi.fn(async () => ["google"] as const),
     openInstallConfirmInBotChrome: vi.fn(async (options) => {
       await options.pollUntilClaimed(true);
       return { status: "claimed" as const };
@@ -103,8 +109,8 @@ vi.mock("../bot/profile.js", async (importOriginal) => {
 // install/cli.ts module pulls in api-client + bot at top level, so
 // this ordering is load-bearing.
 import {
-  detectActiveProviderSessions,
   openInstallConfirmInBotChrome,
+  probeProviderSessionsAfterCeremony,
 } from "../bot/google-login.js";
 import { clearBrowserProfile, clearProviderCookies } from "../bot/login-state.js";
 import { installPoll } from "../api-client.js";
@@ -314,7 +320,7 @@ describe("connect --target=<agent> writes a valid config", () => {
   });
 
   it("uses the claimed account after another connect moves the pointer", async () => {
-    vi.mocked(detectActiveProviderSessions).mockImplementationOnce(async () => {
+    vi.mocked(probeProviderSessionsAfterCeremony).mockImplementationOnce(async () => {
       const storage = await openSessionStorage();
       await storage.write({
         api_base_url: "https://other-account.invalid",
@@ -406,7 +412,9 @@ describe("connect --target=<agent> writes a valid config", () => {
       expect(openInstallConfirmInBotChrome).toHaveBeenCalledWith(
         expect.objectContaining({ profileDir: hermesProfile }),
       );
-      expect(detectActiveProviderSessions).toHaveBeenLastCalledWith(hermesProfile);
+      expect(probeProviderSessionsAfterCeremony).toHaveBeenLastCalledWith(hermesProfile, {
+        awaitProviders: ["google"],
+      });
       // The profile operation guard now belongs to the ceremony launcher
       // itself (launchCeremonyBrowserContext / the broker's own custody),
       // not to the connect flow around it — the ceremony this suite mocks

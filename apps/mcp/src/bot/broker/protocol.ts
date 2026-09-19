@@ -2,7 +2,9 @@
 //
 // The wire used to carry six bespoke methods: `hello`, `tool`, `cancel`,
 // `client_close`, `maintenance`, `resume`. They actually express four
-// operations:
+// operations (`maintenance`/`resume` expressed a connect-only drain window
+// that no longer exists at all: connect now rides the shared browser as an
+// ordinary client instead of draining it):
 //
 //   hello                        -> connect
 //   tool{name:"operate_start"}   -> open

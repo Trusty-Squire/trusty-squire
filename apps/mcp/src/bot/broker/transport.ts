@@ -75,7 +75,7 @@ function send(socket: Socket, value: unknown): void {
 
 export interface BrokerTransportPort {
   authenticate(token: string, agentId?: string): Promise<Omit<BrokerPrincipal, "clientId"> | null>;
-  /** Extra fields (e.g. the connect-only maintenance state) are merged into the
+  /** Extra fields returned by the connect hook are merged into the
    * connect result. */
   connected?(
     principal: BrokerPrincipal,
@@ -254,7 +254,7 @@ export async function listenBroker(
         try {
           extra = await port.connected?.(candidate, request.params);
         } catch (error) {
-          // The connect hook may refuse (e.g. maintenance already owned) after
+          // The connect hook may refuse after
           // the candidate exists; retire it so no half-connected state lingers.
           await port.disconnect(candidate);
           throw error;
@@ -284,7 +284,7 @@ export async function listenBroker(
       }
       // A session-less close ends the connection: the lease boundary that used
       // to be `client_close`. It still reaches the port so the owner can run
-      // its connect-scoped maintenance resume before the socket goes away.
+      // any connection-scoped teardown before the socket goes away.
       if (request.method === "close" && typeof request.params.sessionId !== "string") {
         explicitClose = true;
         return await port.call(principal, "close", request.params, request.id);
@@ -367,7 +367,7 @@ export class BrokerClient {
     }
   >();
   private ended = false;
-  /** The connect result, including the connect-only maintenance state. */
+  /** The connect result. */
   welcome: ConnectResult | undefined;
   private constructor(private readonly socket: Socket) {
     socket.on("error", () => undefined);

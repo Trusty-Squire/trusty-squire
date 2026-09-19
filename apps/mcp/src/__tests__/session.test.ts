@@ -122,3 +122,41 @@ describe("openSessionStorage", () => {
     expect((await openSessionStorage({ filePath: tmpFile })).path).toBe(tmpFile);
   });
 });
+
+describe("SessionData round-trip", () => {
+  it("round-trips install privacy consent flags", async () => {
+    const store = new SessionStore(tmpFile);
+    await store.write({
+      api_base_url: "https://api.test",
+      saved_at: "2026-06-25T00:00:00.000Z",
+      machine_token: "tsm_token",
+      agent_session_token: "mcp_sess",
+      account_id: "acc",
+      consent_skillify_telemetry: true,
+      consent_operator_inbox_otp: false,
+    });
+
+    const back = await store.read();
+    expect(back?.consent_skillify_telemetry).toBe(true);
+    expect(back?.consent_operator_inbox_otp).toBe(false);
+  });
+
+  it("reads a session file written before a later optional field existed", async () => {
+    await fs.mkdir(path.dirname(tmpFile), { recursive: true });
+    await fs.writeFile(
+      tmpFile,
+      JSON.stringify({
+        api_base_url: "https://api.test",
+        saved_at: "2026-05-01T00:00:00Z",
+        machine_token: "tsm_old_token",
+        agent_session_token: "mcp_sess_old",
+        account_id: "acc_old",
+      }),
+      "utf8",
+    );
+    const back = await new SessionStore(tmpFile).read();
+    expect(back).not.toBeNull();
+    expect(back?.machine_token).toBe("tsm_old_token");
+    expect(back?.consent_skillify_telemetry).toBeUndefined();
+  });
+});

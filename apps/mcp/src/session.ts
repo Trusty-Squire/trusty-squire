@@ -49,12 +49,6 @@ export interface SessionData {
   machine_token?: string;
   agent_session_token?: string;
   account_id?: string;
-  // OAuth providers observed by the most recent install-time live probe for
-  // THIS account. Connect UX data, never an authority for provider availability.
-  //
-  // Values are OAuthProviderId strings ("google" | "github"); kept as string[]
-  // here to avoid a circular import.
-  connected_providers?: string[];
   // Install-time preferences. Inbox reads default on when this older optional
   // field is missing; explicit false remains the opt-out.
   consent_skillify_telemetry?: boolean;
