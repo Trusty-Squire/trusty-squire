@@ -183,17 +183,27 @@ through `command`, and `close`s on `release()`. It reaches the browser from any
 process, holds no in-process lease of its own, and throws `BrowserBusy` with
 `.action()` when a layer genuinely refuses.
 
-**Every instruction the façade issues is bounded and abortable** — the acquire
-and `tab.page.goto` alike. Each carries a `deadlineMs` (30 s default) and an
-optional caller `signal`, and each is dispatched under a request id that
-Contract B's reserved `abort` control frame can reach, so a wedged navigate
-rejects with an honest error and cancels that one broker request instead of
-leaving a pending promise for `release()` to drain. Nothing here sleeps.
+**`tab.page.goto` is bounded and abortable, and the acquire is abortable.** The
+page instruction carries a `deadlineMs` (30 s default) because nothing else
+bounds it — a navigate that never returns is the failure this façade exists
+for. The acquire deliberately carries **no** façade deadline: the broker owns
+that budget (connect, Chrome start, the first observation, up to
+`BOT_START_TIMEOUT_MS`) and raises `launch_timeout` itself, so a healthy cold
+start is never mistaken here for a busy layer. Both dispatch under a request id
+that Contract B's reserved `abort` control frame can reach, so a caller
+`signal` cancels exactly that one broker request instead of leaving a pending
+promise for `release()` to drain. Nothing here sleeps.
 
-The broker serves exactly one physical profile. Naming any other is a permanent
-configuration failure, not a busy layer: `openTab` refuses it with
-`UnservableProfileError` naming the profile this installation does serve, and
-never with a `BrowserBusy` whose `.action()` tells the caller to retry.
+Two permanent configuration failures are deliberately **not** busy layers,
+because no retry can clear either and `.action()` would be a lie:
+
+- The broker serves exactly one physical profile. Naming another gets
+  `UnservableProfileError`, which names the profile this installation serves.
+- A broker pointed at an external Chrome (`BOT_CDP_ENDPOINT` set) refuses with
+  the wire code `external_browser`, which propagates unchanged. This is
+  deliberately a separate code from `incompatible_runtime` — that one means
+  "finish the sessions pinning this browser identity, then retry", which is a
+  genuine not-now.
 
 `browserBusy()` is the read-only fold over that one served profile, and
 read-only is load-bearing: it probes for a live broker listener and reads the
@@ -219,7 +229,8 @@ Wire codes stay unchanged — this is a mapping at the package boundary:
 | `launch_timeout`       | custody        |
 
 Other refusal codes are not "not now" and are not mapped; they propagate
-unchanged.
+unchanged. That includes `stale_lease`, `external_browser`, `cancelled` and
+`unauthorized`.
 
 ## Executed mechanical acceptance
 

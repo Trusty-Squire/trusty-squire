@@ -82,14 +82,17 @@ export interface TabHandle {
 export interface OpenTabOptions {
   profile: string;
   purpose: string;
-  /** Bound on the acquire finishing or aborting. Never a poll sleep. */
-  deadlineMs?: number;
+  /**
+   * Cancels the acquire. There is deliberately no façade deadline over it: the
+   * broker owns the launch budget (connect, Chrome start, first observation)
+   * and reports `launch_timeout` itself, so a cold start is never mistaken
+   * here for a busy layer. This signal rides the wire `abort` frame.
+   */
   signal?: AbortSignal;
 }
 
 export interface AcquireTabInput {
-  purpose: string;
-  signal: AbortSignal;
+  signal?: AbortSignal;
 }
 
 export interface AcquiredTab {
@@ -102,7 +105,6 @@ export interface BrowserFacadePorts {
   acquire?: (input: AcquireTabInput) => Promise<AcquiredTab>;
 }
 
-const OPEN_TAB_DEFAULT_DEADLINE_MS = 30_000;
 const PAGE_COMMAND_DEFAULT_DEADLINE_MS = 30_000;
 /** The broker `open` needs a destination; the caller reaches its real page
  * through `tab.page.goto`. */
@@ -306,10 +308,13 @@ async function wireAcquire(input: AcquireTabInput): Promise<AcquiredTab> {
   }
 }
 
-function runWithDeadline<T>(
+/**
+ * The one instruction the façade bounds itself. A page instruction that never
+ * returns is the failure this module exists for, and no other layer bounds it.
+ */
+function runPageInstruction<T>(
   deadlineMs: number,
   userSignal: AbortSignal | undefined,
-  timedOut: (deadlineMs: number) => Error,
   operation: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
   const controller = new AbortController();
@@ -330,27 +335,21 @@ function runWithDeadline<T>(
         ? userSignal.reason
         : new Error("The browser instruction was cancelled by its caller"),
     );
-  const timer = setTimeout(() => abortWith(timedOut(deadlineMs)), deadlineMs);
+  const timer = setTimeout(
+    () =>
+      abortWith(
+        new Error(
+          `The page instruction did not settle within ${deadlineMs}ms and was aborted on the wire`,
+        ),
+      ),
+    deadlineMs,
+  );
   if (userSignal?.aborted) onUserAbort();
   else userSignal?.addEventListener("abort", onUserAbort, { once: true });
   return Promise.race([operation(controller.signal), aborted]).finally(() => {
     clearTimeout(timer);
     userSignal?.removeEventListener("abort", onUserAbort);
   });
-}
-
-function openTimedOut(deadlineMs: number): Error {
-  return new BrowserBusy(
-    reasonFromBusyRefusal("launch_timeout", {
-      message: `openTab deadline elapsed after ${deadlineMs}ms`,
-    }),
-  );
-}
-
-function pageTimedOut(deadlineMs: number): Error {
-  return new Error(
-    `The page instruction did not settle within ${deadlineMs}ms and was aborted on the wire`,
-  );
 }
 
 export interface BrowserFacade {
@@ -372,26 +371,21 @@ export function createBrowserFacade(ports: BrowserFacadePorts = {}): BrowserFaca
       const served = servedBrowserProfile();
       if (profile !== served) throw new UnservableProfileError(profile, served);
       const purpose = options.purpose;
-      const opened = await runWithDeadline(
-        options.deadlineMs ?? OPEN_TAB_DEFAULT_DEADLINE_MS,
-        options.signal,
-        openTimedOut,
-        async (signal) => {
-          try {
-            return await acquire({ purpose, signal });
-          } catch (error) {
-            throw mapBusyRefusal(error) ?? error;
-          }
-        },
-      );
+      let opened: AcquiredTab;
+      try {
+        opened = await acquire({
+          ...(options.signal !== undefined ? { signal: options.signal } : {}),
+        });
+      } catch (error) {
+        throw mapBusyRefusal(error) ?? error;
+      }
       let released = false;
       return {
         page: {
           goto: async (url: string, pageOptions: PageCommandOptions = {}) =>
-            await runWithDeadline(
+            await runPageInstruction(
               pageOptions.deadlineMs ?? PAGE_COMMAND_DEFAULT_DEADLINE_MS,
               pageOptions.signal,
-              pageTimedOut,
               async (signal) => await opened.page.goto(url, { signal }),
             ),
         },

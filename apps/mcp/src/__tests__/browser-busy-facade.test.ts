@@ -3,7 +3,7 @@ import { lstatSync, symlinkSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { brokerSocketPath } from "../bot/broker/discovery.js";
 import { BrokerRefusal } from "../bot/broker/refusal.js";
 import { ProfileBusyError, PROFILE_BUSY_MESSAGE } from "../bot/profile.js";
@@ -76,6 +76,31 @@ describe("busy refusal mapping", () => {
     ).toBeUndefined();
     expect(mapBusyRefusal(new BrokerRefusal("cancelled", "no"))).toBeUndefined();
     expect(mapBusyRefusal(new BrokerRefusal("unauthorized", "no"))).toBeUndefined();
+    // A broker configured onto an external Chrome is a standing configuration
+    // choice, not the identity pin that `incompatible_runtime` names.
+    expect(
+      mapBusyRefusal(new BrokerRefusal("external_browser", "BOT_CDP_ENDPOINT names an external")),
+    ).toBeUndefined();
+  });
+
+  it("hands back the external-browser refusal whole, with no retry advice", async () => {
+    const refusal = new BrokerRefusal(
+      "external_browser",
+      "Broker requires a locally owned browser; BOT_CDP_ENDPOINT names an external Chrome",
+    );
+    const facade = createBrowserFacade({
+      acquire: async () => {
+        throw refusal;
+      },
+    });
+    await expect(
+      facade.openTab({ profile: "default", purpose: "signup:vercel" }),
+    ).rejects.toSatisfy((error: unknown) => {
+      expect(error).toBe(refusal);
+      expect(error).not.toBeInstanceOf(BrowserBusy);
+      expect((error as Error).message).toContain("BOT_CDP_ENDPOINT");
+      return true;
+    });
   });
 
   it("passes a permanent refusal from acquire through untouched", async () => {
@@ -133,56 +158,47 @@ describe("a profile this installation does not serve", () => {
   });
 });
 
-describe("deadlines and cancellation — never a fixed-interval sleep", () => {
-  it("aborts a hanging acquire at the deadline instead of waiting unbounded", async () => {
-    let sawAbort = false;
-    const facade = createBrowserFacade({
-      acquire: async ({ signal }) =>
-        await new Promise<AcquiredTab>((_resolve, reject) => {
-          const watchdog = setTimeout(() => reject(new Error("acquire was not aborted")), 2_000);
-          signal.addEventListener(
-            "abort",
-            () => {
-              sawAbort = true;
-              clearTimeout(watchdog);
-              reject(signal.reason as Error);
-            },
-            { once: true },
-          );
-        }),
-    });
-    const started = Date.now();
-    await expect(
-      facade.openTab({ profile: "default", purpose: "signup:vercel", deadlineMs: 40 }),
-    ).rejects.toSatisfy((error: unknown) => {
-      const busy = expectBusy(error);
-      expect(busy.reason).toMatchObject({ layer: "custody", code: "launch_timeout" });
-      expect(busy.action()).toBe(
-        "Retry the launch; the previous attempt was aborted at its deadline.",
-      );
-      return true;
-    });
-    expect(sawAbort).toBe(true);
-    expect(Date.now() - started).toBeLessThan(1_000);
+describe("acquiring a tab — the broker owns the launch budget", () => {
+  it("does not call a slow cold launch busy", async () => {
+    // The broker races Chrome start against BOT_START_TIMEOUT_MS (10 min by
+    // default) and reports launch_timeout itself. A façade deadline shorter
+    // than that turned a healthy cold start into BrowserBusy(launch_timeout)
+    // with a retry that re-enters the same cold path.
+    vi.useFakeTimers();
+    try {
+      const facade = createBrowserFacade({
+        acquire: async () =>
+          await new Promise<AcquiredTab>((resolve) => {
+            setTimeout(() => resolve({ page, release: async () => undefined }), 120_000);
+          }),
+      });
+      const opening = facade.openTab({ profile: "default", purpose: "signup:vercel" });
+      await vi.advanceTimersByTimeAsync(120_000);
+      const tab = await opening;
+      expect(tab.purpose).toBe("signup:vercel");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it("settles on the caller's abort instead of hanging to the deadline", async () => {
+  it("carries the caller's signal into the acquire so cancellation reaches the wire", async () => {
     const caller = new AbortController();
     const cancelled = new Error("caller changed its mind");
+    let received: AbortSignal | undefined;
     const facade = createBrowserFacade({
-      // An acquire that ignores the signal entirely: the façade must still settle.
-      acquire: async () => await new Promise<AcquiredTab>(() => undefined),
+      acquire: async ({ signal }) => {
+        received = signal;
+        return await new Promise<AcquiredTab>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason as Error), { once: true });
+        });
+      },
     });
     const started = Date.now();
     setTimeout(() => caller.abort(cancelled), 20);
     await expect(
-      facade.openTab({
-        profile: "default",
-        purpose: "signup:vercel",
-        deadlineMs: 30_000,
-        signal: caller.signal,
-      }),
+      facade.openTab({ profile: "default", purpose: "signup:vercel", signal: caller.signal }),
     ).rejects.toBe(cancelled);
+    expect(received).toBe(caller.signal);
     expect(Date.now() - started).toBeLessThan(1_000);
   });
 

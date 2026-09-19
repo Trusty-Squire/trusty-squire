@@ -53,8 +53,14 @@ export class BrokerRuntime implements BrokerBrowserCustody {
     proxyUrl?: string;
   }): Promise<{ browser: BrowserController; profileDir: string }> {
     if (this.closing) throw new BrokerRefusal("maintenance", "Identity cell is draining");
+    // Distinct from incompatible_runtime: that code means "not now, finish the
+    // sessions pinning this identity". This is a standing configuration choice
+    // no retry can clear.
     if ((process.env.BOT_CDP_ENDPOINT ?? "").trim() !== "")
-      throw new BrokerRefusal("incompatible_runtime", "Broker requires a locally owned browser");
+      throw new BrokerRefusal(
+        "external_browser",
+        "Broker requires a locally owned browser; BOT_CDP_ENDPOINT names an external Chrome",
+      );
     // A dead shared Chrome takes every live session with it. Forget the dead
     // tab families and relaunch on the same persistent profile before serving
     // the next start, instead of handing out pages from a dead browser.
