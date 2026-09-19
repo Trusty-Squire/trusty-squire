@@ -9,6 +9,7 @@ import {
   finishProvisionSession,
   forceFinishProvisionSession,
   sessionForCall,
+  withCeremonyStartAdmission,
   withProvisionSessionCall,
 } from "../session/lifecycle.js";
 import {
@@ -43,12 +44,17 @@ const commandSchema = z
   })
   .strict();
 // The tool's own input schema stays the single validator (exactly as before
-// the collapse); the open request only names the three launch fields.
+// the collapse); the open request only names the three launch fields plus
+// the connect ceremony's own marker. `ceremony` is the ONE new field
+// (captain ruling 031): it is set only by the connect ceremony
+// (google-login.ts) — the agent-facing `operate_start` schema has no such
+// field, and no forwarder path can inject it.
 const openSchema = z
   .object({
     serviceUrl: z.string().min(1),
     format: z.enum(["compact", "full"]).optional(),
     proxy: z.string().optional(),
+    ceremony: z.boolean().optional(),
   })
   .strict();
 const closeSchema = z
@@ -72,6 +78,29 @@ function remapSession(value: unknown, from: string, to: string): unknown {
 
 function isOperatorCommand(name: string): boolean {
   return name.startsWith("operate_") || name === "inject_card";
+}
+
+/** Derive the operate_start arguments an `open` request maps to. Exported for
+ * tests: identity adoption is a behavior OF the ceremony open, not a flag of
+ * its own — a ceremony open without an explicit proxy reuses `liveProxyUrl`
+ * (whatever identity the shared browser is already live under), an explicit
+ * proxy always wins, and a plain open stays bare. */
+export function deriveOpenToolArgs(
+  input: {
+    serviceUrl: string;
+    format?: "compact" | "full" | undefined;
+    proxy?: string | undefined;
+    ceremony?: boolean | undefined;
+  },
+  liveProxyUrl: string | undefined,
+): Record<string, unknown> {
+  const liveProxy = input.ceremony === true && input.proxy === undefined ? liveProxyUrl : undefined;
+  return {
+    service_url: input.serviceUrl,
+    ...(input.format !== undefined ? { format: input.format } : {}),
+    ...(input.proxy !== undefined ? { proxy: input.proxy } : {}),
+    ...(input.proxy === undefined && liveProxy !== undefined ? { proxy: liveProxy } : {}),
+  };
 }
 
 function closedResult(value: unknown): boolean {
@@ -171,11 +200,14 @@ export class OperatorBroker implements BrokerTransportPort {
     const tool = findTool("operate_start", this.tools);
     if (tool === null || !isOperatorCommand(tool.name))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
-    const args = tool.inputSchema.parse({
-      service_url: input.serviceUrl,
-      ...(input.format !== undefined ? { format: input.format } : {}),
-      ...(input.proxy !== undefined ? { proxy: input.proxy } : {}),
-    }) as Record<string, unknown>;
+    // A ceremony open is identity-neutral: when the shared browser is
+    // already live under some identity, the opener reuses it instead of
+    // requesting a bare one — a bare request would be refused
+    // incompatible_runtime while other sessions are live, or would recycle
+    // the shared Chrome underneath them when none are.
+    const args = tool.inputSchema.parse(
+      deriveOpenToolArgs(input, brokerBrowserCustody()?.liveProxyUrl?.()),
+    ) as Record<string, unknown>;
     if (requestSignal?.aborted) throw requestSignal.reason;
     const pinnedApi = this.apiFor(principal);
     let observation: unknown;
@@ -188,9 +220,10 @@ export class OperatorBroker implements BrokerTransportPort {
         observation = await withOperatorRequestContext(
           signal,
           async () =>
-            await withBrokerAdmission(
-              { sessionId: id },
-              async () => await tool.handler(args, pinnedApi),
+            await withBrokerAdmission({ sessionId: id }, async () =>
+              input.ceremony === true
+                ? await withCeremonyStartAdmission(async () => await tool.handler(args, pinnedApi))
+                : await tool.handler(args, pinnedApi),
             ),
         );
         if (signal.aborted) throw signal.reason ?? new Error("operator_request_cancelled");

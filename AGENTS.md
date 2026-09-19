@@ -483,13 +483,13 @@ authorized target and delegates to `loginWithOAuth`; never copy cookies, restore
 storage state, swap browsers, or add a parallel OAuth driver.
 
 `operate_start` admits Google only through `detectSessionProviders()` on that
-live context and feeds it to `googleSessionGate`. Do not read Chrome's on-disk
-cookie database for identity or completion.
+live context and feeds it to `googleSessionGate`. An OPERATOR session's
+identity answer still comes from that live context — do not substitute a
+cookie-database read for it.
 
-Connect's Google-safe plain browser deliberately has no CDP context. Its
-completion is the install claim plus explicit Finish callback, not a disk-cookie
-probe. See `apps/mcp/src/bot/google-login.ts` and
-`docs/DESIGN-warm-browser-reuse.md`.
+Connect's ceremony and its exception for cookie-snapshot probes are owned by
+[`docs/browser-broker.md`](docs/browser-broker.md). Do not apply that exception
+to operator identity admission.
 
 ### 14. MCP tests have fast, real-browser, and post-merge-slow tiers
 
@@ -743,26 +743,20 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
 
 ## Browser launch posture
 
-- **`connect` is the only sign-in command, and the login browser is always
-  PLAIN Chrome.** There is no `login` subcommand and no CDP-attached login path
-  — Google's OAuth secure-browser check rejects a CDP attach, and a second
-  command that seeded a provider session outside the account claim let an
-  install report success with no live Google session. Re-auth is
-  `connect --force-relogin[=google|github]`; connect gates its own success on
-  the post-ceremony live provider probe (`decideConnectComplete`,
-  `apps/mcp/src/install/cli.ts`), and the operator's `google_session` wall hands
-  back `resume: "connect"`. Never reintroduce a second sign-in entry point, and
-  never point a user or an agent at `login`.
+- **`connect` is the only sign-in command.** Never reintroduce `login`.
+  The shared-browser ceremony and fallback contracts are owned by
+  [`docs/browser-broker.md`](docs/browser-broker.md); user-facing setup is in
+  [README.md](README.md).
 - **Never quit a Chrome whose profile state you still need with SIGTERM.** Chrome
   routes SIGTERM to its abrupt "session ending" exit and does NOT flush the
   SQLite cookie store (its own commit timer is ~30s out), so a SIGTERM teardown
   seconds after a sign-in silently discards the session that sign-in just
-  established — the 2026-09-04 `connect` regression. The login browser quits with
-  `PLAIN_LOGIN_BROWSER_QUIT_SIGNAL` (SIGINT) and waits for the graceful exit
-  before the owner reaper's SIGTERM → SIGKILL escalation takes over
+  established — the 2026-09-04 `connect` regression. The ceremony browser quits
+  with `BROWSER_QUIT_SIGNAL` (SIGINT) and waits for the graceful exit before
+  the owner reaper's SIGTERM → SIGKILL escalation takes over
   (`apps/mcp/src/bot/browser-process-runtime.ts`, re-exported by `browser.ts`);
   the operator owner shares that bounded graceful quit after page/context close.
-  `browser-close-cookie.test.ts` proves fresh login cookies survive both local
+  `browser-close-cookie.test.ts` proves fresh login cookies survive the local
   launch modes; the original plain-login evidence is in `STATE.md`.
 - `BrowserController` local launches remain headed on their owned display; do
   not reintroduce virtual-display selection or `DISPLAY` plumbing into
@@ -773,22 +767,11 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
 - `apps/mcp/src/bot/broker/runtime.ts` owns Chrome's identity runtime and physical
   profile lease. The broker is the only operator launch path; sessions acquire
   independent tab families and MCP servers forward over IPC. See
-  `docs/browser-broker.md` for discovery, election, maintenance, and recovery.
-- Interactive human login is the deliberate exception. When `connect` (the one
-  onboarding and re-auth pathway, including `--force-relogin`) runs without a
-  user-visible display,
-  `apps/mcp/src/bot/remote-login-display.ts` starts an on-demand Xvfb + noVNC
-  quick tunnel and tears the entire owned rig down with that login. Keep this
-  module scoped to login flows. SSH/TTY sessions must not treat an inherited
-  virtual `DISPLAY` as a user-visible desktop; route those logins through noVNC.
-  When both `TS_LOGIN_PUBLIC_HOSTNAME` and `TS_LOGIN_LOCAL_PORT` select a named
-  tunnel, that tunnel is operator-managed external infrastructure: the login
-  owns and tears down its per-login display and websockify listener, but never
-  creates, owns, or stops the external tunnel. That fixed local port is shared
-  with everything else on the box, so login preflights it and degrades to a
-  per-login quick tunnel when it is occupied (`planLoginTunnel` in
-  `remote-login-display.ts`); never let a helper's bind failure be the first
-  signal, and keep helper stderr drained into the thrown error.
+  `docs/browser-broker.md` for discovery, election, and recovery.
+- Interactive login display custody follows
+  [`docs/browser-broker.md`](docs/browser-broker.md); tunnel configuration is
+  documented in [README.md](README.md). Never tear down a broker-owned display
+  or an externally managed tunnel when closing a ceremony.
 - Keep self-launch + `connectOverCDP` and Patchright as the defaults. The
   2026-08-28 read-only A/B used serial, fresh-profile trials against Exa, Groq,
   Cartesia, Replit, Runpod, and Turso from egress `172.93.111.86`:
@@ -848,30 +831,33 @@ The public operator contract and capability migration are owned by
 
 ## Cross-process browser broker
 
-The default broker custody, maintenance, and recovery
+The default broker custody and recovery
 contracts live in [`docs/browser-broker.md`](docs/browser-broker.md). Mechanical
 fixture acceptance does not qualify real Google auth or prove the current head.
 
-"Is the browser in use" has four true answers (tab families, profile leases,
-connect's maintenance window, custody). Do not diagnose a hang from one layer
-alone, do not read a running tab family as a broker-wide wedge, and do not fold
-the layers from outside the broker — it is the only side that sees all four at
-once, which is why `status` is a wire operation. Ask through
-`browserBusy()` / `openTab` in
+Ask `browserBusy()` / `openTab` in
 [`apps/mcp/src/browser-busy.ts`](apps/mcp/src/browser-busy.ts)
-(`@trusty-squire/mcp/browser`); the mapping table lives in
+(`@trusty-squire/mcp/browser`) instead of inferring availability from a live
+socket or tab family. The authoritative busy-status contract and mapping are in
 [`docs/browser-broker.md`](docs/browser-broker.md#busy-façade).
 
 The client wire is the frozen Contract B (`connect` / `open` / `command` /
 `close`), owned by `apps/mcp/src/bot/broker/protocol.ts`. A tool name crosses
 the wire only inside `command`; `close` finishes a session or ends the
-connection; the plain-login maintenance window is the connect-only `maintain`
-intent. The 512-entry retained-result replay guard, the 5 s connection-session
-grace, and the reserved `abort` control frame (cancel exactly one in-flight
-request by its frame id, leaving the connection and its other sessions alive)
-stay internal policy behind the contract. Do not re-add
-`hello`/`tool`/`cancel`/`client_close`/`maintenance`/`resume` as wire
-operations.
+connection. The 512-entry retained-result replay guard, the 5 s
+connection-session grace, and the reserved `abort` control frame (cancel
+exactly one in-flight request by its frame id, leaving the connection and its
+other sessions alive) stay internal policy behind the contract. Do not re-add
+`hello`/`tool`/`cancel`/`client_close`/`maintenance`/`resume`/`maintain` as
+wire operations.
+
+### 22. Connect uses the target profile's shared broker
+
+Runtime profile resolution must use `currentProfileDir()` after connect selects
+its target environment. Connect joins the browser's broker instead of competing
+for its profile. The authoritative discovery, preflight, ceremony, and recovery
+contracts and their regression tests are in
+[`docs/browser-broker.md`](docs/browser-broker.md).
 
 ## Maintaining this file
 

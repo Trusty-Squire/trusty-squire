@@ -1,12 +1,9 @@
-import { withBrokerMaintenance } from "../bot/broker/maintenance.js";
 // Setup CLI — connect / settings / logout subcommands.
 //
 // `connect` is the ONE onboarding AND re-auth pathway. There is no separate
-// `login` command: it ran its Google OAuth through a CDP-attached Chrome,
-// which Google's "secure browser" check rejects (STATE.md 2026-07-20), and a
-// second command that could seed a provider session independently of the
-// account claim is exactly how an install ended up "connected" with no live
-// Google session.
+// `login` command: a second command that could seed a provider session
+// independently of the account claim is exactly how an install ended up
+// "connected" with no live Google session.
 //
 //   npx @trusty-squire/mcp connect --target=claude-code
 //     Issues a machine token, then opens the trustysquire install-
@@ -53,8 +50,9 @@ import {
 } from "./agents.js";
 import { detectAsn, type AsnInfo } from "../bot/index.js";
 import {
-  detectActiveProviderSessions,
+  detectProviderSessionsFromProfile,
   openInstallConfirmInBotChrome,
+  probeProviderSessionsAfterCeremony,
   type InstallClaimPollResult,
 } from "../bot/google-login.js";
 import { type OAuthProviderId } from "../bot/oauth-providers.js";
@@ -477,21 +475,37 @@ async function connect(args: Argv): Promise<void> {
         ...(context.accountId !== undefined ? { accountId: context.accountId } : {}),
         agentIdentity: context.agentIdentity,
       },
-      async () =>
-        await withBrokerMaintenance(
-          async () =>
-            await withConnectProfileGuard(canonicalProfileDir, (profileDir) =>
-              connectWithProfileGuard(
-                args,
-                target,
-                agent,
-                profileDir,
-                context.accountId,
-                context.agentIdentity,
-                wantInteractive,
-              ),
-            ),
-        ),
+      async () => {
+        // An install that is already connected needs no browser at all. Decide
+        // that BEFORE any browser work, or a machine whose browser is busy with
+        // other work fails an install it never had to perform.
+        if (
+          await settleAlreadyConnected(
+            args,
+            target,
+            agent,
+            canonicalProfileDir,
+            context.accountId,
+            context.agentIdentity,
+          )
+        )
+          return;
+        // No drain, no exclusive profile guard: the ceremony opens the confirm
+        // page as a TAB in the shared browser (the resident broker's Chrome),
+        // or — on a machine where no broker can serve yet — launches the
+        // operator's own persistent-context browser on the bot profile. It
+        // never starts a second instance beside a broker that owns the
+        // profile, and it never waits for one to free it.
+        await runConnectInstall(
+          args,
+          target,
+          agent,
+          canonicalProfileDir,
+          context.accountId,
+          context.agentIdentity,
+          wantInteractive,
+        );
+      },
     );
   } catch (err) {
     if (err instanceof ProfileBusyError) {
@@ -551,9 +565,9 @@ function contextValue(
 }
 
 /**
- * Resolve reconnect custody before any profile lock, broker maintenance, or
- * browser work. Explicit process env wins over the target's recorded launch
- * env; the recorded env wins over first-connect defaults.
+ * Resolve reconnect custody before any browser work. Explicit process env wins
+ * over the target's recorded launch env; the recorded env wins over
+ * first-connect defaults.
  */
 export async function resolveConnectTargetContext(
   target: AgentTarget,
@@ -604,15 +618,80 @@ async function withConnectTargetEnvironment<T>(
   }
 }
 
-export async function withConnectProfileGuard<T>(
+/**
+ * Settle a connect that needs no login ceremony, using only reads: the stored
+ * session, the account-bound plumbing, and a cookie probe of the profile on
+ * disk. Returns true when the connect is finished.
+ *
+ * An existing install is "connected" only when BOTH the account-bound plumbing
+ * still works and the bot profile has Google session cookies. A bare
+ * machine/agent token can talk to Trusty Squire, but it cannot act as the user
+ * at third-party sites, so it must not skip the browser confirm. Pass
+ * --force-relogin to bypass (e.g. to switch Google).
+ *
+ * This runs before any browser work and takes no profile lease: a machine
+ * whose browser is busy is exactly the machine this path exists to settle
+ * without touching the browser at all.
+ */
+async function settleAlreadyConnected(
+  args: Argv,
+  target: AgentTarget,
+  agent: AgentDefinition,
   profileDir: string,
-  operation: (canonicalProfileDir: string) => Promise<T>,
-): Promise<T> {
-  const canonicalProfileDir = profilePathIdentity(profileDir);
-  return await withProfileOperationGuard(canonicalProfileDir, () => operation(canonicalProfileDir));
+  accountId: string | undefined,
+  agentIdentity: string,
+): Promise<boolean> {
+  if (args.forceRelogin) return false;
+  const preflight = await checkAlreadyProvisioned(profileDir, accountId);
+  if (preflight.kind === "ceremony") return false;
+  ui.divider();
+  await hydrateArgsFromStoredPreferences(args, accountId);
+  await ensureConsentRecorded(consentFromArgs(args), args.advancedConfigured === true, accountId);
+  if (preflight.kind === "unverified") {
+    await writeAgentConfig(target, agent, args, preflight.session, {
+      profileDir,
+      agentIdentity,
+    });
+    await maybeStoreTwoCaptchaKey(args, preflight.session);
+    ui.warn(preflightUnverifiedMessage(preflight.detail));
+    ui.hint(
+      `Close any other Trusty Squire session and re-run ` +
+        `${ui.code("npx @trusty-squire/mcp connect --force-relogin")} to verify it.`,
+    );
+    return true;
+  }
+  // Connect session validation: we short-circuited because Google is
+  // cookie-present + bound, but if GitHub cookies are absent, proactively
+  // offer to reconnect it — a missing GitHub session is why people re-run
+  // connect (GitHub-OAuth signups fail). Skippable; non-interactive notices.
+  // Saying yes falls THROUGH into the same ceremony rather than branching into
+  // a second sign-in command.
+  const reconnectGithub =
+    !preflight.providers.includes("github") && (await offerGithubReloginIfDead(args));
+  if (!reconnectGithub) {
+    await writeAgentConfig(target, agent, args, preflight.session, {
+      profileDir,
+      agentIdentity,
+    });
+    await maybeStoreTwoCaptchaKey(args, preflight.session);
+    ui.success(
+      `Already connected (${preflight.providers.join(" + ")}). ` +
+        `${agent.display_name} config refreshed.`,
+    );
+    printProviderState(preflight.providers);
+    ui.hint(
+      `Pass ${ui.code("--force-relogin")} to switch accounts or to refresh a ` +
+        `stale/expired session (this "connected" check reads cached cookies, ` +
+        `which can outlive the real session).`,
+    );
+    return true;
+  }
+  args.forceRelogin = true;
+  args.forceReloginProvider = "github";
+  return false;
 }
 
-async function connectWithProfileGuard(
+async function runConnectInstall(
   args: Argv,
   target: AgentTarget,
   agent: AgentDefinition,
@@ -621,69 +700,6 @@ async function connectWithProfileGuard(
   agentIdentity: string,
   wantInteractive: boolean,
 ): Promise<void> {
-
-  // Preflight: an existing install is "connected" only when BOTH the
-  // account-bound plumbing still works and the bot profile has a confirmed
-  // Google session. A bare machine/agent token can talk to Trusty Squire, but
-  // it cannot act as the user at third-party sites, so it must not skip the
-  // browser confirm. Pass --force-relogin to bypass (e.g. to switch Google).
-  if (!args.forceRelogin) {
-    const preflight = await checkAlreadyProvisioned(profileDir, accountId);
-    if (preflight.kind !== "ceremony") {
-      ui.divider();
-      await hydrateArgsFromStoredPreferences(args, accountId);
-      await ensureConsentRecorded(
-        consentFromArgs(args),
-        args.advancedConfigured === true,
-        accountId,
-      );
-      if (preflight.kind === "unverified") {
-        await writeAgentConfig(target, agent, args, preflight.session, {
-          profileDir,
-          agentIdentity,
-        });
-        await maybeStoreTwoCaptchaKey(args, preflight.session);
-        ui.warn(preflightUnverifiedMessage(preflight.detail));
-        ui.hint(
-          `Close any other Trusty Squire session and re-run ` +
-            `${ui.code("npx @trusty-squire/mcp connect --force-relogin")} to verify it.`,
-        );
-        return;
-      }
-      // Backfill connected_providers from the bot-side marker on
-      // pre-rc.5 sessions, so the preflight cache is current.
-      for (const p of preflight.providers) await recordConnectedProvider(p, accountId);
-      // Connect session validation: we short-circuited because Google is
-      // valid + bound, but if the bot's GitHub session validated DEAD, proactively
-      // offer to reconnect it — a dead GitHub session is exactly why people re-run
-      // connect (GitHub-OAuth signups fail). Skippable; non-interactive notices.
-      // Saying yes falls THROUGH into the same ceremony below rather than
-      // branching into a second sign-in command.
-      const reconnectGithub =
-        !preflight.providers.includes("github") && (await offerGithubReloginIfDead(args));
-      if (!reconnectGithub) {
-        await writeAgentConfig(target, agent, args, preflight.session, {
-          profileDir,
-          agentIdentity,
-        });
-        await maybeStoreTwoCaptchaKey(args, preflight.session);
-        ui.success(
-          `Already connected (${preflight.providers.join(" + ")}). ` +
-            `${agent.display_name} config refreshed.`,
-        );
-        printProviderState(preflight.providers);
-        ui.hint(
-          `Pass ${ui.code("--force-relogin")} to switch accounts or to refresh a ` +
-            `stale/expired session (this "connected" check reads cached cookies, ` +
-            `which can outlive the real session).`,
-        );
-        return;
-      }
-      args.forceRelogin = true;
-      args.forceReloginProvider = "github";
-    }
-  }
-
   console.warn("");
   console.warn(
     "Opening the Trusty Squire install page in a browser. " +
@@ -692,15 +708,46 @@ async function connectWithProfileGuard(
   // --force-relogin means "redo the OAuth dance from scratch". The scoped
   // form clears only one provider; bare --force-relogin is the full-profile
   // account-switch escape hatch.
+  //
+  // clearProviderCookies launches its own short-lived headless Chrome and
+  // fail-fasts while any other browser holds the profile — including the
+  // resident broker's Chrome. Run it BEFORE clearBrowserProfile so an
+  // account-switch on a busy machine is refused at the gate instead of
+  // deleting the profile directory out from under a live Chrome. Both steps
+  // hold ONE profile operation lease (the guard is re-entrant, so the
+  // clear's own inner acquisition nests): releasing between them would let
+  // a browser claim the now-uncontended profile in the window before the
+  // wipe deletes its live user-data-dir. When the clear DOES busy-fail, the
+  // clear now rides the upcoming ceremony instead of hard-refusing the
+  // re-login: the confirm tab signs the providers out through the shared
+  // browser (or the self-launched context, when it wins the profile) — no
+  // second Chrome, no drain.
+  let deferredReloginProviders: OAuthProviderId[] = [];
   if (args.forceRelogin) {
-    let cookiesCleared: boolean;
-    if (args.forceReloginProvider !== undefined) {
-      cookiesCleared = await clearProviderCookies(profileDir, args.forceReloginProvider);
-    } else {
-      clearBrowserProfile(profileDir);
-      cookiesCleared = await clearProviderCookies(profileDir);
+    const wanted: OAuthProviderId[] =
+      args.forceReloginProvider !== undefined ? [args.forceReloginProvider] : ["google", "github"];
+    let cleared = false;
+    let busy = false;
+    try {
+      await withProfileOperationGuard(profileDir, async () => {
+        if (args.forceReloginProvider !== undefined) {
+          cleared = await clearProviderCookies(profileDir, args.forceReloginProvider);
+        } else {
+          cleared = await clearProviderCookies(profileDir);
+          if (cleared) clearBrowserProfile(profileDir);
+        }
+      });
+    } catch (err) {
+      if (!(err instanceof ProfileBusyError)) throw err;
+      busy = true;
     }
-    if (!cookiesCleared) {
+    if (busy) {
+      deferredReloginProviders = wanted;
+      console.error(
+        "[connect] the bot profile is busy, so the old provider sessions will be " +
+          "signed out through the sign-in browser instead.",
+      );
+    } else if (!cleared) {
       ui.fail(
         "I couldn't verify that the previous provider cookies were cleared. " +
           "Close every Chrome process using the bot profile and retry with --force-relogin.",
@@ -756,6 +803,7 @@ async function connectWithProfileGuard(
   const session = await runInstallClaim(args.apiBase, target, baseSession, args.skipBrowser, {
     applyServerPrefs: !wantInteractive,
     profileDir,
+    ...(deferredReloginProviders.length ? { forceReloginProviders: deferredReloginProviders } : {}),
   });
   if (session === null) {
     ui.fail(
@@ -787,16 +835,21 @@ async function connectWithProfileGuard(
   // persisted provider marker is allowed to outlive the session it describes.
   // This probe is also the SUCCESS GATE: the machine claim alone proves the
   // account plumbing, not that the bot can wear the user's identity at a third-
-  // party site. `null` means the probe itself failed, which is not a pass.
+  // party site. After a broker-hosted ceremony the broker's Chrome still holds
+  // the profile, so the live probe busy-fails: probeProviderSessionsAfterCeremony
+  // falls back to the committed-cookie snapshot (polling past Chrome's ~30s
+  // commit lag) instead of failing the gate for winning the broker path.
+  // `null` means the probe itself failed, which is not a pass.
   let providers: OAuthProviderId[] | null = null;
   try {
     providers = await ui.withSpinner({
       start: "Checking provider sessions",
       done: "Provider sessions checked",
       fail: () => "Provider session check failed",
-      // validate=true: confirm each session is LIVE (not just cookie-present),
-      // so a dead-but-present GitHub session isn't shown as connected.
-      task: () => detectActiveProviderSessions(profileDir),
+      task: () =>
+        probeProviderSessionsAfterCeremony(profileDir, {
+          awaitProviders: providersConnectMustAwait(args.forceReloginProvider),
+        }),
     });
   } catch (err) {
     console.error(
@@ -804,8 +857,6 @@ async function connectWithProfileGuard(
     );
   }
 
-  // Persist the current live probe only as connect UX data.
-  for (const p of providers ?? []) await recordConnectedProvider(p);
   printProviderState(providers ?? []);
 
   // Config + key land either way: the session is real and re-running connect
@@ -834,10 +885,7 @@ async function connectWithProfileGuard(
   }
 }
 
-async function hydrateArgsFromStoredPreferences(
-  args: Argv,
-  accountId?: string,
-): Promise<void> {
+async function hydrateArgsFromStoredPreferences(args: Argv, accountId?: string): Promise<void> {
   if (args.advancedConfigured === true) return;
   try {
     const session = await (await openSessionStorage()).read(accountId);
@@ -981,6 +1029,23 @@ export type ConnectIncompleteReason =
 // is null when that probe failed, which fails closed — an unverifiable session
 // must never be reported as connected (that is how connect used to print
 // "Squire on duty" over an install with no Google session at all).
+/**
+ * The providers the post-ceremony probe must wait for before it may answer.
+ *
+ * This is exactly what `decideConnectComplete` goes on to DEMAND, and the two
+ * must not drift: Google is required on every run, plus an explicitly
+ * requested `--force-relogin=<provider>`. Awaiting only the requested one let
+ * the snapshot answer on cookies that were already on disk — a profile with
+ * GitHub committed from an earlier run returns `["github"]` on the first read
+ * while the Google session the user just created is still inside Chrome's
+ * ~30s commit window, and the gate rejects a sign-in that succeeded.
+ */
+export function providersConnectMustAwait(requestedProvider?: OAuthProviderId): OAuthProviderId[] {
+  return requestedProvider === undefined || requestedProvider === "google"
+    ? ["google"]
+    : ["google", requestedProvider];
+}
+
 export function decideConnectComplete(
   providers: OAuthProviderId[] | null,
   requestedProvider?: OAuthProviderId,
@@ -1061,20 +1126,20 @@ async function checkAlreadyProvisioned(
       session.api_base_url,
       session.agent_session_token,
     );
-    // Probe the profile cookies instead of trusting the marker. The marker is a
-    // cache that can lie after logout/expiry; connect is rare enough to pay this
-    // cost, and this keeps "Already connected" aligned with the bot's real
-    // ability to wear the user's Google identity. validate=true so a dead-but-
-    // present GitHub session isn't persisted into connected_providers.
+    // Read the profile's cookie store instead of trusting the marker: the
+    // marker is a cache that can lie after logout/expiry. This is a byte-copy
+    // read — it takes no profile lease, waits for nothing, and opens no
+    // browser — because the machines that are already connected are exactly the
+    // machines whose browser is busy, and asking the profile a question must
+    // never contend with the browser the question is about.
     //
     // A busy profile or any other probe failure must not force a re-pair: that
     // is the connect-loops-forever bug. It also must not become a connected
-    // claim based on cached markers, because only a live probe proves the
+    // claim based on cached markers, because only reading the profile proves the
     // provider session. Refresh config with an explicit unverified warning.
     let providers: OAuthProviderId[] | null;
     try {
-      providers = await detectActiveProviderSessions(profileDir);
-      await syncConnectedProviders(providers, accountId);
+      providers = await detectProviderSessionsFromProfile(profileDir);
     } catch (err) {
       const preflight = decideConnectPreflight(session, stillValid, null);
       if (preflight.kind === "unverified") {
@@ -1087,6 +1152,9 @@ async function checkAlreadyProvisioned(
       return preflight;
     }
     const preflight = decideConnectPreflight(session, stillValid, providers);
+    // The profile IS the record: what its cookie store proves decides the
+    // claim, every run. Nothing persists a provider list to compare against,
+    // so a stale one can never demote a machine that is really signed in.
     return preflight.kind === "provisioned" ? { ...preflight, session } : preflight;
   } catch {
     return { kind: "ceremony" };
@@ -1116,51 +1184,6 @@ async function offerGithubReloginIfDead(args: Argv): Promise<boolean> {
     return false;
   }
   return true;
-}
-
-async function syncConnectedProviders(
-  providers: OAuthProviderId[],
-  accountId?: string,
-): Promise<void> {
-  try {
-    const storage = await openSessionStorage();
-    const session = await storage.read(accountId);
-    if (session === null) return;
-    await storage.write({
-      ...session,
-      connected_providers: [...providers],
-      saved_at: new Date().toISOString(),
-    });
-  } catch {
-    // Best-effort — marker/session drift only affects fast-path UX. The next
-    // connect or provision probe can repair it.
-  }
-}
-
-// Persist `provider` into session.connected_providers (idempotent).
-// Called after a successful live provider probe so the install preflight on the
-// next run can read both providers from the session file without loading a
-// profile-dir marker.
-async function recordConnectedProvider(provider: OAuthProviderId, accountId?: string): Promise<void> {
-  try {
-    const storage = await openSessionStorage();
-    const session = await storage.read(accountId);
-    if (session === null) return;
-    const current = new Set(session.connected_providers ?? []);
-    if (current.has(provider)) return;
-    current.add(provider);
-    await storage.write({
-      ...session,
-      connected_providers: [...current],
-      saved_at: new Date().toISOString(),
-    });
-  } catch {
-    // Best-effort — the bot-side login-state.json marker is the
-    // primary source of truth; session.connected_providers is a
-    // convenience cache for the preflight path. A failed write here
-    // just means the next install runs the secondary prompt again,
-    // which is recoverable.
-  }
 }
 
 function consentFromArgs(args: Argv): InstallConsent {
@@ -1284,6 +1307,9 @@ async function runInstallClaim(
     // discarded a fresh inbox-read preference.
     applyServerPrefs: boolean;
     profileDir: string;
+    // Providers whose cookie clear busy-failed and now rides the ceremony
+    // (see the --force-relogin block in the caller).
+    forceReloginProviders?: readonly OAuthProviderId[];
   },
 ): Promise<SessionData | null> {
   console.warn(`Connecting this machine to your account…`);
@@ -1365,6 +1391,9 @@ async function runInstallClaim(
     pollUntilClaimed: pollOnce,
     heartbeatMessage: () => claimHeartbeatMessage(state.value !== null),
     profileDir: options.profileDir,
+    ...(options.forceReloginProviders?.length
+      ? { forceReloginProviders: options.forceReloginProviders }
+      : {}),
   });
 
   // rc.33 — surface the underlying error instead of letting the outer

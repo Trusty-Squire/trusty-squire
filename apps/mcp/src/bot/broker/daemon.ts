@@ -4,6 +4,7 @@ import { lstat, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { createSessionGuard, setServingAccountId } from "../../session-guard.js";
+import { openSessionStorage } from "../../session.js";
 import { setSelfManagedChromeTerminationSignalExitEnabled } from "../browser.js";
 import { startOwnerProcessReaper } from "../owner-process-reaper.js";
 import {
@@ -11,12 +12,12 @@ import {
   profilePathIdentity,
   CHROME_PROFILE_DIR,
   readLockHolder,
-  waitForProfileFree,
 } from "../profile.js";
 import { brokerBusyStatus } from "./status.js";
 import { installBrokerBrowserCustody } from "./custody.js";
 import { BrokerRuntime } from "./runtime.js";
 import { OperatorBroker } from "./operator.js";
+import { type BrokerPrincipal } from "./authority.js";
 import { BrokerRefusal } from "./refusal.js";
 import { listenBroker } from "./transport.js";
 
@@ -27,23 +28,6 @@ export function brokerIdleTimeoutMs(env: NodeJS.ProcessEnv = process.env): numbe
   const configured = Number(env.TRUSTY_SQUIRE_BROKER_IDLE_TIMEOUT_MS);
   if (!Number.isFinite(configured) || configured <= 0) return DEFAULT_BROKER_IDLE_TIMEOUT_MS;
   return Math.max(MIN_BROKER_IDLE_TIMEOUT_MS, configured);
-}
-
-/** After a connect maintenance window, refresh the resident broker's
- * credential from the enrolled session. The skip path that used to leave a
- * stale digest (profile still busy, or restore/refresh throwing) now
- * terminates the drained broker instead. */
-export async function completeMaintenanceCredentialRefresh(args: {
-  profileIsFree: boolean;
-  restore: () => Promise<void>;
-}): Promise<"restored" | "terminate"> {
-  if (!args.profileIsFree) return "terminate";
-  try {
-    await args.restore();
-    return "restored";
-  } catch {
-    return "terminate";
-  }
 }
 
 /**
@@ -80,6 +64,46 @@ export class BrokerClientRegistry {
   }
 }
 
+/** Strict handshake authentication with one in-place credential refresh
+ * (round-12 review-2 — no maintenance window). When connect re-enrolls it
+ * mints a fresh agent_session_token, and a resident broker still holding the
+ * previous digest would otherwise send every presented credential into the
+ * stale-credential reclaim path — which refuses while any lane's client is
+ * still attached, wedging the re-enroll behind its own resident. On a null
+ * authenticate, re-read THIS daemon's own bound account entry: only a token
+ * that matches that entry (same account, same token string) is adopted via
+ * refreshCredentials and retried once. Anything else — another account, a
+ * token the store has never seen, a refresh refused because live sessions
+ * still hold the broker — stays refused, and the reclaim path reports it
+ * honestly. */
+export async function authenticateOrAdoptCurrentCredential(
+  operator: OperatorBroker,
+  boundAccountId: string | null,
+  readBoundEntry: () => Promise<{
+    account_id?: string;
+    agent_session_token?: string;
+  } | null>,
+  token: string,
+  agentId?: string,
+): Promise<Omit<BrokerPrincipal, "clientId"> | null> {
+  const principal = await operator.authenticate(token, agentId);
+  if (principal !== null) return principal;
+  if (boundAccountId === null) return null;
+  try {
+    const entry = await readBoundEntry();
+    if (entry?.account_id !== boundAccountId || entry.agent_session_token !== token) return null;
+    operator.refreshCredentials({
+      account_id: entry.account_id,
+      agent_session_token: entry.agent_session_token,
+    });
+    return await operator.authenticate(token, agentId);
+  } catch {
+    // Refresh refused (live sessions still drain-required) or the store read
+    // failed: keep the strict refusal; the reclaim path reports it.
+    return null;
+  }
+}
+
 /** On-demand broker entrypoint; retains custody while clients own sessions. */
 export async function runBrokerDaemon(): Promise<void> {
   const path = resolveBrokerSocket();
@@ -102,7 +126,7 @@ export async function runBrokerDaemon(): Promise<void> {
   setSelfManagedChromeTerminationSignalExitEnabled(false);
   startOwnerProcessReaper();
   // Broker election is anchored beside the canonical profile, independent of
-  // each client's socket path or TMPDIR. Retain it through plain-login maintenance.
+  // each client's socket path or TMPDIR.
   const profileElection = acquireProfileOperationGuard(CHROME_PROFILE_DIR, electionRoot);
   runtime.claimProfile();
   const operator = new OperatorBroker({
@@ -114,52 +138,26 @@ export async function runBrokerDaemon(): Promise<void> {
   const clients = new BrokerClientRegistry();
   let closing = false;
   let listenerClosed = false;
-  let maintenanceOwner: string | undefined;
-  let exitAfterMaintenance = false;
   let idleTimer: NodeJS.Timeout | undefined;
   const idleTimeout = brokerIdleTimeoutMs();
   const drained = (): boolean => {
     const inventory = operator.authority.inventory();
     return inventory.sessions === 0 && inventory.admitting === 0 && inventory.closing === 0;
   };
-  const restoreMaintenance = async (): Promise<void> => {
-    const refreshed = await guard.bind();
-    if (refreshed === null) throw new Error("Enrolled account session is missing");
-    operator.refreshCredentials(refreshed);
-    runtime.resume();
-    runtime.claimProfile();
-    maintenanceOwner = undefined;
-  };
-  const releaseMaintenanceLease = async (clientId: string): Promise<void> => {
-    if (maintenanceOwner !== clientId) return;
-    const outcome = await completeMaintenanceCredentialRefresh({
-      profileIsFree: await waitForProfileFree(CHROME_PROFILE_DIR, { deadlineMs: 0 }),
-      restore: restoreMaintenance,
-    });
-    if (outcome === "restored") return;
-    // Profile still busy, or restore/refresh failed: exit the drained broker
-    // rather than keep authenticating the pre-maintenance digest. The next
-    // operator attach launches a daemon that reads the current token.
-    maintenanceOwner = undefined;
-    exitAfterMaintenance = true;
-  };
   const listener = await listenBroker(path, {
-    authenticate: async (token, agentId) => await operator.authenticate(token, agentId),
+    authenticate: async (token, agentId) =>
+      await authenticateOrAdoptCurrentCredential(
+        operator,
+        session.account_id ?? null,
+        async () => await (await openSessionStorage()).read(session.account_id),
+        token,
+        agentId,
+      ),
     connected: async (principal, params) => {
       const probe = params.probe === true;
       clients.admit(principal.clientId, probe);
       if (probe) return;
       if (idleTimer !== undefined) clearTimeout(idleTimer);
-      // Maintenance is a connect-only concern: the plain-login window drains the
-      // shared browser and holds the lease until this connection closes.
-      if (params.maintain === true && maintenanceOwner !== undefined)
-        throw new BrokerRefusal("maintenance", "Identity maintenance is already owned");
-      if (params.maintain !== true) return;
-      maintenanceOwner = principal.clientId;
-      // Never start closing the shared browser while a session still owns it:
-      // the plain-login owner retries once the sessions have ended.
-      if (!drained() || !(await runtime.close())) return { maintenance: "draining" };
-      return { maintenance: "ready" };
     },
     call: async (principal, method, params, id) => {
       const execute = async (registeredSignal?: AbortSignal): Promise<unknown> => {
@@ -173,15 +171,14 @@ export async function runBrokerDaemon(): Promise<void> {
             "Broker is shutting down; no operator command was dispatched",
           );
         // A session-less close is the lease boundary (formerly client_close):
-        // resume the connect-scoped maintenance window before the socket goes.
+        // it ends this connection's claim on the broker.
         if (method === "close" && typeof params.sessionId !== "string") {
-          await releaseMaintenanceLease(principal.clientId);
           return { closed: true };
         }
         // The one place every layer is visible at the same instant.
         if (method === "status")
           return brokerBusyStatus({
-            maintenanceOwned: maintenanceOwner !== undefined,
+            maintenanceOwned: false,
             ...runtime.custodyStatus(),
             profileHolder: readLockHolder(profilePathIdentity(CHROME_PROFILE_DIR)),
           });
@@ -205,14 +202,8 @@ export async function runBrokerDaemon(): Promise<void> {
       const counted = clients.counts(principal.clientId);
       await operator.disconnect(principal, explicit);
       clients.retire(principal.clientId);
-      // A probe never owned maintenance and never held off the countdown, so
-      // its departure must not re-arm one either.
+      // A probe never held off the countdown, so its departure must not re-arm one.
       if (!counted) return;
-      await releaseMaintenanceLease(principal.clientId);
-      if (exitAfterMaintenance) {
-        void shutdown();
-        return;
-      }
       scheduleShutdownIfIdle();
     },
   });

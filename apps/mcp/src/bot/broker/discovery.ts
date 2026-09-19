@@ -7,11 +7,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   acquireProfileOperationGuard,
+  currentProfileDir,
   ProfileBusyError,
   profileOperationLockOwner,
   profilePathIdentity,
   processBirthIdentityState,
-  CHROME_PROFILE_DIR,
   type ProfileOperationLease,
 } from "../profile.js";
 import {
@@ -42,7 +42,7 @@ const RECLAIM_TIMINGS: ReclaimTimings = {
 };
 
 /** Canonical profile discovery is independent of cwd and each client's TMPDIR. */
-export function defaultBrokerSocket(profileDir = CHROME_PROFILE_DIR): string {
+export function defaultBrokerSocket(profileDir = currentProfileDir()): string {
   const key = createHash("sha256")
     .update(profilePathIdentity(profileDir))
     .digest("hex")
@@ -57,15 +57,15 @@ export function defaultBrokerSocket(profileDir = CHROME_PROFILE_DIR): string {
 /** Where a profile's broker socket lives: the configured override, else the
  * derived default. Pure — no directory is created and nothing is asserted, so
  * a read-only probe can ask for a path that may not exist. */
-export function brokerSocketPath(): string {
+export function brokerSocketPath(profileDir = currentProfileDir()): string {
   const configured = process.env.TRUSTY_SQUIRE_BROKER_SOCKET?.trim();
   if (configured) return configured;
-  return defaultBrokerSocket();
+  return defaultBrokerSocket(profileDir);
 }
 
-export function resolveBrokerSocket(): string {
-  const path = brokerSocketPath();
-  if (path !== defaultBrokerSocket()) return path;
+export function resolveBrokerSocket(profileDir = currentProfileDir()): string {
+  const path = brokerSocketPath(profileDir);
+  if (path !== defaultBrokerSocket(profileDir)) return path;
   const parent = dirname(path);
   mkdirSync(parent, { recursive: true, mode: 0o700 });
   const stat = lstatSync(parent);
@@ -74,11 +74,11 @@ export function resolveBrokerSocket(): string {
   return path;
 }
 
-export function brokerElectionRoot(profileDir = CHROME_PROFILE_DIR): string {
+export function brokerElectionRoot(profileDir = currentProfileDir()): string {
   return join(dirname(profilePathIdentity(profileDir)), ".trusty-squire-broker-leases");
 }
 
-export function brokerLaunchRoot(profileDir = CHROME_PROFILE_DIR): string {
+export function brokerLaunchRoot(profileDir = currentProfileDir()): string {
   return join(brokerElectionRoot(profileDir), "launch");
 }
 
@@ -100,7 +100,14 @@ async function brokerElectionIsHeld(profileDir: string): Promise<boolean> {
   }
 }
 
-function isUnavailable(error: unknown): boolean {
+/** True when the error means "no live broker socket could be reached at
+ * all" — no listener (ENOENT), connection refused, or the broker was lost
+ * mid-handshake. Exported for the ceremony's connect-or-launch decision: a
+ * genuinely absent broker means "self-launch may serve", while any other
+ * failure (an identified resident's refusal, a handshake timeout) must
+ * propagate verbatim instead of being swallowed into a self-launch that
+ * fail-fasts with the generic profile-busy message. */
+export function isUnavailable(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException).code;
   return code === "ENOENT" || code === "ECONNREFUSED" || code === "broker_lost";
 }
@@ -118,6 +125,31 @@ function isInvalidBrokerCredential(error: unknown): boolean {
     error.code === "unauthorized" &&
     error.message === "Invalid broker credential"
   );
+}
+
+/** Older Contract B brokers accept connect but reject ceremony open fields
+ * in their strict Zod schema. This is an upgrade signal, not an open retry
+ * for arbitrary execution failures. */
+export function isUnsupportedCeremonyOpen(error: unknown): boolean {
+  if (!(error instanceof BrokerRefusal) || error.code !== "broker_execution_failed") return false;
+  try {
+    const issues = JSON.parse(error.message) as {
+      code?: string;
+      keys?: string[];
+      path?: unknown[];
+    }[];
+    return (
+      Array.isArray(issues) &&
+      issues.some(
+        (issue) =>
+          issue.code === "unrecognized_keys" &&
+          issue.path?.length === 0 &&
+          issue.keys?.some((key) => key === "ceremony"),
+      )
+    );
+  } catch {
+    return false;
+  }
 }
 
 const sleep = async (ms: number): Promise<void> =>
@@ -275,7 +307,7 @@ export async function reclaimPriorContractBrokerIfPresent(
 ): Promise<boolean> {
   if (!isUnauthorizedRefusal(connectError)) return false;
   if (!(await brokerSpeaksLegacyWire(path, token))) return false;
-  const profileDir = profilePathIdentity(CHROME_PROFILE_DIR);
+  const profileDir = profilePathIdentity(currentProfileDir());
   const pid = residentBrokerPid(profileDir);
   if (pid === null) return false;
   await terminateResidentBroker(
@@ -289,7 +321,11 @@ export async function reclaimPriorContractBrokerIfPresent(
   return true;
 }
 
-/** Reclaims a same-contract broker whose credential digest no longer matches
+/** Also serves ceremony opens rejected by an older strict schema, after the
+ * caller closes its connection. The same account/lease/attached-client reclaim
+ * contract applies to both upgrade causes.
+ *
+ * Reclaims a same-contract broker whose credential digest no longer matches
  * the current agent session token: Contract B's `connect` handshake is
  * accepted (the current-contract successor of `hello`) and the credential is
  * rejected, the process holds this profile's election lease with a live
@@ -315,9 +351,10 @@ export async function reclaimStaleCredentialBrokerIfPresent(
   // A prior-contract daemon never produces this exact refusal (it refuses
   // `connect` with "Authenticate before issuing commands"), so the legacy
   // reclaim path owns that case and cannot double-signal here.
-  if (!isInvalidBrokerCredential(connectError)) return false;
+  if (!isInvalidBrokerCredential(connectError) && !isUnsupportedCeremonyOpen(connectError))
+    return false;
   if (accountId === undefined) return false;
-  const profileDir = profilePathIdentity(CHROME_PROFILE_DIR);
+  const profileDir = profilePathIdentity(currentProfileDir());
   if ((await readBrokerAccountBinding(profileDir)) !== accountId) return false;
   const pid = residentBrokerPid(profileDir);
   if (pid === null) return false;
@@ -424,7 +461,7 @@ export async function connectOrLaunchBroker(
     }
   }
 
-  const profileDir = profilePathIdentity(CHROME_PROFILE_DIR);
+  const profileDir = profilePathIdentity(currentProfileDir());
   if (await brokerElectionIsHeld(profileDir)) return await waitForBroker(path, token);
   const launchRoot = brokerLaunchRoot(profileDir);
   let launchLease: ProfileOperationLease;

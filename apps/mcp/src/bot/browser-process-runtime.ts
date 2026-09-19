@@ -53,14 +53,14 @@ export function registerLocalBrowserLaunch(
   baseEnv: NodeJS.ProcessEnv = process.env,
   marker = createOperatorBrowserMarker(),
 ): { marker: string; env: NodeJS.ProcessEnv } {
-  trackOwnerBrowserLaunch(marker, profileDir);
+  trackOwnerBrowserLaunch(marker, profileDir, { env: baseEnv });
   return {
     marker,
     env: { ...baseEnv, [OPERATOR_BROWSER_MARKER_ENV]: marker },
   };
 }
 
-// Shared graceful quit for plain login and locally owned operator Chrome.
+// Shared graceful quit for locally owned ceremony and operator Chrome.
 //
 // It MUST NOT be SIGTERM. Chrome routes SIGTERM to its "session ending" path,
 // which exits abruptly on the assumption the OS is tearing the machine down —
@@ -80,7 +80,7 @@ export const BROWSER_QUIT_SIGNAL: NodeJS.Signals = "SIGINT";
 // the flush we just asked for.
 const BROWSER_QUIT_DEADLINE_MS = 10_000;
 
-// Quit the plain login browser and only THEN run the ownership-proving
+// Quit the locally owned browser and only THEN run the ownership-proving
 // teardown. Exported for tests: the ordering here is the fix, not an
 // implementation detail — `finalize` (the reaper) escalates SIGTERM →
 // SIGKILL, so running it while Chrome is still flushing reintroduces the

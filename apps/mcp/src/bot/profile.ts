@@ -26,6 +26,23 @@ import { basename, dirname, join, resolve } from "node:path";
 export const CHROME_PROFILE_DIR =
   process.env.TRUSTY_SQUIRE_PROFILE_DIR ?? join(homedir(), ".trusty-squire", "chrome-profile");
 
+/**
+ * The profile directory in force for THIS call.
+ *
+ * `CHROME_PROFILE_DIR` freezes the launch-time environment, but `connect`
+ * deliberately re-points `TRUSTY_SQUIRE_PROFILE_DIR` at the target agent's
+ * recorded profile (`withConnectTargetEnvironment`) before it does any broker
+ * or browser work. Every runtime resolution of "the profile" — a broker
+ * endpoint, an election root, a profile lock — must therefore read the
+ * environment live. Reading the frozen constant instead addresses a
+ * DIFFERENT profile's broker than the one about to be guarded, which skips
+ * the shared browser and collides with the live broker that owns the real profile.
+ */
+export function currentProfileDir(): string {
+  const configured = (process.env.TRUSTY_SQUIRE_PROFILE_DIR ?? "").trim();
+  return configured.length > 0 ? configured : CHROME_PROFILE_DIR;
+}
+
 export function profilePathIdentity(profileDir: string): string {
   const absolute = resolve(profileDir);
   const suffix: string[] = [];

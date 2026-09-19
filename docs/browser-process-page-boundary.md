@@ -10,7 +10,8 @@ Each session's `BrowserController` shares its process owner and has an independe
   process ownership is established and cancellation checked.
 - `apps/mcp/src/bot/browser-process-runtime.ts` holds the existing launch helpers,
   launcher singleton, process tracking, and proxy resolution. Helpers shared with
-  plain login remain shared. Their existing exports are re-exported by `browser.ts`.
+  the self-launched connect ceremony remain shared. Their existing exports are
+  re-exported by `browser.ts`.
 - `apps/mcp/src/bot/page-driver.ts` owns primary/current/OAuth page references,
   PR1's `OwnedPages` registry, document subscriptions, navigation, and adoption.
   Disposing its registrations does not terminate Chrome.
@@ -40,9 +41,9 @@ same state machine and retain the late-context cleanup path.
 `profile.ts` remains authoritative for canonical path resolution, operation leases,
 birth identity, and argv checks. `owner-process-reaper.ts` and
 `operator-browser-watchdog.ts` retain manifests, orphan reconciliation, and
-containment. Plain login's launch and CDP boundary are unchanged. Its SIGINT quit helper now
-lives in `browser-process-runtime.ts`, with the original plain-login exports
-preserved by `browser.ts`, so both local owners share the same grace period.
+containment. Connect ceremony custody is defined in the
+[broker guide](browser-broker.md); the shared graceful-quit helper lives in
+`browser-process-runtime.ts` and is re-exported by `browser.ts`.
 
 `browser-process-page-boundary.test.ts` executes the facade against controlled
 transports to pin close ordering, orphan failure, late attachment cancellation,

@@ -1114,3 +1114,41 @@ discipline: form the hypothesis, name the experiment that would FALSIFY it, run
 that experiment, record the result here. patchright + residential is almost
 never the cause; the cause is almost always nav-layer, session-layer, a wrong
 URL, a returning-user state, or a genuine product gate.
+
+## Connect ceremony on the shared broker browser — new hypothesis, falsification pending (2026-09-06, `fm/squire-connect-browser-claim`)
+
+Round 7/8 of the connect browser-claim review abolished the "plain-Chrome-only"
+doctrine above for connect: the ceremony now opens as a TAB in the resident
+broker's browser (ordinary `connectOrLaunchBroker` + `open`, no drain, no second
+Chrome), with the broker's private Xvfb display exposed over noVNC for the
+ceremony so a human can drive the sign-in.
+
+**New hypothesis:** the 2026-07-20 CDP-attach × OAuth failure was specific to
+the OLD self-launch + patchright `connectOverCDP` login cell, not to every
+Playwright-driven Chrome — the broker's Chrome carries Google OAuth fine.
+
+Note the blast radius: connect no longer has a plain-spawn cell at all. The
+self-launch fallback is `launchPersistentContext`, which the 2026-07-20 note
+above already classifies as "also CDP" (it passed on two other Hetzners, so the
+detection is not deterministic across IPs). So BOTH of connect's paths ride on
+the hypothesis below — a PATH B failure does not leave a cleared path standing,
+and restoring one means restoring a plain spawn.
+
+**Falsification experiment (owned by this branch's proofs, `022`):** PATH A —
+valid existing session + broker BUSY → `connect` completes with NO noVNC
+sign-in, NO drain, NO second Chrome; PATH B — no valid session → the sign-in
+opens as a TAB in the already-running broker Chrome and the noVNC frame paints
+the Google login, and the run completes. If either path reproduces
+`/signin/rejected` or a challenge loop, the hypothesis dies and the
+plain-Chrome doctrine must be revisited (with a human-visible plain-Chrome
+path for connect that still satisfies the one-shared-browser contract).
+
+Post-ceremony success gate: live probe first (`detectActiveProviderSessions`);
+on a busy profile it falls back to the committed-cookie snapshot with a ~45s
+commit-lag poll (`probeProviderSessionsAfterCeremony`) — same evidence class
+the preflight "Already connected" answer already accepts. `--force-relogin` on
+a busy machine no longer hard-refuses: the old-provider logout rides the
+ceremony tab (Google `Logout` GET; GitHub `logout` plus an observe-then-click
+of the Sign out control — `operate_click` only accepts a ref a prior
+observation minted, so the drive observes the logout page and clicks the
+observed ref).

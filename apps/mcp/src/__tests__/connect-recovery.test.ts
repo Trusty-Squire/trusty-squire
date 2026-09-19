@@ -10,7 +10,6 @@ import {
   lstatSync,
   mkdtempSync,
   mkdirSync,
-  readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -24,10 +23,9 @@ import {
   claimHeartbeatMessage,
   decideProvisioned,
   shouldCompleteInstallClaim,
-  withConnectProfileGuard,
 } from "../install/cli.js";
 import { clearBrowserProfile } from "../bot/login-state.js";
-import { withProfileOperationGuard } from "../bot/profile.js";
+import { profilePathIdentity, withProfileOperationGuard } from "../bot/profile.js";
 import type { SessionData } from "../session.js";
 
 function fakeFetch(status: number): typeof fetch {
@@ -117,7 +115,10 @@ describe("decideProvisioned (fast-path gate: write config without a re-claim)", 
 });
 
 describe("shouldCompleteInstallClaim (explicit browser completion)", () => {
-  it("keeps one canonical guard while a symlinked profile is reset", async () => {
+  it("canonicalizes a symlinked profile before touching it", async () => {
+    // connect resolves the target profile's realpath identity BEFORE any
+    // browser or lease work, so a reset through the alias clears the same
+    // directory the guard and the browser see.
     const base = mkdtempSync(join(tmpdir(), "ts-connect-profile-"));
     const target = join(base, "profile");
     const alias = join(base, "profile-alias");
@@ -126,13 +127,12 @@ describe("shouldCompleteInstallClaim (explicit browser completion)", () => {
     writeFileSync(join(target, "trusty-squire-session-state.json"), "portable-state");
     symlinkSync(target, alias, "dir");
     try {
-      await withConnectProfileGuard(alias, async (canonicalProfileDir) => {
-        expect(canonicalProfileDir).toBe(target);
-        clearBrowserProfile(canonicalProfileDir);
+      expect(profilePathIdentity(alias)).toBe(target);
+      await withProfileOperationGuard(alias, async () => {
+        clearBrowserProfile(alias);
         expect(realpathSync(alias)).toBe(target);
         expect(existsSync(join(target, "stale-state"))).toBe(false);
         expect(existsSync(join(target, "trusty-squire-session-state.json"))).toBe(false);
-        await withProfileOperationGuard(alias, async () => undefined);
       });
       expect(lstatSync(alias).isSymbolicLink()).toBe(true);
     } finally {

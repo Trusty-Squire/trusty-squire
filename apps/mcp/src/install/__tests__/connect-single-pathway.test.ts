@@ -13,6 +13,7 @@ import {
   decideConnectPreflight,
   decideConnectComplete,
   preflightUnverifiedMessage,
+  providersConnectMustAwait,
   runCli,
   type ConnectIncompleteReason,
 } from "../cli.js";
@@ -72,6 +73,44 @@ describe("decideConnectPreflight", () => {
 
   it("re-pairs an expired agent token even when the live probe failed", () => {
     expect(decideConnectPreflight(boundSession, false, null)).toEqual({ kind: "ceremony" });
+  });
+});
+
+// The probe's wait list and the gate's demand list are the same contract seen
+// from two sides. When they drifted, a run whose Google sign-in had just
+// succeeded was rejected `no_google_session`: the probe stopped at the first
+// non-empty read — GitHub cookies already on disk from an earlier run — while
+// Google's were still inside Chrome's commit window.
+describe("providersConnectMustAwait matches what the success gate demands", () => {
+  const cases: Array<undefined | "google" | "github"> = [undefined, "google", "github"];
+
+  it("waits for exactly the providers that would satisfy the gate", () => {
+    for (const requested of cases) {
+      const awaited = providersConnectMustAwait(requested);
+      expect(decideConnectComplete(awaited, requested), `requested=${requested}`).toEqual({
+        ok: true,
+      });
+    }
+  });
+
+  it("always waits for Google, whatever was explicitly requested", () => {
+    for (const requested of cases) {
+      expect(providersConnectMustAwait(requested), `requested=${requested}`).toContain("google");
+    }
+  });
+
+  it("never lets a stale GitHub cookie answer for a Google sign-in still committing", () => {
+    // What the probe would see on its first read in the reported state.
+    expect(decideConnectComplete(["github"])).toEqual({
+      ok: false,
+      reason: "no_google_session",
+    });
+    // So "github" alone must never be the whole wait list.
+    for (const requested of cases) {
+      expect(providersConnectMustAwait(requested), `requested=${requested}`).not.toEqual([
+        "github",
+      ]);
+    }
   });
 });
 

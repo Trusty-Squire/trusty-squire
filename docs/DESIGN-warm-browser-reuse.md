@@ -10,17 +10,16 @@ broker guide. There is no seed, clone, portable storage state, or profile pool.
 `BrowserController.detectSessionProviders()` reads cookies from that live
 browser context. `googleSessionGate` admits Google only when that live probe
 reports it; otherwise it returns a clear log-in-first `needs_user` result.
-The profile's cookie database is never read for identity admission or login
-completion.
+Ordinary operator admission never substitutes an on-disk cookie read for that
+live-context probe.
 
 Google OAuth stays in the same real-profile browser context. The serialized
 OAuth boundary retains the authorized target and delegates to
 `BrowserController.loginWithOAuth`; it never swaps or recreates the browser.
 
-Interactive `connect` - the one onboarding and re-auth pathway - uses its
-persistent real profile too. The
-plain Google-safe browser has no CDP attachment, and its completion is the
-install claim plus the explicit Finish callback - not a cookie-file read.
+Interactive `connect` uses that real profile too. Its ceremony admission
+exception, completion, and cookie-snapshot probes are owned by the
+[broker guide](browser-broker.md).
 
 ## Lease, ownership, and containment
 

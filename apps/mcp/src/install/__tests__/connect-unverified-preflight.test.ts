@@ -9,7 +9,7 @@ vi.mock("../../bot/google-login.js", async (importOriginal) => {
   const actual = await importOriginal<typeof GoogleLoginModule>();
   return {
     ...actual,
-    detectActiveProviderSessions: vi.fn(async () => {
+    detectProviderSessionsFromProfile: vi.fn(async () => {
       throw new Error("profile is in use by another Trusty Squire session");
     }),
   };

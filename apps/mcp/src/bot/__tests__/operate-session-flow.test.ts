@@ -1263,6 +1263,7 @@ import {
   closeAllProvisionSessions,
   activeSessionCount,
   formSelectMany,
+  withCeremonyStartAdmission,
   captureScreenshot,
   observeQuery,
 } from "../provision-session.js";
@@ -2004,6 +2005,7 @@ describe("operate session — OAuth lifecycle", () => {
     // challenge page, whose URL alone can exceed the whole compact-v2 payload
     // budget. The pending human step must still come back as an observation,
     // never as a "compact-v2 budget metadata exceeded" error.
+    vi.useFakeTimers();
     h.visibleText = "Continue with Google";
     h.elements = [
       elem({
@@ -2014,17 +2016,23 @@ describe("operate session — OAuth lifecycle", () => {
       }),
     ];
     h.oauthResultUrl = `https://accounts.google.com/signin/challenge/dp/2?continue=${"x".repeat(1_200)}`;
+    h.oauthClickSimulate = "provider";
     process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "10";
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
-    // start() navigated to the service URL; the same-tab challenge URL below
-    // only exists once the OAuth click redirects the current page.
-    h.currentUrl = h.oauthResultUrl;
-    const rows = (await observeQuery(started.session_id, "")).safe_table as Array<
-      [string, string, string?]
-    >;
-    const oauthRef = rows[0]?.[0];
-    expect(oauthRef).toBeDefined();
-    const pending = await act(started.session_id, { kind: "oauth_login", target: oauthRef! });
+    const login = act(started.session_id, {
+      kind: "oauth_login",
+      target: googleRef(started),
+    });
+    // Dispatch and observe the same-tab provider redirect before expiring the
+    // wait. A wall-clock 10ms budget can elapse before the click under load,
+    // which correctly reports not_attempted instead of a pending challenge.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.oauthDispatchCalls).toBe(1);
+    expect(h.currentUrl).toBe(h.oauthResultUrl);
+    await vi.advanceTimersByTimeAsync(10);
+    const pending = await login;
+    // Drain the completed handshake's lease release before restoring real timers.
+    await vi.runOnlyPendingTimersAsync();
     expect(pending.oauth).toMatchObject({
       state: "awaiting_human",
       next_action: "operate_observe",
@@ -4862,6 +4870,25 @@ describe("operate session — live-profile precondition gate", () => {
   it("does not create or destroy an ephemeral profile", async () => {
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
     expect(h.createdProfiles).toEqual([]);
+    await finishProvisionSession(obs.session_id);
+    expect(h.destroyedProfiles).toEqual([]);
+  });
+
+  it("the connect ceremony's own start passes the gate — the ceremony is what creates the session", async () => {
+    // The round-12 review-1 deadlock: the gate's own remedy (`connect
+    // --force-relogin=google`) is the ceremony itself, so gating the
+    // ceremony start refused every enrolled machine whose profile had no
+    // live Google session — self-referentially, forever. The bypass is
+    // scoped to `withCeremonyStartAdmission`, which only the broker's
+    // ceremony open (`open` with `ceremony: true`) enters; an agent-facing
+    // operate_start never reaches it.
+    h.providers = []; // no live session
+    h.liveGoogleEmail = null;
+    const obs = await withCeremonyStartAdmission(() =>
+      startProvisionSession({ serviceUrl: "https://app.example.com/" }),
+    );
+    expect(obs.needs_user).toBeUndefined();
+    expect(h.started).toBe(1); // a real session, on the shared browser
     await finishProvisionSession(obs.session_id);
     expect(h.destroyedProfiles).toEqual([]);
   });

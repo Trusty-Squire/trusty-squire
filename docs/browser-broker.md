@@ -40,8 +40,8 @@ minimum of one minute. Idle shutdown never
 changes the fact that the next operator call must attach or start a broker.
 The account must already be enrolled through `connect`; authentication reads its
 existing agent session token from session storage, never command-line token
-arguments. `connect` maintenance authenticates with that same enrolled token and
-does not hold a separate identity.
+arguments. `connect` is an ordinary broker client: it authenticates with that
+same enrolled token and holds no separate identity.
 
 The first client starts `node apps/mcp/dist/bin.js broker` when necessary.
 Socket mode is 0600. No CDP endpoint or browser
@@ -49,14 +49,91 @@ handle crosses IPC. `TRUSTY_SQUIRE_AGENT_IDENTITY` supplies a connection's agent
 label, which carries no authority.
 
 The client wire is the frozen Contract B — `connect`, `open`, `command`,
-`close` (`apps/mcp/src/bot/broker/protocol.ts`). A connect carries the
-connect-only `maintain` intent. The broker closes the shared Chrome once no
-session admits or owns it and answers `maintenance: "draining"` while live
-sessions remain. The client then runs the existing separate plain Google login
-lifecycle with no CDP, and `close{}` (the lease boundary, formerly
-`client_close`) resumes the broker on the same account when the connection ends.
-Resume requires that plain browser to be closed and preserves account binding.
-There are no `hello`/`tool`/`cancel`/`maintenance`/`resume` operations: a
+`close` (`apps/mcp/src/bot/broker/protocol.ts`). A connection ends with
+`close{}` (the lease boundary, formerly `client_close`), which releases that
+connection's claim without draining or restarting the shared browser.
+
+Connect approaches the browser only when it needs it. The already-provisioned
+preflight — stored session, account-bound plumbing, and a byte-copy read of the
+profile's cookie store (`detectProviderSessionsFromProfile`) — runs BEFORE any
+broker or browser work, takes no profile lease, waits for nothing, and opens no
+browser. An install that is already connected therefore completes while the
+broker keeps both its lease and its Chrome. An absent profile or cookie store
+requires the ceremony; a failed preflight probe is reported as `unverified`
+instead of forcing re-pairing.
+
+Ordering it the other way round, or answering it with a probe that opens the
+profile, both fail the same way: the machines that are already connected are
+exactly the machines whose browser is busy, so the question contends with the
+browser it is about and connect reports the profile as busy. Cookie presence is
+all that read proves; a cookie can outlive its server-side session. After the
+ceremony, `probeProviderSessionsAfterCeremony` first tries the live probe. If the
+profile is still busy, it polls committed-cookie snapshots for up to 45 seconds,
+awaiting Google and any explicitly requested provider before accepting early.
+Unreadable snapshots are unknown, not proof of sign-out; no provider list is
+persisted in the account session file. Ceremony completion itself remains the
+install claim plus its explicit nonce-scoped Finish callback, never a cookie read.
+
+When an install does need the login ceremony, the ceremony opens the confirm
+page as a TAB in the shared broker browser — an ordinary `open` on a
+`connectOrLaunchBroker` connection, no drain, no second Chrome, and no touch of
+the profile lease. On an enrolled machine with no resident broker, the ordinary
+connect-or-launch path spawns the broker daemon, whose browser hosts the tab
+(and keeps the reclaim contracts below). The self-launch fallback — a headed
+persistent-context Chrome on the bot profile through the operator's own launch
+custody (`launchCeremonyBrowserContext`) — runs only where no broker can serve
+yet (for example, a first connect on an unenrolled machine, or an unreachable
+broker socket); its profile gate fail-fasts
+with the busy-profile message rather than racing a browser that holds the
+profile. Because the broker's Chrome runs on its own private Xvfb, connect
+exposes that display over noVNC for the ceremony (same x11vnc + websockify +
+tunnel stack as the standalone remote login, reaped at the ceremony's lease
+boundary) — a tab no human can see is a tab no human can complete.
+Display discovery first reads the holder profile's tracked launch display from
+the owner-reaper manifest, then falls back to the holder's process tree: Chrome
+can erase its main process environment while children retain DISPLAY/XAUTHORITY.
+A display outside the repo-owned rig is treated as already visible. Missing
+usable display evidence or failed noVNC exposure stops the ceremony immediately.
+Cleanup removes the ceremony's helpers and tab, preserving the broker's browser
+and display even on setup failure. The self-launch path closes its own browser
+and rig, including when initial page setup fails.
+`shared-ceremony-exposure.test.ts` and `broker-connect-attach.test.ts` pin these
+contracts.
+
+The ceremony adopts the browser's current proxy identity instead of requesting
+a conflicting bare browser. Its `ceremony` open enters the scoped admission
+exception in `session/lifecycle.ts`: sign-in must be able to create the Google
+session it otherwise requires. Ordinary agent-facing `operate_start` admission
+is unchanged.
+
+Known property of that exposure, decided with the connect-browser-claim work:
+the noVNC URL shows the WHOLE shared display, not just the ceremony tab. While
+the ceremony runs (bounded by its deadline), anyone holding the URL can see —
+and, x11vnc not being view-only, drive — every tab the shared browser is
+running, including sibling operator sessions' tabs. The window is the
+ceremony deadline, and the URL is single-use: a fresh VNC password is minted
+per ceremony and the quick tunnel is torn down at the lease boundary. The
+`isOwnedLoginRigXauthority` check keeps real user desktops out of scope —
+this paragraph covers the broker's own rig only. This is a decision, not an
+oversight: do not narrow it without the maintainer's word.
+
+A deferred
+`--force-relogin` cookie clear rides the same tab as ordinary logout navigation.
+
+The ceremony's broker endpoint is derived from the profile the caller is about
+to use, not from the launch-time default. `connect` resolves its target's
+recorded profile and re-points `TRUSTY_SQUIRE_PROFILE_DIR` before any broker or
+browser work, so every runtime resolution of "the profile" — the broker
+endpoint, the election root, the profile lock — reads the environment live
+(`currentProfileDir`). Resolving any of them from the frozen
+`CHROME_PROFILE_DIR` addresses a different profile's broker and then collides
+with the live broker that owns the real profile.
+
+The Google OAuth hypothesis and live-validation evidence are owned by
+[STATE.md](../STATE.md#connect-ceremony-on-the-shared-broker-browser--new-hypothesis-falsification-pending-2026-09-06-fmsquire-connect-browser-claim).
+Do not infer live sign-in success from fixture acceptance.
+
+There are no `hello`/`tool`/`cancel`/`resume` operations: a
 session command is `command{sessionId,name,args}` (the only place a tool name
 appears), and `close` either finishes a session (the `operate_finish` payload
 rides the same request) or ends the connection. Cancelling one in-flight
@@ -67,9 +144,9 @@ and its other sessions intact.
 ## Ownership and contracts
 
 - A canonical-profile election lease prevents competing broker processes even
-  when clients choose different socket paths or temporary directories. It stays
-  held through maintenance. A separate physical-profile lease coordinates Chrome
-  and the existing plain-login path. Profile enrollment pins the account on disk.
+  when clients choose different socket paths or temporary directories. A
+  separate physical-profile lease coordinates Chrome custody, including the
+  ceremony browser's. Profile enrollment pins the account on disk.
 - Default discovery is probe then unlink then bind: a socket path with no live
   listener is a dead predecessor's orphan and is removed and rebound; that orphan
   path has no owner record and no process signaling. A same-contract broker that
@@ -86,11 +163,15 @@ and its other sessions intact.
   `broker_unavailable` refusal naming the pid. A just-started same-contract
   lease holder that has not yet bound its socket is never a reclaim target, and
   a provably-reborn lease pid is left to the ordinary stale-owner scavenge.
-  The same reclaim runs on the maintenance path before the bare-operation
-  fallback.
+  The same reclaim runs whenever a client connects-or-launches — the connect
+  ceremony included — before falling back to a self-launched browser.
+- On a rejected handshake, the daemon first re-reads its bound account entry.
+  It retries authentication once after refreshing credentials only if the account
+  and presented token exactly match that entry and refresh succeeds. A store or
+  refresh refusal leaves the original rejection intact.
 - A same-contract resident whose credential digest no longer matches the current
-  agent session token (re-enrollment, a driver/server restart, or a maintenance
-  release that could not refresh) is a separate reclaim. Positive identification
+  agent session token (re-enrollment or a driver/server restart) is a separate
+  reclaim. Positive identification
   is the current-contract `connect` handshake succeeding as a protocol exchange
   and rejecting the credential (`unauthorized: Invalid broker credential`), plus
   the same election-lease and broker-argv owner pid on this host. A rejected
@@ -102,11 +183,16 @@ and its other sessions intact.
   the same SIGTERM → bounded wait → SIGKILL mechanics, but only when the
   resident has no attached clients. A broker with an attached client is never
   killed; the client fails with one `broker_unavailable` refusal naming the pid
-  and the manual TERM reclaim step. After maintenance, a credential refresh that
-  cannot complete terminates the drained broker rather than leaving it on the
-  old digest. Reclaim timings are internal, never a tool parameter or config
+  and the manual TERM reclaim step. Reclaim timings are internal, never a tool
+  parameter or config
   knob. `broker-prior-contract-reclaim.test.ts` pins both reclaim paths with
   real child processes, signals, lease files, and sockets.
+- An older resident whose strict `open` schema rejects `ceremony` or
+  `adoptIdentity` uses the same stale-credential reclaim path. Connect closes
+  its failed connection first, retains the same-account and attached-client
+  refusal contracts, then connects-or-launches and retries ceremony open once.
+  A second rejection propagates; arbitrary open failures do not trigger reclaim.
+  `broker-connect-attach.test.ts` covers this upgrade path.
 - Each session owns a target family and a serialized command queue. A service
   URL does not reserve a site; one authenticated client drives the shared profile.
   Several connections to the same profile attach at once, one per client process,
@@ -123,7 +209,8 @@ and its other sessions intact.
   a session that was never created. `broker-forwarder.test.ts` pins the replay.
 - Browser egress is unrestricted for all targets. Session cleanup closes only that owned
   family. A close that cannot be proven leaves the broker alive holding physical
-  custody; it never refuses a later command or start. The existing exact
+  custody. A failed close restores the prior closing state: it must neither latch
+  a new refusal nor clear a pre-existing custody-unproven latch. The existing exact
   owner-process identity backstop remains the only physical-process custody.
 - Per-session approval, charge dispatch fences, and post-submit outcome custody
   continue in the existing handlers. Approval notifications travel over the
@@ -169,10 +256,10 @@ Implementation entry points: `src/bot/broker/daemon.ts`, `discovery.ts`,
 
 ## Busy façade
 
-The four layers above each answer "is the browser in use" in their own terms:
-tab families (`runtime.ts`), the profile election / SingletonLock lease
-(`profile.ts`), connect's maintenance window (`daemon.ts`), and the custody
-latch (`custody.ts`). A second consumer imports one fold from
+Browser availability depends on the profile election / SingletonLock lease
+(`profile.ts`) and custody (`custody.ts`); live tab families (`runtime.ts`)
+share the browser. Connect holds an ordinary tab family, not a maintenance
+window. A second consumer imports one fold from
 `@trusty-squire/mcp/browser` (`apps/mcp/src/browser-busy.ts`):
 
 ```ts
@@ -203,17 +290,17 @@ the cancelled call keeps the session lease until it returns — so a caller who
 wants a bound should pass `AbortSignal.timeout(ms)` knowing that, rather than
 receive one it never asked for.
 
-**The broker answers the busy question, because it is the only side that sees
-all four layers at the same instant.** `status` is a read-only Contract B
-operation returning `StatusResult`; `brokerBusyStatus` (`broker/status.ts`)
-computes it from the maintenance window, custody's drain state, the profile
+**The broker answers the busy question from its custody and profile state.**
+`status` is a read-only Contract B operation returning `StatusResult`;
+`brokerBusyStatus` (`broker/status.ts`) uses custody's drain state, the profile
 lock holder, and whether the Chrome holding that lock is the broker's own.
+The daemon supplies `maintenanceOwned: false`; the retained `maintenance`
+refusal code still describes an identity cell that is draining.
 Live tab families are not an input: the broker multiplexes them on one shared
 Chrome, so no number of them can produce a busy answer. `browserBusy()` is a
 thin client of that call. A client cannot fold this from outside — a live
-socket says nothing about whose Chrome holds the lease, and the maintenance
-window is broker-local state, so inferring "not busy" from a listener
-contradicted `openTab` at the same instant.
+socket says nothing about whose Chrome holds the lease or whether custody is
+draining, so a listener alone cannot establish availability.
 
 The result carries the refusal `code` the same condition would produce on
 `open`, and the client maps code to layer; the wire deliberately carries no
@@ -331,7 +418,7 @@ its cookies into the harness.
    worktree**. Run the normal `connect` flow with those HOME, XDG_CONFIG_HOME,
    TRUSTY_SQUIRE_PROFILE_DIR, and pinned TRUSTY_SQUIRE_ACCOUNT_ID values. A human
    must complete the account/passkey and real Google sign-in. Finish and close
-   the plain login browser before running the acceptance arm.
+   the ceremony browser before running the acceptance arm.
 2. Supply three sessions across Resend and Neon: one of each runs concurrently
    with a duplicate provider. Reusing a provider, URL, account, and driver is
    expected; Xata is not a required live resource. Each driver exports

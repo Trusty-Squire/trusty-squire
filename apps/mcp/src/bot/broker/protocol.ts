@@ -2,14 +2,15 @@
 //
 // The wire used to carry six bespoke methods: `hello`, `tool`, `cancel`,
 // `client_close`, `maintenance`, `resume`. They actually express four
-// operations:
+// operations (`maintenance`/`resume` expressed a connect-only drain window
+// that no longer exists at all: connect now rides the shared browser as an
+// ordinary client instead of draining it):
 //
 //   hello                        -> connect
 //   tool{name:"operate_start"}   -> open
 //   tool{name,args}              -> command   (the only place a tool name appears)
 //   tool{name:"operate_finish"}  -> close{ sessionId, args }
 //   client_close                 -> close{}   (ends the connection: the lease boundary)
-//   maintenance / resume         -> the connect-only `maintain` intent on connect
 //   cancel                       -> the reserved `abort` control frame
 //
 // Framing, MAX_FRAME, the `{ id, error: { code, message } }` error shape, the
@@ -31,12 +32,6 @@ export interface ConnectRequest {
   token: string;
   agentId: string;
   /**
-   * Connect-only concern: drain the shared browser for the plain-login
-   * maintenance window ("maintenance" + "resume" folded into the connect path).
-   * It is deliberately not a general client operation.
-   */
-  maintain?: boolean;
-  /**
    * Connect-only concern: this connection will only read `status`. It is a
    * read, so it is kept out of the broker's idle accounting — probing on any
    * cadence must not extend how long the shared Chrome stays resident.
@@ -46,8 +41,6 @@ export interface ConnectRequest {
 export interface ConnectResult {
   version: 1;
   clientId: string;
-  /** Present only when the connection requested `maintain`. */
-  maintenance?: "ready" | "draining";
 }
 
 /** open: start one operator session on the shared browser. */
@@ -55,6 +48,25 @@ export interface OpenRequest {
   serviceUrl: string;
   format?: "compact" | "full";
   proxy?: string;
+  /** This open IS the connect re-auth ceremony — the ONE optional field on
+   * `open`. Two things follow from it, and neither is separately selectable:
+   *
+   * 1. Its start passes the `google_session` admission gate, because the
+   *    ceremony is what creates the live Google session — gating it
+   *    deadlocked every enrolled machine whose profile had none (the gate's
+   *    own remedy, `connect --force-relogin=google`, is the ceremony itself).
+   * 2. It adopts whatever identity the shared browser is already live under
+   *    instead of requesting one. Without that, an open carrying no proxy
+   *    against a proxied Chrome is refused `incompatible_runtime` while other
+   *    sessions live, or recycles the shared Chrome underneath them when none
+   *    do. An explicit `proxy` still wins.
+   *
+   * Nothing else changes: the ceremony still gets a full operator session
+   * (the deferred --force-relogin logout drive rides it) and still counts in
+   * the inventory. Ceremony-only by construction: the only sender is the
+   * connect ceremony in google-login.ts, and the agent-facing `operate_start`
+   * surface has no such field and no forwarder path that could add one. */
+  ceremony?: boolean;
 }
 export interface OpenResult {
   /**
@@ -95,11 +107,8 @@ export interface CloseResult {
 }
 
 /**
- * status: "is the browser in use", answered ONCE by the side that can see all
- * four layers at the same instant — tab families, the profile lease and its
- * holder, the connect maintenance window, and custody. A client cannot fold
- * these from outside: a live socket says nothing about whose Chrome holds the
- * lease, and the maintenance window is broker-local state. Read-only.
+ * Read-only broker availability. The custody/profile fold is defined in
+ * docs/browser-broker.md (Busy façade); a live socket alone cannot answer it.
  */
 export interface StatusResult {
   busy: boolean;

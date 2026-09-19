@@ -1,20 +1,9 @@
 // One typed answer for "is the browser in use".
 //
-// Four layers each have their own word for busy: broker tab families, the
-// profile lease, connect's maintenance window, and custody. A reader holding
-// only one reasons correctly about the wrong layer — a queued page instruction
-// read as a broker-wide wedge. This façade folds them at the package boundary.
-// Wire refusal codes are unchanged; the mapping lives here, not on the broker
-// protocol.
-//
-// The fold itself is NOT computed here. `browserBusy` asks the broker, which
-// is the only side that sees all four layers at the same instant; this module
-// maps that answer, and openTab's refusals, onto one type. Inferring the
-// answer from outside is what produced confident conclusions about the wrong
-// layer — a live socket says nothing about whose Chrome holds the lease, and
-// the connect maintenance window is not observable from another process at
-// all. Only when no broker is resident does this read the profile lock
-// directly, because then there is no broker to hold anything.
+// Availability and refusal contracts are owned by docs/browser-broker.md
+// (Busy façade). This module maps the broker's answer and openTab's refusals
+// onto package-level types; it does not compute the broker's custody state.
+// Only when no broker is resident can it answer from the profile lock alone.
 //
 // Tab families are the layer that is never an answer: the broker multiplexes
 // many on one shared Chrome, so a running family never makes the browser
@@ -315,7 +304,7 @@ async function agentSessionToken(): Promise<
 
 /**
  * Ask the broker. A resident broker is the only thing that can see the
- * maintenance window and knows whether the Chrome on the profile is its own;
+ * custody drain state and knows whether the Chrome on the profile is its own;
  * when none is resident there is nothing to ask and nothing brokered to hold.
  */
 export async function browserBusy(): Promise<BrowserStatus> {

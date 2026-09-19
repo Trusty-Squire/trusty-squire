@@ -65,6 +65,8 @@ import {
 import type { RemoteLoginRig } from "./remote-login-display.js";
 import type { PageDriver } from "./page-driver.js";
 
+const OPERATOR_BROWSER_WINDOW_SIZE = { width: 1280, height: 1024 };
+
 /** Exclusive Chrome custody. Page setup is awaited at the original startup boundary. */
 export class BrowserProcessOwner {
   // A persistent browser context backed by the user's real Chrome profile.
@@ -163,7 +165,7 @@ export class BrowserProcessOwner {
     if (this.ownedDisplayRig === null) {
       const { createXvfbDisplayRig, startRemoteLoginDisplay } =
         await import("./remote-login-display.js");
-      const rig = createXvfbDisplayRig();
+      const rig = createXvfbDisplayRig(OPERATOR_BROWSER_WINDOW_SIZE);
       this.ownedDisplayRig = rig;
       await startRemoteLoginDisplay(rig);
     }
@@ -502,11 +504,11 @@ export class BrowserProcessOwner {
           `(real-host GPU + egress; local fingerprint spoof + display setup disabled)`,
       );
     }
+    const browserEnv = remoteMode ? process.env : await this.ownedHeadedBrowserEnvironment();
     if (!remoteMode && !this.ownerLaunchTracked) {
-      registerLocalBrowserLaunch(this.profileDir, process.env, this.operatorBrowserMarker());
+      registerLocalBrowserLaunch(this.profileDir, browserEnv, this.operatorBrowserMarker());
       this.ownerLaunchTracked = true;
     }
-    const browserEnv = remoteMode ? process.env : await this.ownedHeadedBrowserEnvironment();
     // T3.1: probe where this run's traffic actually exits so the
     // browser's declared timezone matches its egress IP (a US-timezone
     // browser on a foreign proxy IP is itself an anti-bot signal).
@@ -578,7 +580,6 @@ export class BrowserProcessOwner {
       console.error(
         `[operator] self-launch + connectOverCDP (Turnstile-safe launch) binary=${selfLaunchBinary}`,
       );
-      const window = { width: 1280, height: 1024 };
       const selfEnv: NodeJS.ProcessEnv = {
         ...browserEnv,
         TZ: geo?.timezoneId ?? "America/New_York",
@@ -591,7 +592,7 @@ export class BrowserProcessOwner {
           args: launchArgs,
           proxy,
           env: selfEnv,
-          window,
+          window: OPERATOR_BROWSER_WINDOW_SIZE,
         });
       };
       context = await launch();

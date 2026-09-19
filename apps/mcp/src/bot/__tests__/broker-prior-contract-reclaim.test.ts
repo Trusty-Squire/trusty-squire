@@ -1,8 +1,9 @@
 import type * as ChildProcess from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
 import type * as BrokerTransport from "../broker/transport.js";
 import type * as DiscoveryModule from "../broker/discovery.js";
 import type * as ProfileModule from "../profile.js";
@@ -17,8 +18,8 @@ const realSpawn = (await (vi.importActual("node:child_process") as Promise<typeo
 // takes the election lease and binds a real Contract B listener.
 const state = vi.hoisted(() => ({
   spawn: vi.fn(),
-  maintenanceToken: "test",
-  maintenanceAccountId: "account" as string | undefined,
+  sessionToken: "test",
+  sessionAccountId: "account" as string | undefined,
 }));
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof ChildProcess>();
@@ -27,8 +28,8 @@ vi.mock("node:child_process", async (importOriginal) => {
 vi.mock("../../session-guard.js", () => ({
   createSessionGuard: () => ({
     bind: async () => ({
-      agent_session_token: state.maintenanceToken,
-      account_id: state.maintenanceAccountId,
+      agent_session_token: state.sessionToken,
+      account_id: state.sessionAccountId,
     }),
   }),
 }));
@@ -61,6 +62,20 @@ const sleep = async (ms: number) => await new Promise((resolve) => setTimeout(re
  *   authenticates `hello` with the token — a Contract B broker refuses
  *   `hello` instead. It dies on default SIGTERM exactly like the
  *   pre-wire-collapse daemon, unless told to ignore it. */
+// Execute the older strict open schema to generate the actual wire error a
+// pre-ceremony broker produces for the ceremony field.
+const oldOpenErrors = Object.fromEntries(
+  ["ceremony"].map((field) => {
+    const schema = z.object({ serviceUrl: z.string() }).strict();
+    const result = schema.safeParse({
+      serviceUrl: "https://example.com",
+      ceremony: true,
+    });
+    if (result.success) throw new Error("Old schema unexpectedly accepted ceremony");
+    return [field, result.error.message];
+  }),
+);
+
 const PRIOR_CONTRACT_DAEMON_SCRIPT = `
 const fs = require("node:fs");
 const net = require("node:net");
@@ -106,6 +121,15 @@ if (!mode.includes("no-listen")) {
         if (journalPath) fs.appendFileSync(journalPath, String(request.method) + "\\n");
         const reply = (payload) =>
           socket.write(JSON.stringify({ id: request.id, ...payload }) + "\\n");
+        if (mode.includes("schema-") && request.method === "open") {
+          const errors = ${JSON.stringify(oldOpenErrors)};
+          reply({ error: { code: "broker_execution_failed", message: errors["ceremony"] } });
+          continue;
+        }
+        if (mode.includes("schema-") && request.method === "close") {
+          reply({ result: { closed: true } });
+          continue;
+        }
         const authedMethod = mode.includes("contract-b") ? "connect" : "hello";
         if (request.method !== authedMethod || typeof request.params?.token !== "string") {
           reply({
@@ -166,13 +190,6 @@ async function electionLockPath(
   probe.release();
   await rm(join(electionRoot, name), { force: true });
   return join(electionRoot, name);
-}
-
-async function modules() {
-  const discovery = await import("../broker/discovery.js");
-  const profileModule = await import("../profile.js");
-  const transport = await import("../broker/transport.js");
-  return { discovery, profileModule, transport };
 }
 
 /** Wait until the fixture holds its lease and — when listening — answers
@@ -552,6 +569,104 @@ describe("same-contract stale-credential broker reclaim", () => {
     });
   }
 
+  it.each([
+    { field: "ceremony", outcome: "completes" },
+    { field: "ceremony", outcome: "refuses attached clients" },
+    { field: "ceremony", outcome: "stops after one retry" },
+  ])("old broker rejecting $field: $outcome", { timeout: 30_000 }, async ({ field, outcome }) => {
+    const { discovery, profileModule, transport } = await modules();
+    vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", socket);
+    lockPath = await electionLockPath(discovery, profileModule, profile);
+    const journal = join(root, "ceremony-wire.txt");
+    const fixture = spawnFixture(
+      socket,
+      lockPath,
+      state.sessionToken,
+      `contract-b schema-${field}`,
+      journal,
+    );
+    await awaitFixtureReady(socket, lockPath, state.sessionToken, {
+      listens: true,
+      contract: "current",
+    });
+    const freshCalls: { method: string; params: unknown }[] = [];
+    state.spawn.mockImplementation(() => {
+      election = profileModule.acquireProfileOperationGuard(
+        profile,
+        discovery.brokerElectionRoot(profile),
+      );
+      void sleep(10).then(async () => {
+        // Stand in for the replacement's visible browser process so the
+        // real display-discovery helper can let the ceremony complete.
+        const holder = realSpawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+          stdio: "ignore",
+          env: { ...process.env, DISPLAY: ":0", XAUTHORITY: join(root, "desktop-auth") },
+        });
+        children.push(holder);
+        await symlink(`${hostname()}-${holder.pid}`, join(profile, "SingletonLock"));
+        listener = await transport.listenBroker(socket, {
+          authenticate: async () => ({ accountId: ACCOUNT_ID, agentId: "agent" }),
+          connected: async () => undefined,
+          call: async (_identity, method, params) => {
+            freshCalls.push({ method, params });
+            if (method === "open" && outcome === "stops after one retry") {
+              const { BrokerRefusal } = await import("../broker/refusal.js");
+              throw new BrokerRefusal("broker_execution_failed", oldOpenErrors[field]!);
+            }
+            return method === "open" ? { sessionId: "fresh-tab" } : { closed: true };
+          },
+          disconnect: async () => undefined,
+        });
+      });
+      return { once: vi.fn(), unref: vi.fn() };
+    });
+    const { tryRunCeremonyInSharedBroker } = await import("../google-login.js");
+    const attached =
+      outcome === "refuses attached clients"
+        ? await transport.BrokerClient.connect(socket, state.sessionToken)
+        : undefined;
+    const running = tryRunCeremonyInSharedBroker({
+      profileDir: profile,
+      url: "https://trustysquire.ai/install/confirm?install=fixture",
+      deadline: Date.now() + 10_000,
+      pollUntilDone: async () => true,
+      bannerLabel: "fixture",
+    });
+    if (attached !== undefined) {
+      try {
+        await expect(running).rejects.toMatchObject({ code: "broker_unavailable" });
+        await expect(running).rejects.toThrow(/attached client/);
+        expect(state.spawn).not.toHaveBeenCalled();
+        expect(fixture.signalCode).toBeNull();
+        expect(fixture.exitCode).toBeNull();
+      } finally {
+        await attached.close();
+      }
+      return;
+    }
+    if (outcome === "stops after one retry") {
+      await expect(running).rejects.toMatchObject({ code: "broker_execution_failed" });
+    } else {
+      await expect(running).resolves.toEqual({ status: "satisfied", closeState: "closed" });
+    }
+    expect(await awaitExit(fixture)).toBe("SIGTERM");
+    expect(state.spawn).toHaveBeenCalledOnce();
+    expect(
+      (await readFile(journal, "utf8")).split("\n").filter((method) => method === "open"),
+    ).toHaveLength(1);
+    expect(freshCalls.filter(({ method }) => method === "open")).toEqual([
+      {
+        method: "open",
+        params: {
+          serviceUrl: "https://trustysquire.ai/install/confirm?install=fixture",
+          ceremony: true,
+        },
+      },
+    ]);
+    if (outcome === "completes")
+      expect(freshCalls).toContainEqual({ method: "close", params: { sessionId: "fresh-tab" } });
+  });
+
   it(
     "reproduces the orphaning path: a resident same-contract broker whose digest lagged a re-enrollment is reclaimed and replaced",
     { timeout: 30_000 },
@@ -717,90 +832,6 @@ describe("same-contract stale-credential broker reclaim", () => {
       expect(state.spawn).toHaveBeenCalledOnce();
       expect(client.welcome).toBeDefined();
       await client.close();
-    },
-  );
-});
-
-describe("broker reclaim through plain-login maintenance", () => {
-  let root: string;
-  let profile: string;
-  let socket: string;
-  let fixture: ChildProcess.ChildProcess | undefined;
-  let fixtureExit: Promise<string | null> | undefined;
-
-  beforeEach(async () => {
-    root = await mkdtemp(join(tmpdir(), "ts-maint-reclaim-"));
-    profile = join(root, "profile");
-    socket = join(root, "broker.sock");
-    fixture = undefined;
-    fixtureExit = undefined;
-    state.maintenanceAccountId = ACCOUNT_ID;
-    await mkdir(profile);
-    await bindProfileToAccount(profile, ACCOUNT_ID);
-    vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profile);
-    vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", socket);
-    vi.resetModules();
-  });
-
-  afterEach(async () => {
-    fixture?.kill("SIGKILL");
-    vi.unstubAllEnvs();
-    await rm(root, { recursive: true, force: true });
-  });
-
-  it(
-    "drains a resident prior-contract broker instead of racing it for the profile, then logs in plain",
-    { timeout: 30_000 },
-    async () => {
-      state.maintenanceToken = "test";
-      const { discovery, profileModule, transport } = await modules();
-      const lockPath = await electionLockPath(discovery, profileModule, profile);
-
-      fixture = realSpawn(
-        process.execPath,
-        ["-e", PRIOR_CONTRACT_DAEMON_SCRIPT, "broker", socket, lockPath, "test", ""],
-        { stdio: "ignore" },
-      );
-      fixtureExit = awaitExit(fixture);
-      await awaitFixtureReady(socket, lockPath, "test", { listens: true });
-      expect(await leaseOwnerPid(lockPath)).toBe(fixture.pid!);
-
-      // The transport import above registered the real module before the
-      // session-guard mock; a fresh import graph is not needed because the
-      // maintenance module resolves session-guard at its own import.
-      void transport;
-      const { withBrokerMaintenance } = await import("../broker/maintenance.js");
-      await expect(withBrokerMaintenance(async () => "plain-login")).resolves.toBe("plain-login");
-      // The prior-contract daemon is gone: the plain login drained it rather
-      // than racing it for the profile.
-      expect(await fixtureExit).toBe("SIGTERM");
-    },
-  );
-
-  it(
-    "drains a resident same-contract broker whose credential no longer matches, then logs in plain",
-    { timeout: 30_000 },
-    async () => {
-      state.maintenanceToken = "new-token";
-      const { discovery, profileModule, transport } = await modules();
-      const lockPath = await electionLockPath(discovery, profileModule, profile);
-
-      fixture = realSpawn(
-        process.execPath,
-        ["-e", PRIOR_CONTRACT_DAEMON_SCRIPT, "broker", socket, lockPath, "old-token", "contract-b"],
-        { stdio: "ignore" },
-      );
-      fixtureExit = awaitExit(fixture);
-      await awaitFixtureReady(socket, lockPath, "old-token", {
-        listens: true,
-        contract: "current",
-      });
-      expect(await leaseOwnerPid(lockPath)).toBe(fixture.pid!);
-
-      void transport;
-      const { withBrokerMaintenance } = await import("../broker/maintenance.js");
-      await expect(withBrokerMaintenance(async () => "plain-login")).resolves.toBe("plain-login");
-      expect(await fixtureExit).toBe("SIGTERM");
     },
   );
 });

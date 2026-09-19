@@ -10,6 +10,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import type * as RealFs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -18,7 +19,7 @@ import { describe, expect, it, vi } from "vitest";
 // validates so these process-lifecycle tests remain independent of that host
 // package while exercising the real bridge setup.
 vi.mock("node:fs", async (importOriginal) => {
-  const fs = await importOriginal<typeof import("node:fs")>();
+  const fs = await importOriginal<typeof RealFs>();
   const path = await import("node:path");
   return {
     ...fs,
@@ -35,6 +36,7 @@ vi.mock("node:fs", async (importOriginal) => {
 
 import {
   assertRemoteLoginRigLive,
+  createRemoteLoginVncSecrets,
   describeLoginPortHolder,
   exposeRemoteLoginDisplay,
   fallbackCloudflaredArgs,
@@ -420,7 +422,9 @@ setInterval(() => undefined, 1000);
       );
       expect(log.mock.calls.flat().join("\n")).toContain("one-off Cloudflare tunnel");
       expect(rig.procs).toHaveLength(3);
-      const helperPids = rig.procs.map((child) => child.pid).filter((pid): pid is number => pid !== undefined);
+      const helperPids = rig.procs
+        .map((child) => child.pid)
+        .filter((pid): pid is number => pid !== undefined);
 
       await teardownRemoteLoginRig(rig, 50);
       expect(rig.webDir).toBeUndefined();
@@ -677,5 +681,29 @@ process.exit(1);
     }
     expect(set).toHaveBeenNthCalledWith(1, false);
     expect(set).toHaveBeenLastCalledWith(true);
+  });
+});
+
+describe("createRemoteLoginVncSecrets", () => {
+  it("mints fresh VNC secrets without touching the adopted Xauthority", () => {
+    // The shared-broker ceremony exposure adopts the broker daemon's rig —
+    // display AND authFile. The secrets helper must only add VNC credentials;
+    // minting an Xauthority here would clobber the adopted one.
+    const rig = emptyRig("/unused/xvfb");
+    rig.display = ":42";
+    rig.authFile = "/adopted/tsq-elsewhere/Xauthority";
+    try {
+      createRemoteLoginVncSecrets(rig);
+      expect(rig.display).toBe(":42");
+      expect(rig.authFile).toBe("/adopted/tsq-elsewhere/Xauthority");
+      expect(rig.privateDir).toBeDefined();
+      expect(rig.privateDir!.split("/").pop()!.startsWith("tsq-login-")).toBe(true);
+      expect(statSync(rig.privateDir!).mode & 0o777).toBe(0o700);
+      expect(statSync(rig.passFile!).mode & 0o777).toBe(0o600);
+      expect(readFileSync(rig.passFile!, "utf8")).toBe(rig.vncPassword);
+      expect(rig.vncPassword).not.toBe("");
+    } finally {
+      rmSync(rig.privateDir!, { recursive: true, force: true });
+    }
   });
 });

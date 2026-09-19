@@ -7,6 +7,10 @@ export interface BrokerBrowserCustody {
     profileDir?: string;
     proxyUrl?: string;
   }): Promise<{ browser: BrowserController; profileDir: string }>;
+  /** The proxy the shared browser is currently live (or launching) under,
+   * or undefined when none is live or the browser runs bare. Optional: only
+   * the real browser-owning broker provides it. */
+  liveProxyUrl?(): string | undefined;
   cleanupAdmission(sessionId: string): Promise<boolean>;
   orphanAdmission(sessionId: string): Promise<void>;
   orphan(browser: BrowserController): Promise<void>;

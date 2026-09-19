@@ -75,11 +75,11 @@ describe("SessionStore", () => {
     const store = new SessionStore(tmpFile);
     await store.write(entry(ACCOUNT_A, "tok_a"));
     await store.write(entry(ACCOUNT_B, "tok_b"));
-    await store.write({ ...entry(ACCOUNT_A, "tok_a2"), connected_providers: ["google"] });
+    await store.write({ ...entry(ACCOUNT_A, "tok_a2"), consent_skillify_telemetry: true });
 
     expect(await store.read(ACCOUNT_A)).toMatchObject({
       agent_session_token: "tok_a2",
-      connected_providers: ["google"],
+      consent_skillify_telemetry: true,
     });
     expect(await store.read(ACCOUNT_B)).toMatchObject({ agent_session_token: "tok_b" });
   });
@@ -182,7 +182,7 @@ describe("compatibility with builds that are already running", () => {
     account_id: ACCOUNT_A,
     machine_token: "tsm_legacy",
     agent_session_token: "tok_legacy",
-    connected_providers: ["google"],
+    consent_skillify_telemetry: true,
   };
 
   it("reads a pre-per-account flat file as that account's entry", async () => {
@@ -190,7 +190,7 @@ describe("compatibility with builds that are already running", () => {
     const store = new SessionStore(tmpFile);
     expect(await store.read(ACCOUNT_A)).toMatchObject({
       agent_session_token: "tok_legacy",
-      connected_providers: ["google"],
+      consent_skillify_telemetry: true,
     });
     expect(await store.read()).toMatchObject({ agent_session_token: "tok_legacy" });
     expect(await store.currentAccountId()).toBe(ACCOUNT_A);
