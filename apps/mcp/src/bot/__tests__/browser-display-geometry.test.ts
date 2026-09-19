@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as Fs from "node:fs";
+import type * as BrowserProcessRuntime from "../browser-process-runtime.js";
+import type * as OperatorBrowserWatchdog from "../operator-browser-watchdog.js";
+import type * as RemoteLoginDisplay from "../remote-login-display.js";
 import type { PageDriver } from "../page-driver.js";
 
 vi.mock("node:fs", async (importOriginal) => {
-  const fs = await importOriginal<typeof import("node:fs")>();
+  const fs = await importOriginal<typeof Fs>();
   const isHelper = (path: unknown) =>
     typeof path === "string" && /\/(Xvfb|x11vnc|websockify|cloudflared)$/.test(path);
   return {
@@ -17,15 +21,15 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 
 vi.mock("../browser-process-runtime.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../browser-process-runtime.js")>()),
+  ...(await importOriginal<typeof BrowserProcessRuntime>()),
   detectChromiumChannel: vi.fn().mockResolvedValue(null),
 }));
 vi.mock("../operator-browser-watchdog.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../operator-browser-watchdog.js")>()),
+  ...(await importOriginal<typeof OperatorBrowserWatchdog>()),
   startGlobalOperatorBrowserProcessWatchdog: vi.fn(),
 }));
 vi.mock("../remote-login-display.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../remote-login-display.js")>()),
+  ...(await importOriginal<typeof RemoteLoginDisplay>()),
   // Stop at the process boundary after the real rig factory has run.
   startRemoteLoginDisplay: vi.fn().mockRejectedValue(new Error("display startup boundary")),
   teardownRemoteLoginRig: vi.fn().mockResolvedValue(undefined),
