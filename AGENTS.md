@@ -486,9 +486,8 @@ storage state, swap browsers, or add a parallel OAuth driver.
 live context and feeds it to `googleSessionGate`. Do not read Chrome's on-disk
 cookie database for identity or completion.
 
-Connect's Google-safe plain browser deliberately has no CDP context. Its
-completion is the install claim plus explicit Finish callback, not a disk-cookie
-probe. See `apps/mcp/src/bot/google-login.ts` and
+Connect's login ceremony completion is the install claim plus explicit Finish
+callback, not a disk-cookie probe. See `apps/mcp/src/bot/google-login.ts` and
 `docs/DESIGN-warm-browser-reuse.md`.
 
 ### 14. MCP tests have fast, real-browser, and post-merge-slow tiers
@@ -743,14 +742,17 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
 
 ## Browser launch posture
 
-- **`connect` is the only sign-in command, and the login browser is today a
-  separate PLAIN Chrome.** There is no `login` subcommand: a second command that
-  seeded a provider session outside the account claim let an install report
-  success with no live Google session. The plain browser is NOT justified by any
-  CDP-vs-Google claim — nothing in this repo has ever shown a Google sign-in
-  failing through a CDP-attached browser, so do not cite that. It is a known gap
-  that the ceremony does not reuse the broker's running Chrome; see
-  `docs/browser-broker.md`. Re-auth is
+- **`connect` is the only sign-in command.** There is no `login` subcommand: a
+  second command that seeded a provider session outside the account claim let an
+  install report success with no live Google session. The ceremony opens the
+  confirm page as a TAB in the shared broker browser (an ordinary
+  `connectOrLaunchBroker` + `open`, no drain, no second Chrome, no profile
+  lease); the self-launch fallback — a headed persistent-context Chrome through
+  the operator's own launch custody (`launchCeremonyBrowserContext`) — runs only
+  where no broker can serve yet, and its profile gate fail-fasts on a busy
+  profile instead of racing it. Nothing in this repo has ever shown a Google
+  sign-in failing through a CDP-attached browser, so do not cite that as a
+  reason to add a second instance. Re-auth is
   `connect --force-relogin[=google|github]`; connect gates its own success on
   the post-ceremony live provider probe (`decideConnectComplete`,
   `apps/mcp/src/install/cli.ts`), and the operator's `google_session` wall hands
@@ -760,12 +762,12 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
   routes SIGTERM to its abrupt "session ending" exit and does NOT flush the
   SQLite cookie store (its own commit timer is ~30s out), so a SIGTERM teardown
   seconds after a sign-in silently discards the session that sign-in just
-  established — the 2026-09-04 `connect` regression. The login browser quits with
-  `PLAIN_LOGIN_BROWSER_QUIT_SIGNAL` (SIGINT) and waits for the graceful exit
-  before the owner reaper's SIGTERM → SIGKILL escalation takes over
+  established — the 2026-09-04 `connect` regression. The ceremony browser quits
+  with `BROWSER_QUIT_SIGNAL` (SIGINT) and waits for the graceful exit before
+  the owner reaper's SIGTERM → SIGKILL escalation takes over
   (`apps/mcp/src/bot/browser-process-runtime.ts`, re-exported by `browser.ts`);
   the operator owner shares that bounded graceful quit after page/context close.
-  `browser-close-cookie.test.ts` proves fresh login cookies survive both local
+  `browser-close-cookie.test.ts` proves fresh login cookies survive the local
   launch modes; the original plain-login evidence is in `STATE.md`.
 - `BrowserController` local launches remain headed on their owned display; do
   not reintroduce virtual-display selection or `DISPLAY` plumbing into
@@ -776,7 +778,7 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
 - `apps/mcp/src/bot/broker/runtime.ts` owns Chrome's identity runtime and physical
   profile lease. The broker is the only operator launch path; sessions acquire
   independent tab families and MCP servers forward over IPC. See
-  `docs/browser-broker.md` for discovery, election, maintenance, and recovery.
+  `docs/browser-broker.md` for discovery, election, and recovery.
 - Interactive human login is the deliberate exception. When `connect` (the one
   onboarding and re-auth pathway, including `--force-relogin`) runs without a
   user-visible display,
@@ -851,7 +853,7 @@ The public operator contract and capability migration are owned by
 
 ## Cross-process browser broker
 
-The default broker custody, maintenance, and recovery
+The default broker custody and recovery
 contracts live in [`docs/browser-broker.md`](docs/browser-broker.md). Mechanical
 fixture acceptance does not qualify real Google auth or prove the current head.
 
@@ -868,13 +870,12 @@ once, which is why `status` is a wire operation. Ask through
 The client wire is the frozen Contract B (`connect` / `open` / `command` /
 `close`), owned by `apps/mcp/src/bot/broker/protocol.ts`. A tool name crosses
 the wire only inside `command`; `close` finishes a session or ends the
-connection; the plain-login maintenance window is the connect-only `maintain`
-intent. The 512-entry retained-result replay guard, the 5 s connection-session
-grace, and the reserved `abort` control frame (cancel exactly one in-flight
-request by its frame id, leaving the connection and its other sessions alive)
-stay internal policy behind the contract. Do not re-add
-`hello`/`tool`/`cancel`/`client_close`/`maintenance`/`resume` as wire
-operations.
+connection. The 512-entry retained-result replay guard, the 5 s
+connection-session grace, and the reserved `abort` control frame (cancel
+exactly one in-flight request by its frame id, leaving the connection and its
+other sessions alive) stay internal policy behind the contract. Do not re-add
+`hello`/`tool`/`cancel`/`client_close`/`maintenance`/`resume`/`maintain` as
+wire operations.
 
 ### 22. Runtime profile resolution reads the environment live, and `connect` attaches to the broker rather than competing with it
 
@@ -889,19 +890,19 @@ those; `CHROME_PROFILE_DIR` stays the documented default only.
 
 This exact mismatch shipped a repeat failure: `connect` on a machine whose
 target records its own profile resolved the default profile's broker socket,
-found nothing, skipped broker maintenance, and then collided with the live
+found nothing, skipped the shared browser, and then collided with the live
 broker holding the real profile — the install died on
 `another Trusty Squire session is already using the browser — close it first`,
 so no pairing code was ever minted and the sign-in page rendered `not_found`.
-One shared browser per profile is the design. `connect` attaches to the broker
-(`withBrokerMaintenance`), drains it, does the login, and releases on the lease
-boundary — but that login is still a SECOND, self-launched Chrome on the same
-profile, which the design says it should not be. The ceremony is meant to open
-the sign-in as a tab in the browser the broker already has. Until it does, do
-not write here that connect never starts a second instance: it does.
+One shared browser per profile is the design. `connect` attaches as an ordinary
+broker client (`connectOrLaunchBroker`) and opens the sign-in as a TAB in the
+browser the broker already has; the self-launched persistent-context ceremony
+runs only when no broker can serve, and fail-fasts on the profile gate rather
+than racing a browser that owns the profile. It never starts a second instance
+beside a broker that owns the profile, and it never waits for one to free it.
 
 It also only goes there when it has to. The already-provisioned preflight runs
-BEFORE the maintenance handshake and the exclusive profile guard, and its
+BEFORE any broker or browser work, and its
 provider probe is a byte-copy read of the profile's cookie store
 (`detectProviderSessionsFromProfile`) — no profile lease, no wait, no browser.
 That is load-bearing, not an optimization: a probe that OPENS the profile
@@ -910,21 +911,16 @@ the machines that are already connected, which is the reported failure wearing a
 different message. Anything asking "is this machine already connected?" must
 answer it without taking the thing the answer is about.
 
-Only a connect that genuinely needs the login ceremony (no session,
-expired/absent token, `--force-relogin`) may approach the browser exclusively,
-and for that one a `draining` answer is reported at once rather than waited on.
-A probe failure is `unverified`, never a forced re-pair (connect-loops-forever).
+A connect that genuinely needs the login ceremony (no session,
+expired/absent token, `--force-relogin`) opens the confirm page as a tab in the
+shared browser rather than queueing behind live sessions; a probe failure is
+`unverified`, never a forced re-pair (connect-loops-forever).
 
 Corollaries: a close that cannot drain must not leave
 `BrokerRuntime.closing` set (that refuses every later session while the blocking
-sessions keep the broker alive); a maintenance connect answered `draining`
-must not arm the daemon's post-maintenance credential refresh/terminate path;
-and a connect that DID drain keeps the maintenance window owned across that
-whole teardown, so the retry loop can never be answered `ready` mid-restore and
-race the restore for the profile.
+sessions keep the broker alive).
 `apps/mcp/src/bot/__tests__/broker-connect-attach.test.ts` is the regression
-oracle for the attach, `broker-maintenance-window.test.ts` for the held window;
-`broker-maintenance.test.ts`, `broker-daemon.test.ts`,
+oracle for the tab ceremony; `broker-daemon.test.ts`,
 and `broker-prior-contract-reclaim.test.ts` pin the rest.
 
 Stale-artifact sweep: the startup `sweepOrphanedOwnerProcesses`

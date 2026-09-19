@@ -15,8 +15,9 @@
 //   * the profile's operation lease is held for the whole test by a lock record
 //     naming this live process, exactly as a resident broker holds it. Anything
 //     on connect's path that opens the profile throws ProfileBusyError.
-//   * a real `listenBroker` answers on the socket connect resolves, replying
-//     `draining` to any maintenance handshake and counting the attempts.
+//   * a real `listenBroker` answers on the socket connect resolves, as the
+//     resident broker does (connect must settle from reads without ever
+//     touching the broker's custody).
 //
 // The provider probe is NOT stubbed: connect runs the real one against a real
 // Chrome-shaped cookie store. Only the network API is faked — a genuine process
@@ -174,13 +175,9 @@ it("reports already connected while the broker owns the profile and its browser"
   profileLease = acquireProfileOperationGuard(profileDir);
 
   const socket = path.join(socketRoot, "b.sock");
-  let maintainAttempts = 0;
   broker = await listenBroker(socket, {
     authenticate: async () => ({ accountId: "account-id", agentId: "connect" }),
-    connected: async (_principal, params) => {
-      if (params.maintain === true) maintainAttempts += 1;
-      return params.maintain === true ? { maintenance: "draining" } : undefined;
-    },
+    connected: async () => undefined,
     call: async () => ({ closed: true }),
     disconnect: async () => undefined,
   });
@@ -211,9 +208,7 @@ it("reports already connected while the broker owns the profile and its browser"
   // The reported string, and the unverified fallback it arrives on.
   expect(output.join("\n")).not.toContain("already using the browser");
   expect(output.join("\n")).not.toContain("couldn't verify");
-  // The broker was never asked to give up its browser.
-  expect(maintainAttempts).toBe(0);
-  // And nothing waited on the profile: the old probe's pre-wait alone is 15s.
+  // Nothing waited on the profile: the old probe's pre-wait alone is 15s.
   expect(elapsed).toBeLessThan(5_000);
 });
 

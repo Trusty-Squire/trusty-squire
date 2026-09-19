@@ -408,7 +408,7 @@ export class BrokerClient {
   static async connect(
     path: string,
     token: string,
-    options: { maintain?: boolean; probe?: boolean; handshakeTimeoutMs?: number } = {},
+    options: { probe?: boolean; handshakeTimeoutMs?: number } = {},
   ): Promise<BrokerClient> {
     const socket = createConnection(path);
     const client = new BrokerClient(socket);
@@ -428,7 +428,6 @@ export class BrokerClient {
       const request: ConnectRequest = {
         token,
         agentId: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "local-agent",
-        ...(options.maintain ? { maintain: true } : {}),
         ...(options.probe ? { probe: true } : {}),
       };
       const welcome = await client.call("connect", { ...request });

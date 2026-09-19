@@ -1,34 +1,30 @@
-// Regression: `connect` must ATTACH to the live broker that owns the profile
-// it is connecting, not compete with it for the profile.
+// Regression: `connect`'s login ceremony must ATTACH to the live broker that
+// owns the profile it is connecting — as an ordinary broker client opening a
+// session tab at the confirm URL — not compete with it for the profile.
 //
 // One shared browser per profile is the design. The broker owns it and holds
 // the profile's operation lease; `connect` needs that same browser to seed the
-// user's provider session, so it drains the broker through the maintenance
-// handshake and takes the profile only for the duration of the plain login.
+// user's provider session, so it opens the confirm page as a TAB in the
+// broker's browser and never touches the profile lease at all.
 //
-// The seam that broke: `withBrokerMaintenance` resolved the broker ENDPOINT
-// from `CHROME_PROFILE_DIR` — frozen at module load — while `connect` guards
-// the profile it resolved from the TARGET agent's recorded environment.
+// The seam that broke: the old maintenance wrapper resolved the broker
+// ENDPOINT from `CHROME_PROFILE_DIR` — frozen at module load — while `connect`
+// guards the profile it resolved from the TARGET agent's recorded environment.
 // Whenever those differ (a machine carrying more than one Squire stack, or any
-// target whose recorded profile is not the process default), maintenance
-// addressed a different profile's endpoint, found no socket, skipped the
-// drain, and the exclusive guard then collided with the live broker — surfacing
-// as "another Trusty Squire session is already using the browser — close it
-// first" and, because the install never finished, a pairing code that does not
-// exist and a `not_found` sign-in page.
+// target whose recorded profile is not the process default), connect
+// addressed a different profile's endpoint and then collided with the live
+// broker — surfacing as "another Trusty Squire session is already using the
+// browser — close it first" and, because the install never finished, a pairing
+// code that does not exist and a `not_found` sign-in page.
 //
 // The fixture is a real separate process: it holds the profile operation lease
 // in the exact on-disk format the lease machinery reads, and it speaks the
-// connect/close maintenance contract over a real unix socket. Nothing here
-// launches Chrome.
-//
-// A broker whose browser is still owned answers `draining` and connect reports
-// that at once: an already-connected install never gets here (it is settled
-// from reads before any broker work), so the only caller left is one that
-// genuinely needs the login ceremony, and it must not wait.
+// connect/open/close wire contract over a real unix socket. Nothing here
+// launches Chrome — and crucially, the lock is NEVER released: attaching
+// means tab-sharing the broker's browser, not taking the profile from it.
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -37,43 +33,42 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../session-guard.js", () => ({
   createSessionGuard: () => ({
-    bind: async () => ({ agent_session_token: "fixture-token", account_id: "fixture-account" }),
+    bind: async () => ({
+      agent_session_token: "fixture-token",
+      account_id: "fixture-account",
+    }),
   }),
 }));
 
 const TOKEN = "fixture-token";
+const CONFIRM_URL = "https://trustysquire.ai/install/confirm?install=fixture";
 
 /**
  * A real broker fixture: a separate process that
  *
  * - holds the profile operation lease (the file whose owner record the guard
- *   machinery reads) for as long as its browser is up,
- * - releases it while a maintenance window is open and re-claims it on the
- *   lease boundary (`close`), exactly like `BrokerRuntime`,
- * - answers the first `drainingReplies` maintain connects with
- *   `maintenance: "draining"` (live sessions still own the browser) before
- *   opening a window.
+ *   machinery reads) for as long as it lives — like `BrokerRuntime`, which
+ *   keeps the election guard across its whole custody,
+ * - answers the connect handshake and then one `open` with a session id,
+ *   recording what it was asked to open,
+ * - records the session `close` and answers it (the lease-boundary close).
  */
 const BROKER_FIXTURE_SCRIPT = `
 const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
-const [marker, socketPath, lockPath, token, drainingReplies] = process.argv.slice(2);
+const [marker, socketPath, lockPath, token] = process.argv.slice(2);
 if (marker !== "broker") process.exit(78);
 function startTime() {
   const stat = fs.readFileSync("/proc/self/stat", "utf8");
   return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
 }
-function claim() {
-  fs.writeFileSync(
-    lockPath,
-    JSON.stringify({ host: os.hostname(), pid: process.pid, start_time: startTime(), token: "lease" }),
-    { mode: 0o600 },
-  );
-}
-claim();
-let remainingDraining = Number(drainingReplies) || 0;
-let windowOpen = false;
+fs.writeFileSync(
+  lockPath,
+  JSON.stringify({ host: os.hostname(), pid: process.pid, start_time: startTime(), token: "lease" }),
+  { mode: 0o600 },
+);
+const seen = { openUrl: null, closedSession: null };
 const server = net.createServer((socket) => {
   let buffered = "";
   socket.on("data", (chunk) => {
@@ -96,25 +91,18 @@ const server = net.createServer((socket) => {
           reply({ error: { code: "unauthorized", message: "Invalid broker credential" } });
           continue;
         }
-        if (request.params?.maintain === true) {
-          if (remainingDraining > 0) {
-            remainingDraining -= 1;
-            reply({ result: { version: 1, clientId: "fixture", maintenance: "draining" } });
-            continue;
-          }
-          fs.rmSync(lockPath, { force: true });
-          windowOpen = true;
-          reply({ result: { version: 1, clientId: "fixture", maintenance: "ready" } });
-          continue;
-        }
         reply({ result: { version: 1, clientId: "fixture" } });
         continue;
       }
+      if (request.method === "open") {
+        seen.openUrl = request.params?.serviceUrl ?? null;
+        reply({ result: { sessionId: "tab-1" } });
+        continue;
+      }
       if (request.method === "close") {
-        if (windowOpen) {
-          windowOpen = false;
-          claim();
-        }
+        // The connection-level close (release) carries no session id; only
+        // the session-tab close is worth recording.
+        if (request.params?.sessionId != null) seen.closedSession = request.params.sessionId;
         reply({ result: { closed: true } });
         continue;
       }
@@ -123,7 +111,9 @@ const server = net.createServer((socket) => {
   });
 });
 server.listen(socketPath);
-setInterval(() => undefined, 1000);
+fs.writeFileSync(lockPath + ".seen", JSON.stringify(seen), { mode: 0o600 });
+const persist = () => fs.writeFileSync(lockPath + ".seen", JSON.stringify(seen), { mode: 0o600 });
+setInterval(persist, 50);
 `;
 
 const cleanup: { dirs: string[]; children: ChildProcess[] } = { dirs: [], children: [] };
@@ -179,11 +169,12 @@ async function profileLockPath(
  * broker or browser work, so the live environment names the target while
  * `CHROME_PROFILE_DIR` still names the process default.
  */
-async function connectFixture(drainingReplies: number): Promise<{
+async function connectFixture(): Promise<{
   result: unknown;
   profileIdentity: string;
-  guardObservedFree: boolean;
-  lockRestored: boolean;
+  lockNeverReleased: boolean;
+  openUrl: string | null;
+  closedSession: string | null;
 }> {
   const root = await tempDir();
   const lockRoot = join(root, "locks");
@@ -207,8 +198,7 @@ async function connectFixture(drainingReplies: number): Promise<{
   process.env.TRUSTY_SQUIRE_PROFILE_DIR = targetProfile;
 
   const discovery = await import("../broker/discovery.js");
-  const { withBrokerMaintenance } = await import("../broker/maintenance.js");
-  const { withProfileOperationGuard } = profileModule;
+  const { tryRunCeremonyInSharedBroker } = await import("../google-login.js");
 
   const socketPath = discovery.defaultBrokerSocket(targetProfile);
   await mkdir(dirname(socketPath), { recursive: true, mode: 0o700 });
@@ -217,48 +207,63 @@ async function connectFixture(drainingReplies: number): Promise<{
   await writeFile(scriptPath, BROKER_FIXTURE_SCRIPT, { mode: 0o600 });
   const child = spawn(
     process.execPath,
-    [scriptPath, "broker", socketPath, lockPath, TOKEN, String(drainingReplies)],
+    [scriptPath, "broker", socketPath, lockPath, TOKEN],
     { stdio: "ignore" },
   );
   cleanup.children.push(child);
   await waitFor(() => existsSync(lockPath) && existsSync(socketPath));
 
-  let guardObservedFree = false;
-  const result = await withBrokerMaintenance(async () => {
-    // A live broker owns this profile. Attaching to it is what frees the
-    // exclusive guard connect takes next; without the drain this is the
-    // ProfileBusyError the captain saw.
-    guardObservedFree = !existsSync(lockPath);
-    return await withProfileOperationGuard(targetProfile, async () => "connected");
+  await waitFor(() => existsSync(lockPath + ".seen"), 5_000).catch(() => undefined);
+  const result = await tryRunCeremonyInSharedBroker({
+    profileDir: targetProfile,
+    url: CONFIRM_URL,
+    deadline: Date.now() + 5_000,
+    pollUntilDone: async () => true,
+    bannerLabel: "fixture",
   }).catch((error: unknown) => error);
-  await waitFor(() => existsSync(lockPath), 5_000).catch(() => undefined);
+  // The fixture persists its record on a short interval; wait for the close
+  // so the assertion below cannot race the last persist tick.
+  await waitFor(() => {
+    try {
+      return JSON.parse(readFileSync(lockPath + ".seen", "utf8")).closedSession !== null;
+    } catch {
+      return false;
+    }
+  }, 5_000).catch(() => undefined);
+  const seen = ((): { openUrl: string | null; closedSession: string | null } => {
+    try {
+      return JSON.parse(readFileSync(lockPath + ".seen", "utf8"));
+    } catch {
+      return { openUrl: null, closedSession: null };
+    }
+  })();
   return {
     result,
     profileIdentity: profileModule.profilePathIdentity(targetProfile),
-    guardObservedFree,
-    lockRestored: existsSync(lockPath),
+    // Attaching never released the broker's custody of the profile, not even
+    // momentarily: the ceremony is a tab in the broker's browser.
+    lockNeverReleased: existsSync(lockPath),
+    openUrl: seen.openUrl,
+    closedSession: seen.closedSession,
   };
 }
 
 describe("connect attaches to the live broker for the profile it is connecting", () => {
-  it("drains the broker that owns the target profile, not the process default", async () => {
-    const outcome = await connectFixture(0);
-    expect(outcome.result).toBe("connected");
-    // The broker released the profile for the duration of the operation...
-    expect(outcome.guardObservedFree).toBe(true);
-    // ...and took custody back on the lease boundary.
-    expect(outcome.lockRestored).toBe(true);
-  });
-
-  it("reports the TARGET profile when that broker's browser is still owned", async () => {
-    // The refusal is the other half of the same seam: it proves the endpoint
-    // that answered belongs to the target profile, not the process default,
-    // because the fixture listening on it is the target's.
-    const outcome = await connectFixture(1);
-    expect(outcome.result).toBeInstanceOf(Error);
-    expect((outcome.result as Error).message).toContain(outcome.profileIdentity);
-    // Nothing ran and the broker kept custody: no drain, no guard, no relaunch.
-    expect(outcome.guardObservedFree).toBe(false);
-    expect(outcome.lockRestored).toBe(true);
-  });
+  it(
+    "opens the confirm tab through the broker that owns the TARGET profile, not the process default",
+    { timeout: 30_000 },
+    async () => {
+      const outcome = await connectFixture();
+    expect(outcome.result).toEqual({ status: "satisfied", closeState: "closed" });
+    // The confirm URL went to the broker whose socket belongs to the target
+    // profile — the fixture is the only listener on it, and it received the
+    // tab open.
+    expect(outcome.openUrl).toBe(CONFIRM_URL);
+    // The session tab is closed at the lease boundary.
+    expect(outcome.closedSession).toBe("tab-1");
+    // The profile lease was never touched: no drain, no guard, no second
+    // Chrome, no wait.
+      expect(outcome.lockNeverReleased).toBe(true);
+    },
+  );
 });

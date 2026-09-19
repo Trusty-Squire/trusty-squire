@@ -212,7 +212,7 @@ it("refuses to recycle when the previous browser does not close", async () => {
   expect(state.start).toHaveBeenCalledTimes(1);
 });
 
-it("refuses the recycled start when maintenance drains the cell mid-recycle", async () => {
+it("refuses the recycled start when a close drains the cell mid-recycle", async () => {
   state.attach.mockResolvedValue({ closeOwnPagesOnly: vi.fn(async () => "closed") });
   const runtime = new BrokerRuntime("account");
   const first = await runtime.acquire({ profileDir: root });
@@ -232,7 +232,7 @@ it("refuses the recycled start when maintenance drains the cell mid-recycle", as
 
   expect(await maintenance).toBe(true);
   await expect(recycled).rejects.toThrow(/draining/);
-  // The drained cell must not be handed a fresh Chrome behind maintenance's back.
+  // The drained cell must not be handed a fresh Chrome behind the close's back.
   expect(state.start).toHaveBeenCalledTimes(1);
   runtime.resume();
 });

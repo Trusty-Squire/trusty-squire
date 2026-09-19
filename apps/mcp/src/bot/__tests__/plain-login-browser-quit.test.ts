@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { PLAIN_LOGIN_BROWSER_QUIT_SIGNAL, quitPlainLoginBrowser } from "../browser.js";
+import { BROWSER_QUIT_SIGNAL, quitBrowserGracefully } from "../browser-process-runtime.js";
 import { resolveChannelBinary } from "../browser.js";
 
 // Regression: `connect` established a real Google session in the bot's Chrome
@@ -16,10 +16,10 @@ import { resolveChannelBinary } from "../browser.js";
 // truthfully reports "Google not connected". Verified against real Chrome on
 // 2026-09-04: a cookie set 6s before the signal survives SIGINT and is lost on
 // SIGTERM, for both a bare pid and a process-group signal.
-describe("quitPlainLoginBrowser", () => {
+describe("quitBrowserGracefully", () => {
   it("quits with SIGINT, never SIGTERM", async () => {
     const signals: NodeJS.Signals[] = [];
-    await quitPlainLoginBrowser({
+    await quitBrowserGracefully({
       signalQuit: (signal) => {
         signals.push(signal);
         return true;
@@ -28,7 +28,7 @@ describe("quitPlainLoginBrowser", () => {
       finalize: async () => undefined,
     });
     expect(signals).toEqual(["SIGINT"]);
-    expect(PLAIN_LOGIN_BROWSER_QUIT_SIGNAL).toBe("SIGINT");
+    expect(BROWSER_QUIT_SIGNAL).toBe("SIGINT");
   });
 
   it("does not run the reaper handover while Chrome is still shutting down", async () => {
@@ -37,7 +37,7 @@ describe("quitPlainLoginBrowser", () => {
     const order: string[] = [];
     let alive = true;
     let polls = 0;
-    await quitPlainLoginBrowser({
+    await quitBrowserGracefully({
       signalQuit: (signal) => {
         order.push(`signal:${signal}`);
         return true;
@@ -62,7 +62,7 @@ describe("quitPlainLoginBrowser", () => {
   it("hands over immediately when the quit signal could not be delivered", async () => {
     const order: string[] = [];
     let waits = 0;
-    await quitPlainLoginBrowser({
+    await quitBrowserGracefully({
       signalQuit: () => false,
       isRunning: () => true,
       finalize: async () => {
@@ -80,7 +80,7 @@ describe("quitPlainLoginBrowser", () => {
   it("hands over to the reaper when the graceful quit outlasts its deadline", async () => {
     const order: string[] = [];
     let waits = 0;
-    await quitPlainLoginBrowser({
+    await quitBrowserGracefully({
       signalQuit: () => true,
       isRunning: () => true,
       finalize: async () => {
@@ -100,7 +100,7 @@ describe("quitPlainLoginBrowser", () => {
 
 // The fact the fix rests on, checked against REAL Chrome rather than asserted
 // from a comment: a cookie written moments before the quit survives
-// PLAIN_LOGIN_BROWSER_QUIT_SIGNAL. Flip that constant back to SIGTERM and this
+// BROWSER_QUIT_SIGNAL. Flip that constant back to SIGTERM and this
 // fails — the cookie store is never flushed and the profile comes back empty.
 // Opt-in (needs Chrome + an X display or Xvfb): RUN_LIVE_CHROME_QUIT=1.
 describe.skipIf(process.env.RUN_LIVE_CHROME_QUIT !== "1")("live Chrome cookie flush", () => {
@@ -135,7 +135,7 @@ describe.skipIf(process.env.RUN_LIVE_CHROME_QUIT !== "1")("live Chrome cookie fl
         exited = true;
       });
       await new Promise((resolve) => setTimeout(resolve, 6_000));
-      await quitPlainLoginBrowser({
+      await quitBrowserGracefully({
         signalQuit: (signal) => {
           child.kill(signal);
           return true;

@@ -17,8 +17,8 @@ const realSpawn = (await (vi.importActual("node:child_process") as Promise<typeo
 // takes the election lease and binds a real Contract B listener.
 const state = vi.hoisted(() => ({
   spawn: vi.fn(),
-  maintenanceToken: "test",
-  maintenanceAccountId: "account" as string | undefined,
+  sessionToken: "test",
+  sessionAccountId: "account" as string | undefined,
 }));
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof ChildProcess>();
@@ -27,8 +27,8 @@ vi.mock("node:child_process", async (importOriginal) => {
 vi.mock("../../session-guard.js", () => ({
   createSessionGuard: () => ({
     bind: async () => ({
-      agent_session_token: state.maintenanceToken,
-      account_id: state.maintenanceAccountId,
+      agent_session_token: state.sessionToken,
+      account_id: state.sessionAccountId,
     }),
   }),
 }));
@@ -717,90 +717,6 @@ describe("same-contract stale-credential broker reclaim", () => {
       expect(state.spawn).toHaveBeenCalledOnce();
       expect(client.welcome).toBeDefined();
       await client.close();
-    },
-  );
-});
-
-describe("broker reclaim through plain-login maintenance", () => {
-  let root: string;
-  let profile: string;
-  let socket: string;
-  let fixture: ChildProcess.ChildProcess | undefined;
-  let fixtureExit: Promise<string | null> | undefined;
-
-  beforeEach(async () => {
-    root = await mkdtemp(join(tmpdir(), "ts-maint-reclaim-"));
-    profile = join(root, "profile");
-    socket = join(root, "broker.sock");
-    fixture = undefined;
-    fixtureExit = undefined;
-    state.maintenanceAccountId = ACCOUNT_ID;
-    await mkdir(profile);
-    await bindProfileToAccount(profile, ACCOUNT_ID);
-    vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profile);
-    vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", socket);
-    vi.resetModules();
-  });
-
-  afterEach(async () => {
-    fixture?.kill("SIGKILL");
-    vi.unstubAllEnvs();
-    await rm(root, { recursive: true, force: true });
-  });
-
-  it(
-    "drains a resident prior-contract broker instead of racing it for the profile, then logs in plain",
-    { timeout: 30_000 },
-    async () => {
-      state.maintenanceToken = "test";
-      const { discovery, profileModule, transport } = await modules();
-      const lockPath = await electionLockPath(discovery, profileModule, profile);
-
-      fixture = realSpawn(
-        process.execPath,
-        ["-e", PRIOR_CONTRACT_DAEMON_SCRIPT, "broker", socket, lockPath, "test", ""],
-        { stdio: "ignore" },
-      );
-      fixtureExit = awaitExit(fixture);
-      await awaitFixtureReady(socket, lockPath, "test", { listens: true });
-      expect(await leaseOwnerPid(lockPath)).toBe(fixture.pid!);
-
-      // The transport import above registered the real module before the
-      // session-guard mock; a fresh import graph is not needed because the
-      // maintenance module resolves session-guard at its own import.
-      void transport;
-      const { withBrokerMaintenance } = await import("../broker/maintenance.js");
-      await expect(withBrokerMaintenance(async () => "plain-login")).resolves.toBe("plain-login");
-      // The prior-contract daemon is gone: the plain login drained it rather
-      // than racing it for the profile.
-      expect(await fixtureExit).toBe("SIGTERM");
-    },
-  );
-
-  it(
-    "drains a resident same-contract broker whose credential no longer matches, then logs in plain",
-    { timeout: 30_000 },
-    async () => {
-      state.maintenanceToken = "new-token";
-      const { discovery, profileModule, transport } = await modules();
-      const lockPath = await electionLockPath(discovery, profileModule, profile);
-
-      fixture = realSpawn(
-        process.execPath,
-        ["-e", PRIOR_CONTRACT_DAEMON_SCRIPT, "broker", socket, lockPath, "old-token", "contract-b"],
-        { stdio: "ignore" },
-      );
-      fixtureExit = awaitExit(fixture);
-      await awaitFixtureReady(socket, lockPath, "old-token", {
-        listens: true,
-        contract: "current",
-      });
-      expect(await leaseOwnerPid(lockPath)).toBe(fixture.pid!);
-
-      void transport;
-      const { withBrokerMaintenance } = await import("../broker/maintenance.js");
-      await expect(withBrokerMaintenance(async () => "plain-login")).resolves.toBe("plain-login");
-      expect(await fixtureExit).toBe("SIGTERM");
     },
   );
 });

@@ -107,7 +107,6 @@ import {
   openInstallConfirmInBotChrome,
 } from "../bot/google-login.js";
 import { clearBrowserProfile, clearProviderCookies } from "../bot/login-state.js";
-import { withProfileOperationGuard } from "../bot/profile.js";
 import { installPoll } from "../api-client.js";
 import { connect, resolveServerLaunch } from "../install/cli.js";
 import { AGENTS } from "../install/agents.js";
@@ -408,7 +407,11 @@ describe("connect --target=<agent> writes a valid config", () => {
         expect.objectContaining({ profileDir: hermesProfile }),
       );
       expect(detectActiveProviderSessions).toHaveBeenLastCalledWith(hermesProfile);
-      expect(withProfileOperationGuard).toHaveBeenCalledWith(hermesProfile, expect.any(Function));
+      // The profile operation guard now belongs to the ceremony launcher
+      // itself (launchCeremonyBrowserContext / the broker's own custody),
+      // not to the connect flow around it — the ceremony this suite mocks
+      // therefore runs without one. google-login.test.ts pins the guard
+      // contract on the real launcher.
       const config = await readSquireConfig("hermes");
       expect(config.env).toMatchObject({
         TRUSTY_SQUIRE_AGENT_IDENTITY: "hermes",

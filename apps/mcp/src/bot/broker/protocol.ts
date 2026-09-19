@@ -9,7 +9,6 @@
 //   tool{name,args}              -> command   (the only place a tool name appears)
 //   tool{name:"operate_finish"}  -> close{ sessionId, args }
 //   client_close                 -> close{}   (ends the connection: the lease boundary)
-//   maintenance / resume         -> the connect-only `maintain` intent on connect
 //   cancel                       -> the reserved `abort` control frame
 //
 // Framing, MAX_FRAME, the `{ id, error: { code, message } }` error shape, the
@@ -31,12 +30,6 @@ export interface ConnectRequest {
   token: string;
   agentId: string;
   /**
-   * Connect-only concern: drain the shared browser for the plain-login
-   * maintenance window ("maintenance" + "resume" folded into the connect path).
-   * It is deliberately not a general client operation.
-   */
-  maintain?: boolean;
-  /**
    * Connect-only concern: this connection will only read `status`. It is a
    * read, so it is kept out of the broker's idle accounting — probing on any
    * cadence must not extend how long the shared Chrome stays resident.
@@ -46,8 +39,6 @@ export interface ConnectRequest {
 export interface ConnectResult {
   version: 1;
   clientId: string;
-  /** Present only when the connection requested `maintain`. */
-  maintenance?: "ready" | "draining";
 }
 
 /** open: start one operator session on the shared browser. */

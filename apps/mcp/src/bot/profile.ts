@@ -799,41 +799,6 @@ export function currentProfileHolderPid(profileDir: string = CHROME_PROFILE_DIR)
   return holder.pid;
 }
 
-/**
- * Which live process owns this profile right now, named the way a person can
- * act on. `PROFILE_BUSY_MESSAGE` alone ("close it first") tells the user
- * nothing about WHICH session to close or how; this is the diagnostic the
- * interactive entry points append to it.
- *
- * The operation lease is preferred over Chrome's SingletonLock: the lease is
- * the actual gate a later launch collides with, and it names the owner even
- * when the owner has not started Chrome yet. Returns null when nothing on this
- * host provably owns the profile.
- *
- * Only what a person can act on goes in here. A process start time is an
- * internal identity token (raw /proc jiffies on Linux, a platform-prefixed
- * string elsewhere) and is never rendered at the user.
- */
-export function profileBusyDetail(
-  profileDir: string = CHROME_PROFILE_DIR,
-  lockRoot: string = tmpdir(),
-): string | null {
-  const profile = profilePathIdentity(profileDir);
-  const lease = profileOperationLockOwner(profile, lockRoot);
-  const leaseOwner =
-    lease !== null && lease.host === hostname() && isPidAlive(lease.pid) ? lease.pid : null;
-  const holder = readLockHolder(profile);
-  const chromeHolder =
-    holder !== null && holder.host === hostname() && !holder.stale ? holder.pid : null;
-  const pid = leaseOwner ?? chromeHolder;
-  if (pid === null) return null;
-  const role = leaseOwner !== null ? "Trusty Squire session" : "Chrome";
-  return (
-    `${role} pid ${pid} holds ${profile}. ` +
-    `Finish that session, or stop pid ${pid} if it is wedged, then retry.`
-  );
-}
-
 export function reapLeakedProfileHolder(profileDir: string = CHROME_PROFILE_DIR): boolean {
   const holder = readLockHolder(profileDir);
   if (holder === null || holder.host !== hostname()) return false;

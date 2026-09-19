@@ -1,12 +1,9 @@
-import { withBrokerMaintenance } from "../bot/broker/maintenance.js";
 // Setup CLI — connect / settings / logout subcommands.
 //
 // `connect` is the ONE onboarding AND re-auth pathway. There is no separate
-// `login` command: it ran its Google OAuth through a CDP-attached Chrome,
-// which Google's "secure browser" check rejects (STATE.md 2026-07-20), and a
-// second command that could seed a provider session independently of the
-// account claim is exactly how an install ended up "connected" with no live
-// Google session.
+// `login` command: a second command that could seed a provider session
+// independently of the account claim is exactly how an install ended up
+// "connected" with no live Google session.
 //
 //   npx @trusty-squire/mcp connect --target=claude-code
 //     Issues a machine token, then opens the trustysquire install-
@@ -64,9 +61,7 @@ import {
   CHROME_PROFILE_DIR,
   PROFILE_BUSY_MESSAGE,
   ProfileBusyError,
-  profileBusyDetail,
   profilePathIdentity,
-  withProfileOperationGuard,
 } from "../bot/profile.js";
 import { VERSION } from "../version.js";
 import { ensureLatestVersion } from "./version-check.js";
@@ -481,9 +476,8 @@ async function connect(args: Argv): Promise<void> {
       },
       async () => {
         // An install that is already connected needs no browser at all. Decide
-        // that BEFORE the broker drain and the exclusive profile guard, or a
-        // machine whose browser is busy with other work fails an install it
-        // never had to perform.
+        // that BEFORE any browser work, or a machine whose browser is busy with
+        // other work fails an install it never had to perform.
         if (
           await settleAlreadyConnected(
             args,
@@ -495,26 +489,26 @@ async function connect(args: Argv): Promise<void> {
           )
         )
           return;
-        await withBrokerMaintenance(
-          async () =>
-            await withConnectProfileGuard(canonicalProfileDir, (profileDir) =>
-              connectWithProfileGuard(
-                args,
-                target,
-                agent,
-                profileDir,
-                context.accountId,
-                context.agentIdentity,
-                wantInteractive,
-              ),
-            ),
+        // No drain, no exclusive profile guard: the ceremony opens the confirm
+        // page as a TAB in the shared browser (the resident broker's Chrome),
+        // or — on a machine where no broker can serve yet — launches the
+        // operator's own persistent-context browser on the bot profile. It
+        // never starts a second instance beside a broker that owns the
+        // profile, and it never waits for one to free it.
+        await runConnectInstall(
+          args,
+          target,
+          agent,
+          canonicalProfileDir,
+          context.accountId,
+          context.agentIdentity,
+          wantInteractive,
         );
       },
     );
   } catch (err) {
     if (err instanceof ProfileBusyError) {
-      const detail = profileBusyDetail(canonicalProfileDir);
-      ui.fail(detail === null ? PROFILE_BUSY_MESSAGE : `${PROFILE_BUSY_MESSAGE}\n  ${detail}`);
+      ui.fail(PROFILE_BUSY_MESSAGE);
       process.exit(1);
     }
     throw err;
@@ -570,9 +564,9 @@ function contextValue(
 }
 
 /**
- * Resolve reconnect custody before any profile lock, broker maintenance, or
- * browser work. Explicit process env wins over the target's recorded launch
- * env; the recorded env wins over first-connect defaults.
+ * Resolve reconnect custody before any browser work. Explicit process env wins
+ * over the target's recorded launch env; the recorded env wins over
+ * first-connect defaults.
  */
 export async function resolveConnectTargetContext(
   target: AgentTarget,
@@ -623,14 +617,6 @@ async function withConnectTargetEnvironment<T>(
   }
 }
 
-export async function withConnectProfileGuard<T>(
-  profileDir: string,
-  operation: (canonicalProfileDir: string) => Promise<T>,
-): Promise<T> {
-  const canonicalProfileDir = profilePathIdentity(profileDir);
-  return await withProfileOperationGuard(canonicalProfileDir, () => operation(canonicalProfileDir));
-}
-
 /**
  * Settle a connect that needs no login ceremony, using only reads: the stored
  * session, the account-bound plumbing, and a cookie probe of the profile on
@@ -642,9 +628,9 @@ export async function withConnectProfileGuard<T>(
  * at third-party sites, so it must not skip the browser confirm. Pass
  * --force-relogin to bypass (e.g. to switch Google).
  *
- * This runs OUTSIDE the broker maintenance window and the exclusive profile
- * guard: only a connect that genuinely needs the ceremony may approach the
- * browser exclusively.
+ * This runs before any browser work and takes no profile lease: a machine
+ * whose browser is busy is exactly the machine this path exists to settle
+ * without touching the browser at all.
  */
 async function settleAlreadyConnected(
   args: Argv,
@@ -704,7 +690,7 @@ async function settleAlreadyConnected(
   return false;
 }
 
-async function connectWithProfileGuard(
+async function runConnectInstall(
   args: Argv,
   target: AgentTarget,
   agent: AgentDefinition,
@@ -721,13 +707,19 @@ async function connectWithProfileGuard(
   // --force-relogin means "redo the OAuth dance from scratch". The scoped
   // form clears only one provider; bare --force-relogin is the full-profile
   // account-switch escape hatch.
+  //
+  // clearProviderCookies launches its own short-lived headless Chrome and
+  // fail-fasts while any other browser holds the profile — including the
+  // resident broker's Chrome. Run it BEFORE clearBrowserProfile so an
+  // account-switch on a busy machine is refused at the gate instead of
+  // deleting the profile directory out from under a live Chrome.
   if (args.forceRelogin) {
     let cookiesCleared: boolean;
     if (args.forceReloginProvider !== undefined) {
       cookiesCleared = await clearProviderCookies(profileDir, args.forceReloginProvider);
     } else {
-      clearBrowserProfile(profileDir);
       cookiesCleared = await clearProviderCookies(profileDir);
+      if (cookiesCleared) clearBrowserProfile(profileDir);
     }
     if (!cookiesCleared) {
       ui.fail(
@@ -833,8 +825,10 @@ async function connectWithProfileGuard(
     );
   }
 
-  // Persist the current live probe only as connect UX data.
-  for (const p of providers ?? []) await recordConnectedProvider(p);
+  // Persist the current live probe only as connect UX data, bound to the
+  // account the preflight reads, so the post-ceremony writer and the preflight
+  // address the same record on multi-account machines.
+  for (const p of providers ?? []) await recordConnectedProvider(p, accountId);
   printProviderState(providers ?? []);
 
   // Config + key land either way: the session is real and re-running connect
@@ -1078,7 +1072,11 @@ function confirmRecordedProviders(
   cookieProviders: OAuthProviderId[],
 ): OAuthProviderId[] {
   const recorded = session.connected_providers;
-  if (recorded === undefined) return cookieProviders;
+  // An absent or EMPTY record means "unknown", not "none": shipped builds
+  // could persist [] from a transient probe failure, and intersecting cookie
+  // evidence against that lie would demote a really-signed-in machine forever.
+  // The veto only applies to providers the record positively names.
+  if (recorded === undefined || recorded.length === 0) return cookieProviders;
   return cookieProviders.filter((provider) => recorded.includes(provider));
 }
 
@@ -1138,7 +1136,19 @@ async function checkAlreadyProvisioned(
       return preflight;
     }
     const preflight = decideConnectPreflight(session, stillValid, providers);
-    return preflight.kind === "provisioned" ? { ...preflight, session } : preflight;
+    if (preflight.kind === "provisioned") {
+      // Repair write, outside any ceremony: cookie evidence that passed the
+      // live-expiry check outranks an under-reported record. Shipped builds
+      // could persist a short set (a transient probe failure recorded verbatim),
+      // and an unrepaired record demoted every later connect forever. Add-only:
+      // the veto never covered REMOVING a provider on a transient miss.
+      const recorded = new Set(session.connected_providers ?? []);
+      for (const p of providers) {
+        if (!recorded.has(p)) await recordConnectedProvider(p, accountId);
+      }
+      return { ...preflight, session };
+    }
+    return preflight;
   } catch {
     return { kind: "ceremony" };
   }

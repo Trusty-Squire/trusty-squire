@@ -40,23 +40,9 @@ import { OperatorEvidenceCollector } from "./operator-evidence.js";
 // gate).
 
 import {
-  childProcessIsRunning,
-  closeLocalBrowserLaunch,
-  markLocalBrowserLaunchTerminal,
-  profileCollisionFromStderr,
-  quitBrowserGracefully as quitPlainLoginBrowser,
-  registerLocalBrowserLaunch,
-  registerSelfManagedChrome,
-  resolveAttachedProfileChildIdentity,
-  selfManagedChromes,
-  signalOwnedChromeProcessTree,
-  spawnLocalBrowser,
-  trackOwnedChromeProcessTree,
-  withChromeStartupLock,
   type StealthProfile,
 } from "./browser-process-runtime.js";
 
-import { type ChildProcess } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import type { BrowserContext, ElementHandle, FileChooser, Frame, Locator, Page } from "playwright";
 import type { MailResultRow } from "./capture/verification.js";
@@ -65,16 +51,10 @@ import {
   markOperatorMutationDispatchAttempted,
 } from "./request-cancellation.js";
 import { BrowserProcessOwner } from "./browser-process-owner.js";
-import { bindOwnerBrowserLaunch, untrackOwnerBrowserLaunch } from "./owner-process-reaper.js";
 import { PageDriver } from "./page-driver.js";
 import type { ActiveOAuthAttempt } from "./oauth-login.js";
 import {
-  clearStaleSingletonLock,
-  profileProcessIdentity,
-  reapProfileHolderIfOwned,
-  signalProfileProcess,
   type ProfileCloseState,
-  type ProfileProcessIdentity,
 } from "./profile.js";
 
 export type ContextInitScriptId = "evaluate-name-shim" | "navigator-webdriver" | "webgl-spoof";
@@ -292,190 +272,12 @@ export function stripCloudflareChallengeParams(rawUrl: string): string | null {
   return changed ? u.toString() : null;
 }
 
-export interface PlainLoginBrowser {
-  // Idempotent: kills the spawned Chrome child and reaps the profile lock.
-  teardown: () => Promise<void>;
-  forceTeardown: () => void;
-  // Plain login intentionally has no CDP attachment, so expose child liveness
-  // for the polling loop to fail loudly if the visible browser disappears.
-  isRunning: () => boolean;
-  identity: ProfileProcessIdentity | null;
-  marker: string;
-}
-
-// Preserve the plain-login API; both owners use the same bounded graceful quit.
+// The bounded graceful-quit primitives behind the old plain-login browser
+// remain the operator owner's shared teardown path.
 export {
-  BROWSER_QUIT_SIGNAL as PLAIN_LOGIN_BROWSER_QUIT_SIGNAL,
-  quitBrowserGracefully as quitPlainLoginBrowser,
+  BROWSER_QUIT_SIGNAL,
+  quitBrowserGracefully,
 } from "./browser-process-runtime.js";
-
-// Launch a TRULY PLAIN Chrome for the interactive connect claim — NO
-// `--remote-debugging-port`, NO `connectOverCDP`, NO Playwright attach at all.
-//
-// WHY (2026-07-20, fully bisected on chad; see STATE.md "connect Google-login").
-// Google's OAUTH authorization flow (Trusty Squire's "Sign in with Google",
-// Gmail restricted scope) runs a "secure browser" integrity check that a plain
-// `google-chrome` PASSES but a CDP-attached Chrome FAILS with
-// `/v3/signin/rejected` — even a self-launched one, even with patchright, even
-// though the same CDP browser passes a DIRECT accounts.google.com sign-in. The
-// tell is the CDP attachment itself (NOT the launcher, NOT the flags, NOT
-// `navigator.webdriver` — all separately ruled out). The connect claim doesn't
-// need to drive the browser: the USER signs in interactively, completion comes
-// from the API (`installPoll`) plus its explicit Finish callback. So we spawn
-// Chrome and only ever kill it — never attach.
-//
-// Persistent profile is preserved (--user-data-dir=profileDir) so the Google/
-// GitHub session still lands in the bot's profile for later signups.
-export async function launchPlainLoginBrowser(params: {
-  binary: string;
-  profileDir: string;
-  // App mode (--app=URL) opens a chromeless window so the install page fills the
-  // interactive browser window.
-  url: string;
-  window: { width: number; height: number };
-  env: NodeJS.ProcessEnv;
-  proxyServer: string | null;
-  extraArgs?: readonly string[];
-}): Promise<PlainLoginBrowser> {
-  let child: ChildProcess | null = null;
-  let childIdentity: ProfileProcessIdentity | null = null;
-  // Login's plain browser is the no-CDP path used for Google sign-in. Reserve
-  // its marker before launch so the rc.15 fail-closed reaper bind is legitimate.
-  const ownership = registerLocalBrowserLaunch(params.profileDir, params.env);
-  const launchMarker = ownership.marker;
-  let spawned = false;
-  try {
-    await withChromeStartupLock(
-      async () => {
-        clearStaleSingletonLock(params.profileDir);
-        const argv = [
-          `--user-data-dir=${params.profileDir}`,
-          "--no-first-run",
-          "--no-default-browser-check",
-          "--password-store=basic",
-          "--window-position=0,0",
-          `--window-size=${params.window.width},${params.window.height}`,
-          "--lang=en-US",
-          ...(params.extraArgs ?? []),
-          ...(params.proxyServer !== null ? [`--proxy-server=${params.proxyServer}`] : []),
-          `--app=${params.url}`,
-        ];
-        const launched = spawnLocalBrowser(params.binary, argv, params.profileDir, {
-          detached: process.platform !== "win32",
-          env: ownership.env,
-          stdio: ["ignore", "ignore", "pipe"],
-          marker: launchMarker,
-        });
-        child = launched;
-        spawned = true;
-        let chromeStderr = "";
-        launched.stderr?.on("data", (chunk: Buffer) => {
-          chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
-        });
-        // Give Chrome a moment to actually come up (or die). Unlike the CDP path
-        // there is no devtools endpoint to poll — but a crash-on-launch (bad
-        // profile, missing lib) should surface here, not 15min later as a blank
-        // browser. If the process is already dead, throw with its stderr.
-        await new Promise((r) => setTimeout(r, 1_200));
-        childIdentity ??=
-          launched.pid === undefined
-            ? null
-            : profileProcessIdentity(launched.pid, params.profileDir);
-        childIdentity = await resolveAttachedProfileChildIdentity(
-          launched,
-          params.profileDir,
-          childIdentity,
-        );
-        childIdentity = registerSelfManagedChrome(launched, params.profileDir) ?? childIdentity;
-        if (childIdentity !== null) {
-          const existing = selfManagedChromes.get(childIdentity.pid);
-          const proof =
-            existing?.identity.start_time === childIdentity.start_time
-              ? existing.proof
-              : trackOwnedChromeProcessTree(childIdentity, false);
-          if (proof !== null) {
-            selfManagedChromes.set(childIdentity.pid, {
-              identity: childIdentity,
-              processGroup: false,
-              proof,
-            });
-          }
-          // Bind the owner-launch anchor to the profile-proven child identity.
-          // registerSelfManagedChrome only binds when it can read the marker back
-          // from the process, but Chrome erases the marker from its own environ
-          // when it rewrites process titles, so that bind is skipped here. Use
-          // the marker we generated for THIS launch, keyed to the tracked launch
-          // record, so teardown can trust this anchor and reap the marker-only
-          // wrapper processes (the google-chrome launcher's stdout/stderr `cat`
-          // relays and crashpad) instead of reporting closure unproven.
-          bindOwnerBrowserLaunch(launchMarker, childIdentity);
-        }
-        if (!childProcessIsRunning(launched)) {
-          reapProfileHolderIfOwned(params.profileDir, childIdentity);
-          const detail = chromeStderr.trim();
-          const collision = profileCollisionFromStderr(detail);
-          if (collision !== null) throw collision;
-          const termination =
-            launched.exitCode !== null
-              ? `code ${launched.exitCode}`
-              : `signal ${launched.signalCode ?? "unknown"}`;
-          throw new Error(
-            `plain login Chrome exited immediately (${termination})` +
-              `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
-          );
-        }
-        if (process.platform === "linux" && childIdentity === null) {
-          throw new Error("plain login Chrome identity could not be proven");
-        }
-      },
-      { deadlineMs: 0 },
-    );
-  } catch (error) {
-    if (!spawned) untrackOwnerBrowserLaunch(launchMarker);
-    throw error;
-  }
-
-  let teardownPromise: Promise<void> | undefined;
-  const forceTeardown = (): void => {
-    markLocalBrowserLaunchTerminal(child);
-    if (childIdentity !== null) {
-      const tracked = selfManagedChromes.get(childIdentity.pid);
-      signalOwnedChromeProcessTree(childIdentity, false, "SIGKILL", {
-        ...(tracked === undefined ? {} : { proof: tracked.proof }),
-      });
-    } else if (childProcessIsRunning(child)) {
-      child?.kill("SIGKILL");
-    }
-    reapProfileHolderIfOwned(params.profileDir, childIdentity);
-  };
-  const teardown = (): Promise<void> => {
-    teardownPromise ??= (async () => {
-      markLocalBrowserLaunchTerminal(child);
-      await quitPlainLoginBrowser({
-        signalQuit: (signal) => {
-          if (child !== null && childIdentity !== null) {
-            return signalProfileProcess(childIdentity, params.profileDir, signal);
-          }
-          if (childProcessIsRunning(child)) {
-            child?.kill(signal);
-            return true;
-          }
-          return false;
-        },
-        isRunning: () => childProcessIsRunning(child),
-        finalize: async () => await closeLocalBrowserLaunch(launchMarker, params.profileDir),
-      });
-    })();
-    return teardownPromise;
-  };
-  return {
-    teardown,
-    forceTeardown,
-    isRunning: () => childProcessIsRunning(child),
-    identity: childIdentity,
-    marker: launchMarker,
-  };
-}
 
 // Dev-runtime guard: when the bot is run through `tsx`, esbuild may inject
 // calls to its `__name(fn, "name")` helper into functions passed to
