@@ -51,7 +51,10 @@ the per-call allowances within the registered schema's limits.
 A `budget` handoff preserves partial progress for another call on the same
 session. `jev_unavailable`, `no_progress`, and `evaluate_timeout` also return
 handoffs; the last indicates that an in-page evaluation exceeded its deadline.
-`pending_approval` supplies the card approval URL. Always call `operate_finish`
+`pending_approval` supplies the card approval URL. `card_incomplete` means the
+card was released but not every requested field was filled; resume the same
+session to retry against the existing `approval_id`. The handoff's `payment`
+contains the per-field results. Always call `operate_finish`
 when the task is finished. Drive-initiated opens follow the
 [broker refused-start receipt contract](browser-broker.md).
 
@@ -69,8 +72,15 @@ browser-use/jev-ultrafast (MIT) adoptions live in `operate-drive.ts`. Mapping:
 | 8 | No confidence gates, including DONE. Validation of the answer shape stays. The purchase approval is the payment gate | `admitsChoice`, `decideAfterJev` |
 | 9 | Three consecutive non-wait actions with no fingerprint change | `DRIVE_STALE_LIMIT`, `staleNonWait` |
 | 10 | Decision bound to the observation fingerprint, consumed once | `boundFingerprint`, `consumedActionKey` |
-| 11 | 60 actions, 120 Jev calls, 250 candidates (truncated cannot be selected) | `DRIVE_DEFAULT_MAX_STEPS`, `DRIVE_MAX_JEV_CALLS`, `DRIVE_MAX_CANDIDATES` |
-| 12 | Drive-loop step is four calls: one snapshot evaluate, one two-head Jev request, one registry guard evaluate plus CDP click/`insertText` (native select sets `value`), then two animation frames or 50 ms (combobox options capped at 200 ms). `networkidle` only after a navigation | `drive-snapshot.ts`, `drive-act.ts`, `operate-drive.ts` |
+| 11 | Candidate and question budgets; only offered choices can be selected | `driveTargetSets`, `buildDriveQuestions` |
+| 12 | Snapshot, Jev decision, guarded CDP action, then bounded settling; frame refreshes and primitive handoffs can add calls | `drive-snapshot.ts`, `drive-act.ts`, `operate-drive.ts` |
+
+The drive considers up to 250 candidates and caps each decision batch at 128
+total choice criteria, including operation and goal-value choices. Truncation
+is disclosed in the question instructions; retained dropdown choices with
+omitted siblings carry `options_elided` in planner state. The allocator reserves
+a usable goal-value choice alongside `none` when available. Omitted choices
+cannot be selected in that batch.
 
 `operate_read_inbox` reads the session's signed-in Gmail inbox for a
 verification email in dedicated utility tabs that are closed when the read

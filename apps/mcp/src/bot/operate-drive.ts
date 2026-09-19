@@ -2817,9 +2817,8 @@ async function driveLoop(input: {
       // An incomplete fill is NOT success: the card may be released while a
       // requested field reports not_found/detached (ordinary browser
       // outcomes, see inject_card's per-field results). Record the attempt
-      // honestly; if the budget allows, the next loop iteration retries the
-      // fill against the same released approval_id instead of recording
-      // progress over a half-filled card.
+      // honestly and hand back; resuming retries the fill against the same
+      // released approval_id instead of recording progress over a half-filled card.
       const fillComplete = payment.complete !== false;
       drive.cardFillPending = !fillComplete;
       if (!fillComplete) {
