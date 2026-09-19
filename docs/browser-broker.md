@@ -80,7 +80,20 @@ with the busy-profile message rather than racing a browser that holds the
 profile. Because the broker's Chrome runs on its own private Xvfb, connect
 exposes that display over noVNC for the ceremony (same x11vnc + websockify +
 tunnel stack as the standalone remote login, reaped at the ceremony's lease
-boundary) — a tab no human can see is a tab no human can complete. A deferred
+boundary) — a tab no human can see is a tab no human can complete.
+
+Known property of that exposure, decided with the connect-browser-claim work:
+the noVNC URL shows the WHOLE shared display, not just the ceremony tab. While
+the ceremony runs (bounded by its deadline), anyone holding the URL can see —
+and, x11vnc not being view-only, drive — every tab the shared browser is
+running, including sibling operator sessions' tabs. The window is the
+ceremony deadline, and the URL is single-use: a fresh VNC password is minted
+per ceremony and the quick tunnel is torn down at the lease boundary. The
+`isOwnedLoginRigXauthority` check keeps real user desktops out of scope —
+this paragraph covers the broker's own rig only. This is a decision, not an
+oversight: do not narrow it without the maintainer's word.
+
+A deferred
 `--force-relogin` cookie clear rides the same tab as ordinary logout navigation.
 The CDP-attach × Google OAuth question is owned by the STATE.md bisect
 paragraph below — do not cite it as a reason to add a second instance.

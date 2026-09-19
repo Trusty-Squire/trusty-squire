@@ -12,13 +12,18 @@
 // on its own private Xvfb, connect also exposes that display over noVNC for
 // the ceremony (same x11vnc + websockify + tunnel stack as the standalone
 // remote login) — a tab no human can see is a tab no human can complete.
-// Exposure is best-effort: any failure to attach degrades to the unexposed
-// tab with a logged cause and the ceremony continues; it never blocks a
-// connect that would otherwise succeed. A deferred --force-relogin clear
-// rides the same tab as ordinary logout navigation. Only when no broker can
-// serve (first connect on an unenrolled machine, or no live broker) does
-// connect launch its own persistent-context browser on the bot profile — the
-// same launcher class the operator uses.
+// The exposed URL shows the WHOLE shared display — sibling sessions' tabs
+// included — for the ceremony deadline, and is single-use (fresh VNC
+// password, one quick tunnel, torn down at the lease boundary). That pixel
+// exposure is a decided property of the ceremony, documented in
+// docs/browser-broker.md. Exposure is best-effort: any failure to attach
+// degrades to the unexposed tab with a logged cause and the ceremony
+// continues; it never blocks a connect that would otherwise succeed. A
+// deferred --force-relogin clear rides the same tab as ordinary logout
+// navigation. Only when no broker can serve (first connect on an
+// unenrolled machine, or no live broker) does connect launch its own
+// persistent-context browser on the bot profile — the same launcher class
+// the operator uses.
 // Completion never comes off a live BrowserContext in either path.
 //
 // The self-launched ceremony uses a local visible Chrome window when one
@@ -796,6 +801,15 @@ const PROVIDER_LOGOUT_URLS: Record<OAuthProviderId, string> = {
   github: "https://github.com/logout",
 };
 
+// The label printed inside the noVNC URL box for a SHARED-browser ceremony.
+// Disclosure, not softening: the URL shows the whole shared display for the
+// ceremony deadline — sibling sessions' tabs included — and is single-use.
+const SHARED_DISPLAY_LABEL =
+  "This URL shows the shared browser's WHOLE display — every tab it is " +
+  "running, not only the sign-in — for as long as this ceremony runs. It is " +
+  "single-use: the URL and its password exist for this ceremony only and " +
+  "stop working when it ends.";
+
 async function operateCommand(
   client: BrokerClient,
   sessionId: string,
@@ -922,7 +936,7 @@ export async function tryRunCeremonyInSharedBroker(
     // The broker's Chrome runs on its own private Xvfb, so the tab is
     // invisible to the user until this process exposes that display over
     // noVNC. A tab no human can see is a tab no human can complete.
-    stopExposure = await exposeSharedBrokerCeremonyDisplay(opts.profileDir, opts.bannerLabel);
+    stopExposure = await exposeSharedBrokerCeremonyDisplay(opts.profileDir, SHARED_DISPLAY_LABEL);
     console.error(
       stopExposure === null
         ? `\n[login] The install page opened as a tab in the shared browser's private ` +
@@ -930,7 +944,11 @@ export async function tryRunCeremonyInSharedBroker(
           `Without that display nobody can see or complete the sign-in: install the ` +
           `noVNC helpers (x11vnc, websockify, cloudflared — or set TS_LOGIN_PUBLIC_HOSTNAME ` +
           `and TS_LOGIN_LOCAL_PORT to use your own tunnel) and run connect again.\n`
-        : `\n[login] The install page opened as a tab in the shared browser's display — open the noVNC URL above on any device to see and drive it.\n`,
+        : `\n[login] The install page opened as a tab in the shared browser's display — ` +
+          `open the noVNC URL above on any device to see and drive it. That URL shows ` +
+          `the WHOLE shared browser display for the duration of the ceremony — every ` +
+          `tab this browser is running, not only the sign-in — and it is single-use: ` +
+          `it exists for this ceremony only and stops working when the ceremony ends.\n`,
     );
     const ok = await pollUntil(
       opts.deadline,
