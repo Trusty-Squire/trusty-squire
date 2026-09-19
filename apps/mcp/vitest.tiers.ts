@@ -65,6 +65,7 @@ export const REAL_BROWSER_FILES = [
   "src/bot/__tests__/operator-click-fallback.test.ts",
   "src/bot/__tests__/operator-login-read-browser.test.ts",
   "src/bot/__tests__/operator-ref-recovery-flow.test.ts",
+  "src/bot/__tests__/page-driver-start-readiness-browser.test.ts",
   "src/bot/__tests__/phone-country-widget.test.ts",
   "src/bot/__tests__/picker-window.test.ts",
   "src/bot/__tests__/screenshot-click.test.ts",

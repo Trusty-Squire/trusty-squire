@@ -269,20 +269,11 @@ export class PageDriver {
     for (let attempt = 1; ; attempt++) {
       try {
         await page.goto(url, {
-          waitUntil: readiness === "document-ready" ? "commit" : "domcontentloaded",
+          // Deferred scripts must finish before the first interaction. Startup
+          // skips only the post-load dwell, not this DOMContentLoaded boundary.
+          waitUntil: "domcontentloaded",
           timeout: 60000,
         });
-        if (readiness === "document-ready") {
-          // Match jev-ultrafast's startup boundary: navigation dispatch followed
-          // by a tight document.readyState poll. This avoids Playwright's wider
-          // lifecycle/actionability settling and the humanized post-load dwell.
-          const deadline = Date.now() + 15_000;
-          while (Date.now() < deadline) {
-            const state = await page.evaluate(() => document.readyState).catch(() => "loading");
-            if (state === "interactive" || state === "complete") break;
-            await page.waitForTimeout(20);
-          }
-        }
         // A SOCKS/connection drop does NOT always throw: Chrome resolves
         // domcontentloaded on its own `chrome-error://chromewebdata/`
         // interstitial and goto returns cleanly. The bot then ran the whole
