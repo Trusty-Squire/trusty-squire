@@ -856,6 +856,9 @@ export class CredentialVault implements VaultClient {
   // use_credential: decrypt fields, hand them + the request to the
   // injected executor (which substitutes ${SECRET.<field>}), return only
   // the upstream response. Host hard-checked against allowed_hosts first.
+  // This code path deliberately does not call retrieveInternal: the secret
+  // stays inside the API executor, so server-side egress is not subject to
+  // the plaintext-retrieval ceiling. The proxy audit below remains required.
   async proxy(
     reference: string,
     accountId: string,
@@ -1131,11 +1134,12 @@ export class CredentialVault implements VaultClient {
     return fields;
   }
 
-  // Per-account retrieval rate limit, shared by every decrypt path
-  // (agent retrieve, runtime retrieve, web reveal). Counts `retrieved`
-  // audit rows in the trailing window; on breach it records a
-  // rate_limited event and throws. Keeping this in one place is what
-  // stops a new decrypt path from silently bypassing the ceiling.
+  // Per-account plaintext-retrieval rate limit, shared by every path that
+  // returns decrypted fields (agent retrieve, runtime retrieve, browser fill,
+  // and web/approved reveal). Counts `retrieved` audit rows in the trailing
+  // window; on breach it records a rate_limited event and throws. In-API proxy
+  // egress is intentionally separate because its executor never returns the
+  // secret to the caller.
   private async enforceRetrievalRateLimit(
     accountId: string,
     auditOnLimit: Pick<
