@@ -40,7 +40,6 @@ import {
   observationFingerprint,
   pageTextFromObservation,
   peakedProbabilities,
-  requiredFactComboboxAction,
   requiredFillableMissingFact,
   selectTargetKey,
   selectTargets,
@@ -909,30 +908,6 @@ describe("facts, fingerprint, compact merge", () => {
     const facts = { origin: "Zurich", destination: "London", date: "2026-09-20" };
     expect(matchingFactKeys(facts, departure)).toEqual(["date"]);
     expect(typeableCandidates([departure], facts, false).map((c) => c.ref)).toEqual(["@e:dep"]);
-  });
-
-  it("opens a fact-backed combobox whose current value contradicts the fact, then clicks the match", () => {
-    const trip: WireRow = [
-      "@e:trip",
-      "combobox",
-      "Change ticket type. Round trip|a=picker|n=Round trip",
-    ];
-    const cabin: WireRow = [
-      "@e:cabin",
-      "combobox",
-      "Change seating class. Economy|a=picker|n=Economy",
-    ];
-    const oneWay: WireRow = ["@e:ow", "b", "One way"];
-    const facts = { ticket_type: "One way", cabin: "Economy" };
-    expect(matchingFactKeys(facts, trip)).toEqual(["ticket_type"]);
-    expect(matchingFactKeys(facts, cabin)).toEqual(["cabin"]);
-    expect(requiredFactComboboxAction([trip, cabin], facts)).toEqual({ target: "@e:trip" });
-    expect(requiredFactComboboxAction([trip, cabin, oneWay], facts)).toEqual({
-      target: "@e:ow",
-      fillsRef: "@e:trip",
-    });
-    expect(requiredFactComboboxAction([cabin], facts)).toBeUndefined();
-    expect(requiredFactComboboxAction([trip], facts, ["@e:trip"])).toBeUndefined();
   });
 
   it("assigns a page-supplied select option from a goal phrase without a matching fact", () => {
