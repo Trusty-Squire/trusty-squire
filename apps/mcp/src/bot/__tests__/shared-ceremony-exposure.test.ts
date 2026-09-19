@@ -7,19 +7,32 @@
 // tab sits on a display this repository did not create (the machine's own
 // screen), which the user may be looking at right now.
 
-import { symlinkSync } from "node:fs";
+import { existsSync, symlinkSync } from "node:fs";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { exposeSharedBrokerCeremonyDisplay } from "../google-login.js";
+import { registerLocalBrowserLaunch } from "../browser-process-runtime.js";
+import {
+  bindOwnerBrowserLaunch,
+  spawnOwnerTrackedHelper,
+  stopOwnerProcessReaper,
+  untrackOwnerBrowserLaunch,
+} from "../owner-process-reaper.js";
+import { profileProcessIdentity } from "../profile.js";
 import type * as RemoteLoginDisplayModule from "../remote-login-display.js";
 
 const mockState = {
   rigCreated: 0,
   attachAttempts: 0,
   rigSetupFails: false,
+  attachSucceeds: false,
+  secretSetupFails: false,
+  privateDirs: [] as string[],
+  helpers: [] as ChildProcess[],
+  rigs: [] as RemoteLoginDisplayModule.RemoteLoginRig[],
 };
 vi.mock("../remote-login-display.js", async (importOriginal) => {
   const actual = await importOriginal<typeof RemoteLoginDisplayModule>();
@@ -28,7 +41,7 @@ vi.mock("../remote-login-display.js", async (importOriginal) => {
     createRemoteLoginRig: () => {
       mockState.rigCreated += 1;
       if (mockState.rigSetupFails) throw new Error("no x11vnc on PATH");
-      return {
+      const rig = {
         width: 720,
         height: 1280,
         procs: [],
@@ -38,10 +51,26 @@ vi.mock("../remote-login-display.js", async (importOriginal) => {
           websockify: "/unused/websockify",
         },
       };
+      mockState.rigs.push(rig);
+      return rig;
+    },
+    createRemoteLoginVncSecrets: (rig: RemoteLoginDisplayModule.RemoteLoginRig) => {
+      actual.createRemoteLoginVncSecrets(rig);
+      mockState.privateDirs.push(rig.privateDir!);
+      if (mockState.secretSetupFails) {
+        // A helper already belongs to the partially prepared rig. Failure
+        // must reap it as well as remove secrets, without touching the holder.
+        const helper = spawnOwnerTrackedHelper(process.execPath,
+          ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+        rig.procs.push(helper);
+        mockState.helpers.push(helper);
+        throw new Error("secret setup failed");
+      }
     },
     exposeRemoteLoginDisplay: async () => {
       mockState.attachAttempts += 1;
-      throw new Error("vnc attach down");
+      if (!mockState.attachSucceeds) throw new Error("vnc attach down");
+      return "https://fixture.invalid";
     },
   };
 });
@@ -50,11 +79,20 @@ const dirs: string[] = [];
 const children: ChildProcess[] = [];
 
 afterEach(async () => {
+  for (const child of mockState.helpers.splice(0)) child.kill("SIGKILL");
+  stopOwnerProcessReaper();
+  vi.unstubAllEnvs();
   for (const child of children.splice(0)) child.kill("SIGKILL");
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
   mockState.rigCreated = 0;
   mockState.attachAttempts = 0;
   mockState.rigSetupFails = false;
+  mockState.attachSucceeds = false;
+  mockState.secretSetupFails = false;
+  mockState.privateDirs = [];
+  for (const rig of mockState.rigs.splice(0)) {
+    if (rig.privateDir) await rm(rig.privateDir, { recursive: true, force: true });
+  }
 });
 
 async function tempProfile(): Promise<string> {
@@ -70,8 +108,10 @@ async function tempProfile(): Promise<string> {
 // — so the fixture's holder is a live child whose pid the symlink names.
 // The child's exec-time environment (read via /proc/<pid>/environ) decides
 // whether the helper sees a display at all.
-async function spawnHolder(env: NodeJS.ProcessEnv): Promise<ChildProcess> {
-  const child = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000);"], {
+async function spawnHolder(env: NodeJS.ProcessEnv, profile?: string): Promise<ChildProcess> {
+  const args = ["-e", "setInterval(() => undefined, 1000);"];
+  if (profile !== undefined) args.push("--", `--user-data-dir=${profile}`);
+  const child = spawn(process.execPath, args, {
     env,
     stdio: "ignore",
   });
@@ -96,6 +136,74 @@ async function holderOwnsProfile(profile: string, child: ChildProcess): Promise<
 }
 
 describe("exposeSharedBrokerCeremonyDisplay", () => {
+  it("prefers the tracked rig for the holder profile over the process environment", async () => {
+    const profile = await tempProfile();
+    vi.stubEnv("TRUSTY_SQUIRE_REAPER_DIR", join(profile, "reaper"));
+    const authFile = join(tmpdir(), "tsq-login-tracked", "xauthority");
+    const launch = registerLocalBrowserLaunch(profile, { DISPLAY: ":72", XAUTHORITY: authFile });
+    const child = await spawnHolder({ DISPLAY: ":0", XAUTHORITY: "/foreign/xauthority" }, profile);
+    await holderOwnsProfile(profile, child);
+    expect(bindOwnerBrowserLaunch(launch.marker, profileProcessIdentity(child.pid!, profile)!)).toBe(true);
+    mockState.attachSucceeds = true;
+    try {
+      const exposure = await exposeSharedBrokerCeremonyDisplay(profile, "test");
+      expect(exposure.kind).toBe("exposed");
+      expect(mockState.rigs[0]).toMatchObject({ display: ":72", authFile });
+      if (exposure.kind === "exposed") await exposure.stop();
+      expect(mockState.privateDirs.every((path) => !existsSync(path))).toBe(true);
+      untrackOwnerBrowserLaunch(launch.marker);
+      await expect(exposeSharedBrokerCeremonyDisplay(profile, "test")).resolves.toMatchObject({ kind: "already_visible" });
+    } finally {
+      untrackOwnerBrowserLaunch(launch.marker);
+    }
+  });
+
+  it("exposes the child's display when Chrome erased the holder environment", async () => {
+    const profile = await tempProfile();
+    const authFile = join(tmpdir(), "tsq-login-child", "xauthority");
+    const holder = spawn(process.execPath, ["-e", `
+      const { spawn } = require("node:child_process");
+      const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+        env: { DISPLAY: ":71", XAUTHORITY: ${JSON.stringify(authFile)} }, stdio: "ignore"
+      });
+      child.once("spawn", () => process.send(child.pid));
+      process.on("disconnect", () => { child.kill("SIGKILL"); process.exit(); });
+    `], { env: { PATH: process.env.PATH }, stdio: ["ignore", "ignore", "ignore", "ipc"] });
+    const childPid = await new Promise<number>((resolve) => holder.once("message", resolve));
+    try {
+      await holderOwnsProfile(profile, holder);
+      mockState.attachSucceeds = true;
+      const exposure = await exposeSharedBrokerCeremonyDisplay(profile, "test");
+      expect(exposure.kind).toBe("exposed");
+      expect(mockState.rigs[0]).toMatchObject({ display: ":71", authFile });
+      if (exposure.kind === "exposed") await exposure.stop();
+      expect(() => process.kill(holder.pid!, 0)).not.toThrow();
+    } finally {
+      try { process.kill(childPid, "SIGKILL"); } catch {}
+      holder.disconnect();
+    }
+  });
+
+  it("removes a partially prepared exposure rig when setup fails", async () => {
+    const profile = await tempProfile();
+    const child = await spawnHolder({
+      DISPLAY: ":99",
+      XAUTHORITY: join(tmpdir(), "tsq-login-broker", "xauthority"),
+    });
+    await holderOwnsProfile(profile, child);
+    vi.stubEnv("TRUSTY_SQUIRE_REAPER_DIR", join(profile, "reaper"));
+    mockState.secretSetupFails = true;
+    const exposure = await exposeSharedBrokerCeremonyDisplay(profile, "test");
+    expect(exposure).toMatchObject({ kind: "unshowable", reason: expect.stringContaining("secret setup failed") });
+    expect(mockState.rigs).toHaveLength(1);
+    expect(mockState.rigs[0]!.privateDir).toBeUndefined();
+    expect(mockState.privateDirs.every((path) => !existsSync(path))).toBe(true);
+    expect(mockState.attachAttempts).toBe(0);
+    expect(mockState.helpers).toHaveLength(1);
+    await vi.waitFor(() => expect(mockState.helpers[0]!.signalCode).toBe("SIGTERM"));
+    expect(() => process.kill(child.pid!, 0)).not.toThrow();
+  });
+
   it("reports unshowable when no process holds the profile", async () => {
     const profile = await tempProfile();
     await expect(exposeSharedBrokerCeremonyDisplay(profile, "test")).resolves.toEqual({

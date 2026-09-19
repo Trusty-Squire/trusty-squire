@@ -53,7 +53,7 @@ export function registerLocalBrowserLaunch(
   baseEnv: NodeJS.ProcessEnv = process.env,
   marker = createOperatorBrowserMarker(),
 ): { marker: string; env: NodeJS.ProcessEnv } {
-  trackOwnerBrowserLaunch(marker, profileDir);
+  trackOwnerBrowserLaunch(marker, profileDir, { env: baseEnv });
   return {
     marker,
     env: { ...baseEnv, [OPERATOR_BROWSER_MARKER_ENV]: marker },

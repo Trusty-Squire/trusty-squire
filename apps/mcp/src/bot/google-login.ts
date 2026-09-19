@@ -33,7 +33,7 @@
 // path.
 
 import { createRequire } from "node:module";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { copyFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -73,6 +73,7 @@ import {
 } from "./install-completion.js";
 import {
   bindOwnerBrowserLaunch,
+  ownerTrackedBrowserDisplay,
   markOwnerBrowserLaunchTerminal,
   terminateOwnerBrowserLaunch,
   untrackOwnerBrowserLaunch,
@@ -733,8 +734,8 @@ export interface LoginRunResult {
 // (`ownedHeadedBrowserEnvironment` always builds one), so a ceremony tab
 // hosted there is invisible to the user unless this process exposes that
 // display over noVNC — the same x11vnc + websockify + tunnel stack the
-// standalone remote login uses. The display coordinates are discovered from
-// the browser process's own environment (/proc on Linux); the helpers this
+// standalone remote login uses. Discovery prefers the tracked launch display,
+// then the browser process tree's environment (/proc on Linux); the helpers this
 // call spawns are reaped at the ceremony's lease boundary and never touch
 // the display or the browser itself.
 //
@@ -762,14 +763,15 @@ export async function exposeSharedBrokerCeremonyDisplay(
       reason:
         "no live browser process holds the profile, so its display could not be discovered",
     };
-  const env = readProcessEnvironment(holderPid);
-  const display = env?.DISPLAY;
-  const authFile = env?.XAUTHORITY;
+  const tracked = ownerTrackedBrowserDisplay(profileDir, holderPid);
+  const env = tracked === null ? readProcessTreeDisplay(holderPid) : null;
+  const display = tracked?.display ?? env?.DISPLAY;
+  const authFile = tracked?.authFile ?? env?.XAUTHORITY;
   if (display === undefined || authFile === undefined)
     return {
       kind: "unshowable",
       reason:
-        "the browser holding the profile runs without a DISPLAY/XAUTHORITY in its environment",
+        "the browser holding the profile runs without a DISPLAY/XAUTHORITY in its launch record or process tree",
     };
   if (!isOwnedLoginRigXauthority(authFile))
     return {
@@ -778,7 +780,7 @@ export async function exposeSharedBrokerCeremonyDisplay(
         "it runs on a display this repository did not create, which may already be visible " +
         "on this machine's own screen",
     };
-  let rig: RemoteLoginRig;
+  let rig: RemoteLoginRig | undefined;
   try {
     rig = createRemoteLoginRig();
     // FRESH VNC secrets of our own — createRemoteLoginSecrets would also mint
@@ -788,12 +790,14 @@ export async function exposeSharedBrokerCeremonyDisplay(
     rig.display = display;
     rig.authFile = authFile;
   } catch (err) {
+    if (rig !== undefined) await teardownRemoteLoginRig(rig).catch(() => undefined);
     return {
       kind: "unshowable",
       reason: `preparing the noVNC rig failed (${err instanceof Error ? err.message : String(err)})`,
     };
   }
-  const removeCleanup = registerRemoteLoginRigCleanup(rig, () => undefined);
+  const exposureRig = rig;
+  const removeCleanup = registerRemoteLoginRigCleanup(exposureRig, () => undefined);
   try {
     await exposeRemoteLoginDisplay(rig, label);
   } catch (err) {
@@ -809,7 +813,7 @@ export async function exposeSharedBrokerCeremonyDisplay(
     stop: async () => {
       // Helpers only: the display and the browser belong to the broker daemon.
       removeCleanup();
-      await teardownRemoteLoginRig(rig);
+      await teardownRemoteLoginRig(exposureRig);
     },
   };
 }
@@ -822,11 +826,35 @@ function isOwnedLoginRigXauthority(authFile: string): boolean {
   return basename(dir).startsWith("tsq-login-") && dirname(dir) === tmpdir();
 }
 
-// The broker's Chrome inherits its display rig from the daemon's launch
-// environment. On Linux, /proc/<pid>/environ is the live record of that
-// environment (NUL-separated); other platforms have no equivalent, and a
-// failed read just means "cannot discover" — the caller decides what that
-// is worth.
+// Chrome can erase the main process's launch environment while crashpad and
+// other descendants retain it. Inspect all threads' children (not just the main
+// thread), then their descendants; process exits during discovery are ordinary.
+function readProcessTreeDisplay(holderPid: number): NodeJS.ProcessEnv | null {
+  const pending = [holderPid];
+  const seen = new Set<number>();
+  for (const pid of pending) {
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    const env = readProcessEnvironment(pid);
+    if (env?.DISPLAY !== undefined && env.XAUTHORITY !== undefined) return env;
+    try {
+      for (const tid of readdirSync(`/proc/${pid}/task`)) {
+        try {
+          const children = readFileSync(`/proc/${pid}/task/${tid}/children`, "utf8");
+          pending.push(...children.trim().split(/\s+/).filter(Boolean).map(Number));
+        } catch {
+          // Thread exited during discovery.
+        }
+      }
+    } catch {
+      // Process exited, or /proc is unavailable.
+    }
+  }
+  return null;
+}
+
+// Linux's exec-time environment is NUL-separated; other platforms have no
+// equivalent. Missing reads leave discovery to the other available records.
 function readProcessEnvironment(pid: number): NodeJS.ProcessEnv | null {
   if (process.platform !== "linux") return null;
   try {

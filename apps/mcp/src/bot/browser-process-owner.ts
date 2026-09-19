@@ -502,11 +502,11 @@ export class BrowserProcessOwner {
           `(real-host GPU + egress; local fingerprint spoof + display setup disabled)`,
       );
     }
+    const browserEnv = remoteMode ? process.env : await this.ownedHeadedBrowserEnvironment();
     if (!remoteMode && !this.ownerLaunchTracked) {
-      registerLocalBrowserLaunch(this.profileDir, process.env, this.operatorBrowserMarker());
+      registerLocalBrowserLaunch(this.profileDir, browserEnv, this.operatorBrowserMarker());
       this.ownerLaunchTracked = true;
     }
-    const browserEnv = remoteMode ? process.env : await this.ownedHeadedBrowserEnvironment();
     // T3.1: probe where this run's traffic actually exits so the
     // browser's declared timezone matches its egress IP (a US-timezone
     // browser on a foreign proxy IP is itself an anti-bot signal).

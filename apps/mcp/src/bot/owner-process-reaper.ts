@@ -36,10 +36,16 @@ interface OwnerIdentity {
   start_time: string;
 }
 
+interface OwnerBrowserDisplay {
+  display: string;
+  authFile: string;
+}
+
 interface OwnerLaunchRecord {
   marker: string;
   user_data_dir: string;
   anchor?: OwnerIdentity;
+  display?: OwnerBrowserDisplay;
 }
 
 export interface OwnerHelperIdentity {
@@ -77,7 +83,7 @@ export interface OwnerProcessReaper {
   restart(): boolean;
   track(identity: ProfileProcessIdentity): void;
   untrack(identity: ProfileProcessIdentity): void;
-  trackLaunch(marker: string, profileDir: string): void;
+  trackLaunch(marker: string, profileDir: string, display?: OwnerBrowserDisplay): void;
   bindLaunch(marker: string, identity: ProfileProcessIdentity): boolean;
   launchAnchor(marker: string, profileDir: string): OwnerIdentity | null;
   untrackLaunch(marker: string): void;
@@ -126,12 +132,14 @@ function isOwnerIdentity(value: unknown): value is OwnerIdentity {
 function isLaunch(value: unknown): value is OwnerLaunchRecord {
   if (value === null || typeof value !== "object") return false;
   const launch = value as Partial<OwnerLaunchRecord>;
-  const allowedKeys = new Set(["marker", "user_data_dir", "anchor"]);
+  const allowedKeys = new Set(["marker", "user_data_dir", "anchor", "display"]);
   return (
     Object.keys(launch).every((key) => allowedKeys.has(key)) &&
     typeof launch.marker === "string" &&
     typeof launch.user_data_dir === "string" &&
-    (launch.anchor === undefined || isOwnerIdentity(launch.anchor))
+    (launch.anchor === undefined || isOwnerIdentity(launch.anchor)) &&
+    (launch.display === undefined ||
+      (typeof launch.display?.display === "string" && typeof launch.display?.authFile === "string"))
   );
 }
 
@@ -1052,13 +1060,17 @@ export function startOwnerProcessReaper(
         ),
       });
     },
-    trackLaunch: (marker, profileDir) => {
+    trackLaunch: (marker, profileDir, display) => {
       requireAvailable();
       update({
         ...manifest,
         launches: [
           ...manifest.launches.filter((entry) => entry.marker !== marker),
-          { marker, user_data_dir: profilePathIdentity(profileDir) },
+          {
+            marker,
+            user_data_dir: profilePathIdentity(profileDir),
+            ...(display === undefined ? {} : { display }),
+          },
         ],
       });
     },
@@ -1167,13 +1179,47 @@ export function untrackOwnerProcess(identity: ProfileProcessIdentity): void {
 export function trackOwnerBrowserLaunch(
   marker: string,
   profileDir: string,
-  runtime: { ensureReaper?: typeof ensureOwnerProcessReaper } = {},
+  runtime: { ensureReaper?: typeof ensureOwnerProcessReaper; env?: NodeJS.ProcessEnv } = {},
 ): void {
   const reaper = (runtime.ensureReaper ?? ensureOwnerProcessReaper)();
   if (process.platform === "linux" && reaper === null) {
     throw new Error("owner process reaper unavailable for local browser launch");
   }
-  reaper?.trackLaunch(marker, profileDir);
+  const env = runtime.env;
+  reaper?.trackLaunch(
+    marker,
+    profileDir,
+    env?.DISPLAY !== undefined && env.XAUTHORITY !== undefined
+      ? { display: env.DISPLAY, authFile: env.XAUTHORITY }
+      : undefined,
+  );
+}
+
+// Read the launch-time display before consulting Chrome's mutable /proc environ.
+// Match the existing holder birth identity so another launch's rig is not selected.
+export function ownerTrackedBrowserDisplay(
+  profileDir: string,
+  holderPid: number,
+): OwnerBrowserDisplay | null {
+  const root = defaultRootDir();
+  const profile = profilePathIdentity(profileDir);
+  try {
+    for (const name of readdirSync(root)) {
+      if (!name.endsWith(".json")) continue;
+      const read = readManifest(join(root, name));
+      if (read.state !== "present") continue;
+      const launch = read.manifest.launches.find(
+        (entry) =>
+          entry.user_data_dir === profile &&
+          entry.anchor?.pid === holderPid &&
+          processBirthIdentityState(entry.anchor) === "matching",
+      );
+      if (launch?.display !== undefined) return launch.display;
+    }
+  } catch {
+    // Older brokers have no display record; discovery falls back to their tree.
+  }
+  return null;
 }
 
 export function bindOwnerBrowserLaunch(marker: string, identity: ProfileProcessIdentity): boolean {
