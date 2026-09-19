@@ -219,13 +219,15 @@ describe("launched through a bin symlink", () => {
     await expect(exited).resolves.toEqual({ code: 0, signal: null });
   }, 30_000);
 
-  it("exits when its caller dies with every stdio pipe still open", async () => {
-    // A short-lived probe can disappear before it closes the child streams.
-    // The server is then reparented and its next stdout/stderr write gets
-    // EPIPE. This used to recurse through the uncaughtException logger and
-    // spin forever, preventing both EOF shutdown and the idle timer.
-    const link = await linkTo("mcp-server-dead-caller-link.js");
-    const launcher = `
+  it.skipIf(process.platform !== "linux")(
+    "exits when its caller dies with every stdio pipe still open",
+    async () => {
+      // A short-lived probe can disappear before it closes the child streams.
+      // The server is then reparented and its next stdout/stderr write gets
+      // EPIPE. This used to recurse through the uncaughtException logger and
+      // spin forever, preventing both EOF shutdown and the idle timer.
+      const link = await linkTo("mcp-server-dead-caller-link.js");
+      const launcher = `
       const { spawn } = require("node:child_process");
       const child = spawn(process.execPath, [${JSON.stringify(link)}, "server"], {
         env: {
@@ -252,21 +254,23 @@ describe("launched through a bin symlink", () => {
       )});
       process.exit(0);
     `;
-    const launched = spawnSync(process.execPath, ["-e", launcher], {
-      encoding: "utf8",
-      timeout: 10_000,
-    });
-    expect(launched.status).toBe(0);
-    const serverPid = Number(launched.stdout.trim());
-    expect(Number.isSafeInteger(serverPid)).toBe(true);
+      const launched = spawnSync(process.execPath, ["-e", launcher], {
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      expect(launched.status).toBe(0);
+      const serverPid = Number(launched.stdout.trim());
+      expect(Number.isSafeInteger(serverPid)).toBe(true);
 
-    try {
-      await waitUntil(() => !processIsRunning(serverPid), 5_000);
-      expect(processIsRunning(serverPid)).toBe(false);
-    } finally {
-      if (processIsRunning(serverPid)) process.kill(serverPid, "SIGKILL");
-    }
-  }, 30_000);
+      try {
+        await waitUntil(() => !processIsRunning(serverPid), 5_000);
+        expect(processIsRunning(serverPid)).toBe(false);
+      } finally {
+        if (processIsRunning(serverPid)) process.kill(serverPid, "SIGKILL");
+      }
+    },
+    30_000,
+  );
 
   it("stdio survives malformed flat-verb arguments and a deleted action union", async () => {
     const link = await linkTo("mcp-server-malformed-actions.js");
