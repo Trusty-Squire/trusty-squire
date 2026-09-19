@@ -66,7 +66,18 @@ async function writeProfileCookiesRaw(
     );
     for (const cookie of cookies) {
       const persistent = cookie.expires === 0 ? 0 : 1;
-      insert.run(0, cookie.host, cookie.name, "", "/", cookie.expires, 1, 1, persistent, persistent);
+      insert.run(
+        0,
+        cookie.host,
+        cookie.name,
+        "",
+        "/",
+        cookie.expires,
+        1,
+        1,
+        persistent,
+        persistent,
+      );
     }
   } finally {
     db.close();

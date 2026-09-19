@@ -245,12 +245,14 @@ async function profileLockPath(
  * broker or browser work, so the live environment names the target while
  * `CHROME_PROFILE_DIR` still names the process default.
  */
-async function connectFixture(opts: {
-  forceReloginProviders?: readonly string[];
-  brokerToken?: string;
-  openNeedsUser?: boolean;
-  pollUntilDone?: () => Promise<boolean>;
-} = {}): Promise<{
+async function connectFixture(
+  opts: {
+    forceReloginProviders?: readonly string[];
+    brokerToken?: string;
+    openNeedsUser?: boolean;
+    pollUntilDone?: () => Promise<boolean>;
+  } = {},
+): Promise<{
   result: unknown;
   profileIdentity: string;
   lockNeverReleased: boolean;
@@ -341,7 +343,13 @@ async function connectFixture(opts: {
     try {
       return JSON.parse(readFileSync(lockPath + ".seen", "utf8"));
     } catch {
-      return { openUrl: null, openAdoptIdentity: false, openCeremony: false, closedSession: null, commands: [] };
+      return {
+        openUrl: null,
+        openAdoptIdentity: false,
+        openCeremony: false,
+        closedSession: null,
+        commands: [],
+      };
     }
   })();
   return {
@@ -364,21 +372,21 @@ describe("connect attaches to the live broker for the profile it is connecting",
     { timeout: 30_000 },
     async () => {
       const outcome = await connectFixture();
-    expect(outcome.result).toEqual({ status: "satisfied", closeState: "closed" });
-    // The confirm URL went to the broker whose socket belongs to the target
-    // profile — the fixture is the only listener on it, and it received the
-    // tab open.
-    expect(outcome.openUrl).toBe(CONFIRM_URL);
-    // The open is identity-neutral: the ceremony reuses whatever identity
-    // the shared browser is live under instead of requesting a bare one.
-    expect(outcome.openAdoptIdentity).toBe(true);
-    // The open names itself as the ceremony: that marker is what scopes the
-    // google_session admission gate bypass to this open and nothing else.
-    expect(outcome.openCeremony).toBe(true);
-    // The session tab is closed at the lease boundary.
-    expect(outcome.closedSession).toBe("tab-1");
-    // The profile lease was never touched: no drain, no guard, no second
-    // Chrome, no wait.
+      expect(outcome.result).toEqual({ status: "satisfied", closeState: "closed" });
+      // The confirm URL went to the broker whose socket belongs to the target
+      // profile — the fixture is the only listener on it, and it received the
+      // tab open.
+      expect(outcome.openUrl).toBe(CONFIRM_URL);
+      // The open is identity-neutral: the ceremony reuses whatever identity
+      // the shared browser is live under instead of requesting a bare one.
+      expect(outcome.openAdoptIdentity).toBe(true);
+      // The open names itself as the ceremony: that marker is what scopes the
+      // google_session admission gate bypass to this open and nothing else.
+      expect(outcome.openCeremony).toBe(true);
+      // The session tab is closed at the lease boundary.
+      expect(outcome.closedSession).toBe("tab-1");
+      // The profile lease was never touched: no drain, no guard, no second
+      // Chrome, no wait.
       expect(outcome.lockNeverReleased).toBe(true);
     },
   );

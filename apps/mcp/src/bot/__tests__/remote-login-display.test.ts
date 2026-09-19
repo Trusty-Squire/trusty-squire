@@ -422,7 +422,9 @@ setInterval(() => undefined, 1000);
       );
       expect(log.mock.calls.flat().join("\n")).toContain("one-off Cloudflare tunnel");
       expect(rig.procs).toHaveLength(3);
-      const helperPids = rig.procs.map((child) => child.pid).filter((pid): pid is number => pid !== undefined);
+      const helperPids = rig.procs
+        .map((child) => child.pid)
+        .filter((pid): pid is number => pid !== undefined);
 
       await teardownRemoteLoginRig(rig, 50);
       expect(rig.webDir).toBeUndefined();

@@ -32,7 +32,6 @@ import {
   closeProfileWithProof,
   currentProfileHolderPid,
   launchWithProfileGate,
-  profilePathIdentity,
   profileProcessIdentity,
   profileProcessGroupMarkerState,
   profileProcessIdentityState,

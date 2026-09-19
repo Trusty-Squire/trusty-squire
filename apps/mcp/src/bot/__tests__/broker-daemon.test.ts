@@ -69,7 +69,6 @@ it("a close that cannot drain leaves the identity cell serving", async () => {
   } finally {
     vi.unstubAllEnvs();
   }
-
 });
 
 it("a close whose force-close cannot prove the tree died leaves the cell serving", async () => {

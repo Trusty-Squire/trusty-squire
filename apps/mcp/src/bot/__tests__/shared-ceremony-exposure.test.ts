@@ -60,8 +60,11 @@ vi.mock("../remote-login-display.js", async (importOriginal) => {
       if (mockState.secretSetupFails) {
         // A helper already belongs to the partially prepared rig. Failure
         // must reap it as well as remove secrets, without touching the holder.
-        const helper = spawnOwnerTrackedHelper(process.execPath,
-          ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+        const helper = spawnOwnerTrackedHelper(
+          process.execPath,
+          ["-e", "setInterval(() => {}, 1000)"],
+          { stdio: "ignore" },
+        );
         rig.procs.push(helper);
         mockState.helpers.push(helper);
         throw new Error("secret setup failed");
@@ -143,7 +146,9 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
     const launch = registerLocalBrowserLaunch(profile, { DISPLAY: ":72", XAUTHORITY: authFile });
     const child = await spawnHolder({ DISPLAY: ":0", XAUTHORITY: "/foreign/xauthority" }, profile);
     await holderOwnsProfile(profile, child);
-    expect(bindOwnerBrowserLaunch(launch.marker, profileProcessIdentity(child.pid!, profile)!)).toBe(true);
+    expect(
+      bindOwnerBrowserLaunch(launch.marker, profileProcessIdentity(child.pid!, profile)!),
+    ).toBe(true);
     mockState.attachSucceeds = true;
     try {
       const exposure = await exposeSharedBrokerCeremonyDisplay(profile, "test");
@@ -152,7 +157,9 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
       if (exposure.kind === "exposed") await exposure.stop();
       expect(mockState.privateDirs.every((path) => !existsSync(path))).toBe(true);
       untrackOwnerBrowserLaunch(launch.marker);
-      await expect(exposeSharedBrokerCeremonyDisplay(profile, "test")).resolves.toMatchObject({ kind: "already_visible" });
+      await expect(exposeSharedBrokerCeremonyDisplay(profile, "test")).resolves.toMatchObject({
+        kind: "already_visible",
+      });
     } finally {
       untrackOwnerBrowserLaunch(launch.marker);
     }
@@ -161,14 +168,21 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
   it("exposes the child's display when Chrome erased the holder environment", async () => {
     const profile = await tempProfile();
     const authFile = join(tmpdir(), "tsq-login-child", "xauthority");
-    const holder = spawn(process.execPath, ["-e", `
+    const holder = spawn(
+      process.execPath,
+      [
+        "-e",
+        `
       const { spawn } = require("node:child_process");
       const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
         env: { DISPLAY: ":71", XAUTHORITY: ${JSON.stringify(authFile)} }, stdio: "ignore"
       });
       child.once("spawn", () => process.send(child.pid));
       process.on("disconnect", () => { child.kill("SIGKILL"); process.exit(); });
-    `], { env: { PATH: process.env.PATH }, stdio: ["ignore", "ignore", "ignore", "ipc"] });
+    `,
+      ],
+      { env: { PATH: process.env.PATH }, stdio: ["ignore", "ignore", "ignore", "ipc"] },
+    );
     const childPid = await new Promise<number>((resolve) => holder.once("message", resolve));
     try {
       await holderOwnsProfile(profile, holder);
@@ -179,7 +193,9 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
       if (exposure.kind === "exposed") await exposure.stop();
       expect(() => process.kill(holder.pid!, 0)).not.toThrow();
     } finally {
-      try { process.kill(childPid, "SIGKILL"); } catch {}
+      try {
+        process.kill(childPid, "SIGKILL");
+      } catch {}
       holder.disconnect();
     }
   });
@@ -194,7 +210,10 @@ describe("exposeSharedBrokerCeremonyDisplay", () => {
     vi.stubEnv("TRUSTY_SQUIRE_REAPER_DIR", join(profile, "reaper"));
     mockState.secretSetupFails = true;
     const exposure = await exposeSharedBrokerCeremonyDisplay(profile, "test");
-    expect(exposure).toMatchObject({ kind: "unshowable", reason: expect.stringContaining("secret setup failed") });
+    expect(exposure).toMatchObject({
+      kind: "unshowable",
+      reason: expect.stringContaining("secret setup failed"),
+    });
     expect(mockState.rigs).toHaveLength(1);
     expect(mockState.rigs[0]!.privateDir).toBeUndefined();
     expect(mockState.privateDirs.every((path) => !existsSync(path))).toBe(true);
