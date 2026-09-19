@@ -53,6 +53,18 @@ export interface OpenRequest {
    * Chrome underneath them (none live). Only meaningful when `proxy` is
    * omitted; an explicit `proxy` always wins. */
   adoptIdentity?: boolean;
+  /** This open IS the connect re-auth ceremony: its start must pass the
+   * `google_session` admission gate, because the ceremony is what creates
+   * the live Google session — gating it deadlocked every enrolled machine
+   * whose profile had none (the gate's own remedy, `connect
+   * --force-relogin=google`, is the ceremony itself). Nothing else changes:
+   * the ceremony still gets a full operator session (the deferred
+   * --force-relogin logout drive rides it) and still counts in the
+   * inventory. Ceremony-only by construction: the only sender is the
+   * connect ceremony in google-login.ts, and the agent-facing
+   * `operate_start` surface has no such field and no forwarder path that
+   * could add one. */
+  ceremony?: boolean;
 }
 export interface OpenResult {
   /**

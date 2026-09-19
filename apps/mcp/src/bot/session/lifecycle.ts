@@ -29,6 +29,7 @@ import { brokerBrowserCustody } from "../broker/custody.js";
 // runtime import cycle, exactly as session/model.ts does with its type-only
 // back-reference.
 import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { BrowserController } from "../browser.js";
 import { detectGoogleAccountEmail, detectSessionProviders } from "../oauth-login.js";
 import { waitForCaptchaChallengeToSettle } from "../captcha.js";
@@ -508,6 +509,28 @@ export interface NeedsUserLogin {
   // command to users. Keep it pointing at `connect`.
   resume: "connect";
 }
+/** The connect re-auth ceremony's own start must pass the admission gate
+ * unconditionally: the ceremony is what CREATES the live Google session, so
+ * gating it deadlocked every enrolled machine whose profile had none — the
+ * gate's own remedy (`connect --force-relogin=google`) is the ceremony
+ * itself, making the refusal self-referential. The context below is entered
+ * ONLY by the broker's ceremony open (an `open` request carrying
+ * `ceremony: true`), which the agent-facing `operate_start` surface cannot
+ * reach: no other caller can bypass the gate.
+ */
+const ceremonyStartAdmissionContext = new AsyncLocalStorage<true>();
+
+export async function withCeremonyStartAdmission<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
+  return await ceremonyStartAdmissionContext.run(true, operation);
+}
+
+/** True only inside a `withCeremonyStartAdmission` scope. */
+export function ceremonyStartAdmission(): boolean {
+  return ceremonyStartAdmissionContext.getStore() === true;
+}
+
 export function googleSessionGate(
   liveProviders: readonly OAuthProviderId[],
 ): { ok: true } | { ok: false; needs_user: NeedsUserLogin } {
@@ -566,7 +589,9 @@ export async function startProvisionSession(
     liveProviders =
       custody === undefined ? await ensureProvisionPrimaryProviderSession(browser) : await probe();
     assertProvisionStartAdmitted(acquired.shutdownGeneration);
-    const gate = googleSessionGate(liveProviders);
+    const gate = ceremonyStartAdmission()
+      ? { ok: true as const }
+      : googleSessionGate(liveProviders);
     if (!gate.ok) {
       audit(id, "connect_gate", { ok: false, wall: "google_session" });
       await releaseWarmBrowserPage(browser, false);

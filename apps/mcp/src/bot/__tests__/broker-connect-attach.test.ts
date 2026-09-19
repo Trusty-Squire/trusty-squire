@@ -62,19 +62,33 @@ const BROKER_FIXTURE_SCRIPT = `
 const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
-const [marker, socketPath, lockPath, token, openNeedsUser] = process.argv.slice(2);
+const path = require("node:path");
+const [marker, socketPath, lockPath, token, openNeedsUser, profileDir] = process.argv.slice(2);
 const CONFIRM_URL = ${JSON.stringify(CONFIRM_URL)};
 if (marker !== "broker") process.exit(78);
 function startTime() {
   const stat = fs.readFileSync("/proc/self/stat", "utf8");
   return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
 }
+// The ceremony's exposure helper discovers the shared display from the
+// browser process's OWN environment via the profile's SingletonLock symlink
+// — so the fixture holder must look exactly like that: a live pid owning the
+// SingletonLock, running on a display this repo did not create (a foreign
+// XAUTHORITY), which the helper must report as already_visible rather than
+// starting any noVNC rig for.
+try {
+  if (profileDir)
+    fs.symlinkSync(
+      os.hostname() + "-" + process.pid,
+      path.join(profileDir, "SingletonLock"),
+    );
+} catch {}
 fs.writeFileSync(
   lockPath,
   JSON.stringify({ host: os.hostname(), pid: process.pid, start_time: startTime(), token: "lease" }),
   { mode: 0o600 },
 );
-const seen = { openUrl: null, closedSession: null, commands: [] };
+const seen = { openUrl: null, openCeremony: false, closedSession: null, commands: [] };
 const server = net.createServer((socket) => {
   let buffered = "";
   socket.on("data", (chunk) => {
@@ -103,6 +117,7 @@ const server = net.createServer((socket) => {
       if (request.method === "open") {
         seen.openUrl = request.params?.serviceUrl ?? null;
         seen.openAdoptIdentity = request.params?.adoptIdentity === true;
+        seen.openCeremony = request.params?.ceremony === true;
         if (openNeedsUser === "needs-user") {
           // A documented needs_user hand-back (OpenResult): the broker
           // minted no live session — the observation still carries its own
@@ -234,12 +249,14 @@ async function connectFixture(opts: {
   forceReloginProviders?: readonly string[];
   brokerToken?: string;
   openNeedsUser?: boolean;
+  pollUntilDone?: () => Promise<boolean>;
 } = {}): Promise<{
   result: unknown;
   profileIdentity: string;
   lockNeverReleased: boolean;
   openUrl: string | null;
   openAdoptIdentity: boolean;
+  openCeremony: boolean;
   closedSession: string | null;
   commands: { name: string | null; args: Record<string, unknown> | null }[];
 }> {
@@ -281,8 +298,15 @@ async function connectFixture(opts: {
       lockPath,
       opts.brokerToken ?? TOKEN,
       opts.openNeedsUser === true ? "needs-user" : "",
+      targetProfile,
     ],
-    { stdio: "ignore" },
+    {
+      stdio: "ignore",
+      // The exposure helper reads the holder's exec-time environment: a
+      // foreign XAUTHORITY names the machine's own display, so the real
+      // helper resolves already_visible without spawning any helpers.
+      env: { ...process.env, DISPLAY: ":0", XAUTHORITY: "/tmp/fixture-foreign-Xauthority" },
+    },
   );
   cleanup.children.push(child);
   await waitFor(() => existsSync(lockPath) && existsSync(socketPath));
@@ -292,7 +316,7 @@ async function connectFixture(opts: {
     profileDir: targetProfile,
     url: CONFIRM_URL,
     deadline: Date.now() + 5_000,
-    pollUntilDone: async () => true,
+    pollUntilDone: opts.pollUntilDone ?? (async () => true),
     bannerLabel: "fixture",
     ...(opts.forceReloginProviders
       ? { forceReloginProviders: opts.forceReloginProviders as ("google" | "github")[] }
@@ -310,13 +334,14 @@ async function connectFixture(opts: {
   const seen = ((): {
     openUrl: string | null;
     openAdoptIdentity: boolean;
+    openCeremony: boolean;
     closedSession: string | null;
     commands: { name: string | null; args: Record<string, unknown> | null }[];
   } => {
     try {
       return JSON.parse(readFileSync(lockPath + ".seen", "utf8"));
     } catch {
-      return { openUrl: null, openAdoptIdentity: false, closedSession: null, commands: [] };
+      return { openUrl: null, openAdoptIdentity: false, openCeremony: false, closedSession: null, commands: [] };
     }
   })();
   return {
@@ -327,6 +352,7 @@ async function connectFixture(opts: {
     lockNeverReleased: existsSync(lockPath),
     openUrl: seen.openUrl,
     openAdoptIdentity: seen.openAdoptIdentity,
+    openCeremony: seen.openCeremony === true,
     closedSession: seen.closedSession,
     commands: seen.commands,
   };
@@ -346,6 +372,9 @@ describe("connect attaches to the live broker for the profile it is connecting",
     // The open is identity-neutral: the ceremony reuses whatever identity
     // the shared browser is live under instead of requesting a bare one.
     expect(outcome.openAdoptIdentity).toBe(true);
+    // The open names itself as the ceremony: that marker is what scopes the
+    // google_session admission gate bypass to this open and nothing else.
+    expect(outcome.openCeremony).toBe(true);
     // The session tab is closed at the lease boundary.
     expect(outcome.closedSession).toBe("tab-1");
     // The profile lease was never touched: no drain, no guard, no second
@@ -410,28 +439,33 @@ describe("connect attaches to the live broker for the profile it is connecting",
   );
 
   it(
-    "a needs-user hand-back (no sessionId) does not kill connect",
+    "a needs-user hand-back (no session, no tab) fails immediately instead of polling to the deadline",
     { timeout: 30_000 },
     async () => {
       // OpenResult: sessionId is absent when the broker minted no live
-      // session — a documented hand-back, not a fault. The old code threw
-      // "the shared browser did not open the install-confirm tab" here. Now
-      // the ceremony surfaces the hand-back's own guidance and keeps the
-      // poll running to its honest verdict; there is no session tab to close.
-      const errors: string[] = [];
-      const errorSpy = vi.spyOn(console, "error").mockImplementation((line?: unknown) => {
-        errors.push(String(line));
+      // session — no tab to expose, no session to close, and nothing any
+      // retry inside this run could change. Polling to the deadline (the
+      // round-12 review-1 deadlock) just burned the whole window; the
+      // ceremony must stop immediately with the broker's own words and the
+      // recovery step.
+      let polls = 0;
+      const outcome = await connectFixture({
+        openNeedsUser: true,
+        pollUntilDone: async () => {
+          polls += 1;
+          return false;
+        },
       });
-      try {
-        const outcome = await connectFixture({ openNeedsUser: true });
-        expect(outcome.result).toEqual({ status: "satisfied", closeState: "closed" });
-        expect(outcome.openUrl).toBe(CONFIRM_URL);
-        expect(outcome.closedSession).toBeNull();
-        expect(errors.join("\n")).toContain("needs-user hand-back");
-        expect(errors.join("\n")).toContain("No live Google session — sign in first");
-      } finally {
-        errorSpy.mockRestore();
-      }
+      expect(outcome.result).toBeInstanceOf(Error);
+      const message = (outcome.result as Error).message;
+      expect(message).toContain("opened no ceremony tab");
+      // The broker's own guidance travels verbatim.
+      expect(message).toContain("No live Google session — sign in first");
+      // The recovery step and where to look when it repeats.
+      expect(message).toContain("connect");
+      expect(message).toContain("broker.log");
+      // No deadline wait: not one poll.
+      expect(polls).toBe(0);
     },
   );
 });

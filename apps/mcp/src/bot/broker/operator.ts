@@ -9,6 +9,7 @@ import {
   finishProvisionSession,
   forceFinishProvisionSession,
   sessionForCall,
+  withCeremonyStartAdmission,
   withProvisionSessionCall,
 } from "../session/lifecycle.js";
 import {
@@ -44,13 +45,18 @@ const commandSchema = z
   .strict();
 // The tool's own input schema stays the single validator (exactly as before
 // the collapse); the open request only names the three launch fields plus
-// the identity-neutral adoption flag.
+// the identity-neutral adoption flag and the connect ceremony's own marker.
+// `ceremony` is the ONE new field (round-12 captain order): it is set only
+// by the connect ceremony (google-login.ts) and only scopes the
+// google_session admission gate bypass — the agent-facing `operate_start`
+// schema has no such field, and no forwarder path can inject it.
 const openSchema = z
   .object({
     serviceUrl: z.string().min(1),
     format: z.enum(["compact", "full"]).optional(),
     proxy: z.string().optional(),
     adoptIdentity: z.boolean().optional(),
+    ceremony: z.boolean().optional(),
   })
   .strict();
 const closeSchema = z
@@ -219,7 +225,12 @@ export class OperatorBroker implements BrokerTransportPort {
           async () =>
             await withBrokerAdmission(
               { sessionId: id },
-              async () => await tool.handler(args, pinnedApi),
+              async () =>
+                input.ceremony === true
+                  ? await withCeremonyStartAdmission(
+                      async () => await tool.handler(args, pinnedApi),
+                    )
+                  : await tool.handler(args, pinnedApi),
             ),
         );
         if (signal.aborted) throw signal.reason ?? new Error("operator_request_cancelled");

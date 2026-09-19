@@ -734,28 +734,48 @@ export interface LoginRunResult {
 // standalone remote login uses. The display coordinates are discovered from
 // the browser process's own environment (/proc on Linux); the helpers this
 // call spawns are reaped at the ceremony's lease boundary and never touch
-// the display or the browser itself. Returns null — never throws — when
-// there is nothing to expose or exposure could not be set up: the tab is
-// NOT on a rig this repo created (a real user display the human can already
-// see, or a platform with no /proc), or the noVNC attach itself failed
-// (logged; the ceremony continues without it — exposure shows the login,
-// it is never a precondition for it).
+// the display or the browser itself.
+//
+// The result names WHY there is no noVNC exposure, because the ceremony
+// must treat the states differently (round-12 review-3): "unshowable"
+// means the tab provably cannot be shown to anyone (no discoverable
+// display, or the noVNC attach failed) and the ceremony fails immediately
+// instead of silently polling to its deadline; "already_visible" means the
+// tab sits on a display this repository did not create (the machine's own
+// screen), which the user may be looking at right now. Neither failure
+// path ever touches the display or the browser.
+export type SharedCeremonyExposure =
+  | { kind: "exposed"; stop: () => Promise<void> }
+  | { kind: "already_visible"; reason: string }
+  | { kind: "unshowable"; reason: string };
+
 export async function exposeSharedBrokerCeremonyDisplay(
   profileDir: string,
   label: string,
-): Promise<(() => Promise<void>) | null> {
+): Promise<SharedCeremonyExposure> {
   const holderPid = currentProfileHolderPid(profileDir);
-  if (holderPid === null) return null;
+  if (holderPid === null)
+    return {
+      kind: "unshowable",
+      reason:
+        "no live browser process holds the profile, so its display could not be discovered",
+    };
   const env = readProcessEnvironment(holderPid);
   const display = env?.DISPLAY;
   const authFile = env?.XAUTHORITY;
-  if (display === undefined || authFile === undefined) return null;
-  if (!isOwnedLoginRigXauthority(authFile)) return null;
-  // Everything below is BEST-EFFORT exposure: the noVNC page is how the human
-  // is SHOWN the login, not a precondition for logging in. Any failure —
-  // missing helper binaries, tunnel misconfig, attach error — degrades to
-  // "no exposure", is logged with its concrete cause, and the ceremony
-  // continues. This function never throws and never refuses a connect.
+  if (display === undefined || authFile === undefined)
+    return {
+      kind: "unshowable",
+      reason:
+        "the browser holding the profile runs without a DISPLAY/XAUTHORITY in its environment",
+    };
+  if (!isOwnedLoginRigXauthority(authFile))
+    return {
+      kind: "already_visible",
+      reason:
+        "it runs on a display this repository did not create, which may already be visible " +
+        "on this machine's own screen",
+    };
   let rig: RemoteLoginRig;
   try {
     rig = createRemoteLoginRig();
@@ -766,11 +786,10 @@ export async function exposeSharedBrokerCeremonyDisplay(
     rig.display = display;
     rig.authFile = authFile;
   } catch (err) {
-    console.error(
-      `[login] could not prepare a noVNC rig for the shared browser's display ` +
-        `(${err instanceof Error ? err.message : String(err)}) — continuing without it.`,
-    );
-    return null;
+    return {
+      kind: "unshowable",
+      reason: `preparing the noVNC rig failed (${err instanceof Error ? err.message : String(err)})`,
+    };
   }
   const removeCleanup = registerRemoteLoginRigCleanup(rig, () => undefined);
   try {
@@ -778,16 +797,18 @@ export async function exposeSharedBrokerCeremonyDisplay(
   } catch (err) {
     removeCleanup();
     await teardownRemoteLoginRig(rig).catch(() => undefined);
-    console.error(
-      `[login] could not expose the shared browser's display over noVNC ` +
-        `(${err instanceof Error ? err.message : String(err)}) — continuing without it.`,
-    );
-    return null;
+    return {
+      kind: "unshowable",
+      reason: `the noVNC attach failed (${err instanceof Error ? err.message : String(err)})`,
+    };
   }
-  return async () => {
-    // Helpers only: the display and the browser belong to the broker daemon.
-    removeCleanup();
-    await teardownRemoteLoginRig(rig);
+  return {
+    kind: "exposed",
+    stop: async () => {
+      // Helpers only: the display and the browser belong to the broker daemon.
+      removeCleanup();
+      await teardownRemoteLoginRig(rig);
+    },
   };
 }
 
@@ -989,29 +1010,26 @@ export async function tryRunCeremonyInSharedBroker(
     const open = (await client.call("open", {
       serviceUrl: opts.url,
       adoptIdentity: true,
+      // The ceremony IS what creates the live Google session: its start must
+      // pass the google_session admission gate, or every enrolled machine
+      // with an empty profile deadlocks against a self-referential remedy.
+      ceremony: true,
     })) as { sessionId?: string; observation?: unknown };
     sessionId = open.sessionId;
     if (sessionId === undefined) {
-      // A documented `needs_user` hand-back (OpenResult: sessionId absent,
-      // the observation still carries its own session id): the broker minted
-      // no live session, so there is no tab to expose and no session to
-      // close. This must not kill connect — surface the hand-back's own
-      // guidance and let the normal poll run to its honest verdict.
+      // The broker minted no live session AND no tab. Nothing in this run
+      // can show, navigate, or recover that state — the old behavior polled
+      // to the deadline against something no code path could change (the
+      // round-12 review-1 deadlock). Fail immediately with the broker's own
+      // words and the recovery step.
       const detail = openHandbackDetail(open.observation);
-      console.error(
-        `\n[login] The shared browser opened no ceremony tab (needs-user hand-back).` +
+      throw new Error(
+        `[login] The shared browser opened no ceremony tab (the broker minted no live session).` +
           (detail !== "" ? ` ${detail}` : "") +
-          ` Waiting for the install to complete; the deadline still applies.\n`,
+          ` Nothing in this run can show or navigate the page, so waiting out the deadline ` +
+          `would only burn it. Re-run \`npx @trusty-squire/mcp connect\`; if it repeats, ` +
+          `check the broker log at ~/.trusty-squire/.trusty-squire-broker-leases/launch/broker.log.`,
       );
-      const ok = await pollUntil(
-        opts.deadline,
-        () => opts.pollUntilDone(),
-        opts.heartbeatMessage,
-        () => {
-          if (!client.isConnected()) throw new Error(LOGIN_BROWSER_CLOSED_ERROR);
-        },
-      );
-      return { status: ok ? "satisfied" : "timeout", closeState: "closed" };
     }
     if (opts.forceReloginProviders?.length) {
       await logoutProvidersThroughSession(
@@ -1023,21 +1041,34 @@ export async function tryRunCeremonyInSharedBroker(
     }
     // The broker's Chrome runs on its own private Xvfb, so the tab is
     // invisible to the user until this process exposes that display over
-    // noVNC. A tab no human can see is a tab no human can complete.
-    stopExposure = await exposeSharedBrokerCeremonyDisplay(opts.profileDir, SHARED_DISPLAY_LABEL);
+    // noVNC. A tab no human can see is a tab no human can complete — and
+    // when it provably cannot be shown, waiting out the deadline would only
+    // burn it (round-12 review-3): fail now with the cause and the recovery.
+    const exposure = await exposeSharedBrokerCeremonyDisplay(
+      opts.profileDir,
+      SHARED_DISPLAY_LABEL,
+    );
+    if (exposure.kind === "unshowable") {
+      throw new Error(
+        `\n[login] The install page opened as a tab in the shared browser's private ` +
+          `display, which nothing here can show: ${exposure.reason}. Without a display ` +
+          `nobody can see or complete the sign-in, so this run stops instead of waiting ` +
+          `out its deadline. Recovery: install the noVNC helpers (x11vnc, websockify, ` +
+          `cloudflared — or set TS_LOGIN_PUBLIC_HOSTNAME and TS_LOGIN_LOCAL_PORT to use ` +
+          `your own tunnel) and run connect again.\n`,
+      );
+    }
     console.error(
-      stopExposure === null
-        ? `\n[login] The install page opened as a tab in the shared browser's private ` +
-          `display, which could NOT be shown here (see the [login] line above for why). ` +
-          `Without that display nobody can see or complete the sign-in: install the ` +
-          `noVNC helpers (x11vnc, websockify, cloudflared — or set TS_LOGIN_PUBLIC_HOSTNAME ` +
-          `and TS_LOGIN_LOCAL_PORT to use your own tunnel) and run connect again.\n`
+      exposure.kind === "already_visible"
+        ? `\n[login] The install page opened as a tab in the shared browser's display ` +
+          `(${exposure.reason}) — complete the sign-in on that screen.\n`
         : `\n[login] The install page opened as a tab in the shared browser's display — ` +
           `open the noVNC URL above on any device to see and drive it. That URL shows ` +
           `the WHOLE shared browser display for the duration of the ceremony — every ` +
           `tab this browser is running, not only the sign-in — and it is single-use: ` +
           `it exists for this ceremony only and stops working when the ceremony ends.\n`,
     );
+    stopExposure = exposure.kind === "exposed" ? exposure.stop : null;
     const ok = await pollUntil(
       opts.deadline,
       () => opts.pollUntilDone(),

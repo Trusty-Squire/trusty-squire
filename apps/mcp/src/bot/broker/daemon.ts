@@ -4,6 +4,7 @@ import { lstat, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { createSessionGuard, setServingAccountId } from "../../session-guard.js";
+import { openSessionStorage } from "../../session.js";
 import { setSelfManagedChromeTerminationSignalExitEnabled } from "../browser.js";
 import { startOwnerProcessReaper } from "../owner-process-reaper.js";
 import {
@@ -16,6 +17,7 @@ import { brokerBusyStatus } from "./status.js";
 import { installBrokerBrowserCustody } from "./custody.js";
 import { BrokerRuntime } from "./runtime.js";
 import { OperatorBroker } from "./operator.js";
+import { type BrokerPrincipal } from "./authority.js";
 import { BrokerRefusal } from "./refusal.js";
 import { listenBroker } from "./transport.js";
 
@@ -62,6 +64,46 @@ export class BrokerClientRegistry {
   }
 }
 
+/** Strict handshake authentication with one in-place credential refresh
+ * (round-12 review-2 — no maintenance window). When connect re-enrolls it
+ * mints a fresh agent_session_token, and a resident broker still holding the
+ * previous digest would otherwise send every presented credential into the
+ * stale-credential reclaim path — which refuses while any lane's client is
+ * still attached, wedging the re-enroll behind its own resident. On a null
+ * authenticate, re-read THIS daemon's own bound account entry: only a token
+ * that matches that entry (same account, same token string) is adopted via
+ * refreshCredentials and retried once. Anything else — another account, a
+ * token the store has never seen, a refresh refused because live sessions
+ * still hold the broker — stays refused, and the reclaim path reports it
+ * honestly. */
+export async function authenticateOrAdoptCurrentCredential(
+  operator: OperatorBroker,
+  boundAccountId: string | null,
+  readBoundEntry: () => Promise<{
+    account_id?: string;
+    agent_session_token?: string;
+  } | null>,
+  token: string,
+  agentId?: string,
+): Promise<Omit<BrokerPrincipal, "clientId"> | null> {
+  const principal = await operator.authenticate(token, agentId);
+  if (principal !== null) return principal;
+  if (boundAccountId === null) return null;
+  try {
+    const entry = await readBoundEntry();
+    if (entry?.account_id !== boundAccountId || entry.agent_session_token !== token) return null;
+    operator.refreshCredentials({
+      account_id: entry.account_id,
+      agent_session_token: entry.agent_session_token,
+    });
+    return await operator.authenticate(token, agentId);
+  } catch {
+    // Refresh refused (live sessions still drain-required) or the store read
+    // failed: keep the strict refusal; the reclaim path reports it.
+    return null;
+  }
+}
+
 /** On-demand broker entrypoint; retains custody while clients own sessions. */
 export async function runBrokerDaemon(): Promise<void> {
   const path = resolveBrokerSocket();
@@ -103,7 +145,14 @@ export async function runBrokerDaemon(): Promise<void> {
     return inventory.sessions === 0 && inventory.admitting === 0 && inventory.closing === 0;
   };
   const listener = await listenBroker(path, {
-    authenticate: async (token, agentId) => await operator.authenticate(token, agentId),
+    authenticate: async (token, agentId) =>
+      await authenticateOrAdoptCurrentCredential(
+        operator,
+        session.account_id ?? null,
+        async () => await (await openSessionStorage()).read(session.account_id),
+        token,
+        agentId,
+      ),
     connected: async (principal, params) => {
       const probe = params.probe === true;
       clients.admit(principal.clientId, probe);
