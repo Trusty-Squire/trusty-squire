@@ -496,21 +496,28 @@ describe("login browser lifecycle guards", () => {
   });
 });
 
-describe("headless login profile contention", () => {
+describe("self-launched login profile contention", () => {
   it("returns the clear already-in-use error immediately instead of waiting", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-login-profile-"));
     symlinkSync(`${hostname()}-${process.pid}`, join(profileDir, "SingletonLock"));
 
     try {
-      const result = await openInstallConfirmInBotChrome({
-        confirmUrl: "https://example.test/install",
-        pollUntilClaimed: async () => "pending" as const,
-        profileDir,
-      });
+      // Exercise the real self-launch profile gate without broker discovery or
+      // host-dependent noVNC setup. Broker reuse has its own attach regressions.
+      const pollUntilClaimed = vi.fn(async () => "pending" as const);
+      const result = await openInstallConfirmInBotChrome(
+        {
+          confirmUrl: "https://example.test/install",
+          pollUntilClaimed,
+          profileDir,
+        },
+        runDisplayedChrome,
+      );
       expect(result).toEqual({
         status: "error",
         detail: "another Trusty Squire session is already using the browser — close it first",
       });
+      expect(pollUntilClaimed).not.toHaveBeenCalled();
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }
