@@ -12,6 +12,7 @@ import {
   BrowserBusy,
   BrowserNeedsUser,
   browserBusy,
+  ExternalBrowserError,
   openTab,
   UnservableProfileError,
 } from "../browser-busy.js";
@@ -142,7 +143,7 @@ describe("openTab over the real broker wire", () => {
   });
 
   it("hands a permanent refusal back whole rather than calling it retry-later", async () => {
-    for (const code of ["stale_lease", "cancelled", "unauthorized", "external_browser"]) {
+    for (const code of ["stale_lease", "cancelled", "unauthorized"]) {
       await running?.close();
       await broker(({ method }) => {
         if (method === "open") throw new BrokerRefusal(code, `${code} is permanent`);
@@ -157,6 +158,31 @@ describe("openTab over the real broker wire", () => {
         },
       );
     }
+  });
+
+  it("names BOT_CDP_ENDPOINT when the broker is pointed at a browser it cannot own", async () => {
+    // The daemon inherits this env var, so the refusal is a standing
+    // misconfiguration. It must not reach the caller as raw wire vocabulary
+    // the `./browser` entry does not even export a class for.
+    await broker(({ method }) => {
+      if (method === "open")
+        throw new BrokerRefusal(
+          "external_browser",
+          "Broker requires a locally owned browser; BOT_CDP_ENDPOINT names an external Chrome",
+        );
+      return { closed: true };
+    });
+    await expect(openTab({ profile: "default", purpose: "signup:vercel" })).rejects.toSatisfy(
+      (error: unknown) => {
+        expect(error).toBeInstanceOf(ExternalBrowserError);
+        expect(error).not.toBeInstanceOf(BrowserBusy);
+        expect(error).not.toBeInstanceOf(BrokerRefusal);
+        if (!(error instanceof ExternalBrowserError)) throw new Error("expected refusal");
+        expect(error.message).toContain("BOT_CDP_ENDPOINT");
+        expect(error.action()).toContain("BOT_CDP_ENDPOINT");
+        return true;
+      },
+    );
   });
 
   it("names reconnect when the broker hands the start back to the user", async () => {

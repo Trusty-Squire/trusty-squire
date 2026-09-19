@@ -135,6 +135,21 @@ export class BrowserNeedsUser extends Error {
   }
 }
 
+/**
+ * The broker is pointed at an external Chrome it does not own. A standing
+ * configuration choice rather than a layer that is busy: nothing is holding
+ * the browser, and no retry clears it until the environment changes.
+ */
+export class ExternalBrowserError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ExternalBrowserError";
+  }
+  action(): string {
+    return "Unset BOT_CDP_ENDPOINT so the broker owns its own Chrome, then retry.";
+  }
+}
+
 export class BrowserBusy extends Error {
   readonly reason: BrowserBusyReason;
   constructor(reason: BrowserBusyReason, message?: string) {
@@ -208,12 +223,15 @@ function reasonFromBusyRefusal(
 }
 
 /**
- * The refusal a caller saw, as a busy answer — or undefined when it was not a
- * "not now" at all. The holder is only ever what the refusing layer reported;
- * the requester's own purpose is never dressed up as the blocker.
+ * The refusal a caller saw, as one of this module's own types — or undefined
+ * when it names nothing the façade models, in which case it propagates. The
+ * holder is only ever what the refusing layer reported; the requester's own
+ * purpose is never dressed up as the blocker.
  */
-function mapBusyRefusal(error: unknown): BrowserBusy | undefined {
-  if (!(error instanceof BrokerRefusal) || !isBusyRefusalCode(error.code)) return undefined;
+function mapBrokerRefusal(error: unknown): Error | undefined {
+  if (!(error instanceof BrokerRefusal)) return undefined;
+  if (error.code === "external_browser") return new ExternalBrowserError(error.message);
+  if (!isBusyRefusalCode(error.code)) return undefined;
   return new BrowserBusy(
     reasonFromBusyRefusal(error.code, { message: error.message }),
     error.message,
@@ -337,7 +355,7 @@ export async function openTab(options: OpenTabOptions): Promise<TabHandle> {
       credentials.accountId,
     );
   } catch (error) {
-    throw mapBusyRefusal(error) ?? error;
+    throw mapBrokerRefusal(error) ?? error;
   }
   let sessionId: string;
   try {
@@ -349,7 +367,7 @@ export async function openTab(options: OpenTabOptions): Promise<TabHandle> {
       throw new BrowserNeedsUser("The broker handed the start back to the user; no tab was opened");
   } catch (error) {
     await client.close();
-    throw mapBusyRefusal(error) ?? error;
+    throw mapBrokerRefusal(error) ?? error;
   }
   let released = false;
   return {

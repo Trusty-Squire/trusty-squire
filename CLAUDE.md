@@ -594,8 +594,9 @@ and the profile lock holder are all visible at once. That probe connects with
 `probe: true` so it stays out of the broker's idle accounting — a read must
 never extend how long the shared Chrome stays resident. The
 refusal-code mapping, why a façade bound below a layer's budget is worse than
-none, the failures that are deliberately not busy layers, and the "a running
-tab family is not busy" rule live in
+none, the permanent failures that each get their own typed error rather than a
+busy layer (`UnservableProfileError`, `BrowserNeedsUser`, `ExternalBrowserError`),
+and the "a running tab family is not busy" rule live in
 [`docs/browser-broker.md`](docs/browser-broker.md#busy-facade).
 
 ### Browser process vs page lifetime (`browser.ts` is a facade)

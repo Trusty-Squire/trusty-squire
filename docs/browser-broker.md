@@ -243,15 +243,17 @@ the likeliest first run) is not a busy layer either: `openTab` throws
 `BrowserNeedsUser`, whose `.action()` names reconnect.
 
 Two permanent configuration failures are deliberately **not** busy layers,
-because no retry can clear either and `.action()` would be a lie:
+because no retry can clear either and a busy `.action()` would be a lie. Each
+still gets its own typed façade error carrying the action that IS true, so the
+per-layer wire vocabulary never reaches the consumer:
 
 - The broker serves exactly one physical profile. Naming another gets
   `UnservableProfileError`, which names the profile this installation serves.
 - A broker pointed at an external Chrome (`BOT_CDP_ENDPOINT` set) refuses with
-  the wire code `external_browser`, which propagates unchanged. This is
-  deliberately a separate code from `incompatible_runtime` — that one means
-  "finish the sessions pinning this browser identity, then retry", which is a
-  genuine not-now.
+  the wire code `external_browser`, which the façade raises as
+  `ExternalBrowserError` naming that variable. This is deliberately a separate
+  code from `incompatible_runtime` — that one means "finish the sessions
+  pinning this browser identity, then retry", which is a genuine not-now.
 
 `browserBusy()` is the read-only fold over that one served profile, and
 read-only is load-bearing: it probes for a live broker listener and reads the
@@ -276,9 +278,9 @@ Wire codes stay unchanged — this is a mapping at the package boundary:
 | `incompatible_runtime` | custody        |
 | `launch_timeout`       | custody        |
 
-Other refusal codes are not "not now" and are not mapped; they propagate
-unchanged. That includes `stale_lease`, `external_browser`, `cancelled` and
-`unauthorized`.
+Other refusal codes are not "not now" and are not mapped onto a busy layer.
+`external_browser` becomes `ExternalBrowserError`; the rest — `stale_lease`,
+`cancelled`, `unauthorized` — propagate unchanged.
 
 ## Executed mechanical acceptance
 
