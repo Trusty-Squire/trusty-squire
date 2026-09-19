@@ -109,6 +109,8 @@ describe("request building", () => {
     expect(Object.keys(questions.TYPE_TEXT_target.criteria)).not.toContain(slugFor(SUBMIT));
     expect(Object.keys(questions.CLICK_target.criteria)).toContain(slugFor(SUBMIT));
     expect(Object.keys(questions.CLICK_target.criteria)).not.toContain(slugFor(EMAIL));
+    expect(questions.CLICK_target.criteria[slugFor(SUBMIT)]).toBe("continue");
+    expect(questions.TYPE_TEXT_target.criteria[slugFor(EMAIL)]).toBe("email");
     expect(JSON.stringify(questions)).not.toContain('"options":[');
     expect(operation.instructions).toBe(nextActionInstructions("sign up"));
   });
@@ -195,6 +197,12 @@ describe("page text from observation", () => {
         ["first story", "control", ""],
       ),
     ).toBe("HN\nfirst story");
+    expect(
+      pageTextFromObservation({
+        semantic: { title: "Zurich", headings: ["Zürich"] },
+        dom: "<a href='/wiki/Zurich'>long article markup</a>".repeat(40),
+      }),
+    ).toBe("Zurich\nZürich");
   });
 });
 
@@ -221,9 +229,7 @@ describe("history threading", () => {
     expect(state.recent_actions.at(-1)).toBe("click step 21");
     expect(state.recent_actions).not.toContain("click step 0");
     expect(JSON.stringify(state.elements)).not.toContain("@e:");
-    expect(state.elements.some((element) => element.description.includes("type into the email field"))).toBe(
-      true,
-    );
+    expect(state.elements.some((element) => element.description === "email")).toBe(true);
     expect(state.elements.some((element) => element.operations.includes("CLICK"))).toBe(true);
   });
 });
