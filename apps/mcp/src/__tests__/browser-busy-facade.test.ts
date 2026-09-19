@@ -202,11 +202,9 @@ describe("browserBusy asks the broker rather than inferring", () => {
       method === "status"
         ? {
             busy: true,
-            layer: "profile",
             code: "profile_busy",
             detail: "The Chrome profile lease is already held",
             holder: { pid: 4242, host: hostname() },
-            tabFamilies: 0,
           }
         : { closed: true },
     );
@@ -233,10 +231,8 @@ describe("browserBusy asks the broker rather than inferring", () => {
       method === "status"
         ? {
             busy: true,
-            layer: "maintenance",
             code: "maintenance",
             detail: "Connect owns the browser maintenance window",
-            tabFamilies: 0,
           }
         : { closed: true },
     );
@@ -248,11 +244,24 @@ describe("browserBusy asks the broker rather than inferring", () => {
     );
   });
 
-  it("is not busy while the broker multiplexes live tab families", async () => {
-    await broker(({ method }) =>
-      method === "status" ? { busy: false, tabFamilies: 3 } : { closed: true },
-    );
+  it("is not busy when the broker says so", async () => {
+    await broker(({ method }) => (method === "status" ? { busy: false } : { closed: true }));
     await expect(browserBusy()).resolves.toEqual({ busy: false });
+  });
+
+  it("never answers as if nothing runs when a broker is resident it cannot ask", async () => {
+    // `logout` clears the session file without touching the running daemon.
+    // Reading the profile lock here would report the broker's OWN Chrome as a
+    // foreign process to close — the answer its `status` would have denied.
+    await broker(() => ({ closed: true }));
+    await (await openSessionStorage()).clear();
+    symlinkSync(`${hostname()}-${process.pid}`, join(servedProfile(), "SingletonLock"));
+    await expect(browserBusy()).rejects.toSatisfy((error: unknown) => {
+      expect(error).toBeInstanceOf(BrowserNeedsUser);
+      if (!(error instanceof BrowserNeedsUser)) throw new Error("expected needs-user");
+      expect(error.action()).toContain("connect");
+      return true;
+    });
   });
 
   it("falls back to the profile lock when no broker is resident", async () => {

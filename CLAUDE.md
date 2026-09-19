@@ -589,8 +589,10 @@ It invents no deadline of its own — each layer owns its budget and says so in
 its own code, so the acquire and `tab.page.goto` take only an optional `signal`
 and cancel through the wire `abort` frame. **`browserBusy` does not fold the
 layers itself**: it calls the read-only `status` wire operation, which the
-broker answers from `broker/status.ts` where the maintenance window, custody,
-the profile lock holder and the tab families are all visible at once. The
+broker answers from `broker/status.ts` where the maintenance window, custody
+and the profile lock holder are all visible at once. That probe connects with
+`probe: true` so it stays out of the broker's idle accounting — a read must
+never extend how long the shared Chrome stays resident. The
 refusal-code mapping, why a façade bound below a layer's budget is worse than
 none, the failures that are deliberately not busy layers, and the "a running
 tab family is not busy" rule live in

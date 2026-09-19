@@ -304,8 +304,11 @@ export async function browserBusy(): Promise<BrowserStatus> {
   const socket = brokerSocketPath();
   if (!(await brokerEndpointHasLiveListener(socket))) return unbrokeredBrowserStatus();
   const credentials = await agentSessionToken();
-  if (credentials === undefined) return unbrokeredBrowserStatus();
-  const client = await BrokerClient.connect(socket, credentials.token);
+  if (credentials === undefined)
+    throw new BrowserNeedsUser(
+      "A broker is running but this machine has no enrolled account, so its answer cannot be asked for",
+    );
+  const client = await BrokerClient.connect(socket, credentials.token, { probe: true });
   try {
     return statusFromWire(await client.call("status", {}));
   } finally {

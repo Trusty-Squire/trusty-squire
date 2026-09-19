@@ -17,38 +17,28 @@ export interface BrokerBusyInputs {
   ownsLiveBrowser: boolean;
   /** Chrome's SingletonLock holder on the served profile. */
   profileHolder: { pid: number; host: string; stale: boolean } | null;
-  tabFamilies: number;
 }
 
 export function brokerBusyStatus(inputs: BrokerBusyInputs): StatusResult {
-  const { tabFamilies } = inputs;
   if (inputs.maintenanceOwned)
     return {
       busy: true,
-      layer: "maintenance",
       code: "maintenance",
       detail: "Connect owns the browser maintenance window",
-      tabFamilies,
     };
   if (inputs.draining)
-    return {
-      busy: true,
-      layer: "maintenance",
-      code: "maintenance",
-      detail: "Identity cell is draining",
-      tabFamilies,
-    };
+    return { busy: true, code: "maintenance", detail: "Identity cell is draining" };
   // A lock this broker's own live Chrome holds is custody working, not a
   // foreign process to close. Any other live holder is the profile layer.
+  // Live tab families are not an input at all: the broker multiplexes them on
+  // one shared Chrome, so a running family can never make this busy.
   const holder = inputs.profileHolder;
   if (!inputs.ownsLiveBrowser && holder !== null && !holder.stale)
     return {
       busy: true,
-      layer: "profile",
       code: "profile_busy",
       detail: "The Chrome profile lease is already held",
       holder: { pid: holder.pid, host: holder.host },
-      tabFamilies,
     };
-  return { busy: false, tabFamilies };
+  return { busy: false };
 }

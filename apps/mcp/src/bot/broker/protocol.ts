@@ -36,6 +36,12 @@ export interface ConnectRequest {
    * It is deliberately not a general client operation.
    */
   maintain?: boolean;
+  /**
+   * Connect-only concern: this connection will only read `status`. It is a
+   * read, so it is kept out of the broker's idle accounting — probing on any
+   * cadence must not extend how long the shared Chrome stays resident.
+   */
+  probe?: boolean;
 }
 export interface ConnectResult {
   version: 1;
@@ -95,20 +101,17 @@ export interface CloseResult {
  * these from outside: a live socket says nothing about whose Chrome holds the
  * lease, and the maintenance window is broker-local state. Read-only.
  */
-export type BrokerBusyLayer = "profile" | "maintenance" | "custody";
 export interface StatusResult {
   busy: boolean;
-  /** Present only when busy. */
-  layer?: BrokerBusyLayer;
+  /**
+   * The refusal code the same condition would produce on `open`. Present only
+   * when busy. The client maps code to layer; the wire does not carry a second
+   * copy of that mapping to drift from.
+   */
   code?: string;
   detail?: string;
   /** The process actually holding the profile, when the profile layer answers. */
   holder?: { pid?: number; host?: string };
-  /**
-   * Live tab families. Informational: the broker multiplexes them on one
-   * shared Chrome, so a running family never makes the browser unavailable.
-   */
-  tabFamilies: number;
 }
 
 /** Notifications travel on the originating command's stream, unchanged. */

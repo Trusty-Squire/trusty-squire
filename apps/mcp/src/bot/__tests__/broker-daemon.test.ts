@@ -1,5 +1,9 @@
 import { expect, it } from "vitest";
-import { brokerIdleTimeoutMs, completeMaintenanceCredentialRefresh } from "../broker/daemon.js";
+import {
+  BrokerClientRegistry,
+  brokerIdleTimeoutMs,
+  completeMaintenanceCredentialRefresh,
+} from "../broker/daemon.js";
 import { brokerEnvironment } from "../broker/discovery.js";
 
 it("passes the socket path to a detached broker without disturbing its environment", () => {
@@ -48,4 +52,36 @@ it("terminates rather than keeping a stale digest when restore throws", async ()
       },
     }),
   ).resolves.toBe("terminate");
+});
+
+it("does not let a status probe keep the shared Chrome resident", () => {
+  const clients = new BrokerClientRegistry();
+  clients.admit("probe-1", true);
+  // A probe is admitted but never holds off the idle countdown, so a consumer
+  // probing on any cadence cannot pin the browser tree.
+  expect(clients.idle()).toBe(true);
+  expect(clients.counts("probe-1")).toBe(false);
+  clients.touch("probe-1");
+  expect(clients.idle()).toBe(true);
+  clients.retire("probe-1");
+  expect(clients.idle()).toBe(true);
+});
+
+it("stays non-idle while an ordinary client is connected", () => {
+  const clients = new BrokerClientRegistry();
+  clients.admit("client-1", false);
+  expect(clients.counts("client-1")).toBe(true);
+  expect(clients.idle()).toBe(false);
+  clients.admit("probe-1", true);
+  expect(clients.idle()).toBe(false);
+  clients.retire("probe-1");
+  expect(clients.idle()).toBe(false);
+  clients.retire("client-1");
+  expect(clients.idle()).toBe(true);
+});
+
+it("counts a client that first appears on a call, not a connect", () => {
+  const clients = new BrokerClientRegistry();
+  clients.touch("client-1");
+  expect(clients.idle()).toBe(false);
 });

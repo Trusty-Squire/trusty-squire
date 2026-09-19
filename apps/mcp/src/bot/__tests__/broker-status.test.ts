@@ -6,36 +6,35 @@ const idle = {
   draining: false,
   ownsLiveBrowser: false,
   profileHolder: null,
-  tabFamilies: 0,
 };
 const foreignHolder = { pid: 4242, host: "box", stale: false };
 
 describe("the busy fold, computed where all four layers are visible", () => {
   it("is not busy when nothing holds the browser", () => {
-    expect(brokerBusyStatus(idle)).toEqual({ busy: false, tabFamilies: 0 });
+    expect(brokerBusyStatus(idle)).toEqual({ busy: false });
   });
 
   it("reports the maintenance window, which no other process can observe", () => {
-    expect(brokerBusyStatus({ ...idle, maintenanceOwned: true })).toMatchObject({
+    expect(brokerBusyStatus({ ...idle, maintenanceOwned: true })).toEqual({
       busy: true,
-      layer: "maintenance",
       code: "maintenance",
+      detail: "Connect owns the browser maintenance window",
     });
   });
 
   it("reports a draining identity cell as the same window", () => {
     expect(brokerBusyStatus({ ...idle, draining: true })).toMatchObject({
       busy: true,
-      layer: "maintenance",
+      code: "maintenance",
       detail: "Identity cell is draining",
     });
   });
 
   it("names a foreign profile holder", () => {
-    expect(brokerBusyStatus({ ...idle, profileHolder: foreignHolder })).toMatchObject({
+    expect(brokerBusyStatus({ ...idle, profileHolder: foreignHolder })).toEqual({
       busy: true,
-      layer: "profile",
       code: "profile_busy",
+      detail: "The Chrome profile lease is already held",
       holder: { pid: 4242, host: "box" },
     });
   });
@@ -43,20 +42,19 @@ describe("the busy fold, computed where all four layers are visible", () => {
   it("does not call its own live Chrome a foreign process to close", () => {
     expect(
       brokerBusyStatus({ ...idle, ownsLiveBrowser: true, profileHolder: foreignHolder }),
-    ).toEqual({ busy: false, tabFamilies: 0 });
+    ).toEqual({ busy: false });
   });
 
   it("ignores a reclaimable lock left by a dead holder", () => {
     expect(brokerBusyStatus({ ...idle, profileHolder: { ...foreignHolder, stale: true } })).toEqual(
-      { busy: false, tabFamilies: 0 },
+      { busy: false },
     );
   });
 
-  it("does not call live tab families busy — the broker multiplexes them", () => {
-    expect(brokerBusyStatus({ ...idle, ownsLiveBrowser: true, tabFamilies: 3 })).toEqual({
-      busy: false,
-      tabFamilies: 3,
-    });
+  it("is not busy while the broker serves its own live Chrome", () => {
+    // Tab families are not an input: the broker multiplexes them on one shared
+    // Chrome, so no number of running families can produce a busy answer.
+    expect(brokerBusyStatus({ ...idle, ownsLiveBrowser: true })).toEqual({ busy: false });
   });
 
   it("answers the maintenance window ahead of the profile lock connect just took", () => {
@@ -65,6 +63,6 @@ describe("the busy fold, computed where all four layers are visible", () => {
     // tells the caller what to do is the window.
     expect(
       brokerBusyStatus({ ...idle, maintenanceOwned: true, profileHolder: foreignHolder }),
-    ).toMatchObject({ busy: true, layer: "maintenance" });
+    ).toMatchObject({ busy: true, code: "maintenance" });
   });
 });

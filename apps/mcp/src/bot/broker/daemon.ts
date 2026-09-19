@@ -46,6 +46,40 @@ export async function completeMaintenanceCredentialRefresh(args: {
   }
 }
 
+/**
+ * Which connections keep the shared Chrome resident. A `status` probe is a
+ * read: it must never reset the idle countdown, or a consumer following the
+ * probe-before-act pattern on any cadence under the idle bound would pin the
+ * browser tree forever.
+ */
+export class BrokerClientRegistry {
+  private readonly counting = new Set<string>();
+  private readonly probes = new Set<string>();
+
+  admit(clientId: string, probe: boolean): void {
+    if (probe) this.probes.add(clientId);
+    else this.counting.add(clientId);
+  }
+
+  /** Whether this client's traffic should hold off the idle countdown. */
+  counts(clientId: string): boolean {
+    return !this.probes.has(clientId);
+  }
+
+  touch(clientId: string): void {
+    if (this.counts(clientId)) this.counting.add(clientId);
+  }
+
+  retire(clientId: string): void {
+    this.probes.delete(clientId);
+    this.counting.delete(clientId);
+  }
+
+  idle(): boolean {
+    return this.counting.size === 0;
+  }
+}
+
 /** On-demand broker entrypoint; retains custody while clients own sessions. */
 export async function runBrokerDaemon(): Promise<void> {
   const path = resolveBrokerSocket();
@@ -77,7 +111,7 @@ export async function runBrokerDaemon(): Promise<void> {
     apiBaseUrl: session.api_base_url,
     registryBaseUrl: process.env.ADAPTER_REGISTRY_URL ?? "https://registry.trustysquire.ai",
   });
-  const connected = new Set<string>();
+  const clients = new BrokerClientRegistry();
   let closing = false;
   let listenerClosed = false;
   let maintenanceOwner: string | undefined;
@@ -112,12 +146,14 @@ export async function runBrokerDaemon(): Promise<void> {
   const listener = await listenBroker(path, {
     authenticate: async (token, agentId) => await operator.authenticate(token, agentId),
     connected: async (principal, params) => {
+      const probe = params.probe === true;
+      clients.admit(principal.clientId, probe);
+      if (probe) return;
       if (idleTimer !== undefined) clearTimeout(idleTimer);
       // Maintenance is a connect-only concern: the plain-login window drains the
       // shared browser and holds the lease until this connection closes.
       if (params.maintain === true && maintenanceOwner !== undefined)
         throw new BrokerRefusal("maintenance", "Identity maintenance is already owned");
-      connected.add(principal.clientId);
       if (params.maintain !== true) return;
       maintenanceOwner = principal.clientId;
       // Never start closing the shared browser while a session still owns it:
@@ -127,8 +163,10 @@ export async function runBrokerDaemon(): Promise<void> {
     },
     call: async (principal, method, params, id) => {
       const execute = async (registeredSignal?: AbortSignal): Promise<unknown> => {
-        connected.add(principal.clientId);
-        if (idleTimer !== undefined) clearTimeout(idleTimer);
+        if (clients.counts(principal.clientId)) {
+          clients.touch(principal.clientId);
+          if (idleTimer !== undefined) clearTimeout(idleTimer);
+        }
         if (closing)
           throw new BrokerRefusal(
             "broker_lost",
@@ -146,7 +184,6 @@ export async function runBrokerDaemon(): Promise<void> {
             maintenanceOwned: maintenanceOwner !== undefined,
             ...runtime.custodyStatus(),
             profileHolder: readLockHolder(profilePathIdentity(CHROME_PROFILE_DIR)),
-            tabFamilies: operator.authority.inventory().sessions,
           });
         if (method === "command") {
           const busy = operator.busyReadResult(principal, params);
@@ -165,8 +202,12 @@ export async function runBrokerDaemon(): Promise<void> {
     },
     abort: (principal, requestId) => operator.cancel(principal, requestId),
     disconnect: async (principal, explicit) => {
+      const counted = clients.counts(principal.clientId);
       await operator.disconnect(principal, explicit);
-      connected.delete(principal.clientId);
+      clients.retire(principal.clientId);
+      // A probe never owned maintenance and never held off the countdown, so
+      // its departure must not re-arm one either.
+      if (!counted) return;
       await releaseMaintenanceLease(principal.clientId);
       if (exitAfterMaintenance) {
         void shutdown();
@@ -178,7 +219,7 @@ export async function runBrokerDaemon(): Promise<void> {
   function scheduleShutdownIfIdle(): void {
     if (idleTimer !== undefined) clearTimeout(idleTimer);
     idleTimer = undefined;
-    if (closing || connected.size > 0) return;
+    if (closing || !clients.idle()) return;
     idleTimer = setTimeout(() => {
       idleTimer = undefined;
       void shutdown();
@@ -186,7 +227,7 @@ export async function runBrokerDaemon(): Promise<void> {
     idleTimer.unref();
   }
   const shutdown = async (): Promise<void> => {
-    if (closing || connected.size > 0 || !drained()) return;
+    if (closing || !clients.idle() || !drained()) return;
     closing = true;
     if (!(await runtime.close())) {
       process.stderr.write("[browser-broker] cleanup unproven; retaining physical custody\n");

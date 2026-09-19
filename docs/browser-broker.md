@@ -206,12 +206,26 @@ all four layers at the same instant.** `status` is a read-only Contract B
 operation returning `StatusResult`; `brokerBusyStatus` (`broker/status.ts`)
 computes it from the maintenance window, custody's drain state, the profile
 lock holder, and whether the Chrome holding that lock is the broker's own.
-`browserBusy()` is a thin client of that call. A client cannot fold this from
-outside — a live socket says nothing about whose Chrome holds the lease, and
-the maintenance window is broker-local state, so inferring "not busy" from a
-listener contradicted `openTab` at the same instant. Only when no broker is
-resident does the client read the profile lock itself, because then there is
-nothing brokered to hold it.
+Live tab families are not an input: the broker multiplexes them on one shared
+Chrome, so no number of them can produce a busy answer. `browserBusy()` is a
+thin client of that call. A client cannot fold this from outside — a live
+socket says nothing about whose Chrome holds the lease, and the maintenance
+window is broker-local state, so inferring "not busy" from a listener
+contradicted `openTab` at the same instant.
+
+The result carries the refusal `code` the same condition would produce on
+`open`, and the client maps code to layer; the wire deliberately carries no
+second copy of that mapping to drift from. Only when **no** broker is resident
+does the client read the profile lock itself, because then there is nothing
+brokered to hold it. A broker that is resident but cannot be asked — no
+enrolled account to authenticate with — is never answered from the lock
+either: that would report the broker's own Chrome as a foreign process to
+close, so `browserBusy` raises `BrowserNeedsUser` instead.
+
+A status connection sets `probe: true` on `connect` and is kept out of the
+broker's idle accounting (`BrokerClientRegistry` in `daemon.ts`). Probing is a
+read, and a consumer following the probe-before-act pattern on any cadence
+under the idle bound would otherwise pin the shared Chrome resident forever.
 
 The profile layer reaches the client under `profile_busy` in all of its senses.
 `BrokerRuntime.acquire` converts the `ProfileBusyError` that Chrome's
