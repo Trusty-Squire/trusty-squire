@@ -4815,7 +4815,7 @@ describe("operate session — live-profile precondition gate", () => {
     expect(h.startCalls).toBe(1);
     expect(h.started).toBe(0); // the rejected profile is closed before handoff
     expect(h.gotos).toHaveLength(0);
-    expect(h.identityProbeCalls).toBe(2); // broker identity lane probes before provider admission
+    expect(h.identityProbeCalls).toBe(1); // one live probe supplies admission and metadata
     expect(h.storageStateReads).toEqual([]);
     expect(h.profileDirs).toEqual([canonical]);
     expect(h.destroyedProfiles).toEqual([]);
@@ -4840,7 +4840,7 @@ describe("operate session — live-profile precondition gate", () => {
     });
     expect(obs.needs_user).toBeUndefined();
     expect(h.started).toBe(1);
-    expect(h.identityProbeCalls).toBe(2); // warm admission, then optional session metadata
+    expect(h.identityProbeCalls).toBe(1); // one live probe supplies admission and metadata
     expect(h.seededStorageStates).toEqual([undefined]);
     expect(h.profileDirs).toEqual([canonical]);
     await finishProvisionSession(obs.session_id);
@@ -4853,6 +4853,31 @@ describe("operate session — live-profile precondition gate", () => {
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
     expect(obs.needs_user).toBeUndefined();
     await expect(finishProvisionSession(obs.session_id)).resolves.toMatchObject({ closed: true });
+  });
+
+  it("refuses a warm start after Google logout in another session", async () => {
+    const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+    h.providers = [];
+    h.liveGoogleEmail = null;
+    const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
+    expect(second.needs_user?.wall).toBe("google_session");
+    expect(h.identityProbeCalls).toBe(2);
+    expect(h.gotos).toHaveLength(1);
+    await finishProvisionSession(second.session_id);
+    await finishProvisionSession(first.session_id);
+  });
+
+  it("refreshes account metadata with one live probe per warm start", async () => {
+    h.liveGoogleEmail = "first@example.com";
+    const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+    expect(first.user_email).toBe("first@example.com");
+    await finishProvisionSession(first.session_id);
+    h.liveGoogleEmail = "second@example.com";
+    const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
+    expect(second.needs_user).toBeUndefined();
+    expect(second.user_email).toBe("second@example.com");
+    expect(h.identityProbeCalls).toBe(2);
+    await finishProvisionSession(second.session_id);
   });
 
   it("accepts the live provider probe without consulting a snapshot", async () => {

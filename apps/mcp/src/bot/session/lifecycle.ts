@@ -549,21 +549,22 @@ export function googleSessionGate(
 
 async function ensureProvisionPrimaryProviderSession(
   browser: BrowserController,
-): Promise<OAuthProviderId[]> {
+): Promise<{ providers: OAuthProviderId[]; userEmail: string | null }> {
   // Chrome materializes the real profile's provider jar after the account
   // surface is opened in this same context. Match the proven live-identity
   // path before reading the markers. The account lookup warms the context; it
   // is not itself the admission signal.
-  await detectGoogleAccountEmail(browser).catch(() => null);
+  const userEmail = await detectGoogleAccountEmail(browser).catch(() => null);
   // Fail closed, but never SILENTLY: an empty list refuses the start with the
   // same `google_session` wall as a genuinely signed-out profile, so a throwing
   // probe used to be indistinguishable from "not signed in". Say which it was.
-  return await detectSessionProviders(browser).catch((err: unknown) => {
+  const providers = await detectSessionProviders(browser).catch((err: unknown) => {
     console.error(
       `[operate] provider-session detection failed: ${err instanceof Error ? err.message : String(err)}`,
     );
     return [] as OAuthProviderId[];
   });
+  return { providers, userEmail };
 }
 
 export async function startProvisionSession(
@@ -578,14 +579,9 @@ export async function startProvisionSession(
   const acquired = await acquireWarmBrowser(opts);
   browser = acquired.controller;
   try {
-    const probe = async () => {
-      const providers = await ensureProvisionPrimaryProviderSession(browser);
-      workerEmail = await detectGoogleAccountEmail(browser).catch(() => null);
-      return providers;
-    };
-    const custody = brokerBrowserCustody();
-    liveProviders =
-      custody === undefined ? await ensureProvisionPrimaryProviderSession(browser) : await probe();
+    const identity = await ensureProvisionPrimaryProviderSession(browser);
+    liveProviders = identity.providers;
+    workerEmail = identity.userEmail;
     assertProvisionStartAdmitted(acquired.shutdownGeneration);
     const gate = ceremonyStartAdmission()
       ? { ok: true as const }
@@ -611,8 +607,6 @@ export async function startProvisionSession(
             needs_user: gate.needs_user,
           };
     }
-    if (custody === undefined)
-      workerEmail = await detectGoogleAccountEmail(browser).catch(() => null);
   } catch (error) {
     await releaseWarmBrowserPage(browser, false);
     throw error;
@@ -640,7 +634,7 @@ export async function startProvisionSession(
       service_url: opts.serviceUrl,
       allowed_hosts: hostStrings(session),
     });
-    await browser.goto(opts.serviceUrl);
+    await browser.goto(opts.serviceUrl, undefined, "document-ready");
     // A cookie/consent overlay (Usercentrics/OneTrust/…) renders after load and its
     // backdrop occludes the ENTIRE form — the agent then sees every element
     // occluded_by a div and gives up, or falls back to the only thing that looks
@@ -713,7 +707,7 @@ export async function startHarnessProvisionSession(
       service_url: opts.serviceUrl,
       allowed_hosts: hostStrings(session),
     });
-    await opts.browser.goto(opts.serviceUrl);
+    await opts.browser.goto(opts.serviceUrl, undefined, "document-ready");
     const observation = await ports.observeSession(
       session,
       requestedFormat,

@@ -221,7 +221,11 @@ export class PageDriver {
     return this.page !== null;
   }
 
-  async goto(url: string, page: Page | null = this.page): Promise<void> {
+  async goto(
+    url: string,
+    page: Page | null = this.page,
+    readiness: "domcontentloaded" | "document-ready" = "domcontentloaded",
+  ): Promise<void> {
     if (!page) throw new Error("Browser not started");
     // Retry transient network/proxy drops. A residential SOCKS tunnel
     // intermittently resets a connection mid-navigation (Chrome surfaces
@@ -264,7 +268,12 @@ export class PageDriver {
     };
     for (let attempt = 1; ; attempt++) {
       try {
-        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+        await page.goto(url, {
+          // Deferred scripts must finish before the first interaction. Startup
+          // skips only the post-load dwell, not this DOMContentLoaded boundary.
+          waitUntil: "domcontentloaded",
+          timeout: 60000,
+        });
         // A SOCKS/connection drop does NOT always throw: Chrome resolves
         // domcontentloaded on its own `chrome-error://chromewebdata/`
         // interstitial and goto returns cleanly. The bot then ran the whole
@@ -311,10 +320,10 @@ export class PageDriver {
     // Post-load dwell. Cloudflare/reCAPTCHA scoring runs JS that
     // collects behavior signals over a window (typically 500-2000ms);
     // landing on a page and immediately interacting reads as bot-like.
-    // The "dwell" gives the scoring window enough wall-clock to settle
-    // and also gives any deferred JS time to register event listeners
-    // we'll later fire.
-    if (this.humanize) {
+    // The "dwell" gives the scoring window enough wall-clock to settle.
+    // Startup skips this delay; deferred scripts have already finished at
+    // the DOMContentLoaded boundary above.
+    if (this.humanize && readiness !== "document-ready") {
       await this.sleep(rand(800, 2000));
     }
   }

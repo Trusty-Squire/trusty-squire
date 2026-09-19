@@ -10,6 +10,11 @@ The named operator surface contains 20 tools: the 16 driving verbs in
 `edit_payment_card`. Recipe tools and vault/account tools are separate
 surfaces.
 
+Startup navigation waits for `DOMContentLoaded`, including deferred scripts,
+but skips the humanized post-load dwell before observing the page. It does not
+wait for all images or subframes to finish loading; later asynchronous UI may
+still require another observation or an explicit wait.
+
 | Purpose | Tool |
 | --- | --- |
 | Start and finish | `operate_start`, `operate_finish` |

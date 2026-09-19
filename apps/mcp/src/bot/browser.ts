@@ -1123,9 +1123,13 @@ export class BrowserController implements BrowserDriver {
     return { text: this.cardValueOutputMask.maskText(raw.text), links };
   }
 
-  async goto(url: string, page?: Page): Promise<void> {
+  async goto(
+    url: string,
+    page?: Page,
+    readiness: "domcontentloaded" | "document-ready" = "domcontentloaded",
+  ): Promise<void> {
     await markOperatorMutationDispatchAttempted();
-    return await this.pageDriver.goto(url, page);
+    return await this.pageDriver.goto(url, page, readiness);
   }
 
   // Contract C `type` verb: the driver owns the handle/frame/page dispatch.
