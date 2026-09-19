@@ -249,6 +249,12 @@ MCP server-instance records use the hash of
 scope predecessor cleanup to one launcher lane. During terminal shutdown the
 record remains `draining` until cleanup completes or the configured
 `TRUSTY_SQUIRE_SERVER_SHUTDOWN_DEADLINE_MS` expires (30 seconds by default).
+Errors on the MCP server's stdout or stderr (including `EPIPE` after its caller
+exits) trigger this same bounded shutdown as stdin EOF or transport closure.
+An output error during startup is retained until the shutdown handler is ready.
+It must not recurse through the uncaught-exception logger on broken stderr and
+starve the idle timer. The Linux dead-caller regression in
+`apps/mcp/src/__tests__/bin-smoke.test.ts` covers this process-exit boundary.
 
 Implementation entry points: `src/bot/broker/daemon.ts`, `discovery.ts`,
 `authority.ts`, `runtime.ts`, `operator.ts`, `forwarder.ts`, `protocol.ts`, and
