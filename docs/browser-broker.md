@@ -181,16 +181,26 @@ import { openTab, browserBusy, BrowserBusy } from "@trusty-squire/mcp/browser";
 socket exactly as the operator forwarder does, `open`s a session, navigates
 through `command`, and `close`s on `release()`. It reaches the browser from any
 process, holds no in-process lease of its own, and throws `BrowserBusy` with
-`.action()` when a layer genuinely refuses. Its deadline is carried by Contract
-B's reserved `abort` control frame, so a cancelled acquire settles at once
-rather than sleeping.
+`.action()` when a layer genuinely refuses.
 
-`browserBusy()` is the read-only fold, and read-only is load-bearing: it probes
-for a live broker listener and reads the profile's SingletonLock holder. It
-never reclaims a lock, sweeps owner processes, signals anything, or sleeps. A
-live broker owns the profile lease and multiplexes tab families on one shared
-Chrome, so its own Chrome is reported free rather than as a foreign process to
-close.
+**Every instruction the façade issues is bounded and abortable** — the acquire
+and `tab.page.goto` alike. Each carries a `deadlineMs` (30 s default) and an
+optional caller `signal`, and each is dispatched under a request id that
+Contract B's reserved `abort` control frame can reach, so a wedged navigate
+rejects with an honest error and cancels that one broker request instead of
+leaving a pending promise for `release()` to drain. Nothing here sleeps.
+
+The broker serves exactly one physical profile. Naming any other is a permanent
+configuration failure, not a busy layer: `openTab` refuses it with
+`UnservableProfileError` naming the profile this installation does serve, and
+never with a `BrowserBusy` whose `.action()` tells the caller to retry.
+
+`browserBusy()` is the read-only fold over that one served profile, and
+read-only is load-bearing: it probes for a live broker listener and reads the
+profile's SingletonLock holder. It never reclaims a lock, sweeps owner
+processes, signals anything, or sleeps. A live broker owns the profile lease
+and multiplexes tab families on one shared Chrome, so its own Chrome is
+reported free rather than as a foreign process to close.
 
 **Tab families are the layer that is never an answer.** A running session does
 not make the browser unavailable — that is precisely the wrong-layer conclusion

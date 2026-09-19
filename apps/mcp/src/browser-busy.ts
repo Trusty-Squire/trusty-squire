@@ -61,9 +61,15 @@ export type BrowserBusyReason =
 
 export type BrowserStatus = { busy: false } | { busy: true; reason: BrowserBusyReason };
 
+export interface PageCommandOptions {
+  /** Bound on the instruction settling or aborting. Never a poll sleep. */
+  deadlineMs?: number;
+  signal?: AbortSignal;
+}
+
 /** Structural page surface. Playwright's Page satisfies it. */
 export interface TabPage {
-  goto(url: string): Promise<unknown>;
+  goto(url: string, options?: PageCommandOptions): Promise<unknown>;
 }
 
 export interface TabHandle {
@@ -76,17 +82,13 @@ export interface TabHandle {
 export interface OpenTabOptions {
   profile: string;
   purpose: string;
-  /** Where the broker opens the tab. `about:blank` when the caller will `goto`. */
-  url?: string;
   /** Bound on the acquire finishing or aborting. Never a poll sleep. */
   deadlineMs?: number;
   signal?: AbortSignal;
 }
 
 export interface AcquireTabInput {
-  profile: string;
   purpose: string;
-  url: string;
   signal: AbortSignal;
 }
 
@@ -96,13 +98,29 @@ export interface AcquiredTab {
 }
 
 export interface BrowserFacadePorts {
-  /** Read-only status probe. Defaults to the live-listener + lock-holder read. */
-  status?: (profile: string) => Promise<BrowserBusyReason | undefined>;
   /** Tab acquisition. Defaults to the broker wire. */
   acquire?: (input: AcquireTabInput) => Promise<AcquiredTab>;
 }
 
 const OPEN_TAB_DEFAULT_DEADLINE_MS = 30_000;
+const PAGE_COMMAND_DEFAULT_DEADLINE_MS = 30_000;
+/** The broker `open` needs a destination; the caller reaches its real page
+ * through `tab.page.goto`. */
+const BLANK_TAB_URL = "about:blank";
+
+/**
+ * The named profile is not the one this installation serves. No layer is
+ * busy and no retry can clear it, so this is deliberately not a `BrowserBusy`.
+ */
+export class UnservableProfileError extends Error {
+  constructor(
+    readonly requested: string,
+    readonly served: string,
+  ) {
+    super(`No broker serves the profile ${requested}; this installation serves ${served}`);
+    this.name = "UnservableProfileError";
+  }
+}
 
 export class BrowserBusy extends Error {
   readonly reason: BrowserBusyReason;
@@ -191,8 +209,13 @@ export function mapBusyRefusal(error: unknown): BrowserBusy | undefined {
   );
 }
 
-export function resolveBrowserProfile(profile: string): string {
+function resolveBrowserProfile(profile: string): string {
   return profilePathIdentity(profile === "default" ? CHROME_PROFILE_DIR : profile);
+}
+
+/** The single physical profile the broker is pinned to. */
+export function servedBrowserProfile(): string {
+  return profilePathIdentity(CHROME_PROFILE_DIR);
 }
 
 /**
@@ -201,9 +224,9 @@ export function resolveBrowserProfile(profile: string): string {
  * an answer of "busy". Nothing here repairs a lock, sweeps an owner, signals a
  * process, or sleeps.
  */
-async function readBrowserStatus(profile: string): Promise<BrowserBusyReason | undefined> {
-  if (await brokerEndpointHasLiveListener(brokerSocketPath(profile))) return undefined;
-  const holder = readLockHolder(profile);
+async function readBrowserStatus(): Promise<BrowserBusyReason | undefined> {
+  if (await brokerEndpointHasLiveListener(brokerSocketPath())) return undefined;
+  const holder = readLockHolder(servedBrowserProfile());
   if (holder === null || holder.stale) return undefined;
   return reasonFromBusyRefusal("profile_busy", { pid: holder.pid, host: holder.host });
 }
@@ -219,20 +242,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  */
 async function callWithWireAbort(
   client: BrokerClient,
-  signal: AbortSignal,
+  signal: AbortSignal | undefined,
   method: string,
   params: Record<string, unknown>,
 ): Promise<unknown> {
-  if (signal.aborted) throw signal.reason;
+  if (signal?.aborted === true) throw signal.reason;
   const requestId = randomUUID();
   const abort = (): void => {
     void client.abort(requestId);
   };
-  signal.addEventListener("abort", abort, { once: true });
+  signal?.addEventListener("abort", abort, { once: true });
   try {
     return await client.call(method, params, requestId);
   } finally {
-    signal.removeEventListener("abort", abort);
+    signal?.removeEventListener("abort", abort);
   }
 }
 
@@ -242,12 +265,6 @@ async function callWithWireAbort(
  * does, then `open` / `command` / `close`.
  */
 async function wireAcquire(input: AcquireTabInput): Promise<AcquiredTab> {
-  const brokerProfile = profilePathIdentity(CHROME_PROFILE_DIR);
-  if (input.profile !== brokerProfile)
-    throw new BrokerRefusal(
-      "incompatible_runtime",
-      `The broker serves one physical profile (${brokerProfile})`,
-    );
   const session = await createSessionGuard().bind();
   if (session?.agent_session_token === undefined)
     throw new BrokerRefusal("unauthorized", "Connect before opening a tab");
@@ -257,7 +274,9 @@ async function wireAcquire(input: AcquireTabInput): Promise<AcquiredTab> {
     session.account_id,
   );
   try {
-    const raw = await callWithWireAbort(client, input.signal, "open", { serviceUrl: input.url });
+    const raw = await callWithWireAbort(client, input.signal, "open", {
+      serviceUrl: BLANK_TAB_URL,
+    });
     const sessionId = isRecord(raw) && typeof raw.sessionId === "string" ? raw.sessionId : "";
     if (sessionId.length === 0)
       throw new BrokerRefusal(
@@ -266,8 +285,8 @@ async function wireAcquire(input: AcquireTabInput): Promise<AcquiredTab> {
       );
     return {
       page: {
-        goto: async (url: string) =>
-          await client.call("command", {
+        goto: async (url: string, options: PageCommandOptions = {}) =>
+          await callWithWireAbort(client, options.signal, "command", {
             sessionId,
             name: "operate_navigate",
             args: { session_id: sessionId, url },
@@ -290,6 +309,7 @@ async function wireAcquire(input: AcquireTabInput): Promise<AcquiredTab> {
 function runWithDeadline<T>(
   deadlineMs: number,
   userSignal: AbortSignal | undefined,
+  timedOut: (deadlineMs: number) => Error,
   operation: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
   const controller = new AbortController();
@@ -308,19 +328,9 @@ function runWithDeadline<T>(
     abortWith(
       userSignal?.reason instanceof Error
         ? userSignal.reason
-        : new Error("openTab was cancelled by its caller"),
+        : new Error("The browser instruction was cancelled by its caller"),
     );
-  const timer = setTimeout(
-    () =>
-      abortWith(
-        new BrowserBusy(
-          reasonFromBusyRefusal("launch_timeout", {
-            message: `openTab deadline elapsed after ${deadlineMs}ms`,
-          }),
-        ),
-      ),
-    deadlineMs,
-  );
+  const timer = setTimeout(() => abortWith(timedOut(deadlineMs)), deadlineMs);
   if (userSignal?.aborted) onUserAbort();
   else userSignal?.addEventListener("abort", onUserAbort, { once: true });
   return Promise.race([operation(controller.signal), aborted]).finally(() => {
@@ -329,31 +339,46 @@ function runWithDeadline<T>(
   });
 }
 
+function openTimedOut(deadlineMs: number): Error {
+  return new BrowserBusy(
+    reasonFromBusyRefusal("launch_timeout", {
+      message: `openTab deadline elapsed after ${deadlineMs}ms`,
+    }),
+  );
+}
+
+function pageTimedOut(deadlineMs: number): Error {
+  return new Error(
+    `The page instruction did not settle within ${deadlineMs}ms and was aborted on the wire`,
+  );
+}
+
 export interface BrowserFacade {
-  browserBusy(options?: { profile?: string }): Promise<BrowserStatus>;
+  browserBusy(): Promise<BrowserStatus>;
   openTab(options: OpenTabOptions): Promise<TabHandle>;
 }
 
 export function createBrowserFacade(ports: BrowserFacadePorts = {}): BrowserFacade {
-  const status = ports.status ?? readBrowserStatus;
   const acquire = ports.acquire ?? wireAcquire;
 
   return {
-    async browserBusy(options = {}): Promise<BrowserStatus> {
-      const reason = await status(resolveBrowserProfile(options.profile ?? "default"));
+    async browserBusy(): Promise<BrowserStatus> {
+      const reason = await readBrowserStatus();
       return reason === undefined ? { busy: false } : { busy: true, reason };
     },
 
     async openTab(options: OpenTabOptions): Promise<TabHandle> {
       const profile = resolveBrowserProfile(options.profile);
+      const served = servedBrowserProfile();
+      if (profile !== served) throw new UnservableProfileError(profile, served);
       const purpose = options.purpose;
-      const url = options.url ?? "about:blank";
       const opened = await runWithDeadline(
         options.deadlineMs ?? OPEN_TAB_DEFAULT_DEADLINE_MS,
         options.signal,
+        openTimedOut,
         async (signal) => {
           try {
-            return await acquire({ profile, purpose, url, signal });
+            return await acquire({ purpose, signal });
           } catch (error) {
             throw mapBusyRefusal(error) ?? error;
           }
@@ -361,7 +386,15 @@ export function createBrowserFacade(ports: BrowserFacadePorts = {}): BrowserFaca
       );
       let released = false;
       return {
-        page: opened.page,
+        page: {
+          goto: async (url: string, pageOptions: PageCommandOptions = {}) =>
+            await runWithDeadline(
+              pageOptions.deadlineMs ?? PAGE_COMMAND_DEFAULT_DEADLINE_MS,
+              pageOptions.signal,
+              pageTimedOut,
+              async (signal) => await opened.page.goto(url, { signal }),
+            ),
+        },
         profile,
         purpose,
         async release() {
@@ -376,8 +409,8 @@ export function createBrowserFacade(ports: BrowserFacadePorts = {}): BrowserFaca
 
 const defaultFacade = createBrowserFacade();
 
-export async function browserBusy(options?: { profile?: string }): Promise<BrowserStatus> {
-  return await defaultFacade.browserBusy(options);
+export async function browserBusy(): Promise<BrowserStatus> {
+  return await defaultFacade.browserBusy();
 }
 
 export async function openTab(options: OpenTabOptions): Promise<TabHandle> {

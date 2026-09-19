@@ -57,10 +57,10 @@ export function defaultBrokerSocket(profileDir = CHROME_PROFILE_DIR): string {
 /** Where a profile's broker socket lives: the configured override, else the
  * derived default. Pure — no directory is created and nothing is asserted, so
  * a read-only probe can ask for a path that may not exist. */
-export function brokerSocketPath(profileDir = CHROME_PROFILE_DIR): string {
+export function brokerSocketPath(): string {
   const configured = process.env.TRUSTY_SQUIRE_BROKER_SOCKET?.trim();
   if (configured) return configured;
-  return defaultBrokerSocket(profileDir);
+  return defaultBrokerSocket();
 }
 
 export function resolveBrokerSocket(): string {
