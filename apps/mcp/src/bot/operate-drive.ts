@@ -38,6 +38,7 @@ import {
 import { sessionForCall } from "./session/lifecycle.js";
 import {
   lastSelectOptions,
+  type DriveActProfile,
   type DriveHandoffQuestion,
   type DriveTrajectoryStep,
   type Session,
@@ -374,6 +375,11 @@ function progressFingerprint(
     ...drive.filledRefs.map((ref) => `filled:${ref}`),
   ];
   return observationFingerprint(url, rows, fieldState);
+}
+
+function driveTraceEnabled(): boolean {
+  const path = process.env.DRIVE_TRACE_PATH;
+  return path !== undefined && path.length > 0;
 }
 
 function appendDriveTrace(entry: Record<string, unknown>): void {
@@ -1295,8 +1301,9 @@ export function buildDriveQuestions(
   filledRefs: readonly string[] = [],
   pageUrl: string = "",
   pageOptions: ReadonlyMap<string, readonly string[]> = new Map(),
+  precomputed?: DriveTargetSets,
 ): Record<string, JevQuestion> {
-  const sets = driveTargetSets(rows, facts, includePayment, filledRefs, pageUrl, pageOptions);
+  const sets = precomputed ?? driveTargetSets(rows, facts, includePayment, filledRefs, pageUrl, pageOptions);
   const questions: Record<string, JevQuestion> = {
     operation: {
       type: "choice",
@@ -1515,26 +1522,33 @@ export function decideAfterJev(input: {
   pageOptions?: ReadonlyMap<string, readonly string[]>;
   consumedActionKey?: string | null;
   boundFingerprint?: string | null;
+  sets?: DriveTargetSets;
+  questions?: Record<string, JevQuestion>;
 }): DriveDecision {
   const threshold = input.threshold ?? DRIVE_CONFIDENCE_THRESHOLD;
   const includePayment = input.cardRef !== undefined;
-  const sets = driveTargetSets(
-    input.rows,
-    input.facts,
-    includePayment,
-    input.filledRefs ?? [],
-    input.pageUrl ?? "",
-    input.pageOptions ?? new Map(),
-  );
-  const questions = buildDriveQuestions(
-    input.rows,
-    input.facts,
-    input.goal,
-    includePayment,
-    input.filledRefs ?? [],
-    input.pageUrl ?? "",
-    input.pageOptions ?? new Map(),
-  );
+  const sets =
+    input.sets ??
+    driveTargetSets(
+      input.rows,
+      input.facts,
+      includePayment,
+      input.filledRefs ?? [],
+      input.pageUrl ?? "",
+      input.pageOptions ?? new Map(),
+    );
+  const questions =
+    input.questions ??
+    buildDriveQuestions(
+      input.rows,
+      input.facts,
+      input.goal,
+      includePayment,
+      input.filledRefs ?? [],
+      input.pageUrl ?? "",
+      input.pageOptions ?? new Map(),
+      sets,
+    );
   const operationQuestion = questions.operation;
   const operationCriteriaMap =
     operationQuestion?.type === "choice" ? operationQuestion.criteria : operationCriteria(sets.operations);
@@ -1724,7 +1738,21 @@ function actionKeyOf(input: { actionKey: string }): string {
 
 function takeActProfile(
   drive: SessionDriveState,
-): Pick<DriveTrajectoryStep, "act_ms" | "settle_ms" | "observe_ms"> {
+): Pick<
+  DriveTrajectoryStep,
+  | "act_ms"
+  | "settle_ms"
+  | "observe_ms"
+  | "snapshot_script_ms"
+  | "snapshot_wall_ms"
+  | "guard_script_ms"
+  | "guard_wall_ms"
+  | "cdp_ms"
+  | "prepare_ms"
+  | "dispatch_ms"
+  | "jev_question_count"
+  | "jev_state_bytes"
+> {
   const profile = drive.lastActProfile;
   drive.lastActProfile = null;
   return profile ?? {};
@@ -1896,35 +1924,41 @@ async function snapshotDriveSession(
   drive: SessionDriveState,
   deps: DriveDependencies,
   needFrames: boolean,
-): Promise<{ observation: Observation; rows: WireRow[]; snapshotMs: number }> {
+): Promise<{
+  observation: Observation;
+  rows: WireRow[];
+  snapshotMs: number;
+  snapshotScriptMs: number;
+  snapshotWallMs: number;
+}> {
   const started = Date.now();
+  const timed = (
+    observation: Observation,
+    rows: WireRow[],
+    scriptMs = 0,
+    wallMs = Date.now() - started,
+  ) => ({
+    observation,
+    rows,
+    snapshotMs: Date.now() - started,
+    snapshotScriptMs: scriptMs,
+    snapshotWallMs: wallMs,
+  });
   if (deps.snapshot !== undefined) {
     const observation = await deps.snapshot(sessionId, maskedRefsOf(drive));
-    return {
-      observation,
-      rows: mergeCompactTable([], observation),
-      snapshotMs: Date.now() - started,
-    };
+    return timed(observation, mergeCompactTable([], observation));
   }
   const page = session.browser.page;
   if (page === null) {
     const observation = await deps.observe(sessionId, "compact");
-    return {
-      observation,
-      rows: mergeCompactTable([], observation),
-      snapshotMs: Date.now() - started,
-    };
+    return timed(observation, mergeCompactTable([], observation));
   }
   ensureFrameCacheInvalidation(session);
   const omit = maskedRefsOf(drive);
   const main = await captureFrameSnapshot(page, omit, 0);
   if (main === null) {
     const observation = await deps.observe(sessionId, "compact");
-    return {
-      observation,
-      rows: mergeCompactTable([], observation),
-      snapshotMs: Date.now() - started,
-    };
+    return timed(observation, mergeCompactTable([], observation));
   }
   const parts: DriveSnapshot[] = [main];
   if (needFrames) {
@@ -1957,7 +1991,7 @@ async function snapshotDriveSession(
     ...(observation.safe_table === undefined ? {} : { safe_table: observation.safe_table }),
     ...(observation.semantic === undefined ? {} : { semantic: observation.semantic }),
   };
-  return { observation, rows, snapshotMs: Date.now() - started };
+  return timed(observation, rows, snapshot.scriptMs, snapshot.wallMs);
 }
 
 function resolveResumeAnswer(
@@ -2213,7 +2247,13 @@ async function driveLoop(input: {
   );
   let observation: Observation = firstSnap.observation;
   let rows = firstSnap.rows;
-  drive.lastActProfile = { act_ms: 0, settle_ms: 0, observe_ms: firstSnap.snapshotMs };
+  drive.lastActProfile = {
+    act_ms: 0,
+    settle_ms: 0,
+    observe_ms: firstSnap.snapshotMs,
+    snapshot_script_ms: firstSnap.snapshotScriptMs,
+    snapshot_wall_ms: firstSnap.snapshotWallMs,
+  };
   let steps = 0;
 
   const finish = (
@@ -2232,11 +2272,11 @@ async function driveLoop(input: {
       ...extra,
     });
 
-  const refreshSnapshot = async (needFrames: boolean): Promise<number> => {
+  const refreshSnapshot = async (needFrames: boolean) => {
     const snap = await snapshotDriveSession(session, sessionId, drive, dependencies, needFrames);
     observation = snap.observation;
     rows = snap.rows;
-    return snap.snapshotMs;
+    return snap;
   };
   const framesIfNeeded = (): boolean =>
     drive.facts.card_ref !== undefined &&
@@ -2372,11 +2412,13 @@ async function driveLoop(input: {
         });
       }
       markMaskedRefs(drive, [card.fields.pan?.ref, card.fields.cvv?.ref]);
-      const cardObserveMs = await refreshSnapshot(true);
+      const cardSnap = await refreshSnapshot(true);
       drive.lastActProfile = {
         act_ms: drive.lastActProfile?.act_ms ?? 0,
         settle_ms: drive.lastActProfile?.settle_ms ?? 0,
-        observe_ms: cardObserveMs,
+        observe_ms: cardSnap.snapshotMs,
+        snapshot_script_ms: cardSnap.snapshotScriptMs,
+        snapshot_wall_ms: cardSnap.snapshotWallMs,
       };
       drive.trajectory.push({
         action: "inject_card",
@@ -2422,11 +2464,13 @@ async function driveLoop(input: {
       } else {
         return finish("needs_value", { field: "verification_code" });
       }
-      const inboxObserveMs = await refreshSnapshot(framesIfNeeded());
+      const inboxSnap = await refreshSnapshot(framesIfNeeded());
       drive.lastActProfile = {
         act_ms: drive.lastActProfile?.act_ms ?? 0,
         settle_ms: drive.lastActProfile?.settle_ms ?? 0,
-        observe_ms: inboxObserveMs,
+        observe_ms: inboxSnap.snapshotMs,
+        snapshot_script_ms: inboxSnap.snapshotScriptMs,
+        snapshot_wall_ms: inboxSnap.snapshotWallMs,
       };
       drive.trajectory.push({
         action: verification.code !== null ? "type_otp" : "goto_verify",
@@ -2475,8 +2519,22 @@ async function driveLoop(input: {
           await waitForNavigationIdle(page);
         }
       }
-      const observeMs = await refreshSnapshot(framesIfNeeded());
-      drive.lastActProfile = { act_ms: actMs, settle_ms: settleMs, observe_ms: observeMs };
+      const snap = await refreshSnapshot(framesIfNeeded());
+      drive.lastActProfile = {
+        ...drive.lastActProfile,
+        act_ms: actMs,
+        settle_ms: settleMs,
+        observe_ms: snap.snapshotMs,
+        snapshot_script_ms: snap.snapshotScriptMs,
+        snapshot_wall_ms: snap.snapshotWallMs,
+        ...(acted.kind === "ok"
+          ? {
+              guard_script_ms: acted.guardScriptMs,
+              guard_wall_ms: acted.guardWallMs,
+              cdp_ms: acted.cdpMs,
+            }
+          : {}),
+      };
     }
     drive.trajectory.push({
       action: decision.action.kind,
@@ -2499,7 +2557,7 @@ async function driveLoop(input: {
       result: "ok",
       url_after: observation.url,
       fingerprint_after: nextFingerprint,
-      native_selects_after: await nativeSelectSnapshot(session),
+      ...(driveTraceEnabled() ? { native_selects_after: await nativeSelectSnapshot(session) } : {}),
     });
     drive.staleNonWait = nextFingerprint === fingerprint ? drive.staleNonWait + 1 : 0;
     drive.lastFingerprint = nextFingerprint;
@@ -2594,6 +2652,7 @@ async function driveLoop(input: {
 
     if (drive.jevCalls >= DRIVE_MAX_JEV_CALLS) return finish("budget");
 
+    const prepareStarted = Date.now();
     const pageOptions = lastSelectOptions.get(session) ?? selectOptionsFromElements(session.lastElements);
     const sets = driveTargetSets(
       rows,
@@ -2611,6 +2670,7 @@ async function driveLoop(input: {
       drive.filledRefs,
       pageUrl,
       pageOptions,
+      sets,
     );
     const state = buildJevState(
       drive.goal,
@@ -2624,6 +2684,9 @@ async function driveLoop(input: {
         rows.map((row) => readableLabel(row)).slice(0, 40),
       ),
     );
+    const prepareMs = Date.now() - prepareStarted;
+    const questionCount = Object.keys(questions).length;
+    const stateBytes = Buffer.byteLength(JSON.stringify(state));
     const fingerprint = progressFingerprint(observation.url, rows, drive, session);
     if (drive.boundFingerprint !== fingerprint) drive.consumedActionKey = null;
     drive.boundFingerprint = fingerprint;
@@ -2641,10 +2704,13 @@ async function driveLoop(input: {
         pageOptions,
         consumedActionKey: drive.consumedActionKey,
         boundFingerprint: drive.boundFingerprint,
+        sets,
+        questions,
         ...(drive.facts.card_ref === undefined ? {} : { cardRef: drive.facts.card_ref }),
       });
     const jev = await ask(state, questions);
     if (!("result" in jev)) return jev;
+    const dispatchStarted = Date.now();
     let answers = jev.result.answers;
     let decision = decide(answers);
     let jevMs = jev.elapsedMs;
@@ -2661,6 +2727,8 @@ async function driveLoop(input: {
       url_before: observation.url,
       fingerprint_before: fingerprint,
       rows,
+      question_count: questionCount,
+      state_bytes: stateBytes,
       operation_criteria:
         questions.operation?.type === "choice" ? questions.operation.criteria : {},
       CLICK_target:
@@ -2678,8 +2746,27 @@ async function driveLoop(input: {
         SCROLL: candidateDump(sets.SCROLL),
       },
       filledRefs: [...drive.filledRefs],
-      native_selects_before: await nativeSelectSnapshot(session),
+      ...(driveTraceEnabled() ? { native_selects_before: await nativeSelectSnapshot(session) } : {}),
     });
+    const priorProfile: DriveActProfile | null = drive.lastActProfile;
+    drive.lastActProfile = {
+      act_ms: priorProfile?.act_ms ?? 0,
+      settle_ms: priorProfile?.settle_ms ?? 0,
+      observe_ms: priorProfile?.observe_ms ?? 0,
+      ...(priorProfile?.snapshot_script_ms === undefined
+        ? {}
+        : { snapshot_script_ms: priorProfile.snapshot_script_ms }),
+      ...(priorProfile?.snapshot_wall_ms === undefined
+        ? {}
+        : { snapshot_wall_ms: priorProfile.snapshot_wall_ms }),
+      ...(priorProfile?.guard_script_ms === undefined ? {} : { guard_script_ms: priorProfile.guard_script_ms }),
+      ...(priorProfile?.guard_wall_ms === undefined ? {} : { guard_wall_ms: priorProfile.guard_wall_ms }),
+      ...(priorProfile?.cdp_ms === undefined ? {} : { cdp_ms: priorProfile.cdp_ms }),
+      prepare_ms: prepareMs,
+      dispatch_ms: Date.now() - dispatchStarted,
+      jev_question_count: questionCount,
+      jev_state_bytes: stateBytes,
+    };
     const includeEmailCheck =
       lastActionWasClick(drive.trajectory) && remainingFills.length === 0;
     if (includeEmailCheck && (decision.kind === "stuck" || decision.kind === "wait")) {
