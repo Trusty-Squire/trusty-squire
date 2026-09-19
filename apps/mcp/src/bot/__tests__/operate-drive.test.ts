@@ -911,7 +911,7 @@ describe("facts, fingerprint, compact merge", () => {
     expect(typeableCandidates([departure], facts, false).map((c) => c.ref)).toEqual(["@e:dep"]);
   });
 
-  it("opens a fact-backed combobox whose current value contradicts the fact, then clicks the match", () => {
+  it("opens a fact-backed combobox but yields unassociated option clicks to the model", () => {
     const trip: WireRow = [
       "@e:trip",
       "combobox",
@@ -927,12 +927,19 @@ describe("facts, fingerprint, compact merge", () => {
     expect(matchingFactKeys(facts, trip)).toEqual(["ticket_type"]);
     expect(matchingFactKeys(facts, cabin)).toEqual(["cabin"]);
     expect(requiredFactComboboxAction([trip, cabin], facts)).toEqual({ target: "@e:trip" });
-    expect(requiredFactComboboxAction([trip, cabin, oneWay], facts)).toEqual({
-      target: "@e:ow",
-      fillsRef: "@e:trip",
-    });
+    expect(requiredFactComboboxAction([trip, cabin, oneWay], facts)).toBeUndefined();
     expect(requiredFactComboboxAction([cabin], facts)).toBeUndefined();
     expect(requiredFactComboboxAction([trip], facts, ["@e:trip"])).toBeUndefined();
+  });
+
+  it("yields when another Country menu or an unrelated button offers the fact", () => {
+    const shipping: WireRow = ["@e:shipping", "combobox", "Shipping Country|n=United States"];
+    const billing: WireRow = ["@e:billing", "combobox", "Billing Country|n=United States"];
+    const facts = { country: "Canada" };
+    for (const role of ["b", "l"]) {
+      const canada: WireRow = ["@e:canada", role, "Canada"];
+      expect(requiredFactComboboxAction([shipping, billing, canada], facts)).toBeUndefined();
+    }
   });
 
   it("assigns a page-supplied select option from a goal phrase without a matching fact", () => {

@@ -422,16 +422,23 @@ ${
       try {
         const dependencies = deps(async (_api, _state, questions) => {
           modelCalls += 1;
-          if (modelCalls > 1) return jevFromQuestions(questions, true);
-          expect(outcomes).toEqual(["stale"]);
-          expect(await page.locator("#options").isVisible()).toBe(false);
-          const operation = placement === "offscreen" ? "SCROLL" : "CLICK";
+          if (modelCalls > 2) return jevFromQuestions(questions, true);
+          if (modelCalls === 1) {
+            expect(outcomes).toEqual(["stale"]);
+            expect(await page.locator("#options").isVisible()).toBe(false);
+          } else {
+            expect(outcomes).toEqual(["stale", "ok", "ok"]);
+            expect(await page.locator("#options").isVisible()).toBe(true);
+          }
+          const operation = modelCalls === 1 && placement === "offscreen" ? "SCROLL" : "CLICK";
           const head = questions[`${operation}_target`];
           if (head?.type !== "choice") throw new Error(`missing ${operation} recovery`);
           const target =
-            placement === "offscreen"
+            operation === "SCROLL"
               ? "bottom"
-              : Object.keys(head.criteria).find((key) => head.criteria[key] === "Dismiss");
+              : Object.keys(head.criteria).find(
+                  (key) => head.criteria[key] === (modelCalls === 1 ? "Dismiss" : "Canada"),
+                );
           if (target === undefined) throw new Error("missing recovery target");
           const result = jevFromQuestions(questions);
           for (const [name, pick] of [
@@ -471,10 +478,55 @@ ${
           dependencies,
         );
         expect(handoff.status).toBe("complete");
-        expect(modelCalls).toBe(2);
+        expect(modelCalls).toBe(3);
         expect(outcomes).toEqual(["stale", "ok", "ok", "ok"]);
         expect(await page.locator("#country").textContent()).toBe("Canada");
         expect(handoff.trajectory[0]?.action).toBe(placement === "offscreen" ? "scroll" : "click");
+      } finally {
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    30_000,
+  );
+
+  it.each(["button", "option"])(
+    "yields Billing Country's Canada %s without marking Shipping Country filled",
+    async (role) => {
+      const { context, page, started } = await openFixture(
+        `<!doctype html><title>Shipping and billing</title>
+<div id="shipping" role="combobox" aria-label="Shipping Country" tabindex="0"
+  onclick="window.shippingClicks=(window.shippingClicks||0)+1">United States</div>
+<div id="billing" role="combobox" aria-label="Billing Country" aria-controls="billing-menu"
+  aria-expanded="true" tabindex="0">United States</div>
+<div id="billing-menu" role="listbox"><div role="${role}" tabindex="0" onclick="
+  document.querySelector('#billing').textContent='Canada';
+  document.querySelector('#billing-menu').hidden=true;
+">Canada</div></div>`,
+        `country-ownership-${role}.test`,
+      );
+      const ask = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => {
+        expect(await page.locator("#shipping").textContent()).toBe("United States");
+        expect(await page.locator("#billing").textContent()).toBe("United States");
+        expect(await page.evaluate("window.shippingClicks || 0")).toBe(0);
+        expect(sessionForCall(started.session_id)?.drive?.filledRefs).toEqual([]);
+        return jevFromQuestions(questions, true);
+      });
+      try {
+        const handoff = await runOperateDrive(
+          {
+            session_id: started.session_id,
+            goal: "Choose Canada for Shipping Country",
+            facts: { country: "Canada" },
+            max_steps: 1,
+          },
+          api(),
+          undefined,
+          deps(ask),
+        );
+        expect(ask).toHaveBeenCalledOnce();
+        expect(handoff.trajectory).toEqual([]);
+        expect(sessionForCall(started.session_id)?.drive?.filledRefs).toEqual([]);
       } finally {
         await finishProvisionSession(started.session_id);
         await context.close();

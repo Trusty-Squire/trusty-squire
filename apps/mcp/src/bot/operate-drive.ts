@@ -1162,23 +1162,11 @@ function factValuesMatch(left: string, right: string): boolean {
   return normalizeKey(left) === normalizeKey(right);
 }
 
-function factOptionRow(rows: readonly WireRow[], fact: string): WireRow | undefined {
-  const want = normalizeKey(fact);
-  if (want.length === 0) return undefined;
-  for (const row of rows) {
-    if (row[1] === "combobox") continue;
-    if (!isClickableRow(row) || isFillableRow(row) || isDisabledRow(row)) continue;
-    if (factValuesMatch(readableLabel(row), fact)) return row;
-  }
-  return undefined;
-}
-
 export function requiredFactComboboxAction(
   rows: readonly WireRow[],
   facts: Record<string, string>,
   filledRefs: readonly string[] = [],
-  pageOptions: ReadonlyMap<string, readonly string[]> = new Map(),
-): { target: string; fillsRef?: string; select?: string } | undefined {
+): { target: string } | undefined {
   const filled = new Set(filledRefs);
   for (const row of rows) {
     if (row[1] !== "combobox" || isDisabledRow(row) || isActedRow(row) || filled.has(row[0])) {
@@ -1190,16 +1178,17 @@ export function requiredFactComboboxAction(
     if (fact === undefined || fact.length === 0) continue;
     const current = rowCurrentValue(row);
     if (current !== undefined && factValuesMatch(current, fact)) continue;
-    const option = factOptionRow(rows, fact);
-    if (option !== undefined) {
-      return { target: option[0], fillsRef: row[0] };
-    }
-    const offered = [
-      ...(pageOptions.get(row[0]) ?? []),
-      ...(pageOptions.get(readableLabel(row).toLowerCase()) ?? []),
-    ];
-    if (offered.some((text) => factValuesMatch(text, fact))) {
-      return { target: row[0], fillsRef: row[0], select: fact };
+    if (
+      rows.some(
+        (option) =>
+          option[1] !== "combobox" &&
+          isClickableRow(option) &&
+          !isFillableRow(option) &&
+          !isDisabledRow(option) &&
+          factValuesMatch(readableLabel(option), fact),
+      )
+    ) {
+      return undefined;
     }
     return { target: row[0] };
   }
@@ -3169,7 +3158,7 @@ async function driveLoop(input: {
     const comboboxFill =
       comboboxMustYield || comboboxAttempts.has(comboboxObservation)
         ? undefined
-        : requiredFactComboboxAction(rows, drive.facts, drive.filledRefs, pageOptions);
+        : requiredFactComboboxAction(rows, drive.facts, drive.filledRefs);
     comboboxMustYield = false;
     if (comboboxFill !== undefined) {
       comboboxAttempts.add(comboboxObservation);
@@ -3177,21 +3166,11 @@ async function driveLoop(input: {
       drive.consumedActionKey = null;
       const applied = await applyDecision({
         kind: "act",
-        action:
-          comboboxFill.select === undefined
-            ? { kind: "click", target: comboboxFill.target }
-            : { kind: "select", target: comboboxFill.target, text: comboboxFill.select },
+        action: { kind: "click", target: comboboxFill.target },
         actionKey: comboboxFill.target,
         confidence: 1,
       });
       if (applied !== "continue") return applied;
-      if (
-        !comboboxMustYield &&
-        comboboxFill.fillsRef !== undefined &&
-        !drive.filledRefs.includes(comboboxFill.fillsRef)
-      ) {
-        drive.filledRefs.push(comboboxFill.fillsRef);
-      }
       steps += 1;
       continue;
     }
