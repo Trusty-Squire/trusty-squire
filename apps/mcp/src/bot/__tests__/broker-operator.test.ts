@@ -21,8 +21,8 @@ const state = vi.hoisted(() => ({
   forceFinish: vi.fn(),
 }));
 
-vi.mock(import("../session/lifecycle.js"), async (importOriginal) => {
-  const actual = await importOriginal();
+vi.mock("../session/lifecycle.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../session/lifecycle.js")>();
   return {
     ...actual,
     sessionForCall: (sessionId: string) => state.sessions.get(sessionId),
@@ -34,8 +34,8 @@ vi.mock(import("../session/lifecycle.js"), async (importOriginal) => {
   };
 });
 
-vi.mock(import("../provision-session.js"), async (importOriginal) => {
-  const actual = await importOriginal();
+vi.mock("../provision-session.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../provision-session.js")>();
   return {
     ...actual,
     maskOperatorSessionOutput: (_sessionId: string, value: unknown) => value,
