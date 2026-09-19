@@ -170,12 +170,11 @@ function selectAllInPage(input: { ref: string }): boolean {
     element.focus();
     const doc = element.ownerDocument;
     const selection = doc.getSelection();
-    if (selection !== null) {
-      const range = doc.createRange();
-      range.selectNodeContents(element);
-      selection.removeAllRanges();
-      selection.addRange(range);
-    }
+    if (selection === null) return false;
+    const range = doc.createRange();
+    range.selectNodeContents(element);
+    selection.removeAllRanges();
+    selection.addRange(range);
     return true;
   }
   return false;
@@ -302,13 +301,17 @@ export async function driveActOnPage(page: Page, action: ProvisionAction): Promi
       button: "left",
       clickCount: 1,
     });
-    // Focus and select-all INSIDE the element's own frame, after the click
-    // focused it, then insert. The guard no longer pre-focuses (see
-    // selectAllInPage); if this re-resolve fails — frame remounting between
-    // guard and now — insertText still lands in the focused field.
-    await evaluateBound(frame, selectAllInPage, { ref: action.target }).catch(
-      () => undefined,
+    const selected = await evaluateBound(frame, selectAllInPage, { ref: action.target }).catch(
+      () => false,
     );
+    if (!selected) {
+      return {
+        kind: "stale",
+        reason: "reselection_failed",
+        ...timings,
+        cdpMs: Date.now() - cdpStarted,
+      };
+    }
     await cdp.send("Input.insertText", { text: action.text });
     if (guard.searchSubmit) {
       await cdp.send("Input.dispatchKeyEvent", {

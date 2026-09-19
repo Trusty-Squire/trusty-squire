@@ -23,24 +23,22 @@ import {
   buildJevState,
   clickableCandidates,
   decideAfterJev,
-  decideFills,
   driveCandidates,
   fillActionForCandidate,
-  fillQuestionName,
   fillableCandidates,
-  gated,
   isOtpRow,
   lastActionWasClick,
   matchingFactKeys,
   mergeCompactTable,
   mergeFacts,
   nextActionInstructions,
-  noProgressDecision,
   observationFingerprint,
   pageTextFromObservation,
   peakedProbabilities,
   requiredFillableMissingFact,
   selectTargetKey,
+  selectTargets,
+  selectCandidates,
   typeableCandidates,
   validateChoice,
   validateChoiceReason,
@@ -249,15 +247,7 @@ describe("history threading", () => {
   });
 });
 
-describe("confidence gate and validate_choice", () => {
-  it("admits answers at or above 0.6 and refuses below", () => {
-    expect(gated({ confidence: 0.65 })).toBe(true);
-    expect(gated({ confidence: 0.6 })).toBe(true);
-    expect(gated({ confidence: 0.41 })).toBe(false);
-    expect(gated({ noul: 0.26 })).toBe(false);
-    expect(gated(undefined)).toBe(false);
-  });
-
+describe("validate_choice", () => {
   it("rejects a choice that is not offered, not argmax, or badly normalized", () => {
     const criteria = { CLICK: "click", DONE: "done" };
     expect(validateChoice(criteria, valid("CLICK", criteria))).toBe(true);
@@ -584,28 +574,6 @@ describe("decideAfterJev stop reasons", () => {
 });
 
 describe("form-fill assignment helpers", () => {
-  const facts = { email: "a@b.test", first_name: "Ada" };
-
-  it("fills every gated value answer in DOM order and skips none", () => {
-    const fillables = fillableCandidates(ROWS, facts, false);
-    const decided = decideFills({
-      answers: {
-        [fillQuestionName(slugFor(EMAIL))]: { choice: "email", confidence: 0.99 },
-        [fillQuestionName(slugFor(NAME))]: { choice: DRIVE_FIXED_NONE, confidence: 0.8 },
-      },
-      candidates: fillables,
-      facts,
-    });
-    expect(decided.actions).toEqual([
-      {
-        kind: "act",
-        action: { kind: "type", target: "@e:email", text: "a@b.test" },
-        actionKey: "@e:email",
-        confidence: 0.99,
-      },
-    ]);
-  });
-
   it("selects option text on select-like rows instead of typing it", () => {
     const address: DriveCandidate = {
       ref: "@e:addr",
@@ -791,18 +759,6 @@ describe("facts, fingerprint, compact merge", () => {
     expect(clickableCandidates([EMAIL, cont], false).map((c) => c.ref)).toEqual(["@e:go"]);
   });
 
-  it("treats an unchanged map plus the same action as no progress", () => {
-    const fp = observationFingerprint("https://x.test", ROWS);
-    expect(
-      noProgressDecision({
-        fingerprint: fp,
-        lastFingerprint: fp,
-        actionKey: "@e:go",
-        lastActionKey: "@e:go",
-      }),
-    ).toBe(true);
-  });
-
   it("keeps acted markers and committed field state in the progress fingerprint", () => {
     const acted: WireRow = ["@e:state", "s", "@state|w=acted"];
     const before = observationFingerprint("https://x.test", [acted]);
@@ -813,14 +769,6 @@ describe("facts, fingerprint, compact merge", () => {
     );
     expect(before).toContain("w=acted");
     expect(afterFill).not.toBe(before);
-    expect(
-      noProgressDecision({
-        fingerprint: afterFill,
-        lastFingerprint: before,
-        actionKey: "@e:state",
-        lastActionKey: "@e:state",
-      }),
-    ).toBe(false);
   });
 
   it("offers a search field for TYPE_TEXT even without a query fact, then needs_value", () => {
@@ -1002,5 +950,50 @@ describe("operate_drive tool schema", () => {
   it("steers agents to reach for it on signup and checkout goals", () => {
     expect(operateDriveTool.description).toContain("prefer it over calling operate_click");
     expect(operateDriveTool.description).toContain("signup, checkout");
+  });
+});
+
+describe("select option key collisions", () => {
+  it("offers and executes distinct options with the same truncated slug", () => {
+    const options = [
+      "International shipping delivery within 10 days",
+      "International shipping delivery within 15 days",
+    ];
+    const pageOptions = new Map([[STATE[0], options]]);
+    const targets = selectTargets(selectCandidates([STATE], {}, false), {}, pageOptions);
+    expect(targets.slice(1).map((target) => target.option)).toEqual(options);
+    expect(new Set(targets.map((target) => target.slug)).size).toBe(3);
+    const questions = buildDriveQuestions(
+      [STATE],
+      {},
+      "choose shipping",
+      false,
+      [],
+      "",
+      pageOptions,
+    );
+    const operation = questions.operation;
+    const select = questions.SELECT_target;
+    if (operation?.type !== "choice" || select?.type !== "choice")
+      throw new Error("missing choices");
+    for (const target of targets.slice(1)) {
+      const decision = decideAfterJev({
+        rows: [STATE],
+        facts: {},
+        goal: "choose shipping",
+        lastFingerprint: null,
+        lastActionKey: null,
+        fingerprint: "fp",
+        pageOptions,
+        answers: {
+          operation: valid("SELECT", operation.criteria),
+          SELECT_target: valid(target.slug, select.criteria),
+        },
+      });
+      expect(decision).toMatchObject({
+        kind: "act",
+        action: { kind: "select", target: STATE[0], text: target.option },
+      });
+    }
   });
 });

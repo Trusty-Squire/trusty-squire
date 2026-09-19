@@ -15,9 +15,16 @@ import {
   type DriveDependencies,
 } from "../operate-drive.js";
 import { finishProvisionSession, startHarnessProvisionSession } from "../provision-session.js";
-import { act, observe, awaitVerification } from "../provision-session.js";
+import {
+  act,
+  observe,
+  awaitVerification,
+  injectCardIntoSessionTargets,
+} from "../provision-session.js";
 import { captureFrameSnapshot, driveRowsFromSnapshot } from "../drive-snapshot.js";
 import { driveActOnPage, settleDriveStep } from "../drive-act.js";
+import { sessionForCall } from "../session/lifecycle.js";
+import { DriveEvaluateTimeout } from "../drive-evaluate.js";
 
 const SIGNUP_HTML = `<!doctype html><meta charset="utf-8"><title>Signup fixture</title>
 <main>
@@ -351,4 +358,146 @@ describe("coverage-matrix constant", () => {
     expect(DRIVE_CONFIDENCE_THRESHOLD).toBeGreaterThan(0.41);
     expect(DRIVE_CONFIDENCE_THRESHOLD).toBeLessThanOrEqual(0.65);
   });
+});
+
+describe("drive review regressions", () => {
+  it("registers compact injection refs and retries after four incomplete fills", async () => {
+    const { context, page, started } = await openFixture(
+      '<label>Card number <input id="pan" autocomplete="cc-number"></label><label>CVV <input id="cvv" autocomplete="cc-csc"></label>',
+      "checkout.test",
+    );
+    try {
+      await page.goto("https://checkout.test/checkout");
+      const session = sessionForCall(started.session_id)!;
+      expect(session.compactV2Active).toBe(true);
+      const card = {
+        pan: "4111111111111111",
+        cvv: "739",
+        exp_month: "12",
+        exp_year: "2030",
+        name: "Ada",
+        billing: { line1: "1 Main St", city: "Boston", postal_code: "02110", country: "US" },
+      };
+      let attempts = 0;
+      const dependencies = deps(async (_api, _state, questions) =>
+        jevFromQuestions(questions, true),
+      );
+      dependencies.injectCard = async (_session, args) => {
+        attempts += 1;
+        const fields = await injectCardIntoSessionTargets(started.session_id, card, args.fields);
+        expect(fields).toEqual({ pan: { status: "filled" }, cvv: { status: "filled" } });
+        session.releasedPaymentCard = {
+          approvalId: "approved",
+          approvalUrl: "https://approval.test",
+          checkout: {
+            merchant: "test",
+            checkout_origin: "https://checkout.test",
+            amount_cents: 100,
+            currency: "USD",
+          },
+          cardRef: "card",
+          last4: "1111",
+          deadline: Date.now() + 60_000,
+          card,
+        };
+        return { status: "card_injected", complete: attempts > 4, fields };
+      };
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        const result = await runOperateDrive(
+          { session_id: started.session_id, goal: "fill card", facts: { card_ref: "card" } },
+          api(),
+          undefined,
+          dependencies,
+        );
+        expect(result.status).toBe(attempt <= 4 ? "card_incomplete" : "complete");
+      }
+      expect(attempts).toBe(5);
+      expect(await page.locator("#pan").inputValue()).toBe(card.pan);
+      expect(await page.locator("#cvv").inputValue()).toBe(card.cvv);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 60_000);
+
+  it("masks GET query card values before Jev and handoff serialization", async () => {
+    const { context, page, started } = await openFixture(NOOP_HTML, "card-query.test");
+    try {
+      const pan = "4111111111111111";
+      sessionForCall(started.session_id)!.browser.registerCardValueOutputMask({ pan, cvv: "739" });
+      await page.goto(`https://card-query.test/?pan=${pan}`);
+      const urls: string[] = [];
+      const dependencies = deps(async (_api, state, questions) => {
+        const serialized = JSON.stringify(state);
+        expect(serialized).not.toContain(pan);
+        expect(serialized).toContain("[card number]");
+        urls.push((state as { page: { url: string } }).page.url);
+        return jevFromQuestions(questions, true);
+      });
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const result = await runOperateDrive(
+          { session_id: started.session_id, goal: "read page" },
+          api(),
+          undefined,
+          dependencies,
+        );
+        expect(result.status).toBe("complete");
+        expect(JSON.stringify(result)).not.toContain(pan);
+        expect(result.observation?.url).toContain("[card number]");
+      }
+      expect(urls).toHaveLength(2);
+      expect(urls[0]).toBe(urls[1]);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it.each(["detached", "timeout"])(
+    "does not type when reselection is %s",
+    async (failure) => {
+      const { context, page, started } = await openFixture(
+        '<label>Email <input id="email" value="original"></label><input id="other">',
+        "reselect.test",
+      );
+      try {
+        const snapshot = await captureFrameSnapshot(page, [], 0);
+        const target = snapshot!.elements.find((element) => element.label.includes("Email"))!;
+        const frame = page.mainFrame();
+        const original = frame.evaluate.bind(frame);
+        const spy =
+          failure === "timeout"
+            ? vi
+                .spyOn(frame, "evaluate")
+                .mockImplementationOnce(original)
+                .mockRejectedValueOnce(new DriveEvaluateTimeout(1))
+            : undefined;
+        if (failure === "detached") {
+          await page.locator("#email").evaluate((element) =>
+            element.addEventListener("click", () => {
+              element.remove();
+              document.querySelector<HTMLInputElement>("#other")!.focus();
+            }),
+          );
+        }
+        try {
+          const result = await driveActOnPage(page, {
+            kind: "type",
+            target: target.ref,
+            text: "new value",
+          });
+          expect(result.kind).toBe("stale");
+          expect(await page.locator("#other").inputValue()).toBe("");
+          if (failure === "timeout")
+            expect(await page.locator("#email").inputValue()).toBe("original");
+        } finally {
+          spy?.mockRestore();
+        }
+      } finally {
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    30_000,
+  );
 });

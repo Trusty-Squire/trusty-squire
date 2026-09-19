@@ -101,7 +101,6 @@ export const DRIVE_HISTORY_CAP = 20;
 export const DRIVE_MAX_JEV_CALLS = 120;
 export const DRIVE_MAX_CANDIDATES = 250;
 export const DRIVE_WAIT_MS = 1500;
-export const DRIVE_MAX_CARD_FILL_ATTEMPTS = 3;
 export const DRIVE_STALE_LIMIT = 3;
 export const DRIVE_IDENTICAL_RESNAP_MS = 200;
 export const DRIVE_FIXED_DONE = "DONE";
@@ -1036,30 +1035,31 @@ export function selectTargets(
   pageOptions: ReadonlyMap<string, readonly string[]> = new Map(),
 ): DriveCandidate[] {
   const targets: DriveCandidate[] = [];
-  const seen = new Set<string>();
-  const addOption = (candidate: DriveCandidate, text: string) => {
-    const slug = selectTargetKey(candidate.slug, text);
-    if (seen.has(slug)) return;
-    seen.add(slug);
-    targets.push({
-      ...candidate,
-      slug,
-      description: `choose "${text}" in the ${readableLabel(candidate.row)} field`,
-      option: text,
-    });
-  };
   for (const candidate of candidates) {
     targets.push(candidate);
-    seen.add(candidate.slug);
+    const texts = new Set<string>();
+    const used = new Set<string>();
+    const addOption = (text: string) => {
+      if (texts.has(text)) return;
+      texts.add(text);
+      const optionSlug = uniqueCriteriaSlug(text, used);
+      used.add(optionSlug);
+      targets.push({
+        ...candidate,
+        slug: `${candidate.slug}:${optionSlug.replace(/^k/, "")}`,
+        description: `choose "${text}" in the ${readableLabel(candidate.row)} field`,
+        option: text,
+      });
+    };
     for (const key of matchingFactKeys(facts, candidate.row)) {
       const text = facts[key];
       if (text === undefined || text.length === 0) continue;
-      addOption(candidate, text);
+      addOption(text);
     }
     for (const text of pageOptions.get(candidate.ref) ??
       pageOptions.get(readableLabel(candidate.row).toLowerCase()) ??
       []) {
-      if (text.length > 0) addOption(candidate, text);
+      if (text.length > 0) addOption(text);
     }
   }
   return targets;
@@ -1120,30 +1120,6 @@ export function requiredFillableMissingFact(
     };
   }
   return undefined;
-}
-
-export function fillQuestionName(slug: string): string {
-  return `value_${slug}`;
-}
-
-export function buildFillQuestions(
-  candidates: readonly DriveCandidate[],
-  facts: Record<string, string>,
-): Record<string, JevQuestion> {
-  const questions: Record<string, JevQuestion> = {};
-  for (const candidate of candidates) {
-    const criteria: Record<string, string> = {};
-    for (const key of matchingFactKeys(facts, candidate.row)) {
-      criteria[key] = `the provided ${key} value`;
-    }
-    criteria[DRIVE_FIXED_NONE] = "none of the listed facts belong in this field; skip it";
-    questions[fillQuestionName(candidate.slug)] = {
-      type: "choice",
-      instructions: `Which fact supplies the value for the ${readableLabel(candidate.row)} field?`,
-      criteria,
-    };
-  }
-  return questions;
 }
 
 export function compactRowsText(
@@ -1439,13 +1415,6 @@ export function confidenceOf(answer: JevAnswer | undefined): number {
   return 0;
 }
 
-export function gated(
-  answer: JevAnswer | undefined,
-  threshold: number = DRIVE_CONFIDENCE_THRESHOLD,
-): boolean {
-  return confidenceOf(answer) >= threshold;
-}
-
 export type DriveDecision =
   | { kind: "complete"; confidence: number }
   | { kind: "stuck"; confidence: number }
@@ -1511,44 +1480,6 @@ export function fillActionForCandidate(
     ? { kind: "select", target: candidate.ref, text }
     : { kind: "type", target: candidate.ref, text };
   return { kind: "act", action, actionKey: candidate.ref, confidence };
-}
-
-export function decideFills(input: {
-  answers: Record<string, JevAnswer>;
-  candidates: readonly DriveCandidate[];
-  facts: Record<string, string>;
-  threshold?: number;
-}): { actions: Extract<DriveDecision, { kind: "act" }>[]; lowConfidence?: DriveDecision } {
-  const actions: Extract<DriveDecision, { kind: "act" }>[] = [];
-  let lowConfidence: DriveDecision | undefined;
-  for (const candidate of input.candidates) {
-    const answer = input.answers[fillQuestionName(candidate.slug)];
-    const instructions = `Which fact supplies the value for the ${readableLabel(candidate.row)} field?`;
-    const criteria = valueCriteria(input.facts, candidate.row);
-    if (answer?.choice === undefined) {
-      lowConfidence ??= refusalQuestion(
-        "invalid_answer",
-        instructions,
-        criteria,
-        answer,
-        "missing_answer",
-      );
-      continue;
-    }
-    if (answer.choice === DRIVE_FIXED_NONE) continue;
-    const matched = matchingFactKeys(input.facts, candidate.row);
-    if (!matched.includes(answer.choice) || input.facts[answer.choice] === undefined) {
-      continue;
-    }
-    const action = fillActionForCandidate(
-      candidate,
-      input.facts,
-      answer.choice,
-      confidenceOf(answer),
-    );
-    if (action !== undefined && action.kind === "act") actions.push(action);
-  }
-  return { actions, ...(lowConfidence === undefined ? {} : { lowConfidence }) };
 }
 
 export function lastActionWasClick(trajectory: readonly DriveTrajectoryStep[]): boolean {
@@ -1847,19 +1778,6 @@ export function decideAfterJev(input: {
   return refuseAdmission(operationAdmission, instructions, operationCriteriaMap, operation);
 }
 
-export function noProgressDecision(input: {
-  fingerprint: string;
-  lastFingerprint: string | null;
-  actionKey: string;
-  lastActionKey: string | null;
-}): boolean {
-  return input.lastFingerprint === input.fingerprint && input.lastActionKey === actionKeyOf(input);
-}
-
-function actionKeyOf(input: { actionKey: string }): string {
-  return input.actionKey;
-}
-
 function takeActProfile(
   drive: SessionDriveState,
 ): Pick<
@@ -2033,9 +1951,7 @@ async function canonicalDriveRefs(
   refs: readonly (string | undefined)[],
 ): Promise<Map<string, string>> {
   const driveRefs = [
-    ...new Set(
-      refs.filter((ref): ref is string => ref !== undefined && DRIVE_REF_RE.test(ref)),
-    ),
+    ...new Set(refs.filter((ref): ref is string => ref !== undefined && DRIVE_REF_RE.test(ref))),
   ];
   const translated = new Map<string, string>();
   if (driveRefs.length === 0) return translated;
@@ -2090,7 +2006,10 @@ async function canonicalDriveRefs(
       await handle.dispose().catch(() => undefined);
       const match = index >= 0 ? fresh[index] : undefined;
       const canonicalRef = match === undefined ? undefined : canonical.get(match);
-      if (canonicalRef !== undefined) translated.set(ref, canonicalRef);
+      if (canonicalRef !== undefined) {
+        if (session.compactV2Active) session.compactV2Refs.set(canonicalRef, canonicalRef);
+        translated.set(ref, canonicalRef);
+      }
     } catch {
       // Leave untranslated — the primitive reports honestly.
     }
@@ -2155,22 +2074,7 @@ function maskSnapshotOutputs(
     return { observation, rows };
   }
   const maskedRows = browser.maskDriveRows(rows) as unknown as WireRow[];
-  const rest: Observation = { ...observation, safe_table: maskedRows as never };
-  if (typeof rest.dom === "string") rest.dom = browser.maskOperatorOutput(rest.dom);
-  if (rest.semantic !== undefined) {
-    rest.semantic = {
-      ...(rest.semantic.title === undefined
-        ? {}
-        : { title: browser.maskOperatorOutput(rest.semantic.title) }),
-      ...(rest.semantic.headings === undefined
-        ? {}
-        : {
-            headings: rest.semantic.headings.map((heading) =>
-              browser.maskOperatorOutput(heading),
-            ),
-          }),
-    };
-  }
+  const rest = browser.maskOperatorOutput({ ...observation, safe_table: maskedRows as never });
   return { observation: rest, rows: maskedRows };
 }
 
@@ -2791,8 +2695,12 @@ async function driveLoop(input: {
         const pan = preTranslate.pan;
         const cvv = preTranslate.cvv;
         card.fields = {
-          ...(pan === undefined ? {} : { pan: { ...pan, ref: translations.get(pan.ref) ?? pan.ref } }),
-          ...(cvv === undefined ? {} : { cvv: { ...cvv, ref: translations.get(cvv.ref) ?? cvv.ref } }),
+          ...(pan === undefined
+            ? {}
+            : { pan: { ...pan, ref: translations.get(pan.ref) ?? pan.ref } }),
+          ...(cvv === undefined
+            ? {}
+            : { cvv: { ...cvv, ref: translations.get(cvv.ref) ?? cvv.ref } }),
         };
       }
       const payment = await dependencies.injectCard(session, card, api, {
@@ -2825,7 +2733,6 @@ async function driveLoop(input: {
       // honestly; if the budget allows, the next loop iteration retries the
       // fill against the same released approval_id instead of recording
       // progress over a half-filled card.
-      drive.cardFillAttempts = (drive.cardFillAttempts ?? 0) + 1;
       const fillComplete = payment.complete !== false;
       drive.cardFillPending = !fillComplete;
       if (!fillComplete) {
@@ -3054,14 +2961,7 @@ async function driveLoop(input: {
     // to resume the automatic release after phone approval, while a released
     // card must not start a second one.
     const alreadyCard = session.releasedPaymentCard !== null;
-    // A released card with an INCOMPLETE fill may retry within budget: the
-    // released approval_id is reused (no second approval), and attempts are
-    // bounded so a field that never lands ends the drive with
-    // card_incomplete instead of spinning.
-    const cardRetry =
-      alreadyCard &&
-      drive.cardFillPending === true &&
-      (drive.cardFillAttempts ?? 0) < DRIVE_MAX_CARD_FILL_ATTEMPTS;
+    const cardRetry = alreadyCard && drive.cardFillPending === true;
     const onCheckout = isCheckoutUrl(observation.url);
     const remainingFills = fillableCandidates(
       rows,
