@@ -46,6 +46,13 @@ readable action slug from the handoff options, `done`, or `stuck`) and/or
 added `facts`. Use the single-step primitives only for a handoff you are
 answering or a task that is not a goal.
 
+When `operate_drive` opens a `url`, its first page read is the drive snapshot;
+startup skips the general observation and automatic consent-banner dismissal
+and settling retry. Consent overlays remain ordinary controls for the drive
+loop to handle. The live Google-session admission gate still applies.
+Standalone `operate_start` retains its general initial observation in the
+requested format and best-effort consent-banner dismissal before that read.
+
 Calls default to 60 steps and 45 seconds; `max_steps` and `max_seconds` set
 the per-call allowances within the registered schema's limits.
 A `budget` handoff preserves partial progress for another call on the same

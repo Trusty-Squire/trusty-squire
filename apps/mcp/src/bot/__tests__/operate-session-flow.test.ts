@@ -4880,6 +4880,22 @@ describe("operate session — live-profile precondition gate", () => {
     await finishProvisionSession(second.session_id);
   });
 
+  it("defers the general observation when the drive loop owns first perception", async () => {
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/drive",
+      initialObservation: "drive",
+    });
+    expect(started).toMatchObject({
+      session_id: expect.any(String),
+      url: "https://app.example.com/drive",
+    });
+    expect(started).not.toHaveProperty("safe_table");
+    expect(started).not.toHaveProperty("dom");
+    expect(h.extractInteractiveElementsCalls).toBe(0);
+    expect(h.consentDismissCalls).toBe(0);
+    await finishProvisionSession(started.session_id);
+  });
+
   it("accepts the live provider probe without consulting a snapshot", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-probe-only";
     h.providers = ["google"];
