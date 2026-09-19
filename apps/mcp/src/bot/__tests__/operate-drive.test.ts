@@ -1000,17 +1000,24 @@ describe("drive outbound choice budgets", () => {
   it("reserves a usable search value when earlier click targets consume the budget", () => {
     const search: WireRow = ["@e:search", "t", "@search|f=query"];
     const rows: WireRow[] = [
-      ...Array.from({ length: 122 }, (_, i): WireRow => [`@e:link${i}`, "a", `@link-${i}`]),
+      ...Array.from({ length: 122 }, (_, i): WireRow => [`@e:link${i}`, "l", `@link-${i}`]),
       search,
     ];
     const sets = driveTargetSets(rows, {}, false);
+    expect(sets.CLICK).toHaveLength(122);
     const questions = buildDriveQuestions(rows, {}, "widgets", false, [], "", new Map(), sets);
     expect(
       Object.values(questions).reduce(
         (n, q) => n + (q.type === "choice" ? Object.keys(q.criteria).length : 0),
         0,
       ),
-    ).toBeLessThanOrEqual(DRIVE_MAX_CRITERIA);
+    ).toBe(DRIVE_MAX_CRITERIA);
+    const clickQuestion = questions.CLICK_target;
+    expect(clickQuestion?.type).toBe("choice");
+    if (clickQuestion?.type !== "choice") throw new Error("missing click choices");
+    const clickCount = Object.keys(clickQuestion.criteria).length;
+    expect(clickCount).toBeGreaterThan(0);
+    expect(clickCount).toBeLessThan(122);
     const valueQuestion = questions[DRIVE_VALUE_QUESTION];
     const operation = questions.operation;
     const target = questions.TYPE_TEXT_target;
