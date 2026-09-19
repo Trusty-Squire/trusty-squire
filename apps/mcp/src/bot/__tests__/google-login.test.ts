@@ -40,6 +40,7 @@ import {
   scopesAreBasic,
   scrapeGoogleScopePhrases,
   trackActiveLoginBrowser,
+  launchCeremonyBrowserContext,
   launchPersistentLoginContext,
   type CeremonyBrowser,
   type PersistentLauncher,
@@ -1142,5 +1143,107 @@ describe("scopesAreBasic (T7)", () => {
 
   it("rejects an empty scope list — absence is not confirmation", () => {
     expect(scopesAreBasic([])).toBe(false);
+  });
+});
+
+// The ceremony browser is LIVE the moment launchPersistentLoginContext
+// resolves, but the caller only registers its teardown once
+// launchCeremonyBrowserContext RETURNS. So anything that throws in between —
+// a page that will not open, a confirm URL that will not navigate — has to be
+// cleaned up here, or a failed first connect leaves a Chrome on the bot
+// profile for process-exit reaping to find.
+describe("launchCeremonyBrowserContext post-launch failure", () => {
+  const ceremonyProfile = (): string => mkdtempSync(join(tmpdir(), "ts-ceremony-launch-"));
+
+  function loginDouble(context: unknown): {
+    login: { context: unknown; marker: string; close: () => Promise<void> };
+    closed: () => number;
+  } {
+    let closes = 0;
+    return {
+      login: {
+        context,
+        marker: "v1:1:ceremony-double",
+        close: async (): Promise<void> => {
+          closes += 1;
+        },
+      },
+      closed: () => closes,
+    };
+  }
+
+  it("closes the browser when the confirm page will not navigate", async () => {
+    const profileDir = ceremonyProfile();
+    const goto = vi.fn(async () => {
+      throw new Error("net::ERR_CONNECTION_REFUSED");
+    });
+    const { login, closed } = loginDouble({
+      pages: () => [{ goto }],
+    });
+    try {
+      await expect(
+        launchCeremonyBrowserContext(
+          {
+            profileDir,
+            url: "https://trustysquire.ai/install/confirm",
+            window: { width: 1280, height: 800 },
+            env: process.env,
+          },
+          { launchPersistentLoginContext: async () => login as never },
+        ),
+      ).rejects.toThrow("net::ERR_CONNECTION_REFUSED");
+      expect(goto).toHaveBeenCalledOnce();
+      expect(closed()).toBe(1);
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("closes the browser when no page can be opened", async () => {
+    const profileDir = ceremonyProfile();
+    const { login, closed } = loginDouble({
+      pages: () => [],
+      newPage: async () => {
+        throw new Error("Target page, context or browser has been closed");
+      },
+    });
+    try {
+      await expect(
+        launchCeremonyBrowserContext(
+          {
+            profileDir,
+            url: "https://trustysquire.ai/install/confirm",
+            window: { width: 1280, height: 800 },
+            env: process.env,
+          },
+          { launchPersistentLoginContext: async () => login as never },
+        ),
+      ).rejects.toThrow("Target page, context or browser has been closed");
+      expect(closed()).toBe(1);
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves the browser open on the success path — the caller owns it then", async () => {
+    const profileDir = ceremonyProfile();
+    const goto = vi.fn(async () => undefined);
+    const { login, closed } = loginDouble({ pages: () => [{ goto }] });
+    try {
+      const ceremony = await launchCeremonyBrowserContext(
+        {
+          profileDir,
+          url: "https://trustysquire.ai/install/confirm",
+          window: { width: 1280, height: 800 },
+          env: process.env,
+        },
+        { launchPersistentLoginContext: async () => login as never },
+      );
+      expect(closed()).toBe(0);
+      await ceremony.teardown();
+      expect(closed()).toBe(1);
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
   });
 });

@@ -849,16 +849,9 @@ async function runConnectInstall(
       done: "Provider sessions checked",
       fail: () => "Provider session check failed",
       task: () =>
-        probeProviderSessionsAfterCeremony(
-          profileDir,
-          // The scoped refresh waits its requested provider out of the
-          // commit window: the snapshot's first non-empty read would
-          // otherwise return on Google's days-old cookies and fail the
-          // success gate for the provider the run actually refreshed.
-          args.forceReloginProvider !== undefined
-            ? { awaitProviders: [args.forceReloginProvider] }
-            : {},
-        ),
+        probeProviderSessionsAfterCeremony(profileDir, {
+          awaitProviders: providersConnectMustAwait(args.forceReloginProvider),
+        }),
     });
   } catch (err) {
     console.error(
@@ -1041,6 +1034,25 @@ export type ConnectIncompleteReason =
 // is null when that probe failed, which fails closed — an unverifiable session
 // must never be reported as connected (that is how connect used to print
 // "Squire on duty" over an install with no Google session at all).
+/**
+ * The providers the post-ceremony probe must wait for before it may answer.
+ *
+ * This is exactly what `decideConnectComplete` goes on to DEMAND, and the two
+ * must not drift: Google is required on every run, plus an explicitly
+ * requested `--force-relogin=<provider>`. Awaiting only the requested one let
+ * the snapshot answer on cookies that were already on disk — a profile with
+ * GitHub committed from an earlier run returns `["github"]` on the first read
+ * while the Google session the user just created is still inside Chrome's
+ * ~30s commit window, and the gate rejects a sign-in that succeeded.
+ */
+export function providersConnectMustAwait(
+  requestedProvider?: OAuthProviderId,
+): OAuthProviderId[] {
+  return requestedProvider === undefined || requestedProvider === "google"
+    ? ["google"]
+    : ["google", requestedProvider];
+}
+
 export function decideConnectComplete(
   providers: OAuthProviderId[] | null,
   requestedProvider?: OAuthProviderId,

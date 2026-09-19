@@ -1169,6 +1169,28 @@ export async function launchCeremonyBrowserContext(
         ),
       { failFast: true },
     );
+    try {
+      return await prepareCeremonyBrowser(params, login);
+    } catch (err) {
+      // The browser is LIVE from here on, and the caller registers its
+      // teardown only once this function returns — so nothing else can close
+      // it if the page setup below throws. Close it here or a failed first
+      // connect leaks a Chrome until process-exit reaping.
+      await login.close().catch(() => undefined);
+      throw err;
+    }
+  });
+}
+
+async function prepareCeremonyBrowser(
+  params: {
+    profileDir: string;
+    url: string;
+    forceReloginProviders?: readonly OAuthProviderId[];
+  },
+  login: PersistentLoginContext,
+): Promise<CeremonyBrowser> {
+  {
     const page = login.context.pages()[0] ?? (await login.context.newPage());
     if (params.forceReloginProviders?.length) {
       // Deferred --force-relogin clear: the earlier standalone clear
@@ -1206,7 +1228,7 @@ export async function launchCeremonyBrowserContext(
       teardown: close,
       forceTeardown: (): Promise<void> => close().catch(() => undefined),
     };
-  });
+  }
 }
 
 export async function runDisplayedChrome(
