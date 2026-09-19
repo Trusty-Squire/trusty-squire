@@ -36,6 +36,9 @@ import {
 } from "../../bot/profile.js";
 
 const GOOGLE_SESSION_COOKIES = ["__Secure-1PSID", "SID", "HSID", "SSID", "APISID", "SAPISID"];
+// The rows GitHub actually writes to the cookie store while signed in,
+// confirmed against a real bot profile carrying a GitHub login.
+const GITHUB_PERSISTED_COOKIES = ["dotcom_user"];
 const WINDOWS_EPOCH_OFFSET_MS = 11_644_473_600_000;
 
 /**
@@ -43,10 +46,9 @@ const WINDOWS_EPOCH_OFFSET_MS = 11_644_473_600_000;
  * the columns written here are the serialized format the profile owns and the
  * probe reads; `Default/Cookies` is where Chrome puts it under a user-data-dir.
  */
-async function writeProfileCookies(
+async function writeProfileCookiesRaw(
   profileDir: string,
-  cookies: Array<{ host: string; name: string }>,
-  expiresInMs = 30 * 86_400_000,
+  cookies: Array<{ host: string; name: string; expires: number }>,
 ): Promise<void> {
   await fs.mkdir(path.join(profileDir, "Default"), { recursive: true });
   const { default: Database } = await import("better-sqlite3");
@@ -61,13 +63,25 @@ async function writeProfileCookies(
       "insert into cookies (creation_utc, host_key, name, value, path, expires_utc, " +
         "is_secure, is_httponly, has_expires, is_persistent) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
-    const expires = (Date.now() + expiresInMs + WINDOWS_EPOCH_OFFSET_MS) * 1000;
     for (const cookie of cookies) {
-      insert.run(0, cookie.host, cookie.name, "", "/", expires, 1, 1, 1, 1);
+      const persistent = cookie.expires === 0 ? 0 : 1;
+      insert.run(0, cookie.host, cookie.name, "", "/", cookie.expires, 1, 1, persistent, persistent);
     }
   } finally {
     db.close();
   }
+}
+
+async function writeProfileCookies(
+  profileDir: string,
+  cookies: Array<{ host: string; name: string }>,
+  expiresInMs = 30 * 86_400_000,
+): Promise<void> {
+  const expires = (Date.now() + expiresInMs + WINDOWS_EPOCH_OFFSET_MS) * 1000;
+  await writeProfileCookiesRaw(
+    profileDir,
+    cookies.map((cookie) => ({ ...cookie, expires })),
+  );
 }
 
 let tmpHome: string;
@@ -256,36 +270,84 @@ it("does not claim a provider whose cookies have expired", async () => {
   expect(output).toContain("Opening the Trusty Squire install page");
 });
 
-// Cookie evidence confirms; it never discovers. A provider the live
-// post-ceremony probe never recorded cannot be claimed from a cookie name,
-// which is what keeps the dead-GitHub repair offer reachable instead of
-// suppressed by a `user_session` row that outlived its session.
-it("confirms only the providers a live probe recorded, and records nothing itself", async () => {
-  const sessionPath = path.join(
-    process.env.XDG_CONFIG_HOME!,
-    "trusty-squire",
-    "session.json",
-  );
+async function recordConnectedProviders(providers: string[]): Promise<string> {
+  const sessionPath = path.join(process.env.XDG_CONFIG_HOME!, "trusty-squire", "session.json");
   const stored = JSON.parse(await fs.readFile(sessionPath, "utf8")) as Record<string, unknown>;
-  await fs.writeFile(
-    sessionPath,
-    JSON.stringify({ ...stored, connected_providers: ["google"] }),
-  );
+  await fs.writeFile(sessionPath, JSON.stringify({ ...stored, connected_providers: providers }));
+  return sessionPath;
+}
+
+// Cookie evidence confirms; it never discovers. A provider the live
+// post-ceremony probe never recorded cannot be claimed from the cookie store,
+// which is what keeps the dead-GitHub repair offer reachable.
+it("confirms only the providers a live probe recorded, and records nothing itself", async () => {
+  const sessionPath = await recordConnectedProviders(["google"]);
   await writeProfileCookies(profileDir, [
     ...GOOGLE_SESSION_COOKIES.map((name) => ({ host: ".google.com", name })),
-    { host: "github.com", name: "user_session" },
+    ...GITHUB_PERSISTED_COOKIES.map((name) => ({ host: ".github.com", name })),
   ]);
   vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profileDir);
 
   const output = await runConnect();
 
   expect(output).toContain("Already connected (google)");
-  // The repair offer is reachable: a stale user_session row did not buy GitHub
-  // a connected claim, so connect still offers to fix it.
+  // GitHub's rows are on disk, but no live probe ever recorded it, so the
+  // repair offer still fires rather than the claim being upgraded.
   expect(output).toContain("GitHub session is not active");
-  // And the probe left the record exactly as the live probe wrote it.
   const after = JSON.parse(await fs.readFile(sessionPath, "utf8")) as {
     connected_providers?: string[];
   };
   expect(after.connected_providers).toEqual(["google"]);
+});
+
+// The store holds only what Chrome PERSISTS. GitHub's `user_session` is
+// session-scoped and never written, so probing for it reported every signed-in
+// profile as signed out — and interactively that answer walks a fully connected
+// machine into the ceremony, which is the reported failure.
+it("confirms a recorded GitHub session from the rows Chrome actually persists", async () => {
+  await recordConnectedProviders(["google", "github"]);
+  await writeProfileCookies(profileDir, [
+    ...GOOGLE_SESSION_COOKIES.map((name) => ({ host: ".google.com", name })),
+    ...GITHUB_PERSISTED_COOKIES.map((name) => ({ host: ".github.com", name })),
+  ]);
+  vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profileDir);
+
+  const output = await runConnect();
+
+  expect(output).toContain("Already connected (google + github)");
+  expect(output).not.toContain("GitHub session is not active");
+  expect(output).not.toContain("Opening the Trusty Squire install page");
+});
+
+// Signing out of GitHub removes those rows; the repair offer must come back.
+it("offers the GitHub repair once its persisted rows are gone", async () => {
+  await recordConnectedProviders(["google", "github"]);
+  await writeProfileCookies(
+    profileDir,
+    GOOGLE_SESSION_COOKIES.map((name) => ({ host: ".google.com", name })),
+  );
+  vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profileDir);
+
+  const output = await runConnect();
+
+  expect(output).toContain("Already connected (google)");
+  expect(output).toContain("GitHub session is not active");
+});
+
+// A cookie with no expiry is not a cookie that expired in 1601.
+it("accepts a persisted row that carries no expiry", async () => {
+  await recordConnectedProviders(["google", "github"]);
+  await writeProfileCookiesRaw(profileDir, [
+    ...GOOGLE_SESSION_COOKIES.map((name) => ({
+      host: ".google.com",
+      name,
+      expires: (Date.now() + 30 * 86_400_000 + WINDOWS_EPOCH_OFFSET_MS) * 1000,
+    })),
+    ...GITHUB_PERSISTED_COOKIES.map((name) => ({ host: ".github.com", name, expires: 0 })),
+  ]);
+  vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profileDir);
+
+  const output = await runConnect();
+
+  expect(output).toContain("Already connected (google + github)");
 });

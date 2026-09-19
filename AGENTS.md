@@ -743,11 +743,14 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
 
 ## Browser launch posture
 
-- **`connect` is the only sign-in command, and the login browser is always
-  PLAIN Chrome.** There is no `login` subcommand and no CDP-attached login path
-  — Google's OAuth secure-browser check rejects a CDP attach, and a second
-  command that seeded a provider session outside the account claim let an
-  install report success with no live Google session. Re-auth is
+- **`connect` is the only sign-in command, and the login browser is today a
+  separate PLAIN Chrome.** There is no `login` subcommand: a second command that
+  seeded a provider session outside the account claim let an install report
+  success with no live Google session. The plain browser is NOT justified by any
+  CDP-vs-Google claim — nothing in this repo has ever shown a Google sign-in
+  failing through a CDP-attached browser, so do not cite that. It is a known gap
+  that the ceremony does not reuse the broker's running Chrome; see
+  `docs/browser-broker.md`. Re-auth is
   `connect --force-relogin[=google|github]`; connect gates its own success on
   the post-ceremony live provider probe (`decideConnectComplete`,
   `apps/mcp/src/install/cli.ts`), and the operator's `google_session` wall hands

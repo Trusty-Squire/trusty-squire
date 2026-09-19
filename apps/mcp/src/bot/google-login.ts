@@ -215,6 +215,15 @@ interface LoginTarget {
   label: string;
   cookieOrigin: string;
   cookies: readonly string[];
+  /**
+   * The markers that survive on DISK, for the read-only profile probe. A live
+   * BrowserContext sees a provider's session cookies whether or not Chrome ever
+   * writes them; the cookie store only ever holds the persistent ones. GitHub's
+   * `user_session` is session-scoped and is never written, so reading the store
+   * for it reports every signed-in profile as signed out. `dotcom_user` is the
+   * row GitHub does persist while signed in, and it is removed on sign-out.
+   */
+  persistedCookies: readonly string[];
 }
 const LOGIN_TARGETS: Record<OAuthProviderId, LoginTarget> = {
   google: {
@@ -222,12 +231,14 @@ const LOGIN_TARGETS: Record<OAuthProviderId, LoginTarget> = {
     label: "Google",
     cookieOrigin: "https://www.google.com",
     cookies: ["__Secure-1PSID", "SID", "HSID", "SSID", "APISID", "SAPISID"],
+    persistedCookies: ["__Secure-1PSID", "SID", "HSID", "SSID", "APISID", "SAPISID"],
   },
   github: {
     provider: "github",
     label: "GitHub",
     cookieOrigin: "https://github.com",
     cookies: ["user_session", "__Host-user_session_same_site"],
+    persistedCookies: ["dotcom_user"],
   },
 };
 
@@ -337,12 +348,15 @@ interface ProfileCookieRow {
 const WINDOWS_EPOCH_OFFSET_MS = 11_644_473_600_000;
 
 function cookieProvesSession(row: ProfileCookieRow, target: LoginTarget, now = Date.now()): boolean {
-  if (!target.cookies.includes(row.name)) return false;
+  if (!target.persistedCookies.includes(row.name)) return false;
   const host = new URL(target.cookieOrigin).hostname;
   const matchesHost = row.host_key.startsWith(".")
     ? host === row.host_key.slice(1) || host.endsWith(row.host_key)
     : host === row.host_key;
   if (!matchesHost) return false;
+  // Only a row that CARRIES an expiry can be expired. A session cookie records
+  // none, and reading its zero as "expired in 1601" rejects a live session.
+  if (row.expires_utc === 0) return true;
   return row.expires_utc / 1000 - WINDOWS_EPOCH_OFFSET_MS > now;
 }
 
