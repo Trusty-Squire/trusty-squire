@@ -55,6 +55,7 @@ import {
 } from "./drive-snapshot.js";
 import {
   documentEpochOf,
+  documentOriginOf,
   driveActOnPage,
   settleDriveStep,
   waitForNavigationIdle,
@@ -1144,7 +1145,6 @@ export function pageTextFromObservation(
   for (const blocker of observation.semantic?.blockers ?? []) {
     if (blocker.text.length > 0) parts.push(blocker.text);
   }
-  if (observation.dom !== undefined && observation.dom.length > 0) parts.push(observation.dom);
   for (const line of extra) {
     if (line.length > 0 && line !== "control") parts.push(line);
   }
@@ -1154,10 +1154,11 @@ export function pageTextFromObservation(
 export function elementState(candidate: DriveCandidate): DriveStateElement {
   const checked = rowChecked(candidate.row);
   const valueMatch = /(?:^|\|)n=([^|]+)/.exec(candidate.row[2] ?? "");
+  const label = readableLabel(candidate.row);
   return {
     id: candidate.slug,
     role: ROLE_WORDS[candidate.row[1]] ?? candidate.role,
-    description: candidate.description,
+    description: candidate.option === undefined ? label : `${label} → ${candidate.option}`,
     operations: operationsForRow(candidate.row),
     ...(checked === undefined ? {} : { checked }),
     ...(valueMatch === null ? {} : { value: valueMatch[1] }),
@@ -1288,7 +1289,10 @@ export function driveTargetSets(
 function criteriaFromCandidates(candidates: readonly DriveCandidate[]): Record<string, string> {
   const criteria: Record<string, string> = {};
   for (const candidate of candidates) {
-    criteria[candidate.slug] = candidate.description;
+    criteria[candidate.slug] =
+      candidate.option === undefined
+        ? readableLabel(candidate.row)
+        : `${readableLabel(candidate.row)} → ${candidate.option}`;
   }
   return criteria;
 }
@@ -2515,7 +2519,11 @@ async function driveLoop(input: {
       if (page !== null) {
         settleMs = await settleDriveStep(page, acted.combobox);
         const afterEpoch = await documentEpochOf(page);
-        if (beforeEpoch.length > 0 && afterEpoch.length > 0 && beforeEpoch !== afterEpoch) {
+        if (
+          beforeEpoch.length > 0 &&
+          afterEpoch.length > 0 &&
+          documentOriginOf(beforeEpoch) !== documentOriginOf(afterEpoch)
+        ) {
           await waitForNavigationIdle(page);
         }
       }
@@ -2678,11 +2686,10 @@ async function driveLoop(input: {
       drive.history,
       observation.url,
       observation.semantic?.title,
-      [...sets.TYPE_TEXT, ...sets.SELECT, ...sets.CLICK, ...sets.SCROLL],
-      pageTextFromObservation(
-        observation,
-        rows.map((row) => readableLabel(row)).slice(0, 40),
+      [...sets.TYPE_TEXT, ...sets.SELECT, ...sets.CLICK].filter(
+        (candidate) => !isOffscreenRow(candidate.row),
       ),
+      pageTextFromObservation(observation),
     );
     const prepareMs = Date.now() - prepareStarted;
     const questionCount = Object.keys(questions).length;
