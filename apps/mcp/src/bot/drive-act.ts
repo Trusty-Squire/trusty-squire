@@ -318,6 +318,24 @@ export async function driveActOnPage(page: Page, action: ProvisionAction): Promi
         cdpMs: Date.now() - cdpStarted,
       };
     }
+    // Selection API select() / selectNodeContents does not replace a committed
+    // Flights city chip after another overlay has just closed. Issue the
+    // browser's own selectAll command (same as jev-ultrafast) so insertText
+    // overwrites whatever the click focused.
+    const modifier = process.platform === "darwin" ? 4 : 2;
+    await cdp.send("Input.dispatchKeyEvent", {
+      type: "keyDown",
+      key: "a",
+      code: "KeyA",
+      modifiers: modifier,
+      commands: ["selectAll"],
+    });
+    await cdp.send("Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: "a",
+      code: "KeyA",
+      modifiers: modifier,
+    });
     await cdp.send("Input.insertText", { text: action.text });
     if (guard.searchSubmit) {
       await cdp.send("Input.dispatchKeyEvent", {
