@@ -466,9 +466,7 @@ export async function probeProviderSessionsAfterCeremony(
     } catch {
       read = null;
     }
-    if (read === null) {
-      if (!sawSuccessfulRead && Date.now() >= deadline) return null;
-    } else {
+    if (read !== null) {
       sawSuccessfulRead = true;
       found = read;
     }
@@ -1005,8 +1003,6 @@ export async function tryRunCeremonyInSharedBroker(
           (detail !== "" ? ` ${detail}` : "") +
           ` Waiting for the install to complete; the deadline still applies.\n`,
       );
-    }
-    if (sessionId === undefined) {
       const ok = await pollUntil(
         opts.deadline,
         () => opts.pollUntilDone(),
