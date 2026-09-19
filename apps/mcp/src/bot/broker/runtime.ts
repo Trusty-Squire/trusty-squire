@@ -328,20 +328,23 @@ export class BrokerRuntime implements BrokerBrowserCustody {
   }
 
   async close(): Promise<boolean> {
-    // `closing` is set only while a drain is actually in progress. It is what
-    // every later `acquire` reads as "identity cell is draining", so a close
-    // that returns false must leave it clear on EVERY such exit — live sessions
-    // below, and the force-close that could not prove the tree died. Otherwise
-    // the cell refuses every session forever: `resume()` is the only reset and
-    // it refuses while an owner remains, so nothing would ever clear it.
+    // A failed close must undo only the `closing` THIS call set. The flag also
+    // latches custody-unproven from the launch-failure path, where it is set
+    // deliberately with an owner retained so no later acquire touches a profile
+    // whose Chrome was never proven dead; clearing it unconditionally here
+    // released that latch while the daemon still reported retaining custody.
+    // Leaving a drain's own `closing` set is equally wrong — `resume()` refuses
+    // while an owner remains, so nothing would ever clear it and the cell would
+    // refuse every session forever. Restoring the prior value does both.
     if (this.pending > 0 || this.sessions.size > 0) return false;
+    const priorClosing = this.closing;
     this.closing = true;
     if (
       this.owner !== undefined &&
       (await this.owner.close().catch(() => "unknown")) !== "closed"
     ) {
       if ((await this.owner.forceCloseOwnedProcessTree().catch(() => "unknown")) !== "closed") {
-        this.closing = false;
+        this.closing = priorClosing;
         return false;
       }
     }

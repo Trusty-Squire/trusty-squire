@@ -46,6 +46,7 @@ const WINDOWS_EPOCH_OFFSET_MS = 11_644_473_600_000;
 async function writeProfileCookies(
   profileDir: string,
   cookies: Array<{ host: string; name: string }>,
+  expiresInMs = 30 * 86_400_000,
 ): Promise<void> {
   await fs.mkdir(path.join(profileDir, "Default"), { recursive: true });
   const { default: Database } = await import("better-sqlite3");
@@ -60,7 +61,7 @@ async function writeProfileCookies(
       "insert into cookies (creation_utc, host_key, name, value, path, expires_utc, " +
         "is_secure, is_httponly, has_expires, is_persistent) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
-    const expires = (Date.now() + 30 * 86_400_000 + WINDOWS_EPOCH_OFFSET_MS) * 1000;
+    const expires = (Date.now() + expiresInMs + WINDOWS_EPOCH_OFFSET_MS) * 1000;
     for (const cookie of cookies) {
       insert.run(0, cookie.host, cookie.name, "", "/", expires, 1, 1, 1, 1);
     }
@@ -117,6 +118,38 @@ afterEach(async () => {
   await fs.rm(socketRoot, { recursive: true, force: true });
 });
 
+async function runConnect(): Promise<string> {
+  const output: string[] = [];
+  const warn = vi.spyOn(console, "warn").mockImplementation((message?: unknown) => {
+    output.push(String(message));
+  });
+  const error = vi.spyOn(console, "error").mockImplementation((message?: unknown) => {
+    output.push(String(message));
+  });
+  const exit = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+    throw new Error(`exit:${code ?? 0}`);
+  }) as never);
+  try {
+    await connect({
+      command: "connect",
+      target: "cursor",
+      apiBase: "https://api.example.test",
+      skipBrowser: false,
+      forceRelogin: false,
+      noRegistry: false,
+      noInteractive: true,
+    });
+  } catch {
+    // These cases assert the PREFLIGHT decision, which is fully expressed in the
+    // output above. What the ceremony then does with a stubbed API is not it.
+  } finally {
+    exit.mockRestore();
+    error.mockRestore();
+    warn.mockRestore();
+  }
+  return output.join("\n");
+}
+
 it("reports already connected while the broker owns the profile and its browser", async () => {
   await writeProfileCookies(
     profileDir,
@@ -170,30 +203,89 @@ it("reports already connected while the broker owns the profile and its browser"
   expect(elapsed).toBeLessThan(5_000);
 });
 
-it("stays unverified rather than re-pairing when the profile cannot be read", async () => {
-  // No cookie store at all: the probe throws. A probe failure must refresh the
-  // config and warn — never force the full ceremony (connect-loops-forever).
-  profileLease = acquireProfileOperationGuard(profileDir);
-
+// An ABSENT cookie store and an UNREADABLE one are different answers, and
+// collapsing them is what stranded a bound machine with no profile: it can
+// never be "already connected", and it must never be told to close a browser
+// and re-run --force-relogin instead of simply signing in.
+//
+// `--force-relogin` wipes the whole profile before the confirm, so a confirm
+// that is abandoned or times out leaves exactly this state with a still-valid
+// agent token. Treating it as unverified makes every later plain `connect`
+// refuse to run a sign-in, permanently.
+it("runs the sign-in ceremony when the profile has no cookie store at all", async () => {
   vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profileDir);
-  const output: string[] = [];
-  const warn = vi.spyOn(console, "warn").mockImplementation((message?: unknown) => {
-    output.push(String(message));
-  });
-  try {
-    await connect({
-      command: "connect",
-      target: "cursor",
-      apiBase: "https://api.example.test",
-      skipBrowser: false,
-      forceRelogin: false,
-      noRegistry: false,
-      noInteractive: true,
-    });
-  } finally {
-    warn.mockRestore();
-  }
 
-  expect(output.join("\n")).toContain("couldn't verify");
-  expect(output.join("\n")).not.toContain("Already connected");
+  const output = await runConnect();
+
+  expect(output).not.toContain("Already connected");
+  expect(output).not.toContain("couldn't verify");
+  // Past the preflight and into the ceremony, which announces itself first.
+  expect(output).toContain("Opening the Trusty Squire install page");
+});
+
+it("stays unverified rather than re-pairing when the cookie store cannot be read", async () => {
+  // Present but not a database: unknown, not proof of anything. A probe failure
+  // must refresh the config and warn — never force the full ceremony, and never
+  // claim connected (connect-loops-forever).
+  await fs.mkdir(path.join(profileDir, "Default"), { recursive: true });
+  await fs.writeFile(path.join(profileDir, "Default", "Cookies"), "not a sqlite database");
+  profileLease = acquireProfileOperationGuard(profileDir);
+  vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profileDir);
+
+  const output = await runConnect();
+
+  expect(output).toContain("couldn't verify");
+  expect(output).not.toContain("Already connected");
+  // It also never approached the browser: the lease above is still untouched,
+  // so no ProfileBusyError was raised against it.
+  expect(output).not.toContain("Opening the Trusty Squire install page");
+  expect(output).not.toContain("already using the browser");
+});
+
+it("does not claim a provider whose cookies have expired", async () => {
+  await writeProfileCookies(
+    profileDir,
+    GOOGLE_SESSION_COOKIES.map((name) => ({ host: ".google.com", name })),
+    -86_400_000,
+  );
+  vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profileDir);
+
+  const output = await runConnect();
+
+  expect(output).not.toContain("Already connected");
+  expect(output).toContain("Opening the Trusty Squire install page");
+});
+
+// Cookie evidence confirms; it never discovers. A provider the live
+// post-ceremony probe never recorded cannot be claimed from a cookie name,
+// which is what keeps the dead-GitHub repair offer reachable instead of
+// suppressed by a `user_session` row that outlived its session.
+it("confirms only the providers a live probe recorded, and records nothing itself", async () => {
+  const sessionPath = path.join(
+    process.env.XDG_CONFIG_HOME!,
+    "trusty-squire",
+    "session.json",
+  );
+  const stored = JSON.parse(await fs.readFile(sessionPath, "utf8")) as Record<string, unknown>;
+  await fs.writeFile(
+    sessionPath,
+    JSON.stringify({ ...stored, connected_providers: ["google"] }),
+  );
+  await writeProfileCookies(profileDir, [
+    ...GOOGLE_SESSION_COOKIES.map((name) => ({ host: ".google.com", name })),
+    { host: "github.com", name: "user_session" },
+  ]);
+  vi.stubEnv("TRUSTY_SQUIRE_PROFILE_DIR", profileDir);
+
+  const output = await runConnect();
+
+  expect(output).toContain("Already connected (google)");
+  // The repair offer is reachable: a stale user_session row did not buy GitHub
+  // a connected claim, so connect still offers to fix it.
+  expect(output).toContain("GitHub session is not active");
+  // And the probe left the record exactly as the live probe wrote it.
+  const after = JSON.parse(await fs.readFile(sessionPath, "utf8")) as {
+    connected_providers?: string[];
+  };
+  expect(after.connected_providers).toEqual(["google"]);
 });

@@ -291,8 +291,12 @@ async function validateProviderSession(
  * liveness probe below still runs where it is affordable: after the ceremony,
  * on a profile this process has just closed.
  *
- * Throws when the profile cannot be read; the caller must treat that as
- * unverified rather than as proof the machine needs re-pairing.
+ * An ABSENT profile or cookie store is an answer, not a failure: there is no
+ * provider session, so the caller must run the sign-in ceremony. Only a store
+ * that exists and cannot be read is unknown, and that one must not force a
+ * re-pair. Conflating the two is how a machine whose profile was wiped —
+ * `--force-relogin` does exactly that before the confirm — could never reach a
+ * sign-in again.
  */
 export async function detectProviderSessionsFromProfile(
   profileDir: string = CHROME_PROFILE_DIR,
@@ -300,12 +304,17 @@ export async function detectProviderSessionsFromProfile(
   const snapshotDir = await mkdtemp(join(tmpdir(), "ts-cookie-snapshot-"));
   const snapshot = join(snapshotDir, "Cookies");
   try {
-    await copyFile(join(profileDir, "Default", "Cookies"), snapshot);
+    try {
+      await copyFile(join(profileDir, "Default", "Cookies"), snapshot);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw err;
+    }
     const { default: Database } = await import("better-sqlite3");
     const db = new Database(snapshot, { readonly: true, fileMustExist: true });
     try {
       const rows = db
-        .prepare("select host_key, name, expires_utc, is_persistent from cookies")
+        .prepare("select host_key, name, expires_utc from cookies")
         .all() as ProfileCookieRow[];
       return (Object.keys(LOGIN_TARGETS) as OAuthProviderId[]).filter((id) =>
         rows.some((row) => cookieProvesSession(row, LOGIN_TARGETS[id])),
@@ -322,7 +331,6 @@ interface ProfileCookieRow {
   host_key: string;
   name: string;
   expires_utc: number;
-  is_persistent: number;
 }
 
 // Chrome stores expiry as microseconds since 1601-01-01 UTC.
@@ -335,8 +343,6 @@ function cookieProvesSession(row: ProfileCookieRow, target: LoginTarget, now = D
     ? host === row.host_key.slice(1) || host.endsWith(row.host_key)
     : host === row.host_key;
   if (!matchesHost) return false;
-  // A non-persistent cookie has no meaningful expiry recorded.
-  if (row.is_persistent === 0) return true;
   return row.expires_utc / 1000 - WINDOWS_EPOCH_OFFSET_MS > now;
 }
 

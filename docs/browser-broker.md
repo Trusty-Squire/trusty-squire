@@ -78,15 +78,13 @@ browser it is about and connect reports the profile as busy. Cookie presence is
 all that read proves — the live liveness probe still runs after the ceremony,
 where this process has just closed the profile itself.
 
-Attaching is the point, and the claim is what attaching buys. The plain login
-is deliberately a second, non-CDP Chrome on the SAME profile: Google's OAuth
-secure-browser check rejects a CDP-attached browser, so the sign-in ceremony
-cannot be driven through the broker's own browser. `connect` therefore attaches
-to the broker, takes the maintenance window for that profile, drains it, and
-runs the login under that claim — it never competes with the broker for the
-profile and never opens a second instance beside a live one. Do not convert
-`connect` into driving the broker's CDP browser; the claim, not the process
-identity, is what "reuse the browser" means here.
+The ceremony path does NOT yet reuse the broker's browser. It still takes the
+maintenance window, drains the shared Chrome, and runs the sign-in in a second,
+self-launched plain Chrome on the same profile. That is a known gap, not the
+design: the sign-in is meant to open as a tab in the browser the broker is
+already running. Whether a CDP-attached browser can carry a Google sign-in is
+unproven either way in this repo — do not cite it as the reason for the second
+instance without a real run to show for it.
 
 The window stays owned for the whole of the teardown that follows it — the
 credential refresh, the runtime resume, and the re-taken profile lease — not

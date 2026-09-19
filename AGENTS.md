@@ -890,10 +890,12 @@ found nothing, skipped broker maintenance, and then collided with the live
 broker holding the real profile — the install died on
 `another Trusty Squire session is already using the browser — close it first`,
 so no pairing code was ever minted and the sign-in page rendered `not_found`.
-One shared browser per profile is the design: `connect` attaches to the broker
-(`withBrokerMaintenance`), drains it, does the plain login, and releases on the
-lease boundary. It never starts a second instance and never takes the profile
-exclusively while a broker owns it.
+One shared browser per profile is the design. `connect` attaches to the broker
+(`withBrokerMaintenance`), drains it, does the login, and releases on the lease
+boundary — but that login is still a SECOND, self-launched Chrome on the same
+profile, which the design says it should not be. The ceremony is meant to open
+the sign-in as a tab in the browser the broker already has. Until it does, do
+not write here that connect never starts a second instance: it does.
 
 It also only goes there when it has to. The already-provisioned preflight runs
 BEFORE the maintenance handshake and the exclusive profile guard, and its

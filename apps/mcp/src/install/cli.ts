@@ -673,9 +673,6 @@ async function settleAlreadyConnected(
     );
     return true;
   }
-  // Backfill connected_providers from the bot-side marker on
-  // pre-rc.5 sessions, so the preflight cache is current.
-  for (const p of preflight.providers) await recordConnectedProvider(p, accountId);
   // Connect session validation: we short-circuited because Google is
   // valid + bound, but if the bot's GitHub session validated DEAD, proactively
   // offer to reconnect it — a dead GitHub session is exactly why people re-run
@@ -1066,6 +1063,25 @@ export function preflightUnverifiedMessage(detail: string): string {
   );
 }
 
+/**
+ * Cookie evidence may CONFIRM a provider the live post-ceremony probe already
+ * recorded; it may never add one. A cookie name on disk outlives the session
+ * behind it, so treating it as a discovery is how a server-revoked login reads
+ * as connected and the GitHub repair offer stops firing. Nothing here writes
+ * `connected_providers`: only the live probe that runs after a ceremony does.
+ *
+ * A session predating that record has nothing to confirm against, so its
+ * cookies stand alone rather than forcing a needless re-pair.
+ */
+function confirmRecordedProviders(
+  session: SessionData,
+  cookieProviders: OAuthProviderId[],
+): OAuthProviderId[] {
+  const recorded = session.connected_providers;
+  if (recorded === undefined) return cookieProviders;
+  return cookieProviders.filter((provider) => recorded.includes(provider));
+}
+
 type CheckedConnectPreflight =
   | { kind: "ceremony" }
   | { kind: "provisioned"; providers: OAuthProviderId[]; session: SessionData }
@@ -1106,8 +1122,10 @@ async function checkAlreadyProvisioned(
     // provider session. Refresh config with an explicit unverified warning.
     let providers: OAuthProviderId[] | null;
     try {
-      providers = await detectProviderSessionsFromProfile(profileDir);
-      await syncConnectedProviders(providers, accountId);
+      providers = confirmRecordedProviders(
+        session,
+        await detectProviderSessionsFromProfile(profileDir),
+      );
     } catch (err) {
       const preflight = decideConnectPreflight(session, stillValid, null);
       if (preflight.kind === "unverified") {
@@ -1149,25 +1167,6 @@ async function offerGithubReloginIfDead(args: Argv): Promise<boolean> {
     return false;
   }
   return true;
-}
-
-async function syncConnectedProviders(
-  providers: OAuthProviderId[],
-  accountId?: string,
-): Promise<void> {
-  try {
-    const storage = await openSessionStorage();
-    const session = await storage.read(accountId);
-    if (session === null) return;
-    await storage.write({
-      ...session,
-      connected_providers: [...providers],
-      saved_at: new Date().toISOString(),
-    });
-  } catch {
-    // Best-effort — marker/session drift only affects fast-path UX. The next
-    // connect or provision probe can repair it.
-  }
 }
 
 // Persist `provider` into session.connected_providers (idempotent).

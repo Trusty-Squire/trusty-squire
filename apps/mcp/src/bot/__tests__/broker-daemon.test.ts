@@ -134,3 +134,30 @@ it("a close whose force-close cannot prove the tree died leaves the cell serving
     vi.unstubAllEnvs();
   }
 });
+
+it("a failed close leaves a pre-existing custody-unproven latch set", async () => {
+  // `closing` means two things. A drain sets it for the duration of the drain.
+  // The launch-failure path sets it when an owner could NOT be closed, with the
+  // owner deliberately retained, so no later acquire touches a profile whose
+  // Chrome was never proven dead. A close that fails must undo only its own
+  // drain, never that latch — the daemon reports "retaining physical custody"
+  // on exactly this path, and the runtime has to actually retain it.
+  vi.stubEnv("BOT_CDP_ENDPOINT", "http://127.0.0.1:1");
+  try {
+    const runtime = new BrokerRuntime("fixture-account");
+    const internals = runtime as unknown as {
+      closing: boolean;
+      owner: { close: () => Promise<string>; forceCloseOwnedProcessTree: () => Promise<string> };
+    };
+    internals.owner = {
+      close: async () => "unknown",
+      forceCloseOwnedProcessTree: async () => "unknown",
+    };
+    internals.closing = true;
+
+    await expect(runtime.close()).resolves.toBe(false);
+    await expect(runtime.acquire({})).rejects.toThrow("Identity cell is draining");
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});
