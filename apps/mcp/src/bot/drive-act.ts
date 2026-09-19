@@ -3,6 +3,7 @@
 // locator actionability polling and no resolveFreshActTarget re-extraction.
 
 import type { Frame, Page } from "playwright";
+import { evaluateBound } from "./drive-evaluate.js";
 import type { ProvisionAction } from "./provision-session.js";
 
 export const DRIVE_SETTLE_MS = 50;
@@ -125,13 +126,17 @@ export async function driveActOnPage(
   if (action.kind === "scroll") {
     const direction = action.direction ?? "down";
     const wallStarted = Date.now();
-    await page.evaluate((dir) => {
-      const height = innerHeight;
-      if (dir === "down") scrollBy(0, Math.min(560, height));
-      else if (dir === "up") scrollBy(0, -Math.min(560, height));
-      else if (dir === "bottom") scrollTo(0, document.documentElement.scrollHeight);
-      else scrollTo(0, 0);
-    }, direction);
+    try {
+      await evaluateBound(page, (dir) => {
+        const height = innerHeight;
+        if (dir === "down") scrollBy(0, Math.min(560, height));
+        else if (dir === "up") scrollBy(0, -Math.min(560, height));
+        else if (dir === "bottom") scrollTo(0, document.documentElement.scrollHeight);
+        else scrollTo(0, 0);
+      }, direction);
+    } catch {
+      return { kind: "stale", reason: "evaluate_timeout", ...ZERO_ACT_TIMINGS, guardWallMs: Date.now() - wallStarted };
+    }
     return { kind: "ok", combobox: false, ...ZERO_ACT_TIMINGS, guardWallMs: Date.now() - wallStarted };
   }
   if (action.kind !== "click" && action.kind !== "type" && action.kind !== "select") {
@@ -139,11 +144,16 @@ export async function driveActOnPage(
   }
   const frame = resolveDriveFrame(page, action.target);
   const guardStarted = Date.now();
-  const guard = await frame.evaluate(inPageGuard, {
-    ref: action.target,
-    kind: action.kind,
-    ...(action.kind === "select" || action.kind === "type" ? { text: action.text } : {}),
-  });
+  let guard: GuardResult;
+  try {
+    guard = await evaluateBound(frame, inPageGuard, {
+      ref: action.target,
+      kind: action.kind,
+      ...(action.kind === "select" || action.kind === "type" ? { text: action.text } : {}),
+    });
+  } catch {
+    return { kind: "stale", reason: "evaluate_timeout", ...ZERO_ACT_TIMINGS, guardWallMs: Date.now() - guardStarted };
+  }
   const timings: DriveActTimings = {
     guardScriptMs: guard.scriptMs,
     guardWallMs: Date.now() - guardStarted,
@@ -198,49 +208,58 @@ export async function settleDriveStep(
   combobox: boolean,
 ): Promise<number> {
   const started = Date.now();
-  await page.evaluate(
-    async (wait) => {
-      await Promise.race([
-        new Promise<void>((resolve) => {
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => resolve());
-          });
-        }),
-        new Promise<void>((resolve) => {
-          setTimeout(resolve, wait);
-        }),
-      ]);
-    },
-    DRIVE_SETTLE_MS,
-  );
-  if (combobox) {
-    await page.evaluate(async (cap) => {
-      const start = performance.now();
-      const visibleSuggestion = (element: Element): boolean => {
-        if (element.closest('[aria-hidden="true"],[inert]') !== null) return false;
-        if (typeof element.checkVisibility === "function") {
-          return element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
-        }
-        const style = getComputedStyle(element);
-        return style.display !== "none" && style.visibility !== "hidden";
-      };
-      while (performance.now() - start < cap) {
-        const options = Array.from(
-          document.querySelectorAll(
-            '[role="option"],[role="listbox"] a,.suggestions a,.suggestion-link,.suggestions-dropdown a,[aria-selected]',
-          ),
-        ).filter(visibleSuggestion);
-        if (options.length > 0) return;
-        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      }
-    }, DRIVE_COMBOBOX_WAIT_MS);
+  try {
+    await evaluateBound(
+      page,
+      async (wait) => {
+        await Promise.race([
+          new Promise<void>((resolve) => {
+            requestAnimationFrame(() => {
+              requestAnimationFrame(() => resolve());
+            });
+          }),
+          new Promise<void>((resolve) => {
+            setTimeout(resolve, wait);
+          }),
+        ]);
+      },
+      DRIVE_SETTLE_MS,
+    );
+    if (combobox) {
+      await evaluateBound(
+        page,
+        async (cap) => {
+          const start = performance.now();
+          const visibleSuggestion = (element: Element): boolean => {
+            if (element.closest('[aria-hidden="true"],[inert]') !== null) return false;
+            if (typeof element.checkVisibility === "function") {
+              return element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+            }
+            const style = getComputedStyle(element);
+            return style.display !== "none" && style.visibility !== "hidden";
+          };
+          while (performance.now() - start < cap) {
+            const options = Array.from(
+              document.querySelectorAll(
+                '[role="option"],[role="listbox"] a,.suggestions a,.suggestion-link,.suggestions-dropdown a,[aria-selected]',
+              ),
+            ).filter(visibleSuggestion);
+            if (options.length > 0) return;
+            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+          }
+        },
+        DRIVE_COMBOBOX_WAIT_MS,
+      );
+    }
+  } catch {
+    return Date.now() - started;
   }
   return Date.now() - started;
 }
 
 export async function documentEpochOf(page: Page): Promise<string> {
   try {
-    return await page.evaluate(() => `${performance.timeOrigin}|${location.href}`);
+    return await evaluateBound(page, () => `${performance.timeOrigin}|${location.href}`);
   } catch {
     return "";
   }
