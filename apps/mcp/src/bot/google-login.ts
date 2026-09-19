@@ -56,7 +56,11 @@ import {
   registerLocalBrowserLaunch,
 } from "./browser.js";
 import { createSessionGuard } from "../session-guard.js";
-import { connectOrLaunchBroker, resolveBrokerSocket } from "./broker/discovery.js";
+import {
+  connectOrLaunchBroker,
+  isUnavailable,
+  resolveBrokerSocket,
+} from "./broker/discovery.js";
 import type { BrokerClient } from "./broker/transport.js";
 import { controlLabelV2, wireRoleToSafeRoleV2 } from "./compact-observation-v2.js";
 import { extractGoogleAccountEmail } from "./oauth-login.js";
@@ -921,12 +925,25 @@ async function logoutProvidersThroughSession(
 /**
  * Open the confirm page as a session tab in the shared broker's browser — an
  * ordinary broker-client open of one tab family, no drain and no second
- * Chrome. On an enrolled machine with no resident broker, the ordinary
- * connect-or-launch path spawns the broker daemon, whose browser hosts the
- * tab (and keeps the prior-contract / stale-credential reclaim contracts).
- * Returns null when no broker can serve (unenrolled machine, or the broker
- * path failed): the caller then self-launches, which fail-fasts on the
- * profile gate if a browser actually holds the profile.
+ * Chrome. The open is identity-neutral (`adoptIdentity`): when the shared
+ * browser is already live under some identity (for example a proxied
+ * operator session), the ceremony reuses it instead of requesting a bare
+ * one — a bare request would be refused `incompatible_runtime` while other
+ * sessions are live, or would recycle the shared Chrome underneath them
+ * when none are. On an enrolled machine with no resident broker, the
+ * ordinary connect-or-launch path spawns the broker daemon, whose browser
+ * hosts the tab (and keeps the prior-contract / stale-credential reclaim
+ * contracts).
+ *
+ * Returns null ONLY when no broker exists to serve (the connect found no
+ * socket at all, or the socket was lost mid-handshake): the caller then
+ * self-launches, which fail-fasts on the profile gate if a browser actually
+ * holds the profile. Any other connect-or-launch failure propagates
+ * verbatim — in particular an identified resident's refusal (a
+ * stale-credential broker still serving clients, an unreclaimed pid, a
+ * handshake timeout) names the resident process and the recovery step, and
+ * swallowing it into a self-launch is what replaced that message with the
+ * generic "another Trusty Squire session is already using the browser".
  */
 export async function tryRunCeremonyInSharedBroker(
   opts: RunInBotChromeOpts,
@@ -940,21 +957,46 @@ export async function tryRunCeremonyInSharedBroker(
       session.agent_session_token,
       session.account_id,
     );
-  } catch {
-    // No live broker and none could be launched (or its credential was
-    // refused): the self-launch path's profile gate reports the truth about
-    // the profile instead of racing it.
-    return null;
+  } catch (err) {
+    // Genuinely no broker to serve (no listener, connection refused, socket
+    // lost): the self-launch path's profile gate reports the truth about the
+    // profile instead of racing it. Everything else — an identified
+    // resident's refusal above all — reaches connect verbatim.
+    if (isUnavailable(err)) return null;
+    throw err;
   }
   let sessionId: string | undefined;
   let stopExposure: (() => Promise<void>) | null | undefined;
   try {
-    const open = (await client.call("open", { serviceUrl: opts.url })) as {
-      sessionId?: string;
-    };
+    const open = (await client.call("open", {
+      serviceUrl: opts.url,
+      adoptIdentity: true,
+    })) as { sessionId?: string; observation?: unknown };
     sessionId = open.sessionId;
-    if (sessionId === undefined)
-      throw new Error("the shared browser did not open the install-confirm tab");
+    if (sessionId === undefined) {
+      // A documented `needs_user` hand-back (OpenResult: sessionId absent,
+      // the observation still carries its own session id): the broker minted
+      // no live session, so there is no tab to expose and no session to
+      // close. This must not kill connect — surface the hand-back's own
+      // guidance and let the normal poll run to its honest verdict.
+      const detail = openHandbackDetail(open.observation);
+      console.error(
+        `\n[login] The shared browser opened no ceremony tab (needs-user hand-back).` +
+          (detail !== "" ? ` ${detail}` : "") +
+          ` Waiting for the install to complete; the deadline still applies.\n`,
+      );
+    }
+    if (sessionId === undefined) {
+      const ok = await pollUntil(
+        opts.deadline,
+        () => opts.pollUntilDone(),
+        opts.heartbeatMessage,
+        () => {
+          if (!client.isConnected()) throw new Error(LOGIN_BROWSER_CLOSED_ERROR);
+        },
+      );
+      return { status: ok ? "satisfied" : "timeout", closeState: "closed" };
+    }
     if (opts.forceReloginProviders?.length) {
       await logoutProvidersThroughSession(
         client,
@@ -999,6 +1041,19 @@ export async function tryRunCeremonyInSharedBroker(
     if (sessionId !== undefined) await client.call("close", { sessionId }).catch(() => undefined);
     await client.release().catch(() => undefined);
   }
+}
+
+// Pull one human-readable line out of a needs-user hand-back observation so
+// the console message names what the broker actually asked for, not just that
+// it asked.
+function openHandbackDetail(observation: unknown): string {
+  if (observation === null || typeof observation !== "object") return "";
+  const record = observation as Record<string, unknown>;
+  for (const key of ["guidance", "hint", "url"] as const) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim() !== "") return `${key}: ${value}`;
+  }
+  return "";
 }
 
 export async function runLoginBrowserForEnvironment(

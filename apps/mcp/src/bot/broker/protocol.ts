@@ -46,6 +46,13 @@ export interface OpenRequest {
   serviceUrl: string;
   format?: "compact" | "full";
   proxy?: string;
+  /** Reuse whatever identity the shared browser is already live under
+   * instead of requesting one: when the broker's Chrome serves sessions
+   * through a proxy, an open without a proxy would otherwise be refused
+   * `incompatible_runtime` (other sessions live) or recycle the shared
+   * Chrome underneath them (none live). Only meaningful when `proxy` is
+   * omitted; an explicit `proxy` always wins. */
+  adoptIdentity?: boolean;
 }
 export interface OpenResult {
   /**

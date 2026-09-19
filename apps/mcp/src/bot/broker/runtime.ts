@@ -181,6 +181,14 @@ export class BrokerRuntime implements BrokerBrowserCustody {
     }
   }
 
+  /** The proxy the shared browser is currently live (or launching) under,
+   * or undefined when none is live or the browser runs bare. Serves the
+   * identity-neutral ceremony open: an opener that asks to adopt the live
+   * identity reuses this instead of requesting a bare one. */
+  liveProxyUrl(): string | undefined {
+    return this.runtimeIdentity.liveSettings()?.proxyUrl;
+  }
+
   /** Clean IN-BAND identity recycle for a compatible-profile settings change
    * (notably a new proxy): prove the live Chrome closed, release the profile
    * lease, then forget so the next acquire launches fresh. The broker process

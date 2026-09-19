@@ -43,12 +43,14 @@ const commandSchema = z
   })
   .strict();
 // The tool's own input schema stays the single validator (exactly as before
-// the collapse); the open request only names the three launch fields.
+// the collapse); the open request only names the three launch fields plus
+// the identity-neutral adoption flag.
 const openSchema = z
   .object({
     serviceUrl: z.string().min(1),
     format: z.enum(["compact", "full"]).optional(),
     proxy: z.string().optional(),
+    adoptIdentity: z.boolean().optional(),
   })
   .strict();
 const closeSchema = z
@@ -72,6 +74,30 @@ function remapSession(value: unknown, from: string, to: string): unknown {
 
 function isOperatorCommand(name: string): boolean {
   return name.startsWith("operate_") || name === "inject_card";
+}
+
+/** Derive the operate_start arguments an `open` request maps to. Exported for
+ * tests: the identity-neutral rule lives here — an `adoptIdentity` open
+ * without an explicit proxy reuses `liveProxyUrl` (whatever identity the
+ * shared browser is already live under), an explicit proxy always wins, and
+ * with nothing live the request stays bare. */
+export function deriveOpenToolArgs(
+  input: {
+    serviceUrl: string;
+    format?: "compact" | "full" | undefined;
+    proxy?: string | undefined;
+    adoptIdentity?: boolean | undefined;
+  },
+  liveProxyUrl: string | undefined,
+): Record<string, unknown> {
+  const liveProxy =
+    input.adoptIdentity === true && input.proxy === undefined ? liveProxyUrl : undefined;
+  return {
+    service_url: input.serviceUrl,
+    ...(input.format !== undefined ? { format: input.format } : {}),
+    ...(input.proxy !== undefined ? { proxy: input.proxy } : {}),
+    ...(input.proxy === undefined && liveProxy !== undefined ? { proxy: liveProxy } : {}),
+  };
 }
 
 function closedResult(value: unknown): boolean {
@@ -171,11 +197,14 @@ export class OperatorBroker implements BrokerTransportPort {
     const tool = findTool("operate_start", this.tools);
     if (tool === null || !isOperatorCommand(tool.name))
       throw new BrokerRefusal("unknown_tool", "Tool is not an operator command");
-    const args = tool.inputSchema.parse({
-      service_url: input.serviceUrl,
-      ...(input.format !== undefined ? { format: input.format } : {}),
-      ...(input.proxy !== undefined ? { proxy: input.proxy } : {}),
-    }) as Record<string, unknown>;
+    // Identity-neutral open (adoptIdentity): when the shared browser is
+    // already live under some identity, the opener reuses it instead of
+    // requesting a bare one — a bare request would be refused
+    // incompatible_runtime while other sessions are live, or would recycle
+    // the shared Chrome underneath them when none are.
+    const args = tool.inputSchema.parse(
+      deriveOpenToolArgs(input, brokerBrowserCustody()?.liveProxyUrl?.()),
+    ) as Record<string, unknown>;
     if (requestSignal?.aborted) throw requestSignal.reason;
     const pinnedApi = this.apiFor(principal);
     let observation: unknown;

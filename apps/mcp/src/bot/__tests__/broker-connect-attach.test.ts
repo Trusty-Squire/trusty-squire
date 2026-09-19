@@ -42,6 +42,7 @@ vi.mock("../../session-guard.js", () => ({
 }));
 
 const TOKEN = "fixture-token";
+const WRONG_TOKEN = "wrong-token";
 const CONFIRM_URL = "https://trustysquire.ai/install/confirm?install=fixture";
 // Minted by the same function the real observation uses, so the fixture can
 // never encode a label shape production does not emit.
@@ -61,7 +62,8 @@ const BROKER_FIXTURE_SCRIPT = `
 const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
-const [marker, socketPath, lockPath, token] = process.argv.slice(2);
+const [marker, socketPath, lockPath, token, openNeedsUser] = process.argv.slice(2);
+const CONFIRM_URL = ${JSON.stringify(CONFIRM_URL)};
 if (marker !== "broker") process.exit(78);
 function startTime() {
   const stat = fs.readFileSync("/proc/self/stat", "utf8");
@@ -100,6 +102,22 @@ const server = net.createServer((socket) => {
       }
       if (request.method === "open") {
         seen.openUrl = request.params?.serviceUrl ?? null;
+        seen.openAdoptIdentity = request.params?.adoptIdentity === true;
+        if (openNeedsUser === "needs-user") {
+          // A documented needs_user hand-back (OpenResult): the broker
+          // minted no live session — the observation still carries its own
+          // session id, and there is no tab for the ceremony to close.
+          reply({
+            result: {
+              observation: {
+                session_id: "obs-1",
+                url: CONFIRM_URL,
+                guidance: "No live Google session — sign in first",
+              },
+            },
+          });
+          continue;
+        }
         reply({ result: { sessionId: "tab-1" } });
         continue;
       }
@@ -214,11 +232,14 @@ async function profileLockPath(
  */
 async function connectFixture(opts: {
   forceReloginProviders?: readonly string[];
+  brokerToken?: string;
+  openNeedsUser?: boolean;
 } = {}): Promise<{
   result: unknown;
   profileIdentity: string;
   lockNeverReleased: boolean;
   openUrl: string | null;
+  openAdoptIdentity: boolean;
   closedSession: string | null;
   commands: { name: string | null; args: Record<string, unknown> | null }[];
 }> {
@@ -253,7 +274,14 @@ async function connectFixture(opts: {
   await writeFile(scriptPath, BROKER_FIXTURE_SCRIPT, { mode: 0o600 });
   const child = spawn(
     process.execPath,
-    [scriptPath, "broker", socketPath, lockPath, TOKEN],
+    [
+      scriptPath,
+      "broker",
+      socketPath,
+      lockPath,
+      opts.brokerToken ?? TOKEN,
+      opts.openNeedsUser === true ? "needs-user" : "",
+    ],
     { stdio: "ignore" },
   );
   cleanup.children.push(child);
@@ -281,13 +309,14 @@ async function connectFixture(opts: {
   }, 5_000).catch(() => undefined);
   const seen = ((): {
     openUrl: string | null;
+    openAdoptIdentity: boolean;
     closedSession: string | null;
     commands: { name: string | null; args: Record<string, unknown> | null }[];
   } => {
     try {
       return JSON.parse(readFileSync(lockPath + ".seen", "utf8"));
     } catch {
-      return { openUrl: null, closedSession: null, commands: [] };
+      return { openUrl: null, openAdoptIdentity: false, closedSession: null, commands: [] };
     }
   })();
   return {
@@ -297,6 +326,7 @@ async function connectFixture(opts: {
     // momentarily: the ceremony is a tab in the broker's browser.
     lockNeverReleased: existsSync(lockPath),
     openUrl: seen.openUrl,
+    openAdoptIdentity: seen.openAdoptIdentity,
     closedSession: seen.closedSession,
     commands: seen.commands,
   };
@@ -313,6 +343,9 @@ describe("connect attaches to the live broker for the profile it is connecting",
     // profile — the fixture is the only listener on it, and it received the
     // tab open.
     expect(outcome.openUrl).toBe(CONFIRM_URL);
+    // The open is identity-neutral: the ceremony reuses whatever identity
+    // the shared browser is live under instead of requesting a bare one.
+    expect(outcome.openAdoptIdentity).toBe(true);
     // The session tab is closed at the lease boundary.
     expect(outcome.closedSession).toBe("tab-1");
     // The profile lease was never touched: no drain, no guard, no second
@@ -352,6 +385,53 @@ describe("connect attaches to the live broker for the profile it is connecting",
         { name: "operate_navigate", args: { url: CONFIRM_URL, session_id: "tab-1" } },
       ]);
       expect(outcome.lockNeverReleased).toBe(true);
+    },
+  );
+
+  it(
+    "propagates an identified resident's refusal instead of swallowing it into a self-launch",
+    { timeout: 30_000 },
+    async () => {
+      // A live resident broker whose credential no longer matches the
+      // connecting client: the connect handshake is refused `unauthorized`,
+      // the reclaim paths decline (the account binding does not name this
+      // account), and connectOrLaunchBroker throws. The old ceremony caught
+      // that and returned null — connect then self-launched into the profile
+      // the resident still holds and reported the generic "another Trusty
+      // Squire session is already using the browser", discarding the refusal
+      // that names the resident and its recovery step. The refusal must
+      // surface verbatim.
+      const outcome = await connectFixture({ brokerToken: WRONG_TOKEN });
+      expect(outcome.result).toBeInstanceOf(Error);
+      const refusal = outcome.result as Error & { code?: string };
+      expect(refusal.message).toContain("Invalid broker credential");
+      expect(refusal.code).toBe("unauthorized");
+    },
+  );
+
+  it(
+    "a needs-user hand-back (no sessionId) does not kill connect",
+    { timeout: 30_000 },
+    async () => {
+      // OpenResult: sessionId is absent when the broker minted no live
+      // session — a documented hand-back, not a fault. The old code threw
+      // "the shared browser did not open the install-confirm tab" here. Now
+      // the ceremony surfaces the hand-back's own guidance and keeps the
+      // poll running to its honest verdict; there is no session tab to close.
+      const errors: string[] = [];
+      const errorSpy = vi.spyOn(console, "error").mockImplementation((line?: unknown) => {
+        errors.push(String(line));
+      });
+      try {
+        const outcome = await connectFixture({ openNeedsUser: true });
+        expect(outcome.result).toEqual({ status: "satisfied", closeState: "closed" });
+        expect(outcome.openUrl).toBe(CONFIRM_URL);
+        expect(outcome.closedSession).toBeNull();
+        expect(errors.join("\n")).toContain("needs-user hand-back");
+        expect(errors.join("\n")).toContain("No live Google session — sign in first");
+      } finally {
+        errorSpy.mockRestore();
+      }
     },
   );
 });

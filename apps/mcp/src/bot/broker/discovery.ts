@@ -100,7 +100,14 @@ async function brokerElectionIsHeld(profileDir: string): Promise<boolean> {
   }
 }
 
-function isUnavailable(error: unknown): boolean {
+/** True when the error means "no live broker socket could be reached at
+ * all" — no listener (ENOENT), connection refused, or the broker was lost
+ * mid-handshake. Exported for the ceremony's connect-or-launch decision: a
+ * genuinely absent broker means "self-launch may serve", while any other
+ * failure (an identified resident's refusal, a handshake timeout) must
+ * propagate verbatim instead of being swallowed into a self-launch that
+ * fail-fasts with the generic profile-busy message. */
+export function isUnavailable(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException).code;
   return code === "ENOENT" || code === "ECONNREFUSED" || code === "broker_lost";
 }
