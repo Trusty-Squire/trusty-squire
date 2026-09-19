@@ -2755,15 +2755,17 @@ async function driveLoop(input: {
     fingerprint: string,
     nextFingerprint: string,
     actionKey: string,
+    semanticPageMoved = false,
   ): Promise<DriveHandoff | "continue"> => {
     let confirmed = nextFingerprint;
-    if (confirmed === fingerprint) {
+    if (confirmed === fingerprint && !semanticPageMoved) {
       await sleepDrive(DRIVE_IDENTICAL_RESNAP_MS, context?.signal);
       const snap = await snapshotOrTimeout(framesIfNeeded());
       if (snap !== "ok") return snap;
       confirmed = progressFingerprint(observation.url, rows, drive, session);
     }
-    drive.staleNonWait = confirmed === fingerprint ? drive.staleNonWait + 1 : 0;
+    drive.staleNonWait =
+      confirmed === fingerprint && !semanticPageMoved ? drive.staleNonWait + 1 : 0;
     drive.lastFingerprint = confirmed;
     drive.lastActionKey = actionKey;
     if (drive.staleNonWait >= DRIVE_STALE_LIMIT) return finish("no_progress");
@@ -3052,12 +3054,12 @@ async function driveLoop(input: {
     }
     let actMs = Date.now() - actStarted;
     let settleMs = 0;
+    const page = session.browser.page;
     if (acted.kind === "unsupported") {
       observation = await actSafely(dependencies, sessionId, decision.action);
       rows = mergeCompactTable(rows, observation);
       actMs = Date.now() - actStarted;
     } else {
-      const page = session.browser.page;
       if (page !== null) {
         settleMs = await settleDriveStep(page, acted.combobox);
         const afterEpoch = await documentEpochOf(page);
@@ -3124,7 +3126,14 @@ async function driveLoop(input: {
       fingerprint_after: nextFingerprint,
       ...(driveTraceEnabled() ? { native_selects_after: await nativeSelectSnapshot(session) } : {}),
     });
-    return await noteProgress(fingerprint, nextFingerprint, decision.actionKey);
+    const currentPageFingerprint =
+      page === null || beforePageFingerprint.length === 0 ? "" : await pageFingerprintOf(page);
+    return await noteProgress(
+      fingerprint,
+      nextFingerprint,
+      decision.actionKey,
+      currentPageFingerprint.length > 0 && currentPageFingerprint !== beforePageFingerprint,
+    );
   };
 
   if (args.answer !== undefined) {
