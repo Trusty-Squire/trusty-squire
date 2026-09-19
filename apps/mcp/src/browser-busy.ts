@@ -22,12 +22,7 @@ import {
 } from "./bot/broker/discovery.js";
 import { BrokerRefusal } from "./bot/broker/refusal.js";
 import { brokerEndpointHasLiveListener, type BrokerClient } from "./bot/broker/transport.js";
-import {
-  CHROME_PROFILE_DIR,
-  ProfileBusyError,
-  profilePathIdentity,
-  readLockHolder,
-} from "./bot/profile.js";
+import { CHROME_PROFILE_DIR, profilePathIdentity, readLockHolder } from "./bot/profile.js";
 import { createSessionGuard } from "./session-guard.js";
 
 /**
@@ -65,8 +60,13 @@ export type BrowserBusyReason =
 export type BrowserStatus = { busy: false } | { busy: true; reason: BrowserBusyReason };
 
 export interface PageCommandOptions {
-  /** Bound on the instruction settling or aborting. Never a poll sleep. */
-  deadlineMs?: number;
+  /**
+   * Cancels the instruction through the wire `abort` frame. There is no
+   * façade deadline: a navigate gets 60s per attempt over three attempts
+   * inside the broker, so any bound invented here would fail a healthy slow
+   * page — and aborting one does not stop the navigate already in flight.
+   * Pass `AbortSignal.timeout(ms)` to choose a bound knowing that.
+   */
   signal?: AbortSignal;
 }
 
@@ -108,7 +108,6 @@ export interface BrowserFacadePorts {
   acquire?: (input: AcquireTabInput) => Promise<AcquiredTab>;
 }
 
-const PAGE_COMMAND_DEFAULT_DEADLINE_MS = 30_000;
 /** The broker `open` needs a destination; the caller reaches its real page
  * through `tab.page.goto`. */
 const BLANK_TAB_URL = "about:blank";
@@ -205,8 +204,6 @@ function reasonFromBusyRefusal(
  * the requester's own purpose is never dressed up as the blocker.
  */
 function mapBusyRefusal(error: unknown): BrowserBusy | undefined {
-  if (error instanceof ProfileBusyError)
-    return new BrowserBusy(reasonFromBusyRefusal("profile_busy"), error.message);
   if (!(error instanceof BrokerRefusal) || !isBusyRefusalCode(error.code)) return undefined;
   return new BrowserBusy(
     reasonFromBusyRefusal(error.code, { message: error.message }),
@@ -311,50 +308,6 @@ async function wireAcquire(input: AcquireTabInput): Promise<AcquiredTab> {
   }
 }
 
-/**
- * The one instruction the façade bounds itself. A page instruction that never
- * returns is the failure this module exists for, and no other layer bounds it.
- */
-function runPageInstruction<T>(
-  deadlineMs: number,
-  userSignal: AbortSignal | undefined,
-  operation: (signal: AbortSignal) => Promise<T>,
-): Promise<T> {
-  const controller = new AbortController();
-  const abortWith = (reason: Error): void => {
-    if (!controller.signal.aborted) controller.abort(reason);
-  };
-  const aborted = new Promise<never>((_resolve, reject) => {
-    controller.signal.addEventListener("abort", () => reject(controller.signal.reason as Error), {
-      once: true,
-    });
-  });
-  // The race attaches a handler either way; this only covers the operation
-  // winning first, which leaves this rejection with no other reader.
-  aborted.catch(() => undefined);
-  const onUserAbort = (): void =>
-    abortWith(
-      userSignal?.reason instanceof Error
-        ? userSignal.reason
-        : new Error("The browser instruction was cancelled by its caller"),
-    );
-  const timer = setTimeout(
-    () =>
-      abortWith(
-        new Error(
-          `The page instruction did not settle within ${deadlineMs}ms and was aborted on the wire`,
-        ),
-      ),
-    deadlineMs,
-  );
-  if (userSignal?.aborted) onUserAbort();
-  else userSignal?.addEventListener("abort", onUserAbort, { once: true });
-  return Promise.race([operation(controller.signal), aborted]).finally(() => {
-    clearTimeout(timer);
-    userSignal?.removeEventListener("abort", onUserAbort);
-  });
-}
-
 export interface BrowserFacade {
   browserBusy(): Promise<BrowserStatus>;
   openTab(options: OpenTabOptions): Promise<TabHandle>;
@@ -384,14 +337,7 @@ export function createBrowserFacade(ports: BrowserFacadePorts = {}): BrowserFaca
       }
       let released = false;
       return {
-        page: {
-          goto: async (url: string, pageOptions: PageCommandOptions = {}) =>
-            await runPageInstruction(
-              pageOptions.deadlineMs ?? PAGE_COMMAND_DEFAULT_DEADLINE_MS,
-              pageOptions.signal,
-              async (signal) => await opened.page.goto(url, { signal }),
-            ),
-        },
+        page: opened.page,
         profile,
         purpose,
         async release() {

@@ -7,6 +7,7 @@ import {
   acquireProfileOperationGuard,
   profilePathIdentity,
   CHROME_PROFILE_DIR,
+  ProfileBusyError,
   waitForProfileFree,
   type ProfileOperationLease,
 } from "../profile.js";
@@ -163,6 +164,13 @@ export class BrokerRuntime implements BrokerBrowserCustody {
       this.sessions.set(browser, acquired.releaseTabs);
       if (admissionId !== undefined) this.admissionIds.set(browser, admissionId);
       return { browser, profileDir };
+    } catch (error) {
+      // The profile-operation lease and Chrome's SingletonLock both refuse
+      // with a plain ProfileBusyError, which the wire flattens to
+      // broker_execution_failed. It is the profile layer saying "not now", so
+      // it has to reach the client under the code that says so.
+      if (error instanceof ProfileBusyError) throw new BrokerRefusal("profile_busy", error.message);
+      throw error;
     } finally {
       this.pending--;
       if (admissionId !== undefined) {

@@ -6,12 +6,7 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { brokerSocketPath } from "../bot/broker/discovery.js";
 import { BrokerRefusal } from "../bot/broker/refusal.js";
-import {
-  CHROME_PROFILE_DIR,
-  ProfileBusyError,
-  profilePathIdentity,
-  PROFILE_BUSY_MESSAGE,
-} from "../bot/profile.js";
+import { CHROME_PROFILE_DIR, profilePathIdentity } from "../bot/profile.js";
 import {
   BrowserBusy,
   createBrowserFacade,
@@ -91,13 +86,17 @@ describe("busy refusal mapping", () => {
     }
   });
 
-  it("keeps the profile layer's own message when a ProfileBusyError surfaces", async () => {
-    const facade = refusingFacade(new ProfileBusyError(PROFILE_BUSY_MESSAGE));
+  it("names the profile layer, with its action, when the lease refuses on the wire", async () => {
+    // The broker raises the profile-lease collision under this code; without
+    // it the refusal arrived as broker_execution_failed and the caller got a
+    // raw error with no .action() at all.
+    const held = "another Trusty Squire session is already using the browser — close it first";
+    const facade = refusingFacade(new BrokerRefusal("profile_busy", held));
     await expect(
       facade.openTab({ profile: "default", purpose: "signup:vercel" }),
     ).rejects.toSatisfy((error: unknown) => {
       const busy = expectBusy(error);
-      expect(busy.message).toBe(PROFILE_BUSY_MESSAGE);
+      expect(busy.message).toBe(held);
       expect(busy.reason.layer).toBe("profile");
       expect(busy.action()).toBe("Close the other process using this Chrome profile, then retry.");
       return true;
@@ -206,30 +205,26 @@ describe("acquiring a tab — the broker owns the launch budget", () => {
   });
 });
 
-describe("a page instruction is bounded and abortable", () => {
+describe("a page instruction carries the caller's cancellation, and no invented bound", () => {
   async function tabWithHangingGoto(): Promise<{
-    goto: (
-      url: string,
-      options?: { deadlineMs?: number; signal?: AbortSignal },
-    ) => Promise<unknown>;
-    aborted: () => boolean;
+    goto: (url: string, options?: { signal?: AbortSignal }) => Promise<unknown>;
+    received: () => AbortSignal | undefined;
     release: () => Promise<void>;
   }> {
-    let sawAbort = false;
+    let received: AbortSignal | undefined;
     const facade = createBrowserFacade({
       acquire: async () => ({
         page: {
-          goto: async (_url: string, options: { signal?: AbortSignal } = {}) =>
-            await new Promise((_resolve, reject) => {
+          goto: async (_url: string, options: { signal?: AbortSignal } = {}) => {
+            received = options.signal;
+            return await new Promise((_resolve, reject) => {
               options.signal?.addEventListener(
                 "abort",
-                () => {
-                  sawAbort = true;
-                  reject(options.signal?.reason as Error);
-                },
+                () => reject(options.signal?.reason as Error),
                 { once: true },
               );
-            }),
+            });
+          },
         },
         release: async () => undefined,
       }),
@@ -237,40 +232,63 @@ describe("a page instruction is bounded and abortable", () => {
     const tab = await facade.openTab({ profile: "default", purpose: "signup:vercel" });
     return {
       goto: (url, options) => tab.page.goto(url, options),
-      aborted: () => sawAbort,
+      received: () => received,
       release: () => tab.release(),
     };
   }
 
-  it("rejects a wedged navigate at its deadline instead of pending forever", async () => {
-    const tab = await tabWithHangingGoto();
-    const started = Date.now();
-    await expect(tab.goto("https://example.com", { deadlineMs: 40 })).rejects.toThrow(
-      /did not settle within 40ms/,
-    );
-    expect(tab.aborted()).toBe(true);
-    expect(Date.now() - started).toBeLessThan(1_000);
-    // A wedged page instruction is not one of the busy layers.
-    await expect(tab.goto("https://example.com", { deadlineMs: 40 })).rejects.not.toBeInstanceOf(
-      BrowserBusy,
-    );
+  it("does not abort a slow navigate the caller never bounded", async () => {
+    // A navigate gets 60s per attempt over three attempts inside the broker.
+    // A façade deadline below that failed a healthy slow page AND left the
+    // in-flight navigate owning the session lease, so the retry it invited
+    // was refused as busy.
+    vi.useFakeTimers();
+    try {
+      let settle: (() => void) | undefined;
+      const facade = createBrowserFacade({
+        acquire: async () => ({
+          page: {
+            goto: async () =>
+              await new Promise<void>((resolve) => {
+                settle = resolve;
+              }),
+          },
+          release: async () => undefined,
+        }),
+      });
+      const tab = await facade.openTab({ profile: "default", purpose: "signup:vercel" });
+      let rejected: unknown;
+      const navigating = tab.page.goto("https://slow.example").catch((error: unknown) => {
+        rejected = error;
+      });
+      await vi.advanceTimersByTimeAsync(180_000);
+      expect(rejected).toBeUndefined();
+      settle?.();
+      await navigating;
+      expect(rejected).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it("settles a navigate on the caller's own signal", async () => {
+  it("hands the caller's signal to the wire so a navigate is cancellable", async () => {
     const tab = await tabWithHangingGoto();
     const caller = new AbortController();
     const cancelled = new Error("caller gave up on the navigate");
+    const started = Date.now();
     setTimeout(() => caller.abort(cancelled), 20);
-    await expect(
-      tab.goto("https://example.com", { deadlineMs: 30_000, signal: caller.signal }),
-    ).rejects.toBe(cancelled);
+    await expect(tab.goto("https://example.com", { signal: caller.signal })).rejects.toBe(
+      cancelled,
+    );
+    expect(tab.received()).toBe(caller.signal);
+    expect(Date.now() - started).toBeLessThan(1_000);
   });
 
-  it("releases without waiting on a wedged navigate", async () => {
+  it("releases without waiting on a navigate still in flight", async () => {
     const tab = await tabWithHangingGoto();
     const inFlight = new AbortController();
     const wedged = tab
-      .goto("https://example.com", { deadlineMs: 30_000, signal: inFlight.signal })
+      .goto("https://example.com", { signal: inFlight.signal })
       .catch(() => undefined);
     const started = Date.now();
     await tab.release();

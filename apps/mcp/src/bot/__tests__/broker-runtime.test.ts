@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type * as ProfileModule from "../profile.js";
 const state = vi.hoisted(() => ({
   start: vi.fn(),
   close: vi.fn(),
@@ -23,13 +24,16 @@ vi.mock("../browser.js", () => ({
     }
   },
 }));
-vi.mock("../profile.js", () => ({
+vi.mock("../profile.js", async (importActual) => ({
+  ...(await importActual<typeof ProfileModule>()),
   profilePathIdentity: (path: string) => path,
   CHROME_PROFILE_DIR: "/unused",
   waitForProfileFree: async () => true,
   acquireProfileOperationGuard: state.guard,
 }));
 import { BrokerRuntime } from "../broker/runtime.js";
+import { BrokerRefusal } from "../broker/refusal.js";
+import { ProfileBusyError, PROFILE_BUSY_MESSAGE } from "../profile.js";
 import { withBrokerAdmission } from "../broker/admission-context.js";
 let root: string;
 beforeEach(async () => {
@@ -277,4 +281,21 @@ it("retains target custody when terminal persistence fails and refuses orphan cl
   );
   expect(persisted).toHaveBeenCalledOnce();
   expect(await runtime.close()).toBe(true);
+});
+
+it("refuses a held profile lease under the profile-busy code, not a generic failure", async () => {
+  // A plain ProfileBusyError serializes onto the wire as
+  // broker_execution_failed, which no caller can map to the profile layer.
+  // The `connect` ceremony holding this same lease is the common real case.
+  state.guard.mockImplementation(() => {
+    throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
+  });
+  const runtime = new BrokerRuntime("account");
+  await expect(runtime.acquire({ profileDir: root })).rejects.toSatisfy((error: unknown) => {
+    expect(error).toBeInstanceOf(BrokerRefusal);
+    expect((error as BrokerRefusal).code).toBe("profile_busy");
+    expect((error as Error).message).toBe(PROFILE_BUSY_MESSAGE);
+    return true;
+  });
+  expect(state.constructed).toHaveLength(0);
 });

@@ -183,16 +183,30 @@ through `command`, and `close`s on `release()`. It reaches the browser from any
 process, holds no in-process lease of its own, and throws `BrowserBusy` with
 `.action()` when a layer genuinely refuses.
 
-**`tab.page.goto` is bounded and abortable, and the acquire is abortable.** The
-page instruction carries a `deadlineMs` (30 s default) because nothing else
-bounds it — a navigate that never returns is the failure this façade exists
-for. The acquire deliberately carries **no** façade deadline: the broker owns
-that budget (connect, Chrome start, the first observation, up to
-`BOT_START_TIMEOUT_MS`) and raises `launch_timeout` itself, so a healthy cold
-start is never mistaken here for a busy layer. Both dispatch under a request id
-that Contract B's reserved `abort` control frame can reach, so a caller
-`signal` cancels exactly that one broker request instead of leaving a pending
-promise for `release()` to drain. Nothing here sleeps.
+**The façade invents no deadline of its own — every instruction is the
+caller's to cancel.** The acquire and `tab.page.goto` each take an optional
+`signal` and dispatch under a request id that Contract B's reserved `abort`
+control frame can reach, so cancelling one cancels exactly that broker request
+and leaves the connection, its lease, and its other sessions untouched.
+Nothing here sleeps.
+
+Each layer already owns its own budget and says so in its own code, and a
+façade bound below one of those budgets is worse than none: it fails healthy
+work and then invites a retry the layer is not ready for. The acquire is
+bounded by the broker (connect, Chrome start, the first observation, up to
+`BOT_START_TIMEOUT_MS`) which raises `launch_timeout` itself. A navigate gets
+60 s per attempt over three attempts in `PageDriver.goto`; aborting it cancels
+the broker request but does **not** stop the navigate already in flight, and
+the cancelled call keeps the session lease until it returns — so a caller who
+wants a bound should pass `AbortSignal.timeout(ms)` knowing that, rather than
+receive one it never asked for.
+
+The profile layer reaches the client under `profile_busy` in all three of its
+senses — Chrome's SingletonLock, the profile-operation lease (the one `connect`
+holds for a whole interactive login), and a launch collision. `BrokerRuntime.
+acquire` converts the `ProfileBusyError` those raise into that refusal, because
+the wire would otherwise flatten a plain `Error` to `broker_execution_failed`
+and the fold could not name one of the four layers it exists to name.
 
 Two permanent configuration failures are deliberately **not** busy layers,
 because no retry can clear either and `.action()` would be a lie:

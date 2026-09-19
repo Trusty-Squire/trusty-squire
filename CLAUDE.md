@@ -585,13 +585,13 @@ behavior change, not a test to update.
 [`apps/mcp/src/browser-busy.ts`](apps/mcp/src/browser-busy.ts) fold the busy layers
 into one typed answer. Import from `@trusty-squire/mcp/browser`. `openTab` is a
 broker client (connect / open / command / close) reachable from any process.
-`tab.page.goto` carries a deadline because nothing else bounds it; the acquire
-carries none, because the broker owns the launch budget and raises
-`launch_timeout` itself — both are cancellable through the wire `abort` frame.
-`browserBusy` is a strictly read-only probe of the one profile the broker
-serves. The refusal-code mapping, the two permanent failures that are
-deliberately not busy layers, and the "a running tab family is not busy" rule
-live in
+It invents no deadline of its own — each layer owns its budget and says so in
+its own code, so the acquire and `tab.page.goto` take only an optional `signal`
+and cancel through the wire `abort` frame. `browserBusy` is a strictly
+read-only probe of the one profile the broker serves. The refusal-code mapping,
+why a façade bound below a layer's budget is worse than none, the two permanent
+failures that are deliberately not busy layers, and the "a running tab family
+is not busy" rule live in
 [`docs/browser-broker.md`](docs/browser-broker.md#busy-facade).
 
 ### Browser process vs page lifetime (`browser.ts` is a facade)
