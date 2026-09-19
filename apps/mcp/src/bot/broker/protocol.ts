@@ -48,8 +48,10 @@ export interface OpenRequest {
   serviceUrl: string;
   format?: "compact" | "full";
   proxy?: string;
-  /** This open IS the connect re-auth ceremony — the ONE optional field on
-   * `open`. Two things follow from it, and neither is separately selectable:
+  /** A direct drive takes its first perception through the drive snapshot. */
+  initialObservation?: "drive";
+  /** This open IS the connect re-auth ceremony. Two things follow from it,
+   * and neither is separately selectable:
    *
    * 1. Its start passes the `google_session` admission gate, because the
    *    ceremony is what creates the live Google session — gating it

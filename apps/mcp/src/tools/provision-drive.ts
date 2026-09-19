@@ -210,11 +210,14 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
       },
     },
   },
-  async handler(args, api) {
+  async handler(args, api, context) {
     const consentInboxRead = await readInboxConsent();
     return await startProvisionSession({
       serviceUrl: args.service_url,
       format: args.format ?? "compact",
+      ...(context?.initialObservation === undefined
+        ? {}
+        : { initialObservation: context.initialObservation }),
       consentInboxRead,
       ...(args.proxy !== undefined ? { proxyUrl: args.proxy } : {}),
       // Thread the api-client so the captcha paths — the provision gate and the
