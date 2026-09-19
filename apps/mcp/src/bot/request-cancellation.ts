@@ -100,6 +100,19 @@ export function composeOperatorSignals(signals: readonly AbortSignal[]): {
 } {
   const controller = new AbortController();
   const listeners = new Map<AbortSignal, () => void>();
+  // Propagate a registered request-abort hook (attachOperatorRequestAbort is
+  // bound to an input signal — typically the broker's registered request
+  // controller). abortCurrentOperatorRequest resolves the hook from the
+  // signal running in the request context, which is THIS composed signal,
+  // not the original: without propagation the in-page deadline fires into a
+  // WeakMap miss and the hung evaluate keeps running to its own timeout.
+  for (const signal of signals) {
+    const hook = abortBySignal.get(signal);
+    if (hook !== undefined) {
+      abortBySignal.set(controller.signal, hook);
+      break;
+    }
+  }
   const dispose = (): void => {
     for (const [signal, listener] of listeners) signal.removeEventListener("abort", listener);
     listeners.clear();

@@ -253,7 +253,10 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
   }
   const safe = (element: Element): boolean => {
     if (!(element instanceof HTMLInputElement)) return true;
-    return !["password", "file", "hidden"].includes(element.type);
+    // Password inputs stay capturable fill targets (the drive generates the
+    // password as a fact and must be able to fill it); only their VALUES are
+    // never emitted. file/hidden inputs are not drive targets at all.
+    return !["file", "hidden"].includes(element.type);
   };
   const visible = (element: Element): boolean => {
     if (element.closest('[aria-hidden="true"],[inert]') !== null) return false;
@@ -359,6 +362,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       if (["button", "submit", "reset", "image"].includes(element.type)) return "button";
       if (element.type === "search") return "searchbox";
       if (element.type === "number") return "spinbutton";
+      if (element.type === "password") return "textbox";
       if (["text", "email", "url", "tel"].includes(element.type)) return "textbox";
     }
     return null;
@@ -437,6 +441,13 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     } else operations.push("click");
     let value: string | undefined;
     if (omit.has(ref)) {
+      omittedValues += 1;
+    } else if (
+      element instanceof HTMLInputElement &&
+      element.type === "password"
+    ) {
+      // A password field is reported so the drive can fill it, but its value
+      // is never emitted — not to rows, not to the snapshot fingerprint.
       omittedValues += 1;
     } else if (
       element instanceof HTMLInputElement ||
@@ -639,10 +650,28 @@ export async function frameDynamicsSignature(frame: Frame): Promise<string> {
         inputs.length,
         inputs
           .map((element) => {
-            if (element instanceof HTMLInputElement) return `${element.name}:${element.type}`;
-            if (element instanceof HTMLSelectElement)
-              return `${element.name}:select:${element.options.length}`;
-            return element.tagName;
+            const disabled = element.matches(":disabled") ? "!" : "";
+            if (element instanceof HTMLInputElement) {
+              // Password values are omitted exactly as in the snapshot rows;
+              // everything else participates so a value change (typed text,
+              // autofill) invalidates the frame cache even when the DOM
+              // structure is unchanged.
+              const value = element.type === "password" ? "" : element.value;
+              return `${element.name}:${element.type}${disabled}=${value}`;
+            }
+            if (element instanceof HTMLSelectElement) {
+              const options = Array.from(element.options)
+                .map((option) => `${option.value}~${option.label}`)
+                .join(",");
+              return `${element.name}:select${disabled}=${element.value}[${options}]`;
+            }
+            return `${element.tagName}${disabled}${
+              element instanceof HTMLInputElement ||
+              element instanceof HTMLTextAreaElement ||
+              element instanceof HTMLSelectElement
+                ? `=${element.value}`
+                : ""
+            }`;
           })
           .join(","),
       ].join("|");

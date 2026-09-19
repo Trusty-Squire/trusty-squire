@@ -1628,7 +1628,7 @@ export const operateDriveTool: Tool<z.infer<typeof driveSchema>> = {
     "stuck means no listed element advances the goal; " +
     "low_confidence includes the question, options, probabilities, and confidence; " +
     "invalid_answer is a malformed Jev choice (reason + confidence) after one same-observation retry; no_progress, budget, " +
-    "jev_unavailable, evaluate_timeout (an in-page evaluate was aborted so the broker stays serving), and pending_approval (card approval URL) are resumable. Google sign-in, " +
+    "jev_unavailable, evaluate_timeout (an in-page evaluate was aborted so the broker stays serving), pending_approval (card approval URL), and card_incomplete (the card released but not every requested field landed; resume to retry the fill against the same approval_id) are resumable. Google sign-in, " +
     "verification-email read, captcha, and card release run inside the loop. Always operate_finish when done.",
   inputSchema: driveSchema,
   jsonInputSchema: {

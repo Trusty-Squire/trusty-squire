@@ -35,7 +35,9 @@ import {
   type Observation,
   type ProvisionAction,
 } from "./provision-session.js";
-import { sessionForCall } from "./session/lifecycle.js";
+import { audit, sessionForCall } from "./session/lifecycle.js";
+import { registrableHost } from "./session/hosts.js";
+import { observedThreeDsChallenge, rememberCompactV2SourcePage } from "./observe/observe.js";
 import {
   lastSelectOptions,
   type DriveActProfile,
@@ -54,14 +56,17 @@ import {
   type DriveSnapshot,
 } from "./drive-snapshot.js";
 import { evaluateBound } from "./drive-evaluate.js";
+import type { BrowserController } from "./browser.js";
 import {
   documentEpochOf,
   documentOriginOf,
   driveActOnPage,
+  resolveDriveFrame,
   settleDriveStep,
   waitForNavigationIdle,
   type DriveActResult,
 } from "./drive-act.js";
+import { provisionElementRefs } from "./observe/refs.js";
 
 export interface DriveCallContext {
   notifyUser?: (message: string, data?: Record<string, unknown>) => Promise<void>;
@@ -96,6 +101,7 @@ export const DRIVE_HISTORY_CAP = 20;
 export const DRIVE_MAX_JEV_CALLS = 120;
 export const DRIVE_MAX_CANDIDATES = 250;
 export const DRIVE_WAIT_MS = 1500;
+export const DRIVE_MAX_CARD_FILL_ATTEMPTS = 3;
 export const DRIVE_STALE_LIMIT = 3;
 export const DRIVE_IDENTICAL_RESNAP_MS = 200;
 export const DRIVE_FIXED_DONE = "DONE";
@@ -213,6 +219,7 @@ export type DriveStatus =
   | "jev_unavailable"
   | "evaluate_timeout"
   | "pending_approval"
+  | "card_incomplete"
   | "busy";
 
 export type WireRow = [string, string, string?];
@@ -708,6 +715,30 @@ export function slugifyCriteriaKey(seed: string): string {
   );
 }
 
+/**
+ * Disambiguate a criteria slug that collided with an earlier candidate. The
+ * collision suffix must survive slugifyCriteriaKey's own truncation:
+ * re-slugifying `${seed}_${n}` slices the suffix off whenever the seed is
+ * long, so every attempt returned the same already-used key and the caller's
+ * collision loop spun synchronously (no await), pinning a CPU until the rest
+ * of the process starved — the mechanism behind the DuckDuckGo drive hang,
+ * where many suggestion rows share the same long label. Reserve room for the
+ * suffix before truncating instead.
+ */
+export function uniqueCriteriaSlug(seed: string, used: ReadonlySet<string>): string {
+  const first = slugifyCriteriaKey(seed);
+  if (!used.has(first)) return first;
+  const body = seed
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  for (let n = 2; ; n += 1) {
+    const suffix = `_${n}`;
+    const slug = `k${body.slice(0, Math.max(1, 39 - suffix.length))}${suffix}`;
+    if (!used.has(slug)) return slug;
+  }
+}
+
 function rowListChoice(row: WireRow): { index: number; total: number } | undefined {
   const match = /(?:^|\|)q=(\d+)\/(\d+)/.exec(row[2] ?? "");
   if (match === null) return undefined;
@@ -798,15 +829,10 @@ export function goalValueCriteria(
   const add = (text: string, preferredKey?: string) => {
     const value = text.trim();
     if (value.length === 0) return;
-    let slug =
+    const slug =
       preferredKey !== undefined && preferredKey.length > 0 && !used.has(preferredKey)
         ? preferredKey
-        : slugifyCriteriaKey(value);
-    let n = 2;
-    while (used.has(slug)) {
-      slug = slugifyCriteriaKey(`${value}_${n}`);
-      n += 1;
-    }
+        : uniqueCriteriaSlug(value, used);
     used.add(slug);
     criteria[slug] = value;
   };
@@ -879,12 +905,7 @@ export function driveCandidates(
     if (!isCandidateRow(row, includePayment)) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];
     const seed = `${row[2] ?? readableLabel(row)}_${role}`;
-    let slug = slugifyCriteriaKey(seed);
-    let n = 2;
-    while (used.has(slug)) {
-      slug = slugifyCriteriaKey(`${seed}_${n}`);
-      n += 1;
-    }
+    const slug = uniqueCriteriaSlug(seed, used);
     used.add(slug);
     candidates.push({
       ref: row[0],
@@ -925,12 +946,7 @@ export function fillableCandidates(
     if (matchingFactKeys(facts, row).length === 0) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];
     const seed = `${row[2] ?? readableLabel(row)}_${role}`;
-    let slug = slugifyCriteriaKey(seed);
-    let n = 2;
-    while (used.has(slug)) {
-      slug = slugifyCriteriaKey(`${seed}_${n}`);
-      n += 1;
-    }
+    const slug = uniqueCriteriaSlug(seed, used);
     used.add(slug);
     candidates.push({
       ref: row[0],
@@ -966,12 +982,7 @@ export function typeableCandidates(
     if (!isOtpRow(row) && !isSearchRow(row)) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];
     const seed = `${row[2] ?? readableLabel(row)}_${role}`;
-    let slug = slugifyCriteriaKey(seed);
-    let n = 2;
-    while (used.has(slug)) {
-      slug = slugifyCriteriaKey(`${seed}_${n}`);
-      n += 1;
-    }
+    const slug = uniqueCriteriaSlug(seed, used);
     used.add(slug);
     extra.push({
       ref: row[0],
@@ -1002,12 +1013,7 @@ export function selectCandidates(
     if (isPaymentRow(row) || isCvvRow(row)) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];
     const seed = `${row[2] ?? readableLabel(row)}_${role}`;
-    let slug = slugifyCriteriaKey(seed);
-    let n = 2;
-    while (used.has(slug)) {
-      slug = slugifyCriteriaKey(`${seed}_${n}`);
-      n += 1;
-    }
+    const slug = uniqueCriteriaSlug(seed, used);
     used.add(slug);
     candidates.push({
       ref: row[0],
@@ -1067,12 +1073,7 @@ export function scrollTargets(rows: readonly WireRow[]): DriveCandidate[] {
     if (!isFillableRow(row) && !isClickableRow(row)) continue;
     const role = ROLE_LETTERS[row[1]] ?? row[1];
     const seed = `${row[2] ?? readableLabel(row)}_${role}`;
-    let slug = slugifyCriteriaKey(seed);
-    let n = 2;
-    while (used.has(slug)) {
-      slug = slugifyCriteriaKey(`${seed}_${n}`);
-      n += 1;
-    }
+    const slug = uniqueCriteriaSlug(seed, used);
     used.add(slug);
     targets.push({
       ref: row[0],
@@ -1730,6 +1731,14 @@ export function decideAfterJev(input: {
     const row = candidate.row;
     const ref = candidate.ref;
     if (choice === "TYPE_TEXT") {
+      // An explicitly supplied matching fact wins over the inbox path: a
+      // resumed drive carrying the OTP must type it, not re-read the inbox
+      // (which returns the same needs_value handoff when Gmail lags).
+      const matched = matchingFactKeys(input.facts, row);
+      if (matched.length > 0) {
+        const filled = fillActionForCandidate(candidate, input.facts, matched[0]!, confidence);
+        return filled ?? { kind: "needs_value", field: fieldLabelForRow(row) };
+      }
       if (isOtpRow(row)) {
         return {
           kind: "act",
@@ -1738,11 +1747,6 @@ export function decideAfterJev(input: {
           confidence,
           special: "inbox",
         };
-      }
-      const matched = matchingFactKeys(input.facts, row);
-      if (matched.length > 0) {
-        const filled = fillActionForCandidate(candidate, input.facts, matched[0]!, confidence);
-        return filled ?? { kind: "needs_value", field: fieldLabelForRow(row) };
       }
       if (allowsGoalValueAssignment(row)) {
         const valueCriteria = goalValueCriteria(input.goal, input.facts);
@@ -2007,6 +2011,93 @@ function paymentArgs(
   };
 }
 
+const DRIVE_REF_RE = /^@e:f\d+d\d+$/;
+
+/** Translate drive snapshot refs into canonical provision refs.
+ *
+ * Drive refs (`@e:f<frame>d<id>`) name nodes in each frame's in-page
+ * `__tsDriveRegistry` — an identity space private to the drive loop. Every
+ * canonical primitive (inject_card, operate_act, observe_subtree) resolves
+ * refs through the provision-extraction identity, so a raw drive ref is
+ * not_found/stale_ref there (review finding R3). This crosses the existing
+ * canonical node/ref boundary instead of registering drive rows into the
+ * canonical index: re-extract the page's interactive elements, locate each
+ * drive node inside its own frame by node identity
+ * (`querySelector(selector) === node`), and mint the canonical ref for the
+ * matching element via provisionElementRefs. Refs that fail to translate are
+ * omitted, so the primitive sees the original drive ref and reports
+ * not_found honestly instead of a half-translated target.
+ */
+async function canonicalDriveRefs(
+  session: Session,
+  refs: readonly (string | undefined)[],
+): Promise<Map<string, string>> {
+  const driveRefs = [
+    ...new Set(
+      refs.filter((ref): ref is string => ref !== undefined && DRIVE_REF_RE.test(ref)),
+    ),
+  ];
+  const translated = new Map<string, string>();
+  if (driveRefs.length === 0) return translated;
+  const page = session.browser.page;
+  if (page === null) return translated;
+  // Test doubles for the browser controller may not implement extraction.
+  if (typeof session.browser.extractInteractiveElements !== "function") return translated;
+  let fresh: Awaited<ReturnType<BrowserController["extractInteractiveElements"]>>;
+  try {
+    fresh = await session.browser.extractInteractiveElements(page);
+  } catch {
+    return translated;
+  }
+  if (!Array.isArray(fresh) || fresh.length === 0) return translated;
+  const canonical = provisionElementRefs(fresh);
+  const selectors = fresh.map((element) => element.selector);
+  for (const ref of driveRefs) {
+    try {
+      // resolveDriveFrame falls back to the main frame for detached ordinals;
+      // the registry lookup then misses and the ref stays untranslated.
+      const frame = resolveDriveFrame(page, ref);
+      const handle = await frame.evaluateHandle((refId) => {
+        const registry = (
+          window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element> } }
+        ).__tsDriveRegistry;
+        return registry?.nodes.get(refId) ?? null;
+      }, ref);
+      const element = handle.asElement();
+      if (element === null) {
+        await handle.dispose().catch(() => undefined);
+        continue;
+      }
+      // Every fresh element's selector is probed in the drive node's own
+      // document: selectors from other frames cannot match this node, and
+      // equality (`=== node`) pins the match regardless of selector reuse.
+      const index = await frame
+        .evaluate(
+          (input: { node: Element; candidates: string[] }): number => {
+            const { node, candidates } = input;
+            for (let i = 0; i < candidates.length; i += 1) {
+              try {
+                if (document.querySelector(candidates[i] as string) === node) return i;
+              } catch {
+                // Selector invalid in this document — not the match.
+              }
+            }
+            return -1;
+          },
+          { node: element, candidates: selectors },
+        )
+        .catch(() => -1);
+      await handle.dispose().catch(() => undefined);
+      const match = index >= 0 ? fresh[index] : undefined;
+      const canonicalRef = match === undefined ? undefined : canonical.get(match);
+      if (canonicalRef !== undefined) translated.set(ref, canonicalRef);
+    } catch {
+      // Leave untranslated — the primitive reports honestly.
+    }
+  }
+  return translated;
+}
+
 function cardInjected(result: Record<string, unknown>): boolean {
   return result.status === "card_injected" || result.status === "card_released";
 }
@@ -2040,6 +2131,69 @@ function ensureFrameCacheInvalidation(session: Session): void {
   page.on("framenavigated", invalidate);
 }
 
+/**
+ * Apply the session's EXISTING card-value output mask at the drive snapshot
+ * boundary. The driver may release a card through one drive call and a later
+ * drive (fresh mask bookkeeping, or the values typed via masked tokens) still
+ * reads the page — so snapshot rows, page text, and headings must pass through
+ * the session mask before they reach progress fingerprints, drive traces,
+ * Jev state, and model requests. This is the same mask class the observation
+ * and screenshot paths use, not a second masking layer, and it never gates an
+ * action. Guarded so test doubles without the mask methods pass through.
+ */
+function maskSnapshotOutputs(
+  session: Session,
+  observation: Observation,
+  rows: WireRow[],
+): { observation: Observation; rows: WireRow[] } {
+  const browser = session.browser as BrowserController | null;
+  if (
+    browser === null ||
+    typeof browser.maskDriveRows !== "function" ||
+    typeof browser.maskOperatorOutput !== "function"
+  ) {
+    return { observation, rows };
+  }
+  const maskedRows = browser.maskDriveRows(rows) as unknown as WireRow[];
+  const rest: Observation = { ...observation, safe_table: maskedRows as never };
+  if (typeof rest.dom === "string") rest.dom = browser.maskOperatorOutput(rest.dom);
+  if (rest.semantic !== undefined) {
+    rest.semantic = {
+      ...(rest.semantic.title === undefined
+        ? {}
+        : { title: browser.maskOperatorOutput(rest.semantic.title) }),
+      ...(rest.semantic.headings === undefined
+        ? {}
+        : {
+            headings: rest.semantic.headings.map((heading) =>
+              browser.maskOperatorOutput(heading),
+            ),
+          }),
+    };
+  }
+  return { observation: rest, rows: maskedRows };
+}
+
+/**
+ * Attach notification-only 3-D Secure status at the drive snapshot boundary
+ * (one-shot nudge to the cardholder via the existing observe path; the drive
+ * never blocks or takes custody of the challenge), then apply the session's
+ * card-value mask before anything leaves the boundary.
+ */
+async function finalizeSnapshotOutputs(
+  session: Session,
+  sessionId: string,
+  observation: Observation,
+  rows: WireRow[],
+): Promise<{ observation: Observation; rows: WireRow[] }> {
+  let next = observation;
+  if (session.releasedPaymentCard != null) {
+    const threeDs = await observedThreeDsChallenge(sessionId).catch(() => undefined);
+    if (threeDs !== undefined) next = { ...next, three_ds: threeDs };
+  }
+  return maskSnapshotOutputs(session, next, rows);
+}
+
 async function snapshotDriveSession(
   session: Session,
   sessionId: string,
@@ -2071,22 +2225,34 @@ async function snapshotDriveSession(
   });
   if (deps.snapshot !== undefined) {
     const observation = await deps.snapshot(sessionId, maskedRefsOf(drive));
-    return timed(observation, mergeCompactTable([], observation));
+    const compactRows = mergeCompactTable([], observation);
+    const finalized = await finalizeSnapshotOutputs(session, sessionId, observation, compactRows);
+    return timed(finalized.observation, finalized.rows);
   }
   const page = session.browser.page;
   if (page === null) {
     const observation = await deps.observe(sessionId, "compact");
-    return timed(observation, mergeCompactTable([], observation));
+    const compactRows = mergeCompactTable([], observation);
+    const finalized = await finalizeSnapshotOutputs(session, sessionId, observation, compactRows);
+    return timed(finalized.observation, finalized.rows);
   }
   ensureFrameCacheInvalidation(session);
   const omit = maskedRefsOf(drive);
   const main = await captureFrameSnapshot(page, omit, 0);
   if (main === null) {
     const observation = await deps.observe(sessionId, "compact");
-    return timed(observation, mergeCompactTable([], observation));
+    const compactRows = mergeCompactTable([], observation);
+    const finalized = await finalizeSnapshotOutputs(session, sessionId, observation, compactRows);
+    return timed(finalized.observation, finalized.rows);
   }
   if (main.timedOut === true) {
-    return timed(snapshotToObservation(main, sessionId, []), [], 0, main.wallMs, true);
+    const finalized = await finalizeSnapshotOutputs(
+      session,
+      sessionId,
+      snapshotToObservation(main, sessionId, []),
+      [],
+    );
+    return timed(finalized.observation, finalized.rows, 0, main.wallMs, true);
   }
   const parts: DriveSnapshot[] = [main];
   if (needFrames) {
@@ -2109,17 +2275,45 @@ async function snapshotDriveSession(
     driveFrameCache.set(session, cache);
   }
   const snapshot = mergeSnapshots(parts);
-  const rows = driveRowsFromSnapshot(snapshot);
+  const rawRows = driveRowsFromSnapshot(snapshot);
   lastSelectOptions.set(session, snapshotSelectOptions(snapshot));
-  const observation = snapshotToObservation(snapshot, sessionId, rows);
+  const previousEpoch = drive.lastDocumentEpoch;
+  if (
+    typeof previousEpoch === "string" &&
+    previousEpoch.length > 0 &&
+    documentOriginOf(previousEpoch) !== documentOriginOf(snapshot.documentEpoch)
+  ) {
+    // Drive refs are minted into a per-JS-context in-page registry, so they
+    // die with the document; they restart at d1 after a real navigation.
+    // Retained state keyed by those refs must die with them, or the new
+    // document's fields start out marked as already filled.
+    drive.filledRefs = [];
+    drive.consumedActionKey = null;
+  }
   drive.lastDocumentEpoch = snapshot.documentEpoch;
+  const finalized = await finalizeSnapshotOutputs(
+    session,
+    sessionId,
+    snapshotToObservation(snapshot, sessionId, rawRows),
+    rawRows,
+  );
   session.lastCompactObservation = {
-    url: observation.url,
+    url: finalized.observation.url,
     session_id: sessionId,
-    ...(observation.safe_table === undefined ? {} : { safe_table: observation.safe_table }),
-    ...(observation.semantic === undefined ? {} : { semantic: observation.semantic }),
+    ...(finalized.observation.safe_table === undefined
+      ? {}
+      : { safe_table: finalized.observation.safe_table }),
+    ...(finalized.observation.semantic === undefined
+      ? {}
+      : { semantic: finalized.observation.semantic }),
   };
-  return timed(observation, rows, snapshot.scriptMs, snapshot.wallMs, snapshot.timedOut === true);
+  return timed(
+    finalized.observation,
+    finalized.rows,
+    snapshot.scriptMs,
+    snapshot.wallMs,
+    snapshot.timedOut === true,
+  );
 }
 
 function resolveResumeAnswer(
@@ -2139,6 +2333,8 @@ function resolveResumeAnswer(
   return hit?.[0] ?? answer;
 }
 
+const DRIVE_OPENED_TAB_ADOPTION_GRACE_MS = 300;
+
 async function actDriveSafely(
   session: Session,
   sessionId: string,
@@ -2148,7 +2344,28 @@ async function actDriveSafely(
   if (deps.driveAct !== undefined) return await deps.driveAct(sessionId, action);
   const page = session.browser.page;
   if (page === null) return { kind: "unsupported" };
-  return await driveActOnPage(page, action);
+  // A CDP drive click can open a target=_blank tab. The direct click path
+  // below never armed the existing adoption lifecycle, so the next snapshot
+  // read the opener and the drive stalled in no_progress. Arm before the
+  // click and adopt after, exactly like the ordinary act path's
+  // adoptTabOpenedByClick — anything already queued belonged to an earlier
+  // action and is not this click's to follow.
+  const click = action.kind === "click";
+  if (click) session.browser.armOpenedTabAdoption();
+  const acted = await driveActOnPage(page, action);
+  if (click && acted.kind !== "unsupported") {
+    const url = await session.browser
+      .adoptOpenedTab(DRIVE_OPENED_TAB_ADOPTION_GRACE_MS)
+      .catch(() => null);
+    if (url !== null) {
+      const adopted = session.browser.activePage();
+      if (adopted !== null && session.compactV2Active) {
+        rememberCompactV2SourcePage(session, adopted);
+      }
+      audit(session.id, "new_tab_adopted", { host: registrableHost(url) });
+    }
+  }
+  return acted;
 }
 
 async function actSafely(
@@ -2561,6 +2778,23 @@ async function driveLoop(input: {
       if (card === undefined) {
         return finish("needs_value", { field: "card_ref" });
       }
+      // R3: drive refs are registry-scoped, not canonical — translate through
+      // the canonical extraction before the inject_card primitive so the fill
+      // can actually resolve. Untranslatable refs keep their drive form and
+      // are reported not_found by the resolver rather than silently skipped.
+      const preTranslate = card.fields;
+      const translations = await canonicalDriveRefs(session, [
+        preTranslate.pan?.ref,
+        preTranslate.cvv?.ref,
+      ]);
+      if (translations.size > 0) {
+        const pan = preTranslate.pan;
+        const cvv = preTranslate.cvv;
+        card.fields = {
+          ...(pan === undefined ? {} : { pan: { ...pan, ref: translations.get(pan.ref) ?? pan.ref } }),
+          ...(cvv === undefined ? {} : { cvv: { ...cvv, ref: translations.get(cvv.ref) ?? cvv.ref } }),
+        };
+      }
       const payment = await dependencies.injectCard(session, card, api, {
         ...(context?.signal === undefined ? {} : { signal: context.signal }),
         ...(context?.notifyUser === undefined ? {} : { notifyUser: context.notifyUser }),
@@ -2585,6 +2819,18 @@ async function driveLoop(input: {
         });
       }
       markMaskedRefs(drive, [card.fields.pan?.ref, card.fields.cvv?.ref]);
+      // An incomplete fill is NOT success: the card may be released while a
+      // requested field reports not_found/detached (ordinary browser
+      // outcomes, see inject_card's per-field results). Record the attempt
+      // honestly; if the budget allows, the next loop iteration retries the
+      // fill against the same released approval_id instead of recording
+      // progress over a half-filled card.
+      drive.cardFillAttempts = (drive.cardFillAttempts ?? 0) + 1;
+      const fillComplete = payment.complete !== false;
+      drive.cardFillPending = !fillComplete;
+      if (!fillComplete) {
+        return finish("card_incomplete", { payment });
+      }
       const cardSnap = await refreshSnapshot(true);
       if (cardSnap.timedOut)
         return finish("evaluate_timeout", { reason: "in-page evaluate exceeded budget" });
@@ -2743,6 +2989,12 @@ async function driveLoop(input: {
   if (args.answer !== undefined) {
     const compactRows = drive.resumeCompactRows ?? mergeCompactTable([], priorCompact ?? {});
     const answer = resolveResumeAnswer(args.answer, rows, compactRows);
+    // Resume binds to the fresh snapshot: the pending operation (e.g. an
+    // approval that completed on the phone) must pass the consume-once gate
+    // on its first post-resume attempt instead of bouncing off a
+    // boundFingerprint left over from the previous drive call.
+    drive.boundFingerprint = progressFingerprint(observation.url, rows, drive, session);
+    drive.consumedActionKey = null;
     const resumed = await applyDecision(
       resumeAction(answer, rows, drive.facts, drive.goal, drive.facts.card_ref),
     );
@@ -2796,7 +3048,20 @@ async function driveLoop(input: {
     }
 
     const fields = paymentFields(rows);
-    const alreadyCard = drive.trajectory.some((step) => step.action === "inject_card");
+    // A pending approval records an inject_card trajectory step, so trajectory
+    // membership says "attempted", not "released". The released card is the
+    // existing payment state: pending (releasedPaymentCard null) must be able
+    // to resume the automatic release after phone approval, while a released
+    // card must not start a second one.
+    const alreadyCard = session.releasedPaymentCard !== null;
+    // A released card with an INCOMPLETE fill may retry within budget: the
+    // released approval_id is reused (no second approval), and attempts are
+    // bounded so a field that never lands ends the drive with
+    // card_incomplete instead of spinning.
+    const cardRetry =
+      alreadyCard &&
+      drive.cardFillPending === true &&
+      (drive.cardFillAttempts ?? 0) < DRIVE_MAX_CARD_FILL_ATTEMPTS;
     const onCheckout = isCheckoutUrl(observation.url);
     const remainingFills = fillableCandidates(
       rows,
@@ -2807,11 +3072,18 @@ async function driveLoop(input: {
     );
     if (
       includePayment &&
-      !alreadyCard &&
+      (!alreadyCard || cardRetry) &&
       onCheckout &&
       remainingFills.length === 0 &&
       (fields.pan !== undefined || fields.cvv !== undefined)
     ) {
+      // Bind the automatic decision to the current snapshot before applying
+      // it. The last ordinary fill changed the page, so boundFingerprint still
+      // describes the preceding action; without rebinding, applyDecision's
+      // consume-once gate returns "continue" forever and this branch spins
+      // without acting until the time budget expires.
+      drive.boundFingerprint = progressFingerprint(observation.url, rows, drive, session);
+      drive.consumedActionKey = null;
       const applied = await applyDecision({
         kind: "act",
         action: { kind: "click", target: fields.pan ?? fields.cvv ?? "card" },

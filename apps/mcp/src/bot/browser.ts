@@ -461,6 +461,11 @@ export class BrowserController implements BrowserDriver {
     return this.cardValueOutputMask.maskValue(value);
   }
 
+  /** Mask released card values in drive-snapshot wire rows ([ref, role, facts?]). */
+  maskDriveRows<T extends readonly [string, string, string?]>(rows: readonly T[]): T[] {
+    return this.cardValueOutputMask.maskDriveRows(rows);
+  }
+
   logOperatorDiagnostic(message: string): void {
     console.error(this.cardValueOutputMask.maskText(message));
   }
@@ -4135,16 +4140,42 @@ export class BrowserController implements BrowserDriver {
     page: Page | null = this.page,
   ): Promise<{ title: string; headings: string[] }> {
     if (page === null) throw new Error("Browser not started");
-    return await page.evaluate(() => {
-      // A heading that just received text (the directory-search result h2
-      // starts `[hidden]` and is revealed in the same click) can still have a
-      // 0×0 box or UA `display:none` when this evaluate runs. Count any h1/h2
-      // that already has copy; an empty still-hidden heading contributes nothing.
-      const headings = Array.from(document.querySelectorAll("h1,h2"))
-        .map((element) => (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 160))
-        .filter(Boolean)
-        .slice(0, 4);
-      return { title: document.title.slice(0, 160), headings };
+    return await page.evaluate(async () => {
+      // Visible headings only, like every other observation path: a heading
+      // inside [aria-hidden]/[inert], display:none, or visibility:hidden is
+      // page plumbing, not page state. The just-revealed case (the
+      // directory-search result h2 starts [hidden] and is revealed in the
+      // same click) is handled at THIS timing boundary: when headings with
+      // copy exist but none is visible yet, poll a few frames (bounded
+      // ~800ms; rAF may never fire in a backgrounded tab, hence the timeout
+      // race) for the reveal to land before reporting nothing.
+      const visibleHeading = (element: Element): boolean => {
+        if (element.closest('[aria-hidden="true"],[inert]') !== null) return false;
+        if (typeof element.checkVisibility === "function") {
+          return element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+        }
+        const style = getComputedStyle(element);
+        return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
+      };
+      const headingText = (element: Element): string =>
+        (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 160);
+      const visible = (): string[] =>
+        Array.from(document.querySelectorAll("h1,h2"))
+          .filter(visibleHeading)
+          .map(headingText)
+          .filter(Boolean);
+      const withCopy = (): number =>
+        Array.from(document.querySelectorAll("h1,h2")).filter(
+          (element) => headingText(element).length > 0,
+        ).length;
+      const start = performance.now();
+      while (visible().length === 0 && withCopy() > 0 && performance.now() - start < 800) {
+        await Promise.race([
+          new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+          new Promise<void>((resolve) => setTimeout(resolve, 50)),
+        ]);
+      }
+      return { title: document.title.slice(0, 160), headings: visible().slice(0, 4) };
     });
   }
 

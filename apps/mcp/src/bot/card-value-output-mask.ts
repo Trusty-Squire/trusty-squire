@@ -212,6 +212,34 @@ export class CardValueOutputMask {
     return maskStringForKey(value, key, this.records);
   }
 
+  /**
+   * Mask released card values inside drive-snapshot wire rows before they
+   * reach traces, Jev state, or model requests. Rows are [ref, role, facts?]
+   * with pipe-joined facts that may carry a value segment (`n=...`). The PAN
+   * is pattern-masked anywhere; a value segment whose complete digits equal a
+   * released CVV is masked under the same value-equality rule the DOM/AX and
+   * screenshot paths apply, restricted to text-entry rows (role letter "t")
+   * so select/option rows keep merchant values such as years visible.
+   */
+  maskDriveRows<T extends readonly [string, string, string?]>(rows: readonly T[]): T[] {
+    if (!this.active) return [...rows];
+    return rows.map((row) => {
+      const facts = row[2];
+      if (facts === undefined) return [...row] as T;
+      let masked = this.maskText(facts);
+      if (row[1] === "t") {
+        masked = masked.replace(/(^|\|)n=([^|]*)/g, (whole, separator, value) => {
+          const digits = String(value).replace(/\D/g, "");
+          if (digits.length === 0) return whole;
+          return this.records.some((record) => digits === record.cvv)
+            ? `${separator}n=${SECURITY_CODE_MASK}`
+            : whole;
+        });
+      }
+      return [...row.slice(0, 2), masked] as unknown as T;
+    });
+  }
+
   /** Raw values for the internal, pre-output screenshot rectangle finder only. */
   screenshotNeedles(): { pans: string[]; cvvs: string[]; cvvNameSource: string } {
     return {

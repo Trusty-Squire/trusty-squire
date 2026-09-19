@@ -26,6 +26,8 @@ interface GuardOk {
   ok: true;
   x: number;
   y: number;
+  /** The frameElement walk reached window.top (no cross-origin boundary). */
+  reachedTop: boolean;
   combobox: boolean;
   searchSubmit: boolean;
   scriptMs: number;
@@ -72,14 +74,24 @@ function inPageGuard(input: {
   }
   let x = rect.x + rect.width / 2;
   let y = rect.y + rect.height / 2;
-  let view: Window | null = element.ownerDocument.defaultView;
-  let frameEl = view?.frameElement ?? null;
-  while (frameEl instanceof Element) {
-    const frameRect = frameEl.getBoundingClientRect();
-    x += frameRect.x;
-    y += frameRect.y;
-    view = frameEl.ownerDocument.defaultView;
-    frameEl = view?.frameElement ?? null;
+  // Ascend same-origin ancestor frames, accumulating their offsets. A
+  // cross-origin (OOPIF) boundary stops the walk — the child window reports
+  // no frameElement across it — so report reachedTop=false and let the host
+  // add the remaining offset from the frame's own <iframe> element.
+  let reachedTop = false;
+  try {
+    let view: Window | null = element.ownerDocument.defaultView;
+    let frameEl = view?.frameElement ?? null;
+    while (frameEl instanceof Element) {
+      const frameRect = frameEl.getBoundingClientRect();
+      x += frameRect.x;
+      y += frameRect.y;
+      view = frameEl.ownerDocument.defaultView;
+      frameEl = view?.frameElement ?? null;
+    }
+    reachedTop = view === window.top;
+  } catch {
+    reachedTop = false;
   }
   const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
   if (hit === null || (hit !== element && !element.contains(hit) && !hit.contains(element))) {
@@ -102,36 +114,71 @@ function inPageGuard(input: {
       return timed({ ok: false, reason: "not_select" });
     }
     const wanted = input.text ?? "";
-    const match = Array.from(element.options).find(
-      (option) =>
-        option.value === wanted ||
-        option.label === wanted ||
-        (option.textContent ?? "").trim() === wanted ||
-        (option.textContent ?? "").trim().toLowerCase().includes(wanted.toLowerCase()),
-    );
+    const wantedLower = wanted.toLowerCase();
+    const options = Array.from(element.options);
+    // Match exactly first — by value, label, or trimmed visible text, then
+    // case-insensitively — before falling back to a partial substring. A
+    // substring "V" must not select "Visa" when the page offers an exact
+    // option named "V"; two-pass ordering keeps exact matches authoritative.
+    const match =
+      options.find(
+        (option) =>
+          option.value === wanted ||
+          option.label === wanted ||
+          (option.textContent ?? "").trim() === wanted,
+      ) ??
+      options.find(
+        (option) =>
+          option.value.toLowerCase() === wantedLower ||
+          option.label.toLowerCase() === wantedLower ||
+          (option.textContent ?? "").trim().toLowerCase() === wantedLower,
+      ) ??
+      options.find((option) =>
+        (option.textContent ?? "").trim().toLowerCase().includes(wantedLower),
+      );
     if (match === undefined) return timed({ ok: false, reason: "option_missing" });
     element.value = match.value;
     element.dispatchEvent(new Event("input", { bubbles: true }));
     element.dispatchEvent(new Event("change", { bubbles: true }));
-    return timed({ ok: true, x, y, combobox: false, searchSubmit: false });
+    return timed({ ok: true, x, y, reachedTop, combobox: false, searchSubmit: false });
   }
-  if (
-    input.kind === "type" &&
-    (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)
-  ) {
+  // The type path does NOT focus or select here: the host clicks first, then
+  // runs selectAllInPage inside this frame. A guard-side focus races that
+  // click (and is dropped entirely when a cross-origin boundary separates
+  // them), leaving insertText to land in whatever element happens to hold
+  // focus.
+  return timed({ ok: true, x, y, reachedTop, combobox, searchSubmit });
+}
+
+/**
+ * Focus the target and select its contents, after the host's click has
+ * focused it. Runs inside the element's own frame so cross-origin fields are
+ * reached directly; the registry lookup is repeated because the frame may
+ * have re-rendered between the guard and this evaluate.
+ */
+function selectAllInPage(input: { ref: string }): boolean {
+  type DriveCache = { nodes: Map<string, Element> };
+  const root = window as Window & { __tsDriveRegistry?: DriveCache };
+  const element = root.__tsDriveRegistry?.nodes.get(input.ref);
+  if (element === undefined || !element.isConnected) return false;
+  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
     element.focus();
     element.select();
-  } else if (input.kind === "type" && element instanceof HTMLElement) {
+    return true;
+  }
+  if (element instanceof HTMLElement) {
     element.focus();
-    const selection = element.ownerDocument.getSelection();
+    const doc = element.ownerDocument;
+    const selection = doc.getSelection();
     if (selection !== null) {
-      const range = element.ownerDocument.createRange();
+      const range = doc.createRange();
       range.selectNodeContents(element);
       selection.removeAllRanges();
       selection.addRange(range);
     }
+    return true;
   }
-  return timed({ ok: true, x, y, combobox, searchSubmit });
+  return false;
 }
 
 export async function driveActOnPage(page: Page, action: ProvisionAction): Promise<DriveActResult> {
@@ -194,6 +241,26 @@ export async function driveActOnPage(page: Page, action: ProvisionAction): Promi
   if (!guard.ok) return { kind: "stale", reason: guard.reason, ...timings };
   if (action.kind === "select")
     return { kind: "ok", combobox: false, searchSubmit: false, ...timings };
+  // CDP mouse coordinates are main-viewport CSS px; the compositor routes
+  // hits into OOPIFs. When the in-page walk could not reach window.top (a
+  // cross-origin boundary), the guard's x/y are still relative to that
+  // frame's viewport — add the frame's own <iframe> position. Playwright's
+  // boundingBox already accumulates every ancestor frame offset, so a single
+  // hop is the complete correction and further chaining would double-count.
+  let offsetX = 0;
+  let offsetY = 0;
+  if (!guard.reachedTop && frame !== page.mainFrame()) {
+    const element = await frame.frameElement().catch(() => null);
+    if (element !== null) {
+      const box = await element.boundingBox().catch(() => null);
+      if (box !== null) {
+        offsetX = box.x;
+        offsetY = box.y;
+      }
+    }
+  }
+  const x = guard.x + offsetX;
+  const y = guard.y + offsetY;
   const context = page.context();
   const cdpStarted = Date.now();
   const cdp = await context.newCDPSession(page);
@@ -201,15 +268,15 @@ export async function driveActOnPage(page: Page, action: ProvisionAction): Promi
     if (action.kind === "click") {
       await cdp.send("Input.dispatchMouseEvent", {
         type: "mousePressed",
-        x: guard.x,
-        y: guard.y,
+        x,
+        y,
         button: "left",
         clickCount: 1,
       });
       await cdp.send("Input.dispatchMouseEvent", {
         type: "mouseReleased",
-        x: guard.x,
-        y: guard.y,
+        x,
+        y,
         button: "left",
         clickCount: 1,
       });
@@ -223,18 +290,25 @@ export async function driveActOnPage(page: Page, action: ProvisionAction): Promi
     }
     await cdp.send("Input.dispatchMouseEvent", {
       type: "mousePressed",
-      x: guard.x,
-      y: guard.y,
+      x,
+      y,
       button: "left",
       clickCount: 1,
     });
     await cdp.send("Input.dispatchMouseEvent", {
       type: "mouseReleased",
-      x: guard.x,
-      y: guard.y,
+      x,
+      y,
       button: "left",
       clickCount: 1,
     });
+    // Focus and select-all INSIDE the element's own frame, after the click
+    // focused it, then insert. The guard no longer pre-focuses (see
+    // selectAllInPage); if this re-resolve fails — frame remounting between
+    // guard and now — insertText still lands in the focused field.
+    await evaluateBound(frame, selectAllInPage, { ref: action.target }).catch(
+      () => undefined,
+    );
     await cdp.send("Input.insertText", { text: action.text });
     if (guard.searchSubmit) {
       await cdp.send("Input.dispatchKeyEvent", {

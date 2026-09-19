@@ -198,6 +198,10 @@ export interface SessionDriveState {
   maskedValueRefs?: string[];
   lastDocumentEpoch?: string | null;
   resumeCompactRows?: Array<[string, string, string?]>;
+  /** Bounded inject_card fill retries: attempts made, and whether the last
+   * attempt released the card without every requested field landing. */
+  cardFillAttempts?: number;
+  cardFillPending?: boolean;
 }
 
 // The last extracted elements are resealed on every retain so each retained
