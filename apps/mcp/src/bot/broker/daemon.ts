@@ -115,6 +115,12 @@ export async function runBrokerDaemon(): Promise<void> {
   let closing = false;
   let listenerClosed = false;
   let maintenanceOwner: string | undefined;
+  // Whether that owner's connect actually opened the window (drained the
+  // shared browser). A connect answered `draining` never closed anything, so
+  // it must not arm the post-maintenance credential refresh/terminate path:
+  // doing so kills a broker that still owes live sessions their browser, and
+  // it made any client-side drain retry poison the daemon.
+  let maintenanceDrained = false;
   let exitAfterMaintenance = false;
   let idleTimer: NodeJS.Timeout | undefined;
   const idleTimeout = brokerIdleTimeoutMs();
@@ -132,6 +138,10 @@ export async function runBrokerDaemon(): Promise<void> {
   };
   const releaseMaintenanceLease = async (clientId: string): Promise<void> => {
     if (maintenanceOwner !== clientId) return;
+    const drained = maintenanceDrained;
+    maintenanceOwner = undefined;
+    maintenanceDrained = false;
+    if (!drained) return;
     const outcome = await completeMaintenanceCredentialRefresh({
       profileIsFree: await waitForProfileFree(CHROME_PROFILE_DIR, { deadlineMs: 0 }),
       restore: restoreMaintenance,
@@ -156,9 +166,11 @@ export async function runBrokerDaemon(): Promise<void> {
         throw new BrokerRefusal("maintenance", "Identity maintenance is already owned");
       if (params.maintain !== true) return;
       maintenanceOwner = principal.clientId;
+      maintenanceDrained = false;
       // Never start closing the shared browser while a session still owns it:
       // the plain-login owner retries once the sessions have ended.
       if (!drained() || !(await runtime.close())) return { maintenance: "draining" };
+      maintenanceDrained = true;
       return { maintenance: "ready" };
     },
     call: async (principal, method, params, id) => {

@@ -328,8 +328,12 @@ export class BrokerRuntime implements BrokerBrowserCustody {
   }
 
   async close(): Promise<boolean> {
-    this.closing = true;
+    // A close that cannot drain must not enter the closing state: `closing` is
+    // what every later `acquire` reads as "identity cell is draining", so
+    // leaving it set would wedge the broker for good — it would refuse every
+    // session while still holding the live ones that blocked the drain.
     if (this.pending > 0 || this.sessions.size > 0) return false;
+    this.closing = true;
     if (
       this.owner !== undefined &&
       (await this.owner.close().catch(() => "unknown")) !== "closed"

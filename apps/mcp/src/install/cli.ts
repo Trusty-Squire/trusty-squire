@@ -63,6 +63,7 @@ import {
   CHROME_PROFILE_DIR,
   PROFILE_BUSY_MESSAGE,
   ProfileBusyError,
+  profileBusyDetail,
   profilePathIdentity,
   withProfileOperationGuard,
 } from "../bot/profile.js";
@@ -491,11 +492,16 @@ async function connect(args: Argv): Promise<void> {
                 wantInteractive,
               ),
             ),
+          // The broker endpoint is derived from the profile path: maintenance
+          // must address the profile we are about to guard, not the launch-time
+          // default (they differ whenever the target records its own profile).
+          { profileDir: canonicalProfileDir },
         ),
     );
   } catch (err) {
     if (err instanceof ProfileBusyError) {
-      ui.fail(PROFILE_BUSY_MESSAGE);
+      const detail = profileBusyDetail(canonicalProfileDir);
+      ui.fail(detail === null ? PROFILE_BUSY_MESSAGE : `${PROFILE_BUSY_MESSAGE}\n  ${detail}`);
       process.exit(1);
     }
     throw err;

@@ -873,6 +873,42 @@ stay internal policy behind the contract. Do not re-add
 `hello`/`tool`/`cancel`/`client_close`/`maintenance`/`resume` as wire
 operations.
 
+### 22. Runtime profile resolution reads the environment live, and `connect` attaches to the broker rather than competing with it
+
+`connect` resolves its target agent's *recorded* profile and re-points
+`TRUSTY_SQUIRE_PROFILE_DIR` at it (`withConnectTargetEnvironment`) before any
+broker or browser work, then guards that profile. `CHROME_PROFILE_DIR`
+(`apps/mcp/src/bot/profile.ts`) freezes the **launch-time** environment, so it is
+the wrong answer for any runtime resolution once a caller re-points the env — a
+broker endpoint, an election root, or a profile lock derived from it addresses a
+different profile than the one being guarded. Use `currentProfileDir()` for
+those; `CHROME_PROFILE_DIR` stays the documented default only.
+
+This exact mismatch shipped a repeat failure: `connect` on a machine whose
+target records its own profile resolved the default profile's broker socket,
+found nothing, skipped broker maintenance, and then collided with the live
+broker holding the real profile — the install died on
+`another Trusty Squire session is already using the browser — close it first`,
+so no pairing code was ever minted and the sign-in page rendered `not_found`.
+One shared browser per profile is the design: `connect` attaches to the broker
+(`withBrokerMaintenance`), drains it, does the plain login, and releases on the
+lease boundary. It never starts a second instance and never takes the profile
+exclusively while a broker owns it. A `draining` answer is retried, not fatal.
+
+Corollaries: a close that cannot drain must not leave
+`BrokerRuntime.closing` set (that refuses every later session while the blocking
+sessions keep the broker alive), and a maintenance connect answered `draining`
+must not arm the daemon's post-maintenance credential refresh/terminate path.
+`apps/mcp/src/bot/__tests__/broker-connect-attach.test.ts` is the regression
+oracle for the attach; `broker-maintenance.test.ts`, `broker-daemon.test.ts`,
+and `broker-prior-contract-reclaim.test.ts` pin the rest.
+
+Stale-artifact sweep: the startup `sweepOrphanedOwnerProcesses`
+(`apps/mcp/src/bot/owner-process-reaper.ts`) also collects
+`~/.trusty-squire/owner-reapers/*.ready` worker-handshake files whose owning pid
+is gone. Never collect one whose owner is still running — a live owner may be
+mid-handshake, and a reborn pid cannot be told apart from it.
+
 ## Maintaining this file
 
 This file is a living contract, not a historical record. Keep it for durable,

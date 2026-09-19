@@ -52,9 +52,25 @@ The client wire is the frozen Contract B — `connect`, `open`, `command`,
 `close` (`apps/mcp/src/bot/broker/protocol.ts`). A connect carries the
 connect-only `maintain` intent. The broker closes the shared Chrome once no
 session admits or owns it and answers `maintenance: "draining"` while live
-sessions remain. The client then runs the existing separate plain Google login
-lifecycle with no CDP, and `close{}` (the lease boundary, formerly
+sessions remain; it never closes a browser another session owns, and it arms
+its post-maintenance credential refresh only once a drain actually happened. The
+client then runs the existing separate plain Google login lifecycle with no CDP,
+and `close{}` (the lease boundary, formerly
 `client_close`) resumes the broker on the same account when the connection ends.
+A `draining` answer is not a failure: the plain-login owner drops that connection
+without claiming the window and retries (500 ms, bounded by
+`MAINTENANCE_DRAIN_WAIT_MS`, 120 s) until the live sessions end, then proceeds.
+Only a deadline that passes with sessions still running is an error, and it
+names the profile and the retry step.
+
+The maintenance endpoint is derived from the profile the caller is about to
+guard, not from the launch-time default. `connect` resolves its target's
+recorded profile and re-points `TRUSTY_SQUIRE_PROFILE_DIR` before any broker or
+browser work, so every runtime resolution of "the profile" — the broker
+endpoint, the election root, the profile lock — reads the environment live
+(`currentProfileDir`). Resolving any of them from the frozen `CHROME_PROFILE_DIR`
+addresses a different profile's broker, skips the drain, and then collides with
+the live broker that owns the real profile.
 Resume requires that plain browser to be closed and preserves account binding.
 There are no `hello`/`tool`/`cancel`/`maintenance`/`resume` operations: a
 session command is `command{sessionId,name,args}` (the only place a tool name

@@ -738,6 +738,32 @@ async function reapManifest(path: string, manifest: OwnerReaperManifest): Promis
   return signalled;
 }
 
+/**
+ * Remove `.ready` handshake files whose owning process is gone.
+ *
+ * A `.ready` file is the worker-launch handshake: the worker writes it, the
+ * owner polls it, and the owner deletes it as soon as the handshake resolves.
+ * An owner that dies inside that window (SIGKILL, a force-exit during startup)
+ * leaves the file behind forever — nothing else names it, and the manifest
+ * sweep only walks `.json` entries — so the directory grew one per hard owner
+ * death. The leading component of the file name is the OWNER pid (the file's
+ * `pid` field is the worker), and a live owner is never touched: a pid that is
+ * still running may be mid-handshake, and a reborn pid is indistinguishable
+ * from it.
+ */
+function sweepOrphanedReadyHandshakes(rootDir: string): number {
+  let removed = 0;
+  for (const entry of readdirSync(rootDir)) {
+    if (!entry.endsWith(".ready")) continue;
+    const ownerPid = Number(entry.split("-", 1)[0]);
+    if (!Number.isSafeInteger(ownerPid) || ownerPid <= 0) continue;
+    if (linuxProcessRunningState(ownerPid) !== "stale") continue;
+    rmSync(join(rootDir, entry), { force: true });
+    removed += 1;
+  }
+  return removed;
+}
+
 export async function sweepOrphanedOwnerProcesses(
   rootDir = defaultRootDir(),
   profileDir?: string,
@@ -760,6 +786,7 @@ export async function sweepOrphanedOwnerProcesses(
       continue;
     reaped += await reapManifest(path, read.manifest);
   }
+  sweepOrphanedReadyHandshakes(rootDir);
   return reaped;
 }
 

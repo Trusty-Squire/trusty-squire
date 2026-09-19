@@ -26,6 +26,23 @@ import { basename, dirname, join, resolve } from "node:path";
 export const CHROME_PROFILE_DIR =
   process.env.TRUSTY_SQUIRE_PROFILE_DIR ?? join(homedir(), ".trusty-squire", "chrome-profile");
 
+/**
+ * The profile directory in force for THIS call.
+ *
+ * `CHROME_PROFILE_DIR` freezes the launch-time environment, but `connect`
+ * deliberately re-points `TRUSTY_SQUIRE_PROFILE_DIR` at the target agent's
+ * recorded profile (`withConnectTargetEnvironment`) before it does any broker
+ * or browser work. Every runtime resolution of "the profile" — a broker
+ * endpoint, an election root, a profile lock — must therefore read the
+ * environment live. Reading the frozen constant instead addresses a
+ * DIFFERENT profile's broker than the one about to be guarded, which skips
+ * maintenance and collides with the live broker that owns the real profile.
+ */
+export function currentProfileDir(): string {
+  const configured = (process.env.TRUSTY_SQUIRE_PROFILE_DIR ?? "").trim();
+  return configured.length > 0 ? configured : CHROME_PROFILE_DIR;
+}
+
 export function profilePathIdentity(profileDir: string): string {
   const absolute = resolve(profileDir);
   const suffix: string[] = [];
@@ -780,6 +797,39 @@ export function currentProfileHolderPid(profileDir: string = CHROME_PROFILE_DIR)
   const holder = readLockHolder(profileDir);
   if (holder === null || holder.host !== hostname()) return null;
   return holder.pid;
+}
+
+/**
+ * Which live process owns this profile right now, named the way a person can
+ * act on. `PROFILE_BUSY_MESSAGE` alone ("close it first") tells the user
+ * nothing about WHICH session to close or how; this is the diagnostic the
+ * interactive entry points append to it.
+ *
+ * The operation lease is preferred over Chrome's SingletonLock: the lease is
+ * the actual gate a later launch collides with, and it names the owner even
+ * when the owner has not started Chrome yet. Returns null when nothing on this
+ * host provably owns the profile.
+ */
+export function profileBusyDetail(
+  profileDir: string = CHROME_PROFILE_DIR,
+  lockRoot: string = tmpdir(),
+): string | null {
+  const profile = profilePathIdentity(profileDir);
+  const lease = profileOperationLockOwner(profile, lockRoot);
+  const leaseOwner =
+    lease !== null && lease.host === hostname() && isPidAlive(lease.pid) ? lease.pid : null;
+  const holder = readLockHolder(profile);
+  const chromeHolder =
+    holder !== null && holder.host === hostname() && !holder.stale ? holder.pid : null;
+  const pid = leaseOwner ?? chromeHolder;
+  if (pid === null) return null;
+  const role = leaseOwner !== null ? "Trusty Squire session" : "Chrome";
+  const started = readProcessStartTime(pid);
+  const startTime = started.state === "present" ? `, started ${started.startTime}` : "";
+  return (
+    `${role} pid ${pid}${startTime} holds ${profile}. ` +
+    `Finish that session, or stop pid ${pid} if it is wedged, then retry.`
+  );
 }
 
 export function reapLeakedProfileHolder(profileDir: string = CHROME_PROFILE_DIR): boolean {

@@ -7,11 +7,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   acquireProfileOperationGuard,
+  currentProfileDir,
   ProfileBusyError,
   profileOperationLockOwner,
   profilePathIdentity,
   processBirthIdentityState,
-  CHROME_PROFILE_DIR,
   type ProfileOperationLease,
 } from "../profile.js";
 import {
@@ -42,7 +42,7 @@ const RECLAIM_TIMINGS: ReclaimTimings = {
 };
 
 /** Canonical profile discovery is independent of cwd and each client's TMPDIR. */
-export function defaultBrokerSocket(profileDir = CHROME_PROFILE_DIR): string {
+export function defaultBrokerSocket(profileDir = currentProfileDir()): string {
   const key = createHash("sha256")
     .update(profilePathIdentity(profileDir))
     .digest("hex")
@@ -57,15 +57,15 @@ export function defaultBrokerSocket(profileDir = CHROME_PROFILE_DIR): string {
 /** Where a profile's broker socket lives: the configured override, else the
  * derived default. Pure — no directory is created and nothing is asserted, so
  * a read-only probe can ask for a path that may not exist. */
-export function brokerSocketPath(): string {
+export function brokerSocketPath(profileDir = currentProfileDir()): string {
   const configured = process.env.TRUSTY_SQUIRE_BROKER_SOCKET?.trim();
   if (configured) return configured;
-  return defaultBrokerSocket();
+  return defaultBrokerSocket(profileDir);
 }
 
-export function resolveBrokerSocket(): string {
-  const path = brokerSocketPath();
-  if (path !== defaultBrokerSocket()) return path;
+export function resolveBrokerSocket(profileDir = currentProfileDir()): string {
+  const path = brokerSocketPath(profileDir);
+  if (path !== defaultBrokerSocket(profileDir)) return path;
   const parent = dirname(path);
   mkdirSync(parent, { recursive: true, mode: 0o700 });
   const stat = lstatSync(parent);
@@ -74,11 +74,11 @@ export function resolveBrokerSocket(): string {
   return path;
 }
 
-export function brokerElectionRoot(profileDir = CHROME_PROFILE_DIR): string {
+export function brokerElectionRoot(profileDir = currentProfileDir()): string {
   return join(dirname(profilePathIdentity(profileDir)), ".trusty-squire-broker-leases");
 }
 
-export function brokerLaunchRoot(profileDir = CHROME_PROFILE_DIR): string {
+export function brokerLaunchRoot(profileDir = currentProfileDir()): string {
   return join(brokerElectionRoot(profileDir), "launch");
 }
 
@@ -275,7 +275,7 @@ export async function reclaimPriorContractBrokerIfPresent(
 ): Promise<boolean> {
   if (!isUnauthorizedRefusal(connectError)) return false;
   if (!(await brokerSpeaksLegacyWire(path, token))) return false;
-  const profileDir = profilePathIdentity(CHROME_PROFILE_DIR);
+  const profileDir = profilePathIdentity(currentProfileDir());
   const pid = residentBrokerPid(profileDir);
   if (pid === null) return false;
   await terminateResidentBroker(
@@ -317,7 +317,7 @@ export async function reclaimStaleCredentialBrokerIfPresent(
   // reclaim path owns that case and cannot double-signal here.
   if (!isInvalidBrokerCredential(connectError)) return false;
   if (accountId === undefined) return false;
-  const profileDir = profilePathIdentity(CHROME_PROFILE_DIR);
+  const profileDir = profilePathIdentity(currentProfileDir());
   if ((await readBrokerAccountBinding(profileDir)) !== accountId) return false;
   const pid = residentBrokerPid(profileDir);
   if (pid === null) return false;
@@ -424,7 +424,7 @@ export async function connectOrLaunchBroker(
     }
   }
 
-  const profileDir = profilePathIdentity(CHROME_PROFILE_DIR);
+  const profileDir = profilePathIdentity(currentProfileDir());
   if (await brokerElectionIsHeld(profileDir)) return await waitForBroker(path, token);
   const launchRoot = brokerLaunchRoot(profileDir);
   let launchLease: ProfileOperationLease;

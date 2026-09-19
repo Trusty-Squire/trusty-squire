@@ -1,10 +1,11 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import {
   BrokerClientRegistry,
   brokerIdleTimeoutMs,
   completeMaintenanceCredentialRefresh,
 } from "../broker/daemon.js";
 import { brokerEnvironment } from "../broker/discovery.js";
+import { BrokerRuntime } from "../broker/runtime.js";
 
 it("passes the socket path to a detached broker without disturbing its environment", () => {
   expect(brokerEnvironment({ PATH: "/bin" }, "/tmp/broker.sock")).toEqual({
@@ -84,4 +85,28 @@ it("counts a client that first appears on a call, not a connect", () => {
   const clients = new BrokerClientRegistry();
   clients.touch("client-1");
   expect(clients.idle()).toBe(false);
+});
+
+it("a close that cannot drain leaves the identity cell serving", async () => {
+  // A maintenance connect is answered `draining` whenever a live session still
+  // owns the shared browser. `BrokerRuntime.close()` is what decides that, and
+  // entering the closing state on that path is what wedged the broker for good:
+  // every later acquire reads `closing` as "Identity cell is draining" and
+  // refuses, while the sessions that blocked the drain keep it alive.
+  vi.stubEnv("BOT_CDP_ENDPOINT", "http://127.0.0.1:1");
+  try {
+    const runtime = new BrokerRuntime("fixture-account");
+    // `acquire` launches a real browser, so plant the session bookkeeping a
+    // live session would hold directly: `close()` reads only this map.
+    const sessions = (runtime as unknown as { sessions: Map<unknown, () => void> }).sessions;
+    sessions.set({}, () => undefined);
+    await expect(runtime.close()).resolves.toBe(false);
+    sessions.clear();
+    // Past the closing gate, the next launch is refused for an unrelated,
+    // real reason rather than "Identity cell is draining".
+    await expect(runtime.acquire({})).rejects.toThrow("Broker requires a locally owned browser");
+  } finally {
+    vi.unstubAllEnvs();
+  }
+
 });
