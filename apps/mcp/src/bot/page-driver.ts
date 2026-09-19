@@ -279,7 +279,7 @@ export class PageDriver {
           const deadline = Date.now() + 15_000;
           while (Date.now() < deadline) {
             const state = await page.evaluate(() => document.readyState).catch(() => "loading");
-            if (state === "complete") break;
+            if (state === "interactive" || state === "complete") break;
             await page.waitForTimeout(20);
           }
         }

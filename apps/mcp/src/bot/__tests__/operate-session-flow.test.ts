@@ -101,9 +101,6 @@ const h = vi.hoisted(() => ({
   liveGoogleEmail: "default-google@example.com" as string | null,
   identityProbeCalls: 0,
   identityProbeExpectedGoogleAccountEmails: [] as Array<string | undefined>,
-  identityProbeCache: undefined as
-    | { providers: Array<"google" | "github">; userEmail: string | null; observedAt: number }
-    | undefined,
   googleIdentityByExpectedEmail: new Map<string, string | null>(),
   connections: [] as boolean[],
   controllers: [] as Array<{
@@ -260,22 +257,6 @@ vi.mock("../broker/custody.js", async () => {
         await beforeRelease?.();
       },
       identity: async <T>(operation: () => Promise<T>) => await operation(),
-      recentIdentityProbe: (maximumAgeMs: number) => {
-        const probe = h.identityProbeCache;
-        return probe !== undefined && Date.now() - probe.observedAt <= maximumAgeMs
-          ? { ...probe, providers: [...probe.providers] }
-          : undefined;
-      },
-      rememberIdentityProbe: (probe: {
-        providers: Array<"google" | "github">;
-        userEmail: string | null;
-        observedAt: number;
-      }) => {
-        h.identityProbeCache = { ...probe, providers: [...probe.providers] };
-      },
-      invalidateIdentityProbe: () => {
-        h.identityProbeCache = undefined;
-      },
     }),
   };
 });
@@ -1426,7 +1407,6 @@ beforeEach(() => {
   h.liveGoogleEmail = "default-google@example.com";
   h.identityProbeCalls = 0;
   h.identityProbeExpectedGoogleAccountEmails = [];
-  h.identityProbeCache = undefined;
   h.googleIdentityByExpectedEmail = new Map();
   h.connections = [];
   h.controllers = [];
@@ -4875,12 +4855,28 @@ describe("operate session — live-profile precondition gate", () => {
     await expect(finishProvisionSession(obs.session_id)).resolves.toMatchObject({ closed: true });
   });
 
-  it("reuses a recent physical-profile identity probe across warm starts", async () => {
+  it("refuses a warm start after Google logout in another session", async () => {
     const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+    h.providers = [];
+    h.liveGoogleEmail = null;
+    const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
+    expect(second.needs_user?.wall).toBe("google_session");
+    expect(h.identityProbeCalls).toBe(2);
+    expect(h.gotos).toHaveLength(1);
+    await finishProvisionSession(second.session_id);
     await finishProvisionSession(first.session_id);
+  });
+
+  it("refreshes account metadata with one live probe per warm start", async () => {
+    h.liveGoogleEmail = "first@example.com";
+    const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+    expect(first.user_email).toBe("first@example.com");
+    await finishProvisionSession(first.session_id);
+    h.liveGoogleEmail = "second@example.com";
     const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
     expect(second.needs_user).toBeUndefined();
-    expect(h.identityProbeCalls).toBe(1);
+    expect(second.user_email).toBe("second@example.com");
+    expect(h.identityProbeCalls).toBe(2);
     await finishProvisionSession(second.session_id);
   });
 

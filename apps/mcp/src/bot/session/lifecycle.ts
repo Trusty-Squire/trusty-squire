@@ -567,17 +567,6 @@ async function ensureProvisionPrimaryProviderSession(
   return { providers, userEmail };
 }
 
-// The browser broker is the identity lifetime: session tabs come and go while
-// its physical profile remains the same. Thirty seconds removes the repeated
-// warm-start network trip while bounding a revoked or switched Google identity
-// to less than one ordinary task turn. Explicit OAuth and ceremony flows
-// invalidate immediately.
-export const PROVISION_IDENTITY_PROBE_MAX_AGE_MS = 30_000;
-
-export function invalidateProvisionIdentityProbe(): void {
-  brokerBrowserCustody()?.invalidateIdentityProbe?.();
-}
-
 export async function startProvisionSession(
   opts: StartOptions,
   ports: SessionStartPorts,
@@ -590,23 +579,13 @@ export async function startProvisionSession(
   const acquired = await acquireWarmBrowser(opts);
   browser = acquired.controller;
   try {
-    const custody = brokerBrowserCustody();
-    const ceremony = ceremonyStartAdmission();
-    if (ceremony) custody?.invalidateIdentityProbe?.();
-    const cached = ceremony
-      ? undefined
-      : custody?.recentIdentityProbe?.(PROVISION_IDENTITY_PROBE_MAX_AGE_MS);
-    let identity = cached;
-    if (identity === undefined) {
-      const probe = await ensureProvisionPrimaryProviderSession(browser);
-      identity = { ...probe, observedAt: Date.now() };
-    }
+    const identity = await ensureProvisionPrimaryProviderSession(browser);
     liveProviders = identity.providers;
     workerEmail = identity.userEmail;
-    if (!ceremony && cached === undefined && identity.providers.includes("google"))
-      custody?.rememberIdentityProbe?.(identity);
     assertProvisionStartAdmitted(acquired.shutdownGeneration);
-    const gate = ceremony ? { ok: true as const } : googleSessionGate(liveProviders);
+    const gate = ceremonyStartAdmission()
+      ? { ok: true as const }
+      : googleSessionGate(liveProviders);
     if (!gate.ok) {
       audit(id, "connect_gate", { ok: false, wall: "google_session" });
       await releaseWarmBrowserPage(browser, false);

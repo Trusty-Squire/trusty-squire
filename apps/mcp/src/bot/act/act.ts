@@ -58,11 +58,7 @@ import {
   terminalOAuthCompletionObservation,
 } from "../observe/observe.js";
 import { elementRef, provisionElementRefs } from "../observe/refs.js";
-import {
-  audit,
-  invalidateProvisionIdentityProbe,
-  sessionForCall,
-} from "../session/lifecycle.js";
+import { audit, sessionForCall } from "../session/lifecycle.js";
 import { substituteCardTokens } from "../card-secret-tokens.js";
 import { clickScreenshot, ScreenshotClickError } from "../screenshot-click.js";
 import {
@@ -168,7 +164,6 @@ async function runSerializedOAuthBoundary(
   compactAuthorization?: CompactV2TargetAuthorization,
   bindPreparedTargetAtDispatch = false,
 ): Promise<BrowserController> {
-  invalidateProvisionIdentityProbe();
   const authorizedRef = provisionElementRefs(authorizedElements).get(authorizedElement);
   if (authorizedRef === undefined) {
     throw new Error("OAuth action target was not present in the authorized action map");
