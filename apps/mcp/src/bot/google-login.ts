@@ -11,11 +11,14 @@
 // through the nonce-scoped Finish callback. Because the broker's Chrome runs
 // on its own private Xvfb, connect also exposes that display over noVNC for
 // the ceremony (same x11vnc + websockify + tunnel stack as the standalone
-// remote login) — a tab no human can see is a tab no human can complete. A
-// deferred --force-relogin clear rides the same tab as ordinary logout
-// navigation. Only when no broker can serve (first connect on an unenrolled
-// machine, or no live broker) does connect launch its own persistent-context
-// browser on the bot profile — the same launcher class the operator uses.
+// remote login) — a tab no human can see is a tab no human can complete.
+// Exposure is best-effort: any failure to attach degrades to the unexposed
+// tab with a logged cause and the ceremony continues; it never blocks a
+// connect that would otherwise succeed. A deferred --force-relogin clear
+// rides the same tab as ordinary logout navigation. Only when no broker can
+// serve (first connect on an unenrolled machine, or no live broker) does
+// connect launch its own persistent-context browser on the bot profile — the
+// same launcher class the operator uses.
 // Completion never comes off a live BrowserContext in either path.
 //
 // The self-launched ceremony uses a local visible Chrome window when one
@@ -73,6 +76,7 @@ import {
   remoteLoginEnvironment,
   startRemoteLoginDisplay,
   teardownRemoteLoginRig,
+  type RemoteLoginRig,
 } from "./remote-login-display.js";
 export { extractOAuthScopes, scopesAreBasic, scrapeGoogleScopePhrases } from "./oauth-scope.js";
 
@@ -694,9 +698,12 @@ export interface LoginRunResult {
 // standalone remote login uses. The display coordinates are discovered from
 // the browser process's own environment (/proc on Linux); the helpers this
 // call spawns are reaped at the ceremony's lease boundary and never touch
-// the display or the browser itself. Returns null when the tab is NOT on a
-// rig this repo created (a real user display the human can already see, or a
-// platform with no /proc) — nothing to expose, and the banner says so.
+// the display or the browser itself. Returns null — never throws — when
+// there is nothing to expose or exposure could not be set up: the tab is
+// NOT on a rig this repo created (a real user display the human can already
+// see, or a platform with no /proc), or the noVNC attach itself failed
+// (logged; the ceremony continues without it — exposure shows the login,
+// it is never a precondition for it).
 export async function exposeSharedBrokerCeremonyDisplay(
   profileDir: string,
   label: string,
@@ -708,24 +715,38 @@ export async function exposeSharedBrokerCeremonyDisplay(
   const authFile = env?.XAUTHORITY;
   if (display === undefined || authFile === undefined) return null;
   if (!isOwnedLoginRigXauthority(authFile)) return null;
-  // Real binaries (throws with install hints when missing) and FRESH VNC
-  // secrets of our own — createRemoteLoginSecrets would also mint an
-  // Xauthority, but the display's authorization belongs to the broker's Xvfb.
-  const rig = createRemoteLoginRig();
-  createRemoteLoginVncSecrets(rig);
-  rig.display = display;
-  rig.authFile = authFile;
+  // Everything below is BEST-EFFORT exposure: the noVNC page is how the human
+  // is SHOWN the login, not a precondition for logging in. Any failure —
+  // missing helper binaries, tunnel misconfig, attach error — degrades to
+  // "no exposure", is logged with its concrete cause, and the ceremony
+  // continues. This function never throws and never refuses a connect.
+  let rig: RemoteLoginRig;
+  try {
+    rig = createRemoteLoginRig();
+    // FRESH VNC secrets of our own — createRemoteLoginSecrets would also mint
+    // an Xauthority, but the display's authorization belongs to the broker's
+    // Xvfb.
+    createRemoteLoginVncSecrets(rig);
+    rig.display = display;
+    rig.authFile = authFile;
+  } catch (err) {
+    console.error(
+      `[login] could not prepare a noVNC rig for the shared browser's display ` +
+        `(${err instanceof Error ? err.message : String(err)}) — continuing without it.`,
+    );
+    return null;
+  }
   const removeCleanup = registerRemoteLoginRigCleanup(rig, () => undefined);
   try {
     await exposeRemoteLoginDisplay(rig, label);
   } catch (err) {
     removeCleanup();
     await teardownRemoteLoginRig(rig).catch(() => undefined);
-    throw new Error(
-      `could not expose the shared browser's display over noVNC, and the ` +
-        `sign-in tab lives on a headless rig the user cannot see ` +
-        `(${err instanceof Error ? err.message : String(err)})`,
+    console.error(
+      `[login] could not expose the shared browser's display over noVNC ` +
+        `(${err instanceof Error ? err.message : String(err)}) — continuing without it.`,
     );
+    return null;
   }
   return async () => {
     // Helpers only: the display and the browser belong to the broker daemon.
