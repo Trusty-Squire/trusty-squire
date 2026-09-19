@@ -536,11 +536,20 @@ export function isPickerRow(row: WireRow): boolean {
   }
   const label = normalizeKey(readableLabel(row));
   if (label.includes("where_from") || label.includes("where_to")) return true;
-  return label.split("_").some((token) =>
-    ["date", "departure", "depart", "expiry", "expiration", "calendar", "origin", "destination"].includes(
-      token,
-    ),
-  );
+  return label
+    .split("_")
+    .some((token) =>
+      [
+        "date",
+        "departure",
+        "depart",
+        "expiry",
+        "expiration",
+        "calendar",
+        "origin",
+        "destination",
+      ].includes(token),
+    );
 }
 
 export function isClickableRow(row: WireRow): boolean {
@@ -707,9 +716,11 @@ export function matchingFactKeys(facts: Record<string, string>, row: WireRow): s
     for (const alias of aliasKeysFor("destination")) wanted.add(alias);
   }
   if (
-    label.split("_").some((token) =>
-      ["date", "departure", "depart", "expiry", "expiration", "calendar"].includes(token),
-    )
+    label
+      .split("_")
+      .some((token) =>
+        ["date", "departure", "depart", "expiry", "expiration", "calendar"].includes(token),
+      )
   ) {
     for (const alias of aliasKeysFor("date")) wanted.add(alias);
   }

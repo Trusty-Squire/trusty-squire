@@ -79,8 +79,7 @@ const FIELD_FROM_LABEL: Array<{ test: RegExp; field: string }> = [
   { test: /where\s+from|\borigin\b|leaving\s+from/, field: "origin" },
   { test: /where\s+to|\bdestination\b|going\s+to/, field: "destination" },
   {
-    test:
-      /\bdepart(?:ure)?(?:\s*date)?\b|\barrival(?:\s*date)?\b|\bexpir(?:y|ation|es)?\b|\bcalendar\b|\bdate\b/,
+    test: /\bdepart(?:ure)?(?:\s*date)?\b|\barrival(?:\s*date)?\b|\bexpir(?:y|ation|es)?\b|\bcalendar\b|\bdate\b/,
     field: "date",
   },
   { test: /password/, field: "password" },
