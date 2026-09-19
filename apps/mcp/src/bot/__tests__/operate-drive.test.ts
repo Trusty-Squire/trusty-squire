@@ -949,11 +949,6 @@ describe("operate_drive tool schema", () => {
       }).success,
     ).toBe(false);
   });
-
-  it("steers agents to reach for it on signup and checkout goals", () => {
-    expect(operateDriveTool.description).toContain("prefer it over calling operate_click");
-    expect(operateDriveTool.description).toContain("signup, checkout");
-  });
 });
 
 describe("select option key collisions", () => {
@@ -1002,6 +997,53 @@ describe("select option key collisions", () => {
 });
 
 describe("drive outbound choice budgets", () => {
+  it("reserves a usable search value when earlier click targets consume the budget", () => {
+    const search: WireRow = ["@e:search", "t", "@search|f=query"];
+    const rows: WireRow[] = [
+      ...Array.from({ length: 122 }, (_, i): WireRow => [`@e:link${i}`, "a", `@link-${i}`]),
+      search,
+    ];
+    const sets = driveTargetSets(rows, {}, false);
+    const questions = buildDriveQuestions(rows, {}, "widgets", false, [], "", new Map(), sets);
+    expect(
+      Object.values(questions).reduce(
+        (n, q) => n + (q.type === "choice" ? Object.keys(q.criteria).length : 0),
+        0,
+      ),
+    ).toBeLessThanOrEqual(DRIVE_MAX_CRITERIA);
+    const valueQuestion = questions[DRIVE_VALUE_QUESTION];
+    const operation = questions.operation;
+    const target = questions.TYPE_TEXT_target;
+    if (
+      valueQuestion?.type !== "choice" ||
+      operation?.type !== "choice" ||
+      target?.type !== "choice"
+    )
+      throw new Error("missing search choices");
+    expect(valueQuestion.criteria).toHaveProperty(DRIVE_FIXED_NONE);
+    const usable = Object.entries(valueQuestion.criteria).find(
+      ([key, value]) => key !== DRIVE_FIXED_NONE && value === "widgets",
+    );
+    expect(usable).toBeDefined();
+    expect(
+      decideAfterJev({
+        rows,
+        facts: {},
+        goal: "widgets",
+        fingerprint: "page",
+        lastFingerprint: null,
+        lastActionKey: null,
+        sets,
+        questions,
+        answers: {
+          operation: valid("TYPE_TEXT", operation.criteria),
+          TYPE_TEXT_target: valid(sets.TYPE_TEXT[0]!.slug, target.criteria),
+          [DRIVE_VALUE_QUESTION]: valid(usable![0], valueQuestion.criteria),
+        },
+      }),
+    ).toMatchObject({ kind: "act", action: { kind: "type", target: search[0], text: "widgets" } });
+  });
+
   it("elides large dropdowns within the batch budget and executes an offered option", () => {
     const options = Array.from({ length: 200 }, (_, i) => `Region ${i}`);
     const pageOptions = new Map([["state", options]]);

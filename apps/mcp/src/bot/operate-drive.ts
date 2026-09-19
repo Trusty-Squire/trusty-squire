@@ -1438,7 +1438,10 @@ export function buildDriveQuestions(
       .reduce(
         (total, [laterName, later]) =>
           total +
-          Math.min(Object.keys(later.criteria).length, laterName === "SCROLL_target" ? 4 : 1),
+          Math.min(
+            Object.keys(later.criteria).length,
+            laterName === "SCROLL_target" ? 4 : laterName === DRIVE_VALUE_QUESTION ? 2 : 1,
+          ),
         0,
       );
     const entries = Object.entries(question.criteria);
