@@ -78,6 +78,8 @@ const FIELD_FROM_LABEL: Array<{ test: RegExp; field: string }> = [
   { test: /last\s*name|surname|family\s*name/, field: "last_name" },
   { test: /company|organization|organisation/, field: "company" },
   { test: /search|query|\bfind\b/, field: "search" },
+  { test: /where\s+from|\borigin\b|leaving\s+from/, field: "origin" },
+  { test: /where\s+to|\bdestination\b|going\s+to/, field: "destination" },
   { test: /password/, field: "password" },
   { test: /phone|tel|mobile/, field: "phone" },
   { test: /address/, field: "address" },
@@ -148,6 +150,8 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
             ? "t"
             : element.role === "combobox" && element.operations.includes("select")
               ? "s"
+              : element.role === "combobox" && element.operations.includes("fill")
+                ? "t"
               : element.role === "checkbox"
                 ? "c"
                 : element.role === "radio"
@@ -164,13 +168,31 @@ export function driveRowsFromSnapshot(snapshot: DriveSnapshot): SnapshotRow[] {
 
 export function snapshotSelectOptions(snapshot: DriveSnapshot): Map<string, string[]> {
   const options = new Map<string, string[]>();
+  const add = (key: string, texts: readonly string[]) => {
+    if (texts.length === 0) return;
+    const existing = options.get(key) ?? [];
+    for (const text of texts) {
+      if (text.length > 0 && !existing.includes(text)) existing.push(text);
+    }
+    if (existing.length > 0) options.set(key, existing);
+  };
   for (const element of snapshot.elements) {
     if (element.options === undefined || element.options.length === 0) continue;
     const texts = element.options.map((option) => option.label).filter((text) => text.length > 0);
-    if (texts.length === 0) continue;
-    options.set(element.ref, texts);
+    add(element.ref, texts);
     const label = element.label.trim().toLowerCase();
-    if (label.length > 0) options.set(label, texts);
+    if (label.length > 0) add(label, texts);
+  }
+  let owner: DriveSnapshotElement | undefined;
+  for (const element of snapshot.elements) {
+    if (element.role === "combobox" && !element.operations.includes("fill")) {
+      owner = element;
+    }
+    if (element.role === "option" && owner !== undefined && element.label.trim().length > 0) {
+      add(owner.ref, [element.label.trim()]);
+      const label = owner.label.trim().toLowerCase();
+      if (label.length > 0) add(label, [element.label.trim()]);
+    }
   }
   return options;
 }
@@ -428,7 +450,12 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     if (inViewport) inView.push(row);
     else offscreenControls.push(row);
   }
-  const elements = [...inView, ...offscreenControls].slice(0, arg.maxElements);
+  const fieldsFirst = (list: DriveSnapshotElement[]): DriveSnapshotElement[] => {
+    const fields = list.filter((row) => row.operations.includes("fill") || row.operations.includes("select"));
+    const rest = list.filter((row) => !row.operations.includes("fill") && !row.operations.includes("select"));
+    return [...fields, ...rest];
+  };
+  const elements = [...fieldsFirst(inView), ...fieldsFirst(offscreenControls)].slice(0, arg.maxElements);
   const headings: string[] = [];
   for (const heading of Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6"))) {
     if (!visible(heading)) continue;

@@ -16,7 +16,7 @@ export type DriveActTimings = {
 };
 
 export type DriveActResult =
-  | ({ kind: "ok"; combobox: boolean } & DriveActTimings)
+  | ({ kind: "ok"; combobox: boolean; searchSubmit: boolean } & DriveActTimings)
   | ({ kind: "stale"; reason: string } & DriveActTimings)
   | { kind: "unsupported" };
 
@@ -27,6 +27,7 @@ interface GuardOk {
   x: number;
   y: number;
   combobox: boolean;
+  searchSubmit: boolean;
   scriptMs: number;
 }
 
@@ -85,6 +86,13 @@ function inPageGuard(input: { ref: string; kind: "click" | "type" | "select"; te
     element.getAttribute("role") === "searchbox" ||
     (element instanceof HTMLInputElement &&
       (element.type === "search" || element.getAttribute("aria-autocomplete") !== null));
+  const ariaLabel = element.getAttribute("aria-label") ?? "";
+  const placeholder = element instanceof HTMLInputElement ? element.placeholder : "";
+  const searchSubmit =
+    element.getAttribute("role") === "searchbox" ||
+    (element instanceof HTMLInputElement && (element.type === "search" || element.name === "q")) ||
+    /search/i.test(ariaLabel) ||
+    /search/i.test(placeholder);
   if (input.kind === "select") {
     if (!(element instanceof HTMLSelectElement)) {
       return timed({ ok: false, reason: "not_select" });
@@ -101,7 +109,7 @@ function inPageGuard(input: { ref: string; kind: "click" | "type" | "select"; te
     element.value = match.value;
     element.dispatchEvent(new Event("input", { bubbles: true }));
     element.dispatchEvent(new Event("change", { bubbles: true }));
-    return timed({ ok: true, x, y, combobox: false });
+    return timed({ ok: true, x, y, combobox: false, searchSubmit: false });
   }
   if (input.kind === "type" && (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) {
     element.focus();
@@ -116,7 +124,7 @@ function inPageGuard(input: { ref: string; kind: "click" | "type" | "select"; te
       selection.addRange(range);
     }
   }
-  return timed({ ok: true, x, y, combobox });
+  return timed({ ok: true, x, y, combobox, searchSubmit });
 }
 
 export async function driveActOnPage(
@@ -137,7 +145,7 @@ export async function driveActOnPage(
     } catch {
       return { kind: "stale", reason: "evaluate_timeout", ...ZERO_ACT_TIMINGS, guardWallMs: Date.now() - wallStarted };
     }
-    return { kind: "ok", combobox: false, ...ZERO_ACT_TIMINGS, guardWallMs: Date.now() - wallStarted };
+    return { kind: "ok", combobox: false, searchSubmit: false, ...ZERO_ACT_TIMINGS, guardWallMs: Date.now() - wallStarted };
   }
   if (action.kind !== "click" && action.kind !== "type" && action.kind !== "select") {
     return { kind: "unsupported" };
@@ -160,7 +168,7 @@ export async function driveActOnPage(
     cdpMs: 0,
   };
   if (!guard.ok) return { kind: "stale", reason: guard.reason, ...timings };
-  if (action.kind === "select") return { kind: "ok", combobox: false, ...timings };
+  if (action.kind === "select") return { kind: "ok", combobox: false, searchSubmit: false, ...timings };
   const context = page.context();
   const cdpStarted = Date.now();
   const cdp = await context.newCDPSession(page);
@@ -180,7 +188,13 @@ export async function driveActOnPage(
         button: "left",
         clickCount: 1,
       });
-      return { kind: "ok", combobox: guard.combobox, ...timings, cdpMs: Date.now() - cdpStarted };
+      return {
+        kind: "ok",
+        combobox: guard.combobox,
+        searchSubmit: guard.searchSubmit,
+        ...timings,
+        cdpMs: Date.now() - cdpStarted,
+      };
     }
     await cdp.send("Input.dispatchMouseEvent", {
       type: "mousePressed",
@@ -197,7 +211,29 @@ export async function driveActOnPage(
       clickCount: 1,
     });
     await cdp.send("Input.insertText", { text: action.text });
-    return { kind: "ok", combobox: guard.combobox, ...timings, cdpMs: Date.now() - cdpStarted };
+    if (guard.searchSubmit) {
+      await cdp.send("Input.dispatchKeyEvent", {
+        type: "keyDown",
+        key: "Enter",
+        code: "Enter",
+        windowsVirtualKeyCode: 13,
+        nativeVirtualKeyCode: 13,
+      });
+      await cdp.send("Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: "Enter",
+        code: "Enter",
+        windowsVirtualKeyCode: 13,
+        nativeVirtualKeyCode: 13,
+      });
+    }
+    return {
+      kind: "ok",
+      combobox: guard.combobox,
+      searchSubmit: guard.searchSubmit,
+      ...timings,
+      cdpMs: Date.now() - cdpStarted,
+    };
   } finally {
     await cdp.detach().catch(() => undefined);
   }
