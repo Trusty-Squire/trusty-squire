@@ -2702,6 +2702,8 @@ async function driveLoop(input: {
     snapshot_wall_ms: firstSnap.snapshotWallMs,
   };
   let steps = 0;
+  const comboboxAttempts = new Set<string>();
+  let comboboxMustYield = false;
 
   const finish = (
     status: DriveStatus,
@@ -3025,6 +3027,7 @@ async function driveLoop(input: {
     const actStarted = Date.now();
     const acted = await actDriveSafely(session, sessionId, decision.action, dependencies);
     if (acted.kind === "stale") {
+      comboboxMustYield = true;
       drive.consumedActionKey = null;
       const staleSnap = await snapshotOrTimeout(framesIfNeeded());
       if (staleSnap !== "ok") return staleSnap;
@@ -3162,13 +3165,14 @@ async function driveLoop(input: {
     );
     const pageOptions =
       lastSelectOptions.get(session) ?? selectOptionsFromElements(session.lastElements);
-    const comboboxFill = requiredFactComboboxAction(
-      rows,
-      drive.facts,
-      drive.filledRefs,
-      pageOptions,
-    );
+    const comboboxObservation = observationFingerprint(observation.url, rows);
+    const comboboxFill =
+      comboboxMustYield || comboboxAttempts.has(comboboxObservation)
+        ? undefined
+        : requiredFactComboboxAction(rows, drive.facts, drive.filledRefs, pageOptions);
+    comboboxMustYield = false;
     if (comboboxFill !== undefined) {
+      comboboxAttempts.add(comboboxObservation);
       drive.boundFingerprint = progressFingerprint(observation.url, rows, drive, session);
       drive.consumedActionKey = null;
       const applied = await applyDecision({
@@ -3181,7 +3185,11 @@ async function driveLoop(input: {
         confidence: 1,
       });
       if (applied !== "continue") return applied;
-      if (comboboxFill.fillsRef !== undefined && !drive.filledRefs.includes(comboboxFill.fillsRef)) {
+      if (
+        !comboboxMustYield &&
+        comboboxFill.fillsRef !== undefined &&
+        !drive.filledRefs.includes(comboboxFill.fillsRef)
+      ) {
         drive.filledRefs.push(comboboxFill.fillsRef);
       }
       steps += 1;

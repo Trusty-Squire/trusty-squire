@@ -398,6 +398,122 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
+  it.each(["offscreen", "occluded"] as const)(
+    "yields a %s Country combobox to model recovery before retrying",
+    async (placement) => {
+      const html = `<!doctype html><title>Country picker</title>
+<main style="${placement === "offscreen" ? "padding-top:1800px;padding-bottom:120px" : ""}">
+  <div role="combobox" aria-label="Country" id="country" tabindex="0"
+    style="width:200px;height:40px" onclick="document.querySelector('#options').hidden=false">Choose country</div>
+  <div id="options" hidden><button onclick="
+    document.querySelector('#country').textContent='Canada';
+    document.querySelector('#options').hidden=true;
+  ">Canada</button></div>
+</main>
+${
+  placement === "occluded"
+    ? `<div id="cover" style="position:absolute;top:0;left:0;width:220px;height:60px"></div>
+<button style="margin-top:80px" onclick="document.querySelector('#cover').remove();this.remove()">Dismiss</button>`
+    : ""
+}`;
+      const { context, page, started } = await openFixture(html, `country-${placement}.test`);
+      const outcomes: string[] = [];
+      let modelCalls = 0;
+      try {
+        const dependencies = deps(async (_api, _state, questions) => {
+          modelCalls += 1;
+          if (modelCalls > 1) return jevFromQuestions(questions, true);
+          expect(outcomes).toEqual(["stale"]);
+          expect(await page.locator("#options").isVisible()).toBe(false);
+          const operation = placement === "offscreen" ? "SCROLL" : "CLICK";
+          const head = questions[`${operation}_target`];
+          if (head?.type !== "choice") throw new Error(`missing ${operation} recovery`);
+          const target =
+            placement === "offscreen"
+              ? "bottom"
+              : Object.keys(head.criteria).find((key) => head.criteria[key] === "Dismiss");
+          if (target === undefined) throw new Error("missing recovery target");
+          const result = jevFromQuestions(questions);
+          for (const [name, pick] of [
+            ["operation", operation],
+            [`${operation}_target`, target],
+          ] as const) {
+            const question = questions[name];
+            if (question?.type !== "choice") throw new Error(`missing ${name}`);
+            result.result.answers[name] = {
+              choice: pick,
+              confidence: 0.93,
+              probabilities: peaked(Object.keys(question.criteria), pick),
+            };
+          }
+          return result;
+        });
+        dependencies.driveAct = async (_sessionId, action) => {
+          const result = await driveActOnPage(page, action);
+          outcomes.push(result.kind);
+          if (outcomes.length === 1) {
+            expect(result.kind).toBe("stale");
+            await page.locator("#country").evaluate((element) => {
+              element.setAttribute("aria-label", "Country choice");
+            });
+          }
+          return result;
+        };
+        const handoff = await runOperateDrive(
+          {
+            session_id: started.session_id,
+            goal: "Choose Canada as the country",
+            facts: { country: "Canada" },
+            max_steps: 8,
+          },
+          api(),
+          undefined,
+          dependencies,
+        );
+        expect(handoff.status).toBe("complete");
+        expect(modelCalls).toBe(2);
+        expect(outcomes).toEqual(["stale", "ok", "ok", "ok"]);
+        expect(await page.locator("#country").textContent()).toBe("Canada");
+        expect(handoff.trajectory[0]?.action).toBe(placement === "offscreen" ? "scroll" : "click");
+      } finally {
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    30_000,
+  );
+
+  it("attempts an unchanged fact-backed combobox only once before asking the model", async () => {
+    const { context, page, started } = await openFixture(
+      `<!doctype html><title>Country picker</title>
+<div role="combobox" aria-label="Country" tabindex="0" onclick="window.clicks=(window.clicks||0)+1">Choose country</div>`,
+      "country-noop.test",
+    );
+    const ask = vi.fn<DriveDependencies["askJev"]>(async (_api, _state, questions) => {
+      expect(await page.evaluate("window.clicks")).toBe(1);
+      return jevFromQuestions(questions, true);
+    });
+    try {
+      const handoff = await runOperateDrive(
+        {
+          session_id: started.session_id,
+          goal: "Choose Canada as the country",
+          facts: { country: "Canada" },
+          max_steps: 5,
+        },
+        api(),
+        undefined,
+        deps(ask),
+      );
+      expect(ask).toHaveBeenCalledOnce();
+      expect(handoff.status).toBe("complete");
+      expect(await page.evaluate("window.clicks")).toBe(1);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("keeps offscreen fields and drops ordinary offscreen buttons", async () => {
     const html = `<!doctype html><meta charset="utf-8"><title>Picker viewport</title>
 <main style="min-height:4000px">
