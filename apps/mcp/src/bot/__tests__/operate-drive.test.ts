@@ -879,11 +879,9 @@ describe("facts, fingerprint, compact merge", () => {
       "@e:go",
     ]);
     expect(
-      typeableCandidates(
-        [departure, from, EMAIL],
-        { ...facts, email: "a@b.test" },
-        false,
-      ).map((c) => c.ref),
+      typeableCandidates([departure, from, EMAIL], { ...facts, email: "a@b.test" }, false).map(
+        (c) => c.ref,
+      ),
     ).toEqual(["@e:dep", "@e:from", "@e:email"]);
     const questions = buildDriveQuestions(
       [departure, from, EMAIL, SUBMIT],
@@ -892,7 +890,10 @@ describe("facts, fingerprint, compact merge", () => {
     );
     expect(questions.TYPE_TEXT_target?.type).toBe("choice");
     expect(questions.CLICK_target?.type).toBe("choice");
-    if (questions.CLICK_target?.type !== "choice" || questions.TYPE_TEXT_target?.type !== "choice") {
+    if (
+      questions.CLICK_target?.type !== "choice" ||
+      questions.TYPE_TEXT_target?.type !== "choice"
+    ) {
       return;
     }
     expect(Object.values(questions.CLICK_target.criteria)).toEqual(
