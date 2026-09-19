@@ -16,13 +16,15 @@ import {
 } from "../operate-drive.js";
 import { finishProvisionSession, startHarnessProvisionSession } from "../provision-session.js";
 import { act, observe, awaitVerification } from "../provision-session.js";
+import { captureFrameSnapshot, driveRowsFromSnapshot } from "../drive-snapshot.js";
+import { driveActOnPage, settleDriveStep } from "../drive-act.js";
 
 const SIGNUP_HTML = `<!doctype html><meta charset="utf-8"><title>Signup fixture</title>
 <main>
   <h1>Create account</h1>
   <form id="f">
     <label>Email <input id="email" name="email" type="email"></label>
-    <label>Company <input id="company" name="company"></label>
+    <label>Company <input id="company" name="company" required></label>
     <button type="button" id="continue" onclick="
       const email = document.querySelector('#email').value;
       const company = document.querySelector('#company').value;
@@ -48,20 +50,57 @@ function api(): ApiClient {
   return { useCredential: vi.fn() } as unknown as ApiClient;
 }
 
-function jevPick(choice: string, value?: string): JevCallOutcome {
-  return {
-    attempts: 1,
-    elapsedMs: 12,
-    result: {
-      answers: {
-        next_action: { choice, confidence: 0.93 },
-        goal_complete: { noul: choice === "done" ? 0.92 : 0.04 },
-        ...(value === undefined
-          ? {}
-          : { value: { choice: value, confidence: 0.91 } }),
-      },
-    },
-  };
+function peaked(ids: string[], pick: string, peak = 0.91): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (ids.length <= 1) {
+    if (ids[0] !== undefined) out[ids[0]] = 1;
+    return out;
+  }
+  const rest = (1 - peak) / (ids.length - 1);
+  for (const id of ids) out[id] = id === pick ? peak : rest;
+  return out;
+}
+
+function jevFromQuestions(
+  questions: Record<string, { type?: string; criteria?: Record<string, string> }>,
+  preferDone = false,
+): JevCallOutcome {
+  const answers: Record<
+    string,
+    { choice?: string; confidence?: number; probabilities?: Record<string, number> }
+  > = {};
+  const typeKeys = Object.keys(questions.TYPE_TEXT_target?.criteria ?? {});
+  const selectKeys = Object.keys(questions.SELECT_target?.criteria ?? {});
+  const clickKeys = Object.keys(questions.CLICK_target?.criteria ?? {});
+  const pickOp = preferDone
+    ? "DONE"
+    : typeKeys.length > 0
+      ? "TYPE_TEXT"
+      : selectKeys.length > 0
+        ? "SELECT"
+        : clickKeys.length > 0
+          ? "CLICK"
+          : "DONE";
+  for (const [name, question] of Object.entries(questions)) {
+    if (question.criteria === undefined) continue;
+    const keys = Object.keys(question.criteria);
+    const pick =
+      name === "operation"
+        ? pickOp
+        : name === "TYPE_TEXT_target"
+          ? (typeKeys[0] ?? keys[0]!)
+          : name === "SELECT_target"
+            ? (selectKeys[0] ?? keys[0]!)
+            : name === "CLICK_target"
+              ? (clickKeys[0] ?? keys[0]!)
+              : keys[0]!;
+    answers[name] = {
+      choice: pick,
+      confidence: 0.93,
+      probabilities: peaked(keys, pick),
+    };
+  }
+  return { attempts: 1, elapsedMs: 12, result: { answers } };
 }
 
 function deps(ask: DriveDependencies["askJev"]): DriveDependencies {
@@ -108,15 +147,7 @@ describe("operate_drive real-browser fixture", () => {
   it("completes a multi-step signup in one call", async () => {
     const { context, page, started } = await openFixture(SIGNUP_HTML, "signup-complete.test");
     try {
-      const emailRef = refFor(started, "@email");
-      const companyRef = refFor(started, "@company");
-      const goRef = refFor(started, "@continue");
-      const picks = [
-        jevPick(emailRef, "email"),
-        jevPick(companyRef, "company"),
-        jevPick(goRef),
-        jevPick("done"),
-      ];
+      let round = 0;
       const handoff = await runOperateDrive(
         {
           session_id: started.session_id,
@@ -125,7 +156,10 @@ describe("operate_drive real-browser fixture", () => {
         },
         api(),
         undefined,
-        deps(async () => picks.shift() ?? jevPick("done")),
+        deps(async (_api, _state, questions) => {
+          round += 1;
+          return jevFromQuestions(questions, round > 3);
+        }),
       );
       expect(handoff.status).toBe("complete");
       expect(await page.locator("#done").textContent()).toContain("ada@fixture.test");
@@ -137,12 +171,35 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 60_000);
 
+  it("snapshots visible-text labels and all headings, then acts through the registry", async () => {
+    const { context, page, started } = await openFixture(SIGNUP_HTML, "signup-snapshot.test");
+    try {
+      const snap = await captureFrameSnapshot(page, [], 0);
+      expect(snap).not.toBeNull();
+      if (snap === null) return;
+      expect(snap.headings).toEqual(expect.arrayContaining(["Create account"]));
+      expect(snap.elements.some((element) => element.label.includes("Email"))).toBe(true);
+      expect(snap.elements.some((element) => element.label.includes("Continue"))).toBe(true);
+      expect(JSON.stringify(snap.elements)).not.toContain("zurich-largest-city");
+      const rows = driveRowsFromSnapshot(snap);
+      expect(rows.some((row) => (row[2] ?? "").includes("Email"))).toBe(true);
+      const email = snap.elements.find((element) => element.label.includes("Email"));
+      expect(email).toBeDefined();
+      if (email === undefined) return;
+      const typed = await driveActOnPage(page, { kind: "type", target: email.ref, text: "ada@fixture.test" });
+      expect(typed.kind).toBe("ok");
+      await settleDriveStep(page, typed.kind === "ok" && typed.combobox);
+      expect(await page.locator("#email").inputValue()).toBe("ada@fixture.test");
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("returns needs_value naming a field with no matching fact, then resume completes", async () => {
     const { context, page, started } = await openFixture(SIGNUP_HTML, "signup-missing.test");
     try {
-      const emailRef = refFor(started, "@email");
       const companyRef = refFor(started, "@company");
-      const goRef = refFor(started, "@continue");
       const missing = await runOperateDrive(
         {
           session_id: started.session_id,
@@ -151,11 +208,13 @@ describe("operate_drive real-browser fixture", () => {
         },
         api(),
         undefined,
-        deps(async () => jevPick(companyRef, "company")),
+        deps(async () => {
+          throw new Error("jev should not run for a required field with no fact");
+        }),
       );
       expect(missing.status).toBe("needs_value");
       expect(missing.field).toMatch(/company/i);
-      const picks = [jevPick(emailRef, "email"), jevPick(goRef), jevPick("done")];
+      let round = 0;
       const resumed = await runOperateDrive(
         {
           session_id: started.session_id,
@@ -165,7 +224,10 @@ describe("operate_drive real-browser fixture", () => {
         },
         api(),
         undefined,
-        deps(async () => picks.shift() ?? jevPick("done")),
+        deps(async (_api, _state, questions) => {
+          round += 1;
+          return jevFromQuestions(questions, round > 2);
+        }),
       );
       expect(resumed.status).toBe("complete");
       expect(await page.locator("#done").textContent()).toContain("Acme");
@@ -178,7 +240,6 @@ describe("operate_drive real-browser fixture", () => {
   it("returns no_progress when the chosen action does not change the page", async () => {
     const { context, started } = await openFixture(NOOP_HTML, "signup-noop.test");
     try {
-      const noopRef = refFor(started, "@do-nothing");
       const handoff = await runOperateDrive(
         {
           session_id: started.session_id,
@@ -187,7 +248,7 @@ describe("operate_drive real-browser fixture", () => {
         },
         api(),
         undefined,
-        deps(async () => jevPick(noopRef)),
+        deps(async (_api, _state, questions) => jevFromQuestions(questions)),
       );
       expect(handoff.status).toBe("no_progress");
       expect(handoff.trajectory.length).toBeGreaterThanOrEqual(1);
@@ -232,10 +293,15 @@ describe("operate_drive real-browser fixture", () => {
         facts: {},
         trajectory: [],
         history: [],
+        filledRefs: [],
         lastQuestion: null,
         lastActionKey: null,
         lastFingerprint: null,
         jevCalls: 1,
+        staleNonWait: 0,
+        boundFingerprint: null,
+        consumedActionKey: null,
+        lastActProfile: null,
       };
       const handoff = await runOperateDrive(
         { session_id: started.session_id, goal: "another drive" },

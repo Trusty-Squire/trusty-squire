@@ -1591,7 +1591,7 @@ const driveSchema = z
     url: z.string().url().optional(),
     goal: z.string().min(1).max(4000),
     facts: z.record(z.string(), z.string()).optional(),
-    max_steps: z.number().int().min(1).max(50).optional(),
+    max_steps: z.number().int().min(1).max(60).optional(),
     max_seconds: z.number().int().min(1).max(120).optional(),
     answer: z.string().min(1).max(200).optional(),
   })
@@ -1616,14 +1616,18 @@ export const operateDriveTool: Tool<z.infer<typeof driveSchema>> = {
     "operate_start, sign-in wall and hint included) and drive in one call. goal is the task in words. " +
     "facts is the key/value bag of values the loop may type (email, first_name, last_name, company, " +
     "address, city, state, zip, password, card_ref, merchant, amount_cents, currency, …); it never " +
-    "invents a value. Optional max_steps (default 15) and max_seconds (default 45) bound this call; " +
+    "invents a value. A search or query field may receive a phrase Jev assigns from the goal's own " +
+    "words or the facts; identity and payment fields still require a fact. Each step asks Jev for one operation (CLICK, TYPE_TEXT, SELECT, SCROLL, WAIT, DONE, BLOCKED) " +
+    "and a matching per-operation target; unused target heads cannot act. It reads verification mail " +
+    "when a verification field is chosen or the page is stuck after a click. Optional max_steps (default 60) and max_seconds (default 45) bound this call; " +
     "a budget handoff is partial progress — call again on the same session to continue. " +
     "Resume with answer (one option key from a previous handoff: a readable action slug, done, or stuck) and/or added " +
     "facts; the loop continues from the current page. Returns a handoff, never a bare page: status, " +
     "the current compact observation with the same stable refs, trajectory, done/remaining, and " +
     "step/time counters. Status complete means the goal is done; needs_value names the missing field's label; " +
     "stuck means no listed element advances the goal; " +
-    "low_confidence includes the question, options, and probabilities to answer; no_progress, budget, " +
+    "low_confidence includes the question, options, probabilities, and confidence; " +
+    "invalid_answer is a malformed Jev choice (reason + confidence) after one same-observation retry; no_progress, budget, " +
     "jev_unavailable, and pending_approval (card approval URL) are resumable. Google sign-in, " +
     "verification-email read, captcha, and card release run inside the loop. Always operate_finish when done.",
   inputSchema: driveSchema,
@@ -1636,7 +1640,7 @@ export const operateDriveTool: Tool<z.infer<typeof driveSchema>> = {
       url: { type: "string", format: "uri" },
       goal: { type: "string" },
       facts: { type: "object", additionalProperties: { type: "string" } },
-      max_steps: { type: "integer", minimum: 1, maximum: 50 },
+      max_steps: { type: "integer", minimum: 1, maximum: 60 },
       max_seconds: { type: "integer", minimum: 1, maximum: 120 },
       answer: { type: "string" },
     },
