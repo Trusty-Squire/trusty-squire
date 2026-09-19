@@ -6,23 +6,33 @@ import type { Frame, Page } from "playwright";
 import type { ProvisionAction } from "./provision-session.js";
 
 export const DRIVE_SETTLE_MS = 50;
-export const DRIVE_COMBOBOX_WAIT_MS = 200;
+export const DRIVE_COMBOBOX_WAIT_MS = 400;
+
+export type DriveActTimings = {
+  guardScriptMs: number;
+  guardWallMs: number;
+  cdpMs: number;
+};
 
 export type DriveActResult =
-  | { kind: "ok"; combobox: boolean }
-  | { kind: "stale"; reason: string }
+  | ({ kind: "ok"; combobox: boolean } & DriveActTimings)
+  | ({ kind: "stale"; reason: string } & DriveActTimings)
   | { kind: "unsupported" };
+
+const ZERO_ACT_TIMINGS: DriveActTimings = { guardScriptMs: 0, guardWallMs: 0, cdpMs: 0 };
 
 interface GuardOk {
   ok: true;
   x: number;
   y: number;
   combobox: boolean;
+  scriptMs: number;
 }
 
 interface GuardFail {
   ok: false;
   reason: string;
+  scriptMs: number;
 }
 
 type GuardResult = GuardOk | GuardFail;
@@ -39,15 +49,20 @@ export function resolveDriveFrame(page: Page, ref: string): Frame {
 }
 
 function inPageGuard(input: { ref: string; kind: "click" | "type" | "select"; text?: string }): GuardResult {
+  const scriptStarted = performance.now();
+  const timed = <T extends Omit<GuardResult, "scriptMs">>(result: T): T & { scriptMs: number } => ({
+    ...result,
+    scriptMs: performance.now() - scriptStarted,
+  });
   type DriveCache = { nodes: Map<string, Element> };
   const root = window as Window & { __tsDriveRegistry?: DriveCache };
   const element = root.__tsDriveRegistry?.nodes.get(input.ref);
   if (element === undefined || !element.isConnected) {
-    return { ok: false, reason: "detached" };
+    return timed({ ok: false, reason: "detached" });
   }
   const rect = element.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) {
-    return { ok: false, reason: "no_box" };
+    return timed({ ok: false, reason: "no_box" });
   }
   let x = rect.x + rect.width / 2;
   let y = rect.y + rect.height / 2;
@@ -62,14 +77,16 @@ function inPageGuard(input: { ref: string; kind: "click" | "type" | "select"; te
   }
   const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
   if (hit === null || (hit !== element && !element.contains(hit) && !hit.contains(element))) {
-    return { ok: false, reason: "occluded" };
+    return timed({ ok: false, reason: "occluded" });
   }
   const combobox =
     element.getAttribute("role") === "combobox" ||
-    (element instanceof HTMLInputElement && element.getAttribute("aria-autocomplete") !== null);
+    element.getAttribute("role") === "searchbox" ||
+    (element instanceof HTMLInputElement &&
+      (element.type === "search" || element.getAttribute("aria-autocomplete") !== null));
   if (input.kind === "select") {
     if (!(element instanceof HTMLSelectElement)) {
-      return { ok: false, reason: "not_select" };
+      return timed({ ok: false, reason: "not_select" });
     }
     const wanted = input.text ?? "";
     const match = Array.from(element.options).find(
@@ -79,11 +96,11 @@ function inPageGuard(input: { ref: string; kind: "click" | "type" | "select"; te
         (option.textContent ?? "").trim() === wanted ||
         (option.textContent ?? "").trim().toLowerCase().includes(wanted.toLowerCase()),
     );
-    if (match === undefined) return { ok: false, reason: "option_missing" };
+    if (match === undefined) return timed({ ok: false, reason: "option_missing" });
     element.value = match.value;
     element.dispatchEvent(new Event("input", { bubbles: true }));
     element.dispatchEvent(new Event("change", { bubbles: true }));
-    return { ok: true, x, y, combobox: false };
+    return timed({ ok: true, x, y, combobox: false });
   }
   if (input.kind === "type" && (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) {
     element.focus();
@@ -98,7 +115,7 @@ function inPageGuard(input: { ref: string; kind: "click" | "type" | "select"; te
       selection.addRange(range);
     }
   }
-  return { ok: true, x, y, combobox };
+  return timed({ ok: true, x, y, combobox });
 }
 
 export async function driveActOnPage(
@@ -107,6 +124,7 @@ export async function driveActOnPage(
 ): Promise<DriveActResult> {
   if (action.kind === "scroll") {
     const direction = action.direction ?? "down";
+    const wallStarted = Date.now();
     await page.evaluate((dir) => {
       const height = innerHeight;
       if (dir === "down") scrollBy(0, Math.min(560, height));
@@ -114,20 +132,27 @@ export async function driveActOnPage(
       else if (dir === "bottom") scrollTo(0, document.documentElement.scrollHeight);
       else scrollTo(0, 0);
     }, direction);
-    return { kind: "ok", combobox: false };
+    return { kind: "ok", combobox: false, ...ZERO_ACT_TIMINGS, guardWallMs: Date.now() - wallStarted };
   }
   if (action.kind !== "click" && action.kind !== "type" && action.kind !== "select") {
     return { kind: "unsupported" };
   }
   const frame = resolveDriveFrame(page, action.target);
+  const guardStarted = Date.now();
   const guard = await frame.evaluate(inPageGuard, {
     ref: action.target,
     kind: action.kind,
     ...(action.kind === "select" || action.kind === "type" ? { text: action.text } : {}),
   });
-  if (!guard.ok) return { kind: "stale", reason: guard.reason };
-  if (action.kind === "select") return { kind: "ok", combobox: false };
+  const timings: DriveActTimings = {
+    guardScriptMs: guard.scriptMs,
+    guardWallMs: Date.now() - guardStarted,
+    cdpMs: 0,
+  };
+  if (!guard.ok) return { kind: "stale", reason: guard.reason, ...timings };
+  if (action.kind === "select") return { kind: "ok", combobox: false, ...timings };
   const context = page.context();
+  const cdpStarted = Date.now();
   const cdp = await context.newCDPSession(page);
   try {
     if (action.kind === "click") {
@@ -145,10 +170,24 @@ export async function driveActOnPage(
         button: "left",
         clickCount: 1,
       });
-      return { kind: "ok", combobox: guard.combobox };
+      return { kind: "ok", combobox: guard.combobox, ...timings, cdpMs: Date.now() - cdpStarted };
     }
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x: guard.x,
+      y: guard.y,
+      button: "left",
+      clickCount: 1,
+    });
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x: guard.x,
+      y: guard.y,
+      button: "left",
+      clickCount: 1,
+    });
     await cdp.send("Input.insertText", { text: action.text });
-    return { kind: "ok", combobox: guard.combobox };
+    return { kind: "ok", combobox: guard.combobox, ...timings, cdpMs: Date.now() - cdpStarted };
   } finally {
     await cdp.detach().catch(() => undefined);
   }
@@ -177,15 +216,20 @@ export async function settleDriveStep(
   if (combobox) {
     await page.evaluate(async (cap) => {
       const start = performance.now();
+      const visibleSuggestion = (element: Element): boolean => {
+        if (element.closest('[aria-hidden="true"],[inert]') !== null) return false;
+        if (typeof element.checkVisibility === "function") {
+          return element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+        }
+        const style = getComputedStyle(element);
+        return style.display !== "none" && style.visibility !== "hidden";
+      };
       while (performance.now() - start < cap) {
-        const options = Array.from(document.querySelectorAll('[role="option"]')).filter((element) => {
-          if (element.closest('[aria-hidden="true"],[inert]') !== null) return false;
-          if (typeof element.checkVisibility === "function") {
-            return element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
-          }
-          const style = getComputedStyle(element);
-          return style.display !== "none" && style.visibility !== "hidden";
-        });
+        const options = Array.from(
+          document.querySelectorAll(
+            '[role="option"],[role="listbox"] a,.suggestions a,.suggestion-link,.suggestions-dropdown a,[aria-selected]',
+          ),
+        ).filter(visibleSuggestion);
         if (options.length > 0) return;
         await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       }

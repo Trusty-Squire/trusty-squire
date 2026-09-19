@@ -98,6 +98,8 @@ describe("request building", () => {
     expect(operation.criteria).not.toHaveProperty("SELECT");
     expect(questions.goal_complete).toBeUndefined();
     expect(questions.next_action).toBeUndefined();
+    expect(questions.SCROLL_target).toBeUndefined();
+    expect(Object.keys(questions).sort()).toEqual(["CLICK_target", "TYPE_TEXT_target", "operation"]);
     expect(questions.TYPE_TEXT_target?.type).toBe("choice");
     expect(questions.CLICK_target?.type).toBe("choice");
     if (questions.TYPE_TEXT_target?.type !== "choice" || questions.CLICK_target?.type !== "choice") {

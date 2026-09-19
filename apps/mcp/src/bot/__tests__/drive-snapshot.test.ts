@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DRIVE_SNAPSHOT_CREDIT,
+  DRIVE_SNAPSHOT_MAX_ELEMENTS,
   driveRowsFromSnapshot,
   inferFieldFromLabel,
   snapshotSelectOptions,
@@ -20,6 +21,8 @@ function snapshot(partial: Partial<DriveSnapshot> = {}): DriveSnapshot {
     documentEpoch: "1|https://example.test/",
     elements: [],
     omittedValues: 0,
+    scriptMs: 0,
+    wallMs: 0,
     ...partial,
   };
 }
@@ -28,6 +31,7 @@ describe("drive snapshot conversion", () => {
   it("credits jev-ultrafast snapshot.js", () => {
     expect(DRIVE_SNAPSHOT_CREDIT).toContain("jev-ultrafast");
     expect(DRIVE_SNAPSHOT_CREDIT).toContain("MIT");
+    expect(DRIVE_SNAPSHOT_MAX_ELEMENTS).toBe(250);
   });
 
   it("keeps visible text labels and infers fields without slugging", () => {
@@ -73,6 +77,20 @@ describe("drive snapshot conversion", () => {
     expect(rows[1]?.[2]).toContain("Zürich, largest city in Switzerland");
     expect(rows[1]?.[2]).not.toContain("zurich-largest-city");
     expect(rows[1]?.[2]).toContain("q=1/3");
+    const suggestion = driveRowsFromSnapshot(
+      snapshot({
+        elements: [
+          {
+            ref: "@e:f0d20",
+            role: "link",
+            label: "Zurich Largest city in Switzerland",
+            operations: ["click"],
+            frameOrdinal: 0,
+          },
+        ],
+      }),
+    );
+    expect(suggestion[0]?.[2]).toContain("Zurich Largest city in Switzerland");
   });
 
   it("omits marked card values and keeps select option text", () => {

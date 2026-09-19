@@ -138,6 +138,21 @@ export interface Session {
   drive: SessionDriveState | null;
 }
 
+export interface DriveActProfile {
+  act_ms: number;
+  settle_ms: number;
+  observe_ms: number;
+  snapshot_script_ms?: number;
+  snapshot_wall_ms?: number;
+  guard_script_ms?: number;
+  guard_wall_ms?: number;
+  cdp_ms?: number;
+  prepare_ms?: number;
+  dispatch_ms?: number;
+  jev_question_count?: number;
+  jev_state_bytes?: number;
+}
+
 export interface DriveTrajectoryStep {
   action: string;
   target: string;
@@ -148,6 +163,15 @@ export interface DriveTrajectoryStep {
   act_ms?: number;
   settle_ms?: number;
   observe_ms?: number;
+  snapshot_script_ms?: number;
+  snapshot_wall_ms?: number;
+  guard_script_ms?: number;
+  guard_wall_ms?: number;
+  cdp_ms?: number;
+  prepare_ms?: number;
+  dispatch_ms?: number;
+  jev_question_count?: number;
+  jev_state_bytes?: number;
 }
 
 export interface DriveHandoffQuestion {
@@ -170,7 +194,7 @@ export interface SessionDriveState {
   staleNonWait: number;
   boundFingerprint: string | null;
   consumedActionKey: string | null;
-  lastActProfile: { act_ms: number; settle_ms: number; observe_ms: number } | null;
+  lastActProfile: DriveActProfile | null;
   maskedValueRefs?: string[];
   lastDocumentEpoch?: string | null;
   resumeCompactRows?: Array<[string, string, string?]>;

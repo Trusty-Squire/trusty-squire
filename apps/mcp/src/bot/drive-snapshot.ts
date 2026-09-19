@@ -10,6 +10,8 @@ type SnapshotRow = [string, string, string?];
 export const DRIVE_SNAPSHOT_CREDIT =
   "Drive snapshot evaluate adapted from browser-use/jev-ultrafast snapshot.js (MIT).";
 
+export const DRIVE_SNAPSHOT_MAX_ELEMENTS = 250;
+
 export interface DriveSnapshotOption {
   value: string;
   label: string;
@@ -40,11 +42,14 @@ export interface DriveSnapshot {
   documentEpoch: string;
   elements: DriveSnapshotElement[];
   omittedValues: number;
+  scriptMs: number;
+  wallMs: number;
 }
 
 interface DriveSnapshotArg {
   omitValueRefs: string[];
   frameOrdinal: number;
+  maxElements: number;
 }
 
 type DriveInPageSnapshot = {
@@ -56,6 +61,7 @@ type DriveInPageSnapshot = {
   documentEpoch: string;
   elements: DriveSnapshotElement[];
   omittedValues: number;
+  scriptMs: number;
 };
 
 const FIELD_FROM_LABEL: Array<{ test: RegExp; field: string }> = [
@@ -179,6 +185,7 @@ export function snapshotToObservation(
 }
 
 function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
+  const scriptStarted = performance.now();
   if (document.body === null) return null;
   type DriveCache = {
     ids: WeakMap<Element, number>;
@@ -281,13 +288,13 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     "spinbutton",
   ];
   const selector =
-    'a[href],button,input,textarea,select,summary,[contenteditable="true"],' +
+    'a[href],a.suggestion-link,button,input,textarea,select,summary,[contenteditable="true"],' +
     roles.map((role) => `[role="${role}"]`).join(",");
   const roleOf = (element: Element): string | null => {
     const explicit = element.getAttribute("role");
     if (explicit !== null && roles.includes(explicit)) return explicit;
     if (element.tagName === "BUTTON" || element.tagName === "SUMMARY") return "button";
-    if (element.tagName === "A") return "link";
+    if (element.tagName === "A" || element.classList.contains("suggestion-link")) return "link";
     if (element.tagName === "SELECT") return "combobox";
     if (element.tagName === "TEXTAREA" || (element instanceof HTMLElement && element.isContentEditable)) {
       return "textbox";
@@ -301,7 +308,8 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     }
     return null;
   };
-  const elements: DriveSnapshotElement[] = [];
+  const inView: DriveSnapshotElement[] = [];
+  const offscreenControls: DriveSnapshotElement[] = [];
   let omittedValues = 0;
   for (const element of Array.from(document.querySelectorAll(selector))) {
     if (!safe(element) || !visible(element)) continue;
@@ -315,6 +323,20 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       rect.top < innerHeight &&
       rect.right > 0 &&
       rect.left < innerWidth;
+    const keepOffscreen =
+      role === "button" ||
+      role === "textbox" ||
+      role === "searchbox" ||
+      role === "spinbutton" ||
+      role === "checkbox" ||
+      role === "radio" ||
+      role === "combobox" ||
+      element.tagName === "SELECT";
+    const pinned =
+      element.closest(
+        "header,nav,footer,[role='banner'],[role='navigation'],[role='contentinfo']",
+      ) !== null;
+    if (!inViewport && !keepOffscreen && !pinned) continue;
     const ref = identity(element);
     const label = name(element) || role;
     const disabled =
@@ -389,8 +411,10 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
       ...(inViewport ? {} : { offscreen: true }),
       ...(options === undefined ? {} : { options }),
     };
-    elements.push(row);
+    if (inViewport) inView.push(row);
+    else offscreenControls.push(row);
   }
+  const elements = [...inView, ...offscreenControls].slice(0, arg.maxElements);
   const headings: string[] = [];
   for (const heading of Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6"))) {
     if (!visible(heading)) continue;
@@ -413,7 +437,14 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     ) {
       range.selectNodeContents(node);
       const rect = range.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) {
+      if (
+        rect.width > 0 &&
+        rect.height > 0 &&
+        rect.bottom > 0 &&
+        rect.top < innerHeight &&
+        rect.right > 0 &&
+        rect.left < innerWidth
+      ) {
         words.push(value);
         length += value.length;
       }
@@ -443,6 +474,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     documentEpoch: `${performance.timeOrigin}|${location.href}`,
     elements,
     omittedValues,
+    scriptMs: performance.now() - scriptStarted,
   };
 }
 
@@ -451,11 +483,15 @@ export async function captureFrameSnapshot(
   omitValueRefs: readonly string[],
   frameOrdinal: number,
 ): Promise<DriveSnapshot | null> {
+  const wallStarted = Date.now();
   const raw = await target.evaluate(inPageSnapshot, {
     omitValueRefs: [...omitValueRefs],
     frameOrdinal,
+    maxElements: DRIVE_SNAPSHOT_MAX_ELEMENTS,
   });
-  return raw;
+  const wallMs = Date.now() - wallStarted;
+  if (raw === null) return null;
+  return { ...raw, wallMs };
 }
 
 export function mergeSnapshots(parts: readonly DriveSnapshot[]): DriveSnapshot {
@@ -469,6 +505,8 @@ export function mergeSnapshots(parts: readonly DriveSnapshot[]): DriveSnapshot {
       documentEpoch: "",
       elements: [],
       omittedValues: 0,
+      scriptMs: 0,
+      wallMs: 0,
     };
   }
   const main = parts[0]!;
@@ -485,6 +523,8 @@ export function mergeSnapshots(parts: readonly DriveSnapshot[]): DriveSnapshot {
     documentEpoch: main.documentEpoch,
     elements,
     omittedValues: parts.reduce((sum, part) => sum + part.omittedValues, 0),
+    scriptMs: parts.reduce((sum, part) => sum + part.scriptMs, 0),
+    wallMs: parts.reduce((sum, part) => sum + part.wallMs, 0),
   };
 }
 
