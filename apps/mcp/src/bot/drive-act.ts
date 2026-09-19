@@ -9,7 +9,6 @@ import type { ProvisionAction } from "./provision-session.js";
 export const DRIVE_SETTLE_MS = 50;
 export const DRIVE_COMBOBOX_WAIT_MS = 400;
 export const DRIVE_OVERLAY_REFRESH_WAIT_MS = 2000;
-export const DRIVE_NAVIGATION_WAIT_MS = 300;
 
 export type DriveActTimings = {
   guardScriptMs: number;
@@ -499,48 +498,11 @@ export async function documentEpochOf(page: Page): Promise<string> {
   }
 }
 
-export async function pageFingerprintOf(page: Page): Promise<string> {
-  try {
-    return await evaluateBound(page, () => {
-      const text = document.body?.innerText.slice(0, 6000) ?? "";
-      const controls = Array.from(
-        document.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
-          "input,select,textarea",
-        ),
-      )
-        .map((element) => `${element.tagName}:${element.type}:${element.value}`)
-        .join("\n");
-      return [location.href, document.title, text, controls].join("\n");
-    });
-  } catch {
-    return "";
-  }
-}
-
 export function documentOriginOf(epoch: string): string {
   const bar = epoch.indexOf("|");
   return bar === -1 ? epoch : epoch.slice(0, bar);
 }
 
-export async function waitForNavigationIdle(page: Page, beforeFingerprint: string): Promise<void> {
-  await evaluateBound(
-    page,
-    async ({ before, cap }) => {
-      const fingerprint = (): string => {
-        const text = document.body?.innerText.slice(0, 6000) ?? "";
-        const controls = Array.from<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
-          document.querySelectorAll("input,select,textarea"),
-        )
-          .map((element) => `${element.tagName}:${element.type}:${element.value}`)
-          .join("\n");
-        return [location.href, document.title, text, controls].join("\n");
-      };
-      const started = performance.now();
-      while (performance.now() - started < cap) {
-        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-        if (fingerprint() !== before) return;
-      }
-    },
-    { before: beforeFingerprint, cap: DRIVE_NAVIGATION_WAIT_MS },
-  ).catch(() => undefined);
+export async function waitForNavigationIdle(page: Page): Promise<void> {
+  await page.waitForLoadState("networkidle", { timeout: 3000 }).catch(() => undefined);
 }
