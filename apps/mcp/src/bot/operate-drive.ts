@@ -11,8 +11,8 @@
 //
 // Confidence: no gates anywhere, including DONE. Validation of the answer
 // shape stays. The purchase approval is the payment gate. Safety net is
-// validate_choice, fingerprint-bound consume-once, and three-strike /
-// same-ref no-progress.
+// validate_choice, fingerprint-bound consume-once, and three consecutive
+// non-wait actions with no page change (re-snapshot once before a strike).
 
 import { appendFileSync } from "node:fs";
 import type { Page } from "playwright";
@@ -97,6 +97,7 @@ export const DRIVE_MAX_JEV_CALLS = 120;
 export const DRIVE_MAX_CANDIDATES = 250;
 export const DRIVE_WAIT_MS = 1500;
 export const DRIVE_STALE_LIMIT = 3;
+export const DRIVE_IDENTICAL_RESNAP_MS = 200;
 export const DRIVE_FIXED_DONE = "DONE";
 export const DRIVE_FIXED_STUCK = "BLOCKED";
 export const DRIVE_FIXED_NONE = "none";
@@ -139,7 +140,7 @@ export const DRIVE_RULES: readonly string[] = [
 ];
 // Drive rules above adapt browser-use/jev-ultrafast (MIT) NEXT_ACTION / TARGET prose.
 
-const FILLABLE_ROLES = new Set(["t", "s", "textbox", "select"]);
+const FILLABLE_ROLES = new Set(["t", "s", "textbox", "searchbox", "select"]);
 const CLICKABLE_ROLES = new Set([
   "b",
   "button",
@@ -153,17 +154,20 @@ const CLICKABLE_ROLES = new Set([
   "tab",
   "m",
   "menuitem",
+  "combobox",
 ]);
 const ROLE_LETTERS: Record<string, string> = {
   button: "b",
   link: "l",
   textbox: "t",
+  searchbox: "t",
   select: "s",
   checkbox: "c",
   radio: "r",
   tab: "tb",
   menuitem: "m",
   file: "f",
+  combobox: "combobox",
 };
 
 const ROLE_WORDS: Record<string, string> = {
@@ -173,6 +177,8 @@ const ROLE_WORDS: Record<string, string> = {
   link: "link",
   t: "textbox",
   textbox: "textbox",
+  searchbox: "textbox",
+  combobox: "combobox",
   s: "select",
   select: "select",
   c: "checkbox",
@@ -380,6 +386,24 @@ function progressFingerprint(
   return observationFingerprint(url, rows, fieldState);
 }
 
+function sleepDrive(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(signal.reason ?? new Error("operator_request_cancelled"));
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    if (signal === undefined) return;
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(signal.reason ?? new Error("operator_request_cancelled"));
+      },
+      { once: true },
+    );
+  });
+}
+
 function driveTraceEnabled(): boolean {
   const path = process.env.DRIVE_TRACE_PATH;
   return path !== undefined && path.length > 0;
@@ -574,6 +598,9 @@ const FIELD_ALIASES: Record<string, readonly string[]> = {
   password: ["password", "password_label"],
   otp: ["otp", "code", "verification_code", "pin"],
   query: ["query", "q", "search", "search_query", "keywords"],
+  origin: ["origin", "from", "departure", "where_from"],
+  destination: ["destination", "to", "arrival", "where_to"],
+  date: ["date", "departure_date", "depart_date"],
 };
 
 function normalizeKey(value: string): string {
@@ -627,6 +654,12 @@ export function matchingFactKeys(facts: Record<string, string>, row: WireRow): s
   }
   if (label.includes("search") || normalizeKey(fieldNameForRow(row)).includes("search")) {
     for (const alias of aliasKeysFor("query")) wanted.add(alias);
+  }
+  if (label.includes("where_from") || label.includes("origin") || label.includes("leaving_from")) {
+    for (const alias of aliasKeysFor("origin")) wanted.add(alias);
+  }
+  if (label.includes("where_to") || label.includes("destination") || label.includes("going_to")) {
+    for (const alias of aliasKeysFor("destination")) wanted.add(alias);
   }
   return keys.filter((key) => wanted.has(normalizeKey(key)));
 }
@@ -1598,9 +1631,6 @@ export function decideAfterJev(input: {
           ...sets.SCROLL,
         ])?.ref ?? targetChoice);
 
-  if (input.lastFingerprint === input.fingerprint && input.lastActionKey === actionKey) {
-    return { kind: "no_progress" };
-  }
   if (
     input.boundFingerprint === input.fingerprint &&
     input.consumedActionKey !== undefined &&
@@ -1679,7 +1709,16 @@ export function decideAfterJev(input: {
   }
   if (choice === "SELECT") {
     const key = matchingFactKeys(input.facts, row)[0];
-    const text = candidate.option ?? (key === undefined ? undefined : input.facts[key]);
+    let text = candidate.option ?? (key === undefined ? undefined : input.facts[key]);
+    if (text === undefined && !isIdentityOrPaymentRow(row)) {
+      const pageOptions = input.pageOptions ?? new Map();
+      const offered = [
+        ...(pageOptions.get(ref) ?? []),
+        ...(pageOptions.get(readableLabel(row).toLowerCase()) ?? []),
+      ];
+      const phrases = new Set(goalValuePhrases(input.goal).map((phrase) => normalizeKey(phrase)));
+      text = offered.find((option) => phrases.has(normalizeKey(option)));
+    }
     if (text === undefined) {
       return { kind: "needs_value", field: fieldLabelForRow(row) };
     }
@@ -2313,6 +2352,24 @@ async function driveLoop(input: {
   const framesIfNeeded = (): boolean =>
     drive.facts.card_ref !== undefined &&
     (paymentFields(rows).pan === undefined || isCheckoutUrl(observation.url));
+  const noteProgress = async (
+    fingerprint: string,
+    nextFingerprint: string,
+    actionKey: string,
+  ): Promise<DriveHandoff | "continue"> => {
+    let confirmed = nextFingerprint;
+    if (confirmed === fingerprint) {
+      await sleepDrive(DRIVE_IDENTICAL_RESNAP_MS, context?.signal);
+      const snap = await snapshotOrTimeout(framesIfNeeded());
+      if (snap !== "ok") return snap;
+      confirmed = progressFingerprint(observation.url, rows, drive, session);
+    }
+    drive.staleNonWait = confirmed === fingerprint ? drive.staleNonWait + 1 : 0;
+    drive.lastFingerprint = confirmed;
+    drive.lastActionKey = actionKey;
+    if (drive.staleNonWait >= DRIVE_STALE_LIMIT) return finish("no_progress");
+    return "continue";
+  };
 
   const applyDecision = async (decision: DriveDecision, jevMs?: number): Promise<DriveHandoff | "continue"> => {
     if (decision.kind === "complete") {
@@ -2399,15 +2456,7 @@ async function driveLoop(input: {
       drive.consumedActionKey = null;
       return "continue";
     }
-    if (
-      noProgressDecision({
-        fingerprint,
-        lastFingerprint: drive.lastFingerprint,
-        actionKey: decision.actionKey,
-        lastActionKey: drive.lastActionKey,
-      }) ||
-      (drive.boundFingerprint === fingerprint && drive.consumedActionKey === decision.actionKey)
-    ) {
+    if (drive.boundFingerprint === fingerprint && drive.consumedActionKey === decision.actionKey) {
       return finish("no_progress");
     }
     drive.consumedActionKey = decision.actionKey;
@@ -2466,11 +2515,7 @@ async function driveLoop(input: {
       });
       drive.history.push("inject card");
       const nextFingerprint = progressFingerprint(observation.url, rows, drive, session);
-      drive.staleNonWait = nextFingerprint === fingerprint ? drive.staleNonWait + 1 : 0;
-      drive.lastFingerprint = nextFingerprint;
-      drive.lastActionKey = decision.actionKey;
-      if (drive.staleNonWait >= DRIVE_STALE_LIMIT) return finish("no_progress");
-      return "continue";
+      return await noteProgress(fingerprint, nextFingerprint, decision.actionKey);
     }
 
     if (decision.special === "inbox") {
@@ -2519,11 +2564,7 @@ async function driveLoop(input: {
       });
       drive.history.push(verification.code !== null ? "type verification code" : "open verification link");
       const nextFingerprint = progressFingerprint(observation.url, rows, drive, session);
-      drive.staleNonWait = nextFingerprint === fingerprint ? drive.staleNonWait + 1 : 0;
-      drive.lastFingerprint = nextFingerprint;
-      drive.lastActionKey = decision.actionKey;
-      if (drive.staleNonWait >= DRIVE_STALE_LIMIT) return finish("no_progress");
-      return "continue";
+      return await noteProgress(fingerprint, nextFingerprint, decision.actionKey);
     }
 
     const historyLine = (() => {
@@ -2601,11 +2642,7 @@ async function driveLoop(input: {
       fingerprint_after: nextFingerprint,
       ...(driveTraceEnabled() ? { native_selects_after: await nativeSelectSnapshot(session) } : {}),
     });
-    drive.staleNonWait = nextFingerprint === fingerprint ? drive.staleNonWait + 1 : 0;
-    drive.lastFingerprint = nextFingerprint;
-    drive.lastActionKey = decision.actionKey;
-    if (drive.staleNonWait >= DRIVE_STALE_LIMIT) return finish("no_progress");
-    return "continue";
+    return await noteProgress(fingerprint, nextFingerprint, decision.actionKey);
   };
 
   if (args.answer !== undefined) {

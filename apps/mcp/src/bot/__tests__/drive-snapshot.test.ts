@@ -43,6 +43,8 @@ describe("drive snapshot conversion", () => {
   it("keeps visible text labels and infers fields without slugging", () => {
     expect(inferFieldFromLabel("Zürich, largest city in Switzerland", "link")).toBeUndefined();
     expect(inferFieldFromLabel("Search Wikipedia", "searchbox")).toBe("search");
+    expect(inferFieldFromLabel("Where from?", "combobox")).toBe("origin");
+    expect(inferFieldFromLabel("Where to?", "combobox")).toBe("destination");
     expect(inferFieldFromLabel("Card number", "textbox")).toBe("payment");
     const rows = driveRowsFromSnapshot(
       snapshot({
@@ -145,5 +147,23 @@ describe("drive snapshot conversion", () => {
       }),
     );
     expect(options.get("@e:f0d8")).toEqual(["California", "Oregon"]);
+  });
+
+  it("maps a fillable combobox to a text field, not a select", () => {
+    const rows = driveRowsFromSnapshot(
+      snapshot({
+        elements: [
+          {
+            ref: "@e:q",
+            role: "combobox",
+            label: "Search with DuckDuckGo",
+            operations: ["fill", "click"],
+            frameOrdinal: 0,
+          },
+        ],
+      }),
+    );
+    expect(rows[0]?.[1]).toBe("t");
+    expect(rows[0]?.[2]).toContain("f=search");
   });
 });
