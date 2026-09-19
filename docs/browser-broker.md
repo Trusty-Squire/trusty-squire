@@ -63,6 +63,12 @@ without claiming the window and retries (500 ms, bounded by
 Only a deadline that passes with sessions still running is an error, and it
 names the profile and the retry step.
 
+The window stays owned for the whole of the teardown that follows it — the
+credential refresh, the runtime resume, and the re-taken profile lease — not
+just until `close{}` arrives. A concurrent maintain connect is answered
+`maintenance` (retryable) throughout, so a retry can never be handed a `ready`
+for a browser the previous owner is still taking back.
+
 The maintenance endpoint is derived from the profile the caller is about to
 guard, not from the launch-time default. `connect` resolves its target's
 recorded profile and re-points `TRUSTY_SQUIRE_PROFILE_DIR` before any broker or

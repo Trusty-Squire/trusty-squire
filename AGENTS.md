@@ -897,10 +897,14 @@ exclusively while a broker owns it. A `draining` answer is retried, not fatal.
 
 Corollaries: a close that cannot drain must not leave
 `BrokerRuntime.closing` set (that refuses every later session while the blocking
-sessions keep the broker alive), and a maintenance connect answered `draining`
-must not arm the daemon's post-maintenance credential refresh/terminate path.
+sessions keep the broker alive); a maintenance connect answered `draining`
+must not arm the daemon's post-maintenance credential refresh/terminate path;
+and a connect that DID drain keeps the maintenance window owned across that
+whole teardown, so the retry loop can never be answered `ready` mid-restore and
+race the restore for the profile.
 `apps/mcp/src/bot/__tests__/broker-connect-attach.test.ts` is the regression
-oracle for the attach; `broker-maintenance.test.ts`, `broker-daemon.test.ts`,
+oracle for the attach, `broker-maintenance-window.test.ts` for the held window;
+`broker-maintenance.test.ts`, `broker-daemon.test.ts`,
 and `broker-prior-contract-reclaim.test.ts` pin the rest.
 
 Stale-artifact sweep: the startup `sweepOrphanedOwnerProcesses`

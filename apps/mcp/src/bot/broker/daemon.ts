@@ -134,14 +134,21 @@ export async function runBrokerDaemon(): Promise<void> {
     operator.refreshCredentials(refreshed);
     runtime.resume();
     runtime.claimProfile();
+    maintenanceDrained = false;
     maintenanceOwner = undefined;
   };
   const releaseMaintenanceLease = async (clientId: string): Promise<void> => {
     if (maintenanceOwner !== clientId) return;
-    const drained = maintenanceDrained;
-    maintenanceOwner = undefined;
-    maintenanceDrained = false;
-    if (!drained) return;
+    // A connect answered `draining` closed nothing, so it owes no teardown:
+    // free the window at once so the client's retry can have it.
+    if (!maintenanceDrained) {
+      maintenanceOwner = undefined;
+      return;
+    }
+    // A drained one keeps the window until the browser is back. Freeing it any
+    // earlier hands a concurrent maintain connect a `ready` the restore below
+    // then takes away — the retry and the restore race for the profile, which
+    // is the ProfileBusyError this whole path exists to avoid.
     const outcome = await completeMaintenanceCredentialRefresh({
       profileIsFree: await waitForProfileFree(CHROME_PROFILE_DIR, { deadlineMs: 0 }),
       restore: restoreMaintenance,
@@ -150,6 +157,7 @@ export async function runBrokerDaemon(): Promise<void> {
     // Profile still busy, or restore/refresh failed: exit the drained broker
     // rather than keep authenticating the pre-maintenance digest. The next
     // operator attach launches a daemon that reads the current token.
+    maintenanceDrained = false;
     maintenanceOwner = undefined;
     exitAfterMaintenance = true;
   };

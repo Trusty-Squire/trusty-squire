@@ -90,6 +90,34 @@ describe("plain-login broker maintenance over the connect path", () => {
     expect(events).toContain("close");
   });
 
+  it("still waits out live sessions when the drain-wait variable is blank", async () => {
+    // Blanking an env var is how a shell profile or an MCP config env block
+    // neutralizes it. That must mean "unset" — coercing it to a zero deadline
+    // would make the first `draining` answer fatal again.
+    const root = await mkdtemp(join(tmpdir(), "ts-maint-blank-"));
+    const path = join(root, "b.sock");
+    let connects = 0;
+    const broker = await listenBroker(path, {
+      authenticate: async () => ({ accountId: "account", agentId: "connect" }),
+      connected: async () => {
+        connects += 1;
+        return connects === 1 ? { maintenance: "draining" } : { maintenance: "ready" };
+      },
+      call: async () => ({ closed: true }),
+      disconnect: async () => undefined,
+    });
+    vi.stubEnv("TRUSTY_SQUIRE_BROKER_SOCKET", path);
+    vi.stubEnv("TRUSTY_SQUIRE_MAINTENANCE_DRAIN_WAIT_MS", "");
+    try {
+      await expect(withBrokerMaintenance(async () => "plain-login")).resolves.toBe("plain-login");
+    } finally {
+      vi.unstubAllEnvs();
+      await broker.close();
+      await rm(root, { recursive: true, force: true });
+    }
+    expect(connects).toBe(2);
+  });
+
   it("reports the profile when live sessions never release the browser", async () => {
     const root = await mkdtemp(join(tmpdir(), "ts-maint-stuck-"));
     const path = join(root, "b.sock");

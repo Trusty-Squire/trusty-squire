@@ -26,7 +26,12 @@ export const MAINTENANCE_DRAIN_WAIT_MS = 120_000;
 const MAINTENANCE_DRAIN_RETRY_MS = 500;
 
 export function maintenanceDrainWaitMs(env: NodeJS.ProcessEnv = process.env): number {
-  const configured = Number(env.TRUSTY_SQUIRE_MAINTENANCE_DRAIN_WAIT_MS);
+  // An absent or blank value is "unset", not zero: neutralizing the variable in
+  // a shell profile or an MCP config env block must not silently turn every
+  // `draining` answer back into an immediate failure.
+  const raw = env.TRUSTY_SQUIRE_MAINTENANCE_DRAIN_WAIT_MS?.trim();
+  if (raw === undefined || raw === "") return MAINTENANCE_DRAIN_WAIT_MS;
+  const configured = Number(raw);
   return Number.isFinite(configured) && configured >= 0 ? configured : MAINTENANCE_DRAIN_WAIT_MS;
 }
 
