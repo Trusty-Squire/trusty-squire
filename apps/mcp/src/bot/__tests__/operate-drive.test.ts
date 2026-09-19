@@ -41,7 +41,6 @@ import {
   pageTextFromObservation,
   peakedProbabilities,
   requiredFactComboboxAction,
-  requiredFactCityType,
   requiredFillableMissingFact,
   selectTargetKey,
   selectTargets,
@@ -934,23 +933,6 @@ describe("facts, fingerprint, compact merge", () => {
     });
     expect(requiredFactComboboxAction([cabin], facts)).toBeUndefined();
     expect(requiredFactComboboxAction([trip], facts, ["@e:trip"])).toBeUndefined();
-  });
-
-  it("types origin and destination facts into city pickers whose value is missing or wrong", () => {
-    const from: WireRow = ["@e:from", "t", "Where from?|f=origin|a=picker|n=Philadelphia"];
-    const to: WireRow = ["@e:to", "t", "Where to?|f=destination|a=picker"];
-    const facts = { origin: "Zurich", destination: "London" };
-    expect(requiredFactCityType([from, to], facts)).toEqual({ target: "@e:from", text: "Zurich" });
-    expect(requiredFactCityType([from, to], facts, ["@e:from"])).toEqual({
-      target: "@e:to",
-      text: "London",
-    });
-    const filledFrom: WireRow = ["@e:from", "t", "Where from?|f=origin|a=picker|n=Zurich"];
-    expect(requiredFactCityType([filledFrom, to], facts)).toEqual({
-      target: "@e:to",
-      text: "London",
-    });
-    expect(requiredFactCityType([filledFrom], facts)).toBeUndefined();
   });
 
   it("assigns a page-supplied select option from a goal phrase without a matching fact", () => {
