@@ -1,10 +1,7 @@
 import { resolveBrokerSocket } from "./bot/broker/discovery.js";
 import { randomUUID } from "node:crypto";
 import { BrokerRefusal } from "./bot/broker/refusal.js";
-import {
-  ForwardedResultError,
-  OperatorForwarder,
-} from "./bot/broker/forwarder.js";
+import { ForwardedResultError, OperatorForwarder } from "./bot/broker/forwarder.js";
 // MCP server: reads its account's session from the session file, sets up an ApiClient
 // against the configured API base URL, and exposes the registered tools
 // over stdio.
@@ -27,7 +24,10 @@ import {
   composeOperatorSignals,
   withOperatorRequestContext,
 } from "./bot/request-cancellation.js";
-import { maskOperatorSessionOutput, UnknownProvisionSessionError } from "./bot/provision-session.js";
+import {
+  maskOperatorSessionOutput,
+  UnknownProvisionSessionError,
+} from "./bot/provision-session.js";
 import {
   heartbeatIntervalMs,
   idleCheckIntervalMs,
@@ -447,9 +447,20 @@ function errorContent(code: string, message: string, guidance?: Record<string, u
 // terminal teardown, and no security gate depends on process death — a crash
 // leaves any half-done page action in exactly the same state, minus the
 // transport. Installed only for `mcp server`; the CLI keeps fail-fast.
-export function installServerProcessGuards(): void {
+export function installServerProcessGuards(
+  onOutputFailure: () => void = () => process.exit(0),
+): void {
   const describe = (reason: unknown): string =>
     reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+  const outputFailed = (): void => {
+    onOutputFailure();
+  };
+  // A dead stdio peer closes the read ends of stdout/stderr. Without explicit
+  // listeners, Node promotes the resulting EPIPE to uncaughtException; the
+  // handler below then writes that exception to the same broken stderr and
+  // enters a tight EPIPE loop. Treat output failure as transport loss instead.
+  process.stdout.on("error", outputFailed);
+  process.stderr.on("error", outputFailed);
   process.on("unhandledRejection", (reason) => {
     process.stderr.write(
       `[trusty-squire] unhandled rejection (server kept alive): ${describe(reason)}\n`,
@@ -465,7 +476,12 @@ export function installServerProcessGuards(): void {
 // Start the MCP stdio server. Throws on a fatal startup failure; bin.ts
 // owns the process-level error handling.
 export async function runServer(): Promise<void> {
-  installServerProcessGuards();
+  let outputFailed = false;
+  let shutdownAfterOutputFailure: (() => void) | undefined;
+  installServerProcessGuards(() => {
+    outputFailed = true;
+    shutdownAfterOutputFailure?.();
+  });
   // Startup breadcrumb on stderr (which lands in the host agent's MCP
   // log). A silent no-op was the worst part of the entrypoint-guard
   // bug — this line makes "did the server actually start?" answerable
@@ -657,5 +673,7 @@ export async function runServer(): Promise<void> {
   staleInstanceSweepTimer = setInterval(sweepStaleInstances, heartbeatIntervalMs());
   staleInstanceSweepTimer.unref();
 
+  shutdownAfterOutputFailure = requestShutdown;
+  if (outputFailed) requestShutdown();
   await server.connect(transport);
 }
