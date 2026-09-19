@@ -3,13 +3,13 @@
 // Every layer has its own word for busy and its own refusal code. Folding them
 // from outside is what produces a confident answer about the wrong layer: a
 // live socket does not say whose Chrome holds the profile lease, and the
-// connect maintenance window is not observable at all from another process.
-// This is the only place all four are visible at the same instant.
+// custody drain state is not observable from the socket alone.
+// The availability contract is owned by docs/browser-broker.md (Busy façade).
 
 import type { StatusResult } from "./protocol.js";
 
 export interface BrokerBusyInputs {
-  /** A connect login owns the maintenance window on this broker. */
+  /** Retained fold input; the daemon passes false since Connect shares ordinary tabs. */
   maintenanceOwned: boolean;
   /** Custody is draining the identity cell. */
   draining: boolean;

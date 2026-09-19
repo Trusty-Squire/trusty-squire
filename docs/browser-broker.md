@@ -256,10 +256,10 @@ Implementation entry points: `src/bot/broker/daemon.ts`, `discovery.ts`,
 
 ## Busy façade
 
-The four layers above each answer "is the browser in use" in their own terms:
-tab families (`runtime.ts`), the profile election / SingletonLock lease
-(`profile.ts`), connect's maintenance window (`daemon.ts`), and the custody
-latch (`custody.ts`). A second consumer imports one fold from
+Browser availability depends on the profile election / SingletonLock lease
+(`profile.ts`) and custody (`custody.ts`); live tab families (`runtime.ts`)
+share the browser. Connect holds an ordinary tab family, not a maintenance
+window. A second consumer imports one fold from
 `@trusty-squire/mcp/browser` (`apps/mcp/src/browser-busy.ts`):
 
 ```ts
@@ -290,17 +290,17 @@ the cancelled call keeps the session lease until it returns — so a caller who
 wants a bound should pass `AbortSignal.timeout(ms)` knowing that, rather than
 receive one it never asked for.
 
-**The broker answers the busy question, because it is the only side that sees
-all four layers at the same instant.** `status` is a read-only Contract B
-operation returning `StatusResult`; `brokerBusyStatus` (`broker/status.ts`)
-computes it from the maintenance window, custody's drain state, the profile
+**The broker answers the busy question from its custody and profile state.**
+`status` is a read-only Contract B operation returning `StatusResult`;
+`brokerBusyStatus` (`broker/status.ts`) uses custody's drain state, the profile
 lock holder, and whether the Chrome holding that lock is the broker's own.
+The daemon supplies `maintenanceOwned: false`; the retained `maintenance`
+refusal code still describes an identity cell that is draining.
 Live tab families are not an input: the broker multiplexes them on one shared
 Chrome, so no number of them can produce a busy answer. `browserBusy()` is a
 thin client of that call. A client cannot fold this from outside — a live
-socket says nothing about whose Chrome holds the lease, and the maintenance
-window is broker-local state, so inferring "not busy" from a listener
-contradicted `openTab` at the same instant.
+socket says nothing about whose Chrome holds the lease or whether custody is
+draining, so a listener alone cannot establish availability.
 
 The result carries the refusal `code` the same condition would produce on
 `open`, and the client maps code to layer; the wire deliberately carries no

@@ -107,11 +107,8 @@ export interface CloseResult {
 }
 
 /**
- * status: "is the browser in use", answered ONCE by the side that can see all
- * four layers at the same instant — tab families, the profile lease and its
- * holder, the connect maintenance window, and custody. A client cannot fold
- * these from outside: a live socket says nothing about whose Chrome holds the
- * lease, and the maintenance window is broker-local state. Read-only.
+ * Read-only broker availability. The custody/profile fold is defined in
+ * docs/browser-broker.md (Busy façade); a live socket alone cannot answer it.
  */
 export interface StatusResult {
   busy: boolean;
