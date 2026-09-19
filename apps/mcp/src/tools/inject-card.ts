@@ -41,7 +41,13 @@ const inputSchema = z.object({
     .strict(),
 });
 
-type InjectCardInput = z.infer<typeof inputSchema>;
+export type InjectCardInput = z.infer<typeof inputSchema>;
+
+export interface InjectCardCallOptions {
+  signal?: AbortSignal;
+  notifyUser?: (message: string, data?: Record<string, unknown>) => Promise<void>;
+  pollBudgetMs?: number;
+}
 
 function cloneCard(card: CheckoutCard): CheckoutCard {
   return {
@@ -174,89 +180,99 @@ export const injectCardTool: Tool<InjectCardInput> = {
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   async handler(args, api, context) {
     assertApi(api);
-    return await withPaymentSessionCall(args.session_id, async (session) => {
-      if (session.releasedPaymentCard !== null) return await injectReleasedCard(session, args);
-      if (args.approval_id !== undefined) {
-        const pending = session.activePayment;
-        if (
-          pending?.status !== "awaiting_approval" ||
-          pending.state.approval_id !== args.approval_id
-        ) {
-          throw new Error("approval_id is not resumable in this session");
-        }
-      }
-      const resumeFrom: PendingApprovalWait | undefined =
-        session.activePayment?.status === "awaiting_approval"
-          ? session.activePayment.state
-          : undefined;
-      const controller = session.browser;
-      let releasedCard: CheckoutCard | null = null;
-      let fieldResults: Record<InjectCardField, InjectCardFieldResult> | null = null;
-      let filled: ReleasedCardApproval | null = null;
-      const releaseBrowser: CardReleaseBrowser = {
-        injectCardFields: async (card) => {
-          releasedCard = cloneCard(card);
-          fieldResults = await injectCardIntoSessionTargets(session.id, card, args.fields);
-        },
-        currentUrl: () => controller.currentUrl(),
-      };
-      const result = await executeCardReleaseApproval(
-        {
-          merchant: args.merchant,
-          amount_cents: args.amount_cents,
-          currency: args.currency,
-          item: args.item,
-          reason: args.reason,
-          card_ref: args.card_ref,
-        },
-        api as ApiClient,
-        releaseBrowser,
-        {
-          ...(resumeFrom === undefined ? {} : { resumeFrom }),
+    return await withPaymentSessionCall(
+      args.session_id,
+      async (session) =>
+        await injectCardOnSession(session, args, api as ApiClient, {
           ...(context?.signal === undefined ? {} : { signal: context.signal }),
-          pollBudgetMs: APPROVAL_WAIT_MS,
-          surfaceApprovalUrl: async (url) => {
-            await context?.notifyUser?.(`Approve this purchase on your phone: ${url}`, {
-              approval_url: url,
-            });
-          },
-          onApprovalPending: (state) => {
-            session.activePayment = { status: "awaiting_approval", state };
-          },
-          onApprovalTerminal: () => {
-            session.activePayment = null;
-          },
-          onCardFilled: (pending) => {
-            filled = pending;
-          },
-        },
-      );
-      if (releasedCard === null || fieldResults === null || filled === null) {
-        return pendingResult(session, result);
-      }
-      const approved = filled as ReleasedCardApproval;
-      session.releasedPaymentCard = {
-        approvalId: approved.approval_id,
-        approvalUrl: approved.approval_url,
-        checkout: approved.checkout,
-        cardRef: approved.card_ref,
-        last4: approved.last4,
-        deadline: approved.deadline ?? Date.now() + 5 * 60_000,
-        card: releasedCard,
-      };
-      session.activePayment = null;
-      return cardInjectedResult(
-        session,
-        args,
-        {
-          approvalId: approved.approval_id,
-          approvalUrl: approved.approval_url,
-          checkout: approved.checkout,
-          last4: approved.last4,
-          card: releasedCard,
-        },
-        fieldResults,
-      );
-    });
+          ...(context?.notifyUser === undefined ? {} : { notifyUser: context.notifyUser }),
+        }),
+    );
   },
 };
+
+/** The inject_card implementation. operate_drive calls this on the card step. */
+export async function injectCardOnSession(
+  session: Session,
+  args: InjectCardInput,
+  api: ApiClient,
+  options: InjectCardCallOptions = {},
+): Promise<Record<string, unknown>> {
+  if (session.releasedPaymentCard !== null) return await injectReleasedCard(session, args);
+  if (args.approval_id !== undefined) {
+    const pending = session.activePayment;
+    if (pending?.status !== "awaiting_approval" || pending.state.approval_id !== args.approval_id) {
+      throw new Error("approval_id is not resumable in this session");
+    }
+  }
+  const resumeFrom: PendingApprovalWait | undefined =
+    session.activePayment?.status === "awaiting_approval" ? session.activePayment.state : undefined;
+  const controller = session.browser;
+  let releasedCard: CheckoutCard | null = null;
+  let fieldResults: Record<InjectCardField, InjectCardFieldResult> | null = null;
+  let filled: ReleasedCardApproval | null = null;
+  const releaseBrowser: CardReleaseBrowser = {
+    injectCardFields: async (card) => {
+      releasedCard = cloneCard(card);
+      fieldResults = await injectCardIntoSessionTargets(session.id, card, args.fields);
+    },
+    currentUrl: () => controller.currentUrl(),
+  };
+  const result = await executeCardReleaseApproval(
+    {
+      merchant: args.merchant,
+      amount_cents: args.amount_cents,
+      currency: args.currency,
+      item: args.item,
+      reason: args.reason,
+      card_ref: args.card_ref,
+    },
+    api,
+    releaseBrowser,
+    {
+      ...(resumeFrom === undefined ? {} : { resumeFrom }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      pollBudgetMs: options.pollBudgetMs ?? APPROVAL_WAIT_MS,
+      surfaceApprovalUrl: async (url) => {
+        await options.notifyUser?.(`Approve this purchase on your phone: ${url}`, {
+          approval_url: url,
+        });
+      },
+      onApprovalPending: (state) => {
+        session.activePayment = { status: "awaiting_approval", state };
+      },
+      onApprovalTerminal: () => {
+        session.activePayment = null;
+      },
+      onCardFilled: (pending) => {
+        filled = pending;
+      },
+    },
+  );
+  if (releasedCard === null || fieldResults === null || filled === null) {
+    return pendingResult(session, result);
+  }
+  const approved = filled as ReleasedCardApproval;
+  session.releasedPaymentCard = {
+    approvalId: approved.approval_id,
+    approvalUrl: approved.approval_url,
+    checkout: approved.checkout,
+    cardRef: approved.card_ref,
+    last4: approved.last4,
+    deadline: approved.deadline ?? Date.now() + 5 * 60_000,
+    card: releasedCard,
+  };
+  session.activePayment = null;
+  return cardInjectedResult(
+    session,
+    args,
+    {
+      approvalId: approved.approval_id,
+      approvalUrl: approved.approval_url,
+      checkout: approved.checkout,
+      last4: approved.last4,
+      card: releasedCard,
+    },
+    fieldResults,
+  );
+}

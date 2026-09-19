@@ -577,6 +577,18 @@ async function executeAct(
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   let browser = session.browser;
   const compactV2ActionPage = operationPage ?? operationPageForSession(session);
+  const driveSettle =
+    session.drive !== null && action.kind !== "oauth_login" && action.kind !== "oauth_click";
+  let settleMs = 0;
+  const settle = async (combobox = false) => {
+    const started = Date.now();
+    await settleAfterStateChange(browser, compactV2ActionPage, {
+      drive: driveSettle,
+      combobox: driveSettle && combobox,
+    });
+    settleMs += Date.now() - started;
+  };
+  const actStarted = Date.now();
   let actionPageAfter = compactV2ActionPage;
   let completedAction: ProvisionAction = action;
   let resolutionTarget: string | undefined;
@@ -761,13 +773,13 @@ async function executeAct(
           compactV2CommittedSelectValue(session, committedText),
         );
         completedAction = { ...action, text: committedText };
-        await settleAfterStateChange(browser, compactV2ActionPage);
+        await settle();
         break;
       }
       case "set_phone_country": {
         // No captured element — the bot finds the phone-local native <select>.
         await browser.setPhoneCountry(action.country, compactV2ActionPage);
-        await settleAfterStateChange(browser, compactV2ActionPage);
+        await settle();
         break;
       }
       case "click":
@@ -796,7 +808,7 @@ async function executeAct(
               await clickScreenshot(compactV2ActionPage, action.screenshot!, () => undefined);
               onScreenshotDispatched?.();
             })) ?? actionPageAfter;
-          await settleAfterStateChange(browser, compactV2ActionPage);
+          await settle();
           if (browser.isActivePage(compactV2ActionPage)) {
             actionPageAfter = (await adoptOpenedTab(session, browser, 0)) ?? actionPageAfter;
           }
@@ -854,7 +866,7 @@ async function executeAct(
             host: registrableHost(urlBeforeAction),
           });
           if (action.kind !== "type") {
-            await settleAfterStateChange(browser, compactV2ActionPage);
+            await settle();
             // A tab opened by JS a tick after the click lands during the
             // settle above, not inside the click's own grace window. Drain it
             // here — the queue is already populated, so this costs nothing.
@@ -923,8 +935,8 @@ async function executeAct(
           rememberOAuthCompletionSourcePage(session, completedPage);
           actionPageAfter = completedPage ?? actionPageAfter;
         }
-        if (action.kind !== "type") {
-          await settleAfterStateChange(browser, compactV2ActionPage);
+        if (action.kind !== "type" || driveSettle) {
+          await settle(action.kind === "type" && (el.role ?? "").toLowerCase() === "combobox");
         }
         // Only a plain click follows a tab it opened. oauth_click owns its own
         // provider-page lifecycle and upload never opens one.
@@ -998,6 +1010,7 @@ async function executeAct(
   // operate_observe before its next ref-targeted act (refs aren't refreshed here).
   const terminalOAuthCompletionUrl = browser.takeOAuthTerminalCompletionUrl();
   const actionObservationPage = actionPageAfter;
+  const observeStarted = Date.now();
   const observation =
     terminalOAuthCompletionUrl !== null
       ? terminalOAuthCompletionObservation(session, terminalOAuthCompletionUrl)
@@ -1024,6 +1037,14 @@ async function executeAct(
             // so a write is confirmable from its own result.
             compactV2Authorization?.row?.ref,
           );
+  if (session.drive !== null) {
+    const observeMs = Date.now() - observeStarted;
+    session.drive.lastActProfile = {
+      act_ms: Math.max(0, Date.now() - actStarted - settleMs - observeMs),
+      settle_ms: settleMs,
+      observe_ms: observeMs,
+    };
+  }
   const actionDocAfter = (() => {
     try {
       return browser.mainDocumentIdentity(actionObservationPage);
@@ -1147,10 +1168,57 @@ async function adoptTabOpenedByClick(
   return adopted;
 }
 
+export async function settleAfterDriveAction(page?: Page, combobox = false): Promise<void> {
+  if (!page) return;
+  const capMs = combobox ? 200 : 50;
+  await page
+    .evaluate(
+      ({ cap, waitOptions }: { cap: number; waitOptions: boolean }) =>
+        new Promise<void>((resolve) => {
+          let frames = 0;
+          let stopped = false;
+          const finish = () => {
+            if (stopped) return;
+            stopped = true;
+            resolve();
+          };
+          setTimeout(finish, cap);
+          const tick = () => {
+            if (stopped) return;
+            frames += 1;
+            if (waitOptions) {
+              const visible = Array.from(document.querySelectorAll('[role="option"]')).some(
+                (node) => {
+                  const box = (node as HTMLElement).getBoundingClientRect();
+                  return box.width > 0 && box.height > 0;
+                },
+              );
+              if (visible) {
+                finish();
+                return;
+              }
+            } else if (frames >= 2) {
+              finish();
+              return;
+            }
+            requestAnimationFrame(tick);
+          };
+          requestAnimationFrame(tick);
+        }),
+      { cap: capMs, waitOptions: combobox },
+    )
+    .catch(() => undefined);
+}
+
 export async function settleAfterStateChange(
   browser: BrowserController,
   page?: Page,
+  options?: { drive?: boolean; combobox?: boolean },
 ): Promise<void> {
+  if (options?.drive === true) {
+    await settleAfterDriveAction(page, options.combobox === true);
+    return;
+  }
   // A fixed dwell here used to consume the OAuth action's completion window
   // after the provider had already returned. Wait for the page's actual
   // interactive state instead; it resolves immediately when the redirect has

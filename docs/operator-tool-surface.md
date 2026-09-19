@@ -4,11 +4,8 @@ Trusty Squire’s operator surface is a set of flat, single-purpose MCP tools.
 Discover the installed server’s exact input and output schemas with `tools/list`;
 that registered schema is authoritative for a particular server version.
 
-The named operator surface contains 20 tools: the 16 driving verbs in
-`OPERATE_TOOLS`, excluding the separately exposed recipe tools, plus
-`inject_card`, `list_credentials`, `list_payment_cards`, and
-`edit_payment_card`. Recipe tools and vault/account tools are separate
-surfaces.
+The operator surface is listed below. Recipe and vault/account tools are
+separate surfaces.
 
 Startup navigation waits for `DOMContentLoaded`, including deferred scripts,
 but skips the humanized post-load dwell before observing the page. It does not
@@ -17,6 +14,7 @@ still require another observation or an explicit wait.
 
 | Purpose | Tool |
 | --- | --- |
+| Goal-shaped drive | `operate_drive` |
 | Start and finish | `operate_start`, `operate_finish` |
 | Read the page | `operate_observe`, `operate_screenshot`, `operate_network` |
 | Drive ordinary UI | `operate_navigate`, `operate_click`, `operate_type`, `operate_select`, `operate_press`, `operate_scroll`, `operate_wait` |
@@ -24,6 +22,65 @@ still require another observation or an explicit wait.
 | Login | `operate_login` |
 | Vault-aware browser work | `operate_fill_credential`, `operate_extract` |
 | Payments and vault lists | `inject_card`, `list_credentials`, `list_payment_cards`, `edit_payment_card` |
+
+For a signup, checkout, or other goal-shaped website task, call `operate_drive`
+with the goal and a `facts` bag (email, name, address, `card_ref`, …). Pass
+`session_id` of an open session, or `url` to open the page and drive in one
+call; provide exactly one. Each step asks Jev for one operation (CLICK, TYPE_TEXT, SELECT,
+SCROLL, WAIT, DONE, BLOCKED) plus a matching per-operation target; unused
+target heads cannot act. Identifying values come only from the facts bag. A
+search or query field may receive a phrase Jev assigns from the goal's own
+words or the facts; identity and payment fields still require a fact.
+The loop reads verification mail when a verification field is chosen or
+the page is stuck after a click. It does not gate on confidence. The drive
+loop snapshots and acts with an in-page registry plus CDP input; login,
+inbox, and card still use those primitives. The two-head Jev request,
+structured state, choice validation, WAIT, SELECT option targets, snapshot
+evaluate, and drive rules prose are adapted from browser-use/jev-ultrafast
+(MIT).
+It returns a handoff (never a bare page): status, the current compact
+observation with the same stable refs, trajectory, and done/remaining.
+`needs_value` names the missing field's label; `stuck` means no listed
+element advances the goal. Resume the same session with `answer` (a
+readable action slug from the handoff options, `done`, or `stuck`) and/or
+added `facts`. Use the single-step primitives only for a handoff you are
+answering or a task that is not a goal.
+
+Calls default to 60 steps and 45 seconds; `max_steps` and `max_seconds` set
+the per-call allowances within the registered schema's limits.
+A `budget` handoff preserves partial progress for another call on the same
+session. `jev_unavailable`, `no_progress`, and `evaluate_timeout` also return
+handoffs; the last indicates that an in-page evaluation exceeded its deadline.
+`pending_approval` supplies the card approval URL. `card_incomplete` means the
+card was released but not every requested field was filled; resume the same
+session to retry against the existing `approval_id`. The handoff's `payment`
+contains the per-field results. Always call `operate_finish`
+when the task is finished. Drive-initiated opens follow the
+[broker refused-start receipt contract](browser-broker.md).
+
+browser-use/jev-ultrafast (MIT) adoptions live in `operate-drive.ts`. Mapping:
+
+| # | Adoption | Where |
+| --- | --- | --- |
+| 1 | Two heads: `operation` plus `<operation>_target`; unused heads cannot act | `buildDriveQuestions`, `decideAfterJev` |
+| 2 | Structured `state` `{page, elements, recent_actions}` and `instructions` `{goal, rules}` | `DriveJevState`, `buildJevState`, `pageTextFromObservation` |
+| 3 | Per-element `operations` plus checked/disabled/required/acted and live `value` from the drive snapshot | `elementState`, `operationsForRow`, `drive-snapshot.ts` |
+| 4 | `validate_choice`: offered id, exact keys, finite [0,1], sum ±0.02, argmax. Malformed answers are `invalid_answer` (reason + confidence), not `low_confidence`; one same-observation retry | `validateChoiceReason`, `admitsChoice` |
+| 5 | SELECT option is a target (`slug:option`) | `selectTargets`, `selectTargetKey`, `lastSelectOptions` |
+| 6 | WAIT when the needed control is absent/disabled or results are loading | `DRIVE_RULES`, `{kind:"wait"}`, `DRIVE_WAIT_MS` |
+| 7 | Rules prose adapted from their MIT `NEXT_ACTION` / `TARGET` | `DRIVE_RULES` |
+| 8 | No confidence gates, including DONE. Validation of the answer shape stays. The purchase approval is the payment gate | `admitsChoice`, `decideAfterJev` |
+| 9 | Three consecutive non-wait actions with no fingerprint change | `DRIVE_STALE_LIMIT`, `staleNonWait` |
+| 10 | Decision bound to the observation fingerprint, consumed once | `boundFingerprint`, `consumedActionKey` |
+| 11 | Candidate and question budgets; only offered choices can be selected | `driveTargetSets`, `buildDriveQuestions` |
+| 12 | Snapshot, Jev decision, guarded CDP action, then bounded settling; frame refreshes and primitive handoffs can add calls | `drive-snapshot.ts`, `drive-act.ts`, `operate-drive.ts` |
+
+The drive considers up to 250 candidates and caps each decision batch at 128
+total choice criteria, including operation and goal-value choices. Truncation
+is disclosed in the question instructions; retained dropdown choices with
+omitted siblings carry `options_elided` in planner state. The allocator reserves
+a usable goal-value choice alongside `none` when available. Omitted choices
+cannot be selected in that batch.
 
 `operate_read_inbox` reads the session's signed-in Gmail inbox for a
 verification email in dedicated utility tabs that are closed when the read

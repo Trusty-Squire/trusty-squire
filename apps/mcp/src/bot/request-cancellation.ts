@@ -15,6 +15,25 @@ interface RequestAutomationContext {
 }
 
 const contexts = new AsyncLocalStorage<RequestAutomationContext>();
+const abortBySignal = new WeakMap<AbortSignal, (reason?: unknown) => void>();
+
+/** Bind the registered request AbortController so an in-page deadline can
+ * fire the abort path that already exists, without touching other sessions. */
+export function attachOperatorRequestAbort(
+  signal: AbortSignal,
+  abort: (reason?: unknown) => void,
+): void {
+  abortBySignal.set(signal, abort);
+}
+
+export function abortCurrentOperatorRequest(reason?: unknown): boolean {
+  const signal = currentOperatorRequestSignal();
+  if (signal === undefined) return false;
+  const abort = abortBySignal.get(signal);
+  if (abort === undefined) return false;
+  abort(reason);
+  return true;
+}
 
 export async function withOperatorRequestContext<T>(
   signal: AbortSignal,
@@ -81,6 +100,19 @@ export function composeOperatorSignals(signals: readonly AbortSignal[]): {
 } {
   const controller = new AbortController();
   const listeners = new Map<AbortSignal, () => void>();
+  // Propagate a registered request-abort hook (attachOperatorRequestAbort is
+  // bound to an input signal — typically the broker's registered request
+  // controller). abortCurrentOperatorRequest resolves the hook from the
+  // signal running in the request context, which is THIS composed signal,
+  // not the original: without propagation the in-page deadline fires into a
+  // WeakMap miss and the hung evaluate keeps running to its own timeout.
+  for (const signal of signals) {
+    const hook = abortBySignal.get(signal);
+    if (hook !== undefined) {
+      abortBySignal.set(controller.signal, hook);
+      break;
+    }
+  }
   const dispose = (): void => {
     for (const [signal, listener] of listeners) signal.removeEventListener("abort", listener);
     listeners.clear();

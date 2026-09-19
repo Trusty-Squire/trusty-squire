@@ -198,15 +198,9 @@ for the system and data flows.
 
 ## MCP tools
 
-The default MCP registry exposes 29 tools (31 when maintainer diagnostics are
-enabled). The 20-tool operator driving surface uses flat, single-purpose verbs:
-`operate_start`, `operate_finish`, `operate_observe`, `operate_screenshot`,
-`operate_network`, `operate_navigate`, `operate_click`, `operate_type`, `operate_select`,
-`operate_press`, `operate_scroll`, `operate_wait`, `operate_read_inbox`, `operate_login`,
-`operate_fill_credential`, `operate_extract`, `inject_card`, `list_credentials`,
-`list_payment_cards`, and `edit_payment_card`.
-Recipe and vault/account tools remain separate surfaces. The complete migration
-table and input contracts are in [operator-tool-surface.md](docs/operator-tool-surface.md).
+Discover the installed tool inventory and schemas with `tools/list`. For the
+operator surface and input contracts, see
+[operator-tool-surface.md](docs/operator-tool-surface.md).
 The evidence required to qualify an operator build is in
 [operator-acceptance-runbook.md](docs/operator-acceptance-runbook.md).
 Continue a pending card release by re-calling `inject_card` with its returned
@@ -220,7 +214,7 @@ For controls visible only in the image, see
 The maintainer-only `list_extract_failures` → `get_extract_failure`
 DOM-diagnostics pair is excluded from that surface; set
 `TRUSTY_SQUIRE_DIAGNOSTICS=1` in the MCP server environment to opt into the
-22-tool diagnostics profile.
+diagnostics profile.
 
 Operate sessions default to `format:"compact"` observations: a bounded,
 paged `browser-use-control-query` control map containing every actionable
@@ -246,7 +240,11 @@ in [browser-use-serializer-port.md](docs/browser-use-serializer-port.md).
   `server_unavailable` includes `retry.max_attempts: 1`: retry once, and never
   kill or restart the shared operator process.
 - `operate_start` opens a scoped website session and `operate_observe` reads its
-  current state. Drive ordinary controls with `operate_click`, `operate_type`,
+  current state. For a signup, checkout, or other goal-shaped task, call
+  `operate_drive` with the goal and facts (or pass `url` to open and drive in
+  one call) instead of planning each click and type yourself; resume that
+  session with `answer` and/or added facts if it hands back. Drive ordinary
+  controls with `operate_click`, `operate_type`,
   `operate_select`, `operate_press`, and `operate_scroll`; use
   `operate_navigate` for scoped navigation. Acting tools target a current `ref`.
   `operate_type` accepts either literal `text` or a protected session `slot`,

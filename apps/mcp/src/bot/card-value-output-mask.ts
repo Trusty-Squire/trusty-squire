@@ -122,16 +122,16 @@ function maskNode(
     ownKind === "pan" || ownKind === "cvv"
       ? ownKind
       : (targetKinds.get(node.id) ??
-         // Agent-directed placement: the agent may type the CVV (via masked
-         // tokens) into ANY field, so identity-based inference alone is not
-         // enough. Any textbox whose complete digit value equals a released
-         // CVV is masked — the same value-equality rule the screenshot
-         // pixel scan has always applied, mirrored here for the DOM/AX read.
-         (isTextboxNode(node) && nodeHoldsReleasedCvvValue(node, records)
-           ? "cvv"
-           : nodeHasReleasedCvv(node, records)
-             ? "cvv"
-             : inheritedKind));
+        // Agent-directed placement: the agent may type the CVV (via masked
+        // tokens) into ANY field, so identity-based inference alone is not
+        // enough. Any textbox whose complete digit value equals a released
+        // CVV is masked — the same value-equality rule the screenshot
+        // pixel scan has always applied, mirrored here for the DOM/AX read.
+        (isTextboxNode(node) && nodeHoldsReleasedCvvValue(node, records)
+          ? "cvv"
+          : nodeHasReleasedCvv(node, records)
+            ? "cvv"
+            : inheritedKind));
   node.value =
     kind === "pan"
       ? CARD_NUMBER_MASK
@@ -209,7 +209,48 @@ export class CardValueOutputMask {
   }
 
   maskText(value: string, key?: string): string {
-    return maskStringForKey(value, key, this.records);
+    if (key !== "url" || !this.active) return maskStringForKey(value, key, this.records);
+    const masked = value.replace(
+      /([?&][^=&#]*=)([^&#]*)/g,
+      (whole, prefix: string, encoded: string) => {
+        try {
+          const decoded = decodeURIComponent(encoded.replace(/\+/g, " "));
+          const maskedQuery = maskStringForKey(decoded, undefined, this.records);
+          return maskedQuery === decoded ? whole : `${prefix}${encodeURIComponent(maskedQuery)}`;
+        } catch {
+          return whole;
+        }
+      },
+    );
+    return maskStringForKey(masked, key, this.records);
+  }
+
+  /**
+   * Mask released card values inside drive-snapshot wire rows before they
+   * reach traces, Jev state, or model requests. Rows are [ref, role, facts?]
+   * with pipe-joined facts that may carry a value segment (`n=...`). The PAN
+   * is pattern-masked anywhere; a value segment whose complete digits equal a
+   * released CVV is masked under the same value-equality rule the DOM/AX and
+   * screenshot paths apply, restricted to text-entry rows (role letter "t")
+   * so select/option rows keep merchant values such as years visible.
+   */
+  maskDriveRows<T extends readonly [string, string, string?]>(rows: readonly T[]): T[] {
+    if (!this.active) return [...rows];
+    return rows.map((row) => {
+      const facts = row[2];
+      if (facts === undefined) return [...row] as T;
+      let masked = this.maskText(facts);
+      if (row[1] === "t") {
+        masked = masked.replace(/(^|\|)n=([^|]*)/g, (whole, separator, value) => {
+          const digits = String(value).replace(/\D/g, "");
+          if (digits.length === 0) return whole;
+          return this.records.some((record) => digits === record.cvv)
+            ? `${separator}n=${SECURITY_CODE_MASK}`
+            : whole;
+        });
+      }
+      return [...row.slice(0, 2), masked] as unknown as T;
+    });
   }
 
   /** Raw values for the internal, pre-output screenshot rectangle finder only. */

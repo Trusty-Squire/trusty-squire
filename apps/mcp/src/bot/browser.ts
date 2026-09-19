@@ -461,6 +461,11 @@ export class BrowserController implements BrowserDriver {
     return this.cardValueOutputMask.maskValue(value);
   }
 
+  /** Mask released card values in drive-snapshot wire rows ([ref, role, facts?]). */
+  maskDriveRows<T extends readonly [string, string, string?]>(rows: readonly T[]): T[] {
+    return this.cardValueOutputMask.maskDriveRows(rows);
+  }
+
   logOperatorDiagnostic(message: string): void {
     console.error(this.cardValueOutputMask.maskText(message));
   }
@@ -2851,6 +2856,20 @@ export class BrowserController implements BrowserDriver {
         }
       }
     }
+    if (tagName === "label") {
+      const nestedSelect = page.locator(activeSelector).locator("select");
+      if ((await nestedSelect.count()) === 1) {
+        const nestedId = await nestedSelect
+          .first()
+          .evaluate((node) =>
+            node instanceof HTMLSelectElement && node.id.length > 0 ? node.id : "",
+          );
+        if (nestedId.length > 0) {
+          activeSelector = `#${nestedId}`;
+          tagName = "select";
+        }
+      }
+    }
 
     if (tagName === "select") {
       // Keep the resolved target as a Locator. Walker selectors can include
@@ -3375,19 +3394,25 @@ export class BrowserController implements BrowserDriver {
         .first()
         .evaluate((node) => {
           if (!(node instanceof HTMLLabelElement)) return null;
-          const forAttr = node.htmlFor;
-          if (forAttr.length === 0) return null;
-          const target = node.ownerDocument.getElementById(forAttr);
-          if (target === null) return null;
-          // Only redirect when the target is input/textarea/select. A
-          // label pointing at a non-form element (rare; React Aria
-          // does it for a labelled-by relationship) shouldn't trigger
-          // the redirect.
-          const tag = target.tagName.toLowerCase();
+          const labeled = (() => {
+            const forAttr = node.htmlFor;
+            if (forAttr.length > 0) {
+              const byFor = node.ownerDocument.getElementById(forAttr);
+              if (byFor !== null) return byFor;
+            }
+            // A wrapping label with no for= labels its first labelable
+            // descendant. The directory-search fixture (and a lot of
+            // authored HTML) is this shape; leaving the label as the
+            // select target silently takes the combobox path, which
+            // cannot see native <option>s.
+            return node.querySelector("select, input, textarea");
+          })();
+          if (labeled === null) return null;
+          const tag = labeled.tagName.toLowerCase();
           if (tag !== "input" && tag !== "textarea" && tag !== "select") {
             return null;
           }
-          return forAttr;
+          return labeled.id.length > 0 ? labeled.id : null;
         });
       if (resolvedId === null) return selector;
       // CSS-escape the id so unusual characters (Sentry's `--` separator
@@ -4115,24 +4140,42 @@ export class BrowserController implements BrowserDriver {
     page: Page | null = this.page,
   ): Promise<{ title: string; headings: string[] }> {
     if (page === null) throw new Error("Browser not started");
-    return await page.evaluate(() => {
-      const visible = (element: Element): boolean => {
-        const html = element as HTMLElement;
-        const style = window.getComputedStyle(html);
-        const rect = html.getBoundingClientRect();
-        return (
-          style.display !== "none" &&
-          style.visibility !== "hidden" &&
-          rect.width > 0 &&
-          rect.height > 0
-        );
+    return await page.evaluate(async () => {
+      // Visible headings only, like every other observation path: a heading
+      // inside [aria-hidden]/[inert], display:none, or visibility:hidden is
+      // page plumbing, not page state. The just-revealed case (the
+      // directory-search result h2 starts [hidden] and is revealed in the
+      // same click) is handled at THIS timing boundary: when headings with
+      // copy exist but none is visible yet, poll a few frames (bounded
+      // ~800ms; rAF may never fire in a backgrounded tab, hence the timeout
+      // race) for the reveal to land before reporting nothing.
+      const visibleHeading = (element: Element): boolean => {
+        if (element.closest('[aria-hidden="true"],[inert]') !== null) return false;
+        if (typeof element.checkVisibility === "function") {
+          return element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+        }
+        const style = getComputedStyle(element);
+        return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
       };
-      const headings = Array.from(document.querySelectorAll("h1,h2"))
-        .filter(visible)
-        .map((element) => (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 160))
-        .filter(Boolean)
-        .slice(0, 2);
-      return { title: document.title.slice(0, 160), headings };
+      const headingText = (element: Element): string =>
+        (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 160);
+      const visible = (): string[] =>
+        Array.from(document.querySelectorAll("h1,h2"))
+          .filter(visibleHeading)
+          .map(headingText)
+          .filter(Boolean);
+      const withCopy = (): number =>
+        Array.from(document.querySelectorAll("h1,h2")).filter(
+          (element) => headingText(element).length > 0,
+        ).length;
+      const start = performance.now();
+      while (visible().length === 0 && withCopy() > 0 && performance.now() - start < 800) {
+        await Promise.race([
+          new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+          new Promise<void>((resolve) => setTimeout(resolve, 50)),
+        ]);
+      }
+      return { title: document.title.slice(0, 160), headings: visible().slice(0, 4) };
     });
   }
 

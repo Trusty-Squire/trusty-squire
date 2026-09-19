@@ -13,6 +13,7 @@ import {
   disambiguateDuplicateLabelsV2,
   encodeV2QueryPage,
   safeBlockersV2,
+  SAFE_HEADING_MAX,
   safePageSemanticsV2,
   safeDescriptionV2,
   safeOriginV2,
@@ -880,7 +881,13 @@ describe("compact observation v2", () => {
           src: "https://www.google.com/recaptcha/api2/bframe?ar=1&k=SITEKEY",
         },
         ...(open
-          ? { contentDocument: el("bframe-doc", { nodeType: 9, nodeName: "#document", children: [] }) }
+          ? {
+              contentDocument: el("bframe-doc", {
+                nodeType: 9,
+                nodeName: "#document",
+                children: [],
+              }),
+            }
           : {}),
       });
     const responseTextarea = (token: string): BrowserUseNode =>
@@ -968,7 +975,9 @@ describe("compact observation v2", () => {
               children: [
                 el("verify-button", {
                   nodeName: "BUTTON",
-                  children: [el("verify-text", { nodeType: 3, nodeName: "#text", value: "Verify" })],
+                  children: [
+                    el("verify-text", { nodeType: 3, nodeName: "#text", value: "Verify" }),
+                  ],
                 }),
               ],
             }),
@@ -1534,14 +1543,17 @@ describe("compact observation v2", () => {
     expect(
       safePageSemanticsV2({
         title: "Example storefront",
-        // Only the FIRST heading is carried (a size budget); nothing is screened.
+        // A small heading set is carried (SAFE_HEADING_MAX); nothing is screened.
         headings: [
           "Create your account",
           "4111111111111111",
           "API key: abcdefghijklmnopqrstuvwxyz",
         ],
       }),
-    ).toEqual({ title: "Example storefront", headings: ["Create your account"] });
+    ).toEqual({
+      title: "Example storefront",
+      headings: ["Create your account", "4111111111111111", "API key: abcdefghijklmnopqrstuvwxyz"],
+    });
     expect(
       safePageSemanticsV2({ title: "4111111111111111", headings: ["API key: abcdef"] }),
     ).toEqual({ title: "4111111111111111", headings: ["API key: abcdef"] });
@@ -1559,6 +1571,36 @@ describe("compact observation v2", () => {
       expect.objectContaining({ label: "@continue-to-registration" }),
     );
     expect(safe.rows).toContainEqual(expect.objectContaining({ label: "@4111111111111111" }));
+  });
+
+  it("keeps a heading that is the result of an action in the next compact observation", () => {
+    const before = safePageSemanticsV2({
+      title: "Store",
+      headings: ["Checkout", "Shipping", "Payment", "Review"],
+    });
+    expect(before.headings).toEqual(["Checkout", "Shipping", "Payment", "Review"]);
+    expect(SAFE_HEADING_MAX).toBe(4);
+    const after = safePageSemanticsV2(
+      {
+        title: "Store",
+        headings: ["Checkout", "Shipping", "Payment", "Review", "Thank you for your order"],
+      },
+      before.headings,
+    );
+    expect(after.headings).toContain("Thank you for your order");
+    expect(after.headings?.length).toBeLessThanOrEqual(SAFE_HEADING_MAX);
+  });
+
+  it("prefers newly appeared headings when the heading budget binds", () => {
+    const after = safePageSemanticsV2(
+      {
+        title: "Store",
+        headings: ["Checkout", "Shipping", "Payment", "Review", "Thank you for your order"],
+      },
+      ["Checkout", "Shipping", "Payment", "Review"],
+    );
+    expect(after.headings?.[0]).toBe("Thank you for your order");
+    expect(after.headings).not.toContain("Review");
   });
 
   it("preserves a page title in query semantic metadata without changing the query response", () => {

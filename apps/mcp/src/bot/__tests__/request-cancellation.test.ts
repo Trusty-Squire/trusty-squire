@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  abortCurrentOperatorRequest,
+  attachOperatorRequestAbort,
   composeOperatorSignals,
   markOperatorMutationDispatchAttempted,
   operatorMutationDispatchPhase,
@@ -54,6 +56,16 @@ describe("operator cancellation evidence", () => {
     expect(removed).toHaveBeenCalledOnce();
     composed.dispose();
     expect(removed).toHaveBeenCalledOnce();
+  });
+
+  it("lets an in-page deadline fire the registered request abort", async () => {
+    const controller = new AbortController();
+    attachOperatorRequestAbort(controller.signal, (reason) => controller.abort(reason));
+    await withOperatorRequestContext(controller.signal, async () => {
+      expect(abortCurrentOperatorRequest("evaluate_timeout")).toBe(true);
+    });
+    expect(controller.signal.aborted).toBe(true);
+    expect(controller.signal.reason).toBe("evaluate_timeout");
   });
 
   it("preserves an already-aborted source and explicit disposal", () => {

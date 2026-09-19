@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { z, type Tool } from "../../tools/index.js";
 import type { ApiClient } from "../../api-client.js";
 import type { SessionGuard } from "../../session-guard.js";
+import type * as SessionLifecycle from "../session/lifecycle.js";
+import type * as ProvisionSession from "../provision-session.js";
 
 interface SessionDouble {
   browser: {
@@ -23,21 +25,29 @@ const state = vi.hoisted(() => ({
   dispatches: 0,
 }));
 
-vi.mock("../session/lifecycle.js", () => ({
-  sessionForCall: (sessionId: string) => state.sessions.get(sessionId),
-  finishProvisionSession: state.finish,
-  forceFinishProvisionSession: state.forceFinish,
-  withProvisionSessionCall: async (_sessionId: string, operation: () => Promise<unknown>) =>
-    await operation(),
-  withCeremonyStartAdmission: async (operation: () => Promise<unknown>) => await operation(),
-}));
+vi.mock("../session/lifecycle.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof SessionLifecycle>();
+  return {
+    ...actual,
+    sessionForCall: (sessionId: string) => state.sessions.get(sessionId),
+    finishProvisionSession: state.finish,
+    forceFinishProvisionSession: state.forceFinish,
+    withProvisionSessionCall: async (_sessionId: string, operation: () => Promise<unknown>) =>
+      await operation(),
+    withCeremonyStartAdmission: async (operation: () => Promise<unknown>) => await operation(),
+  };
+});
 
-vi.mock("../provision-session.js", () => ({
-  maskOperatorSessionOutput: (_sessionId: string, value: unknown) => value,
-  preparePublicOAuthLoginTarget: async () => undefined,
-  withPreparedOAuthLoginTarget: async (_prepared: unknown, operation: () => Promise<unknown>) =>
-    await operation(),
-}));
+vi.mock("../provision-session.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof ProvisionSession>();
+  return {
+    ...actual,
+    maskOperatorSessionOutput: (_sessionId: string, value: unknown) => value,
+    preparePublicOAuthLoginTarget: async () => undefined,
+    withPreparedOAuthLoginTarget: async (_prepared: unknown, operation: () => Promise<unknown>) =>
+      await operation(),
+  };
+});
 
 import { OperatorBroker } from "../broker/operator.js";
 import { OperatorForwarder } from "../broker/forwarder.js";

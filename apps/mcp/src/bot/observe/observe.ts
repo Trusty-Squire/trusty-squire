@@ -558,7 +558,7 @@ function compactV2Observation(
   const handles = compactV2Handles(session, elements, sourcePage);
   const safe = compactV2LiveControls(session, elements, sourcePage, handles);
   const targetableRefs = new Set(safe.rows.map((row) => row.ref));
-  const semanticBase = safePageSemanticsV2(semanticSource);
+  const semanticBase = safePageSemanticsV2(semanticSource, previous?.semantics.headings ?? []);
   // Page-level error evidence (e.g. a CDN block page named from title/headings)
   // leads the list; DOM-derived blockers follow, capped at the shared maximum.
   const blockers = [
@@ -569,10 +569,6 @@ function compactV2Observation(
       return ref !== undefined && targetableRefs.has(ref) ? ref : undefined;
     }),
   ].slice(0, BLOCKER_MAX_ITEMS);
-  const semantics = {
-    ...semanticBase,
-    ...(blockers.length === 0 ? {} : { blockers, blocked: true as const }),
-  };
   const rendered = serializeBrowserUseDOM(capture.root, {
     ref: (node) => {
       const element = capture.nodeElements.get(node.id);
@@ -589,6 +585,10 @@ function compactV2Observation(
   // Emit canonical names and text verbatim, preserving whitespace, line order
   // and indentation; no prose extraction or byte-budget pruning.
   const dom = rendered.dom;
+  const semantics = {
+    ...semanticBase,
+    ...(blockers.length === 0 ? {} : { blockers, blocked: true as const }),
+  };
   // A changed URL, frame set, or closed-shadow/iframe structure is a real
   // change even when the rendered text is byte-identical: the observation the
   // host already holds describes a page that no longer exists.
@@ -1050,7 +1050,7 @@ export async function observeSession(
       // Semantic context is optional availability-wise; it is independently
       // sealed below and never changes action-map safety.
     }
-    return compactV2Observation(
+    const observation = compactV2Observation(
       session,
       generation,
       capture,
@@ -1063,6 +1063,14 @@ export async function observeSession(
       forceFullDOM,
       actedRef,
     );
+    session.lastCompactObservation = {
+      url: observation.url,
+      session_id: observation.session_id,
+      ...(observation.stage === undefined ? {} : { stage: observation.stage }),
+      ...(observation.safe_table === undefined ? {} : { safe_table: observation.safe_table }),
+      ...(observation.semantic === undefined ? {} : { semantic: observation.semantic }),
+    };
+    return observation;
   } catch (err) {
     const oauth = session.browser ? oauthTransitionStatus(session.browser) : undefined;
     if (oauth?.providerPageClosed === true && oauth.productPageViable && oauth.browserConnected) {

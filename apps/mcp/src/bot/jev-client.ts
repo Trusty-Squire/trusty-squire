@@ -131,7 +131,7 @@ async function accountHasTypesafeCredential(api: ApiClient): Promise<boolean> {
 async function callJev(
   api: ApiClient,
   byok: boolean,
-  state: string,
+  state: unknown,
   questions: Record<string, JevQuestion>,
 ): Promise<{ status: number; body: string }> {
   if (byok) {
@@ -157,17 +157,21 @@ async function callJev(
       typesafeByokCache.delete(api);
     }
   }
-  return api.decide(state, questions);
+  // The platform route's /v1/decide schema pins `state` to a string, while
+  // operate_drive sends structured state (the measured BYOK wire shape). A
+  // non-string state is serialized exactly once here so the drive loop works
+  // through both transports; string states pass through unchanged.
+  return api.decide(typeof state === "string" ? state : JSON.stringify(state), questions);
 }
 
 /**
- * Ask Jev one batch of named questions against `state` (the page context
- * string). Retries 503/529 with exponential backoff inside
- * JEV_RETRY_BUDGET_MS; any other non-200 is an immediate honest failure.
+ * Ask Jev one batch of named questions against string or structured page
+ * context. Transport encoding is owned by callJev above. Retries 503/529
+ * with exponential backoff inside JEV_RETRY_BUDGET_MS; any other non-200 is an immediate honest failure.
  */
 export async function askJev(
   api: ApiClient,
-  state: string,
+  state: unknown,
   questions: Record<string, JevQuestion>,
   signal?: AbortSignal,
 ): Promise<JevCallOutcome> {

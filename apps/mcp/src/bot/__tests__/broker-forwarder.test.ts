@@ -289,4 +289,88 @@ describe("MCP broker forwarding over the Contract B wire", () => {
       },
     );
   });
+
+  it("replays and finishes a refused drive-open without dispatching commands", async () => {
+    const observation = {
+      session_id: "drive-refused",
+      needs_user: { wall: "google_session", message: "Connect first", resume: "connect" },
+    };
+    const seen: string[] = [];
+    await withBroker(
+      "ts-drive-wall-",
+      async (method) => {
+        seen.push(method);
+        return { observation };
+      },
+      async (path) => {
+        const forwarder = new OperatorForwarder(path, guard);
+        try {
+          await expect(
+            forwarder.invoke(
+              "operate_drive",
+              { url: "https://signup.test", goal: "sign up" },
+              "drive-wall",
+            ),
+          ).resolves.toMatchObject({
+            status: "needs_value",
+            field: "google_session",
+            observation,
+            steps: 0,
+          });
+          expect(forwarder.sessionCount()).toBe(0);
+          await expect(
+            forwarder.invoke("operate_observe", { session_id: "drive-refused" }, "wall-observe"),
+          ).resolves.toEqual(observation);
+          await expect(
+            forwarder.invoke("operate_finish", { session_id: "drive-refused" }, "wall-finish"),
+          ).resolves.toMatchObject({ closed: true, mutation: "not_dispatched", cleanup: "closed" });
+          expect(seen).toEqual(["open"]);
+          await expect(
+            forwarder.invoke("operate_observe", { session_id: "drive-refused" }, "after-finish"),
+          ).rejects.toMatchObject({ code: "stale_lease" });
+        } finally {
+          await forwarder.close();
+        }
+      },
+    );
+  });
+
+  it("opens then commands when operate_drive is given a url instead of a session", async () => {
+    const seen: { method: string; params: Record<string, unknown> }[] = [];
+    await withBroker(
+      "ts-forward-drive-",
+      async (method, params) => {
+        seen.push({ method, params });
+        if (method === "open")
+          return { sessionId: "session-drive", observation: { session_id: "session-drive" } };
+        return { result: { status: "budget", session_id: "session-drive" } };
+      },
+      async (path) => {
+        const forwarder = new OperatorForwarder(path, guard);
+        try {
+          expect(
+            await forwarder.invoke(
+              "operate_drive",
+              { url: "https://signup.test/", goal: "create an account" },
+              "drive",
+            ),
+          ).toEqual({ status: "budget", session_id: "session-drive" });
+          expect(seen[0]).toMatchObject({
+            method: "open",
+            params: { serviceUrl: "https://signup.test/" },
+          });
+          expect(seen[1]).toMatchObject({
+            method: "command",
+            params: {
+              sessionId: "session-drive",
+              name: "operate_drive",
+              args: { session_id: "session-drive", goal: "create an account" },
+            },
+          });
+        } finally {
+          await forwarder.close();
+        }
+      },
+    );
+  });
 });

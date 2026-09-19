@@ -36,6 +36,37 @@ function refusedStartFinishReceipt(sessionId: string): Record<string, unknown> {
   };
 }
 
+function parseOpenReply(raw: unknown): {
+  observation: Record<string, unknown>;
+  sessionId?: string;
+  owned: boolean;
+} {
+  if (!isRecord(raw))
+    throw new ForwardedResultError("Broker returned a non-object open reply", {
+      cleanup: "unknown",
+      closed: false,
+    });
+  const observation = isRecord(raw.observation) ? raw.observation : undefined;
+  const returnedSessionId = observation?.session_id;
+  const owned = typeof raw.sessionId === "string" && raw.sessionId.length > 0;
+  const refusedStart = isRecord(observation?.needs_user);
+  const validStartResult =
+    typeof returnedSessionId === "string" &&
+    returnedSessionId.length > 0 &&
+    (owned ? returnedSessionId === raw.sessionId : refusedStart);
+  if (!validStartResult || observation === undefined)
+    throw new ForwardedResultError("Broker did not return a valid startup result", {
+      ...(owned ? { session_id: raw.sessionId } : {}),
+      cleanup: owned ? "open" : "unknown",
+      closed: false,
+    });
+  return {
+    observation,
+    owned,
+    ...(owned ? { sessionId: raw.sessionId as string } : {}),
+  };
+}
+
 /** The MCP process holds only plain session ids. Never reconnect/replay a
  * dispatched request after transport loss: its side effect may have happened.
  * The wire is Contract B: connect / open / command / close. */
@@ -112,11 +143,15 @@ export class OperatorForwarder {
     // and the broker refuses them.
     if (reconnecting) this.sessions.clear();
     let args = originalArgs;
-    if (name !== "operate_start" && args.session_id === undefined && this.sessions.size === 1)
+    if (
+      name !== "operate_start" &&
+      args.session_id === undefined &&
+      typeof args.url !== "string" &&
+      this.sessions.size === 1
+    )
       args = { ...args, session_id: this.sessions.values().next().value };
     const requested = typeof args.session_id === "string" ? args.session_id : undefined;
-    const sessionId =
-      requested !== undefined && this.sessions.has(requested) ? requested : undefined;
+    let sessionId = requested !== undefined && this.sessions.has(requested) ? requested : undefined;
     checkCancelled();
 
     // Cancellation is per request, keyed on the dispatched frame id: the broker
@@ -131,8 +166,9 @@ export class OperatorForwarder {
       method: BrokerWireMethod,
       params: Record<string, unknown>,
     ): Promise<unknown> => {
-      dispatchedRequestId = requestId;
-      return await client.call(method, params, requestId, notifyUser);
+      const id = method === "open" && name === "operate_drive" ? `${requestId}:open` : requestId;
+      dispatchedRequestId = id;
+      return await client.call(method, params, id, notifyUser);
     };
     try {
       if (name === "operate_start") {
@@ -167,6 +203,43 @@ export class OperatorForwarder {
         else if (refusedStart && typeof returnedSessionId === "string")
           this.refusedStarts.set(returnedSessionId, observation);
         return observation;
+      }
+
+      if (
+        name === "operate_drive" &&
+        typeof args.url === "string" &&
+        typeof args.session_id !== "string"
+      ) {
+        const opened = parseOpenReply(await dispatch("open", { serviceUrl: args.url }));
+        if (opened.owned && opened.sessionId !== undefined) this.sessions.add(opened.sessionId);
+        if (!opened.owned || opened.sessionId === undefined) {
+          const refusedStartId = opened.observation.session_id;
+          if (typeof refusedStartId === "string")
+            this.refusedStarts.set(refusedStartId, opened.observation);
+          const wall =
+            isRecord(opened.observation.needs_user) &&
+            typeof opened.observation.needs_user.wall === "string"
+              ? opened.observation.needs_user.wall
+              : "google_session";
+          return {
+            status: "needs_value",
+            field: wall,
+            observation: opened.observation,
+            trajectory: [],
+            done: "nothing yet",
+            remaining: typeof args.goal === "string" ? args.goal : "",
+            steps: 0,
+            seconds: 0,
+            jev_calls: 0,
+            ...(isRecord(opened.observation.needs_user) &&
+            typeof opened.observation.needs_user.message === "string"
+              ? { question: opened.observation.needs_user.message, options: {} }
+              : {}),
+          };
+        }
+        args = { ...args, session_id: opened.sessionId };
+        delete args.url;
+        sessionId = opened.sessionId;
       }
 
       if (name === "operate_finish") {

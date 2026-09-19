@@ -206,7 +206,11 @@ rerenders, navigation, partial fills, or cleared controls.
 - Compact versus full observation remains a size/shape choice. The mask applies
   to emitted DOM/AX values, properties, attributes, text, URLs, errors, headers,
   and request/response bodies. PAN formatting with whitespace, common hyphens,
-  periods, or middle dots is covered.
+  periods, or middle dots is covered. URL query values also cover ordinary
+  query encoding, including `+` and percent-encoded spaces.
+- `operate_drive` uses this same session mask for snapshot rows, page text,
+  headings, URLs, and outbound dropdown labels and choice keys before planner
+  state and traces are constructed. Raw dropdown selection text stays internal.
 - `operate_screenshot` composites masks over value-bearing pixels of injected
   controls and identified ordinary displayed copies. It preserves their borders,
   labels, validation errors, and surrounding pixels. An active mask is never
