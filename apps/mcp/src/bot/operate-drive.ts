@@ -55,7 +55,7 @@ import {
   snapshotToObservation,
   type DriveSnapshot,
 } from "./drive-snapshot.js";
-import { evaluateBound } from "./drive-evaluate.js";
+import { DriveEvaluateTimeout, evaluateBound } from "./drive-evaluate.js";
 import type { BrowserController } from "./browser.js";
 import { frameOriginOf } from "./browser-use-capture.js";
 import {
@@ -1976,53 +1976,52 @@ async function canonicalDriveRefs(
       const frameUrl = frame.url();
       const frameOrigin = frameOriginOf(frame);
       const candidates = fresh.flatMap((element, index) => {
+        let candidateFrame = page.mainFrame();
+        if (element.framePath != null) {
+          for (const part of element.framePath.split("/")) {
+            if (!/^\d+$/.test(part)) return [];
+            const child = candidateFrame.childFrames()[Number(part)];
+            if (child === undefined) return [];
+            candidateFrame = child;
+          }
+        }
         const sameFrame =
-          element.frameUrl == null
+          candidateFrame === frame &&
+          (element.frameUrl == null
             ? frame === page.mainFrame()
-            : frame !== page.mainFrame() &&
-              element.frameUrl === frameUrl &&
-              element.frameOrigin === frameOrigin;
+            : element.frameUrl === frameUrl && element.frameOrigin === frameOrigin);
         return sameFrame ? [{ index, selector: element.selector }] : [];
       });
-      const handle = await frame.evaluateHandle((refId) => {
-        const registry = (
-          window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element> } }
-        ).__tsDriveRegistry;
-        return registry?.nodes.get(refId) ?? null;
-      }, ref);
-      const element = handle.asElement();
-      if (element === null) {
-        await handle.dispose().catch(() => undefined);
-        continue;
-      }
-      const index = await frame
-        .evaluate(
-          (input: {
-            node: Element;
-            candidates: Array<{ index: number; selector: string }>;
-          }): number => {
-            const { node, candidates } = input;
-            for (const candidate of candidates) {
-              try {
-                if (document.querySelector(candidate.selector) === node) return candidate.index;
-              } catch {
-                // Selector invalid in this document — not the match.
-              }
+      const index = await evaluateBound(
+        frame,
+        (input: {
+          ref: string;
+          candidates: Array<{ index: number; selector: string }>;
+        }): number => {
+          const registry = (
+            window as Window & { __tsDriveRegistry?: { nodes: Map<string, Element> } }
+          ).__tsDriveRegistry;
+          const node = registry?.nodes.get(input.ref);
+          if (node === undefined || !node.isConnected) return -1;
+          for (const candidate of input.candidates) {
+            try {
+              if (document.querySelector(candidate.selector) === node) return candidate.index;
+            } catch {
+              continue;
             }
-            return -1;
-          },
-          { node: element, candidates },
-        )
-        .catch(() => -1);
-      await handle.dispose().catch(() => undefined);
+          }
+          return -1;
+        },
+        { ref, candidates },
+      );
       const match = index >= 0 ? fresh[index] : undefined;
       const canonicalRef = match === undefined ? undefined : canonical.get(match);
       if (canonicalRef !== undefined) {
         if (session.compactV2Active) session.compactV2Refs.set(canonicalRef, canonicalRef);
         translated.set(ref, canonicalRef);
       }
-    } catch {
-      // Leave untranslated — the primitive reports honestly.
+    } catch (error) {
+      if (error instanceof DriveEvaluateTimeout) throw error;
     }
   }
   return translated;
@@ -2698,10 +2697,18 @@ async function driveLoop(input: {
       // can actually resolve. Untranslatable refs keep their drive form and
       // are reported not_found by the resolver rather than silently skipped.
       const preTranslate = card.fields;
-      const translations = await canonicalDriveRefs(session, [
-        preTranslate.pan?.ref,
-        preTranslate.cvv?.ref,
-      ]);
+      let translations: Map<string, string>;
+      try {
+        translations = await canonicalDriveRefs(session, [
+          preTranslate.pan?.ref,
+          preTranslate.cvv?.ref,
+        ]);
+      } catch (error) {
+        if (error instanceof DriveEvaluateTimeout) {
+          return finish("evaluate_timeout", { reason: "in-page evaluate exceeded budget" });
+        }
+        throw error;
+      }
       if (translations.size > 0) {
         const pan = preTranslate.pan;
         const cvv = preTranslate.cvv;

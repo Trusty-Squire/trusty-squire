@@ -4,7 +4,6 @@
 import { describe, expect, it } from "vitest";
 import {
   DRIVE_SNAPSHOT_BUDGET_MS,
-  DRIVE_SNAPSHOT_CREDIT,
   DRIVE_SNAPSHOT_MAX_ELEMENTS,
   DRIVE_SNAPSHOT_MAX_NAME_VISITS,
   DRIVE_SNAPSHOT_MAX_WALK_NODES,
@@ -31,9 +30,7 @@ function snapshot(partial: Partial<DriveSnapshot> = {}): DriveSnapshot {
 }
 
 describe("drive snapshot conversion", () => {
-  it("credits jev-ultrafast snapshot.js", () => {
-    expect(DRIVE_SNAPSHOT_CREDIT).toContain("jev-ultrafast");
-    expect(DRIVE_SNAPSHOT_CREDIT).toContain("MIT");
+  it("bounds snapshot work", () => {
     expect(DRIVE_SNAPSHOT_MAX_ELEMENTS).toBe(250);
     expect(DRIVE_SNAPSHOT_BUDGET_MS).toBeLessThan(DRIVE_SNAPSHOT_MAX_ELEMENTS * 20);
     expect(DRIVE_SNAPSHOT_MAX_WALK_NODES).toBeLessThan(10_000);

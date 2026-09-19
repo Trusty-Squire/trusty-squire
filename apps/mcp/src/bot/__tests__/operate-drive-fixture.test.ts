@@ -25,6 +25,7 @@ import { captureFrameSnapshot, driveRowsFromSnapshot } from "../drive-snapshot.j
 import { driveActOnPage, settleDriveStep } from "../drive-act.js";
 import { sessionForCall } from "../session/lifecycle.js";
 import { DriveEvaluateTimeout } from "../drive-evaluate.js";
+import { attachOperatorRequestAbort, withOperatorRequestContext } from "../request-cancellation.js";
 
 const SIGNUP_HTML = `<!doctype html><meta charset="utf-8"><title>Signup fixture</title>
 <main>
@@ -361,15 +362,18 @@ describe("coverage-matrix constant", () => {
 });
 
 describe("drive review regressions", () => {
-  it.each([false, true])(
-    "keeps reused hosted-field selectors frame-scoped (cross-origin: %s)",
-    async (crossOrigin) => {
+  it.each(["same-origin", "cross-origin", "same-url", "srcdoc"])(
+    "keeps reused hosted-field selectors frame-scoped (%s)",
+    async (frameKind) => {
       const context = await browser.newContext();
       const page = await context.newPage();
       let sessionId: string | undefined;
       try {
         const panUrl = "https://provider.test/pan";
-        const cvvUrl = crossOrigin ? "https://cvv-provider.test/cvv" : "https://provider.test/cvv";
+        const cvvUrl =
+          frameKind === "cross-origin"
+            ? "https://cvv-provider.test/cvv"
+            : "https://provider.test/cvv";
         await page.route(panUrl, (route) =>
           route.fulfill({
             contentType: "text/html",
@@ -382,11 +386,24 @@ describe("drive review regressions", () => {
             body: '<label>CVV <input id="field" autocomplete="cc-csc"></label>',
           }),
         );
+        let frameMarkup = `<iframe id="pan" src="${panUrl}"></iframe><iframe id="cvv" src="${cvvUrl}"></iframe>`;
+        if (frameKind === "same-url") {
+          const shared = "https://provider.test/shared";
+          await page.route(shared, (route) =>
+            route.fulfill({
+              contentType: "text/html",
+              body: `<label><span id="label"></span><input id="field"></label><script>document.querySelector('#label').textContent = window.name === 'pan' ? 'Card number' : 'CVV';</script>`,
+            }),
+          );
+          frameMarkup = `<iframe id="pan" name="pan" src="${shared}"></iframe><iframe id="cvv" name="cvv" src="${shared}"></iframe>`;
+        } else if (frameKind === "srcdoc") {
+          frameMarkup = `<iframe id="pan" srcdoc="<label>Card number <input id='field'></label>"></iframe><iframe id="cvv" srcdoc="<label>CVV <input id='field'></label>"></iframe>`;
+        }
         const url = "https://hosted-checkout.test/checkout";
         await page.route(url, (route) =>
           route.fulfill({
             contentType: "text/html",
-            body: `<input id="field" aria-label="Unrelated" value="unchanged"><iframe id="pan" src="${panUrl}"></iframe><iframe id="cvv" src="${cvvUrl}"></iframe>`,
+            body: `<input id="field" aria-label="Unrelated" value="unchanged">${frameMarkup}`,
           }),
         );
         await page.goto(url);
@@ -438,6 +455,52 @@ describe("drive review regressions", () => {
     },
     30_000,
   );
+
+  it("aborts a stalled card-ref lookup and returns evaluate_timeout without injection", async () => {
+    const { context, page, started } = await openFixture(
+      '<label>Card number <input id="pan"></label>',
+      "lookup-timeout.test",
+    );
+    const controller = new AbortController();
+    attachOperatorRequestAbort(controller.signal, (reason) => controller.abort(reason));
+    const session = sessionForCall(started.session_id)!;
+    const extract = session.browser.extractInteractiveElements.bind(session.browser);
+    const frame = page.mainFrame();
+    let evaluation: { mockRestore(): void } | undefined;
+    const extraction = vi
+      .spyOn(session.browser, "extractInteractiveElements")
+      .mockImplementation(async (...args) => {
+        const fresh = await extract(...args);
+        evaluation = vi
+          .spyOn(frame, "evaluate")
+          .mockImplementationOnce(() => new Promise(() => undefined));
+        return fresh;
+      });
+    try {
+      await page.goto("https://lookup-timeout.test/checkout");
+      const dependencies = deps(async () => {
+        throw new Error("unexpected Jev call");
+      });
+      const injection = vi.fn(async () => ({ status: "unused" }));
+      dependencies.injectCard = injection;
+      const result = await withOperatorRequestContext(controller.signal, () =>
+        runOperateDrive(
+          { session_id: started.session_id, goal: "fill card", facts: { card_ref: "card" } },
+          api(),
+          undefined,
+          dependencies,
+        ),
+      );
+      expect(result.status).toBe("evaluate_timeout");
+      expect(controller.signal.aborted).toBe(true);
+      expect(injection).not.toHaveBeenCalled();
+    } finally {
+      evaluation?.mockRestore();
+      extraction.mockRestore();
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
 
   it("registers compact injection refs and retries after four incomplete fills", async () => {
     const { context, page, started } = await openFixture(

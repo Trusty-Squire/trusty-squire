@@ -8,9 +8,6 @@ import type { Observation } from "./provision-session.js";
 
 type SnapshotRow = [string, string, string?];
 
-export const DRIVE_SNAPSHOT_CREDIT =
-  "Drive snapshot evaluate adapted from browser-use/jev-ultrafast snapshot.js (MIT).";
-
 export const DRIVE_SNAPSHOT_MAX_ELEMENTS = 250;
 export const DRIVE_SNAPSHOT_BUDGET_MS = 2500;
 export const DRIVE_SNAPSHOT_MAX_WALK_NODES = 2000;
@@ -442,10 +439,7 @@ function inPageSnapshot(arg: DriveSnapshotArg): DriveInPageSnapshot | null {
     let value: string | undefined;
     if (omit.has(ref)) {
       omittedValues += 1;
-    } else if (
-      element instanceof HTMLInputElement &&
-      element.type === "password"
-    ) {
+    } else if (element instanceof HTMLInputElement && element.type === "password") {
       // A password field is reported so the drive can fill it, but its value
       // is never emitted — not to rows, not to the snapshot fingerprint.
       omittedValues += 1;
