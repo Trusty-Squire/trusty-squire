@@ -24,8 +24,18 @@ surfaces.
 For a signup, checkout, or other goal-shaped website task, call `operate_drive`
 with the goal and a `facts` bag (email, name, address, `card_ref`, …). Pass
 `session_id` of an open session, or `url` to open the page and drive in one
-call. The loop observes, lets Jev pick the next control, gates on confidence,
-and acts through the same click/type/select/login/inbox/card primitives.
+call. Each step asks Jev for one operation (CLICK, TYPE_TEXT, SELECT,
+SCROLL, WAIT, DONE, BLOCKED) plus a matching per-operation target; unused
+target heads cannot act. Identifying values come only from the facts bag. A
+search or query field may receive a phrase Jev assigns from the goal's own
+words or the facts; identity and payment fields still require a fact.
+The loop reads verification mail when a verification field is chosen or
+the page is stuck after a click. It does not gate on confidence. The drive
+loop snapshots and acts with an in-page registry plus CDP input; login,
+inbox, and card still use those primitives. The two-head Jev request,
+structured state, choice validation, WAIT, SELECT option targets, snapshot
+evaluate, and drive rules prose are adapted from browser-use/jev-ultrafast
+(MIT).
 It returns a handoff (never a bare page): status, the current compact
 observation with the same stable refs, trajectory, and done/remaining.
 `needs_value` names the missing field's label; `stuck` means no listed
@@ -33,6 +43,23 @@ element advances the goal. Resume the same session with `answer` (a
 readable action slug from the handoff options, `done`, or `stuck`) and/or
 added `facts`. Use the single-step primitives only for a handoff you are
 answering or a task that is not a goal.
+
+browser-use/jev-ultrafast (MIT) adoptions live in `operate-drive.ts`. Mapping:
+
+| # | Adoption | Where |
+| --- | --- | --- |
+| 1 | Two heads: `operation` plus `<operation>_target`; unused heads cannot act | `buildDriveQuestions`, `decideAfterJev` |
+| 2 | Structured `state` `{page, elements, recent_actions}` and `instructions` `{goal, rules}` | `DriveJevState`, `buildJevState`, `pageTextFromObservation` |
+| 3 | Per-element `operations` plus checked/disabled/required/acted and live `value` from the drive snapshot | `elementState`, `operationsForRow`, `drive-snapshot.ts` |
+| 4 | `validate_choice`: offered id, exact keys, finite [0,1], sum ±0.02, argmax. Malformed answers are `invalid_answer` (reason + confidence), not `low_confidence`; one same-observation retry | `validateChoiceReason`, `admitsChoice` |
+| 5 | SELECT option is a target (`slug:option`) | `selectTargets`, `selectTargetKey`, `lastSelectOptions` |
+| 6 | WAIT when the needed control is absent/disabled or results are loading | `DRIVE_RULES`, `{kind:"wait"}`, `DRIVE_WAIT_MS` |
+| 7 | Rules prose adapted from their MIT `NEXT_ACTION` / `TARGET` | `DRIVE_RULES` |
+| 8 | No confidence gates, including DONE. Validation of the answer shape stays. The purchase approval is the payment gate | `admitsChoice`, `decideAfterJev` |
+| 9 | Three consecutive non-wait actions with no fingerprint change | `DRIVE_STALE_LIMIT`, `staleNonWait` |
+| 10 | Decision bound to the observation fingerprint, consumed once | `boundFingerprint`, `consumedActionKey` |
+| 11 | 60 actions, 120 Jev calls, 250 candidates (truncated cannot be selected) | `DRIVE_DEFAULT_MAX_STEPS`, `DRIVE_MAX_JEV_CALLS`, `DRIVE_MAX_CANDIDATES` |
+| 12 | Drive-loop step is four calls: one snapshot evaluate, one two-head Jev request, one registry guard evaluate plus CDP click/`insertText` (native select sets `value`), then two animation frames or 50 ms (combobox options capped at 200 ms). `networkidle` only after a navigation | `drive-snapshot.ts`, `drive-act.ts`, `operate-drive.ts` |
 
 `operate_read_inbox` reads the session's signed-in Gmail inbox for a
 verification email in dedicated utility tabs that are closed when the read

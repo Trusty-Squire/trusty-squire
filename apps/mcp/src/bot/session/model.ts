@@ -62,6 +62,13 @@ export interface Session {
   // The last extracted elements, kept so resolveTarget can be unit-tested
   // against a snapshot, but act() always RE-extracts first (re-resolution).
   lastElements: InteractiveElement[];
+  lastCompactObservation: {
+    url: string;
+    session_id?: string;
+    stage?: string;
+    safe_table?: unknown;
+    semantic?: { title?: string; headings?: string[]; blockers?: Array<{ text: string }> };
+  } | null;
   compactV2Secret: Buffer;
   compactV2HintPages: string[];
   /** True once this session has emitted V2; target resolution stays sealed until finish. */
@@ -138,6 +145,9 @@ export interface DriveTrajectoryStep {
   url: string;
   stage?: string;
   jev_ms?: number;
+  act_ms?: number;
+  settle_ms?: number;
+  observe_ms?: number;
 }
 
 export interface DriveHandoffQuestion {
@@ -152,17 +162,43 @@ export interface SessionDriveState {
   facts: Record<string, string>;
   trajectory: DriveTrajectoryStep[];
   history: string[];
+  filledRefs: string[];
   lastQuestion: DriveHandoffQuestion | null;
   lastActionKey: string | null;
   lastFingerprint: string | null;
   jevCalls: number;
+  staleNonWait: number;
+  boundFingerprint: string | null;
+  consumedActionKey: string | null;
+  lastActProfile: { act_ms: number; settle_ms: number; observe_ms: number } | null;
+  maskedValueRefs?: string[];
+  lastDocumentEpoch?: string | null;
+  resumeCompactRows?: Array<[string, string, string?]>;
 }
 
 // The last extracted elements are resealed on every retain so each retained
 // element carries the session-secret correlation selector act() re-resolves
 // against. Kept so resolveTarget can be unit-tested against a snapshot, but
 // act() always RE-extracts first (re-resolution).
+// Unsealed <select> option labels for operate_drive SELECT targets. Kept off
+// lastElements because sealRetainedInteractiveElementsV2 nulls selectOptions
+// so raw page text does not sit on the retained inventory.
+export const lastSelectOptions = new WeakMap<Session, Map<string, string[]>>();
+
 export function retainSessionElements(session: Session, elements: InteractiveElement[]): void {
+  const options = new Map<string, string[]>();
+  for (const element of elements) {
+    const texts = (element.selectOptions ?? [])
+      .map((option) => option.text)
+      .filter((text) => text.length > 0);
+    if (texts.length === 0) continue;
+    for (const label of [element.ariaLabel, element.labelText, element.visibleText]) {
+      if (label !== null && label !== undefined && label.length > 0) {
+        options.set(label.toLowerCase(), texts);
+      }
+    }
+  }
+  lastSelectOptions.set(session, options);
   session.lastElements = sealRetainedInteractiveElementsV2(elements, (element) =>
     compactV2CorrelationSelector(session, element),
   );
@@ -225,6 +261,7 @@ export function createSession(input: CreateSessionInput): Session {
     generation: 0,
     secretSlots: new Map(),
     lastElements: [],
+    lastCompactObservation: null,
     compactV2Secret: randomBytes(32),
     compactV2HintPages: [],
     compactV2Active: false,

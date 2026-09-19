@@ -11,10 +11,12 @@ import { BrowserController } from "../browser.js";
 import { askJev } from "../jev-client.js";
 import {
   DRIVE_CONFIDENCE_THRESHOLD,
-  actionCriteria,
+  DRIVE_OPERATIONS,
   buildDriveQuestions,
   buildJevState,
-  driveCandidates,
+  driveTargetSets,
+  matchingFactKeys,
+  validateChoice,
   wireRowsFromObservation,
 } from "../operate-drive.js";
 import { finishProvisionSession, startHarnessProvisionSession } from "../provision-session.js";
@@ -79,33 +81,45 @@ describe.skipIf(!live)("operate_drive coverage-matrix replay", () => {
           ? {}
           : { accountId: process.env.TRUSTY_SQUIRE_ACCOUNT_ID }),
       });
-      const questions = buildDriveQuestions(rows, FACTS, "fill the checkout contact and shipping fields");
+      const goal = "fill the checkout contact and shipping fields";
+      const sets = driveTargetSets(rows, FACTS, false);
+      const questions = buildDriveQuestions(rows, FACTS, goal);
       const state = buildJevState(
-        "fill the checkout contact and shipping fields",
+        goal,
         Object.keys(FACTS),
         [],
         started.url,
         started.semantic?.title,
-        driveCandidates(rows, false),
+        [...sets.TYPE_TEXT, ...sets.SELECT, ...sets.CLICK, ...sets.SCROLL],
       );
       const outcome = await askJev(api, state, questions);
-      const next = outcome.result.answers.next_action;
-      const value = outcome.result.answers.value;
-      const complete = outcome.result.answers.goal_complete;
       const gatedCorrect: string[] = [];
-      if ((next?.confidence ?? 0) >= DRIVE_CONFIDENCE_THRESHOLD) {
-        expect(next?.choice).toBeDefined();
-        expect(Object.keys(actionCriteria(rows))).toContain(next?.choice);
-        expect(String(next?.choice ?? "")).not.toMatch(/^@e:/);
-        gatedCorrect.push(`next_action:${next?.choice}`);
-      }
-      if ((value?.confidence ?? 0) >= DRIVE_CONFIDENCE_THRESHOLD) {
-        expect(Object.keys(FACTS)).toContain(value?.choice);
-        gatedCorrect.push(`value:${value?.choice}`);
-      }
-      if ((complete?.noul ?? 0) >= DRIVE_CONFIDENCE_THRESHOLD) {
-        // Checkout is not complete on this fixture.
-        expect(complete?.noul).toBeLessThan(DRIVE_CONFIDENCE_THRESHOLD);
+      const operation = outcome.result.answers.operation;
+      const operationCriteria =
+        questions.operation?.type === "choice" ? questions.operation.criteria : {};
+      if ((operation?.confidence ?? 0) >= DRIVE_CONFIDENCE_THRESHOLD) {
+        expect(validateChoice(operationCriteria, operation)).toBe(true);
+        expect(DRIVE_OPERATIONS).toContain(operation?.choice);
+        gatedCorrect.push(`operation:${operation?.choice}`);
+        const targetName = `${operation?.choice}_target`;
+        const targetQuestion = questions[targetName];
+        const target = outcome.result.answers[targetName];
+        if (targetQuestion?.type === "choice") {
+          if ((target?.confidence ?? 0) >= DRIVE_CONFIDENCE_THRESHOLD) {
+            expect(validateChoice(targetQuestion.criteria, target)).toBe(true);
+            if (operation?.choice === "TYPE_TEXT") {
+              const hit = sets.TYPE_TEXT.find((candidate) => candidate.slug === target?.choice);
+              expect(hit).toBeDefined();
+              if (hit !== undefined) {
+                expect(matchingFactKeys(FACTS, hit.row).length).toBeGreaterThan(0);
+              }
+            }
+            if (operation?.choice === "SELECT") {
+              expect(Object.keys(targetQuestion.criteria)).toContain(target?.choice);
+            }
+            gatedCorrect.push(`${targetName}:${target?.choice}`);
+          }
+        }
       }
       expect(gatedCorrect.length).toBeGreaterThan(0);
     } finally {
