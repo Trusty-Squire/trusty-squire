@@ -50,9 +50,9 @@ import {
 } from "./agents.js";
 import { detectAsn, type AsnInfo } from "../bot/index.js";
 import {
-  detectActiveProviderSessions,
   detectProviderSessionsFromProfile,
   openInstallConfirmInBotChrome,
+  probeProviderSessionsAfterCeremony,
   type InstallClaimPollResult,
 } from "../bot/google-login.js";
 import { type OAuthProviderId } from "../bot/oauth-providers.js";
@@ -712,16 +712,35 @@ async function runConnectInstall(
   // fail-fasts while any other browser holds the profile — including the
   // resident broker's Chrome. Run it BEFORE clearBrowserProfile so an
   // account-switch on a busy machine is refused at the gate instead of
-  // deleting the profile directory out from under a live Chrome.
+  // deleting the profile directory out from under a live Chrome. When the
+  // clear DOES busy-fail, the clear now rides the upcoming ceremony instead
+  // of hard-refusing the re-login: the confirm tab signs the providers out
+  // through the shared browser (or the self-launched context, when it wins
+  // the profile) — no second Chrome, no drain.
+  let deferredReloginProviders: OAuthProviderId[] = [];
   if (args.forceRelogin) {
-    let cookiesCleared: boolean;
-    if (args.forceReloginProvider !== undefined) {
-      cookiesCleared = await clearProviderCookies(profileDir, args.forceReloginProvider);
-    } else {
-      cookiesCleared = await clearProviderCookies(profileDir);
-      if (cookiesCleared) clearBrowserProfile(profileDir);
+    const wanted: OAuthProviderId[] =
+      args.forceReloginProvider !== undefined ? [args.forceReloginProvider] : ["google", "github"];
+    let cleared = false;
+    let busy = false;
+    try {
+      if (args.forceReloginProvider !== undefined) {
+        cleared = await clearProviderCookies(profileDir, args.forceReloginProvider);
+      } else {
+        cleared = await clearProviderCookies(profileDir);
+        if (cleared) clearBrowserProfile(profileDir);
+      }
+    } catch (err) {
+      if (!(err instanceof ProfileBusyError)) throw err;
+      busy = true;
     }
-    if (!cookiesCleared) {
+    if (busy) {
+      deferredReloginProviders = wanted;
+      console.error(
+        "[connect] the bot profile is busy, so the old provider sessions will be " +
+          "signed out through the sign-in browser instead.",
+      );
+    } else if (!cleared) {
       ui.fail(
         "I couldn't verify that the previous provider cookies were cleared. " +
           "Close every Chrome process using the bot profile and retry with --force-relogin.",
@@ -777,6 +796,9 @@ async function runConnectInstall(
   const session = await runInstallClaim(args.apiBase, target, baseSession, args.skipBrowser, {
     applyServerPrefs: !wantInteractive,
     profileDir,
+    ...(deferredReloginProviders.length
+      ? { forceReloginProviders: deferredReloginProviders }
+      : {}),
   });
   if (session === null) {
     ui.fail(
@@ -808,16 +830,18 @@ async function runConnectInstall(
   // persisted provider marker is allowed to outlive the session it describes.
   // This probe is also the SUCCESS GATE: the machine claim alone proves the
   // account plumbing, not that the bot can wear the user's identity at a third-
-  // party site. `null` means the probe itself failed, which is not a pass.
+  // party site. After a broker-hosted ceremony the broker's Chrome still holds
+  // the profile, so the live probe busy-fails: probeProviderSessionsAfterCeremony
+  // falls back to the committed-cookie snapshot (polling past Chrome's ~30s
+  // commit lag) instead of failing the gate for winning the broker path.
+  // `null` means the probe itself failed, which is not a pass.
   let providers: OAuthProviderId[] | null = null;
   try {
     providers = await ui.withSpinner({
       start: "Checking provider sessions",
       done: "Provider sessions checked",
       fail: () => "Provider session check failed",
-      // validate=true: confirm each session is LIVE (not just cookie-present),
-      // so a dead-but-present GitHub session isn't shown as connected.
-      task: () => detectActiveProviderSessions(profileDir),
+      task: () => probeProviderSessionsAfterCeremony(profileDir),
     });
   } catch (err) {
     console.error(
@@ -1138,19 +1162,12 @@ async function checkAlreadyProvisioned(
       return preflight;
     }
     const preflight = decideConnectPreflight(session, stillValid, providers);
-    if (preflight.kind === "provisioned") {
-      // Repair write, outside any ceremony: cookie evidence that passed the
-      // live-expiry check outranks an under-reported record. Shipped builds
-      // could persist a short set (a transient probe failure recorded verbatim),
-      // and an unrepaired record demoted every later connect forever. Add-only:
-      // the veto never covered REMOVING a provider on a transient miss.
-      const recorded = new Set(session.connected_providers ?? []);
-      for (const p of providers) {
-        if (!recorded.has(p)) await recordConnectedProvider(p, accountId);
-      }
-      return { ...preflight, session };
-    }
-    return preflight;
+    // Nothing here writes connected_providers: cookie presence can ADD a
+    // provider the record lacks, but it cannot prove liveness, and a repair
+    // write keyed on presence alone would promote a dead session (an empty
+    // record is the one state this branch can reach). Only the live probe
+    // that runs after a ceremony persists provider records.
+    return preflight.kind === "provisioned" ? { ...preflight, session } : preflight;
   } catch {
     return { kind: "ceremony" };
   }
@@ -1329,6 +1346,9 @@ async function runInstallClaim(
     // discarded a fresh inbox-read preference.
     applyServerPrefs: boolean;
     profileDir: string;
+    // Providers whose cookie clear busy-failed and now rides the ceremony
+    // (see the --force-relogin block in the caller).
+    forceReloginProviders?: readonly OAuthProviderId[];
   },
 ): Promise<SessionData | null> {
   console.warn(`Connecting this machine to your account…`);
@@ -1410,6 +1430,9 @@ async function runInstallClaim(
     pollUntilClaimed: pollOnce,
     heartbeatMessage: () => claimHeartbeatMessage(state.value !== null),
     profileDir: options.profileDir,
+    ...(options.forceReloginProviders?.length
+      ? { forceReloginProviders: options.forceReloginProviders }
+      : {}),
   });
 
   // rc.33 — surface the underlying error instead of letting the outer

@@ -68,7 +68,7 @@ fs.writeFileSync(
   JSON.stringify({ host: os.hostname(), pid: process.pid, start_time: startTime(), token: "lease" }),
   { mode: 0o600 },
 );
-const seen = { openUrl: null, closedSession: null };
+const seen = { openUrl: null, closedSession: null, commands: [] };
 const server = net.createServer((socket) => {
   let buffered = "";
   socket.on("data", (chunk) => {
@@ -97,6 +97,15 @@ const server = net.createServer((socket) => {
       if (request.method === "open") {
         seen.openUrl = request.params?.serviceUrl ?? null;
         reply({ result: { sessionId: "tab-1" } });
+        continue;
+      }
+      if (request.method === "command") {
+        seen.commands = seen.commands || [];
+        seen.commands.push({
+          name: request.params?.name ?? null,
+          args: request.params?.args ?? null,
+        });
+        reply({ result: { ok: true } });
         continue;
       }
       if (request.method === "close") {
@@ -169,12 +178,15 @@ async function profileLockPath(
  * broker or browser work, so the live environment names the target while
  * `CHROME_PROFILE_DIR` still names the process default.
  */
-async function connectFixture(): Promise<{
+async function connectFixture(opts: {
+  forceReloginProviders?: readonly string[];
+} = {}): Promise<{
   result: unknown;
   profileIdentity: string;
   lockNeverReleased: boolean;
   openUrl: string | null;
   closedSession: string | null;
+  commands: { name: string | null; args: Record<string, unknown> | null }[];
 }> {
   const root = await tempDir();
   const lockRoot = join(root, "locks");
@@ -220,6 +232,9 @@ async function connectFixture(): Promise<{
     deadline: Date.now() + 5_000,
     pollUntilDone: async () => true,
     bannerLabel: "fixture",
+    ...(opts.forceReloginProviders
+      ? { forceReloginProviders: opts.forceReloginProviders as ("google" | "github")[] }
+      : {}),
   }).catch((error: unknown) => error);
   // The fixture persists its record on a short interval; wait for the close
   // so the assertion below cannot race the last persist tick.
@@ -230,11 +245,15 @@ async function connectFixture(): Promise<{
       return false;
     }
   }, 5_000).catch(() => undefined);
-  const seen = ((): { openUrl: string | null; closedSession: string | null } => {
+  const seen = ((): {
+    openUrl: string | null;
+    closedSession: string | null;
+    commands: { name: string | null; args: Record<string, unknown> | null }[];
+  } => {
     try {
       return JSON.parse(readFileSync(lockPath + ".seen", "utf8"));
     } catch {
-      return { openUrl: null, closedSession: null };
+      return { openUrl: null, closedSession: null, commands: [] };
     }
   })();
   return {
@@ -245,6 +264,7 @@ async function connectFixture(): Promise<{
     lockNeverReleased: existsSync(lockPath),
     openUrl: seen.openUrl,
     closedSession: seen.closedSession,
+    commands: seen.commands,
   };
 }
 
@@ -263,6 +283,27 @@ describe("connect attaches to the live broker for the profile it is connecting",
     expect(outcome.closedSession).toBe("tab-1");
     // The profile lease was never touched: no drain, no guard, no second
     // Chrome, no wait.
+      expect(outcome.lockNeverReleased).toBe(true);
+    },
+  );
+
+  it(
+    "drives the deferred --force-relogin logout through the shared session's own commands",
+    { timeout: 30_000 },
+    async () => {
+      const outcome = await connectFixture({ forceReloginProviders: ["google", "github"] });
+      expect(outcome.result).toEqual({ status: "satisfied", closeState: "closed" });
+      expect(outcome.openUrl).toBe(CONFIRM_URL);
+      // The logout drive rode the SAME session tab the ceremony opened — plain
+      // operate_* commands on the wire, no extra session, no CDP attach:
+      // Google's GET logout, GitHub's logout navigation plus its confirm
+      // click, then back to the confirm page for the fresh sign-in.
+      expect(outcome.commands).toEqual([
+        { name: "operate_navigate", args: { url: "https://accounts.google.com/Logout" } },
+        { name: "operate_navigate", args: { url: "https://github.com/logout" } },
+        { name: "operate_click", args: { ref: 'text="Sign out"' } },
+        { name: "operate_navigate", args: { url: CONFIRM_URL } },
+      ]);
       expect(outcome.lockNeverReleased).toBe(true);
     },
   );

@@ -107,6 +107,28 @@ function createRemoteLoginSecrets(rig: RemoteLoginRig): void {
   }
 }
 
+// VNC credentials WITHOUT an Xvfb or a new Xauthority: the shared-broker
+// exposure adopts an existing display + authority (the broker daemon's Xvfb
+// rig) and only needs VNC secrets of its own. createRemoteLoginSecrets would
+// also mint an Xauthority, which would clobber the adopted rig.authFile.
+export function createRemoteLoginVncSecrets(rig: RemoteLoginRig): void {
+  const privateDir = mkdtempSync(join(tmpdir(), "tsq-login-"));
+  chmodSync(privateDir, 0o700);
+  rig.privateDir = privateDir;
+  try {
+    rig.vncPassword = generateVncPassword();
+    rig.passFile = join(privateDir, "vnc.pass");
+    writeFileSync(rig.passFile, rig.vncPassword, { flag: "wx", mode: 0o600 });
+    chmodSync(rig.passFile, 0o600);
+  } catch (error) {
+    rmSync(privateDir, { recursive: true, force: true });
+    delete rig.privateDir;
+    delete rig.passFile;
+    delete rig.vncPassword;
+    throw error;
+  }
+}
+
 export function remoteLoginEnvironment(
   rig: RemoteLoginRig,
   baseEnv: NodeJS.ProcessEnv = process.env,

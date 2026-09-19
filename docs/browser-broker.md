@@ -77,9 +77,13 @@ persistent-context Chrome on the bot profile through the operator's own launch
 custody (`launchCeremonyBrowserContext`) — runs only where no broker can serve
 yet (a first-ever connect on an unenrolled machine); its profile gate fail-fasts
 with the busy-profile message rather than racing a browser that holds the
-profile. Whether a CDP-attached browser can carry a Google sign-in is unproven
-either way in this repo — do not cite it as a reason to add a second instance
-without a real run to show for it.
+profile. Because the broker's Chrome runs on its own private Xvfb, connect
+exposes that display over noVNC for the ceremony (same x11vnc + websockify +
+tunnel stack as the standalone remote login, reaped at the ceremony's lease
+boundary) — a tab no human can see is a tab no human can complete. A deferred
+`--force-relogin` cookie clear rides the same tab as ordinary logout navigation.
+The CDP-attach × Google OAuth question is owned by the STATE.md bisect
+paragraph below — do not cite it as a reason to add a second instance.
 
 The ceremony's broker endpoint is derived from the profile the caller is about
 to use, not from the launch-time default. `connect` resolves its target's
@@ -89,6 +93,15 @@ endpoint, the election root, the profile lock — reads the environment live
 (`currentProfileDir`). Resolving any of them from the frozen
 `CHROME_PROFILE_DIR` addresses a different profile's broker and then collides
 with the live broker that owns the real profile.
+
+STATE.md's 2026-07-20 bisect confirmed a CDP-attach × Google OAuth failure for
+the OLD self-launch + `connectOverCDP` login cell (2026-09-04 extended it to
+the deleted `login` subcommand). Whether the broker's Playwright-driven Chrome
+carries a Google sign-in is the open hypothesis; the connect PATH A/B E2E
+proofs (valid-session and no-session runs completing against a live broker) are
+the falsification experiment. Do not cite either the failure or its absence as
+settled without that run.
+
 There are no `hello`/`tool`/`cancel`/`resume` operations: a
 session command is `command{sessionId,name,args}` (the only place a tool name
 appears), and `close` either finishes a session (the `operate_finish` payload

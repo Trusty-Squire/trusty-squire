@@ -747,17 +747,26 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
   install report success with no live Google session. The ceremony opens the
   confirm page as a TAB in the shared broker browser (an ordinary
   `connectOrLaunchBroker` + `open`, no drain, no second Chrome, no profile
-  lease); the self-launch fallback — a headed persistent-context Chrome through
-  the operator's own launch custody (`launchCeremonyBrowserContext`) — runs only
-  where no broker can serve yet, and its profile gate fail-fasts on a busy
-  profile instead of racing it. Nothing in this repo has ever shown a Google
-  sign-in failing through a CDP-attached browser, so do not cite that as a
-  reason to add a second instance. Re-auth is
-  `connect --force-relogin[=google|github]`; connect gates its own success on
-  the post-ceremony live provider probe (`decideConnectComplete`,
-  `apps/mcp/src/install/cli.ts`), and the operator's `google_session` wall hands
-  back `resume: "connect"`. Never reintroduce a second sign-in entry point, and
-  never point a user or an agent at `login`.
+  lease), with that browser's private Xvfb display exposed over noVNC for the
+  ceremony so a human can actually drive the sign-in; the self-launch fallback
+  — a headed persistent-context Chrome through the operator's own launch
+  custody (`launchCeremonyBrowserContext`) — runs only where no broker can
+  serve yet, and its profile gate fail-fasts on a busy profile instead of
+  racing it. STATE.md's 2026-07-20 bisect DID confirm a CDP-attach × Google
+  OAuth failure for the old self-launch + `connectOverCDP` login cell (and the
+  2026-09-04 `login` repro extended it) — do not cite that history as settled
+  clearance for the broker-hosted ceremony either way: the open hypothesis is
+  that the failure was specific to that cell, and the connect PATH A/B E2E
+  proofs on a real broker-hosted tab are the experiment that settles it.
+  Re-auth is
+  `connect --force-relogin[=google|github]`; on a machine whose broker holds
+  the profile, the old-provider cookie clear rides the ceremony (logout
+  through the confirm tab) instead of hard-refusing, and connect gates its
+  own success on the post-ceremony provider probe (live probe first,
+  committed-cookie fallback past Chrome's commit lag when the profile is
+  still busy — `probeProviderSessionsAfterCeremony`), and the operator's
+  `google_session` wall hands back `resume: "connect"`. Never reintroduce a
+  second sign-in entry point, and never point a user or an agent at `login`.
 - **Never quit a Chrome whose profile state you still need with SIGTERM.** Chrome
   routes SIGTERM to its abrupt "session ending" exit and does NOT flush the
   SQLite cookie store (its own commit timer is ~30s out), so a SIGTERM teardown
