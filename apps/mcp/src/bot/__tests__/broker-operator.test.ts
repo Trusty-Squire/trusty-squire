@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { z, type Tool } from "../../tools/index.js";
 import type { ApiClient } from "../../api-client.js";
 import type { SessionGuard } from "../../session-guard.js";
+import type * as SessionLifecycle from "../session/lifecycle.js";
+import type * as ProvisionSession from "../provision-session.js";
 
 const state = vi.hoisted(() => ({
   sessions: new Map<
@@ -22,7 +24,7 @@ const state = vi.hoisted(() => ({
 }));
 
 vi.mock("../session/lifecycle.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../session/lifecycle.js")>();
+  const actual = await importOriginal<typeof SessionLifecycle>();
   return {
     ...actual,
     sessionForCall: (sessionId: string) => state.sessions.get(sessionId),
@@ -35,7 +37,7 @@ vi.mock("../session/lifecycle.js", async (importOriginal) => {
 });
 
 vi.mock("../provision-session.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../provision-session.js")>();
+  const actual = await importOriginal<typeof ProvisionSession>();
   return {
     ...actual,
     maskOperatorSessionOutput: (_sessionId: string, value: unknown) => value,
