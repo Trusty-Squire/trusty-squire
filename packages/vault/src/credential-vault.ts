@@ -726,7 +726,7 @@ export class CredentialVault implements VaultClient {
   // passkey-signed fetch approval bound to this exact (account, credential);
   // this method performs no authorization of its own beyond account scoping,
   // which is why nothing but the fetch-approval route may call it. Counted
-  // against the same retrieval ceiling as every other decrypt path.
+  // against the plaintext-retrieval ceiling enforced by retrieveInternal.
   //
   // `approvedFieldNames` is the EXACT field set the human signed for, and the
   // filtering happens here rather than in the caller so the audit row states

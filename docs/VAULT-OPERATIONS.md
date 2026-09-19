@@ -92,9 +92,15 @@ signed before-state, applies the metadata edit or soft delete, records the audit
 event, and marks the approval terminal. A transaction failure leaves the
 approval pending and the credential unchanged.
 
-**Rate limiting:** every decrypt path — agent retrieve, runtime
-retrieve, AND web `reveal` — counts against one per-account ceiling
-(100/hr). There is no human-only bypass.
+**Rate limiting:** paths that return decrypted fields — agent and runtime
+retrieve, browser fill, web `reveal`, and approval-gated fetch — share one
+per-account ceiling of 100 retrievals per rolling hour. There is no human-only
+bypass. Server-side proxy use is exempt: the API uses the credential inside
+its outbound executor without returning the plaintext to the caller. Proxy
+calls do not consume that retrieval allowance and can continue after it is
+exhausted; host allowlists and proxy auditing still apply. The separate API
+control-plane limit is documented under `API_ACCOUNT_HOURLY_LIMIT` in
+[`CLAUDE.md`](../CLAUDE.md).
 
 ## Reading the audit trail (`audit_log`)
 

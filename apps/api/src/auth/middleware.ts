@@ -73,7 +73,7 @@ export function makeAuthMiddleware(deps: AuthDeps) {
   }
 
   // Per-account rolling-hour rate limit on the authed control plane — a DoS
-  // backstop so one token can't hammer vault store/list/use, grant mint, etc.
+  // backstop so one token can't hammer vault store/list, grant mint, etc.
   // Generous (the deployed-app egress PROXY runs on a SEPARATE grant-token path
   // with an optional per-grant cap, so this won't throttle workloads). In-memory /
   // single-instance, like the grant limiter. `<= 0` disables it.
