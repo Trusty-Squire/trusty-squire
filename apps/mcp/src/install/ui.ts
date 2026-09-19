@@ -8,7 +8,7 @@
 //     256-color, then 16-color, then plain text.
 //   - ora detects !isTTY and renders a single line per "spinner"
 //     transition (no escape sequences, no redraw).
-//   - boxen still emits, but as plain ASCII art that scales to width.
+//   - boxen still emits a bordered panel; see panel() for sizing.
 //   - OSC 8 hyperlink wrapping is gated on isTTY — pipes / logs get
 //     plain text, no garbage escape codes.
 //
@@ -99,6 +99,14 @@ export function panel(body: string, opts: PanelOpts = {}): void {
   const color = opts.color ?? "wine";
   const borderColor =
     color === "wine" ? WINE : color === "dim" ? "#555" : color === "yellow" ? "yellow" : "red";
+  // Beeline parses the printed install URL, so non-TTY panels must keep it
+  // contiguous: wrapping can truncate its token and cause `not_found`.
+  // Include side padding and borders when sizing to the longest body line;
+  // interactive terminals retain the compact width. The piped-URL regression
+  // is covered in __tests__/ui-snapshots.test.ts.
+  const width = process.stdout.isTTY
+    ? Math.min(termWidth() - 2, 78)
+    : Math.max(termWidth() - 2, ...body.split("\n").map((line) => line.length + 4));
   // Tighter padding than the design's previous round-border default:
   // hairline border + 1 column of side padding reads as a Linear-style
   // panel rather than a heavy boxed callout.
@@ -109,7 +117,7 @@ export function panel(body: string, opts: PanelOpts = {}): void {
       borderStyle: "single",
       borderColor,
       ...(opts.align !== undefined ? { textAlignment: opts.align } : {}),
-      width: Math.min(termWidth() - 2, 78),
+      width,
     }),
   );
 }

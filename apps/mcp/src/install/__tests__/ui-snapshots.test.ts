@@ -141,4 +141,28 @@ describe("ui.panel", () => {
     expect(out).toContain("│");
     expect(out).toContain("hello");
   });
+
+  it("keeps a setup URL contiguous when output is piped to another process", () => {
+    const originalIsTTY = process.stdout.isTTY;
+    Object.defineProperty(process.stdout, "isTTY", {
+      value: false,
+      configurable: true,
+    });
+    try {
+      const token = "x".repeat(43);
+      const url = `https://trustysquire.ai/install?token=${token}`;
+      ui.panel(`Open this URL to sign in and confirm:\n\n  ${ui.link(url)}`, {
+        color: "wine",
+        title: "sign in",
+      });
+
+      expect(warned).toHaveLength(1);
+      expect(warned[0]).toContain(url);
+    } finally {
+      Object.defineProperty(process.stdout, "isTTY", {
+        value: originalIsTTY,
+        configurable: true,
+      });
+    }
+  });
 });
