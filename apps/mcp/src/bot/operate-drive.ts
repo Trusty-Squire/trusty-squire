@@ -641,6 +641,9 @@ const FIELD_ALIASES: Record<string, readonly string[]> = {
   origin: ["origin", "from", "where_from"],
   destination: ["destination", "to", "arrival", "where_to"],
   date: ["date", "departure_date", "depart_date", "departure", "expiry", "expiration", "exp_date"],
+  ticket_type: ["ticket_type", "trip_type", "flight_type"],
+  cabin: ["cabin", "seating_class", "seat_class"],
+  passengers: ["passengers", "passenger_count", "travelers", "travellers"],
 };
 
 function normalizeKey(value: string): string {
@@ -710,6 +713,15 @@ export function matchingFactKeys(facts: Record<string, string>, row: WireRow): s
     )
   ) {
     for (const alias of aliasKeysFor("date")) wanted.add(alias);
+  }
+  if (label.includes("ticket_type") || label.includes("trip_type")) {
+    for (const alias of aliasKeysFor("ticket_type")) wanted.add(alias);
+  }
+  if (label.includes("seating_class") || label.includes("cabin")) {
+    for (const alias of aliasKeysFor("cabin")) wanted.add(alias);
+  }
+  if (label.includes("passenger")) {
+    for (const alias of aliasKeysFor("passengers")) wanted.add(alias);
   }
   return keys.filter((key) => wanted.has(normalizeKey(key)));
 }
@@ -1140,6 +1152,59 @@ function takeCapped<T>(items: readonly T[], remaining: { n: number }): T[] {
   const slice = items.slice(0, remaining.n);
   remaining.n -= slice.length;
   return [...slice];
+}
+
+function rowCurrentValue(row: WireRow): string | undefined {
+  const match = /(?:^|\|)n=([^|]+)/.exec(row[2] ?? "");
+  return match?.[1];
+}
+
+function factValuesMatch(left: string, right: string): boolean {
+  return normalizeKey(left) === normalizeKey(right);
+}
+
+function factOptionRow(rows: readonly WireRow[], fact: string): WireRow | undefined {
+  const want = normalizeKey(fact);
+  if (want.length === 0) return undefined;
+  for (const row of rows) {
+    if (row[1] === "combobox") continue;
+    if (!isClickableRow(row) || isFillableRow(row) || isDisabledRow(row)) continue;
+    if (factValuesMatch(readableLabel(row), fact)) return row;
+  }
+  return undefined;
+}
+
+export function requiredFactComboboxAction(
+  rows: readonly WireRow[],
+  facts: Record<string, string>,
+  filledRefs: readonly string[] = [],
+  pageOptions: ReadonlyMap<string, readonly string[]> = new Map(),
+): { target: string; fillsRef?: string; select?: string } | undefined {
+  const filled = new Set(filledRefs);
+  for (const row of rows) {
+    if (row[1] !== "combobox" || isDisabledRow(row) || isActedRow(row) || filled.has(row[0])) {
+      continue;
+    }
+    const key = matchingFactKeys(facts, row)[0];
+    if (key === undefined) continue;
+    const fact = facts[key];
+    if (fact === undefined || fact.length === 0) continue;
+    const current = rowCurrentValue(row);
+    if (current !== undefined && factValuesMatch(current, fact)) continue;
+    const option = factOptionRow(rows, fact);
+    if (option !== undefined) {
+      return { target: option[0], fillsRef: row[0] };
+    }
+    const offered = [
+      ...(pageOptions.get(row[0]) ?? []),
+      ...(pageOptions.get(readableLabel(row).toLowerCase()) ?? []),
+    ];
+    if (offered.some((text) => factValuesMatch(text, fact))) {
+      return { target: row[0], fillsRef: row[0], select: fact };
+    }
+    return { target: row[0] };
+  }
+  return undefined;
 }
 
 export function requiredFillableMissingFact(
@@ -3097,6 +3162,33 @@ async function driveLoop(input: {
       drive.filledRefs,
       pageUrl,
     );
+    const pageOptions =
+      lastSelectOptions.get(session) ?? selectOptionsFromElements(session.lastElements);
+    const comboboxFill = requiredFactComboboxAction(
+      rows,
+      drive.facts,
+      drive.filledRefs,
+      pageOptions,
+    );
+    if (comboboxFill !== undefined) {
+      drive.boundFingerprint = progressFingerprint(observation.url, rows, drive, session);
+      drive.consumedActionKey = null;
+      const applied = await applyDecision({
+        kind: "act",
+        action:
+          comboboxFill.select === undefined
+            ? { kind: "click", target: comboboxFill.target }
+            : { kind: "select", target: comboboxFill.target, text: comboboxFill.select },
+        actionKey: comboboxFill.target,
+        confidence: 1,
+      });
+      if (applied !== "continue") return applied;
+      if (comboboxFill.fillsRef !== undefined && !drive.filledRefs.includes(comboboxFill.fillsRef)) {
+        drive.filledRefs.push(comboboxFill.fillsRef);
+      }
+      steps += 1;
+      continue;
+    }
     if (missing !== undefined) {
       const field = fieldLabelForRow(missing.row);
       return finish("needs_value", {
@@ -3155,8 +3247,6 @@ async function driveLoop(input: {
     if (drive.jevCalls >= DRIVE_MAX_JEV_CALLS) return finish("budget");
 
     const prepareStarted = Date.now();
-    const pageOptions =
-      lastSelectOptions.get(session) ?? selectOptionsFromElements(session.lastElements);
     const sets = driveTargetSets(
       rows,
       drive.facts,
