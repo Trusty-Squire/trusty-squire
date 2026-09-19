@@ -476,6 +476,9 @@ export interface StartOptions {
   serviceUrl: string;
   /** Observation shape returned by this start. Compact is the public default. */
   format?: "compact" | "full";
+  /** Internal drive callers take their first perception through the much
+   * smaller drive snapshot instead of paying for the general observation. */
+  initialObservation?: "standard" | "drive";
   // The user's real Chrome profile. Operate opens this directory directly.
   profileDir?: string;
   proxyUrl?: string;
@@ -639,19 +642,34 @@ export async function startProvisionSession(
     // backdrop occludes the ENTIRE form — the agent then sees every element
     // occluded_by a div and gives up, or falls back to the only thing that looks
     // clickable (e.g. a "Connect wallet" CTA on the Robinhood faucet). Dismiss it
-    // BEFORE the first observation so the real actionable form is operable.
+    // BEFORE a general first observation so the real actionable form is operable.
     // dismissConsentBanner() existed but had NO call sites (dead code); it only
     // clicks banner-specific CTAs (accept/reject all), so a false click is unlikely.
     // Best-effort + one retry, since the widget lazy-loads a beat after the goto.
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const cta = await browser.dismissConsentBanner().catch(() => null);
-      if (cta !== null) {
-        audit(id, "consent_dismissed", { cta });
-        break;
+    // A drive-owned start snapshots the overlay as an ordinary actionable state
+    // instead of spending this general-observation settling budget up front.
+    if (opts.initialObservation !== "drive") {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const cta = await browser.dismissConsentBanner().catch(() => null);
+        if (cta !== null) {
+          audit(id, "consent_dismissed", { cta });
+          break;
+        }
+        if (attempt === 0)
+          await waitForCaptchaChallengeToSettle(browser, 800, 0).catch(() => false);
       }
-      if (attempt === 0) await waitForCaptchaChallengeToSettle(browser, 800, 0).catch(() => false);
     }
     const loginHint = loginSessionGuidance(liveProviders);
+    if (opts.initialObservation === "drive") {
+      session.initializing = false;
+      session.lastActivityAt = Date.now();
+      return {
+        session_id: session.id,
+        url: session.browser.currentUrl(),
+        hint: loginHint,
+        ...(session.userEmail !== null ? { user_email: session.userEmail } : {}),
+      };
+    }
     const observation = await ports.observeSession(
       session,
       requestedFormat,
@@ -708,6 +726,11 @@ export async function startHarnessProvisionSession(
       allowed_hosts: hostStrings(session),
     });
     await opts.browser.goto(opts.serviceUrl, undefined, "document-ready");
+    if (opts.initialObservation === "drive") {
+      session.initializing = false;
+      session.lastActivityAt = Date.now();
+      return { session_id: session.id, url: session.browser.currentUrl(), hint: "" };
+    }
     const observation = await ports.observeSession(
       session,
       requestedFormat,
