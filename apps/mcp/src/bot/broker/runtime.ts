@@ -321,21 +321,15 @@ export class BrokerRuntime implements BrokerBrowserCustody {
     return this.sessions.size;
   }
 
-  resume(): void {
-    if (this.owner !== undefined || this.pending !== 0 || this.sessions.size !== 0)
-      throw new BrokerRefusal("maintenance", "Physical browser has not drained");
-    this.closing = false;
-  }
-
   async close(): Promise<boolean> {
     // A failed close must undo only the `closing` THIS call set. The flag also
     // latches custody-unproven from the launch-failure path, where it is set
     // deliberately with an owner retained so no later acquire touches a profile
     // whose Chrome was never proven dead; clearing it unconditionally here
     // released that latch while the daemon still reported retaining custody.
-    // Leaving a drain's own `closing` set is equally wrong — `resume()` refuses
-    // while an owner remains, so nothing would ever clear it and the cell would
-    // refuse every session forever. Restoring the prior value does both.
+    // Leaving a drain's own `closing` set is equally wrong — nothing would
+    // ever clear it and the cell would refuse every session forever.
+    // Restoring the prior value does both.
     if (this.pending > 0 || this.sessions.size > 0) return false;
     const priorClosing = this.closing;
     this.closing = true;

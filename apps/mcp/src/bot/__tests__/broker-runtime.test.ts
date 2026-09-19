@@ -234,7 +234,6 @@ it("refuses the recycled start when a close drains the cell mid-recycle", async 
   await expect(recycled).rejects.toThrow(/draining/);
   // The drained cell must not be handed a fresh Chrome behind the close's back.
   expect(state.start).toHaveBeenCalledTimes(1);
-  runtime.resume();
 });
 
 it("persists every concurrent terminal hook before releasing target custody", async () => {

@@ -826,9 +826,11 @@ async function runConnectInstall(
   }
 
   // Persist the current live probe only as connect UX data, bound to the
-  // account the preflight reads, so the post-ceremony writer and the preflight
-  // address the same record on multi-account machines.
-  for (const p of providers ?? []) await recordConnectedProvider(p, accountId);
+  // account the ceremony just established. On a bare --force-relogin account
+  // switch that is the NEW account (the caller-level accountId is the old
+  // pin), and it is the record the config pin and the next preflight read.
+  for (const p of providers ?? [])
+    await recordConnectedProvider(p, session.account_id ?? accountId);
   printProviderState(providers ?? []);
 
   // Config + key land either way: the session is real and re-running connect
@@ -1191,7 +1193,8 @@ async function recordConnectedProvider(provider: OAuthProviderId, accountId?: st
     const current = new Set(session.connected_providers ?? []);
     if (current.has(provider)) return;
     current.add(provider);
-    await storage.write({
+    // Bookkeeping, not binding: never move the current-account pointer.
+    await storage.writeAccountRecord({
       ...session,
       connected_providers: [...current],
       saved_at: new Date().toISOString(),
