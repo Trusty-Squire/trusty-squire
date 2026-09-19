@@ -178,16 +178,18 @@ describe("operate_drive real-browser fixture", () => {
     );
     let started: Awaited<ReturnType<typeof startHarnessProvisionSession>> | undefined;
     try {
-      const startSession = vi.fn(async (options: Parameters<DriveDependencies["startSession"]>[0]) => {
-        started = await startHarnessProvisionSession({
-          ...options,
-          browser: BrowserController.fromHarnessPage(page),
-        });
-        expect(started).not.toHaveProperty("safe_table");
-        expect(started).not.toHaveProperty("dom");
-        expect(sessionForCall(started.session_id)?.initializing).toBe(false);
-        return started;
-      });
+      const startSession = vi.fn(
+        async (options: Parameters<DriveDependencies["startSession"]>[0]) => {
+          started = await startHarnessProvisionSession({
+            ...options,
+            browser: BrowserController.fromHarnessPage(page),
+          });
+          expect(started).not.toHaveProperty("safe_table");
+          expect(started).not.toHaveProperty("dom");
+          expect(sessionForCall(started.session_id)?.initializing).toBe(false);
+          return started;
+        },
+      );
       const observeSpy = vi.fn(async () => {
         throw new Error("drive startup should not call the general observation");
       });
