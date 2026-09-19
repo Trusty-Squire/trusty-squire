@@ -6,20 +6,35 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { brokerSocketPath } from "../bot/broker/discovery.js";
 import { BrokerRefusal } from "../bot/broker/refusal.js";
-import { ProfileBusyError, PROFILE_BUSY_MESSAGE } from "../bot/profile.js";
+import {
+  CHROME_PROFILE_DIR,
+  ProfileBusyError,
+  profilePathIdentity,
+  PROFILE_BUSY_MESSAGE,
+} from "../bot/profile.js";
 import {
   BrowserBusy,
-  BUSY_REFUSAL_LAYER,
   createBrowserFacade,
-  mapBusyRefusal,
   openTab,
-  servedBrowserProfile,
   UnservableProfileError,
   type AcquiredTab,
   type TabPage,
 } from "../browser-busy.js";
 
 const page: TabPage = { goto: async () => undefined };
+
+/** The one physical profile the broker serves, read from its own owner. */
+function servedProfile(): string {
+  return profilePathIdentity(CHROME_PROFILE_DIR);
+}
+
+function refusingFacade(error: unknown) {
+  return createBrowserFacade({
+    acquire: async () => {
+      throw error;
+    },
+  });
+}
 
 function expectBusy(error: unknown): BrowserBusy {
   expect(error).toBeInstanceOf(BrowserBusy);
@@ -32,18 +47,8 @@ function stubAcquire(overrides: Partial<AcquiredTab> = {}): () => Promise<Acquir
 }
 
 describe("busy refusal mapping", () => {
-  it("maps each not-now wire code onto exactly one layer", () => {
-    expect(BUSY_REFUSAL_LAYER).toEqual({
-      profile_busy: "profile",
-      maintenance: "maintenance",
-      broker_unavailable: "custody",
-      incompatible_runtime: "custody",
-      launch_timeout: "custody",
-    });
-  });
-
   it("wraps each not-now BrokerRefusal from acquire as that layer's BrowserBusy", async () => {
-    const cases: Array<{ code: keyof typeof BUSY_REFUSAL_LAYER; layer: string }> = [
+    const cases = [
       { code: "profile_busy", layer: "profile" },
       { code: "maintenance", layer: "maintenance" },
       { code: "broker_unavailable", layer: "custody" },
@@ -51,11 +56,7 @@ describe("busy refusal mapping", () => {
       { code: "launch_timeout", layer: "custody" },
     ];
     for (const { code, layer } of cases) {
-      const facade = createBrowserFacade({
-        acquire: async () => {
-          throw new BrokerRefusal(code, `${code} from wire`);
-        },
-      });
+      const facade = refusingFacade(new BrokerRefusal(code, `${code} from wire`));
       await expect(
         facade.openTab({ profile: "default", purpose: "signup:vercel" }),
       ).rejects.toSatisfy((error: unknown) => {
@@ -69,56 +70,38 @@ describe("busy refusal mapping", () => {
     }
   });
 
-  it("leaves a permanent failure unmapped rather than calling it retry-later", () => {
-    // stale_lease means "not yours, or gone" — a retry can never clear it.
-    expect(
-      mapBusyRefusal(new BrokerRefusal("stale_lease", "Session is not owned")),
-    ).toBeUndefined();
-    expect(mapBusyRefusal(new BrokerRefusal("cancelled", "no"))).toBeUndefined();
-    expect(mapBusyRefusal(new BrokerRefusal("unauthorized", "no"))).toBeUndefined();
-    // A broker configured onto an external Chrome is a standing configuration
-    // choice, not the identity pin that `incompatible_runtime` names.
-    expect(
-      mapBusyRefusal(new BrokerRefusal("external_browser", "BOT_CDP_ENDPOINT names an external")),
-    ).toBeUndefined();
+  it("hands a permanent refusal back whole rather than calling it retry-later", async () => {
+    // Each of these is "not yours, gone, or a standing configuration choice".
+    // A retry can never clear one, so none may arrive as a busy layer with an
+    // .action() telling the caller to try again.
+    const refusals = [
+      new BrokerRefusal("stale_lease", "Session is not owned by this connection"),
+      new BrokerRefusal("cancelled", "Caller cancelled the request"),
+      new BrokerRefusal("unauthorized", "Connect before using the broker"),
+      new BrokerRefusal("external_browser", "BOT_CDP_ENDPOINT names an external Chrome"),
+    ];
+    for (const refusal of refusals) {
+      await expect(
+        refusingFacade(refusal).openTab({ profile: "default", purpose: "signup:vercel" }),
+      ).rejects.toSatisfy((error: unknown) => {
+        expect(error).toBe(refusal);
+        expect(error).not.toBeInstanceOf(BrowserBusy);
+        return true;
+      });
+    }
   });
 
-  it("hands back the external-browser refusal whole, with no retry advice", async () => {
-    const refusal = new BrokerRefusal(
-      "external_browser",
-      "Broker requires a locally owned browser; BOT_CDP_ENDPOINT names an external Chrome",
-    );
-    const facade = createBrowserFacade({
-      acquire: async () => {
-        throw refusal;
-      },
-    });
+  it("keeps the profile layer's own message when a ProfileBusyError surfaces", async () => {
+    const facade = refusingFacade(new ProfileBusyError(PROFILE_BUSY_MESSAGE));
     await expect(
       facade.openTab({ profile: "default", purpose: "signup:vercel" }),
     ).rejects.toSatisfy((error: unknown) => {
-      expect(error).toBe(refusal);
-      expect(error).not.toBeInstanceOf(BrowserBusy);
-      expect((error as Error).message).toContain("BOT_CDP_ENDPOINT");
+      const busy = expectBusy(error);
+      expect(busy.message).toBe(PROFILE_BUSY_MESSAGE);
+      expect(busy.reason.layer).toBe("profile");
+      expect(busy.action()).toBe("Close the other process using this Chrome profile, then retry.");
       return true;
     });
-  });
-
-  it("passes a permanent refusal from acquire through untouched", async () => {
-    const refusal = new BrokerRefusal("stale_lease", "Session is not owned by this connection");
-    const facade = createBrowserFacade({
-      acquire: async () => {
-        throw refusal;
-      },
-    });
-    await expect(facade.openTab({ profile: "default", purpose: "x" })).rejects.toBe(refusal);
-  });
-
-  it("keeps the profile layer's own message when a ProfileBusyError is mapped", () => {
-    const mapped = mapBusyRefusal(new ProfileBusyError(PROFILE_BUSY_MESSAGE));
-    expect(mapped).toBeInstanceOf(BrowserBusy);
-    expect(mapped?.message).toBe(PROFILE_BUSY_MESSAGE);
-    expect(mapped?.reason.layer).toBe("profile");
-    expect(mapped?.action()).toBe("Close the other process using this Chrome profile, then retry.");
   });
 });
 
@@ -138,8 +121,8 @@ describe("a profile this installation does not serve", () => {
           expect(error).toBeInstanceOf(UnservableProfileError);
           expect(error).not.toBeInstanceOf(BrowserBusy);
           if (!(error instanceof UnservableProfileError)) throw new Error("expected refusal");
-          expect(error.served).toBe(servedBrowserProfile());
-          expect(error.message).toContain(servedBrowserProfile());
+          expect(error.served).toBe(servedProfile());
+          expect(error.message).toContain(servedProfile());
           return true;
         },
       );
@@ -307,7 +290,7 @@ describe("browserBusy — a strictly read-only fold of the served profile", () =
     // configured override would point the probe at a real broker.
     configuredSocket = process.env.TRUSTY_SQUIRE_BROKER_SOCKET;
     delete process.env.TRUSTY_SQUIRE_BROKER_SOCKET;
-    profile = servedBrowserProfile();
+    profile = servedProfile();
     await mkdir(profile, { recursive: true });
   });
 

@@ -30,8 +30,12 @@ import {
 } from "./bot/profile.js";
 import { createSessionGuard } from "./session-guard.js";
 
-/** Wire codes that mean "not now", each mapped onto exactly one layer. */
-export const BUSY_REFUSAL_LAYER = {
+/**
+ * Wire codes that mean "not now", each mapped onto exactly one layer. Private
+ * on purpose: handing a consumer the per-layer vocabulary back is the thing
+ * this façade exists to stop. `BrowserBusy.reason` is the public answer.
+ */
+const BUSY_REFUSAL_LAYER = {
   profile_busy: "profile",
   maintenance: "maintenance",
   broker_unavailable: "custody",
@@ -39,8 +43,7 @@ export const BUSY_REFUSAL_LAYER = {
   launch_timeout: "custody",
 } as const;
 
-export type BusyRefusalCode = keyof typeof BUSY_REFUSAL_LAYER;
-export type BrowserBusyLayer = (typeof BUSY_REFUSAL_LAYER)[BusyRefusalCode];
+type BusyRefusalCode = keyof typeof BUSY_REFUSAL_LAYER;
 
 export type BrowserBusyReason =
   | {
@@ -165,11 +168,11 @@ function busyMessage(reason: BrowserBusyReason): string {
   }
 }
 
-export function isBusyRefusalCode(code: string): code is BusyRefusalCode {
+function isBusyRefusalCode(code: string): code is BusyRefusalCode {
   return Object.prototype.hasOwnProperty.call(BUSY_REFUSAL_LAYER, code);
 }
 
-export function reasonFromBusyRefusal(
+function reasonFromBusyRefusal(
   code: BusyRefusalCode,
   extras: { message?: string; pid?: number; host?: string } = {},
 ): BrowserBusyReason {
@@ -201,7 +204,7 @@ export function reasonFromBusyRefusal(
  * "not now" at all. The holder is only ever what the refusing layer reported;
  * the requester's own purpose is never dressed up as the blocker.
  */
-export function mapBusyRefusal(error: unknown): BrowserBusy | undefined {
+function mapBusyRefusal(error: unknown): BrowserBusy | undefined {
   if (error instanceof ProfileBusyError)
     return new BrowserBusy(reasonFromBusyRefusal("profile_busy"), error.message);
   if (!(error instanceof BrokerRefusal) || !isBusyRefusalCode(error.code)) return undefined;
@@ -216,7 +219,7 @@ function resolveBrowserProfile(profile: string): string {
 }
 
 /** The single physical profile the broker is pinned to. */
-export function servedBrowserProfile(): string {
+function servedBrowserProfile(): string {
   return profilePathIdentity(CHROME_PROFILE_DIR);
 }
 
