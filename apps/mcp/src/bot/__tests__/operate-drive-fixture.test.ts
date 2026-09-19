@@ -224,6 +224,65 @@ describe("operate_drive real-browser fixture", () => {
     }
   }, 30_000);
 
+  it("accepts DONE without recapturing an unchanged page", async () => {
+    const { context, started } = await openFixture(NOOP_HTML, "done-unchanged.test");
+    try {
+      let snapshots = 0;
+      const dependencies = deps(async (_api, _state, questions) =>
+        jevFromQuestions(questions, true),
+      );
+      dependencies.snapshot = async (sessionId) => {
+        snapshots += 1;
+        return await observe(sessionId, "compact");
+      };
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "confirm the page is open" },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(result.status).toBe("complete");
+      expect(result.jev_calls).toBe(1);
+      expect(snapshots).toBe(1);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
+  it("recaptures when the page changes while DONE is being decided", async () => {
+    const { context, page, started } = await openFixture(NOOP_HTML, "done-changing.test");
+    try {
+      let snapshots = 0;
+      let decisions = 0;
+      const dependencies = deps(async (_api, _state, questions) => {
+        decisions += 1;
+        if (decisions === 1) {
+          await page.evaluate(() => {
+            document.querySelector("#status")!.textContent = "changed";
+          });
+        }
+        return jevFromQuestions(questions, true);
+      });
+      dependencies.snapshot = async (sessionId) => {
+        snapshots += 1;
+        return await observe(sessionId, "compact");
+      };
+      const result = await runOperateDrive(
+        { session_id: started.session_id, goal: "confirm the page is open" },
+        api(),
+        undefined,
+        dependencies,
+      );
+      expect(result.status).toBe("complete");
+      expect(result.jev_calls).toBe(1);
+      expect(snapshots).toBe(2);
+    } finally {
+      await finishProvisionSession(started.session_id);
+      await context.close();
+    }
+  }, 30_000);
+
   it("completes a multi-step signup in one call", async () => {
     const { context, page, started } = await openFixture(SIGNUP_HTML, "signup-complete.test");
     try {
