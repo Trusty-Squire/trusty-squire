@@ -62,7 +62,6 @@ import {
   documentEpochOf,
   documentOriginOf,
   driveActOnPage,
-  pageFingerprintOf,
   resolveDriveFrame,
   settleDriveStep,
   waitForNavigationIdle,
@@ -3025,8 +3024,6 @@ async function driveLoop(input: {
     const beforeEpoch =
       drive.lastDocumentEpoch ??
       (session.browser.page === null ? "" : await documentEpochOf(session.browser.page));
-    const beforePageFingerprint =
-      session.browser.page === null ? "" : await pageFingerprintOf(session.browser.page);
     const actStarted = Date.now();
     const acted = await actDriveSafely(session, sessionId, decision.action, dependencies);
     if (acted.kind === "stale") {
@@ -3052,7 +3049,7 @@ async function driveLoop(input: {
           afterEpoch.length > 0 &&
           documentOriginOf(beforeEpoch) !== documentOriginOf(afterEpoch)
         ) {
-          await waitForNavigationIdle(page, beforePageFingerprint);
+          await waitForNavigationIdle(page);
         }
       }
       const snap = await refreshSnapshot(framesIfNeeded());
