@@ -21,21 +21,29 @@ const state = vi.hoisted(() => ({
   forceFinish: vi.fn(),
 }));
 
-vi.mock("../session/lifecycle.js", () => ({
-  sessionForCall: (sessionId: string) => state.sessions.get(sessionId),
-  finishProvisionSession: state.finish,
-  forceFinishProvisionSession: state.forceFinish,
-  withProvisionSessionCall: async (_sessionId: string, operation: () => Promise<unknown>) =>
-    await operation(),
-  withCeremonyStartAdmission: async (operation: () => Promise<unknown>) => await operation(),
-}));
+vi.mock(import("../session/lifecycle.js"), async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    sessionForCall: (sessionId: string) => state.sessions.get(sessionId),
+    finishProvisionSession: state.finish,
+    forceFinishProvisionSession: state.forceFinish,
+    withProvisionSessionCall: async (_sessionId: string, operation: () => Promise<unknown>) =>
+      await operation(),
+    withCeremonyStartAdmission: async (operation: () => Promise<unknown>) => await operation(),
+  };
+});
 
-vi.mock("../provision-session.js", () => ({
-  maskOperatorSessionOutput: (_sessionId: string, value: unknown) => value,
-  preparePublicOAuthLoginTarget: async () => undefined,
-  withPreparedOAuthLoginTarget: async (_prepared: unknown, operation: () => Promise<unknown>) =>
-    await operation(),
-}));
+vi.mock(import("../provision-session.js"), async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    maskOperatorSessionOutput: (_sessionId: string, value: unknown) => value,
+    preparePublicOAuthLoginTarget: async () => undefined,
+    withPreparedOAuthLoginTarget: async (_prepared: unknown, operation: () => Promise<unknown>) =>
+      await operation(),
+  };
+});
 
 import { OperatorBroker } from "../broker/operator.js";
 import { OperatorForwarder } from "../broker/forwarder.js";
