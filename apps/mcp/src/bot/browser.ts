@@ -3052,6 +3052,18 @@ export class BrowserController implements BrowserDriver {
         }
       }
     }
+    if (tagName === "label") {
+      const nestedSelect = page.locator(activeSelector).locator("select");
+      if ((await nestedSelect.count()) === 1) {
+        const nestedId = await nestedSelect
+          .first()
+          .evaluate((node) => (node instanceof HTMLSelectElement && node.id.length > 0 ? node.id : ""));
+        if (nestedId.length > 0) {
+          activeSelector = `#${nestedId}`;
+          tagName = "select";
+        }
+      }
+    }
 
     if (tagName === "select") {
       // Keep the resolved target as a Locator. Walker selectors can include
@@ -3576,19 +3588,25 @@ export class BrowserController implements BrowserDriver {
         .first()
         .evaluate((node) => {
           if (!(node instanceof HTMLLabelElement)) return null;
-          const forAttr = node.htmlFor;
-          if (forAttr.length === 0) return null;
-          const target = node.ownerDocument.getElementById(forAttr);
-          if (target === null) return null;
-          // Only redirect when the target is input/textarea/select. A
-          // label pointing at a non-form element (rare; React Aria
-          // does it for a labelled-by relationship) shouldn't trigger
-          // the redirect.
-          const tag = target.tagName.toLowerCase();
+          const labeled = (() => {
+            const forAttr = node.htmlFor;
+            if (forAttr.length > 0) {
+              const byFor = node.ownerDocument.getElementById(forAttr);
+              if (byFor !== null) return byFor;
+            }
+            // A wrapping label with no for= labels its first labelable
+            // descendant. The directory-search fixture (and a lot of
+            // authored HTML) is this shape; leaving the label as the
+            // select target silently takes the combobox path, which
+            // cannot see native <option>s.
+            return node.querySelector("select, input, textarea");
+          })();
+          if (labeled === null) return null;
+          const tag = labeled.tagName.toLowerCase();
           if (tag !== "input" && tag !== "textarea" && tag !== "select") {
             return null;
           }
-          return forAttr;
+          return labeled.id.length > 0 ? labeled.id : null;
         });
       if (resolvedId === null) return selector;
       // CSS-escape the id so unusual characters (Sentry's `--` separator
@@ -4317,22 +4335,14 @@ export class BrowserController implements BrowserDriver {
   ): Promise<{ title: string; headings: string[] }> {
     if (page === null) throw new Error("Browser not started");
     return await page.evaluate(() => {
-      const visible = (element: Element): boolean => {
-        const html = element as HTMLElement;
-        const style = window.getComputedStyle(html);
-        const rect = html.getBoundingClientRect();
-        return (
-          style.display !== "none" &&
-          style.visibility !== "hidden" &&
-          rect.width > 0 &&
-          rect.height > 0
-        );
-      };
+      // A heading that just received text (the directory-search result h2
+      // starts `[hidden]` and is revealed in the same click) can still have a
+      // 0×0 box or UA `display:none` when this evaluate runs. Count any h1/h2
+      // that already has copy; an empty still-hidden heading contributes nothing.
       const headings = Array.from(document.querySelectorAll("h1,h2"))
-        .filter(visible)
         .map((element) => (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 160))
         .filter(Boolean)
-        .slice(0, 2);
+        .slice(0, 4);
       return { title: document.title.slice(0, 160), headings };
     });
   }

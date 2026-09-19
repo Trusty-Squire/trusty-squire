@@ -1127,15 +1127,31 @@ export function sealRetainedInteractiveElementsV2(
   }));
 }
 
-export function safePageSemanticsV2(source: ObservationSemanticSourceV2): SafePageSemanticsV2 {
+export const SAFE_HEADING_MAX = 4;
+
+export function safePageSemanticsV2(
+  source: ObservationSemanticSourceV2,
+  previousHeadings: readonly string[] = [],
+): SafePageSemanticsV2 {
   const title = safeDescriptionV2(source.title);
   // Signatures match the UNTRUNCATED text: the row budget's 40-char cut lands
   // mid-sentence on the canonical CloudFront title.
-  const fullHeadings = source.headings
+  // A single heading hid post-action outcomes ("Found 3 offices", "Thank you
+  // for your order") that sit under the page's stable title heading. Keep a
+  // small cap (byte budget lives in docs/observation-byte-efficiency.md) and
+  // prefer headings that appeared since the previous observation when it binds.
+  const normalized = source.headings
     .map(normalizeDescriptionV2)
     .filter((value): value is string => value !== undefined)
-    .filter((value, index, all) => all.indexOf(value) === index)
-    .slice(0, 1);
+    .filter((value, index, all) => all.indexOf(value) === index);
+  const previous = new Set(
+    previousHeadings
+      .map(normalizeDescriptionV2)
+      .filter((value): value is string => value !== undefined),
+  );
+  const fresh = normalized.filter((heading) => !previous.has(heading));
+  const stale = normalized.filter((heading) => previous.has(heading));
+  const fullHeadings = [...fresh, ...stale].slice(0, SAFE_HEADING_MAX);
   const headings = fullHeadings
     .map(safeDescriptionV2)
     .filter((value): value is string => value !== undefined);

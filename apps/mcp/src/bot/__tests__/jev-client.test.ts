@@ -58,7 +58,7 @@ describe("askJev request mapping", () => {
 
     const body = JSON.parse(input.http.body!) as {
       model: string;
-      state: string;
+      state: unknown;
       questions: typeof QUESTIONS;
     };
     expect(body.model).toBe(JEV_MODEL);
