@@ -79,6 +79,7 @@ const FIELD_FROM_LABEL: Array<{ test: RegExp; field: string }> = [
   { test: /where\s+to|\bdestination\b|going\s+to/, field: "destination" },
   { test: /password/, field: "password" },
   { test: /phone|tel|mobile/, field: "phone" },
+  { test: /\baddress[\s-]*(?:line[\s-]*)?2\b|\b(?:apt|apartment|unit|suite)\b/, field: "address2" },
   { test: /address/, field: "address" },
   { test: /\bcity\b/, field: "city" },
   { test: /\bstate\b|province|region/, field: "state" },

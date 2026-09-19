@@ -229,3 +229,27 @@ describe("released card value output mask", () => {
     );
   });
 });
+
+describe("card URL query masking", () => {
+  it.each(["+", "%20", "%09", "%2E", "%2D", "%C2%B7", "%E2%80%93", "%C2%A0"])(
+    "masks PAN formatting encoded with %s without rewriting other values",
+    (separator) => {
+      const mask = new CardValueOutputMask();
+      mask.register(SYNTHETIC_CARD);
+      const formatted = ["4111", "1111", "1111", "1111"].join(separator);
+      const suffix = "&amount=123&note=hello+world%20again&last4=1111&bad=%ZZ";
+      const input = { url: `https://shop.test/receipt?pan=${formatted}${suffix}` };
+      const output = mask.maskValue(input);
+      expect(new URL(output.url).searchParams.get("pan")).toBe(CARD_NUMBER_MASK);
+      expect(output.url.endsWith(suffix)).toBe(true);
+      expect(mask.maskValue(output)).toEqual(output);
+      expect(
+        mask.maskValue({
+          url: `https://shop.test/?other=5555${separator}5555${separator}5555${separator}4444`,
+        }),
+      ).toEqual({
+        url: `https://shop.test/?other=5555${separator}5555${separator}5555${separator}4444`,
+      });
+    },
+  );
+});

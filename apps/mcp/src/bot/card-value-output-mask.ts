@@ -122,16 +122,16 @@ function maskNode(
     ownKind === "pan" || ownKind === "cvv"
       ? ownKind
       : (targetKinds.get(node.id) ??
-         // Agent-directed placement: the agent may type the CVV (via masked
-         // tokens) into ANY field, so identity-based inference alone is not
-         // enough. Any textbox whose complete digit value equals a released
-         // CVV is masked — the same value-equality rule the screenshot
-         // pixel scan has always applied, mirrored here for the DOM/AX read.
-         (isTextboxNode(node) && nodeHoldsReleasedCvvValue(node, records)
-           ? "cvv"
-           : nodeHasReleasedCvv(node, records)
-             ? "cvv"
-             : inheritedKind));
+        // Agent-directed placement: the agent may type the CVV (via masked
+        // tokens) into ANY field, so identity-based inference alone is not
+        // enough. Any textbox whose complete digit value equals a released
+        // CVV is masked — the same value-equality rule the screenshot
+        // pixel scan has always applied, mirrored here for the DOM/AX read.
+        (isTextboxNode(node) && nodeHoldsReleasedCvvValue(node, records)
+          ? "cvv"
+          : nodeHasReleasedCvv(node, records)
+            ? "cvv"
+            : inheritedKind));
   node.value =
     kind === "pan"
       ? CARD_NUMBER_MASK
@@ -209,7 +209,20 @@ export class CardValueOutputMask {
   }
 
   maskText(value: string, key?: string): string {
-    return maskStringForKey(value, key, this.records);
+    if (key !== "url" || !this.active) return maskStringForKey(value, key, this.records);
+    const masked = value.replace(
+      /([?&][^=&#]*=)([^&#]*)/g,
+      (whole, prefix: string, encoded: string) => {
+        try {
+          const decoded = decodeURIComponent(encoded.replace(/\+/g, " "));
+          const maskedQuery = maskStringForKey(decoded, undefined, this.records);
+          return maskedQuery === decoded ? whole : `${prefix}${encodeURIComponent(maskedQuery)}`;
+        } catch {
+          return whole;
+        }
+      },
+    );
+    return maskStringForKey(masked, key, this.records);
   }
 
   /**

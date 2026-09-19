@@ -1,3 +1,4 @@
+import { matchingFactKeys } from "../operate-drive.js";
 // Drive-loop snapshot conversion: visible-text labels, inferred fields,
 // omitted card values, and all headings. No browser.
 
@@ -162,5 +163,30 @@ describe("drive snapshot conversion", () => {
     );
     expect(rows[0]?.[1]).toBe("t");
     expect(rows[0]?.[2]).toContain("f=search");
+  });
+});
+
+describe("second address line inference", () => {
+  it.each([
+    "Address line 2",
+    "Address 2",
+    "Address2",
+    "Apt",
+    "Apartment",
+    "Unit",
+    "Suite",
+    "Apartment, suite, etc. (optional)",
+  ])("assigns %s to address2", (label) => {
+    const rows = driveRowsFromSnapshot(
+      snapshot({
+        elements: [
+          { ref: "@e:f0d1", role: "textbox", label, frameOrdinal: 0, operations: ["fill"] },
+        ],
+      }),
+    );
+    expect(inferFieldFromLabel(label, "textbox")).toBe("address2");
+    expect(matchingFactKeys({ address: "1 Main St", address2: "Apt 4" }, rows[0]!)).toEqual([
+      "address2",
+    ]);
   });
 });

@@ -2896,7 +2896,20 @@ async function driveLoop(input: {
     });
     drive.history.push(historyLine);
     if (decision.action.kind === "type" || decision.action.kind === "select") {
-      if (!drive.filledRefs.includes(decision.actionKey)) drive.filledRefs.push(decision.actionKey);
+      const completionEpoch =
+        acted.kind === "unsupported"
+          ? session.browser.page === null
+            ? ""
+            : await documentEpochOf(session.browser.page)
+          : (drive.lastDocumentEpoch ?? "");
+      if (
+        beforeEpoch.length > 0 &&
+        completionEpoch.length > 0 &&
+        documentOriginOf(beforeEpoch) === documentOriginOf(completionEpoch) &&
+        !drive.filledRefs.includes(decision.actionKey)
+      ) {
+        drive.filledRefs.push(decision.actionKey);
+      }
     }
     const nextFingerprint = progressFingerprint(observation.url, rows, drive, session);
     appendDriveTrace({

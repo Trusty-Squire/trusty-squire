@@ -362,6 +362,44 @@ describe("coverage-matrix constant", () => {
 });
 
 describe("drive review regressions", () => {
+  it.each(["type", "select"])(
+    "does not retain a completed %s ref after navigation",
+    async (action) => {
+      const html =
+        action === "type"
+          ? '<form action="/next"><label>Search <input id="field" type="search" name="q" oninput="location.href=\'/next\'"></label></form>'
+          : '<label>Country <select id="field" onchange="location.href=\'/next\'"><option value="">Choose</option><option>Canada</option></select></label>';
+      const { context, page, started } = await openFixture(html, "fill-navigation.test");
+      try {
+        await page.route("**/next*", (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: '<label>Email <input id="email" type="email" required></label>',
+          }),
+        );
+        const dependencies = deps(async (_api, _state, questions) => jevFromQuestions(questions));
+        const result = await runOperateDrive(
+          {
+            session_id: started.session_id,
+            goal: "open form",
+            facts: action === "type" ? { query: "hello" } : { country: "Canada" },
+          },
+          api(),
+          undefined,
+          dependencies,
+        );
+        expect(result.status).toBe("needs_value");
+        expect(result.field).toBe("Email");
+        expect(await page.locator("#email").inputValue()).toBe("");
+        expect(sessionForCall(started.session_id)!.drive!.filledRefs).toEqual([]);
+      } finally {
+        await finishProvisionSession(started.session_id);
+        await context.close();
+      }
+    },
+    30_000,
+  );
+
   it.each(["same-origin", "cross-origin", "same-url", "srcdoc"])(
     "keeps reused hosted-field selectors frame-scoped (%s)",
     async (frameKind) => {
@@ -561,38 +599,52 @@ describe("drive review regressions", () => {
     }
   }, 60_000);
 
-  it("masks GET query card values before Jev and handoff serialization", async () => {
-    const { context, page, started } = await openFixture(NOOP_HTML, "card-query.test");
-    try {
-      const pan = "4111111111111111";
-      sessionForCall(started.session_id)!.browser.registerCardValueOutputMask({ pan, cvv: "739" });
-      await page.goto(`https://card-query.test/?pan=${pan}`);
-      const urls: string[] = [];
-      const dependencies = deps(async (_api, state, questions) => {
-        const serialized = JSON.stringify(state);
-        expect(serialized).not.toContain(pan);
-        expect(serialized).toContain("[card number]");
-        urls.push((state as { page: { url: string } }).page.url);
-        return jevFromQuestions(questions, true);
-      });
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        const result = await runOperateDrive(
-          { session_id: started.session_id, goal: "read page" },
-          api(),
-          undefined,
-          dependencies,
-        );
-        expect(result.status).toBe("complete");
-        expect(JSON.stringify(result)).not.toContain(pan);
-        expect(result.observation?.url).toContain("[card number]");
+  it.each([
+    "4111111111111111",
+    "4111+1111+1111+1111",
+    "4111%201111%201111%201111",
+    "4111%C2%B71111%C2%B71111%C2%B71111",
+  ])(
+    "masks GET query card values before Jev and handoff serialization: %s",
+    async (encodedPan) => {
+      const { context, page, started } = await openFixture(NOOP_HTML, "card-query.test");
+      try {
+        const pan = "4111111111111111";
+        sessionForCall(started.session_id)!.browser.registerCardValueOutputMask({
+          pan,
+          cvv: "739",
+        });
+        await page.goto(`https://card-query.test/?pan=${encodedPan}`);
+        const urls: string[] = [];
+        const dependencies = deps(async (_api, state, questions) => {
+          const serialized = JSON.stringify(state);
+          expect(serialized).not.toContain(pan);
+          expect(
+            new URL((state as { page: { url: string } }).page.url).searchParams.get("pan"),
+          ).toBe("[card number]");
+          urls.push((state as { page: { url: string } }).page.url);
+          return jevFromQuestions(questions, true);
+        });
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const result = await runOperateDrive(
+            { session_id: started.session_id, goal: "read page" },
+            api(),
+            undefined,
+            dependencies,
+          );
+          expect(result.status).toBe("complete");
+          expect(JSON.stringify(result)).not.toContain(pan);
+          expect(new URL(result.observation!.url).searchParams.get("pan")).toBe("[card number]");
+        }
+        expect(urls).toHaveLength(2);
+        expect(urls[0]).toBe(urls[1]);
+      } finally {
+        await finishProvisionSession(started.session_id);
+        await context.close();
       }
-      expect(urls).toHaveLength(2);
-      expect(urls[0]).toBe(urls[1]);
-    } finally {
-      await finishProvisionSession(started.session_id);
-      await context.close();
-    }
-  }, 30_000);
+    },
+    30_000,
+  );
 
   it.each(["detached", "timeout"])(
     "does not type when reselection is %s",
