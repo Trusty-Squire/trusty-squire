@@ -11,7 +11,7 @@ import {
   waitForProfileFree,
   type ProfileOperationLease,
 } from "../profile.js";
-import type { BrokerBrowserCustody } from "./custody.js";
+import type { BrokerBrowserCustody, BrokerIdentityProbe } from "./custody.js";
 import { BrokerRefusal } from "./refusal.js";
 
 interface Settings {
@@ -35,6 +35,7 @@ export class BrokerRuntime implements BrokerBrowserCustody {
   private closing = false;
   private recycling = false;
   private pending = 0;
+  private identityProbe: BrokerIdentityProbe | undefined;
 
   constructor(private readonly accountId: string) {}
 
@@ -189,6 +190,20 @@ export class BrokerRuntime implements BrokerBrowserCustody {
     return this.runtimeIdentity.liveSettings()?.proxyUrl;
   }
 
+  recentIdentityProbe(maximumAgeMs: number): BrokerIdentityProbe | undefined {
+    const probe = this.identityProbe;
+    if (probe === undefined || Date.now() - probe.observedAt > maximumAgeMs) return undefined;
+    return { ...probe, providers: [...probe.providers] };
+  }
+
+  rememberIdentityProbe(probe: BrokerIdentityProbe): void {
+    this.identityProbe = { ...probe, providers: [...probe.providers] };
+  }
+
+  invalidateIdentityProbe(): void {
+    this.identityProbe = undefined;
+  }
+
   /** Clean IN-BAND identity recycle for a compatible-profile settings change
    * (notably a new proxy): prove the live Chrome closed, release the profile
    * lease, then forget so the next acquire launches fresh. The broker process
@@ -197,6 +212,7 @@ export class BrokerRuntime implements BrokerBrowserCustody {
    * active sessions first; recycling under live siblings would yank the
    * shared Chrome out from under them. */
   private async recycleIdentity(): Promise<void> {
+    this.invalidateIdentityProbe();
     if (this.owner !== undefined) {
       const closed = await this.owner.close().catch(() => "unknown" as const);
       if (closed !== "closed") {
@@ -220,6 +236,7 @@ export class BrokerRuntime implements BrokerBrowserCustody {
   /** Drop the tab bookkeeping of a browser that died underneath its sessions
    * and prove it is gone before the next launch may reclaim the profile. */
   private async recycleLostBrowser(): Promise<void> {
+    this.invalidateIdentityProbe();
     for (const release of [...this.sessions.values()]) release();
     this.sessions.clear();
     this.admissionIds.clear();
@@ -238,6 +255,7 @@ export class BrokerRuntime implements BrokerBrowserCustody {
     this.lease = undefined;
     this.leaseProfile = undefined;
     this.owner = undefined;
+    this.invalidateIdentityProbe();
     this.runtimeIdentity.forgetAfterShutdown();
   }
 
@@ -354,6 +372,7 @@ export class BrokerRuntime implements BrokerBrowserCustody {
     this.lease = undefined;
     this.leaseProfile = undefined;
     this.owner = undefined;
+    this.invalidateIdentityProbe();
     this.runtimeIdentity.forgetAfterShutdown();
     return true;
   }

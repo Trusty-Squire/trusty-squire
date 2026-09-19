@@ -101,6 +101,9 @@ const h = vi.hoisted(() => ({
   liveGoogleEmail: "default-google@example.com" as string | null,
   identityProbeCalls: 0,
   identityProbeExpectedGoogleAccountEmails: [] as Array<string | undefined>,
+  identityProbeCache: undefined as
+    | { providers: Array<"google" | "github">; userEmail: string | null; observedAt: number }
+    | undefined,
   googleIdentityByExpectedEmail: new Map<string, string | null>(),
   connections: [] as boolean[],
   controllers: [] as Array<{
@@ -257,6 +260,22 @@ vi.mock("../broker/custody.js", async () => {
         await beforeRelease?.();
       },
       identity: async <T>(operation: () => Promise<T>) => await operation(),
+      recentIdentityProbe: (maximumAgeMs: number) => {
+        const probe = h.identityProbeCache;
+        return probe !== undefined && Date.now() - probe.observedAt <= maximumAgeMs
+          ? { ...probe, providers: [...probe.providers] }
+          : undefined;
+      },
+      rememberIdentityProbe: (probe: {
+        providers: Array<"google" | "github">;
+        userEmail: string | null;
+        observedAt: number;
+      }) => {
+        h.identityProbeCache = { ...probe, providers: [...probe.providers] };
+      },
+      invalidateIdentityProbe: () => {
+        h.identityProbeCache = undefined;
+      },
     }),
   };
 });
@@ -1407,6 +1426,7 @@ beforeEach(() => {
   h.liveGoogleEmail = "default-google@example.com";
   h.identityProbeCalls = 0;
   h.identityProbeExpectedGoogleAccountEmails = [];
+  h.identityProbeCache = undefined;
   h.googleIdentityByExpectedEmail = new Map();
   h.connections = [];
   h.controllers = [];
@@ -4815,7 +4835,7 @@ describe("operate session — live-profile precondition gate", () => {
     expect(h.startCalls).toBe(1);
     expect(h.started).toBe(0); // the rejected profile is closed before handoff
     expect(h.gotos).toHaveLength(0);
-    expect(h.identityProbeCalls).toBe(2); // broker identity lane probes before provider admission
+    expect(h.identityProbeCalls).toBe(1); // one live probe supplies admission and metadata
     expect(h.storageStateReads).toEqual([]);
     expect(h.profileDirs).toEqual([canonical]);
     expect(h.destroyedProfiles).toEqual([]);
@@ -4840,7 +4860,7 @@ describe("operate session — live-profile precondition gate", () => {
     });
     expect(obs.needs_user).toBeUndefined();
     expect(h.started).toBe(1);
-    expect(h.identityProbeCalls).toBe(2); // warm admission, then optional session metadata
+    expect(h.identityProbeCalls).toBe(1); // one live probe supplies admission and metadata
     expect(h.seededStorageStates).toEqual([undefined]);
     expect(h.profileDirs).toEqual([canonical]);
     await finishProvisionSession(obs.session_id);
@@ -4853,6 +4873,15 @@ describe("operate session — live-profile precondition gate", () => {
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
     expect(obs.needs_user).toBeUndefined();
     await expect(finishProvisionSession(obs.session_id)).resolves.toMatchObject({ closed: true });
+  });
+
+  it("reuses a recent physical-profile identity probe across warm starts", async () => {
+    const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+    await finishProvisionSession(first.session_id);
+    const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
+    expect(second.needs_user).toBeUndefined();
+    expect(h.identityProbeCalls).toBe(1);
+    await finishProvisionSession(second.session_id);
   });
 
   it("accepts the live provider probe without consulting a snapshot", async () => {

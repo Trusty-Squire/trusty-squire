@@ -76,6 +76,26 @@ it("shares a physical launch, serializes duplicate tab release, and retains sibl
   expect(await runtime.close()).toBe(true);
   expect(state.release).toHaveBeenCalledTimes(1);
 });
+it("bounds and invalidates the physical-profile identity cache", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(10_000);
+  const runtime = new BrokerRuntime("account");
+  runtime.rememberIdentityProbe({
+    providers: ["google"],
+    userEmail: "operator@example.test",
+    observedAt: Date.now(),
+  });
+  expect(runtime.recentIdentityProbe(30_000)).toEqual({
+    providers: ["google"],
+    userEmail: "operator@example.test",
+    observedAt: 10_000,
+  });
+  vi.setSystemTime(40_001);
+  expect(runtime.recentIdentityProbe(30_000)).toBeUndefined();
+  runtime.rememberIdentityProbe({ providers: ["google"], userEmail: null, observedAt: Date.now() });
+  runtime.invalidateIdentityProbe();
+  expect(runtime.recentIdentityProbe(30_000)).toBeUndefined();
+});
 it("does not classify a physical launch as lost before it finishes connecting", async () => {
   let finishStart!: () => void;
   state.connected = false;

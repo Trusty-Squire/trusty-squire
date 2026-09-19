@@ -221,7 +221,11 @@ export class PageDriver {
     return this.page !== null;
   }
 
-  async goto(url: string, page: Page | null = this.page): Promise<void> {
+  async goto(
+    url: string,
+    page: Page | null = this.page,
+    readiness: "domcontentloaded" | "document-ready" = "domcontentloaded",
+  ): Promise<void> {
     if (!page) throw new Error("Browser not started");
     // Retry transient network/proxy drops. A residential SOCKS tunnel
     // intermittently resets a connection mid-navigation (Chrome surfaces
@@ -264,7 +268,21 @@ export class PageDriver {
     };
     for (let attempt = 1; ; attempt++) {
       try {
-        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+        await page.goto(url, {
+          waitUntil: readiness === "document-ready" ? "commit" : "domcontentloaded",
+          timeout: 60000,
+        });
+        if (readiness === "document-ready") {
+          // Match jev-ultrafast's startup boundary: navigation dispatch followed
+          // by a tight document.readyState poll. This avoids Playwright's wider
+          // lifecycle/actionability settling and the humanized post-load dwell.
+          const deadline = Date.now() + 15_000;
+          while (Date.now() < deadline) {
+            const state = await page.evaluate(() => document.readyState).catch(() => "loading");
+            if (state === "complete") break;
+            await page.waitForTimeout(20);
+          }
+        }
         // A SOCKS/connection drop does NOT always throw: Chrome resolves
         // domcontentloaded on its own `chrome-error://chromewebdata/`
         // interstitial and goto returns cleanly. The bot then ran the whole
@@ -314,7 +332,7 @@ export class PageDriver {
     // The "dwell" gives the scoring window enough wall-clock to settle
     // and also gives any deferred JS time to register event listeners
     // we'll later fire.
-    if (this.humanize) {
+    if (this.humanize && readiness !== "document-ready") {
       await this.sleep(rand(800, 2000));
     }
   }
