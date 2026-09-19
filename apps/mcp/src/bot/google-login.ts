@@ -416,8 +416,12 @@ export async function detectActiveProviderSessions(
 // committed-cookie snapshot and poll past the commit lag before accepting a
 // negative. Presence-only evidence is the same class connect's preflight
 // already accepts on a busy machine — "Already connected" reads the cookie
-// store for exactly this reason. `null` means the probe itself failed, which
-// is not a pass.
+// store for exactly this reason. `awaitProviders` names the providers THIS
+// run must show in the snapshot before the poll may accept it early (the
+// scoped --force-relogin refresh passes the requested provider): Google's
+// cookies were committed days ago, so "any provider" would return before
+// the provider the run actually cared about commits. `null` means the probe
+// itself failed, which is not a pass.
 export async function probeProviderSessionsAfterCeremony(
   profileDir: string = CHROME_PROFILE_DIR,
   runtime: {
@@ -425,6 +429,7 @@ export async function probeProviderSessionsAfterCeremony(
     snapshot?: typeof detectProviderSessionsFromProfile;
     windowMs?: number;
     pollMs?: number;
+    awaitProviders?: readonly OAuthProviderId[];
   } = {},
 ): Promise<OAuthProviderId[] | null> {
   try {
@@ -434,10 +439,13 @@ export async function probeProviderSessionsAfterCeremony(
   }
   const deadline = Date.now() + (runtime.windowMs ?? COOKIE_COMMIT_WINDOW_MS);
   const snapshot = runtime.snapshot ?? detectProviderSessionsFromProfile;
+  const awaited = runtime.awaitProviders ?? [];
   let found: OAuthProviderId[] = [];
   for (;;) {
     found = await snapshot(profileDir).catch(() => []);
-    if (found.length > 0 || Date.now() >= deadline) return found;
+    const satisfied =
+      awaited.length === 0 ? found.length > 0 : awaited.every((id) => found.includes(id));
+    if (satisfied || Date.now() >= deadline) return found;
     await new Promise((resolve) => setTimeout(resolve, runtime.pollMs ?? COOKIE_COMMIT_POLL_MS));
   }
 }
@@ -800,11 +808,12 @@ async function operateCommand(
 }
 
 // A deferred --force-relogin clear runs through the very tab the ceremony
-// opened: ordinary operator verbs (navigate +, for GitHub, its one confirm
-// click) inside the shared browser — no second Chrome, no profile custody.
-// Best-effort by design: a provider that is already signed out has nothing
-// to clear (its logout page 404s or renders without the button), and a
-// failed clear must not block the fresh sign-in the user asked for.
+// opened: ordinary operator verbs (navigate +, for GitHub, an observe-then-
+// click of its one confirm control) inside the shared browser — no second
+// Chrome, no profile custody. Best-effort by design: a provider that is
+// already signed out has nothing to clear (its logout page 404s or renders
+// without the button), and a failed clear must not block the fresh sign-in
+// the user asked for.
 async function logoutProvidersThroughSession(
   client: BrokerClient,
   sessionId: string,
@@ -817,17 +826,31 @@ async function logoutProvidersThroughSession(
         url: PROVIDER_LOGOUT_URLS[provider],
       });
       if (provider === "github") {
-        let signedOut = true;
+        // operate_click only accepts a ref a prior observation minted — a
+        // bare text selector never resolves (stale_ref). Observe the logout
+        // page, find the Sign out control in the returned action map, and
+        // click its ref.
+        let signedOut = false;
         try {
-          await operateCommand(client, sessionId, "operate_click", {
-            ref: 'text="Sign out"',
-          });
+          const observed = (await operateCommand(client, sessionId, "operate_observe", {})) as {
+            safe_table?: { ref: string; role?: string; label?: string }[];
+          };
+          const signOut = (observed?.safe_table ?? []).find(
+            (row) =>
+              (row.role === "button" || row.role === "link") &&
+              (row.label ?? "").toLowerCase().startsWith("sign-out"),
+          );
+          if (signOut !== undefined) {
+            await operateCommand(client, sessionId, "operate_click", { ref: signOut.ref });
+            signedOut = true;
+          }
         } catch {
           signedOut = false;
         }
         if (!signedOut) {
           console.error(
-            `[login] GitHub did not show a Sign out button in the shared browser — it may already be signed out. Continuing.`,
+            `[login] GitHub's logout page did not show a Sign out control in the shared ` +
+              `browser — it may already be signed out. Continuing.`,
           );
         }
       }
@@ -902,7 +925,11 @@ export async function tryRunCeremonyInSharedBroker(
     stopExposure = await exposeSharedBrokerCeremonyDisplay(opts.profileDir, opts.bannerLabel);
     console.error(
       stopExposure === null
-        ? `\n[login] The install page opened as a tab in the shared browser. ${opts.bannerLabel}\n`
+        ? `\n[login] The install page opened as a tab in the shared browser's private ` +
+          `display, which could NOT be shown here (see the [login] line above for why). ` +
+          `Without that display nobody can see or complete the sign-in: install the ` +
+          `noVNC helpers (x11vnc, websockify, cloudflared — or set TS_LOGIN_PUBLIC_HOSTNAME ` +
+          `and TS_LOGIN_LOCAL_PORT to use your own tunnel) and run connect again.\n`
         : `\n[login] The install page opened as a tab in the shared browser's display — open the noVNC URL above on any device to see and drive it.\n`,
     );
     const ok = await pollUntil(

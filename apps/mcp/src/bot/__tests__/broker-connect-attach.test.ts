@@ -105,7 +105,14 @@ const server = net.createServer((socket) => {
           name: request.params?.name ?? null,
           args: request.params?.args ?? null,
         });
-        reply({ result: { ok: true } });
+        // GitHub's logout page renders its confirm control; the observe-then-
+        // click drive must find a Sign out row in the returned action map.
+        reply({
+          result:
+            request.params?.name === "operate_observe"
+              ? { safe_table: [{ ref: "@e5", role: "button", label: "sign-out" }] }
+              : { ok: true },
+        });
         continue;
       }
       if (request.method === "close") {
@@ -296,12 +303,16 @@ describe("connect attaches to the live broker for the profile it is connecting",
       expect(outcome.openUrl).toBe(CONFIRM_URL);
       // The logout drive rode the SAME session tab the ceremony opened — plain
       // operate_* commands on the wire, no extra session, no CDP attach:
-      // Google's GET logout, GitHub's logout navigation plus its confirm
-      // click, then back to the confirm page for the fresh sign-in.
+      // Google's GET logout, GitHub's logout navigation, an observation whose
+      // action map names the Sign out control, the click on THAT OBSERVED REF
+      // (a bare text selector never resolves — operate_click only accepts a
+      // ref a prior observation minted), then back to the confirm page for
+      // the fresh sign-in.
       expect(outcome.commands).toEqual([
         { name: "operate_navigate", args: { url: "https://accounts.google.com/Logout" } },
         { name: "operate_navigate", args: { url: "https://github.com/logout" } },
-        { name: "operate_click", args: { ref: 'text="Sign out"' } },
+        { name: "operate_observe", args: {} },
+        { name: "operate_click", args: { ref: "@e5" } },
         { name: "operate_navigate", args: { url: CONFIRM_URL } },
       ]);
       expect(outcome.lockNeverReleased).toBe(true);

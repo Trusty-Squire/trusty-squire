@@ -62,6 +62,7 @@ import {
   PROFILE_BUSY_MESSAGE,
   ProfileBusyError,
   profilePathIdentity,
+  withProfileOperationGuard,
 } from "../bot/profile.js";
 import { VERSION } from "../version.js";
 import { ensureLatestVersion } from "./version-check.js";
@@ -712,11 +713,15 @@ async function runConnectInstall(
   // fail-fasts while any other browser holds the profile — including the
   // resident broker's Chrome. Run it BEFORE clearBrowserProfile so an
   // account-switch on a busy machine is refused at the gate instead of
-  // deleting the profile directory out from under a live Chrome. When the
-  // clear DOES busy-fail, the clear now rides the upcoming ceremony instead
-  // of hard-refusing the re-login: the confirm tab signs the providers out
-  // through the shared browser (or the self-launched context, when it wins
-  // the profile) — no second Chrome, no drain.
+  // deleting the profile directory out from under a live Chrome. Both steps
+  // hold ONE profile operation lease (the guard is re-entrant, so the
+  // clear's own inner acquisition nests): releasing between them would let
+  // a browser claim the now-uncontended profile in the window before the
+  // wipe deletes its live user-data-dir. When the clear DOES busy-fail, the
+  // clear now rides the upcoming ceremony instead of hard-refusing the
+  // re-login: the confirm tab signs the providers out through the shared
+  // browser (or the self-launched context, when it wins the profile) — no
+  // second Chrome, no drain.
   let deferredReloginProviders: OAuthProviderId[] = [];
   if (args.forceRelogin) {
     const wanted: OAuthProviderId[] =
@@ -724,12 +729,14 @@ async function runConnectInstall(
     let cleared = false;
     let busy = false;
     try {
-      if (args.forceReloginProvider !== undefined) {
-        cleared = await clearProviderCookies(profileDir, args.forceReloginProvider);
-      } else {
-        cleared = await clearProviderCookies(profileDir);
-        if (cleared) clearBrowserProfile(profileDir);
-      }
+      await withProfileOperationGuard(profileDir, async () => {
+        if (args.forceReloginProvider !== undefined) {
+          cleared = await clearProviderCookies(profileDir, args.forceReloginProvider);
+        } else {
+          cleared = await clearProviderCookies(profileDir);
+          if (cleared) clearBrowserProfile(profileDir);
+        }
+      });
     } catch (err) {
       if (!(err instanceof ProfileBusyError)) throw err;
       busy = true;
@@ -841,7 +848,17 @@ async function runConnectInstall(
       start: "Checking provider sessions",
       done: "Provider sessions checked",
       fail: () => "Provider session check failed",
-      task: () => probeProviderSessionsAfterCeremony(profileDir),
+      task: () =>
+        probeProviderSessionsAfterCeremony(
+          profileDir,
+          // The scoped refresh waits its requested provider out of the
+          // commit window: the snapshot's first non-empty read would
+          // otherwise return on Google's days-old cookies and fail the
+          // success gate for the provider the run actually refreshed.
+          args.forceReloginProvider !== undefined
+            ? { awaitProviders: [args.forceReloginProvider] }
+            : {},
+        ),
     });
   } catch (err) {
     console.error(

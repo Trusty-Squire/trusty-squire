@@ -1148,4 +1148,7 @@ on a busy profile it falls back to the committed-cookie snapshot with a ~45s
 commit-lag poll (`probeProviderSessionsAfterCeremony`) — same evidence class
 the preflight "Already connected" answer already accepts. `--force-relogin` on
 a busy machine no longer hard-refuses: the old-provider logout rides the
-ceremony tab (Google `Logout` GET; GitHub `logout` + its confirm click).
+ceremony tab (Google `Logout` GET; GitHub `logout` plus an observe-then-click
+of the Sign out control — `operate_click` only accepts a ref a prior
+observation minted, so the drive observes the logout page and clicks the
+observed ref).

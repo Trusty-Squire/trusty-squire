@@ -71,4 +71,40 @@ describe("probeProviderSessionsAfterCeremony", () => {
     });
     expect(result).toEqual([]);
   });
+
+  it("keeps polling until the AWAITED provider commits, not just any provider", async () => {
+    // The scoped --force-relogin github refresh: Google's days-old cookies
+    // are already committed, so a first-non-empty early return would accept
+    // ["google"] and fail the gate for the provider the run refreshed.
+    let calls = 0;
+    const snapshot = vi.fn(async (): Promise<OAuthProviderId[]> => {
+      calls++;
+      return calls >= 3 ? ["google", "github"] : ["google"];
+    });
+    const result = await probeProviderSessionsAfterCeremony("/unused", {
+      live: async () => {
+        throw new ProfileBusyError("busy");
+      },
+      snapshot,
+      windowMs: 10_000,
+      pollMs: 1,
+      awaitProviders: ["github"],
+    });
+    expect(result).toEqual(["google", "github"]);
+    expect(calls).toBe(3);
+  });
+
+  it("returns the partial snapshot when the awaited provider never commits in the window", async () => {
+    const snapshot = vi.fn(async (): Promise<OAuthProviderId[]> => ["google"]);
+    const result = await probeProviderSessionsAfterCeremony("/unused", {
+      live: async () => {
+        throw new ProfileBusyError("busy");
+      },
+      snapshot,
+      windowMs: 30,
+      pollMs: 10,
+      awaitProviders: ["github"],
+    });
+    expect(result).toEqual(["google"]);
+  });
 });
