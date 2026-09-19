@@ -10,8 +10,10 @@ import {
   acquireProfileOperationGuard,
   profilePathIdentity,
   CHROME_PROFILE_DIR,
+  readLockHolder,
   waitForProfileFree,
 } from "../profile.js";
+import { brokerBusyStatus } from "./status.js";
 import { installBrokerBrowserCustody } from "./custody.js";
 import { BrokerRuntime } from "./runtime.js";
 import { OperatorBroker } from "./operator.js";
@@ -138,6 +140,14 @@ export async function runBrokerDaemon(): Promise<void> {
           await releaseMaintenanceLease(principal.clientId);
           return { closed: true };
         }
+        // The one place every layer is visible at the same instant.
+        if (method === "status")
+          return brokerBusyStatus({
+            maintenanceOwned: maintenanceOwner !== undefined,
+            ...runtime.custodyStatus(),
+            profileHolder: readLockHolder(profilePathIdentity(CHROME_PROFILE_DIR)),
+            tabFamilies: operator.authority.inventory().sessions,
+          });
         if (method === "command") {
           const busy = operator.busyReadResult(principal, params);
           if (busy !== undefined) return busy;

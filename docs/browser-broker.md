@@ -201,12 +201,32 @@ the cancelled call keeps the session lease until it returns — so a caller who
 wants a bound should pass `AbortSignal.timeout(ms)` knowing that, rather than
 receive one it never asked for.
 
-The profile layer reaches the client under `profile_busy` in all three of its
-senses — Chrome's SingletonLock, the profile-operation lease (the one `connect`
-holds for a whole interactive login), and a launch collision. `BrokerRuntime.
-acquire` converts the `ProfileBusyError` those raise into that refusal, because
-the wire would otherwise flatten a plain `Error` to `broker_execution_failed`
-and the fold could not name one of the four layers it exists to name.
+**The broker answers the busy question, because it is the only side that sees
+all four layers at the same instant.** `status` is a read-only Contract B
+operation returning `StatusResult`; `brokerBusyStatus` (`broker/status.ts`)
+computes it from the maintenance window, custody's drain state, the profile
+lock holder, and whether the Chrome holding that lock is the broker's own.
+`browserBusy()` is a thin client of that call. A client cannot fold this from
+outside — a live socket says nothing about whose Chrome holds the lease, and
+the maintenance window is broker-local state, so inferring "not busy" from a
+listener contradicted `openTab` at the same instant. Only when no broker is
+resident does the client read the profile lock itself, because then there is
+nothing brokered to hold it.
+
+The profile layer reaches the client under `profile_busy` in all of its senses.
+`BrokerRuntime.acquire` converts the `ProfileBusyError` that Chrome's
+SingletonLock and a launch collision raise, because the wire would otherwise
+flatten a plain `Error` to `broker_execution_failed`. The profile-operation
+lease — the one `connect` holds for a whole interactive login — is claimed in
+daemon startup *before* the socket listens, so a held lease kills the daemon
+rather than refusing a request; `connectOrLaunchBroker` therefore reads that
+lease's owner when a spawned daemon dies before attachment and refuses
+`profile_busy` naming the holder, instead of reporting a broker that merely
+failed to start.
+
+A start the broker hands back (no live provider session in the bot profile —
+the likeliest first run) is not a busy layer either: `openTab` throws
+`BrowserNeedsUser`, whose `.action()` names reconnect.
 
 Two permanent configuration failures are deliberately **not** busy layers,
 because no retry can clear either and `.action()` would be a lie:

@@ -7,12 +7,20 @@
 // Wire refusal codes are unchanged; the mapping lives here, not on the broker
 // protocol.
 //
-// Tab families are the layer that is NOT an answer: a live broker multiplexes
-// many of them on one shared Chrome, so a running session never makes the
-// browser unavailable, and the profile lease a live broker holds is that
-// broker's own Chrome rather than a foreign process to close. `stale_lease`
-// means "not yours, or gone" — a permanent failure, never "not now" — so it
-// stays unmapped beside `cancelled` and `unauthorized`.
+// The fold itself is NOT computed here. `browserBusy` asks the broker, which
+// is the only side that sees all four layers at the same instant; this module
+// maps that answer, and openTab's refusals, onto one type. Inferring the
+// answer from outside is what produced confident conclusions about the wrong
+// layer — a live socket says nothing about whose Chrome holds the lease, and
+// the connect maintenance window is not observable from another process at
+// all. Only when no broker is resident does this read the profile lock
+// directly, because then there is no broker to hold anything.
+//
+// Tab families are the layer that is never an answer: the broker multiplexes
+// many on one shared Chrome, so a running family never makes the browser
+// unavailable. `stale_lease` means "not yours, or gone" — a permanent
+// failure, never "not now" — so it stays unmapped beside `cancelled` and
+// `unauthorized`.
 
 import { randomUUID } from "node:crypto";
 import {
@@ -21,7 +29,7 @@ import {
   resolveBrokerSocket,
 } from "./bot/broker/discovery.js";
 import { BrokerRefusal } from "./bot/broker/refusal.js";
-import { brokerEndpointHasLiveListener, type BrokerClient } from "./bot/broker/transport.js";
+import { BrokerClient, brokerEndpointHasLiveListener } from "./bot/broker/transport.js";
 import { CHROME_PROFILE_DIR, profilePathIdentity, readLockHolder } from "./bot/profile.js";
 import { createSessionGuard } from "./session-guard.js";
 
@@ -94,20 +102,6 @@ export interface OpenTabOptions {
   signal?: AbortSignal;
 }
 
-export interface AcquireTabInput {
-  signal?: AbortSignal;
-}
-
-export interface AcquiredTab {
-  page: TabPage;
-  release: () => Promise<void>;
-}
-
-export interface BrowserFacadePorts {
-  /** Tab acquisition. Defaults to the broker wire. */
-  acquire?: (input: AcquireTabInput) => Promise<AcquiredTab>;
-}
-
 /** The broker `open` needs a destination; the caller reaches its real page
  * through `tab.page.goto`. */
 const BLANK_TAB_URL = "about:blank";
@@ -123,6 +117,21 @@ export class UnservableProfileError extends Error {
   ) {
     super(`No broker serves the profile ${requested}; this installation serves ${served}`);
     this.name = "UnservableProfileError";
+  }
+}
+
+/**
+ * The broker handed the start back: no tab was opened and nothing changed.
+ * Not a busy layer — no other process is holding anything — but it is the
+ * likeliest first-run failure, so it carries the same actionable shape.
+ */
+export class BrowserNeedsUser extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BrowserNeedsUser";
+  }
+  action(): string {
+    return "Reconnect the browser session with `npx @trusty-squire/mcp connect`, then retry.";
   }
 }
 
@@ -221,16 +230,33 @@ function servedBrowserProfile(): string {
 }
 
 /**
- * Read-only: a live broker listener, then the profile's lock holder. A live
- * broker owns the lease and hands out tab families, so its own Chrome is not
- * an answer of "busy". Nothing here repairs a lock, sweeps an owner, signals a
- * process, or sleeps.
+ * No broker is resident, so no broker holds anything and there is nothing to
+ * ask: the only layer that can still answer is the profile lock. Read-only —
+ * nothing here repairs a lock, sweeps an owner, signals a process, or sleeps.
  */
-async function readBrowserStatus(): Promise<BrowserBusyReason | undefined> {
-  if (await brokerEndpointHasLiveListener(brokerSocketPath())) return undefined;
+function unbrokeredBrowserStatus(): BrowserStatus {
   const holder = readLockHolder(servedBrowserProfile());
-  if (holder === null || holder.stale) return undefined;
-  return reasonFromBusyRefusal("profile_busy", { pid: holder.pid, host: holder.host });
+  if (holder === null || holder.stale) return { busy: false };
+  return {
+    busy: true,
+    reason: reasonFromBusyRefusal("profile_busy", { pid: holder.pid, host: holder.host }),
+  };
+}
+
+/** The broker's own answer, as this module's one type. */
+function statusFromWire(raw: unknown): BrowserStatus {
+  if (!isRecord(raw) || raw.busy !== true) return { busy: false };
+  const holder = isRecord(raw.holder) ? raw.holder : undefined;
+  const code = typeof raw.code === "string" && isBusyRefusalCode(raw.code) ? raw.code : undefined;
+  if (code === undefined) return { busy: false };
+  return {
+    busy: true,
+    reason: reasonFromBusyRefusal(code, {
+      ...(typeof raw.detail === "string" ? { message: raw.detail } : {}),
+      ...(typeof holder?.pid === "number" ? { pid: holder.pid } : {}),
+      ...(typeof holder?.host === "string" ? { host: holder.host } : {}),
+    }),
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -261,101 +287,87 @@ async function callWithWireAbort(
   }
 }
 
+async function agentSessionToken(): Promise<
+  { token: string; accountId: string | undefined } | undefined
+> {
+  const session = await createSessionGuard().bind();
+  if (session?.agent_session_token === undefined) return undefined;
+  return { token: session.agent_session_token, accountId: session.account_id };
+}
+
+/**
+ * Ask the broker. A resident broker is the only thing that can see the
+ * maintenance window and knows whether the Chrome on the profile is its own;
+ * when none is resident there is nothing to ask and nothing brokered to hold.
+ */
+export async function browserBusy(): Promise<BrowserStatus> {
+  const socket = brokerSocketPath();
+  if (!(await brokerEndpointHasLiveListener(socket))) return unbrokeredBrowserStatus();
+  const credentials = await agentSessionToken();
+  if (credentials === undefined) return unbrokeredBrowserStatus();
+  const client = await BrokerClient.connect(socket, credentials.token);
+  try {
+    return statusFromWire(await client.call("status", {}));
+  } finally {
+    await client.close();
+  }
+}
+
 /**
  * The broker is the only path that returns a tab, and it is reachable from any
  * process: connect over the local socket exactly as the operator forwarder
  * does, then `open` / `command` / `close`.
  */
-async function wireAcquire(input: AcquireTabInput): Promise<AcquiredTab> {
-  const session = await createSessionGuard().bind();
-  if (session?.agent_session_token === undefined)
-    throw new BrokerRefusal("unauthorized", "Connect before opening a tab");
-  const client = await connectOrLaunchBroker(
-    resolveBrokerSocket(),
-    session.agent_session_token,
-    session.account_id,
-  );
+export async function openTab(options: OpenTabOptions): Promise<TabHandle> {
+  const profile = resolveBrowserProfile(options.profile);
+  const served = servedBrowserProfile();
+  if (profile !== served) throw new UnservableProfileError(profile, served);
+  const purpose = options.purpose;
+  const credentials = await agentSessionToken();
+  if (credentials === undefined)
+    throw new BrowserNeedsUser("No enrolled account on this machine; no tab was opened");
+  let client: BrokerClient;
   try {
-    const raw = await callWithWireAbort(client, input.signal, "open", {
+    client = await connectOrLaunchBroker(
+      resolveBrokerSocket(),
+      credentials.token,
+      credentials.accountId,
+    );
+  } catch (error) {
+    throw mapBusyRefusal(error) ?? error;
+  }
+  let sessionId: string;
+  try {
+    const raw = await callWithWireAbort(client, options.signal, "open", {
       serviceUrl: BLANK_TAB_URL,
     });
-    const sessionId = isRecord(raw) && typeof raw.sessionId === "string" ? raw.sessionId : "";
+    sessionId = isRecord(raw) && typeof raw.sessionId === "string" ? raw.sessionId : "";
     if (sessionId.length === 0)
-      throw new BrokerRefusal(
-        "needs_user",
-        "Broker handed the start back to the user; no tab was opened",
-      );
-    return {
-      page: {
-        goto: async (url: string, options: PageCommandOptions = {}) =>
-          await callWithWireAbort(client, options.signal, "command", {
-            sessionId,
-            name: "operate_navigate",
-            args: { session_id: sessionId, url },
-          }),
-      },
-      release: async () => {
-        try {
-          await client.call("close", { sessionId, args: { session_id: sessionId } });
-        } finally {
-          await client.close();
-        }
-      },
-    };
+      throw new BrowserNeedsUser("The broker handed the start back to the user; no tab was opened");
   } catch (error) {
     await client.close();
-    throw error;
+    throw mapBusyRefusal(error) ?? error;
   }
-}
-
-export interface BrowserFacade {
-  browserBusy(): Promise<BrowserStatus>;
-  openTab(options: OpenTabOptions): Promise<TabHandle>;
-}
-
-export function createBrowserFacade(ports: BrowserFacadePorts = {}): BrowserFacade {
-  const acquire = ports.acquire ?? wireAcquire;
-
+  let released = false;
   return {
-    async browserBusy(): Promise<BrowserStatus> {
-      const reason = await readBrowserStatus();
-      return reason === undefined ? { busy: false } : { busy: true, reason };
+    page: {
+      goto: async (url: string, pageOptions: PageCommandOptions = {}) =>
+        await callWithWireAbort(client, pageOptions.signal, "command", {
+          sessionId,
+          name: "operate_navigate",
+          args: { session_id: sessionId, url },
+        }),
     },
-
-    async openTab(options: OpenTabOptions): Promise<TabHandle> {
-      const profile = resolveBrowserProfile(options.profile);
-      const served = servedBrowserProfile();
-      if (profile !== served) throw new UnservableProfileError(profile, served);
-      const purpose = options.purpose;
-      let opened: AcquiredTab;
+    profile,
+    purpose,
+    async release() {
+      if (released) return;
+      released = true;
       try {
-        opened = await acquire({
-          ...(options.signal !== undefined ? { signal: options.signal } : {}),
-        });
-      } catch (error) {
-        throw mapBusyRefusal(error) ?? error;
+        await client.call("close", { sessionId, args: { session_id: sessionId } });
+      } finally {
+        await client.close();
       }
-      let released = false;
-      return {
-        page: opened.page,
-        profile,
-        purpose,
-        async release() {
-          if (released) return;
-          released = true;
-          await opened.release();
-        },
-      };
     },
   };
-}
-
-const defaultFacade = createBrowserFacade();
-
-export async function browserBusy(): Promise<BrowserStatus> {
-  return await defaultFacade.browserBusy();
-}
-
-export async function openTab(options: OpenTabOptions): Promise<TabHandle> {
-  return await defaultFacade.openTab(options);
 }

@@ -1,34 +1,48 @@
-import { createServer, type Server } from "node:net";
-import { lstatSync, symlinkSync } from "node:fs";
+import { symlinkSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { brokerSocketPath } from "../bot/broker/discovery.js";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { BrokerPrincipal } from "../bot/broker/authority.js";
 import { BrokerRefusal } from "../bot/broker/refusal.js";
+import { listenBroker } from "../bot/broker/transport.js";
 import { CHROME_PROFILE_DIR, profilePathIdentity } from "../bot/profile.js";
+import { openSessionStorage } from "../session.js";
 import {
   BrowserBusy,
-  createBrowserFacade,
+  BrowserNeedsUser,
+  browserBusy,
   openTab,
   UnservableProfileError,
-  type AcquiredTab,
-  type TabPage,
 } from "../browser-busy.js";
 
-const page: TabPage = { goto: async () => undefined };
-
-/** The one physical profile the broker serves, read from its own owner. */
-function servedProfile(): string {
-  return profilePathIdentity(CHROME_PROFILE_DIR);
+interface WireCall {
+  method: string;
+  params: Record<string, unknown>;
 }
 
-function refusingFacade(error: unknown) {
-  return createBrowserFacade({
-    acquire: async () => {
-      throw error;
+/** Real IPC and the real Contract B framing; only the broker's work is stubbed. */
+async function listenAsBroker(
+  socket: string,
+  answer: (call: WireCall) => unknown,
+): Promise<{ calls: WireCall[]; close: () => Promise<void> }> {
+  const calls: WireCall[] = [];
+  const listener = await listenBroker(socket, {
+    authenticate: async (): Promise<Omit<BrokerPrincipal, "clientId">> => ({
+      accountId: "account",
+      agentId: "agent",
+    }),
+    call: async (_principal, method, params) => {
+      calls.push({ method, params });
+      return answer({ method, params });
     },
+    disconnect: async () => undefined,
   });
+  return { calls, close: async () => await listener.close() };
+}
+
+function servedProfile(): string {
+  return profilePathIdentity(CHROME_PROFILE_DIR);
 }
 
 function expectBusy(error: unknown): BrowserBusy {
@@ -37,12 +51,70 @@ function expectBusy(error: unknown): BrowserBusy {
   return error;
 }
 
-function stubAcquire(overrides: Partial<AcquiredTab> = {}): () => Promise<AcquiredTab> {
-  return async () => ({ page, release: async () => undefined, ...overrides });
+let root: string;
+let socket: string;
+let running: { calls: WireCall[]; close: () => Promise<void> } | undefined;
+
+beforeEach(async () => {
+  root = await mkdtemp(join(tmpdir(), "ts-browser-busy-"));
+  socket = join(root, "broker.sock");
+  process.env.TRUSTY_SQUIRE_BROKER_SOCKET = socket;
+  await mkdir(servedProfile(), { recursive: true });
+  // wireAcquire and the status read both bind the enrolled account first; the
+  // test setup sandboxes XDG_CONFIG_HOME, so this writes a throwaway session.
+  await (
+    await openSessionStorage()
+  ).write({
+    api_base_url: "http://unused.test",
+    saved_at: new Date().toISOString(),
+    account_id: "account",
+    agent_session_token: "token",
+  });
+});
+
+afterEach(async () => {
+  await running?.close();
+  running = undefined;
+  delete process.env.TRUSTY_SQUIRE_BROKER_SOCKET;
+  await rm(servedProfile(), { recursive: true, force: true });
+  await rm(root, { recursive: true, force: true });
+});
+
+async function broker(answer: (call: WireCall) => unknown): Promise<WireCall[]> {
+  running = await listenAsBroker(socket, answer);
+  return running.calls;
 }
 
-describe("busy refusal mapping", () => {
-  it("wraps each not-now BrokerRefusal from acquire as that layer's BrowserBusy", async () => {
+describe("openTab over the real broker wire", () => {
+  it("opens, navigates and closes one session with the frames Contract B defines", async () => {
+    const calls = await broker(({ method }) => {
+      if (method === "open") return { sessionId: "sess-1", observation: { session_id: "sess-1" } };
+      if (method === "command") return { result: { url: "https://example.test/" } };
+      return { closed: true };
+    });
+
+    const tab = await openTab({ profile: "default", purpose: "signup:vercel" });
+    expect(tab.purpose).toBe("signup:vercel");
+    expect(tab.profile).toBe(servedProfile());
+    await tab.page.goto("https://example.test/");
+    await tab.release();
+    await tab.release();
+
+    // `connect` is the transport's own handshake and never reaches the port.
+    expect(calls.map((call) => call.method)).toEqual(["open", "command", "close"]);
+    expect(calls[0]?.params).toEqual({ serviceUrl: "about:blank" });
+    expect(calls[1]?.params).toEqual({
+      sessionId: "sess-1",
+      name: "operate_navigate",
+      args: { session_id: "sess-1", url: "https://example.test/" },
+    });
+    expect(calls[2]?.params).toEqual({
+      sessionId: "sess-1",
+      args: { session_id: "sess-1" },
+    });
+  });
+
+  it("maps each not-now refusal from the wire onto its layer, with an action", async () => {
     const cases = [
       { code: "profile_busy", layer: "profile" },
       { code: "maintenance", layer: "maintenance" },
@@ -51,287 +123,141 @@ describe("busy refusal mapping", () => {
       { code: "launch_timeout", layer: "custody" },
     ];
     for (const { code, layer } of cases) {
-      const facade = refusingFacade(new BrokerRefusal(code, `${code} from wire`));
-      await expect(
-        facade.openTab({ profile: "default", purpose: "signup:vercel" }),
-      ).rejects.toSatisfy((error: unknown) => {
-        const busy = expectBusy(error);
-        expect(busy.reason.layer).toBe(layer);
-        expect(busy.reason.code).toBe(code);
-        expect(busy.message).toBe(`${code} from wire`);
-        expect(busy.action().length).toBeGreaterThan(0);
-        return true;
+      await running?.close();
+      await broker(({ method }) => {
+        if (method === "open") throw new BrokerRefusal(code, `${code} from wire`);
+        return { closed: true };
       });
+      await expect(openTab({ profile: "default", purpose: "signup:vercel" })).rejects.toSatisfy(
+        (error: unknown) => {
+          const busy = expectBusy(error);
+          expect(busy.reason.layer).toBe(layer);
+          expect(busy.reason.code).toBe(code);
+          expect(busy.message).toBe(`${code} from wire`);
+          expect(busy.action().length).toBeGreaterThan(0);
+          return true;
+        },
+      );
     }
   });
 
   it("hands a permanent refusal back whole rather than calling it retry-later", async () => {
-    // Each of these is "not yours, gone, or a standing configuration choice".
-    // A retry can never clear one, so none may arrive as a busy layer with an
-    // .action() telling the caller to try again.
-    const refusals = [
-      new BrokerRefusal("stale_lease", "Session is not owned by this connection"),
-      new BrokerRefusal("cancelled", "Caller cancelled the request"),
-      new BrokerRefusal("unauthorized", "Connect before using the broker"),
-      new BrokerRefusal("external_browser", "BOT_CDP_ENDPOINT names an external Chrome"),
-    ];
-    for (const refusal of refusals) {
-      await expect(
-        refusingFacade(refusal).openTab({ profile: "default", purpose: "signup:vercel" }),
-      ).rejects.toSatisfy((error: unknown) => {
-        expect(error).toBe(refusal);
-        expect(error).not.toBeInstanceOf(BrowserBusy);
-        return true;
+    for (const code of ["stale_lease", "cancelled", "unauthorized", "external_browser"]) {
+      await running?.close();
+      await broker(({ method }) => {
+        if (method === "open") throw new BrokerRefusal(code, `${code} is permanent`);
+        return { closed: true };
       });
+      await expect(openTab({ profile: "default", purpose: "signup:vercel" })).rejects.toSatisfy(
+        (error: unknown) => {
+          expect(error).not.toBeInstanceOf(BrowserBusy);
+          expect(error).toBeInstanceOf(BrokerRefusal);
+          expect((error as BrokerRefusal).code).toBe(code);
+          return true;
+        },
+      );
     }
   });
 
-  it("names the profile layer, with its action, when the lease refuses on the wire", async () => {
-    // The broker raises the profile-lease collision under this code; without
-    // it the refusal arrived as broker_execution_failed and the caller got a
-    // raw error with no .action() at all.
-    const held = "another Trusty Squire session is already using the browser — close it first";
-    const facade = refusingFacade(new BrokerRefusal("profile_busy", held));
-    await expect(
-      facade.openTab({ profile: "default", purpose: "signup:vercel" }),
-    ).rejects.toSatisfy((error: unknown) => {
-      const busy = expectBusy(error);
-      expect(busy.message).toBe(held);
-      expect(busy.reason.layer).toBe("profile");
-      expect(busy.action()).toBe("Close the other process using this Chrome profile, then retry.");
-      return true;
+  it("names reconnect when the broker hands the start back to the user", async () => {
+    // googleSessionGate returns an observation with no owned session whenever
+    // the bot profile has no live provider session — the likeliest first run.
+    await broker(({ method }) => {
+      if (method === "open") return { observation: { session_id: "x", needs_user: {} } };
+      return { closed: true };
     });
+    await expect(openTab({ profile: "default", purpose: "signup:vercel" })).rejects.toSatisfy(
+      (error: unknown) => {
+        expect(error).toBeInstanceOf(BrowserNeedsUser);
+        if (!(error instanceof BrowserNeedsUser)) throw new Error("expected needs-user");
+        expect(error.action()).toContain("connect");
+        return true;
+      },
+    );
   });
-});
 
-describe("a profile this installation does not serve", () => {
-  it("is a permanent configuration failure, not a busy layer to retry", async () => {
+  it("refuses a profile this installation does not serve before any wire contact", async () => {
+    const calls = await broker(() => ({ closed: true }));
     const other = await mkdtemp(join(tmpdir(), "ts-browser-busy-other-"));
     try {
-      let acquired = false;
-      const facade = createBrowserFacade({
-        acquire: async () => {
-          acquired = true;
-          return { page, release: async () => undefined };
-        },
-      });
-      await expect(facade.openTab({ profile: other, purpose: "signup:vercel" })).rejects.toSatisfy(
+      await expect(openTab({ profile: other, purpose: "signup:vercel" })).rejects.toSatisfy(
         (error: unknown) => {
           expect(error).toBeInstanceOf(UnservableProfileError);
           expect(error).not.toBeInstanceOf(BrowserBusy);
           if (!(error instanceof UnservableProfileError)) throw new Error("expected refusal");
           expect(error.served).toBe(servedProfile());
-          expect(error.message).toContain(servedProfile());
           return true;
         },
       );
-      expect(acquired).toBe(false);
+      expect(calls).toHaveLength(0);
     } finally {
       await rm(other, { recursive: true, force: true });
     }
   });
-
-  it("reaches the broker for the profile it does serve", async () => {
-    // No broker is running under the sandboxed profile, so the default wire
-    // acquire must get as far as the broker and fail there, not at a guard.
-    await expect(
-      openTab({ profile: "default", purpose: "signup:vercel" }),
-    ).rejects.not.toBeInstanceOf(UnservableProfileError);
-  });
 });
 
-describe("acquiring a tab — the broker owns the launch budget", () => {
-  it("does not call a slow cold launch busy", async () => {
-    // The broker races Chrome start against BOT_START_TIMEOUT_MS (10 min by
-    // default) and reports launch_timeout itself. A façade deadline shorter
-    // than that turned a healthy cold start into BrowserBusy(launch_timeout)
-    // with a retry that re-enters the same cold path.
-    vi.useFakeTimers();
-    try {
-      const facade = createBrowserFacade({
-        acquire: async () =>
-          await new Promise<AcquiredTab>((resolve) => {
-            setTimeout(() => resolve({ page, release: async () => undefined }), 120_000);
-          }),
-      });
-      const opening = facade.openTab({ profile: "default", purpose: "signup:vercel" });
-      await vi.advanceTimersByTimeAsync(120_000);
-      const tab = await opening;
-      expect(tab.purpose).toBe("signup:vercel");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("carries the caller's signal into the acquire so cancellation reaches the wire", async () => {
-    const caller = new AbortController();
-    const cancelled = new Error("caller changed its mind");
-    let received: AbortSignal | undefined;
-    const facade = createBrowserFacade({
-      acquire: async ({ signal }) => {
-        received = signal;
-        return await new Promise<AcquiredTab>((_resolve, reject) => {
-          signal?.addEventListener("abort", () => reject(signal.reason as Error), { once: true });
-        });
+describe("browserBusy asks the broker rather than inferring", () => {
+  it("reports the layer the broker names, with the holder it saw", async () => {
+    const calls = await broker(({ method }) =>
+      method === "status"
+        ? {
+            busy: true,
+            layer: "profile",
+            code: "profile_busy",
+            detail: "The Chrome profile lease is already held",
+            holder: { pid: 4242, host: hostname() },
+            tabFamilies: 0,
+          }
+        : { closed: true },
+    );
+    const status = await browserBusy();
+    expect(calls.map((call) => call.method)).toEqual(["status"]);
+    expect(status).toEqual({
+      busy: true,
+      reason: {
+        layer: "profile",
+        code: "profile_busy",
+        holder: { pid: 4242, host: hostname() },
       },
     });
-    const started = Date.now();
-    setTimeout(() => caller.abort(cancelled), 20);
-    await expect(
-      facade.openTab({ profile: "default", purpose: "signup:vercel", signal: caller.signal }),
-    ).rejects.toBe(cancelled);
-    expect(received).toBe(caller.signal);
-    expect(Date.now() - started).toBeLessThan(1_000);
-  });
-
-  it("returns a released tab without arming anything the next open must wait on", async () => {
-    let releases = 0;
-    const facade = createBrowserFacade({
-      acquire: stubAcquire({
-        release: async () => {
-          releases += 1;
-        },
-      }),
-    });
-    const first = await facade.openTab({ profile: "default", purpose: "signup:vercel" });
-    expect(first.purpose).toBe("signup:vercel");
-    // A live broker multiplexes tab families: a second open is not refused
-    // just because the first is still held.
-    const second = await facade.openTab({ profile: "default", purpose: "signup:other" });
-    await first.release();
-    await first.release();
-    await second.release();
-    expect(releases).toBe(2);
-  });
-});
-
-describe("a page instruction carries the caller's cancellation, and no invented bound", () => {
-  async function tabWithHangingGoto(): Promise<{
-    goto: (url: string, options?: { signal?: AbortSignal }) => Promise<unknown>;
-    received: () => AbortSignal | undefined;
-    release: () => Promise<void>;
-  }> {
-    let received: AbortSignal | undefined;
-    const facade = createBrowserFacade({
-      acquire: async () => ({
-        page: {
-          goto: async (_url: string, options: { signal?: AbortSignal } = {}) => {
-            received = options.signal;
-            return await new Promise((_resolve, reject) => {
-              options.signal?.addEventListener(
-                "abort",
-                () => reject(options.signal?.reason as Error),
-                { once: true },
-              );
-            });
-          },
-        },
-        release: async () => undefined,
-      }),
-    });
-    const tab = await facade.openTab({ profile: "default", purpose: "signup:vercel" });
-    return {
-      goto: (url, options) => tab.page.goto(url, options),
-      received: () => received,
-      release: () => tab.release(),
-    };
-  }
-
-  it("does not abort a slow navigate the caller never bounded", async () => {
-    // A navigate gets 60s per attempt over three attempts inside the broker.
-    // A façade deadline below that failed a healthy slow page AND left the
-    // in-flight navigate owning the session lease, so the retry it invited
-    // was refused as busy.
-    vi.useFakeTimers();
-    try {
-      let settle: (() => void) | undefined;
-      const facade = createBrowserFacade({
-        acquire: async () => ({
-          page: {
-            goto: async () =>
-              await new Promise<void>((resolve) => {
-                settle = resolve;
-              }),
-          },
-          release: async () => undefined,
-        }),
-      });
-      const tab = await facade.openTab({ profile: "default", purpose: "signup:vercel" });
-      let rejected: unknown;
-      const navigating = tab.page.goto("https://slow.example").catch((error: unknown) => {
-        rejected = error;
-      });
-      await vi.advanceTimersByTimeAsync(180_000);
-      expect(rejected).toBeUndefined();
-      settle?.();
-      await navigating;
-      expect(rejected).toBeUndefined();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("hands the caller's signal to the wire so a navigate is cancellable", async () => {
-    const tab = await tabWithHangingGoto();
-    const caller = new AbortController();
-    const cancelled = new Error("caller gave up on the navigate");
-    const started = Date.now();
-    setTimeout(() => caller.abort(cancelled), 20);
-    await expect(tab.goto("https://example.com", { signal: caller.signal })).rejects.toBe(
-      cancelled,
+    if (!status.busy) throw new Error("expected busy");
+    expect(new BrowserBusy(status.reason).action()).toBe(
+      "Close the other process using this Chrome profile (pid 4242), then retry.",
     );
-    expect(tab.received()).toBe(caller.signal);
-    expect(Date.now() - started).toBeLessThan(1_000);
   });
 
-  it("releases without waiting on a navigate still in flight", async () => {
-    const tab = await tabWithHangingGoto();
-    const inFlight = new AbortController();
-    const wedged = tab
-      .goto("https://example.com", { signal: inFlight.signal })
-      .catch(() => undefined);
-    const started = Date.now();
-    await tab.release();
-    expect(Date.now() - started).toBeLessThan(1_000);
-    inFlight.abort(new Error("test teardown"));
-    await wedged;
-  });
-});
-
-describe("browserBusy — a strictly read-only fold of the served profile", () => {
-  const sockets: Server[] = [];
-  let profile: string;
-  let configuredSocket: string | undefined;
-
-  beforeEach(async () => {
-    // The sandboxed profile owns this file's socket path; a globally
-    // configured override would point the probe at a real broker.
-    configuredSocket = process.env.TRUSTY_SQUIRE_BROKER_SOCKET;
-    delete process.env.TRUSTY_SQUIRE_BROKER_SOCKET;
-    profile = servedProfile();
-    await mkdir(profile, { recursive: true });
+  it("reports maintenance, which no caller outside the broker can observe", async () => {
+    // A live listener used to be read as "not busy"; across connect's
+    // maintenance window that contradicted openTab at the same instant.
+    await broker(({ method }) =>
+      method === "status"
+        ? {
+            busy: true,
+            layer: "maintenance",
+            code: "maintenance",
+            detail: "Connect owns the browser maintenance window",
+            tabFamilies: 0,
+          }
+        : { closed: true },
+    );
+    const status = await browserBusy();
+    if (!status.busy) throw new Error("expected busy");
+    expect(status.reason.layer).toBe("maintenance");
+    expect(new BrowserBusy(status.reason).action()).toBe(
+      "Finish the connect login window that owns maintenance, then retry.",
+    );
   });
 
-  afterEach(async () => {
-    for (const server of sockets.splice(0))
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    await rm(profile, { recursive: true, force: true });
-    if (configuredSocket === undefined) delete process.env.TRUSTY_SQUIRE_BROKER_SOCKET;
-    else process.env.TRUSTY_SQUIRE_BROKER_SOCKET = configuredSocket;
+  it("is not busy while the broker multiplexes live tab families", async () => {
+    await broker(({ method }) =>
+      method === "status" ? { busy: false, tabFamilies: 3 } : { closed: true },
+    );
+    await expect(browserBusy()).resolves.toEqual({ busy: false });
   });
 
-  async function listenAsBroker(): Promise<void> {
-    const path = brokerSocketPath();
-    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-    const server = createServer(() => undefined);
-    sockets.push(server);
-    await new Promise<void>((resolve) => server.listen(path, resolve));
-  }
-
-  it("reports the live lock holder when nothing brokers the profile", async () => {
-    symlinkSync(`${hostname()}-${process.pid}`, join(profile, "SingletonLock"));
-    const status = await createBrowserFacade().browserBusy();
-    expect(status).toEqual({
+  it("falls back to the profile lock when no broker is resident", async () => {
+    symlinkSync(`${hostname()}-${process.pid}`, join(servedProfile(), "SingletonLock"));
+    await expect(browserBusy()).resolves.toEqual({
       busy: true,
       reason: {
         layer: "profile",
@@ -339,29 +265,9 @@ describe("browserBusy — a strictly read-only fold of the served profile", () =
         holder: { pid: process.pid, host: hostname() },
       },
     });
-    if (!status.busy) throw new Error("expected busy");
-    expect(new BrowserBusy(status.reason).action()).toBe(
-      `Close the other process using this Chrome profile (pid ${process.pid}), then retry.`,
-    );
   });
 
-  it("does not call a live broker's own Chrome a foreign process to close", async () => {
-    symlinkSync(`${hostname()}-${process.pid}`, join(profile, "SingletonLock"));
-    await listenAsBroker();
-    await expect(createBrowserFacade().browserBusy()).resolves.toEqual({ busy: false });
-  });
-
-  it("never repairs a reclaimable lock while reading", async () => {
-    const lock = join(profile, "SingletonLock");
-    // A dead pid on this host. The old fold reclaimed the lock — and awaited
-    // the orphan-owner sweep, which SIGTERMs/SIGKILLs process trees — as a
-    // side effect of answering a status question.
-    symlinkSync(`${hostname()}-21474836`, lock);
-    await expect(createBrowserFacade().browserBusy()).resolves.toEqual({ busy: false });
-    expect(lstatSync(lock).isSymbolicLink()).toBe(true);
-  });
-
-  it("reads free when no lock and no broker answer", async () => {
-    await expect(createBrowserFacade().browserBusy()).resolves.toEqual({ busy: false });
+  it("reads free when no broker is resident and no process holds the profile", async () => {
+    await expect(browserBusy()).resolves.toEqual({ busy: false });
   });
 });

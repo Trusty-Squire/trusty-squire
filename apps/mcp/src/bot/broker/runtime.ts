@@ -301,6 +301,14 @@ export class BrokerRuntime implements BrokerBrowserCustody {
     release();
   }
 
+  /** What custody itself can see, for the wire `status` fold. */
+  custodyStatus(): { draining: boolean; ownsLiveBrowser: boolean } {
+    return {
+      draining: this.closing,
+      ownsLiveBrowser: this.owner !== undefined && this.owner.isConnected(),
+    };
+  }
+
   browserLost(): boolean {
     return (
       this.owner !== undefined && !this.runtimeIdentity.isLaunching() && !this.owner.isConnected()

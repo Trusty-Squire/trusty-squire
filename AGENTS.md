@@ -854,8 +854,10 @@ fixture acceptance does not qualify real Google auth or prove the current head.
 
 "Is the browser in use" has four true answers (tab families, profile leases,
 connect's maintenance window, custody). Do not diagnose a hang from one layer
-alone, and do not read a running tab family as a broker-wide wedge. Fold them
-through `browserBusy()` / `openTab` in
+alone, do not read a running tab family as a broker-wide wedge, and do not fold
+the layers from outside the broker — it is the only side that sees all four at
+once, which is why `status` is a wire operation. Ask through
+`browserBusy()` / `openTab` in
 [`apps/mcp/src/browser-busy.ts`](apps/mcp/src/browser-busy.ts)
 (`@trusty-squire/mcp/browser`); the mapping table lives in
 [`docs/browser-broker.md`](docs/browser-broker.md#busy-facade).

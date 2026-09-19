@@ -23,8 +23,8 @@
 
 import type { Observation } from "../provision-session.js";
 
-/** The four operations the wire expresses. */
-export type BrokerWireMethod = "connect" | "open" | "command" | "close";
+/** The four operations the wire expresses, plus the read that answers for them. */
+export type BrokerWireMethod = "connect" | "open" | "command" | "close" | "status";
 
 /** connect: authenticate the local MCP process and mint its connection id. */
 export interface ConnectRequest {
@@ -86,6 +86,29 @@ export interface CloseResult {
   /** The `operate_finish` tool payload, when a session was finished. */
   result?: unknown;
   preDispatchFailure?: { error: string; dispatch: "not_dispatched" };
+}
+
+/**
+ * status: "is the browser in use", answered ONCE by the side that can see all
+ * four layers at the same instant — tab families, the profile lease and its
+ * holder, the connect maintenance window, and custody. A client cannot fold
+ * these from outside: a live socket says nothing about whose Chrome holds the
+ * lease, and the maintenance window is broker-local state. Read-only.
+ */
+export type BrokerBusyLayer = "profile" | "maintenance" | "custody";
+export interface StatusResult {
+  busy: boolean;
+  /** Present only when busy. */
+  layer?: BrokerBusyLayer;
+  code?: string;
+  detail?: string;
+  /** The process actually holding the profile, when the profile layer answers. */
+  holder?: { pid?: number; host?: string };
+  /**
+   * Live tab families. Informational: the broker multiplexes them on one
+   * shared Chrome, so a running family never makes the browser unavailable.
+   */
+  tabFamilies: number;
 }
 
 /** Notifications travel on the originating command's stream, unchanged. */
