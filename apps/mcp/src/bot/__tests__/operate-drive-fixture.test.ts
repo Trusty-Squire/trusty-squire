@@ -139,7 +139,11 @@ function deps(ask: DriveDependencies["askJev"]): DriveDependencies {
   };
 }
 
-async function openFixture(html: string, host: string) {
+async function openFixture(
+  html: string,
+  host: string,
+  initialObservation: "standard" | "drive" = "standard",
+) {
   const context = await browser.newContext();
   const page = await context.newPage();
   const url = `https://${host}/`;
@@ -149,6 +153,7 @@ async function openFixture(html: string, host: string) {
     browser: BrowserController.fromHarnessPage(page),
     serviceUrl: url,
     format: "compact",
+    initialObservation,
   });
   return { context, page, started };
 }
@@ -166,12 +171,23 @@ function refFor(started: { safe_table?: unknown }, label: string): string {
 
 describe("operate_drive real-browser fixture", () => {
   it("starts URL-owned drives with deferred general perception and snapshots directly", async () => {
-    const { context, started } = await openFixture(SIGNUP_HTML, "signup-direct-start.test");
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route("**/*", (route) =>
+      route.fulfill({ contentType: "text/html", body: SIGNUP_HTML }),
+    );
+    let started: Awaited<ReturnType<typeof startHarnessProvisionSession>> | undefined;
     try {
-      const startSession = vi.fn(async () => ({
-        session_id: started.session_id,
-        url: "https://signup-direct-start.test/",
-      }));
+      const startSession = vi.fn(async (options: Parameters<DriveDependencies["startSession"]>[0]) => {
+        started = await startHarnessProvisionSession({
+          ...options,
+          browser: BrowserController.fromHarnessPage(page),
+        });
+        expect(started).not.toHaveProperty("safe_table");
+        expect(started).not.toHaveProperty("dom");
+        expect(sessionForCall(started.session_id)?.initializing).toBe(false);
+        return started;
+      });
       const observeSpy = vi.fn(async () => {
         throw new Error("drive startup should not call the general observation");
       });
@@ -198,8 +214,10 @@ describe("operate_drive real-browser fixture", () => {
       );
       expect(observeSpy).not.toHaveBeenCalled();
       expect(handoff.observation?.safe_table).toBeDefined();
+      expect(JSON.stringify(handoff.observation?.safe_table)).toContain("Email");
+      expect(JSON.stringify(handoff.observation?.safe_table)).toContain("Company");
     } finally {
-      await finishProvisionSession(started.session_id);
+      if (started !== undefined) await finishProvisionSession(started.session_id);
       await context.close();
     }
   }, 30_000);
@@ -379,7 +397,9 @@ describe("operate_drive real-browser fixture", () => {
   }, 30_000);
 
   it("returns a snapshot on a lazily-growing DOM instead of walking forever", async () => {
-    const { context, page, started } = await openFixture(GROWING_HTML, "growing.test");
+    // Exercise drive capture without first walking the growing DOM through
+    // general observation during fixture setup.
+    const { context, page, started } = await openFixture(GROWING_HTML, "growing.test", "drive");
     try {
       await page.waitForTimeout(50);
       const startedAt = Date.now();
