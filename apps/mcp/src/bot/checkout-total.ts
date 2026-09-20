@@ -3,8 +3,13 @@
 // stay deleted: an unreadable total must still mint, never refuse.
 
 import type { Page } from "playwright";
+import { evaluateBound } from "./drive-evaluate.js";
 
 export const CHECKOUT_TOTAL_UNREADABLE = "total not readable";
+
+/** inject_card's inputSchema and POST /v1/pay/approvals both cap amount_cents
+ * here. A page number above it would 400 the mint and block the purchase. */
+const APPROVAL_AMOUNT_CENTS_MAX = 2_147_483_647;
 
 export interface CheckoutAmount {
   amount_cents: number;
@@ -195,7 +200,7 @@ export function resolveDriveApprovalAmount(
 ): DriveApprovalAmount {
   const fallback = factCurrency(facts);
   const parsed = parseCheckoutAmount(pageTexts, fallback ?? "USD");
-  if (parsed === null) {
+  if (parsed === null || parsed.amount_cents > APPROVAL_AMOUNT_CENTS_MAX) {
     return { amount_cents: 0, currency: fallback ?? "USD", unknown: true };
   }
   return { amount_cents: parsed.amount_cents, currency: parsed.currency, unknown: false };
@@ -204,7 +209,7 @@ export function resolveDriveApprovalAmount(
 export async function readPageCheckoutTexts(page: Page | null): Promise<string[]> {
   if (page === null) return [];
   try {
-    const text = await page.evaluate(() => document.body?.innerText ?? "");
+    const text = await evaluateBound(page, () => document.body?.innerText ?? "");
     return text.trim().length > 0 ? [text] : [];
   } catch {
     return [];
